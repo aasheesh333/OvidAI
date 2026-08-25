@@ -1,10 +1,19 @@
 import 'package:flutter/material.dart';
 import '../core/theme.dart';
 
-/// Studio — coding harness (DeepSeek IDE style): file tree, editor with
-/// syntax-y dummy code, agent activity rail, and proot Ubuntu terminal.
-class StudioScreen extends StatelessWidget {
+/// Studio — coding harness (DeepSeek-web style): file explorer bound to the
+/// user's connected GitHub repo, editor with dummy code, agent activity rail,
+/// and a sandbox terminal. The user never sees OS/infra details — only
+/// "Sandbox ● ready".
+class StudioScreen extends StatefulWidget {
   const StudioScreen({super.key});
+  @override
+  State<StudioScreen> createState() => _StudioScreenState();
+}
+
+class _StudioScreenState extends State<StudioScreen> {
+  bool _showFiles = true;
+  String _repo = 'xyrus/orbit-app';
 
   @override
   Widget build(BuildContext context) {
@@ -14,12 +23,19 @@ class StudioScreen extends StatelessWidget {
         leading: const BackButton(),
         title: const Text('Studio'),
         actions: [
+          IconButton(
+            tooltip: 'Toggle files',
+            visualDensity: VisualDensity.compact,
+            icon: Icon(_showFiles ? Icons.folder_open : Icons.folder_outlined,
+                size: 19, color: Aether.textMuted),
+            onPressed: () => setState(() => _showFiles = !_showFiles),
+          ),
           const Icon(Icons.play_arrow_rounded,
               size: 22, color: Aether.success),
-          const SizedBox(width: 16),
+          const SizedBox(width: 14),
           const Icon(Icons.account_tree_outlined,
               size: 18, color: Aether.textMuted),
-          const SizedBox(width: 16),
+          const SizedBox(width: 14),
           Padding(
             padding: const EdgeInsets.only(right: 14),
             child: Row(children: [
@@ -29,24 +45,168 @@ class StudioScreen extends StatelessWidget {
                   decoration: const BoxDecoration(
                       color: Aether.success, shape: BoxShape.circle)),
               const SizedBox(width: 6),
-              const Text('proot ubuntu 24.04',
+              const Text('Sandbox ready',
                   style: TextStyle(
-                      fontSize: 11.5,
-                      fontFamily: Aether.mono,
-                      color: Aether.textMuted)),
+                      fontSize: 11.5, color: Aether.textMuted)),
             ]),
           ),
         ],
       ),
-      body: const SafeArea(
+      body: SafeArea(
         child: Column(
           children: [
-            _Tabs(),
-            Expanded(child: _Editor()),
-            Divider(height: 1),
-            _Terminal(),
+            _RepoBar(repo: _repo),
+            Expanded(
+              child: Row(
+                children: [
+                  if (_showFiles) ...[
+                    SizedBox(width: 210, child: _FileTree(repo: _repo)),
+                    const VerticalDivider(width: 1),
+                  ],
+                  const Expanded(
+                    child: Column(children: [
+                      _Tabs(),
+                      Expanded(child: _Editor()),
+                    ]),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            const _Terminal(),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _RepoBar extends StatelessWidget {
+  final String repo;
+  const _RepoBar({required this.repo});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 40,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: const BoxDecoration(
+        color: Aether.surface,
+        border: Border(bottom: BorderSide(color: Aether.hairline)),
+      ),
+      child: Row(children: [
+        const Icon(Icons.hub_outlined, size: 15, color: Aether.textMuted),
+        const SizedBox(width: 8),
+        Text(repo,
+            style: const TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+                color: Aether.text)),
+        const SizedBox(width: 8),
+        const Tag('GITHUB', color: Aether.textMuted),
+        const Spacer(),
+        const Text('AI edits sync to this repo automatically',
+            style: TextStyle(fontSize: 11, color: Aether.textFaint)),
+        const SizedBox(width: 10),
+        TextButton(
+          style: TextButton.styleFrom(
+              minimumSize: Size.zero,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              foregroundColor: Aether.accent),
+          onPressed: () {},
+          child: const Text('Change', style: TextStyle(fontSize: 12)),
+        ),
+      ]),
+    );
+  }
+}
+
+class _FileTree extends StatelessWidget {
+  final String repo;
+  const _FileTree({required this.repo});
+
+  static const tree = [
+    ('lib/', 0, true),
+    ('main.dart', 1, false),
+    ('core/', 1, true),
+    ('theme.dart', 2, false),
+    ('state.dart', 2, false),
+    ('ui/', 1, true),
+    ('chat_screen.dart', 2, false),
+    ('studio_screen.dart', 2, false),
+    ('pubspec.yaml', 0, false),
+    ('README.md', 0, false),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Aether.surface,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(12, 10, 12, 8),
+            child: Text('FILES',
+                style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.4,
+                    color: Aether.textFaint)),
+          ),
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: [
+                for (final (name, depth, isDir) in tree)
+                  InkWell(
+                    onTap: () {},
+                    child: Padding(
+                      padding: EdgeInsets.fromLTRB(
+                          10.0 + depth * 14, 6, 8, 6),
+                      child: Row(children: [
+                        Icon(
+                          isDir
+                              ? Icons.keyboard_arrow_down
+                              : Icons.description_outlined,
+                          size: 13,
+                          color: isDir
+                              ? Aether.textMuted
+                              : Aether.textFaint,
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(name,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: isDir
+                                      ? Aether.text
+                                      : Aether.textMuted)),
+                        ),
+                      ]),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+            decoration: const BoxDecoration(
+                border:
+                    Border(top: BorderSide(color: Aether.hairline))),
+            child: const Row(children: [
+              Icon(Icons.cloud_done_outlined,
+                  size: 13, color: Aether.success),
+              SizedBox(width: 7),
+              Text('Synced with GitHub',
+                  style: TextStyle(
+                      fontSize: 11, color: Aether.textMuted)),
+            ]),
+          ),
+        ],
       ),
     );
   }
@@ -56,7 +216,7 @@ class _Tabs extends StatelessWidget {
   const _Tabs();
   @override
   Widget build(BuildContext context) {
-    final tabs = ['main.dart', 'auth.js', 'README.md'];
+    final tabs = ['main.dart', 'theme.dart', 'README.md'];
     return Container(
       height: 38,
       color: Aether.surface,
@@ -112,7 +272,7 @@ class OvidApp extends StatelessWidget {
     return MaterialApp(
       theme: ThemeData.dark(),
       home: const Scaffold(
-        body: Center(child: Text('Hello from proot Ubuntu')),
+        body: Center(child: Text('Hello from the sandbox')),
       ),
     );
   }
@@ -163,12 +323,13 @@ class _Terminal extends StatelessWidget {
   const _Terminal();
 
   static const out = [
-    '\$ proot-distro login ubuntu',
-    'root@localhost:~# apt install python3 -y',
-    'Reading package lists... Done',
-    'root@localhost:~# python3 --version',
-    'Python 3.12.3',
-    'root@localhost:~# agent --task "write tests" ',
+    '\$ agent run "add unit tests for theme.dart"',
+    '✓ sandbox ready',
+    '✓ pulled latest from xyrus/orbit-app',
+    '✓ wrote test/core/theme_test.dart',
+    '✓ 12 tests passed',
+    '✓ pushed commit a3f9c2e to main',
+    '\$ ',
   ];
 
   @override
@@ -186,7 +347,7 @@ class _Terminal extends StatelessWidget {
             child: const Row(children: [
               Icon(Icons.terminal, size: 13, color: Aether.textMuted),
               SizedBox(width: 8),
-              Text('TERMINAL — ubuntu@localhost',
+              Text('SANDBOX TERMINAL',
                   style: TextStyle(
                       fontSize: 10.5,
                       fontWeight: FontWeight.w700,
@@ -209,10 +370,11 @@ class _Terminal extends StatelessWidget {
                           fontFamily: Aether.mono,
                           fontSize: 11.5,
                           height: 1.6,
-                          color: l.startsWith('\$') ||
-                                  l.startsWith('root@')
-                              ? Aether.success
-                              : Aether.textMuted)),
+                          color: l.startsWith('\$')
+                              ? Aether.accent
+                              : l.startsWith('✓')
+                                  ? Aether.success
+                                  : Aether.textMuted)),
               ],
             ),
           ),

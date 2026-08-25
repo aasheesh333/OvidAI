@@ -261,11 +261,11 @@ class AppState extends ChangeNotifier {
           category: 'Agent',
           installs: 12800),
       PluginItem(
-          name: 'proot Ubuntu 24.04',
+          name: 'Sandbox Runtime',
           author: 'termux',
           description:
-              'Full Ubuntu userland on-device. apt, gcc, python, node — no root needed.',
-          version: '24.04.3',
+              'Full Linux userland on-device: python, node, gcc — isolated and instant.',
+          version: '3.1.0',
           category: 'Runtime',
           installed: true,
           enabled: true,

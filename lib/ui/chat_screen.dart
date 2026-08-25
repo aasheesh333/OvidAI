@@ -3,6 +3,7 @@ import '../core/theme.dart';
 import '../core/state.dart';
 import 'studio_screen.dart';
 import 'browser_screen.dart';
+import 'sidebar.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
@@ -23,15 +24,18 @@ class _ChatScreenState extends State<ChatScreen> {
       animation: app,
       builder: (_, __) {
         final s = app.activeSession;
+        final wide = MediaQuery.of(context).size.width >= 840;
         return Scaffold(
           backgroundColor: Aether.bg,
+          drawer: wide
+              ? null
+              : const Drawer(
+                  width: 288,
+                  backgroundColor: Aether.surface,
+                  child: SessionsSidebar(),
+                ),
           appBar: AppBar(
-            leading: Builder(
-              builder: (ctx) => IconButton(
-                icon: const Icon(Icons.menu),
-                onPressed: () => Scaffold.of(ctx).openDrawer(),
-              ),
-            ),
+            automaticallyImplyLeading: !wide,
             title: GestureDetector(
               onTap: () => _modelPicker(context),
               child: Row(
@@ -145,23 +149,97 @@ class _ChatScreenState extends State<ChatScreen> {
                   ]),
                 ),
                 for (final m in p.models)
-                  ListTile(
-                    dense: true,
-                    leading: const Icon(Icons.smart_toy_outlined,
-                        size: 18, color: Aether.textMuted),
-                    title: Text(m, style: const TextStyle(fontSize: 13.5)),
-                    trailing: app.activeSession?.model == m
-                        ? const Icon(Icons.check,
-                            size: 18, color: Aether.accent)
-                        : null,
-                    onTap: () {
-                      app.setModel(p.name, m);
-                      Navigator.pop(context);
-                    },
-                  ),
+                  _ModelTile(provider: p.name, model: m),
               ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _ModelTile extends StatelessWidget {
+  final String provider;
+  final String model;
+  const _ModelTile({required this.provider, required this.model});
+
+  static const _effortModels = [
+    'deepseek', 'gpt', 'kimi', 'glm', 'opus', 'sonnet',
+    'gemini-2.5', 'qwen3', 'o4', 'grok', 'r1',
+  ];
+  static const variants = ['Default', 'High', 'xHigh', 'Max'];
+
+  bool get supportsEffort =>
+      _effortModels.any((e) => model.toLowerCase().contains(e));
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    final current = app.activeSession?.model ?? '';
+    final selected = current == model || current.startsWith('$model ·');
+
+    if (!supportsEffort) {
+      return ListTile(
+        dense: true,
+        leading: const Icon(Icons.smart_toy_outlined,
+            size: 18, color: Aether.textMuted),
+        title: Text(model, style: const TextStyle(fontSize: 13.5)),
+        trailing: selected
+            ? const Icon(Icons.check, size: 18, color: Aether.accent)
+            : null,
+        onTap: () {
+          app.setModel(provider, model);
+          Navigator.pop(context);
+        },
+      );
+    }
+
+    return Theme(
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        dense: true,
+        tilePadding: const EdgeInsets.symmetric(horizontal: 16),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+        leading: const Icon(Icons.psychology_outlined,
+            size: 18, color: Aether.textMuted),
+        title: Text(model, style: const TextStyle(fontSize: 13.5)),
+        subtitle: selected && current.contains('·')
+            ? Text(current.split('·').last.trim(),
+                style: const TextStyle(
+                    fontSize: 11, color: Aether.accent))
+            : null,
+        trailing: selected
+            ? const Icon(Icons.check, size: 18, color: Aether.accent)
+            : null,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final v in variants)
+                ChoiceChip(
+                  label:
+                      Text(v, style: const TextStyle(fontSize: 12)),
+                  selected: current == (v == 'Default' ? model : '$model · $v'),
+                  onSelected: (_) {
+                    app.setModel(
+                        provider, v == 'Default' ? model : '$model · $v');
+                    Navigator.pop(context);
+                  },
+                  showCheckmark: false,
+                  selectedColor: Aether.accentSoft,
+                  backgroundColor: Aether.surfaceAlt,
+                  side: BorderSide(
+                      color: current ==
+                              (v == 'Default' ? model : '$model · $v')
+                          ? Aether.accent
+                          : Aether.hairline),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(9)),
+                ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -390,6 +468,45 @@ class _InputBar extends StatelessWidget {
   final VoidCallback onSend;
   const _InputBar({required this.controller, required this.onSend});
 
+  void _attachSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      builder: (_) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const SizedBox(height: 8),
+          _attachOption(context, Icons.photo_library_outlined,
+              'Photos & videos', 'Pick from gallery'),
+          _attachOption(context, Icons.camera_alt_outlined,
+              'Camera', 'Take a photo'),
+          _attachOption(context, Icons.insert_drive_file_outlined,
+              'Document', 'PDF, code, text files'),
+          _attachOption(context, Icons.auto_awesome,
+              'Generate image', 'Create with AI in this chat'),
+          const SizedBox(height: 8),
+        ]),
+      ),
+    );
+  }
+
+  Widget _attachOption(
+      BuildContext context, IconData icon, String title, String sub) {
+    return ListTile(
+      leading: Container(
+        width: 38,
+        height: 38,
+        decoration: BoxDecoration(
+            color: Aether.surfaceRaised,
+            borderRadius: BorderRadius.circular(10)),
+        child: Icon(icon, size: 18, color: Aether.textMuted),
+      ),
+      title: Text(title, style: const TextStyle(fontSize: 14)),
+      subtitle: Text(sub,
+          style:
+              const TextStyle(fontSize: 11.5, color: Aether.textFaint)),
+      onTap: () => Navigator.pop(context),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return SafeArea(
@@ -397,10 +514,10 @@ class _InputBar extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
           decoration: BoxDecoration(
             color: Aether.surfaceAlt,
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(26),
             border: Border.all(color: Aether.hairline),
           ),
           child: Row(
@@ -408,14 +525,9 @@ class _InputBar extends StatelessWidget {
             children: [
               IconButton(
                   tooltip: 'Attach',
-                  icon: const Icon(Icons.attach_file,
-                      size: 20, color: Aether.textMuted),
-                  onPressed: () {}),
-              IconButton(
-                  tooltip: 'Generate image',
-                  icon: const Icon(Icons.image_outlined,
-                      size: 20, color: Aether.textMuted),
-                  onPressed: () {}),
+                  icon: const Icon(Icons.add_circle_outline,
+                      size: 22, color: Aether.textMuted),
+                  onPressed: () => _attachSheet(context)),
               Expanded(
                 child: TextField(
                   controller: controller,

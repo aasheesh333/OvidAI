@@ -76,7 +76,7 @@ class _PluginList extends StatelessWidget {
               SizedBox(width: 12),
               Expanded(
                 child: Text(
-                  'Plugins run inside the on-device proot Ubuntu sandbox. Nothing leaves your phone unless a plugin says so.',
+                  'Plugins run inside the on-device secure on-device sandbox. Nothing leaves your phone unless a plugin says so.',
                   style: TextStyle(
                       fontSize: 12.5,
                       height: 1.45,

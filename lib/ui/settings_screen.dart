@@ -61,18 +61,52 @@ class SettingsScreen extends StatelessWidget {
                 ],
               ),
             ),
-            const SectionHeader('General'),
+            const SectionHeader('Personalization'),
+            _switchTile(Icons.tune, 'Custom instructions',
+                'How the AI should respond', true),
+            _switchTile(Icons.psychology_outlined, 'Memory',
+                'Remember preferences across chats', true),
+            _switchTile(Icons.auto_awesome, 'Reasoning mode',
+                'Show thinking before answers', false),
+            const SectionHeader('Chat'),
             _settingTile(Icons.dark_mode_outlined, 'Appearance',
                 'Dark (hacker)'),
+            _settingTile(Icons.translate, 'Language', 'English'),
+            _settingTile(Icons.image_outlined, 'Image generation',
+                'Auto · up to 1024px'),
+            _settingTile(Icons.mic_none, 'Voice input', 'On'),
+            const SectionHeader('Agents & Sandbox'),
+            _settingTile(Icons.smart_toy_outlined, 'Default agent',
+                'Auto-select by task'),
+            _settingTile(Icons.public, 'In-app browser',
+                'Agent can browse & log in (ask me)'),
+            _switchTile(Icons.folder_shared_outlined, 'GitHub sync',
+                'AI edits push to your connected repo', true),
+            _switchTile(Icons.flash_on, 'Auto-run safe commands',
+                'No confirm for read-only terminal commands', true),
+            _settingTile(Icons.security_outlined, 'Sandbox',
+                'Ready · isolated on-device'),
+            const SectionHeader('Data controls'),
+            _settingTile(Icons.download_outlined, 'Export chats',
+                'Download all sessions as JSON'),
+            _settingTile(Icons.delete_outline, 'Delete all data',
+                'Chats, keys and settings · irreversible'),
             _settingTile(Icons.storage_outlined, 'Storage',
                 '214 MB · on-device only'),
+            const SectionHeader('General'),
             _settingTile(Icons.security_outlined, 'Sandbox',
-                'proot Ubuntu 24.04 · ready'),
+                'Ready · isolated on-device'),
             _settingTile(Icons.info_outline, 'About', 'OvidAI 0.1.0-demo'),
           ],
         ),
       ),
     );
+  }
+
+  Widget _switchTile(
+      IconData icon, String title, String subtitle, bool initial) {
+    return _SwitchTile(
+        icon: icon, title: title, subtitle: subtitle, initial: initial);
   }
 
   Widget _settingTile(IconData icon, String title, String trailing) {
@@ -309,6 +343,44 @@ class _ProviderCard extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _SwitchTile extends StatefulWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final bool initial;
+  const _SwitchTile(
+      {required this.icon,
+      required this.title,
+      required this.subtitle,
+      required this.initial});
+  @override
+  State<_SwitchTile> createState() => _SwitchTileState();
+}
+
+class _SwitchTileState extends State<_SwitchTile> {
+  late bool v = widget.initial;
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      dense: true,
+      leading: Icon(widget.icon, size: 19, color: Aether.textMuted),
+      title: Text(widget.title, style: const TextStyle(fontSize: 14)),
+      subtitle: Text(widget.subtitle,
+          style:
+              const TextStyle(fontSize: 11.5, color: Aether.textFaint)),
+      trailing: SizedBox(
+        height: 26,
+        child: Switch(
+          value: v,
+          activeTrackColor: Aether.accent,
+          onChanged: (x) => setState(() => v = x),
+        ),
+      ),
+      onTap: () => setState(() => v = !v),
     );
   }
 }
