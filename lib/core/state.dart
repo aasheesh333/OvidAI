@@ -150,7 +150,12 @@ class AppState extends ChangeNotifier {
     if (s.title == 'New chat') {
       s.title = text.length > 34 ? '${text.substring(0, 34)}…' : text;
     }
-    // Demo assistant reply
+    notifyListeners();
+  }
+
+  void receiveDemoReply(String text) {
+    final s = activeSession;
+    if (s == null) return;
     s.messages.add(Message(
       role: 'assistant',
       kind: MsgKind.reasoning,
@@ -159,8 +164,17 @@ class AppState extends ChangeNotifier {
     ));
     s.messages.add(Message(
       role: 'assistant',
-      content:
-          'This is a demo response from OvidAI. Connect a provider API key in Settings → Providers and this reply will come from the real model. Your prompt was:\n\n"$text"',
+      content: '''Here is a demo reply from OvidAI.
+
+**What just happened**
+- Your prompt was received: "$text"
+- A reasoning step ran first (you can toggle it in Settings)
+- Once you add a key in **Settings → Providers**, replies stream live from the real model
+
+**Try next**
+1. Open the model picker (top) and pick an effort variant
+2. Tap `</>` for Studio or 🌐 for Browser
+3. Paste an API key — everything stays on-device''',
     ));
     notifyListeners();
   }

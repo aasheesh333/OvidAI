@@ -22,11 +22,14 @@ class Aether {
   static const warn = Color(0xFFE8B44C);
   static const danger = Color(0xFFE5534B);
 
-  static const mono = 'monospace';
+  static const mono = 'JetBrainsMono';
 
   static ThemeData theme() {
     final base = ThemeData.dark(useMaterial3: true);
     return base.copyWith(
+      pageTransitionsTheme: const PageTransitionsTheme(builders: {
+        TargetPlatform.android: _FadeSlideTransitionsBuilder(),
+      }),
       scaffoldBackgroundColor: bg,
       dividerColor: hairline,
       colorScheme: const ColorScheme.dark(
@@ -92,7 +95,8 @@ class Aether {
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
       ),
-      textTheme: base.textTheme.apply(bodyColor: text, displayColor: text),
+      textTheme: base.textTheme.apply(
+          fontFamily: 'Inter', bodyColor: text, displayColor: text),
     );
   }
 }
@@ -156,6 +160,30 @@ class SectionHeader extends StatelessWidget {
                     const TextStyle(fontSize: 12.5, color: Aether.textMuted)),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// Soft fade + slight upward slide — premium page transitions.
+class _FadeSlideTransitionsBuilder extends PageTransitionsBuilder {
+  const _FadeSlideTransitionsBuilder();
+  @override
+  Widget buildTransitions<T>(
+    Route<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    final curved = CurvedAnimation(
+        parent: animation, curve: Curves.easeOutCubic);
+    return FadeTransition(
+      opacity: curved,
+      child: SlideTransition(
+        position: Tween(begin: const Offset(0, 0.025), end: Offset.zero)
+            .animate(curved),
+        child: child,
       ),
     );
   }

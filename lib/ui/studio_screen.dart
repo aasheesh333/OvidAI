@@ -13,7 +13,7 @@ class StudioScreen extends StatefulWidget {
 
 class _StudioScreenState extends State<StudioScreen> {
   bool _showFiles = true;
-  String _repo = 'xyrus/orbit-app';
+  String _repo = 'orbit/orbit-app';
 
   @override
   Widget build(BuildContext context) {
@@ -325,7 +325,7 @@ class _Terminal extends StatelessWidget {
   static const out = [
     '\$ agent run "add unit tests for theme.dart"',
     '✓ sandbox ready',
-    '✓ pulled latest from xyrus/orbit-app',
+    '✓ pulled latest from orbit/orbit-app',
     '✓ wrote test/core/theme_test.dart',
     '✓ 12 tests passed',
     '✓ pushed commit a3f9c2e to main',

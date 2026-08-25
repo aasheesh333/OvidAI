@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import 'studio_screen.dart';
@@ -13,9 +15,11 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen>
+    with SingleTickerProviderStateMixin {
   final _input = TextEditingController();
   final _scroll = ScrollController();
+  bool _typing = false;
 
   @override
   Widget build(BuildContext context) {
@@ -82,26 +86,36 @@ class _ChatScreenState extends State<ChatScreen> {
               children: [
                 Expanded(
                   child: s == null || s.messages.isEmpty
-                      ? const _EmptyState()
+                      ? _EmptyState(onSuggest: (t) {
+                        _input.text = t;
+                      })
                       : ListView.builder(
                           controller: _scroll,
                           padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                          itemCount: s.messages.length,
-                          itemBuilder: (_, i) =>
-                              _MessageView(m: s.messages[i]),
+                          itemCount:
+                              s.messages.length + (_typing ? 1 : 0),
+                          itemBuilder: (_, i) => i == s.messages.length
+                              ? const _TypingBubble()
+                              : _MessageView(m: s.messages[i]),
                         ),
                 ),
                 _InputBar(
                   controller: _input,
                   onSend: () {
                     final t = _input.text.trim();
-                    if (t.isEmpty) return;
+                    if (t.isEmpty || _typing) return;
                     app.sendMessage(t);
                     _input.clear();
+                    setState(() => _typing = true);
                     Future.delayed(const Duration(milliseconds: 60), () {
                       if (_scroll.hasClients) {
                         _scroll.jumpTo(_scroll.position.maxScrollExtent);
                       }
+                    });
+                    Future.delayed(
+                        const Duration(milliseconds: 1400), () {
+                      app.receiveDemoReply(t);
+                      if (mounted) setState(() => _typing = false);
                     });
                   },
                 ),
@@ -246,7 +260,8 @@ class _ModelTile extends StatelessWidget {
 }
 
 class _EmptyState extends StatelessWidget {
-  const _EmptyState();
+  final void Function(String)? onSuggest;
+  const _EmptyState({this.onSuggest});
   @override
   Widget build(BuildContext context) {
     const suggestions = [
@@ -283,7 +298,9 @@ class _EmptyState extends StatelessWidget {
                     TextStyle(fontSize: 13, color: Aether.textMuted)),
             const SizedBox(height: 28),
             for (final s in suggestions)
-              Container(
+              GestureDetector(
+                onTap: () => onSuggest?.call(s.$2),
+                child: Container(
                 width: 320,
                 margin: const EdgeInsets.only(bottom: 8),
                 padding:
@@ -302,6 +319,7 @@ class _EmptyState extends StatelessWidget {
                               fontSize: 13,
                               color: Aether.textMuted))),
                 ]),
+                ),
               ),
           ],
         ),
@@ -334,15 +352,34 @@ class _MessageView extends StatelessWidget {
   }
 
   Widget _text(bool isUser) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+        padding: EdgeInsets.symmetric(
+            horizontal: isUser ? 14 : 4, vertical: isUser ? 11 : 4),
         decoration: BoxDecoration(
           color: isUser ? Aether.surfaceRaised : Colors.transparent,
           borderRadius: BorderRadius.circular(14),
           border: isUser ? Border.all(color: Aether.hairline) : null,
         ),
-        child: Text(m.content,
-            style: const TextStyle(
-                fontSize: 14, height: 1.5, color: Aether.text)),
+        child: isUser
+            ? Text(m.content,
+                style: const TextStyle(
+                    fontSize: 14, height: 1.5, color: Aether.text))
+            : MarkdownBody(
+                data: m.content,
+                styleSheet: MarkdownStyleSheet(
+                  p: const TextStyle(
+                      fontSize: 14, height: 1.55, color: Aether.text),
+                  strong: const TextStyle(
+                      fontWeight: FontWeight.w700, color: Aether.text),
+                  code: const TextStyle(
+                      fontFamily: Aether.mono,
+                      fontSize: 12.5,
+                      backgroundColor: Aether.surfaceAlt,
+                      color: Aether.text),
+                  listBullet: const TextStyle(
+                      fontSize: 14, color: Aether.textMuted),
+                  listIndent: 18,
+                ),
+              ),
       );
 
   Widget _reasoning() => Container(
@@ -388,12 +425,7 @@ class _MessageView extends StatelessWidget {
                     style: const TextStyle(
                         fontSize: 11, color: Aether.textMuted)),
                 const Spacer(),
-                const Icon(Icons.copy_outlined,
-                    size: 14, color: Aether.textFaint),
-                const SizedBox(width: 6),
-                const Text('Copy',
-                    style:
-                        TextStyle(fontSize: 11, color: Aether.textFaint)),
+                _CopyButton(code: m.content),
               ]),
             ),
             SingleChildScrollView(
@@ -564,6 +596,97 @@ class _InputBar extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _TypingBubble extends StatefulWidget {
+  const _TypingBubble();
+  @override
+  State<_TypingBubble> createState() => _TypingBubbleState();
+}
+
+class _TypingBubbleState extends State<_TypingBubble>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController c = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 1100))
+    ..repeat();
+
+  @override
+  void dispose() {
+    c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: Aether.surface,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Aether.hairline),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          for (var i = 0; i < 3; i++)
+            AnimatedBuilder(
+              animation: c,
+              builder: (_, __) {
+                final t = (c.value * 3 - i).clamp(0.0, 1.0);
+                final op = 0.25 + 0.75 * (t < 0.5 ? t * 2 : (1 - t) * 2);
+                return Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 2),
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                      color: Aether.accent.withValues(alpha: op),
+                      shape: BoxShape.circle),
+                );
+              },
+            ),
+        ]),
+      ),
+    );
+  }
+}
+
+class _CopyButton extends StatefulWidget {
+  final String code;
+  const _CopyButton({required this.code});
+  @override
+  State<_CopyButton> createState() => _CopyButtonState();
+}
+
+class _CopyButtonState extends State<_CopyButton> {
+  bool copied = false;
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(6),
+      onTap: () async {
+        await Clipboard.setData(ClipboardData(text: widget.code));
+        setState(() => copied = true);
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted) setState(() => copied = false);
+        });
+      },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        child: Row(children: [
+          Icon(copied ? Icons.check : Icons.copy_outlined,
+              size: 14,
+              color: copied ? Aether.success : Aether.textFaint),
+          const SizedBox(width: 6),
+          Text(copied ? 'Copied' : 'Copy',
+              style: TextStyle(
+                  fontSize: 11,
+                  color: copied ? Aether.success : Aether.textFaint)),
+        ]),
       ),
     );
   }
