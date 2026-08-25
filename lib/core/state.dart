@@ -122,7 +122,7 @@ class AppState extends ChangeNotifier {
     final s = ChatSession(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       title: 'New chat',
-      model: defaultProvider.selectedModel ?? 'deepseek-v4-pro',
+      model: defaultProvider.selectedModel ?? 'Select a provider',
     );
     sessions.insert(0, s);
     activeSessionId = s.id;
@@ -181,56 +181,94 @@ class AppState extends ChangeNotifier {
   void _seed() {
     providers.addAll([
       ProviderConfig(
-        name: 'OpenCode Free',
-        description: 'Free open models bundled with the app. No key required.',
-        baseUrl: 'https://opencode.ai/zen/v1',
-        isFree: true,
-        connected: true,
-        models: ['deepseek-v4-pro', 'qwen3-coder-480b', 'kimi-k3', 'glm-5'],
-        selectedModel: 'deepseek-v4-pro',
-      ),
-      ProviderConfig(
-        name: 'OpenRouter (free tier)',
-        description: 'One key, hundreds of models incl. free variants.',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        isFree: true,
-        models: [
-          'deepseek/deepseek-r1:free',
-          'google/gemini-2.5-flash:free',
-          'meta/llama-4-maverick:free',
-        ],
-        selectedModel: 'deepseek/deepseek-r1:free',
-      ),
-      ProviderConfig(
-        name: 'Google AI Studio',
-        description: 'Gemini free tier with generous rate limits.',
-        baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-        models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'],
-      ),
-      ProviderConfig(
         name: 'OpenAI',
-        description: 'GPT-5 and friends.',
+        description: 'GPT-5, o4 and the full OpenAI platform.',
         baseUrl: 'https://api.openai.com/v1',
-        models: [],
+        models: ['gpt-5.2', 'o4-mini'],
       ),
       ProviderConfig(
         name: 'Anthropic',
-        description: 'Claude family.',
+        description: 'Claude Opus, Sonnet and Haiku family.',
         baseUrl: 'https://api.anthropic.com/v1',
-        models: [],
+        models: ['claude-opus-4-6', 'claude-sonnet-4-6'],
       ),
       ProviderConfig(
-        name: 'Groq',
-        description: 'Ultra-fast LPU inference, free tier available.',
-        baseUrl: 'https://api.groq.com/openai/v1',
-        isFree: true,
-        models: ['llama-3.3-70b-versatile', 'qwen-qwq-32b'],
+        name: 'Google Gemini',
+        description: 'Gemini 2.5 series via AI Studio (free tier available).',
+        baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+        models: ['gemini-2.5-pro', 'gemini-2.5-flash'],
       ),
       ProviderConfig(
         name: 'DeepSeek',
-        description: 'Direct DeepSeek API.',
+        description: 'DeepSeek chat & reasoner, direct API.',
         baseUrl: 'https://api.deepseek.com/v1',
         models: ['deepseek-chat', 'deepseek-reasoner'],
+      ),
+      ProviderConfig(
+        name: 'xAI',
+        description: 'Grok family from xAI.',
+        baseUrl: 'https://api.x.ai/v1',
+        models: ['grok-4', 'grok-4-fast'],
+      ),
+      ProviderConfig(
+        name: 'Mistral AI',
+        description: 'Mistral Large, Codestral and open weights.',
+        baseUrl: 'https://api.mistral.ai/v1',
+        models: ['mistral-large-latest', 'codestral-latest'],
+      ),
+      ProviderConfig(
+        name: 'Groq',
+        description: 'Ultra-fast LPU inference. Free tier available.',
+        baseUrl: 'https://api.groq.com/openai/v1',
+        models: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b'],
+      ),
+      ProviderConfig(
+        name: 'OpenRouter',
+        description: 'One key, 300+ models including free variants.',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        models: ['deepseek/deepseek-chat-v3.1', 'meta-llama/llama-4-maverick'],
+      ),
+      ProviderConfig(
+        name: 'Together AI',
+        description: 'Fast inference for open models.',
+        baseUrl: 'https://api.together.xyz/v1',
+        models: [],
+      ),
+      ProviderConfig(
+        name: 'Fireworks AI',
+        description: 'Serverless open-model inference.',
+        baseUrl: 'https://api.fireworks.ai/inference/v1',
+        models: [],
+      ),
+      ProviderConfig(
+        name: 'Perplexity',
+        description: 'Sonar models with live web access.',
+        baseUrl: 'https://api.perplexity.ai',
+        models: ['sonar-pro', 'sonar'],
+      ),
+      ProviderConfig(
+        name: 'Cerebras',
+        description: 'Wafer-scale speed. Free tier available.',
+        baseUrl: 'https://api.cerebras.ai/v1',
+        models: ['llama-3.3-70b'],
+      ),
+      ProviderConfig(
+        name: 'GitHub Models',
+        description: 'Free tier models with a GitHub token.',
+        baseUrl: 'https://models.github.ai/inference',
+        models: ['gpt-4.1', 'DeepSeek-R1'],
+      ),
+      ProviderConfig(
+        name: 'Cohere',
+        description: 'Command and Embed models.',
+        baseUrl: 'https://api.cohere.com/v2',
+        models: [],
+      ),
+      ProviderConfig(
+        name: 'Ollama (local)',
+        description: 'Models fully on-device or LAN, no key needed.',
+        baseUrl: 'http://localhost:11434/v1',
+        models: [],
       ),
     ]);
 
@@ -345,7 +383,7 @@ class AppState extends ChangeNotifier {
     final s1 = ChatSession(
       id: 's1',
       title: 'Refactor auth middleware',
-      model: 'deepseek-v4-pro',
+      model: 'deepseek-chat',
       messages: [
         Message(
             role: 'user',
@@ -400,7 +438,7 @@ function auth(rotate = true) {
     final s3 = ChatSession(
       id: 's3',
       title: 'Weekend trip packing list',
-      model: 'qwen3-coder-480b',
+      model: 'gemini-2.5-flash',
       messages: [
         Message(role: 'user', content: 'What should I pack for a 2-day trek?'),
         Message(

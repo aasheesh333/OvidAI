@@ -264,6 +264,56 @@ class ProviderCard extends StatelessWidget {
                         content: Text(
                             'Demo: would GET {baseUrl}/models with your key'))),
               ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Aether.textMuted,
+                  side: const BorderSide(color: Aether.hairlineStrong),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 8),
+                  minimumSize: Size.zero,
+                ),
+                icon: const Icon(Icons.add, size: 14),
+                label: const Text('Add model ID',
+                    style: TextStyle(fontSize: 12)),
+                onPressed: () {
+                  final c = TextEditingController();
+                  showDialog(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: const Text('Add model manually',
+                          style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600)),
+                      content: TextField(
+                          controller: c,
+                          autofocus: true,
+                          style: const TextStyle(
+                              fontSize: 13.5,
+                              fontFamily: Aether.mono),
+                          decoration: const InputDecoration(
+                              hintText: 'e.g. gpt-5.2-codex')),
+                      actions: [
+                        TextButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            child: const Text('Cancel')),
+                        TextButton(
+                          onPressed: () {
+                            final id = c.text.trim();
+                            if (id.isNotEmpty) {
+                              provider.models.add(id);
+                              AppState.I.refresh();
+                            }
+                            Navigator.pop(ctx);
+                          },
+                          child: const Text('Add',
+                              style: TextStyle(color: Aether.accent)),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
               const SizedBox(width: 10),
               if (provider.models.isNotEmpty)
                 Expanded(

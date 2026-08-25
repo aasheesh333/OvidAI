@@ -278,7 +278,7 @@ class _EmptyState extends StatelessWidget {
             const Text('How can I help?',
                 style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
             const SizedBox(height: 6),
-            const Text('Free models included — no API key needed.',
+            const Text('Add an API key in Settings → Providers to get started.',
                 style:
                     TextStyle(fontSize: 13, color: Aether.textMuted)),
             const SizedBox(height: 28),

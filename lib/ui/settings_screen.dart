@@ -33,11 +33,11 @@ class SettingsScreen extends StatelessWidget {
               const Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Xyrus',
+                  Text('You',
                       style: TextStyle(
                           fontSize: 15.5, fontWeight: FontWeight.w700)),
                   SizedBox(height: 2),
-                  Text('Free plan · local account',
+                  Text('Local account · keys stay on device',
                       style: TextStyle(
                           fontSize: 12, color: Aether.textFaint)),
                 ],
@@ -53,6 +53,12 @@ class SettingsScreen extends StatelessWidget {
               'BYOK · free & custom providers', const ProvidersScreen()),
           _navTile(context, Icons.extension_outlined, 'Plugins',
               'Agents, MCP servers, tools', const PluginsScreen()),
+
+          const SectionHeader(
+            'Usage',
+            subtitle: 'Per-model activity and estimated spend',
+          ),
+          const _UsageCard(),
 
           const SectionHeader('Personalization'),
           _switchTile(Icons.tune, 'Custom instructions',
@@ -169,4 +175,101 @@ class _SwitchTileState extends State<_SwitchTile> {
       onTap: () => setState(() => v = !v),
     );
   }
+}
+
+class _UsageCard extends StatelessWidget {
+  const _UsageCard();
+
+  static const rows = [
+    ('claude-sonnet-4-6', '412', '1.2M in', '6.8M out', r'$11.42'),
+    ('deepseek-chat', '380', '0.9M in', '4.1M out', r'$0.87'),
+    ('gpt-5.2', '96', '0.4M in', '1.9M out', r'$7.05'),
+    ('gemini-2.5-flash', '610', '2.4M in', '9.6M out', r'$0.00'),
+    ('deepseek-reasoner', '44', '0.3M in', '2.2M out', r'$1.31'),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
+      decoration: BoxDecoration(
+        color: Aether.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Column(children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Row(children: [
+            const Expanded(
+                flex: 5,
+                child: Text('MODEL',
+                    style: TextStyle(
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.1,
+                        color: Aether.textFaint))),
+            _h('REQ'),
+            _h('TOKENS'),
+            _h('COST'),
+          ]),
+        ),
+        for (final r in rows) ...[
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 9),
+            child: Row(children: [
+              Expanded(
+                  flex: 5,
+                  child: Text(r.$1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 11.5,
+                          fontFamily: Aether.mono,
+                          color: Aether.text))),
+              _v(r.$2, width: 40),
+              _v('${r.$3} · ${r.$4}', width: 108),
+              _v(r.$5, width: 52, cost: true),
+            ]),
+          ),
+        ],
+        const Divider(height: 1),
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: 10),
+          child: Row(children: [
+            Expanded(
+                child: Text('This month (demo data)',
+                    style: TextStyle(
+                        fontSize: 11, color: Aether.textFaint))),
+            Text(r'$20.65 total',
+                style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: Aether.text)),
+          ]),
+        ),
+      ]),
+    );
+  }
+
+  static Widget _h(String t) => SizedBox(
+      width: t == 'TOKENS' ? 108 : (t == 'REQ' ? 40 : 52),
+      child: Text(t,
+          textAlign: TextAlign.right,
+          style: const TextStyle(
+              fontSize: 9.5,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.1,
+              color: Aether.textFaint)));
+
+  static Widget _v(String t, {double width = 44, bool cost = false}) =>
+      SizedBox(
+          width: width,
+          child: Text(t,
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                  fontSize: 11,
+                  fontFamily: Aether.mono,
+                  color: cost ? Aether.warn : Aether.textMuted)));
 }
