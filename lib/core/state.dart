@@ -306,6 +306,41 @@ class AppState extends ChangeNotifier {
           installs: 9300),
     ]);
 
+
+    // community library (dummy bulk)
+    const extra = <(String, String, String, String, int)>[
+      ('Puppeteer MCP', 'mcp-community', 'Headless browser automation for agents.', 'MCP', 18200),
+      ('Postgres Tools', 'mcp-community', 'Query and inspect Postgres databases.', 'MCP', 9400),
+      ('Figma Bridge', 'figma', 'Read design frames and tokens.', 'MCP', 12600),
+      ('Slack Notify', 'community', 'Send agent updates to Slack channels.', 'Tool', 5100),
+      ('RAG Memory', 'ovidai', 'Long-term vector memory for your chats.', 'Tool', 22800),
+      ('Docker-in-Sandbox', 'sandbox', 'OCI containers inside the sandbox.', 'Runtime', 7700),
+      ('Aider Bridge', 'community', 'Pair-program with the aider CLI.', 'Agent', 8900),
+      ('Shell History', 'ovidai', 'Searchable sandbox terminal history.', 'Tool', 3400),
+      ('Voice Code', 'community', 'Dictate code and commands hands-free.', 'Tool', 6600),
+      ('Rust Toolchain', 'sandbox', 'cargo + rustc prebuilt for the sandbox.', 'Runtime', 4100),
+      ('Go Toolchain', 'sandbox', 'Go 1.23 toolchain, one tap install.', 'Runtime', 3900),
+      ('Linear Sync', 'community', 'Create and update Linear issues from chat.', 'Tool', 2800),
+      ('Sentry Watch', 'community', 'Pull errors into chat and let agents fix them.', 'Tool', 3300),
+      ('Stripe MCP', 'stripe', 'Payments, invoices and customers via MCP.', 'MCP', 5400),
+      ('Vercel Deploy', 'vercel', 'Ship previews straight from the sandbox.', 'Tool', 11300),
+      ('PR Reviewer', 'ovidai', 'Auto-review GitHub PRs with fixes.', 'Agent', 15100),
+      ('DB Designer', 'community', 'Draw and migrate schemas in chat.', 'Tool', 4700),
+      ('Audio Notes', 'community', 'Transcribe meetings into sessions.', 'Tool', 3600),
+      ('Tailwind Helper', 'community', 'Tailwind-aware UI generation.', 'Tool', 9800),
+      ('Terraform MCP', 'hashicorp', 'Plan and apply infra safely.', 'MCP', 2500),
+    ];
+    plugins.addAll([
+      for (final (n, a, d, c, i) in extra)
+        PluginItem(
+            name: n,
+            author: a,
+            description: d,
+            version: '1.${(i % 9) + 0}.${i % 7}',
+            category: c,
+            installs: i),
+    ]);
+
     // --- dummy sessions ---
     final s1 = ChatSession(
       id: 's1',
