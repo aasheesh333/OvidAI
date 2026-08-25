@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
+import 'settings_screen.dart';
 
 /// Sessions sidebar — DeepSeek-style harness: auto-named sessions,
 /// search, new session, swipe to delete, long-press rename.
@@ -128,24 +129,34 @@ class SessionsSidebar extends StatelessWidget {
             ),
 
             const Divider(),
-            // Bottom nav shortcuts
-            _SideNavItem(
-                icon: Icons.chat_bubble_outline,
-                label: 'Chat',
-                index: 0),
-            _SideNavItem(
-                icon: Icons.code, label: 'Studio', index: 1),
-            _SideNavItem(
-                icon: Icons.public, label: 'Browser', index: 2),
-            _SideNavItem(
-                icon: Icons.extension_outlined,
-                label: 'Plugins',
-                index: 3),
-            _SideNavItem(
-                icon: Icons.settings_outlined,
-                label: 'Settings',
-                index: 4),
-            const SizedBox(height: 12),
+            // Settings at the very bottom — DeepSeek style.
+            InkWell(
+              onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => const SettingsScreen())),
+              child: Container(
+                margin: const EdgeInsets.fromLTRB(8, 4, 8, 10),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 11),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Row(children: [
+                  CircleAvatar(
+                    radius: 13,
+                    backgroundColor: Aether.surfaceRaised,
+                    child: Icon(Icons.person_outline,
+                        size: 15, color: Aether.textMuted),
+                  ),
+                  SizedBox(width: 12),
+                  Text('Settings',
+                      style: TextStyle(
+                          fontSize: 13, color: Aether.textMuted)),
+                  Spacer(),
+                  Icon(Icons.chevron_right,
+                      size: 16, color: Aether.textFaint),
+                ]),
+              ),
+            ),
           ],
         ),
       ),
@@ -250,47 +261,6 @@ class _SessionTile extends StatelessWidget {
                 style: TextStyle(color: Aether.accent)),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _SideNavItem extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final int index;
-  const _SideNavItem(
-      {required this.icon, required this.label, required this.index});
-
-  @override
-  Widget build(BuildContext context) {
-    final active = AppState.I.navIndex == index;
-    return InkWell(
-      onTap: () {
-        AppState.I.setNav(index);
-        Navigator.maybePop(context);
-      },
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 1.5),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-        decoration: BoxDecoration(
-          color: active ? Aether.surfaceRaised : Colors.transparent,
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Row(
-          children: [
-            Icon(icon,
-                size: 17,
-                color: active ? Aether.accent : Aether.textMuted),
-            const SizedBox(width: 12),
-            Text(label,
-                style: TextStyle(
-                    fontSize: 13,
-                    fontWeight:
-                        active ? FontWeight.w600 : FontWeight.w400,
-                    color: active ? Aether.text : Aether.textMuted)),
-          ],
-        ),
       ),
     );
   }

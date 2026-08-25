@@ -87,15 +87,15 @@ class _PluginList extends StatelessWidget {
           );
         }
         final p = items[filter == null ? i - 1 : i];
-        return _PluginCard(plugin: p);
+        return PluginCard(plugin: p);
       },
     );
   }
 }
 
-class _PluginCard extends StatelessWidget {
+class PluginCard extends StatelessWidget {
   final PluginItem plugin;
-  const _PluginCard({required this.plugin});
+  const PluginCard({super.key, required this.plugin});
 
   @override
   Widget build(BuildContext context) {

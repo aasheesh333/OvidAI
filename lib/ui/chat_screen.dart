@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
+import 'studio_screen.dart';
+import 'browser_screen.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
@@ -48,12 +50,23 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
             actions: [
               IconButton(
-                tooltip: 'Temporary chat',
-                icon: const Icon(Icons.bolt_outlined, size: 19),
-                onPressed: () {},
+                tooltip: 'Studio — code & terminal',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.code, size: 19),
+                onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const StudioScreen())),
+              ),
+              IconButton(
+                tooltip: 'Browser — agent & login',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.public, size: 19),
+                onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                        builder: (_) => const BrowserScreen())),
               ),
               IconButton(
                 tooltip: 'New session',
+                visualDensity: VisualDensity.compact,
                 icon: const Icon(Icons.edit_square, size: 18),
                 onPressed: app.newSession,
               ),

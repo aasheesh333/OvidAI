@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
+import 'plugins_screen.dart';
 
 /// Settings — BYOK providers. Everything stored on-device.
 /// Pre-added providers (some free); user just pastes a key when needed.
@@ -13,12 +14,7 @@ class SettingsScreen extends StatelessWidget {
     return Scaffold(
       backgroundColor: Aether.bg,
       appBar: AppBar(
-        leading: Builder(
-          builder: (ctx) => IconButton(
-            icon: const Icon(Icons.menu),
-            onPressed: () => Scaffold.of(ctx).openDrawer(),
-          ),
-        ),
+        automaticallyImplyLeading: true,
         title: const Text('Settings'),
       ),
       body: AnimatedBuilder(
@@ -47,6 +43,22 @@ class SettingsScreen extends StatelessWidget {
                 label: const Text('Add custom provider',
                     style: TextStyle(fontSize: 13)),
                 onPressed: () => _addProviderSheet(context),
+              ),
+            ),
+            const SectionHeader(
+              'Plugins',
+              subtitle:
+                  'Agent harnesses, MCP servers and the proot runtime — all run on-device.',
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Column(
+                children: [
+                  for (final pl in app.plugins) ...[
+                    PluginCard(plugin: pl),
+                    const SizedBox(height: 10),
+                  ],
+                ],
               ),
             ),
             const SectionHeader('General'),

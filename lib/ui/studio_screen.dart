@@ -11,12 +11,7 @@ class StudioScreen extends StatelessWidget {
     return Scaffold(
       backgroundColor: Aether.bg,
       appBar: AppBar(
-        leading: Builder(
-          builder: (ctx) => IconButton(
-            icon: const Icon(Icons.menu),
-            onPressed: () => Scaffold.of(ctx).openDrawer(),
-          ),
-        ),
+        leading: const BackButton(),
         title: const Text('Studio'),
         actions: [
           const Icon(Icons.play_arrow_rounded,
