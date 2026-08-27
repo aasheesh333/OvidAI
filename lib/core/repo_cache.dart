@@ -17,15 +17,17 @@ class RepoCache extends ChangeNotifier {
   static final RepoCache I = RepoCache._();
 
   static const _api = 'https://api.github.com';
+  static const _requestTimeout = Duration(seconds: 20);
 
-  String? repoFull;          // "owner/repo"
-  String? _token;            // from GitHubService after login
+  String? repoFull; // "owner/repo"
+  String? _token; // from GitHubService after login
   String? defaultBranch;
+  int _bindingGeneration = 0;
 
   /// path → content (working copy)
   final Map<String, String> files = {};
-  final Set<String> _dirty = {};      // locally modified paths
-  final List<String> treePaths = [];  // all paths from git tree
+  final Set<String> _dirty = {}; // locally modified paths
+  final List<String> treePaths = []; // all paths from git tree
   DateTime? lastSync;
 
   bool get isReady => repoFull != null && files.isNotEmpty;
@@ -37,6 +39,7 @@ class RepoCache extends ChangeNotifier {
 
   // ── init ─────────────────────────────────────────────────────────────
   void bind(String full, String token, {String branch = 'main'}) {
+    _bindingGeneration++;
     repoFull = full;
     _token = token;
     defaultBranch = branch;
@@ -44,6 +47,7 @@ class RepoCache extends ChangeNotifier {
 
   /// Disconnect — clear everything so Studio shows the login state again.
   void unbind() {
+    _bindingGeneration++;
     repoFull = null;
     _token = null;
     defaultBranch = null;
@@ -60,55 +64,105 @@ class RepoCache extends ChangeNotifier {
   Future<void> sync({
     int maxFiles = 400,
     void Function(String line)? onLine,
+    http.Client? client,
   }) async {
-    if (repoFull == null || _token == null) {
+    final repo = repoFull;
+    final token = _token;
+    final branch = defaultBranch ?? 'main';
+    final generation = _bindingGeneration;
+    if (repo == null || token == null || token.isEmpty) {
       throw Exception('repo not bound');
     }
-    treePaths.clear();
-    files.clear();
-    _dirty.clear();
 
-    onLine?.call('fetching tree of $repoFull …');
-    final tree = await _getTree();
-    // only text-ish files, skip vendor dirs
-    const skip = <String>[
-      'node_modules/', '.git/', 'build/', '.dart_tool/', 'dist/',
-      'android/app/build/', 'ios/Pods/', '.png', '.jpg', '.jpeg', '.gif',
-      '.webp', '.ico', '.woff', '.woff2', '.ttf', '.zip', '.jar', '.so',
-      '.apk', '.pdf', '.mp4', '.bin',
-    ];
-    final okPaths = tree
-        .where((e) => e['type'] == 'blob')
-        .map((e) => e['path'] as String)
-        .where((p) => !skip.any((s) => p.contains(s)))
-        .toList();
+    final c = client ?? http.Client();
+    try {
+      onLine?.call('fetching tree of $repo …');
+      final tree = await _getTree(repo, token, branch, c);
+      // only text-ish files, skip vendor dirs
+      const skip = <String>[
+        'node_modules/',
+        '.git/',
+        'build/',
+        '.dart_tool/',
+        'dist/',
+        'android/app/build/',
+        'ios/Pods/',
+        '.png',
+        '.jpg',
+        '.jpeg',
+        '.gif',
+        '.webp',
+        '.ico',
+        '.woff',
+        '.woff2',
+        '.ttf',
+        '.zip',
+        '.jar',
+        '.so',
+        '.apk',
+        '.pdf',
+        '.mp4',
+        '.bin',
+      ];
+      final okPaths = tree
+          .where((e) => e['type'] == 'blob')
+          .map((e) => e['path'] as String)
+          .where((p) => !skip.any((s) => p.contains(s)))
+          .toList();
 
-    final take = okPaths.length > maxFiles ? okPaths.sublist(0, maxFiles) : okPaths;
-    treePaths.addAll(take);
+      final take = okPaths.length > maxFiles
+          ? okPaths.sublist(0, maxFiles)
+          : okPaths;
+      final syncedFiles = <String, String>{};
 
-    // fetch contents in small batches
-    var done = 0;
-    for (final p in take) {
-      final c = await _fetchRaw(p);
-      if (c != null) files[p] = c;
-      done++;
-      if (done % 25 == 0) {
-        onLine?.call('synced $done / ${take.length} files');
+      // fetch contents in small batches
+      var done = 0;
+      for (final p in take) {
+        _ensureBinding(generation);
+        final content = await _fetchRaw(repo, token, p, c);
+        if (content != null) syncedFiles[p] = content;
+        done++;
+        if (done % 25 == 0) {
+          onLine?.call('synced $done / ${take.length} files');
+        }
       }
+      _ensureBinding(generation);
+      treePaths
+        ..clear()
+        ..addAll(take);
+      files
+        ..clear()
+        ..addAll(syncedFiles);
+      _dirty.clear();
+      lastSync = DateTime.now();
+      onLine?.call('repo synced ✓ ${files.length} files in memory');
+      notifyListeners();
+    } finally {
+      if (client == null) c.close();
     }
-    lastSync = DateTime.now();
-    onLine?.call('repo synced ✓ ${files.length} files in memory');
-    notifyListeners();
   }
 
-  Future<List<Map<String, dynamic>>> _getTree() async {
-    final res = await http.get(
-      Uri.parse('$_api/repos/$repoFull/git/trees/${defaultBranch ?? 'main'}?recursive=1'),
-      headers: {
-        'Authorization': 'Bearer $_token',
-        'Accept': 'application/vnd.github+json',
-      },
-    );
+  void _ensureBinding(int generation) {
+    if (generation != _bindingGeneration) {
+      throw StateError('repository binding changed');
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _getTree(
+    String repo,
+    String token,
+    String branch,
+    http.Client client,
+  ) async {
+    final res = await client
+        .get(
+          Uri.parse('$_api/repos/$repo/git/trees/$branch?recursive=1'),
+          headers: {
+            'Authorization': 'Bearer $token',
+            'Accept': 'application/vnd.github+json',
+          },
+        )
+        .timeout(_requestTimeout);
     if (res.statusCode != 200) {
       throw Exception('tree fetch ${res.statusCode}');
     }
@@ -116,16 +170,24 @@ class RepoCache extends ChangeNotifier {
     return (j['tree'] as List).cast<Map<String, dynamic>>();
   }
 
-  Future<String?> _fetchRaw(String path) async {
+  Future<String?> _fetchRaw(
+    String repo,
+    String token,
+    String path,
+    http.Client client,
+  ) async {
     try {
-      final res = await http.get(
-        Uri.parse(
-            '$_api/repos/$repoFull/contents/${Uri.encodeComponent(path)}'),
-        headers: {
-          'Authorization': 'Bearer $_token',
-          'Accept': 'application/vnd.github.raw',
-        },
-      );
+      final res = await client
+          .get(
+            Uri.parse(
+              '$_api/repos/$repo/contents/${Uri.encodeComponent(path)}',
+            ),
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Accept': 'application/vnd.github.raw',
+            },
+          )
+          .timeout(_requestTimeout);
       if (res.statusCode != 200) return null;
       return utf8.decode(res.bodyBytes, allowMalformed: true);
     } catch (_) {
@@ -173,31 +235,63 @@ class RepoCache extends ChangeNotifier {
   }
 
   // ── commit pending ───────────────────────────────────────────────────
-  Future<int> commitAll(String message) async {
-    if (repoFull == null || _token == null) return 0;
-    var pushed = 0;
-    for (final path in _dirty.toList()) {
-      final content = files[path];
-      if (content == null) continue;
-      final sha = await _shaOf(path);
-      final ok = await _putFile(path, content, message, sha);
-      if (ok) {
-        _dirty.remove(path);
-        pushed++;
-      }
+  Future<int> commitAll(String message, {http.Client? client}) async {
+    final repo = repoFull;
+    final token = _token;
+    final generation = _bindingGeneration;
+    if (repo == null || token == null || token.isEmpty) {
+      throw StateError('repo not bound');
     }
-    return pushed;
+    final pending = {
+      for (final path in _dirty)
+        if (files[path] case final String content) path: content,
+    };
+    final c = client ?? http.Client();
+    try {
+      var pushed = 0;
+      for (final entry in pending.entries) {
+        _ensureBinding(generation);
+        final sha = await _shaOf(repo, token, entry.key, c);
+        _ensureBinding(generation);
+        final ok = await _putFile(
+          repo,
+          token,
+          entry.key,
+          entry.value,
+          message,
+          sha,
+          c,
+        );
+        _ensureBinding(generation);
+        if (ok) {
+          if (files[entry.key] == entry.value) _dirty.remove(entry.key);
+          pushed++;
+        }
+      }
+      return pushed;
+    } finally {
+      if (client == null) c.close();
+    }
   }
 
-  Future<String?> _shaOf(String path) async {
+  Future<String?> _shaOf(
+    String repo,
+    String token,
+    String path,
+    http.Client client,
+  ) async {
     try {
-      final res = await http.get(
-        Uri.parse('$_api/repos/$repoFull/contents/${Uri.encodeComponent(path)}'),
-        headers: {
-          'Authorization': 'Bearer $_token',
-          'Accept': 'application/vnd.github+json',
-        },
-      );
+      final res = await client
+          .get(
+            Uri.parse(
+              '$_api/repos/$repo/contents/${Uri.encodeComponent(path)}',
+            ),
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Accept': 'application/vnd.github+json',
+            },
+          )
+          .timeout(_requestTimeout);
       if (res.statusCode == 200) {
         return (jsonDecode(res.body))['sha'] as String?;
       }
@@ -205,21 +299,30 @@ class RepoCache extends ChangeNotifier {
     return null;
   }
 
-  Future<bool> _putFile(String path, String content, String message,
-      String? sha) async {
-    final res = await http.put(
-      Uri.parse('$_api/repos/$repoFull/contents/${Uri.encodeComponent(path)}'),
-      headers: {
-        'Authorization': 'Bearer $_token',
-        'Accept': 'application/vnd.github+json',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({
-        'message': message,
-        'content': base64Encode(utf8.encode(content)),
-        'sha': ?sha,
-      }),
-    );
+  Future<bool> _putFile(
+    String repo,
+    String token,
+    String path,
+    String content,
+    String message,
+    String? sha,
+    http.Client client,
+  ) async {
+    final res = await client
+        .put(
+          Uri.parse('$_api/repos/$repo/contents/${Uri.encodeComponent(path)}'),
+          headers: {
+            'Authorization': 'Bearer $token',
+            'Accept': 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'message': message,
+            'content': base64Encode(utf8.encode(content)),
+            'sha': ?sha,
+          }),
+        )
+        .timeout(_requestTimeout);
     return res.statusCode == 200 || res.statusCode == 201;
   }
 

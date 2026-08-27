@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show IconData, Icons, Color;
 import 'package:webview_flutter/webview_flutter.dart';
@@ -540,10 +541,15 @@ You are Ovid's on-device coding & browsing agent running INSIDE a Flutter app.
 Environment: Android device with an Ubuntu proot sandbox (python3/node/git/gcc),
 a live Browser panel, and the user's connected GitHub repo (${GitHubService.I.login ?? 'github'}).
 Access mode: ${mode.label.toUpperCase()} — ${mode.hint}
-When a task needs commands, pages or file changes, CALL THE TOOLS instead of
-describing them. Prefer many small steps. Always verify results before finishing.
+
+RESPONSE STYLE (default): Be concise and lightweight, like a fast coding assistant.
+Lead with the answer or result. Skip long preambles, restating the question, and
+filler. Use short bullet points or code blocks only when they help. Match the
+user's language (Hindi/English). Only give long explanations, step-by-step
+reasoning, or extra detail when the user explicitly asks for it or the task truly
+requires it. When a task needs commands, pages or file changes, CALL THE TOOLS
+instead of describing them. Prefer many small steps. Verify results before finishing.
 If the user asks to install a plugin or MCP, use agent_install_plugin or agent_install_mcp.
-Available plugins and MCPs appear dynamically in your tool list based on what the user has installed.
 ''';
 
     final historyStart = s.messages.length > 12 ? s.messages.length - 12 : 0;
@@ -664,9 +670,12 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
       if (effort != null) body['reasoning_effort'] = effort;
 
       final bodyStr = jsonEncode(body);
-      req.headers.contentLength = utf8.encode(bodyStr).length;
-      req.write(bodyStr);
+      final bodyBytes = utf8.encode(bodyStr);
+      req.headers.contentLength = bodyBytes.length;
+      req.add(bodyBytes);
 
+      // Total stream deadline — 2 min covers connect, headers and body.
+      final streamDeadline = DateTime.now().add(const Duration(minutes: 2));
       final res = await req.close().timeout(const Duration(seconds: 30));
       if (res.statusCode != 200) {
         final data = <int>[];
@@ -687,17 +696,17 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
       final contentBuf = StringBuffer();
       final reasoningBuf = StringBuffer();
       final tcAcc = <int, Map<String, dynamic>>{};
-      int totalBytes = 0;
       String? finishReason;
 
       await for (final raw
           in res
               .cast<List<int>>()
-              .transform(utf8.decoder)
-              .transform(const LineSplitter())
-              .timeout(const Duration(seconds: 60))) {
-        totalBytes += raw.length;
-        if (totalBytes > 8 * 1024 * 1024) break; // 8MB hard cap — runaway guard
+              .transform(SseLineSplitter(maxBytes: 8 * 1024 * 1024))
+              .timeout(
+                streamDeadline.difference(DateTime.now()),
+                onTimeout: (sink) =>
+                    throw TimeoutException('model stream exceeded 2 minutes'),
+              )) {
         final line = raw.trim();
         if (line.isEmpty || !line.startsWith('data:')) continue;
         final payload = line.substring(5).trim();
@@ -1196,53 +1205,189 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
   }
 }
 
+/// Splits a byte stream into UTF-8 lines with a hard total-byte cap.
+/// Unlike `LineSplitter`, no single newline-free line can grow without bound.
+class SseLineSplitter extends StreamTransformerBase<List<int>, String> {
+  final int maxBytes;
+
+  const SseLineSplitter({required this.maxBytes});
+
+  @override
+  Stream<String> bind(Stream<List<int>> stream) {
+    var totalBytes = 0;
+    var pending = BytesBuilder(copy: false);
+    late StreamController<String> controller;
+    StreamSubscription<List<int>>? sub;
+
+    void fail(String message) {
+      controller.addError(HttpException(message));
+      unawaited(sub?.cancel());
+      unawaited(controller.close());
+    }
+
+    void flushLines({required bool endOfStream}) {
+      final bytes = pending.takeBytes();
+      if (bytes.isEmpty) return;
+      final decoded = utf8.decode(bytes, allowMalformed: true);
+      var start = 0;
+      for (var i = 0; i < decoded.length; i++) {
+        final code = decoded.codeUnitAt(i);
+        if (code == 0x0A || code == 0x0D) {
+          if (i > start) controller.add(decoded.substring(start, i));
+          if (code == 0x0D &&
+              i + 1 < decoded.length &&
+              decoded.codeUnitAt(i + 1) == 0x0A) {
+            i++; // CRLF
+          }
+          start = i + 1;
+        }
+      }
+      if (start < decoded.length) {
+        if (endOfStream) {
+          controller.add(decoded.substring(start));
+        } else {
+          pending = BytesBuilder(copy: false)
+            ..add(utf8.encode(decoded.substring(start)));
+        }
+      }
+    }
+
+    controller = StreamController<String>(
+      onListen: () {
+        sub = stream.listen(
+          (chunk) {
+            if (controller.isClosed) return;
+            totalBytes += chunk.length;
+            if (totalBytes > maxBytes) {
+              fail('response exceeded $maxBytes bytes');
+              return;
+            }
+            pending.add(chunk);
+            flushLines(endOfStream: false);
+          },
+          onError: controller.addError,
+          onDone: () {
+            flushLines(endOfStream: true);
+            unawaited(controller.close());
+          },
+          cancelOnError: true,
+        );
+      },
+      onCancel: () => sub?.cancel(),
+    );
+    return controller.stream;
+  }
+}
+
 class HttpShim {
+  static const _requestTimeout = Duration(seconds: 20);
+  static const _maxResponseBytes = 8 * 1024 * 1024;
+
   static Future<({int status, String bodyText, List<int> bytes})> post(
     Uri u, {
     Map<String, String>? headers,
     Object? body,
+    Duration timeout = _requestTimeout,
+    int maxResponseBytes = _maxResponseBytes,
   }) async {
     final client = HttpClient();
     try {
-      final req = await client.postUrl(u);
-      headers?.forEach((k, v) => req.headers.set(k, v));
-      req.headers.contentLength = utf8.encode(body as String).length;
-      req.write(body);
-      final res = await req.close();
-      final data = <int>[];
-      await for (final c in res) {
-        data.addAll(c);
-      }
-      return (
-        status: res.statusCode,
-        bodyText: utf8.decode(data, allowMalformed: true),
-        bytes: data,
-      );
+      return await _postInner(
+        client,
+        u,
+        headers: headers,
+        body: body,
+        timeout: timeout,
+        maxResponseBytes: maxResponseBytes,
+      ).timeout(timeout);
     } finally {
       client.close(force: true);
     }
   }
 
+  static Future<({int status, String bodyText, List<int> bytes})> _postInner(
+    HttpClient client,
+    Uri u, {
+    Map<String, String>? headers,
+    Object? body,
+    required Duration timeout,
+    required int maxResponseBytes,
+  }) async {
+    client.connectionTimeout = timeout;
+    final req = await client.postUrl(u);
+    headers?.forEach((k, v) => req.headers.set(k, v));
+    final bodyBytes = utf8.encode(body as String);
+    req.headers.contentLength = bodyBytes.length;
+    req.add(bodyBytes);
+    final res = await req.close();
+    final data = await _readBounded(res, maxResponseBytes);
+    return (
+      status: res.statusCode,
+      bodyText: utf8.decode(data, allowMalformed: true),
+      bytes: data,
+    );
+  }
+
   static Future<({int status, String bodyText, List<int> bytes})> get(
     Uri u, {
     Map<String, String>? headers,
+    Duration timeout = _requestTimeout,
+    int maxResponseBytes = _maxResponseBytes,
   }) async {
     final client = HttpClient();
     try {
-      final req = await client.getUrl(u);
-      headers?.forEach((k, v) => req.headers.set(k, v));
-      final res = await req.close();
-      final data = <int>[];
-      await for (final c in res) {
-        data.addAll(c);
-      }
-      return (
-        status: res.statusCode,
-        bodyText: utf8.decode(data, allowMalformed: true),
-        bytes: data,
-      );
+      return await _getInner(
+        client,
+        u,
+        headers: headers,
+        timeout: timeout,
+        maxResponseBytes: maxResponseBytes,
+      ).timeout(timeout);
     } finally {
       client.close(force: true);
     }
+  }
+
+  static Future<({int status, String bodyText, List<int> bytes})> _getInner(
+    HttpClient client,
+    Uri u, {
+    Map<String, String>? headers,
+    required Duration timeout,
+    required int maxResponseBytes,
+  }) async {
+    client.connectionTimeout = timeout;
+    final req = await client.getUrl(u);
+    headers?.forEach((k, v) => req.headers.set(k, v));
+    final res = await req.close();
+    final data = await _readBounded(res, maxResponseBytes);
+    return (
+      status: res.statusCode,
+      bodyText: utf8.decode(data, allowMalformed: true),
+      bytes: data,
+    );
+  }
+
+  static Future<List<int>> _readBounded(
+    HttpClientResponse response,
+    int maxResponseBytes,
+  ) async {
+    if (maxResponseBytes <= 0) {
+      throw ArgumentError.value(
+        maxResponseBytes,
+        'maxResponseBytes',
+        'Must be positive',
+      );
+    }
+    if (response.contentLength > maxResponseBytes) {
+      throw HttpException('Response exceeds $maxResponseBytes bytes');
+    }
+    final data = <int>[];
+    await for (final chunk in response) {
+      if (data.length + chunk.length > maxResponseBytes) {
+        throw HttpException('Response exceeds $maxResponseBytes bytes');
+      }
+      data.addAll(chunk);
+    }
+    return data;
   }
 }

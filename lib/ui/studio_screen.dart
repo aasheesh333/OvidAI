@@ -19,17 +19,29 @@ class StudioScreen extends StatefulWidget {
 class _StudioScreenState extends State<StudioScreen> {
   bool _showFiles = true;
   bool _syncing = false;
+  bool _handledInitialAuth = false;
 
   String? get _repo => AgentService.I.repoFull;
 
   @override
   void initState() {
     super.initState();
-    // Not logged in yet → show Device Flow login sheet once.
-    if (!GitHubService.I.isLoggedIn) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        showGithubLoginSheet(context);
-      });
+    GitHubService.I.addListener(_handleInitialAuth);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _handleInitialAuth());
+  }
+
+  @override
+  void dispose() {
+    GitHubService.I.removeListener(_handleInitialAuth);
+    super.dispose();
+  }
+
+  void _handleInitialAuth() {
+    final github = GitHubService.I;
+    if (!mounted || _handledInitialAuth || github.isInitializing) return;
+    _handledInitialAuth = true;
+    if (!github.isLoggedIn) {
+      showGithubLoginSheet(context);
     } else if (_repo != null && !RepoCache.I.isReady) {
       _autoSync();
     }
@@ -66,21 +78,30 @@ class _StudioScreenState extends State<StudioScreen> {
             children: [
               const Padding(
                 padding: EdgeInsets.all(14),
-                child: Text('Your repositories',
-                    style:
-                        TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+                child: Text(
+                  'Your repositories',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                ),
               ),
               for (final r in repos)
                 ListTile(
                   dense: true,
-                  leading: const Icon(Icons.bookmark_border,
-                      size: 18, color: Aether.textMuted),
-                  title: Text(r['full_name'] ?? '${r['name']}',
-                      style: const TextStyle(fontSize: 13.5)),
+                  leading: const Icon(
+                    Icons.bookmark_border,
+                    size: 18,
+                    color: Aether.textMuted,
+                  ),
+                  title: Text(
+                    r['full_name'] ?? '${r['name']}',
+                    style: const TextStyle(fontSize: 13.5),
+                  ),
                   subtitle: Text(
-                      '${r['language'] ?? '—'} · ⭐ ${r['stargazers_count'] ?? 0}',
-                      style: const TextStyle(
-                          fontSize: 11, color: Aether.textFaint)),
+                    '${r['language'] ?? '—'} · ⭐ ${r['stargazers_count'] ?? 0}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Aether.textFaint,
+                    ),
+                  ),
                   onTap: () => Navigator.pop(context, r['full_name'] as String),
                 ),
             ],
@@ -93,8 +114,9 @@ class _StudioScreenState extends State<StudioScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Repo list failed: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Repo list failed: $e')));
       }
     }
   }
@@ -110,15 +132,20 @@ class _StudioScreenState extends State<StudioScreen> {
           IconButton(
             tooltip: 'Toggle files',
             visualDensity: VisualDensity.compact,
-            icon: Icon(_showFiles ? Icons.folder_open : Icons.folder_outlined,
-                size: 19, color: Aether.textMuted),
+            icon: Icon(
+              _showFiles ? Icons.folder_open : Icons.folder_outlined,
+              size: 19,
+              color: Aether.textMuted,
+            ),
             onPressed: () => setState(() => _showFiles = !_showFiles),
           ),
-          const Icon(Icons.play_arrow_rounded,
-              size: 22, color: Aether.success),
+          const Icon(Icons.play_arrow_rounded, size: 22, color: Aether.success),
           const SizedBox(width: 14),
-          const Icon(Icons.account_tree_outlined,
-              size: 18, color: Aether.textMuted),
+          const Icon(
+            Icons.account_tree_outlined,
+            size: 18,
+            color: Aether.textMuted,
+          ),
           const SizedBox(width: 14),
           // ── GitHub account chip + sign out ──
           const _AccountChip(),
@@ -126,23 +153,30 @@ class _StudioScreenState extends State<StudioScreen> {
             padding: const EdgeInsets.only(right: 14, left: 4),
             child: AnimatedBuilder(
               animation: AppState.I,
-              builder: (context, _) => Row(children: [
-                Container(
+              builder: (context, _) => Row(
+                children: [
+                  Container(
                     width: 7,
                     height: 7,
                     decoration: BoxDecoration(
-                        color: AppState.I.sandboxInstalled
-                            ? Aether.success
-                            : Aether.warn,
-                        shape: BoxShape.circle)),
-                const SizedBox(width: 6),
-                Text(
+                      color: AppState.I.sandboxInstalled
+                          ? Aether.success
+                          : Aether.warn,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
                     AppState.I.sandboxInstalled
                         ? 'Sandbox ready'
                         : 'Sandbox pending',
                     style: const TextStyle(
-                        fontSize: 11.5, color: Aether.textMuted)),
-              ]),
+                      fontSize: 11.5,
+                      color: Aether.textMuted,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
@@ -151,9 +185,10 @@ class _StudioScreenState extends State<StudioScreen> {
         child: Column(
           children: [
             _RepoBar(
-                repo: _repo ?? 'Connect a repo',
-                onPick: _pickRepo,
-                syncing: _syncing),
+              repo: _repo ?? 'Connect a repo',
+              onPick: _pickRepo,
+              syncing: _syncing,
+            ),
             Expanded(
               child: Row(
                 children: [
@@ -162,10 +197,12 @@ class _StudioScreenState extends State<StudioScreen> {
                     const VerticalDivider(width: 1),
                   ],
                   const Expanded(
-                    child: Column(children: [
-                      _Tabs(),
-                      Expanded(child: _Editor()),
-                    ]),
+                    child: Column(
+                      children: [
+                        _Tabs(),
+                        Expanded(child: _Editor()),
+                      ],
+                    ),
                   ),
                 ],
               ),
@@ -183,8 +220,11 @@ class _RepoBar extends StatelessWidget {
   final String repo;
   final VoidCallback onPick;
   final bool syncing;
-  const _RepoBar(
-      {required this.repo, required this.onPick, required this.syncing});
+  const _RepoBar({
+    required this.repo,
+    required this.onPick,
+    required this.syncing,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -195,41 +235,51 @@ class _RepoBar extends StatelessWidget {
         color: Aether.surface,
         border: Border(bottom: BorderSide(color: Aether.hairline)),
       ),
-      child: Row(children: [
-        const Icon(Icons.hub_outlined, size: 15, color: Aether.textMuted),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(repo,
+      child: Row(
+        children: [
+          const Icon(Icons.hub_outlined, size: 15, color: Aether.textMuted),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              repo,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  color: repo == 'Connect a repo'
-                      ? Aether.textFaint
-                      : Aether.text)),
-        ),
-        if (repo != 'Connect a repo')
-          const Tag('GITHUB', color: Aether.textMuted),
-        if (syncing) ...[
-          const SizedBox(width: 8),
-          const SizedBox(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+                color: repo == 'Connect a repo'
+                    ? Aether.textFaint
+                    : Aether.text,
+              ),
+            ),
+          ),
+          if (repo != 'Connect a repo')
+            const Tag('GITHUB', color: Aether.textMuted),
+          if (syncing) ...[
+            const SizedBox(width: 8),
+            const SizedBox(
               width: 11,
               height: 11,
               child: CircularProgressIndicator(
-                  strokeWidth: 1.5, color: Aether.accent)),
-        ],
-        const SizedBox(width: 8),
-        TextButton(
-          style: TextButton.styleFrom(
+                strokeWidth: 1.5,
+                color: Aether.accent,
+              ),
+            ),
+          ],
+          const SizedBox(width: 8),
+          TextButton(
+            style: TextButton.styleFrom(
               minimumSize: Size.zero,
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              foregroundColor: Aether.accent),
-          onPressed: onPick,
-          child: Text(repo == 'Connect a repo' ? 'Connect' : 'Change',
-              style: const TextStyle(fontSize: 12)),
-        ),
-      ]),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              foregroundColor: Aether.accent,
+            ),
+            onPressed: onPick,
+            child: Text(
+              repo == 'Connect a repo' ? 'Connect' : 'Change',
+              style: const TextStyle(fontSize: 12),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -251,12 +301,15 @@ class _FileTree extends StatelessWidget {
             children: [
               const Padding(
                 padding: EdgeInsets.fromLTRB(12, 10, 12, 8),
-                child: Text('FILES',
-                    style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 1.4,
-                        color: Aether.textFaint)),
+                child: Text(
+                  'FILES',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.4,
+                    color: Aether.textFaint,
+                  ),
+                ),
               ),
               Expanded(
                 child: paths.isEmpty
@@ -264,12 +317,14 @@ class _FileTree extends StatelessWidget {
                         child: Padding(
                           padding: const EdgeInsets.all(14),
                           child: Text(
-                              'Connect a repo —\nfiles appear here live.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                  fontSize: 11.5,
-                                  height: 1.6,
-                                  color: Aether.textFaint)),
+                            'Connect a repo —\nfiles appear here live.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              height: 1.6,
+                              color: Aether.textFaint,
+                            ),
+                          ),
                         ),
                       )
                     : ListView.builder(
@@ -277,12 +332,11 @@ class _FileTree extends StatelessWidget {
                         itemCount: paths.length,
                         itemBuilder: (_, i) {
                           final p = paths[i];
-                          final depth =
-                              '/'.allMatches(p).length;
-                          final isDir = i + 1 < paths.length &&
+                          final depth = '/'.allMatches(p).length;
+                          final isDir =
+                              i + 1 < paths.length &&
                               paths[i + 1].startsWith('$p/');
-                          final active =
-                              AgentService.I.activeFilePath == p;
+                          final active = AgentService.I.activeFilePath == p;
                           return InkWell(
                             onTap: () {
                               AgentService.I.activeFilePath = p;
@@ -296,62 +350,76 @@ class _FileTree extends StatelessWidget {
                                   ? Aether.accentSoft
                                   : Colors.transparent,
                               padding: EdgeInsets.fromLTRB(
-                                  10.0 + depth * 14, 6, 8, 6),
-                              child: Row(children: [
-                                Icon(
-                                  isDir
-                                      ? Icons.folder_outlined
-                                      : Icons.description_outlined,
-                                  size: 13,
-                                  color: isDir
-                                      ? Aether.textMuted
-                                      : Aether.textFaint,
-                                ),
-                                const SizedBox(width: 6),
-                                Expanded(
-                                  child: Text(
+                                10.0 + depth * 14,
+                                6,
+                                8,
+                                6,
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    isDir
+                                        ? Icons.folder_outlined
+                                        : Icons.description_outlined,
+                                    size: 13,
+                                    color: isDir
+                                        ? Aether.textMuted
+                                        : Aether.textFaint,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Expanded(
+                                    child: Text(
                                       p.split('/').last,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
-                                          fontSize: 12,
-                                          fontFamily: Aether.mono,
-                                          color: active
-                                              ? Aether.accent
-                                              : isDir
-                                                  ? Aether.text
-                                                  : Aether.textMuted)),
-                                ),
-                              ]),
+                                        fontSize: 12,
+                                        fontFamily: Aether.mono,
+                                        color: active
+                                            ? Aether.accent
+                                            : isDir
+                                            ? Aether.text
+                                            : Aether.textMuted,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           );
                         },
                       ),
               ),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 9,
+                ),
                 decoration: const BoxDecoration(
-                    border:
-                        Border(top: BorderSide(color: Aether.hairline))),
-                child: Row(children: [
-                  Icon(
+                  border: Border(top: BorderSide(color: Aether.hairline)),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
                       cache.isReady
                           ? Icons.cloud_done_outlined
                           : Icons.cloud_off_outlined,
                       size: 13,
-                      color: cache.isReady
-                          ? Aether.success
-                          : Aether.textFaint),
-                  const SizedBox(width: 7),
-                  Expanded(
-                    child: Text(
+                      color: cache.isReady ? Aether.success : Aether.textFaint,
+                    ),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: Text(
                         cache.isReady
                             ? 'Synced · ${cache.files.length} files'
                             : 'Not connected',
                         style: const TextStyle(
-                            fontSize: 11, color: Aether.textMuted)),
-                  ),
-                ]),
+                          fontSize: 11,
+                          color: Aether.textMuted,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
@@ -380,24 +448,31 @@ class _Tabs extends StatelessWidget {
               border: Border(
                 right: const BorderSide(color: Aether.hairline),
                 top: BorderSide(
-                    color: active ? Aether.accent : Colors.transparent,
-                    width: 2),
+                  color: active ? Aether.accent : Colors.transparent,
+                  width: 2,
+                ),
               ),
               color: active ? Aether.bg : Aether.surface,
             ),
-            child: Row(children: [
-              Icon(Icons.description_outlined,
+            child: Row(
+              children: [
+                Icon(
+                  Icons.description_outlined,
                   size: 13,
-                  color: active ? Aether.text : Aether.textFaint),
-              const SizedBox(width: 6),
-              Text(tabs[i],
+                  color: active ? Aether.text : Aether.textFaint,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  tabs[i],
                   style: TextStyle(
-                      fontSize: 12,
-                      color:
-                          active ? Aether.text : Aether.textMuted)),
-              const SizedBox(width: 8),
-              const Icon(Icons.close, size: 12, color: Aether.textFaint),
-            ]),
+                    fontSize: 12,
+                    color: active ? Aether.text : Aether.textMuted,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Icon(Icons.close, size: 12, color: Aether.textFaint),
+              ],
+            ),
           );
         },
       ),
@@ -415,7 +490,8 @@ class _Editor extends StatelessWidget {
       builder: (_, _) {
         final a = AgentService.I;
         final path = a.activeFilePath ?? 'welcome.md';
-        final code = a.fileBuffer[path] ??
+        final code =
+            a.fileBuffer[path] ??
             "Ovid Agent ready.\n\n"
                 "Ask the AI in chat to:\n"
                 "  • read a file from your connected repo\n"
@@ -430,27 +506,36 @@ class _Editor extends StatelessWidget {
             children: [
               // Active file path header
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 5,
+                ),
                 color: Aether.surfaceAlt,
-                child: Row(children: [
-                  const Icon(Icons.edit_note,
-                      size: 12, color: Aether.accent),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(path,
+                child: Row(
+                  children: [
+                    const Icon(Icons.edit_note, size: 12, color: Aether.accent),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        path,
                         style: TextStyle(
-                            fontFamily: Aether.mono,
-                            fontSize: 10.5,
-                            color: Aether.textMuted)),
-                  ),
-                  if (AgentService.I.repoFull != null)
-                    Text(AgentService.I.repoFull!,
+                          fontFamily: Aether.mono,
+                          fontSize: 10.5,
+                          color: Aether.textMuted,
+                        ),
+                      ),
+                    ),
+                    if (AgentService.I.repoFull != null)
+                      Text(
+                        AgentService.I.repoFull!,
                         style: const TextStyle(
-                            fontFamily: Aether.mono,
-                            fontSize: 10,
-                            color: Aether.textFaint)),
-                ]),
+                          fontFamily: Aether.mono,
+                          fontSize: 10,
+                          color: Aether.textFaint,
+                        ),
+                      ),
+                  ],
+                ),
               ),
               Expanded(
                 child: ListView.builder(
@@ -463,22 +548,28 @@ class _Editor extends StatelessWidget {
                       children: [
                         SizedBox(
                           width: 32,
-                          child: Text('${i + 1}',
-                              textAlign: TextAlign.right,
-                              style: const TextStyle(
-                                  fontFamily: Aether.mono,
-                                  fontSize: 11.5,
-                                  height: 1.6,
-                                  color: Aether.textFaint)),
+                          child: Text(
+                            '${i + 1}',
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(
+                              fontFamily: Aether.mono,
+                              fontSize: 11.5,
+                              height: 1.6,
+                              color: Aether.textFaint,
+                            ),
+                          ),
                         ),
                         const SizedBox(width: 14),
                         Expanded(
-                          child: SelectableText(lines[i],
-                              style: const TextStyle(
-                                  fontFamily: Aether.mono,
-                                  fontSize: 12,
-                                  height: 1.6,
-                                  color: Aether.text)),
+                          child: SelectableText(
+                            lines[i],
+                            style: const TextStyle(
+                              fontFamily: Aether.mono,
+                              fontSize: 12,
+                              height: 1.6,
+                              color: Aether.text,
+                            ),
+                          ),
                         ),
                       ],
                     ),
@@ -516,40 +607,53 @@ class _Terminal extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 7,
+                ),
                 color: Aether.surfaceAlt,
-                child: const Row(children: [
-                  Icon(Icons.terminal, size: 13, color: Aether.textMuted),
-                  SizedBox(width: 8),
-                  Text('SANDBOX TERMINAL',
+                child: const Row(
+                  children: [
+                    Icon(Icons.terminal, size: 13, color: Aether.textMuted),
+                    SizedBox(width: 8),
+                    Text(
+                      'SANDBOX TERMINAL',
                       style: TextStyle(
-                          fontSize: 10.5,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.8,
-                          color: Aether.textMuted)),
-                  Spacer(),
-                  Icon(Icons.add, size: 14, color: Aether.textFaint),
-                  SizedBox(width: 12),
-                  Icon(Icons.keyboard_arrow_up,
-                      size: 16, color: Aether.textFaint),
-                ]),
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.8,
+                        color: Aether.textMuted,
+                      ),
+                    ),
+                    Spacer(),
+                    Icon(Icons.add, size: 14, color: Aether.textFaint),
+                    SizedBox(width: 12),
+                    Icon(
+                      Icons.keyboard_arrow_up,
+                      size: 16,
+                      color: Aether.textFaint,
+                    ),
+                  ],
+                ),
               ),
               Expanded(
                 child: ListView(
                   padding: const EdgeInsets.all(12),
                   children: [
                     for (final l in lines)
-                      Text(l,
-                          style: TextStyle(
-                              fontFamily: Aether.mono,
-                              fontSize: 11.5,
-                              height: 1.6,
-                              color: l.startsWith('\$')
-                                  ? Aether.accent
-                                  : l.startsWith('✓') || l.endsWith('✓')
-                                      ? Aether.success
-                                      : Aether.textMuted)),
+                      Text(
+                        l,
+                        style: TextStyle(
+                          fontFamily: Aether.mono,
+                          fontSize: 11.5,
+                          height: 1.6,
+                          color: l.startsWith('\$')
+                              ? Aether.accent
+                              : l.startsWith('✓') || l.endsWith('✓')
+                              ? Aether.success
+                              : Aether.textMuted,
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -583,22 +687,40 @@ class _AccountChip extends StatelessWidget {
               showDialog(
                 context: context,
                 builder: (d) => AlertDialog(
-                  title: const Text('Sign out of GitHub?',
-                      style: TextStyle(fontSize: 15)),
+                  title: const Text(
+                    'Sign out of GitHub?',
+                    style: TextStyle(fontSize: 15),
+                  ),
                   content: const Text(
-                      'The repo connection will be cleared. Your GitHub access token is removed from this device only.',
-                      style: TextStyle(fontSize: 12.5)),
+                    'The repo connection will be cleared. Your GitHub access token is removed from this device only.',
+                    style: TextStyle(fontSize: 12.5),
+                  ),
                   actions: [
                     TextButton(
-                        onPressed: () => Navigator.pop(d),
-                        child: const Text('Cancel')),
+                      onPressed: () => Navigator.pop(d),
+                      child: const Text('Cancel'),
+                    ),
                     TextButton(
-                        onPressed: () {
-                          gh.signOut();
-                          Navigator.pop(d);
-                        },
-                        child: const Text('Sign out',
-                            style: TextStyle(color: Aether.danger))),
+                      onPressed: () async {
+                        Navigator.pop(d);
+                        try {
+                          await gh.signOut();
+                        } catch (_) {
+                          if (!context.mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Signed out, but the saved token could not be removed.',
+                              ),
+                            ),
+                          );
+                        }
+                      },
+                      child: const Text(
+                        'Sign out',
+                        style: TextStyle(color: Aether.danger),
+                      ),
+                    ),
                   ],
                 ),
               );
@@ -607,50 +729,70 @@ class _AccountChip extends StatelessWidget {
           itemBuilder: (_) => [
             PopupMenuItem(
               enabled: false,
-              child: Row(children: [
-                _Avatar(url: gh.avatarUrl, size: 24),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(gh.name ?? gh.login ?? '',
+              child: Row(
+                children: [
+                  _Avatar(url: gh.avatarUrl, size: 24),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          gh.name ?? gh.login ?? '',
                           style: const TextStyle(
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w600)),
-                      Text('@${gh.login ?? ''}',
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Text(
+                          '@${gh.login ?? ''}',
                           style: const TextStyle(
-                              fontSize: 10.5,
-                              color: Aether.textFaint)),
-                    ],
+                            fontSize: 10.5,
+                            color: Aether.textFaint,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ]),
+                ],
+              ),
             ),
             const PopupMenuDivider(height: 6),
             const PopupMenuItem(
               value: 'signout',
-              child: Row(children: [
-                Icon(Icons.logout,
-                    size: 15, color: Aether.danger),
-                SizedBox(width: 8),
-                Text('Sign out',
-                    style: TextStyle(
-                        fontSize: 12.5, color: Aether.danger)),
-              ]),
+              child: Row(
+                children: [
+                  Icon(Icons.logout, size: 15, color: Aether.danger),
+                  SizedBox(width: 8),
+                  Text(
+                    'Sign out',
+                    style: TextStyle(fontSize: 12.5, color: Aether.danger),
+                  ),
+                ],
+              ),
             ),
           ],
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 6),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              _Avatar(url: gh.avatarUrl, size: 20),
-              const SizedBox(width: 6),
-              Text(gh.login ?? '',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _Avatar(url: gh.avatarUrl, size: 20),
+                const SizedBox(width: 6),
+                Text(
+                  gh.login ?? '',
                   style: const TextStyle(
-                      fontSize: 11.5, color: Aether.textMuted)),
-              const Icon(Icons.expand_more,
-                  size: 14, color: Aether.textFaint),
-            ]),
+                    fontSize: 11.5,
+                    color: Aether.textMuted,
+                  ),
+                ),
+                const Icon(
+                  Icons.expand_more,
+                  size: 14,
+                  color: Aether.textFaint,
+                ),
+              ],
+            ),
           ),
         );
       },
@@ -673,8 +815,11 @@ class _Avatar extends StatelessWidget {
           color: Aether.surfaceRaised,
           shape: BoxShape.circle,
         ),
-        child: Icon(Icons.person_outline,
-            size: size * 0.55, color: Aether.textMuted),
+        child: Icon(
+          Icons.person_outline,
+          size: size * 0.55,
+          color: Aether.textMuted,
+        ),
       );
     }
     return ClipRRect(
@@ -688,8 +833,11 @@ class _Avatar extends StatelessWidget {
           width: size,
           height: size,
           color: Aether.surfaceRaised,
-          child: Icon(Icons.person_outline,
-              size: size * 0.55, color: Aether.textMuted),
+          child: Icon(
+            Icons.person_outline,
+            size: size * 0.55,
+            color: Aether.textMuted,
+          ),
         ),
       ),
     );

@@ -48,3 +48,12 @@ app.*.map.json
 docs/*.apk
 *.apk
 
+
+# Firebase + signing secrets — injected via CI, never commit
+android/app/google-services.json
+google-services.json
+android/keystore.properties
+android/release-keystore.jks
+*.jks
+*.keystore
+keystore.properties

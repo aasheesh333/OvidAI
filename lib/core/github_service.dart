@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'repo_cache.dart';
 
@@ -45,24 +46,81 @@ class GitHubService extends ChangeNotifier {
   static const _deviceCodeUrl = 'https://github.com/login/device/code';
   static const _tokenUrl = 'https://github.com/login/oauth/access_token';
   static const _apiBase = 'https://api.github.com';
+  static const _tokenStorageKey = 'ovid_github_token';
+  static const _secureStorage = FlutterSecureStorage();
+  static const _requestTimeout = Duration(seconds: 20);
 
   String? _token;
   Map<String, dynamic>? _user;
   int _authGeneration = 0;
+  Future<void> _tokenWrite = Future<void>.value();
+  bool _isInitializing = true;
 
   bool get isLoggedIn => _token != null;
+  bool get isInitializing => _isInitializing;
   String? get login => _user?['login'] as String?;
   String? get avatarUrl => _user?['avatar_url'] as String?;
   String? get name => _user?['name'] as String?;
   String? get token => _token;
 
   /// Sign out — clear token + profile, disconnect repo cache.
-  void signOut() {
+  Future<void> signOut() async {
     _authGeneration++;
+    _isInitializing = false;
     _token = null;
     _user = null;
     RepoCache.I.unbind();
     notifyListeners();
+    await _persistToken(null);
+  }
+
+  Future<void> initialize({http.Client? client}) async {
+    final generation = ++_authGeneration;
+    _isInitializing = true;
+    notifyListeners();
+    final c = client ?? http.Client();
+    final ownsClient = client == null;
+    try {
+      final token = await _secureStorage.read(key: _tokenStorageKey);
+      if (token == null || token.isEmpty || generation != _authGeneration) {
+        return;
+      }
+      final user = await _fetchUser(token, c);
+      if (generation != _authGeneration) return;
+      _token = token;
+      _user = user;
+      notifyListeners();
+    } on GitHubAuthException catch (error) {
+      if (generation == _authGeneration && error.code == 'invalid_token') {
+        _token = null;
+        _user = null;
+        await _persistToken(null);
+      }
+    } catch (_) {
+      // Keep a stored token through transient network and decoding failures.
+    } finally {
+      if (ownsClient) c.close();
+      if (generation == _authGeneration) {
+        _isInitializing = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<void> _persistToken(String? token, {int? generation}) {
+    final write = _tokenWrite.then((_) async {
+      if (generation != null && generation != _authGeneration) return;
+      if (token == null || token.isEmpty) {
+        await _secureStorage.delete(key: _tokenStorageKey);
+      } else {
+        await _secureStorage.write(key: _tokenStorageKey, value: token);
+        if (generation != null && generation != _authGeneration) {
+          await _secureStorage.delete(key: _tokenStorageKey);
+        }
+      }
+    });
+    _tokenWrite = write.then<void>((_) {}, onError: (_) {});
+    return write;
   }
 
   /// -------------------------------------------------------------------------
@@ -73,6 +131,7 @@ class GitHubService extends ChangeNotifier {
     http.Client? client,
   }) async {
     _authGeneration++;
+    _isInitializing = false;
     final c = client ?? http.Client();
     final ownsClient = client == null;
     try {
@@ -191,6 +250,8 @@ class GitHubService extends ChangeNotifier {
         if (accessToken is String && accessToken.isNotEmpty) {
           final user = await _fetchUser(accessToken, c);
           ensureCurrent();
+          await _persistToken(accessToken, generation: generation);
+          ensureCurrent();
           _token = accessToken;
           _user = user;
           notifyListeners();
@@ -265,6 +326,12 @@ class GitHubService extends ChangeNotifier {
           },
         )
         .timeout(const Duration(seconds: 20));
+    if (res.statusCode == 401) {
+      throw const GitHubAuthException(
+        'invalid_token',
+        'The stored GitHub authorization is no longer valid.',
+      );
+    }
     if (res.statusCode != 200) {
       throw GitHubAuthException(
         'profile_failed',
@@ -274,19 +341,41 @@ class GitHubService extends ChangeNotifier {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
-  /// List repos accessible to the user (owns first).
-  Future<List<Map<String, dynamic>>> listRepos({int limit = 30}) async {
-    final res = await http.get(
-      Uri.parse('$_apiBase/user/repos?per_page=$limit&sort=updated'),
-      headers: {
-        'Authorization': 'Bearer $_token',
-        'Accept': 'application/vnd.github+json',
-      },
-    );
-    if (res.statusCode != 200) {
-      throw Exception('repos fetch failed: ${res.statusCode}');
+  String _requireToken() {
+    final token = _token;
+    if (token == null || token.isEmpty) {
+      throw const GitHubAuthException(
+        'not_authenticated',
+        'Connect GitHub before accessing repositories.',
+      );
     }
-    return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+    return token;
+  }
+
+  /// List repos accessible to the user (owns first).
+  Future<List<Map<String, dynamic>>> listRepos({
+    int limit = 30,
+    http.Client? client,
+  }) async {
+    final token = _requireToken();
+    final c = client ?? http.Client();
+    try {
+      final res = await c
+          .get(
+            Uri.parse('$_apiBase/user/repos?per_page=$limit&sort=updated'),
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Accept': 'application/vnd.github+json',
+            },
+          )
+          .timeout(_requestTimeout);
+      if (res.statusCode != 200) {
+        throw Exception('repos fetch failed: ${res.statusCode}');
+      }
+      return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+    } finally {
+      if (client == null) c.close();
+    }
   }
 
   /// List files of a repo at a branch/path (Studio file tree).
@@ -296,21 +385,30 @@ class GitHubService extends ChangeNotifier {
     required String owner,
     required String repo,
     String path = '',
+    http.Client? client,
   }) async {
+    final token = _requireToken();
     final uri = Uri.parse('$_apiBase/repos/$owner/$repo/contents/$path');
-    final res = await http.get(
-      uri,
-      headers: {
-        'Authorization': 'Bearer $_token',
-        'Accept': 'application/vnd.github+json',
-      },
-    );
-    if (res.statusCode != 200) {
-      throw Exception('content fetch failed: ${res.statusCode}');
+    final c = client ?? http.Client();
+    try {
+      final res = await c
+          .get(
+            uri,
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Accept': 'application/vnd.github+json',
+            },
+          )
+          .timeout(_requestTimeout);
+      if (res.statusCode != 200) {
+        throw Exception('content fetch failed: ${res.statusCode}');
+      }
+      final body = jsonDecode(res.body);
+      if (body is List) return body.cast<Map<String, dynamic>>();
+      return [body as Map<String, dynamic>]; // single file object
+    } finally {
+      if (client == null) c.close();
     }
-    final body = jsonDecode(res.body);
-    if (body is List) return body.cast<Map<String, dynamic>>();
-    return [body as Map<String, dynamic>]; // single file object
   }
 
   /// Create or update a file (commit) in the repo.
@@ -321,25 +419,37 @@ class GitHubService extends ChangeNotifier {
     required String message,
     String? sha, // null means create, else update
     String branch = 'main',
+    http.Client? client,
   }) async {
+    final token = _requireToken();
     final parts = repoFull.split('/');
+    if (parts.length != 2 || parts.any((part) => part.isEmpty)) {
+      throw ArgumentError.value(repoFull, 'repoFull', 'Expected owner/repo');
+    }
     final uri = Uri.parse(
       '$_apiBase/repos/${parts[0]}/${parts[1]}/contents/$path',
     );
-    final res = await http.put(
-      uri,
-      headers: {
-        'Authorization': 'Bearer $_token',
-        'Accept': 'application/vnd.github+json',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({
-        'message': message,
-        'content': base64Encode(utf8.encode(content)),
-        'branch': branch,
-        'sha': ?sha,
-      }),
-    );
-    return res.statusCode == 200 || res.statusCode == 201;
+    final c = client ?? http.Client();
+    try {
+      final res = await c
+          .put(
+            uri,
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Accept': 'application/vnd.github+json',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({
+              'message': message,
+              'content': base64Encode(utf8.encode(content)),
+              'branch': branch,
+              'sha': ?sha,
+            }),
+          )
+          .timeout(_requestTimeout);
+      return res.statusCode == 200 || res.statusCode == 201;
+    } finally {
+      if (client == null) c.close();
+    }
   }
 }

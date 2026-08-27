@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'sandbox_service.dart';
 
@@ -30,22 +31,22 @@ class ProviderConfig {
     this.selectedModel,
     this.connected = false,
     this.requiresApiKey = true,
-  })  : id = id ?? _slug(name),
-        models = models ?? [];
+  }) : id = id ?? _slug(name),
+       models = models ?? [];
 
   bool get hasKey => apiKey.trim().isNotEmpty;
   bool get isConfigured => !requiresApiKey || hasKey;
 
   Map<String, dynamic> toPersistedJson() => {
-        'id': id,
-        'name': name,
-        'description': description,
-        'baseUrl': baseUrl,
-        'isFree': isFree,
-        'custom': custom,
-        'models': models,
-        'requiresApiKey': requiresApiKey,
-      };
+    'id': id,
+    'name': name,
+    'description': description,
+    'baseUrl': baseUrl,
+    'isFree': isFree,
+    'custom': custom,
+    'models': models,
+    'requiresApiKey': requiresApiKey,
+  };
 }
 
 String _slug(String value) => value
@@ -86,7 +87,7 @@ class McpServer {
   final String category; // Official / Community / Custom
   final String command; // e.g. npx
   final List<String>
-      args; // e.g. ['-y', '@modelcontextprotocol/server-filesystem']
+  args; // e.g. ['-y', '@modelcontextprotocol/server-filesystem']
   final String? envHint; // env var needed, e.g. 'GITHUB_TOKEN'
   final String source; // registry.modelcontextprotocol.io | mcp.so | custom
   bool connected;
@@ -126,25 +127,25 @@ class Message {
   }) : time = time ?? DateTime.now();
 
   factory Message.fromJson(Map<String, dynamic> j) => Message(
-        role: j['role'] as String? ?? 'user',
-        kind: MsgKind.values.firstWhere(
-          (k) => k.name == j['kind'],
-          orElse: () => MsgKind.text,
-        ),
-        content: j['content'] as String? ?? '',
-        lang: j['lang'] as String?,
-        thinking: j['thinking'] as bool? ?? false,
-        time: j['time'] != null ? DateTime.tryParse(j['time'] as String) : null,
-      );
+    role: j['role'] as String? ?? 'user',
+    kind: MsgKind.values.firstWhere(
+      (k) => k.name == j['kind'],
+      orElse: () => MsgKind.text,
+    ),
+    content: j['content'] as String? ?? '',
+    lang: j['lang'] as String?,
+    thinking: j['thinking'] as bool? ?? false,
+    time: j['time'] != null ? DateTime.tryParse(j['time'] as String) : null,
+  );
 
   Map<String, dynamic> toJson() => {
-        'role': role,
-        'kind': kind.name,
-        'content': content,
-        if (lang != null) 'lang': lang,
-        if (thinking) 'thinking': thinking,
-        'time': time.toIso8601String(),
-      };
+    'role': role,
+    'kind': kind.name,
+    'content': content,
+    if (lang != null) 'lang': lang,
+    if (thinking) 'thinking': thinking,
+    'time': time.toIso8601String(),
+  };
 }
 
 class ChatSession {
@@ -162,31 +163,32 @@ class ChatSession {
     this.providerId,
     List<Message>? messages,
     DateTime? createdAt,
-  })  : messages = messages ?? [],
-        createdAt = createdAt ?? DateTime.now();
+  }) : messages = messages ?? [],
+       createdAt = createdAt ?? DateTime.now();
 
   factory ChatSession.fromJson(Map<String, dynamic> j) => ChatSession(
-        id: j['id'] as String,
-        title: j['title'] as String? ?? 'New chat',
-        model: j['model'] as String? ?? 'Select a provider',
-        providerId: j['providerId'] as String?,
-        messages: (j['messages'] as List?)
-                ?.map((m) => Message.fromJson(m as Map<String, dynamic>))
-                .toList() ??
-            [],
-        createdAt: j['createdAt'] != null
-            ? DateTime.tryParse(j['createdAt'] as String) ?? DateTime.now()
-            : DateTime.now(),
-      );
+    id: j['id'] as String,
+    title: j['title'] as String? ?? 'New chat',
+    model: j['model'] as String? ?? 'Select a provider',
+    providerId: j['providerId'] as String?,
+    messages:
+        (j['messages'] as List?)
+            ?.map((m) => Message.fromJson(m as Map<String, dynamic>))
+            .toList() ??
+        [],
+    createdAt: j['createdAt'] != null
+        ? DateTime.tryParse(j['createdAt'] as String) ?? DateTime.now()
+        : DateTime.now(),
+  );
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'model': model,
-        if (providerId != null) 'providerId': providerId,
-        'messages': messages.map((m) => m.toJson()).toList(),
-        'createdAt': createdAt.toIso8601String(),
-      };
+    'id': id,
+    'title': title,
+    'model': model,
+    if (providerId != null) 'providerId': providerId,
+    'messages': messages.map((m) => m.toJson()).toList(),
+    'createdAt': createdAt.toIso8601String(),
+  };
 }
 
 /// ---------- App state ----------
@@ -197,11 +199,17 @@ class AppState extends ChangeNotifier {
   AppState._() {
     _seed();
     _ensureActiveSession();
-    _init();
   }
 
-  Future<void> _init() async {
+  static const _secureStorage = FlutterSecureStorage();
+  static const _providerKeyPrefix = 'ovid_provider_key_';
+  Future<void>? _initialization;
+
+  Future<void> initialize() => _initialization ??= _initialize();
+
+  Future<void> _initialize() async {
     await loadProviderState();
+    await loadProviderCredentials();
     await loadSessions();
   }
 
@@ -209,6 +217,7 @@ class AppState extends ChangeNotifier {
   static const _kActive = 'ovid_active_session';
   static const _kProviders = 'ovid_provider_configs_v1';
   Future<void> _providerWrite = Future<void>.value();
+  Future<void> _credentialWrite = Future<void>.value();
 
   Future<void> loadProviderState() async {
     try {
@@ -221,7 +230,8 @@ class AppState extends ChangeNotifier {
         if (id == null || id.isEmpty) continue;
         final existing = providerById(id);
         final hasStoredModels = entry.containsKey('models');
-        final models = (entry['models'] as List?)
+        final models =
+            (entry['models'] as List?)
                 ?.whereType<String>()
                 .where((model) => model.isNotEmpty)
                 .toList() ??
@@ -237,7 +247,8 @@ class AppState extends ChangeNotifier {
           ProviderConfig(
             id: id,
             name: entry['name'] as String? ?? 'Custom provider',
-            description: entry['description'] as String? ??
+            description:
+                entry['description'] as String? ??
                 'Custom OpenAI-compatible provider',
             baseUrl: entry['baseUrl'] as String? ?? '',
             custom: true,
@@ -263,6 +274,19 @@ class AppState extends ChangeNotifier {
       } catch (_) {}
     });
     await _providerWrite;
+  }
+
+  Future<void> loadProviderCredentials() async {
+    try {
+      final credentials = await _secureStorage.readAll();
+      for (final provider in providers) {
+        provider.apiKey =
+            credentials['$_providerKeyPrefix${provider.id}']?.trim() ?? '';
+      }
+      notifyListeners();
+    } catch (_) {
+      // A device keystore failure must not prevent the app from starting.
+    }
   }
 
   Future<void> loadSessions() async {
@@ -487,11 +511,11 @@ class AppState extends ChangeNotifier {
     persistSessions();
   }
 
-  String? addCustomProvider({
+  Future<String?> addCustomProvider({
     required String name,
     required String baseUrl,
     String apiKey = '',
-  }) {
+  }) async {
     final normalizedName = name.trim();
     final normalizedUrl = baseUrl.trim();
     if (normalizedName.isEmpty) return 'Provider name is required.';
@@ -503,19 +527,23 @@ class AppState extends ChangeNotifier {
     if (providers.any((provider) => provider.id == id)) {
       return 'A provider with this name already exists.';
     }
-    providers.add(
-      ProviderConfig(
-        id: id,
-        name: normalizedName,
-        description: 'Custom OpenAI-compatible provider',
-        baseUrl: normalizedUrl,
-        apiKey: apiKey.trim(),
-        custom: true,
-        requiresApiKey: apiKey.trim().isNotEmpty,
-      ),
+    final provider = ProviderConfig(
+      id: id,
+      name: normalizedName,
+      description: 'Custom OpenAI-compatible provider',
+      baseUrl: normalizedUrl,
+      apiKey: apiKey.trim(),
+      custom: true,
+      requiresApiKey: apiKey.trim().isNotEmpty,
     );
+    try {
+      await updateProviderApiKey(provider, provider.apiKey);
+    } catch (_) {
+      return 'The API key could not be stored securely on this device.';
+    }
+    providers.add(provider);
     refresh();
-    persistProviderState();
+    await persistProviderState();
     return null;
   }
 
@@ -524,9 +552,23 @@ class AppState extends ChangeNotifier {
     persistProviderState();
   }
 
-  void updateProviderApiKey(ProviderConfig provider, String value) {
+  Future<void> updateProviderApiKey(
+    ProviderConfig provider,
+    String value,
+  ) async {
     provider.apiKey = value.trim();
     refresh();
+    final key = '$_providerKeyPrefix${provider.id}';
+    final secret = provider.apiKey;
+    final write = _credentialWrite.then((_) async {
+      if (secret.isEmpty) {
+        await _secureStorage.delete(key: key);
+      } else {
+        await _secureStorage.write(key: key, value: secret);
+      }
+    });
+    _credentialWrite = write.then<void>((_) {}, onError: (_) {});
+    await write;
   }
 
   void refresh() => notifyListeners();

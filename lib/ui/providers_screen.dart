@@ -155,12 +155,13 @@ void addProviderSheet(BuildContext context) {
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
-              onPressed: () {
-                final error = AppState.I.addCustomProvider(
+              onPressed: () async {
+                final error = await AppState.I.addCustomProvider(
                   name: name.text,
                   baseUrl: url.text,
                   apiKey: key.text,
                 );
+                if (!ctx.mounted) return;
                 if (error != null) {
                   ScaffoldMessenger.of(
                     ctx,
@@ -196,6 +197,7 @@ class ProviderCard extends StatefulWidget {
 class _ProviderCardState extends State<ProviderCard> {
   late final TextEditingController _keyController;
   late final TextEditingController _urlController;
+  Timer? _keyPersistTimer;
   Timer? _urlPersistTimer;
 
   ProviderConfig get provider => widget.provider;
@@ -218,7 +220,13 @@ class _ProviderCardState extends State<ProviderCard> {
 
   @override
   void dispose() {
+    _keyPersistTimer?.cancel();
     _urlPersistTimer?.cancel();
+    unawaited(
+      AppState.I
+          .updateProviderApiKey(provider, _keyController.text)
+          .catchError((_) {}),
+    );
     if (provider.custom) AppState.I.persistProviderState();
     _keyController.dispose();
     _urlController.dispose();
@@ -230,6 +238,23 @@ class _ProviderCardState extends State<ProviderCard> {
     _urlPersistTimer?.cancel();
     _urlPersistTimer = Timer(const Duration(milliseconds: 400), () {
       AppState.I.persistProviderState();
+    });
+  }
+
+  void _updateApiKey(String value) {
+    final target = provider;
+    target.apiKey = value.trim();
+    AppState.I.refresh();
+    _keyPersistTimer?.cancel();
+    _keyPersistTimer = Timer(const Duration(milliseconds: 400), () {
+      AppState.I.updateProviderApiKey(target, value).catchError((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('The API key could not be stored securely.'),
+          ),
+        );
+      });
     });
   }
 
@@ -311,11 +336,11 @@ class _ProviderCardState extends State<ProviderCard> {
               obscureText: true,
               style: const TextStyle(fontSize: 13.5),
               controller: _keyController,
-              onChanged: (v) => AppState.I.updateProviderApiKey(provider, v),
+              onChanged: _updateApiKey,
               decoration: InputDecoration(
                 hintText: provider.isFree
-                    ? 'Free tier API key — kept for this app session'
-                    : 'API key — kept for this app session',
+                    ? 'Free tier API key — stored securely on this device'
+                    : 'API key — stored securely on this device',
                 suffixIcon: provider.hasKey
                     ? const Icon(
                         Icons.check_circle,
@@ -383,13 +408,15 @@ class _ProviderCardState extends State<ProviderCard> {
                       if (!url.endsWith('/')) url += '/';
                       // NVIDIA NIM and OpenAI-compatible /models endpoint
                       final uri = Uri.parse('${url}models');
-                      final res = await http.get(
-                        uri,
-                        headers: {
-                          if (provider.apiKey.isNotEmpty)
-                            'Authorization': 'Bearer ${provider.apiKey}',
-                        },
-                      ).timeout(const Duration(seconds: 15));
+                      final res = await http
+                          .get(
+                            uri,
+                            headers: {
+                              if (provider.apiKey.isNotEmpty)
+                                'Authorization': 'Bearer ${provider.apiKey}',
+                            },
+                          )
+                          .timeout(const Duration(seconds: 15));
                       if (res.statusCode == 200) {
                         final j = jsonDecode(res.body);
                         final List fetched = j['data'] ?? j['models'] ?? [];
