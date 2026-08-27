@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'sandbox_service.dart';
 
 /// ---------- Models ----------
@@ -97,6 +99,27 @@ class Message {
     this.thinking = false,
     DateTime? time,
   }) : time = time ?? DateTime.now();
+
+  factory Message.fromJson(Map<String, dynamic> j) => Message(
+        role: j['role'] as String? ?? 'user',
+        kind: MsgKind.values.firstWhere(
+          (k) => k.name == j['kind'],
+          orElse: () => MsgKind.text,
+        ),
+        content: j['content'] as String? ?? '',
+        lang: j['lang'] as String?,
+        thinking: j['thinking'] as bool? ?? false,
+        time: j['time'] != null ? DateTime.tryParse(j['time'] as String) : null,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'role': role,
+        'kind': kind.name,
+        'content': content,
+        if (lang != null) 'lang': lang,
+        if (thinking) 'thinking': thinking,
+        'time': time.toIso8601String(),
+      };
 }
 
 class ChatSession {
@@ -114,6 +137,27 @@ class ChatSession {
     DateTime? createdAt,
   })  : messages = messages ?? [],
         createdAt = createdAt ?? DateTime.now();
+
+  factory ChatSession.fromJson(Map<String, dynamic> j) => ChatSession(
+        id: j['id'] as String,
+        title: j['title'] as String? ?? 'New chat',
+        model: j['model'] as String? ?? 'Select a provider',
+        messages: (j['messages'] as List?)
+                ?.map((m) => Message.fromJson(m as Map<String, dynamic>))
+                .toList() ??
+            [],
+        createdAt: j['createdAt'] != null
+            ? DateTime.tryParse(j['createdAt'] as String) ?? DateTime.now()
+            : DateTime.now(),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'model': model,
+        'messages': messages.map((m) => m.toJson()).toList(),
+        'createdAt': createdAt.toIso8601String(),
+      };
 }
 
 /// ---------- App state (demo, in-memory) ----------
@@ -122,7 +166,46 @@ class AppState extends ChangeNotifier {
   /// Singleton — everything is user-side / on-device.
   static final AppState I = AppState._();
   AppState._() {
-    _seed();
+    _init();
+  }
+
+  Future<void> _init() async {
+    await loadSessions();
+  }
+
+  static const _kSessions = 'ovid_sessions';
+  static const _kActive = 'ovid_active_session';
+
+  Future<void> loadSessions() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getStringList(_kSessions);
+      if (raw != null && raw.isNotEmpty) {
+        sessions
+          ..clear()
+          ..addAll(raw.map((s) => ChatSession.fromJson(jsonDecode(s))));
+      }
+      activeSessionId = prefs.getString(_kActive);
+      if (activeSessionId == null && sessions.isNotEmpty) {
+        activeSessionId = sessions.first.id;
+      }
+      notifyListeners();
+    } catch (_) {
+      // corrupt prefs — start empty
+    }
+  }
+
+  Future<void> _persist() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(
+          _kSessions, sessions.map((s) => jsonEncode(s.toJson())).toList());
+      if (activeSessionId != null) {
+        await prefs.setString(_kActive, activeSessionId!);
+      } else {
+        await prefs.remove(_kActive);
+      }
+    } catch (_) {}
   }
 
   int navIndex = 0; // 0 Chat, 1 Studio, 2 Browser, 3 Plugins, 4 Settings
@@ -148,6 +231,7 @@ class AppState extends ChangeNotifier {
   void selectSession(String id) {
     activeSessionId = id;
     notifyListeners();
+    _persist();
   }
 
   void newSession() {
@@ -159,6 +243,7 @@ class AppState extends ChangeNotifier {
     sessions.insert(0, s);
     activeSessionId = s.id;
     notifyListeners();
+    _persist();
   }
 
   void deleteSession(String id) {
@@ -167,22 +252,38 @@ class AppState extends ChangeNotifier {
       activeSessionId = sessions.isEmpty ? null : sessions.first.id;
     }
     notifyListeners();
+    _persist();
   }
 
   void renameSession(String id, String title) {
     sessions.firstWhere((s) => s.id == id).title = title;
     notifyListeners();
+    _persist();
   }
 
   void sendMessage(String text) {
     final s = activeSession;
     if (s == null) return;
     s.messages.add(Message(role: 'user', content: text));
-    // Auto-name session from first message
-    if (s.title == 'New chat') {
-      s.title = text.length > 34 ? '${text.substring(0, 34)}…' : text;
+    // Auto-name session from first message (smart: strip markdown/prompt fluff)
+    if (s.title == 'New chat' || s.title.isEmpty) {
+      s.title = _autoTitle(text);
     }
     notifyListeners();
+    _persist();
+  }
+
+  static String _autoTitle(String text) {
+    var t = text.trim();
+    // strip markdown headers, code fences, common prefixes
+    t = t.replaceAll(RegExp(r'^[#>`*\-\s]+'), '');
+    t = t.replaceFirst(RegExp(r'^(hey|hi|hello|please|plz|can you|could you|help me|i want|i need|write|make|build|create|generate|explain)\b[,: ]*', caseSensitive: false), '');
+    t = t.trim();
+    if (t.isEmpty) return 'New chat';
+    final words = t.split(RegExp(r'\s+'));
+    final take = words.take(6).join(' ');
+    final title = take.length > 40 ? '${take.substring(0, 40)}…' : take;
+    return words.length > 6 && !title.endsWith('…') ? '$title…' : title;
   }
 
   void receiveDemoReply(String text) {
@@ -209,6 +310,7 @@ class AppState extends ChangeNotifier {
 3. Paste an API key — everything stays on-device''',
     ));
     notifyListeners();
+    _persist();
   }
 
   void removeModel(String provider, String model) {
@@ -223,6 +325,7 @@ class AppState extends ChangeNotifier {
     final s = activeSession;
     if (s != null) s.model = model;
     notifyListeners();
+    _persist();
   }
 
   void refresh() => notifyListeners();
@@ -713,76 +816,5 @@ class AppState extends ChangeNotifier {
     marketplaces.addAll([
       'ovidai/ovid-plugins',
     ]);
-
-    // --- dummy sessions ---
-    final s1 = ChatSession(
-      id: 's1',
-      title: 'Refactor auth middleware',
-      model: 'deepseek-chat',
-      messages: [
-        Message(
-            role: 'user',
-            content: 'Can you refactor my Express auth middleware to use JWT rotation?'),
-        Message(
-          role: 'assistant',
-          kind: MsgKind.reasoning,
-          thinking: true,
-          content: 'Inspecting middleware chain… identifying token verify step…',
-        ),
-        Message(
-          role: 'assistant',
-          kind: MsgKind.code,
-          lang: 'javascript',
-          content: '''const { verify, sign } = require("jsonwebtoken");
-
-function auth(rotate = true) {
-  return async (req, res, next) => {
-    const token = req.headers.authorization?.split(" ")[1];
-    if (!token) return res.status(401).end();
-    const payload = verify(token, process.env.JWT_SECRET);
-    req.user = payload;
-    if (rotate) {
-      res.set("x-refresh-token",
-        sign({ sub: payload.sub }, process.env.JWT_SECRET, { expiresIn: "15m" }));
-    }
-    next();
-  };
-}''',
-        ),
-        Message(
-            role: 'assistant',
-            content:
-                'Done. I added rotating refresh tokens via the `x-refresh-token` header and cleaned up the verify step. Want me to write tests next?'),
-      ],
-    );
-    final s2 = ChatSession(
-      id: 's2',
-      title: 'Neural network diagram',
-      model: 'Image Studio',
-      messages: [
-        Message(
-            role: 'user',
-            content: 'Generate an image: minimal diagram of a neural network, dark background'),
-        Message(
-          role: 'assistant',
-          kind: MsgKind.imageGen,
-          content: 'minimal diagram of a neural network, dark background',
-        ),
-      ],
-    );
-    final s3 = ChatSession(
-      id: 's3',
-      title: 'Weekend trip packing list',
-      model: 'gemini-2.5-flash',
-      messages: [
-        Message(role: 'user', content: 'What should I pack for a 2-day trek?'),
-        Message(
-            role: 'assistant',
-            content:
-                'Here is a tight 2-day list:\n\n• 2L water + filter\n• Base layer + fleece + shell\n• Headlamp, power bank\n• First aid, blister kit\n• Trail snacks × 6\n• Sleeping bag rated to expected low\n\nWant me to trim it to ultralight?'),
-      ],
-    );
-    sessions.addAll([s1, s2, s3]);
-    activeSessionId = s1.id;
   }
 }
