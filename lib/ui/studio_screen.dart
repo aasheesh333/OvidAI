@@ -3,6 +3,7 @@ import '../core/theme.dart';
 import '../core/state.dart';
 import '../core/github_service.dart';
 import '../core/agent_service.dart';
+import '../core/repo_cache.dart';
 import 'github_login_sheet.dart';
 
 /// Studio — coding harness (DeepSeek-web style): file explorer bound to the
@@ -46,7 +47,7 @@ class _StudioScreenState extends State<StudioScreen> {
 
   Future<void> _pickRepo() async {
     if (!GitHubService.I.isLoggedIn) {
-      await showGithubLoginSheet(context);
+      showGithubLoginSheet(context);
       return;
     }
     try {

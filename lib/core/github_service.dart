@@ -196,9 +196,4 @@ class GitHubService extends ChangeNotifier {
     }));
     return res.statusCode == 200 || res.statusCode == 201;
   }
-
-  void signOut() {
-    _token = null;
-    _user = null;
-  }
 }

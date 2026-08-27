@@ -145,17 +145,19 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   void _modelPicker(BuildContext context) {
-    showDraggableScrollableSheet(
+    showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      initialChildSize: 0.5,
-      minChildSize: 0.32,
-      maxChildSize: 0.92,
-      snap: true,
-      snapSizes: const [0.5, 0.92],
       backgroundColor: Colors.transparent,
-      builder: (ctx, scrollController) => _ModelPickerSheet(
-          scrollController: scrollController),
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: 0.5,
+        minChildSize: 0.32,
+        maxChildSize: 0.92,
+        snap: true,
+        snapSizes: const [0.5, 0.92],
+        builder: (ctx, scrollController) =>
+            _ModelPickerSheet(scrollController: scrollController),
+      ),
     );
   }
 }
@@ -1083,8 +1085,10 @@ class _DiffLines extends StatelessWidget {
 /// Inline `code` — mono, accent-colored chip.
 class _DshInlineCodeBuilder extends MarkdownElementBuilder {
   @override
-  Widget visitElementAfterWithContext(BuildContext context, Element element,
+  Widget? visitElementAfterWithContext(BuildContext context, md.Element element,
       TextStyle? preferredStyle, TextStyle? parentStyle) {
+    final text = element.children?.map((c) => c.textContent).join() ??
+        element.textContent;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
       decoration: BoxDecoration(
@@ -1092,8 +1096,8 @@ class _DshInlineCodeBuilder extends MarkdownElementBuilder {
         borderRadius: BorderRadius.circular(5),
         border: Border.all(color: Aether.hairline),
       ),
-      child: Text(element.textContent,
-          style: TextStyle(
+      child: Text(text,
+          style: const TextStyle(
               fontFamily: Aether.mono,
               fontSize: 12,
               color: Aether.text)),
