@@ -2,7 +2,7 @@ name: Validate and Build Android
 
 on:
   push:
-    branches: [main]
+    branches: [main, ci/verified-android-build-20260827]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -21,6 +21,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Detect presence of signing secrets without using the `secrets` context
+      # in `if:` conditions (not allowed by GitHub Actions). A flag file is
+      # written and later steps check for its existence.
+      - name: Detect signing configuration
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "signing=true" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$GOOGLE_SERVICES" ]; then
+            echo "firebase=true" >> "$GITHUB_ENV"
+          fi
+          echo "signing_enabled=$( [ -n "$KEYSTORE_B64" ] && echo yes || echo no )"
+          echo "firebase_enabled=$( [ -n "$GOOGLE_SERVICES" ] && echo yes || echo no )"
+
       - name: Setup Java
         uses: actions/setup-java@v6
         with:
@@ -36,22 +53,29 @@ jobs:
 
       # Inject Firebase config from secret — never committed to the repo.
       - name: Write google-services.json
-        if: ${{ secrets.GOOGLE_SERVICES_JSON != '' }}
+        if: env.firebase == 'true'
+        env:
+          GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
           mkdir -p android/app
-          printf '%s' '${{ secrets.GOOGLE_SERVICES_JSON }}' > android/app/google-services.json
+          printf '%s' "$GOOGLE_SERVICES" > android/app/google-services.json
 
       # Decode release keystore + write signing properties from secrets.
       - name: Prepare release signing
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        if: env.signing == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          printf '%s' '${{ secrets.ANDROID_KEYSTORE_BASE64 }}' | base64 -d > android/release-keystore.jks
-          cat > android/keystore.properties <<EOF
-          storeFile=release-keystore.jks
-          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
-          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
-          EOF
+          printf '%s' "$KEYSTORE_B64" | base64 -d > android/release-keystore.jks
+          {
+            echo "storeFile=release-keystore.jks"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > android/keystore.properties
 
       - name: Resolve dependencies
         run: flutter pub get --enforce-lockfile
@@ -74,7 +98,7 @@ jobs:
         run: flutter build apk --debug
 
       - name: Build signed release APK + AAB
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        if: env.signing == 'true'
         run: |
           flutter build apk --release --obfuscate --split-debug-info=build/symbols
           flutter build appbundle --release --obfuscate --split-debug-info=build/symbols
@@ -97,7 +121,7 @@ jobs:
           retention-days: 30
 
       - name: Upload release APK
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        if: env.signing == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: Ovid-APK-release
@@ -106,7 +130,7 @@ jobs:
           retention-days: 30
 
       - name: Upload release AAB (Play)
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        if: env.signing == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: Ovid-AAB-release
@@ -115,7 +139,7 @@ jobs:
           retention-days: 30
 
       - name: Upload obfuscation symbols
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        if: env.signing == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: Ovid-symbols
