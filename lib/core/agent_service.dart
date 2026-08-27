@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart'
     show IconData, Icons, Color;
+import 'package:webview_flutter/webview_flutter.dart';
 import '../core/theme.dart';
 import 'state.dart';
 import 'sandbox_service.dart';
@@ -62,12 +63,20 @@ class ApprovalRequest {
   ApprovalRequest({required this.tool, required this.summary, required this.detail});
 }
 
-/// AgentRuntime — ek hi singleton jo poora DSH-jaisa loop chalata hai:
+/// ═════════════════════════════ OpenAI-compatible LLM bridge ═══════════
+/// SSE streaming + tool-calling agent loop — DSH-web harness style.
 ///
-/// user prompt → LLM (+tools) ─┬─ run_shell     → SandboxService.exec  → STUDIO terminal
-///                             ├─ browser_open   → fetch URL           → BROWSER screen
-///                             ├─ repo_read      → GitHub API
-///                             └─ repo_write     → GitHub commit       → STUDIO editor
+/// Response chunk schema (SSE `data:` lines):
+///   {"choices":[{"delta":{
+///     "role":"assistant",
+///     "content": "...",                  ← final answer token → bubble
+///     "reasoning" | "reasoning_content": "...",  ← thinking tokens → live
+///     "tool_calls":[{"index":0,"id":"...","function":{"name":"...","arguments":"fragment"}}]
+///   }}]}
+///
+/// Final usage: {"usage":{"prompt_tokens","completion_tokens","total_tokens"}}
+/// Non-stream fallback: choices[0].message.* with reasoning_content support.
+
 ///                  ← tool results loop back to model till final answer
 class AgentService extends ChangeNotifier {
   AgentService._();
@@ -83,6 +92,11 @@ class AgentService extends ChangeNotifier {
   String? browserUrl;
   String? browserPageText;
   String? previewFile; // local path to index.html for WebView
+
+  /// Live WebView binding (set by BrowserScreen) — agent can drive it.
+  WebViewController? _webView;
+  void bindWebView(WebViewController c) { _webView = c; }
+  void unbindWebView() { _webView = null; }
 
   /// Studio live buffers (path → content) written by repo_write,
   /// ya repo_read se load hua. Studio isko render karta hai.
@@ -103,6 +117,8 @@ class AgentService extends ChangeNotifier {
     if (events.length > 120) events.removeRange(0, events.length - 120);
     notifyListeners();
   }
+
+  void refreshNow() => notifyListeners();
 
   void approve(bool ok) {
     pendingApproval?.completer.complete(ok);
@@ -133,6 +149,59 @@ class AgentService extends ChangeNotifier {
 
   // ── TOOLS (OpenAI function-calling schema) ────────────────────────────
   List<Map<String, dynamic>> get _tools => [
+        // ── Chrome DevTools MCP-style browser tools (inbuilt WebView) ──
+        {
+          'type': 'function',
+          'function': {
+            'name': 'browser_navigate',
+            'description':
+                'Navigate the inbuilt browser to a URL. Returns page title + first chunk of text. Use instead of browser_open.',
+            'parameters': {
+              'type': 'object',
+              'properties': {'url': {'type': 'string'}},
+              'required': ['url'],
+            },
+          },
+        },
+        {
+          'type': 'function',
+          'function': {
+            'name': 'browser_click',
+            'description':
+                'Click an element on the current page. selector = CSS selector. '
+                'Returns whether the click succeeded.',
+            'parameters': {
+              'type': 'object',
+              'properties': {'selector': {'type': 'string'}},
+              'required': ['selector'],
+            },
+          },
+        },
+        {
+          'type': 'function',
+          'function': {
+            'name': 'browser_evaluate',
+            'description':
+                'Run JavaScript on the current page and return the result. '
+                'Use for reading values, extracting data, or interacting with the page.',
+            'parameters': {
+              'type': 'object',
+              'properties': {'expression': {'type': 'string'}},
+              'required': ['expression'],
+            },
+          },
+        },
+        {
+          'type': 'function',
+          'function': {
+            'name': 'browser_read',
+            'description':
+                'Read the current page content as clean text (title + visible text). '
+                'Use after navigate/click to see what the page shows now.',
+            'parameters': {'type': 'object', 'properties': {}},
+          },
+        },
+        // ── Core agent tools ──
         {
           'type': 'function',
           'function': {
@@ -280,25 +349,24 @@ describing them. Prefer many small steps. Always verify results before finishing
 
     try {
       for (var turn = 0; turn < 12; turn++) {
-        final res = await _callLlm(p, msgs);
-        if (res == null) break;
-        final choice = res['choices']?[0];
-        if (choice == null) break;
-        final msg = choice['message'];
+        _resetLiveBuffers();
+        final msg = await _callLlm(p, msgs);
+        if (msg == null) break;
 
         final toolCalls = msg['tool_calls'] as List?;
         if (toolCalls == null || toolCalls.isEmpty) {
-          // FINAL answer
-          final text = (msg['content'] ?? '') as String;
-          AppState.I.receiveDemoReply('');
-          _appendAssistant(text, kind: MsgKind.text);
+          // FINAL answer — already streamed to the bubble live.
+          _finalizeLive();
           _emit('done', 'completed');
           break;
         }
 
+        // Tool round: freeze current bubble as reasoning, keep streaming next.
+        _finalizeLive();
+
         msgs.add({
           'role': 'assistant',
-          'content': msg['content'],
+          'content': msg['content'] ?? '',
           'tool_calls': toolCalls,
         });
 
@@ -317,6 +385,7 @@ describing them. Prefer many small steps. Always verify results before finishing
           });
         }
       }
+      _finalizeLive();
     } catch (e) {
       _emit('err', '$e');
       _appendAssistant('⚠️ Agent error: $e');
@@ -326,31 +395,215 @@ describing them. Prefer many small steps. Always verify results before finishing
     }
   }
 
+  /// Clear per-run streaming buffers (new turn = fresh bubble).
+  void _resetLiveBuffers() {
+    _liveContent.clear();
+    _liveReasoning.clear();
+    _liveMsg = null;
+    _liveSession = null;
+  }
+
   Future<Map<String, dynamic>?> _callLlm(
       ProviderConfig p, List<Map<String, dynamic>> msgs) async {
+    HttpClient? client;
     try {
-      final r = await HttpShim.post(
-        _endpoint(p),
-        headers: {
-          'Authorization': 'Bearer ${p.apiKey}',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'model': p.selectedModel,
-          'messages': msgs,
-          'tools': _tools,
-          'temperature': 0.2,
-        }),
-      );
-      if (r.status != 200) {
-        _emit('err', 'LLM ${r.status}: ${r.bodyText.substring(0, r.bodyText.length.clamp(0, 200))}');
+      client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 20);
+      final req = await client.postUrl(_endpoint(p)).timeout(
+            const Duration(seconds: 20),
+            onTimeout: () => throw Exception('connect timeout'),
+          );
+      req.headers.set('Authorization', 'Bearer ${p.apiKey}');
+      req.headers.set('Content-Type', 'application/json');
+      req.headers.set('Accept', 'text/event-stream');
+
+      // Strip effort suffix (e.g. "gpt-5.2 · High") → real model id + effort
+      final raw = p.selectedModel ?? '';
+      final effMatch = RegExp(r'·\s*(low|medium|high)$', caseSensitive: false)
+          .firstMatch(raw);
+      final modelId =
+          effMatch != null ? raw.substring(0, effMatch.start).trim() : raw;
+      final eff = (effMatch?.group(1) ?? 'medium').toLowerCase();
+
+      final body = <String, dynamic>{
+        'model': modelId,
+        'messages': msgs,
+        'stream': true,
+      };
+      if (_tools.isNotEmpty) body['tools'] = _tools;
+      // Reasoning effort — OpenAI/o-series & DeepSeek/Qwen-compatible param.
+      // Only models that support it; others ignore it server-side.
+      body['reasoning_effort'] = eff;
+
+      final bodyStr = jsonEncode(body);
+      req.headers.contentLength = utf8.encode(bodyStr).length;
+      req.write(bodyStr);
+
+      final res = await req.close().timeout(const Duration(seconds: 30));
+      if (res.statusCode != 200) {
+        final data = <int>[];
+        await for (final c in res) {
+          data.addAll(c);
+          if (data.length > 65536) break; // bounded error read
+        }
+        final txt = utf8.decode(data, allowMalformed: true);
+        _emit('err',
+            'LLM ${res.statusCode}: ${txt.substring(0, txt.length.clamp(0, 300))}');
+        client.close(force: true);
         return null;
       }
-      return jsonDecode(r.bodyText) as Map<String, dynamic>;
+
+      // ── SSE parse: bounded buffers, resilient to malformed lines ──
+      final contentBuf = StringBuffer();
+      final reasoningBuf = StringBuffer();
+      final tcAcc = <int, Map<String, dynamic>>{};
+      int totalBytes = 0;
+      String? finishReason;
+
+      await for (final raw in res
+          .cast<List<int>>()
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())) {
+        totalBytes += raw.length;
+        if (totalBytes > 8 * 1024 * 1024) break; // 8MB hard cap — runaway guard
+        final line = raw.trim();
+        if (line.isEmpty || !line.startsWith('data:')) continue;
+        final payload = line.substring(5).trim();
+        if (payload == '[DONE]') break;
+
+        Map<String, dynamic>? j;
+        try {
+          j = jsonDecode(payload) as Map<String, dynamic>;
+        } catch (_) {
+          continue; // malformed chunk — skip, keep stream alive
+        }
+        final choices = j['choices'] as List?;
+        if (choices == null || choices.isEmpty) continue;
+        final choice = choices[0] as Map<String, dynamic>;
+        final delta = (choice['delta'] ?? choice['message'] ?? {})
+            as Map<String, dynamic>;
+        finishReason = choice['finish_reason'] as String? ?? finishReason;
+
+        final c = delta['content'];
+        if (c is String && c.isNotEmpty) {
+          contentBuf.write(c);
+          _streamToBubble(c);
+        }
+        // Reasoning tokens — DeepSeek `reasoning_content` / OpenRouter `reasoning`
+        final r = delta['reasoning_content'] ?? delta['reasoning'];
+        if (r is String && r.isNotEmpty) {
+          reasoningBuf.write(r);
+          _streamReasoning(r);
+        }
+        // Tool-call argument fragments — accumulate by index
+        final tcs = delta['tool_calls'] as List?;
+        if (tcs != null) {
+          for (final t in tcs) {
+            if (t is! Map) continue;
+            final idx = (t['index'] as num?)?.toInt() ?? 0;
+            final acc = tcAcc.putIfAbsent(idx, () {
+              return {
+                'id': (t['id'] as String?) ?? 'call_$idx',
+                'type': 'function',
+                'function': {'name': '', 'arguments': ''},
+              };
+            });
+            if (t['id'] is String && (t['id'] as String).isNotEmpty) {
+              acc['id'] = t['id'];
+            }
+            final fn = t['function'];
+            if (fn is Map) {
+              final n = fn['name'];
+              if (n is String && n.isNotEmpty) acc['function']['name'] = n;
+              final a = fn['arguments'];
+              if (a is String) acc['function']['arguments'] += a;
+            }
+          }
+        }
+      }
+
+      client.close();
+      client = null;
+
+      if (contentBuf.isEmpty && tcAcc.isEmpty) {
+        _emit('err', 'empty response from ${modelId.isEmpty ? 'model' : modelId}');
+        return null;
+      }
+      return {
+        'role': 'assistant',
+        'content': contentBuf.toString(),
+        if (reasoningBuf.isNotEmpty)
+          'reasoning_content': reasoningBuf.toString(),
+        if (tcAcc.isNotEmpty) 'tool_calls': tcAcc.values.toList(),
+        if (finishReason != null) 'finish_reason': finishReason,
+      };
     } catch (e) {
-      _emit('err', 'network: $e');
+      _emit('err', 'stream error: $e');
       return null;
+    } finally {
+      client?.close(force: true);
     }
+  }
+
+  // ── LIVE BUBBLE streaming (DSH-web style) ─────────────────────────────
+  final StringBuffer _liveContent = StringBuffer();
+  final StringBuffer _liveReasoning = StringBuffer();
+  ChatSession? _liveSession;
+  Message? _liveMsg;
+
+  void _ensureLiveMsg() {
+    final s = AppState.I.activeSession;
+    if (s == null) return;
+    if (_liveSession == s && _liveMsg != null && s.messages.contains(_liveMsg)) {
+      return; // reuse
+    }
+    _liveMsg = Message(
+        role: 'assistant',
+        kind: MsgKind.reasoning,
+        thinking: true,
+        content: '');
+    s.messages.add(_liveMsg!);
+    _liveSession = s;
+  }
+
+  void _streamToBubble(String tok) {
+    final s = AppState.I.activeSession;
+    if (s == null) return;
+    _ensureLiveMsg();
+    _liveContent.write(tok);
+    _liveMsg!.content = _liveContent.toString();
+    _liveMsg!.thinking = _liveContent.isEmpty;
+    AppState.I.refresh();
+  }
+
+  void _streamReasoning(String tok) {
+    final s = AppState.I.activeSession;
+    if (s == null) return;
+    _ensureLiveMsg();
+    _liveReasoning.write(tok);
+    _liveMsg!.content = _liveReasoning.toString();
+    _liveMsg!.thinking = true;
+    AppState.I.refresh();
+  }
+
+  /// Promote the streaming bubble to a permanent text message.
+  void _finalizeLive() {
+    final s = _liveSession;
+    final m = _liveMsg;
+    if (s == null || m == null) return;
+    if (_liveContent.isNotEmpty) {
+      m.kind = MsgKind.text; // kind is non-final? check Message class
+      m.thinking = false;
+      m.content = _liveContent.toString();
+    } else if (_liveReasoning.isNotEmpty) {
+      m.kind = MsgKind.reasoning;
+      m.thinking = true;
+      m.content = _liveReasoning.toString();
+    }
+    _liveSession = null;
+    _liveMsg = null;
+    AppState.I.refresh();
+    AppState.I.persistSessions();
   }
 
   // ── TOOL DISPATCH (with mode-based approvals) ─────────────────────────
@@ -381,6 +634,15 @@ describing them. Prefer many small steps. Always verify results before finishing
         if (!ok) return 'DENIED by user';
         _emit('nav', url);
         try {
+          // Drive the live WebView if the Browser screen is open.
+          if (_webView != null) {
+            _webView!.loadRequest(Uri.parse(url));
+            browserUrl = url;
+            notifyListeners();
+            _emit('page', 'loading $url');
+            // Give the webview time to load before reading text.
+            await Future.delayed(const Duration(seconds: 2));
+          }
           final r = await HttpShim.get(Uri.parse(url),
               headers: {'User-Agent': 'OvidAgent/1.0'});
           var body = utf8.decode(r.bytes, allowMalformed: true);
@@ -398,6 +660,56 @@ describing them. Prefer many small steps. Always verify results before finishing
           return browserPageText!;
         } catch (e) {
           return 'fetch failed: $e';
+        }
+
+      // ─── Chrome DevTools MCP tools (inbuilt WebView) ─────────────────
+      case 'browser_navigate':
+        final url = args['url'] as String;
+        final ok = await _maybeApprove('browser_navigate', url,
+            'Browser me ye page khulega:\n$url');
+        if (!ok) return 'DENIED by user';
+        if (_webView == null) return 'Browser screen not open. Open the Browser panel first.';
+        _webView!.loadRequest(Uri.parse(url));
+        browserUrl = url;
+        _emit('nav', url);
+        await Future.delayed(const Duration(seconds: 2));
+        final title = await _webView!.getTitle();
+        return 'Navigated to $url\nTitle: ${title ?? "unknown"}';
+      case 'browser_click':
+        final sel = args['selector'] as String;
+        if (_webView == null) return 'Browser screen not open.';
+        final js = 'document.querySelector(${jsonEncode(sel)})?.click()';
+        await _webView!.runJavaScript(js);
+        _emit('shell', 'click: $sel');
+        return 'Clicked $sel (or attempted)';
+      case 'browser_evaluate':
+        final expr = args['expression'] as String;
+        if (_webView == null) return 'Browser screen not open.';
+        try {
+          final result = await _webView!.runJavaScriptReturningResult(expr);
+          final text = result.toString();
+          _emit('shellOut', 'eval: $expr');
+          return text.length > 4000 ? '${text.substring(0, 4000)}…' : text;
+        } catch (e) {
+          return 'JS error: $e';
+        }
+      case 'browser_read':
+        if (_webView == null) {
+          return 'Browser screen not open. Call browser_navigate first.';
+        }
+        try {
+          final title = await _webView!.getTitle();
+          final result = await _webView!.runJavaScriptReturningResult(
+              'document.body.innerText.substring(0,5000)');
+          final raw = result.toString();
+          // runJavaScriptReturningResult returns JSON-quoted string — decode it.
+          final text = raw.startsWith('"') && raw.endsWith('"')
+              ? jsonDecode(raw) as String
+              : raw;
+          _emit('page', title ?? 'page read');
+          return 'Title: ${title ?? "unknown"}\n\n$text';
+        } catch (e) {
+          return 'read failed: $e';
         }
 
       // ─── DSH-grade repo tools ─────────────────────────────────────────

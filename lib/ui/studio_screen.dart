@@ -17,7 +17,9 @@ class StudioScreen extends StatefulWidget {
 
 class _StudioScreenState extends State<StudioScreen> {
   bool _showFiles = true;
-  String _repo = 'orbit/orbit-app';
+  bool _syncing = false;
+
+  String? get _repo => AgentService.I.repoFull;
 
   @override
   void initState() {
@@ -27,6 +29,72 @@ class _StudioScreenState extends State<StudioScreen> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         showGithubLoginSheet(context);
       });
+    } else if (_repo != null && !RepoCache.I.isReady) {
+      _autoSync();
+    }
+  }
+
+  Future<void> _autoSync() async {
+    if (_repo == null || _syncing) return;
+    setState(() => _syncing = true);
+    try {
+      RepoCache.I.bind(_repo!, GitHubService.I.token!);
+      await RepoCache.I.sync();
+    } catch (_) {}
+    if (mounted) setState(() => _syncing = false);
+  }
+
+  Future<void> _pickRepo() async {
+    if (!GitHubService.I.isLoggedIn) {
+      await showGithubLoginSheet(context);
+      return;
+    }
+    try {
+      final repos = await GitHubService.I.listRepos();
+      if (!mounted) return;
+      final picked = await showModalBottomSheet<String>(
+        context: context,
+        backgroundColor: Aether.surface,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (_) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(14),
+                child: Text('Your repositories',
+                    style:
+                        TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+              ),
+              for (final r in repos)
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.bookmark_border,
+                      size: 18, color: Aether.textMuted),
+                  title: Text(r['full_name'] ?? '${r['name']}',
+                      style: const TextStyle(fontSize: 13.5)),
+                  subtitle: Text(
+                      '${r['language'] ?? '—'} · ⭐ ${r['stargazers_count'] ?? 0}',
+                      style: const TextStyle(
+                          fontSize: 11, color: Aether.textFaint)),
+                  onTap: () => Navigator.pop(context, r['full_name'] as String),
+                ),
+            ],
+          ),
+        ),
+      );
+      if (picked != null) {
+        AgentService.I.repoFull = picked;
+        await _autoSync();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Repo list failed: $e')));
+      }
     }
   }
 
@@ -51,8 +119,10 @@ class _StudioScreenState extends State<StudioScreen> {
           const Icon(Icons.account_tree_outlined,
               size: 18, color: Aether.textMuted),
           const SizedBox(width: 14),
+          // ── GitHub account chip + sign out ──
+          const _AccountChip(),
           Padding(
-            padding: const EdgeInsets.only(right: 14),
+            padding: const EdgeInsets.only(right: 14, left: 4),
             child: AnimatedBuilder(
               animation: AppState.I,
               builder: (context, _) => Row(children: [
@@ -79,12 +149,15 @@ class _StudioScreenState extends State<StudioScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            _RepoBar(repo: _repo),
+            _RepoBar(
+                repo: _repo ?? 'Connect a repo',
+                onPick: _pickRepo,
+                syncing: _syncing),
             Expanded(
               child: Row(
                 children: [
                   if (_showFiles) ...[
-                    SizedBox(width: 210, child: _FileTree(repo: _repo)),
+                    SizedBox(width: 210, child: _FileTree()),
                     const VerticalDivider(width: 1),
                   ],
                   const Expanded(
@@ -107,7 +180,10 @@ class _StudioScreenState extends State<StudioScreen> {
 
 class _RepoBar extends StatelessWidget {
   final String repo;
-  const _RepoBar({required this.repo});
+  final VoidCallback onPick;
+  final bool syncing;
+  const _RepoBar(
+      {required this.repo, required this.onPick, required this.syncing});
 
   @override
   Widget build(BuildContext context) {
@@ -121,25 +197,36 @@ class _RepoBar extends StatelessWidget {
       child: Row(children: [
         const Icon(Icons.hub_outlined, size: 15, color: Aether.textMuted),
         const SizedBox(width: 8),
-        Text(repo,
-            style: const TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w600,
-                color: Aether.text)),
+        Expanded(
+          child: Text(repo,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: repo == 'Connect a repo'
+                      ? Aether.textFaint
+                      : Aether.text)),
+        ),
+        if (repo != 'Connect a repo')
+          const Tag('GITHUB', color: Aether.textMuted),
+        if (syncing) ...[
+          const SizedBox(width: 8),
+          const SizedBox(
+              width: 11,
+              height: 11,
+              child: CircularProgressIndicator(
+                  strokeWidth: 1.5, color: Aether.accent)),
+        ],
         const SizedBox(width: 8),
-        const Tag('GITHUB', color: Aether.textMuted),
-        const Spacer(),
-        const Text('AI edits sync to this repo automatically',
-            style: TextStyle(fontSize: 11, color: Aether.textFaint)),
-        const SizedBox(width: 10),
         TextButton(
           style: TextButton.styleFrom(
               minimumSize: Size.zero,
               padding:
                   const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               foregroundColor: Aether.accent),
-          onPressed: () {},
-          child: const Text('Change', style: TextStyle(fontSize: 12)),
+          onPressed: onPick,
+          child: Text(repo == 'Connect a repo' ? 'Connect' : 'Change',
+              style: const TextStyle(fontSize: 12)),
         ),
       ]),
     );
@@ -147,91 +234,128 @@ class _RepoBar extends StatelessWidget {
 }
 
 class _FileTree extends StatelessWidget {
-  final String repo;
-  const _FileTree({required this.repo});
-
-  static const tree = [
-    ('lib/', 0, true),
-    ('main.dart', 1, false),
-    ('core/', 1, true),
-    ('theme.dart', 2, false),
-    ('state.dart', 2, false),
-    ('ui/', 1, true),
-    ('chat_screen.dart', 2, false),
-    ('studio_screen.dart', 2, false),
-    ('pubspec.yaml', 0, false),
-    ('README.md', 0, false),
-  ];
+  const _FileTree();
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      color: Aether.surface,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(12, 10, 12, 8),
-            child: Text('FILES',
-                style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.4,
-                    color: Aether.textFaint)),
-          ),
-          Expanded(
-            child: ListView(
-              padding: EdgeInsets.zero,
-              children: [
-                for (final (name, depth, isDir) in tree)
-                  InkWell(
-                    onTap: () {},
-                    child: Padding(
-                      padding: EdgeInsets.fromLTRB(
-                          10.0 + depth * 14, 6, 8, 6),
-                      child: Row(children: [
-                        Icon(
-                          isDir
-                              ? Icons.keyboard_arrow_down
-                              : Icons.description_outlined,
-                          size: 13,
-                          color: isDir
-                              ? Aether.textMuted
-                              : Aether.textFaint,
-                        ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(name,
-                              overflow: TextOverflow.ellipsis,
+    return AnimatedBuilder(
+      animation: Listenable.merge([RepoCache.I, AgentService.I]),
+      builder: (_, __) {
+        final cache = RepoCache.I;
+        final paths = cache.treePaths;
+        return Container(
+          color: Aether.surface,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(12, 10, 12, 8),
+                child: Text('FILES',
+                    style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.4,
+                        color: Aether.textFaint)),
+              ),
+              Expanded(
+                child: paths.isEmpty
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(14),
+                          child: Text(
+                              'Connect a repo —\nfiles appear here live.',
+                              textAlign: TextAlign.center,
                               style: TextStyle(
-                                  fontSize: 12,
-                                  color: isDir
-                                      ? Aether.text
-                                      : Aether.textMuted)),
+                                  fontSize: 11.5,
+                                  height: 1.6,
+                                  color: Aether.textFaint)),
                         ),
-                      ]),
-                    ),
+                      )
+                    : ListView.builder(
+                        padding: EdgeInsets.zero,
+                        itemCount: paths.length,
+                        itemBuilder: (_, i) {
+                          final p = paths[i];
+                          final depth =
+                              '/'.allMatches(p).length;
+                          final isDir = i + 1 < paths.length &&
+                              paths[i + 1].startsWith('$p/');
+                          final active =
+                              AgentService.I.activeFilePath == p;
+                          return InkWell(
+                            onTap: () {
+                              AgentService.I.activeFilePath = p;
+                              if (!isDir && cache.files[p] != null) {
+                                AgentService.I.fileBuffer[p] = cache.files[p]!;
+                              }
+                              AgentService.I.refreshNow();
+                            },
+                            child: Container(
+                              color: active
+                                  ? Aether.accentSoft
+                                  : Colors.transparent,
+                              padding: EdgeInsets.fromLTRB(
+                                  10.0 + depth * 14, 6, 8, 6),
+                              child: Row(children: [
+                                Icon(
+                                  isDir
+                                      ? Icons.folder_outlined
+                                      : Icons.description_outlined,
+                                  size: 13,
+                                  color: isDir
+                                      ? Aether.textMuted
+                                      : Aether.textFaint,
+                                ),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                      p.split('/').last,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          fontSize: 12,
+                                          fontFamily: Aether.mono,
+                                          color: active
+                                              ? Aether.accent
+                                              : isDir
+                                                  ? Aether.text
+                                                  : Aether.textMuted)),
+                                ),
+                              ]),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                decoration: const BoxDecoration(
+                    border:
+                        Border(top: BorderSide(color: Aether.hairline))),
+                child: Row(children: [
+                  Icon(
+                      cache.isReady
+                          ? Icons.cloud_done_outlined
+                          : Icons.cloud_off_outlined,
+                      size: 13,
+                      color: cache.isReady
+                          ? Aether.success
+                          : Aether.textFaint),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                        cache.isReady
+                            ? 'Synced · ${cache.files.length} files'
+                            : 'Not connected',
+                        style: const TextStyle(
+                            fontSize: 11, color: Aether.textMuted)),
                   ),
-              ],
-            ),
+                ]),
+              ),
+            ],
           ),
-          Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-            decoration: const BoxDecoration(
-                border:
-                    Border(top: BorderSide(color: Aether.hairline))),
-            child: const Row(children: [
-              Icon(Icons.cloud_done_outlined,
-                  size: 13, color: Aether.success),
-              SizedBox(width: 7),
-              Text('Synced with GitHub',
-                  style: TextStyle(
-                      fontSize: 11, color: Aether.textMuted)),
-            ]),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
@@ -432,6 +556,141 @@ class _Terminal extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// ── GitHub account chip with avatar, login name, and sign-out menu ──
+class _AccountChip extends StatelessWidget {
+  const _AccountChip();
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: GitHubService.I,
+      builder: (_, __) {
+        final gh = GitHubService.I;
+        if (!gh.isLoggedIn) {
+          return const SizedBox.shrink();
+        }
+        return PopupMenuButton<String>(
+          tooltip: 'GitHub account',
+          padding: EdgeInsets.zero,
+          position: PopupMenuPosition.under,
+          onSelected: (v) {
+            if (v == 'signout') {
+              showDialog(
+                context: context,
+                builder: (d) => AlertDialog(
+                  title: const Text('Sign out of GitHub?',
+                      style: TextStyle(fontSize: 15)),
+                  content: const Text(
+                      'The repo connection will be cleared. Your GitHub access token is removed from this device only.',
+                      style: TextStyle(fontSize: 12.5)),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(d),
+                        child: const Text('Cancel')),
+                    TextButton(
+                        onPressed: () {
+                          gh.signOut();
+                          Navigator.pop(d);
+                        },
+                        child: const Text('Sign out',
+                            style: TextStyle(color: Aether.danger))),
+                  ],
+                ),
+              );
+            }
+          },
+          itemBuilder: (_) => [
+            PopupMenuItem(
+              enabled: false,
+              child: Row(children: [
+                _Avatar(url: gh.avatarUrl, size: 24),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(gh.name ?? gh.login ?? '',
+                          style: const TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600)),
+                      Text('@${gh.login ?? ''}',
+                          style: const TextStyle(
+                              fontSize: 10.5,
+                              color: Aether.textFaint)),
+                    ],
+                  ),
+                ),
+              ]),
+            ),
+            const PopupMenuDivider(height: 6),
+            const PopupMenuItem(
+              value: 'signout',
+              child: Row(children: [
+                Icon(Icons.logout,
+                    size: 15, color: Aether.danger),
+                SizedBox(width: 8),
+                Text('Sign out',
+                    style: TextStyle(
+                        fontSize: 12.5, color: Aether.danger)),
+              ]),
+            ),
+          ],
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              _Avatar(url: gh.avatarUrl, size: 20),
+              const SizedBox(width: 6),
+              Text(gh.login ?? '',
+                  style: const TextStyle(
+                      fontSize: 11.5, color: Aether.textMuted)),
+              const Icon(Icons.expand_more,
+                  size: 14, color: Aether.textFaint),
+            ]),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _Avatar extends StatelessWidget {
+  final String? url;
+  final double size;
+  const _Avatar({required this.url, required this.size});
+
+  @override
+  Widget build(BuildContext context) {
+    if (url == null || url!.isEmpty) {
+      return Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: Aether.surfaceRaised,
+          shape: BoxShape.circle,
+        ),
+        child: Icon(Icons.person_outline,
+            size: size * 0.55, color: Aether.textMuted),
+      );
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(size / 2),
+      child: Image.network(
+        url!,
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => Container(
+          width: size,
+          height: size,
+          color: Aether.surfaceRaised,
+          child: Icon(Icons.person_outline,
+              size: size * 0.55, color: Aether.textMuted),
+        ),
+      ),
     );
   }
 }

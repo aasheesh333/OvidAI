@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:markdown/markdown.dart' as md;
 import '../core/theme.dart';
 import '../core/state.dart';
 import 'studio_screen.dart';
@@ -106,6 +107,21 @@ class _ChatScreenState extends State<ChatScreen>
                   onSend: () {
                     final t = _input.text.trim();
                     if (t.isEmpty || _typing) return;
+
+                    // No key anywhere → guide user to Providers instead of failing.
+                    final hasAnyKey =
+                        AppState.I.providers.any((p) => p.hasKey);
+                    if (!hasAnyKey) {
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                        content: const Text(
+                            'Add an API key first — Settings → Providers → tap a provider'),
+                        action: SnackBarAction(
+                            label: 'Open',
+                            onPressed: () => app.setNav(4)),
+                      ));
+                      return;
+                    }
+
                     app.sendMessage(t);
                     _input.clear();
                     setState(() => _typing = true);
@@ -114,7 +130,7 @@ class _ChatScreenState extends State<ChatScreen>
                         _scroll.jumpTo(_scroll.position.maxScrollExtent);
                       }
                     });
-                    // Launch the real agent (BYOK + tool-use).
+                    // Launch the real agent (BYOK + tool-use, SSE streaming).
                     AgentService.I.runTask(t).whenComplete(() {
                       if (mounted) setState(() => _typing = false);
                     });
@@ -129,45 +145,168 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   void _modelPicker(BuildContext context) {
-    final app = AppState.I;
-    showModalBottomSheet(
+    showDraggableScrollableSheet(
       context: context,
       isScrollControlled: true,
-      builder: (_) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          padding: const EdgeInsets.only(bottom: 12),
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 16, 20, 4),
-              child: Text('MODELS',
-                  style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 1.4,
-                      color: Aether.textFaint)),
+      initialChildSize: 0.5,
+      minChildSize: 0.32,
+      maxChildSize: 0.92,
+      snap: true,
+      snapSizes: const [0.5, 0.92],
+      backgroundColor: Colors.transparent,
+      builder: (ctx, scrollController) => _ModelPickerSheet(
+          scrollController: scrollController),
+    );
+  }
+}
+
+/// Half-sheet model picker — rounded top corners, search bar,
+/// drag handle to expand to fullscreen.
+class _ModelPickerSheet extends StatefulWidget {
+  final ScrollController scrollController;
+  const _ModelPickerSheet({required this.scrollController});
+
+  @override
+  State<_ModelPickerSheet> createState() => _ModelPickerSheetState();
+}
+
+class _ModelPickerSheetState extends State<_ModelPickerSheet> {
+  String _query = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    final q = _query.toLowerCase();
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: Aether.surface,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      child: Column(
+        children: [
+          // Drag handle
+          Container(
+            margin: const EdgeInsets.only(top: 10, bottom: 4),
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Aether.hairlineStrong,
+              borderRadius: BorderRadius.circular(2),
             ),
-            for (final p in app.providers)
-              if (p.models.isNotEmpty) ...[
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 14, 20, 4),
-                  child: Row(children: [
-                    Text(p.name,
-                        style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: Aether.textMuted)),
-                    if (p.isFree) ...[
-                      const SizedBox(width: 8),
-                      const Tag('FREE', color: Aether.success, filled: true),
-                    ],
-                  ]),
+          ),
+          const SizedBox(height: 10),
+          // Title + search
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 18),
+            child: Row(children: [
+              const Text('Select model',
+                  style: TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w700)),
+              const Spacer(),
+              IconButton(
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.close, size: 18),
+                  onPressed: () => Navigator.pop(context)),
+            ]),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 4, 18, 8),
+            child: TextField(
+              onChanged: (v) => setState(() => _query = v),
+              style: const TextStyle(fontSize: 13.5),
+              decoration: InputDecoration(
+                hintText: 'Search models or providers…',
+                prefixIcon: const Icon(Icons.search,
+                    size: 17, color: Aether.textFaint),
+                isDense: true,
+                filled: true,
+                fillColor: Aether.surfaceAlt,
+                contentPadding: const EdgeInsets.symmetric(vertical: 9),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Aether.hairline),
                 ),
-                for (final m in p.models)
-                  _ModelTile(provider: p.name, model: m),
-              ],
-          ],
-        ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Aether.hairline),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Aether.accent),
+                ),
+              ),
+            ),
+          ),
+          // Provider → model list
+          Expanded(
+            child: AnimatedBuilder(
+              animation: app,
+              builder: (_, __) {
+                final providers = app.providers
+                    .where((p) => p.models.isNotEmpty)
+                    .where((p) => q.isEmpty ||
+                        p.name.toLowerCase().contains(q) ||
+                        p.models.any((m) => m.toLowerCase().contains(q)))
+                    .toList();
+                if (providers.isEmpty) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(
+                          'No models yet.\nAdd a key in Settings → Providers and tap Fetch models.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                              fontSize: 12.5,
+                              height: 1.6,
+                              color: Aether.textMuted)),
+                    ),
+                  );
+                }
+                return ListView.builder(
+                  controller: widget.scrollController,
+                  padding: const EdgeInsets.only(bottom: 20),
+                  itemCount: providers.length,
+                  itemBuilder: (_, i) {
+                    final p = providers[i];
+                    final models = p.models
+                        .where((m) => q.isEmpty ||
+                            p.name.toLowerCase().contains(q) ||
+                            m.toLowerCase().contains(q))
+                        .toList();
+                    if (models.isEmpty) return const SizedBox.shrink();
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(18, 14, 18, 4),
+                          child: Row(children: [
+                            Text(p.name,
+                                style: const TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: Aether.textMuted)),
+                            const SizedBox(width: 8),
+                            if (p.isFree)
+                              const Tag('FREE',
+                                  color: Aether.success, filled: true),
+                            if (p.hasKey) ...[
+                              const SizedBox(width: 6),
+                              const Tag('KEY',
+                                  color: Aether.accent, filled: true),
+                            ],
+                          ]),
+                        ),
+                        for (final m in models)
+                          _ModelTile(provider: p.name, model: m),
+                      ],
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -182,7 +321,7 @@ class _ModelTile extends StatelessWidget {
     'deepseek', 'gpt', 'kimi', 'glm', 'opus', 'sonnet',
     'gemini-2.5', 'qwen3', 'o4', 'grok', 'r1',
   ];
-  static const variants = ['Default', 'High', 'xHigh', 'Max'];
+  static const variants = ['Low', 'Medium', 'High'];
 
   bool get supportsEffort =>
       _effortModels.any((e) => model.toLowerCase().contains(e));
@@ -235,10 +374,10 @@ class _ModelTile extends StatelessWidget {
                 ChoiceChip(
                   label:
                       Text(v, style: const TextStyle(fontSize: 12)),
-                  selected: current == (v == 'Default' ? model : '$model · $v'),
+                  selected: current == (v == 'Medium' ? '$model · Medium' : '$model · $v'),
                   onSelected: (_) {
                     app.setModel(
-                        provider, v == 'Default' ? model : '$model · $v');
+                        provider, v == 'Medium' ? '$model · Medium' : '$model · $v');
                     Navigator.pop(context);
                   },
                   showCheckmark: false,
@@ -246,7 +385,7 @@ class _ModelTile extends StatelessWidget {
                   backgroundColor: Aether.surfaceAlt,
                   side: BorderSide(
                       color: current ==
-                              (v == 'Default' ? model : '$model · $v')
+                              (v == 'Medium' ? '$model · Medium' : '$model · $v')
                           ? Aether.accent
                           : Aether.hairline),
                   shape: RoundedRectangleBorder(
@@ -364,23 +503,7 @@ class _MessageView extends StatelessWidget {
             ? Text(m.content,
                 style: const TextStyle(
                     fontSize: 14, height: 1.5, color: Aether.text))
-            : MarkdownBody(
-                data: m.content,
-                styleSheet: MarkdownStyleSheet(
-                  p: const TextStyle(
-                      fontSize: 14, height: 1.55, color: Aether.text),
-                  strong: const TextStyle(
-                      fontWeight: FontWeight.w700, color: Aether.text),
-                  code: const TextStyle(
-                      fontFamily: Aether.mono,
-                      fontSize: 12.5,
-                      backgroundColor: Aether.surfaceAlt,
-                      color: Aether.text),
-                  listBullet: const TextStyle(
-                      fontSize: 14, color: Aether.textMuted),
-                  listIndent: 18,
-                ),
-              ),
+            : _DshMarkdown(content: m.content),
       );
 
   Widget _reasoning() => Container(
@@ -784,6 +907,196 @@ class _CopyButtonState extends State<_CopyButton> {
                   color: copied ? Aether.success : Aether.textFaint)),
         ]),
       ),
+    );
+  }
+}
+
+/// ═══════════════ DSH-web style markdown renderer ═══════════════
+/// Fenced code blocks → copyable boxes with lang label + copy btn.
+/// Diff lines (+/-) inside code get green/red gutter coloring.
+class _DshMarkdown extends StatelessWidget {
+  final String content;
+  const _DshMarkdown({required this.content});
+
+  static final _fenceRe =
+      RegExp(r'```(\w*)\n([\s\S]*?)```', multiLine: true);
+
+  @override
+  Widget build(BuildContext context) {
+    final parts = <Widget>[];
+    var last = 0;
+    for (final match in _fenceRe.allMatches(content)) {
+      if (match.start > last) {
+        parts.add(_prose(content.substring(last, match.start)));
+      }
+      parts.add(_DshCodeBox(
+          lang: match.group(1)?.isEmpty ?? true ? 'code' : match.group(1)!,
+          code: match.group(2) ?? ''));
+      last = match.end;
+    }
+    if (last < content.length) {
+      parts.add(_prose(content.substring(last)));
+    }
+    if (parts.isEmpty) parts.add(_prose(content));
+    return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [for (final w in parts) Padding(
+            padding: const EdgeInsets.only(bottom: 6), child: w)]);
+  }
+
+  Widget _prose(String text) {
+    if (text.trim().isEmpty) return const SizedBox.shrink();
+    return MarkdownBody(
+      data: text,
+      builders: {
+        'code': _DshInlineCodeBuilder(),
+      },
+      styleSheet: MarkdownStyleSheet(
+        p: const TextStyle(
+            fontSize: 14, height: 1.55, color: Aether.text),
+        h1: const TextStyle(
+            fontSize: 19, fontWeight: FontWeight.w700, color: Aether.text),
+        h2: const TextStyle(
+            fontSize: 17, fontWeight: FontWeight.w700, color: Aether.text),
+        h3: const TextStyle(
+            fontSize: 15.5, fontWeight: FontWeight.w600, color: Aether.text),
+        strong: const TextStyle(
+            fontWeight: FontWeight.w700, color: Aether.text),
+        em: const TextStyle(fontStyle: FontStyle.italic, color: Aether.text),
+        code: const TextStyle(
+            fontFamily: Aether.mono,
+            fontSize: 12.5,
+            backgroundColor: Colors.transparent,
+            color: Aether.accent),
+        listBullet: const TextStyle(
+            fontSize: 14, height: 1.5, color: Aether.text),
+        listIndent: 18,
+        blockquoteDecoration: BoxDecoration(
+            border: Border(left: BorderSide(
+                color: Aether.hairlineStrong, width: 3))),
+        blockquotePadding: const EdgeInsets.only(left: 10),
+        a: const TextStyle(color: Aether.accent, decoration: TextDecoration.underline),
+      ),
+    );
+  }
+}
+
+/// Copyable fenced code box with lang label, copy, and diff coloring.
+class _DshCodeBox extends StatelessWidget {
+  final String lang;
+  final String code;
+  const _DshCodeBox({required this.lang, required this.code});
+
+  bool get _isDiff =>
+      lang == 'diff' ||
+      code.split('\n').take(8).any((l) =>
+          l.startsWith('+') || l.startsWith('-'));
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      decoration: BoxDecoration(
+        color: Aether.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            color: Aether.surfaceAlt,
+            child: Row(children: [
+              Icon(
+                  _isDiff ? Icons.difference : Icons.code,
+                  size: 13,
+                  color: Aether.textFaint),
+              const SizedBox(width: 7),
+              Text(lang,
+                  style: const TextStyle(
+                      fontSize: 11,
+                      fontFamily: Aether.mono,
+                      color: Aether.textMuted)),
+              const Spacer(),
+              _CopyButton(code: code),
+            ]),
+          ),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: _isDiff
+                ? _DiffLines(code: code)
+                : Text(code,
+                    style: const TextStyle(
+                        fontFamily: Aether.mono,
+                        fontSize: 12,
+                        height: 1.55,
+                        color: Aether.text)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Diff renderer: +/- lines green/red like DSH-web edits.
+class _DiffLines extends StatelessWidget {
+  final String code;
+  const _DiffLines({required this.code});
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = code.split('\n');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final l in lines)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1.5),
+            color: l.startsWith('+')
+                ? Aether.success.withValues(alpha: 0.10)
+                : l.startsWith('-')
+                    ? Aether.danger.withValues(alpha: 0.10)
+                    : Colors.transparent,
+            child: Text(
+              l,
+              style: TextStyle(
+                fontFamily: Aether.mono,
+                fontSize: 12,
+                height: 1.5,
+                color: l.startsWith('+')
+                    ? Aether.success
+                    : l.startsWith('-')
+                        ? Aether.danger
+                        : Aether.textMuted,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Inline `code` — mono, accent-colored chip.
+class _DshInlineCodeBuilder extends MarkdownElementBuilder {
+  @override
+  Widget visitElementAfterWithContext(BuildContext context, Element element,
+      TextStyle? preferredStyle, TextStyle? parentStyle) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+      decoration: BoxDecoration(
+        color: Aether.surfaceAlt,
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Text(element.textContent,
+          style: TextStyle(
+              fontFamily: Aether.mono,
+              fontSize: 12,
+              color: Aether.text)),
     );
   }
 }

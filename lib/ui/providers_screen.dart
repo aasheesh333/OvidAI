@@ -227,30 +227,41 @@ class ProviderCard extends StatelessWidget {
                       color: Aether.textMuted)),
             ),
             const SizedBox(height: 12),
-            if (!provider.isFree) ...[
-              TextField(
-                obscureText: true,
-                style: const TextStyle(fontSize: 13.5),
-                controller:
-                    TextEditingController(text: provider.apiKey),
-                onChanged: (v) => provider.apiKey = v,
-                decoration: InputDecoration(
-                  hintText: 'API key — stored only on this device',
-                  suffixIcon: provider.hasKey
-                      ? const Icon(Icons.check_circle,
-                          size: 17, color: Aether.success)
-                      : null,
-                ),
-              ),
-              const SizedBox(height: 10),
-            ],
+            // API key — ALWAYS shown. Free tiers (Groq/Gemini/Mistral/OpenRouter)
+            // bhi key maangte hain; "free" sirf cost ka matlab hai.
             TextField(
+              obscureText: true,
+              style: const TextStyle(fontSize: 13.5),
+              controller: TextEditingController(text: provider.apiKey),
+              onChanged: (v) => provider.apiKey = v,
+              decoration: InputDecoration(
+                hintText: provider.isFree
+                    ? 'Free tier API key — stored only on this device'
+                    : 'API key — stored only on this device',
+                suffixIcon: provider.hasKey
+                    ? const Icon(Icons.check_circle,
+                        size: 17, color: Aether.success)
+                    : null,
+              ),
+            ),
+            const SizedBox(height: 10),
+            // Base URL — inbuilt me read-only (already filled); custom me editable.
+            TextField(
+              readOnly: !provider.custom,
               style: const TextStyle(
                   fontSize: 13.5, fontFamily: Aether.mono),
               controller: TextEditingController(text: provider.baseUrl),
               onChanged: (v) => provider.baseUrl = v,
-              decoration:
-                  const InputDecoration(hintText: 'Base URL'),
+              decoration: InputDecoration(
+                hintText: 'Base URL',
+                helperText: provider.custom ? null : 'Inbuilt — locked',
+                helperStyle:
+                    const TextStyle(fontSize: 10, color: Aether.textFaint),
+                suffixIcon: provider.custom
+                    ? null
+                    : const Icon(Icons.lock_outline,
+                        size: 14, color: Aether.textFaint),
+              ),
             ),
             const SizedBox(height: 10),
             Row(children: [

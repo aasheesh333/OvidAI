@@ -85,11 +85,11 @@ enum MsgKind { text, code, imageGen, reasoning }
 
 class Message {
   final String role; // 'user' | 'assistant'
-  final MsgKind kind;
-  final String content;
+  MsgKind kind; // mutable — reasoning → text promote
+  String content; // mutable — live streaming updates
   final String? lang; // for code blocks
   final DateTime time;
-  final bool thinking;
+  bool thinking; // mutable — live state
 
   Message({
     required this.role,
@@ -195,7 +195,7 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<void> _persist() async {
+  Future<void> persistSessions() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(
@@ -231,7 +231,7 @@ class AppState extends ChangeNotifier {
   void selectSession(String id) {
     activeSessionId = id;
     notifyListeners();
-    _persist();
+    persistSessions();
   }
 
   void newSession() {
@@ -243,7 +243,7 @@ class AppState extends ChangeNotifier {
     sessions.insert(0, s);
     activeSessionId = s.id;
     notifyListeners();
-    _persist();
+    persistSessions();
   }
 
   void deleteSession(String id) {
@@ -252,13 +252,13 @@ class AppState extends ChangeNotifier {
       activeSessionId = sessions.isEmpty ? null : sessions.first.id;
     }
     notifyListeners();
-    _persist();
+    persistSessions();
   }
 
   void renameSession(String id, String title) {
     sessions.firstWhere((s) => s.id == id).title = title;
     notifyListeners();
-    _persist();
+    persistSessions();
   }
 
   void sendMessage(String text) {
@@ -270,7 +270,7 @@ class AppState extends ChangeNotifier {
       s.title = _autoTitle(text);
     }
     notifyListeners();
-    _persist();
+    persistSessions();
   }
 
   static String _autoTitle(String text) {
@@ -310,7 +310,7 @@ class AppState extends ChangeNotifier {
 3. Paste an API key — everything stays on-device''',
     ));
     notifyListeners();
-    _persist();
+    persistSessions();
   }
 
   void removeModel(String provider, String model) {
@@ -325,7 +325,7 @@ class AppState extends ChangeNotifier {
     final s = activeSession;
     if (s != null) s.model = model;
     notifyListeners();
-    _persist();
+    persistSessions();
   }
 
   void refresh() => notifyListeners();
@@ -411,6 +411,7 @@ class AppState extends ChangeNotifier {
         name: 'Google Gemini',
         description: 'Gemini 2.5 series via AI Studio (free tier available).',
         baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+        isFree: true, // AI Studio free tier — bas API key daalo
         models: ['gemini-2.5-pro', 'gemini-2.5-flash'],
       ),
       ProviderConfig(
@@ -469,12 +470,14 @@ class AppState extends ChangeNotifier {
         name: 'Mistral AI',
         description: 'Mistral Large, Codestral and open weights. Free experiment tier.',
         baseUrl: 'https://api.mistral.ai/v1',
+        isFree: true,
         models: ['mistral-large-latest', 'codestral-latest'],
       ),
       ProviderConfig(
         name: 'OpenRouter',
         description: 'One key, 300+ models including free variants.',
         baseUrl: 'https://openrouter.ai/api/v1',
+        isFree: true, // :free suffix models — free tier available
         models: ['deepseek/deepseek-chat-v3.1', 'meta-llama/llama-4-maverick'],
       ),
       ProviderConfig(
@@ -736,6 +739,16 @@ class AppState extends ChangeNotifier {
 
     // --- MCP servers (official registry + community) ---
     mcpServers.addAll([
+      McpServer(
+        name: 'Chrome DevTools',
+        author: 'ovidai',
+        description:
+            'Browser automation for the inbuilt browser — navigate, click, type, evaluate JS, read pages. Powers agent web browsing.',
+        category: 'Official',
+        command: 'npx',
+        args: ['-y', '@ovidai/chrome-devtools-mcp'],
+        connected: true,
+      ),
       McpServer(
         name: 'Filesystem',
         author: 'modelcontextprotocol',

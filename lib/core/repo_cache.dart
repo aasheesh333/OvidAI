@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
@@ -11,7 +12,7 @@ import 'package:path_provider/path_provider.dart';
 ///   • write()         → local edit (pending commit)
 ///   • commitAll()     → push pending edits to GitHub via Contents API
 ///   • exportPreview() → copy web projects (html/css/js) for live preview
-class RepoCache {
+class RepoCache extends ChangeNotifier {
   RepoCache._();
   static final RepoCache I = RepoCache._();
 
@@ -31,11 +32,26 @@ class RepoCache {
   bool get hasPending => _dirty.isNotEmpty;
   int get dirtyCount => _dirty.length;
 
+  @override
+  void notifyListeners() => super.notifyListeners();
+
   // ── init ─────────────────────────────────────────────────────────────
   void bind(String full, String token, {String branch = 'main'}) {
     repoFull = full;
     _token = token;
     defaultBranch = branch;
+  }
+
+  /// Disconnect — clear everything so Studio shows the login state again.
+  void unbind() {
+    repoFull = null;
+    _token = null;
+    defaultBranch = null;
+    files.clear();
+    treePaths.clear();
+    _dirty.clear();
+    lastSync = null;
+    notifyListeners();
   }
 
   // ── sync from GitHub ─────────────────────────────────────────────────
@@ -82,6 +98,7 @@ class RepoCache {
     }
     lastSync = DateTime.now();
     onLine?.call('repo synced ✓ ${files.length} files in memory');
+    notifyListeners();
   }
 
   Future<List<Map<String, dynamic>>> _getTree() async {
@@ -120,6 +137,7 @@ class RepoCache {
   void write(String path, String content) {
     files[path] = content;
     _dirty.add(path);
+    notifyListeners();
   }
 
   String? read(String path) => files[path];

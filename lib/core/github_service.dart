@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'repo_cache.dart';
 
 /// GitHub Device Flow authentication — real implementation (RFC 8628).
 ///
@@ -9,7 +11,7 @@ import 'package:http/http.dart' as http;
 ///   2. User opens github.com/login/device and enters the code
 ///   3. Poll POST /login/oauth/access_token until authorized
 ///   4. Use token for API calls + git push/pull from Studio
-class GitHubService {
+class GitHubService extends ChangeNotifier {
   GitHubService._();
   static final GitHubService I = GitHubService._();
 
@@ -27,6 +29,14 @@ class GitHubService {
   String? get avatarUrl => _user?['avatar_url'] as String?;
   String? get name => _user?['name'] as String?;
   String? get token => _token;
+
+  /// Sign out — clear token + profile, disconnect repo cache.
+  void signOut() {
+    _token = null;
+    _user = null;
+    RepoCache.I.unbind();
+    notifyListeners();
+  }
 
   /// -------------------------------------------------------------------------
   /// STEP 1 — request device code.
@@ -90,6 +100,7 @@ class GitHubService {
       if (j['access_token'] != null) {
         _token = j['access_token'] as String;
         await fetchUser();
+        notifyListeners();
         return _token!;
       }
 
@@ -122,6 +133,7 @@ class GitHubService {
     );
     if (res.statusCode == 200) {
       _user = jsonDecode(res.body) as Map<String, dynamic>;
+      notifyListeners();
     }
   }
 
