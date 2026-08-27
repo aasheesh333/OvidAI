@@ -412,7 +412,7 @@ class ProviderCard extends StatelessWidget {
                 ),
               ),
             ],
-          ),
+          ], // ExpansionTile children
         ),
       ),
     );
@@ -480,5 +480,4 @@ class _ModelChipState extends State<_ModelChip> {
       ]),
     );
   }
-}
 }
