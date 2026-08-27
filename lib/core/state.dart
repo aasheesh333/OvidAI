@@ -211,6 +211,13 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  void removeModel(String provider, String model) {
+    final p = providers.firstWhere((p) => p.name == provider);
+    p.models.remove(model);
+    if (p.selectedModel == model) p.selectedModel = null;
+    refresh();
+  }
+
   void setModel(String provider, String model) {
     providers.firstWhere((p) => p.name == provider).selectedModel = model;
     final s = activeSession;
@@ -322,10 +329,44 @@ class AppState extends ChangeNotifier {
         models: ['mistral-large-latest', 'codestral-latest'],
       ),
       ProviderConfig(
+        name: 'NVIDIA NIM',
+        description:
+            'Free credits for hosted open models: Llama, DeepSeek, Qwen, Mistral on build.nvidia.com.',
+        baseUrl: 'https://integrate.api.nvidia.com/v1',
+        isFree: true,
+        models: [
+          'meta/llama-3.3-70b-instruct',
+          'deepseek-ai/deepseek-r1',
+          'qwen/qwen2.5-coder-32b-instruct',
+          'mistralai/mistral-nemotron',
+        ],
+      ),
+      ProviderConfig(
         name: 'Groq',
         description: 'Ultra-fast LPU inference. Free tier available.',
         baseUrl: 'https://api.groq.com/openai/v1',
+        isFree: true,
         models: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b'],
+      ),
+      ProviderConfig(
+        name: 'Cerebras',
+        description: 'Wafer-scale speed. Free tier available.',
+        baseUrl: 'https://api.cerebras.ai/v1',
+        isFree: true,
+        models: ['llama-3.3-70b'],
+      ),
+      ProviderConfig(
+        name: 'GitHub Models',
+        description: 'Free tier models with a GitHub token.',
+        baseUrl: 'https://models.github.ai/inference',
+        isFree: true,
+        models: ['gpt-4.1', 'DeepSeek-R1'],
+      ),
+      ProviderConfig(
+        name: 'Mistral AI',
+        description: 'Mistral Large, Codestral and open weights. Free experiment tier.',
+        baseUrl: 'https://api.mistral.ai/v1',
+        models: ['mistral-large-latest', 'codestral-latest'],
       ),
       ProviderConfig(
         name: 'OpenRouter',
@@ -350,18 +391,6 @@ class AppState extends ChangeNotifier {
         description: 'Sonar models with live web access.',
         baseUrl: 'https://api.perplexity.ai',
         models: ['sonar-pro', 'sonar'],
-      ),
-      ProviderConfig(
-        name: 'Cerebras',
-        description: 'Wafer-scale speed. Free tier available.',
-        baseUrl: 'https://api.cerebras.ai/v1',
-        models: ['llama-3.3-70b'],
-      ),
-      ProviderConfig(
-        name: 'GitHub Models',
-        description: 'Free tier models with a GitHub token.',
-        baseUrl: 'https://models.github.ai/inference',
-        models: ['gpt-4.1', 'DeepSeek-R1'],
       ),
       ProviderConfig(
         name: 'Cohere',
