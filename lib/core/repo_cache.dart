@@ -217,7 +217,7 @@ class RepoCache extends ChangeNotifier {
       body: jsonEncode({
         'message': message,
         'content': base64Encode(utf8.encode(content)),
-        if (sha != null) 'sha': sha,
+        'sha': ?sha,
       }),
     );
     return res.statusCode == 200 || res.statusCode == 201;

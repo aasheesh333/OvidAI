@@ -392,7 +392,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             child: TweenAnimationBuilder<double>(
               tween: Tween(begin: overall, end: overall),
               duration: const Duration(milliseconds: 120),
-              builder: (_, v, __) => LinearProgressIndicator(
+              builder: (_, v, _) => LinearProgressIndicator(
                 value: v,
                 minHeight: 6,
                 backgroundColor: Aether.surfaceAlt,
@@ -502,7 +502,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
               tween: Tween(begin: 0, end: 1),
               duration: const Duration(milliseconds: 450),
               curve: Curves.elasticOut,
-              builder: (_, v, __) => Transform.scale(
+              builder: (_, v, _) => Transform.scale(
                 scale: v,
                 child: Container(
                   width: 72,

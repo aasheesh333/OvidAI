@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
@@ -45,7 +44,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
       ),
       body: AnimatedBuilder(
         animation: app,
-        builder: (_, __) => CustomScrollView(
+        builder: (_, _) => CustomScrollView(
           slivers: [
             // ── Search bar ON TOP ──
             SliverToBoxAdapter(
@@ -116,7 +115,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
               sliver: SliverList.separated(
                 itemCount: items.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 10),
+                separatorBuilder: (_, _) => const SizedBox(height: 10),
                 itemBuilder: (_, i) => PluginCard(plugin: items[i]),
               ),
             ),
@@ -568,7 +567,7 @@ class _McpSection extends StatelessWidget {
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 16),
             itemCount: app.mcpServers.length + 1, // +1 add-tile
-            separatorBuilder: (_, __) => const SizedBox(width: 10),
+            separatorBuilder: (_, _) => const SizedBox(width: 10),
             itemBuilder: (_, i) {
               if (i == app.mcpServers.length) {
                 return _AddMcpTile(onTap: () => _addMcpDialog(context));

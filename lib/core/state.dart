@@ -6,6 +6,7 @@ import 'sandbox_service.dart';
 /// ---------- Models ----------
 
 class ProviderConfig {
+  final String id;
   String name;
   String description;
   String baseUrl;
@@ -15,8 +16,10 @@ class ProviderConfig {
   List<String> models;
   String? selectedModel;
   bool connected;
+  final bool requiresApiKey;
 
   ProviderConfig({
+    String? id,
     required this.name,
     required this.description,
     required this.baseUrl,
@@ -26,10 +29,31 @@ class ProviderConfig {
     List<String>? models,
     this.selectedModel,
     this.connected = false,
-  }) : models = models ?? [];
+    this.requiresApiKey = true,
+  })  : id = id ?? _slug(name),
+        models = models ?? [];
 
-  bool get hasKey => apiKey.isNotEmpty || isFree;
+  bool get hasKey => apiKey.trim().isNotEmpty;
+  bool get isConfigured => !requiresApiKey || hasKey;
+
+  Map<String, dynamic> toPersistedJson() => {
+        'id': id,
+        'name': name,
+        'description': description,
+        'baseUrl': baseUrl,
+        'isFree': isFree,
+        'custom': custom,
+        'models': models,
+        'requiresApiKey': requiresApiKey,
+      };
 }
+
+String _slug(String value) => value
+    .toLowerCase()
+    .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+    .replaceAll(RegExp(r'^-+|-+$'), '');
+
+String _baseModel(String value) => value.split('·').first.trim();
 
 class PluginItem {
   final String name;
@@ -61,7 +85,8 @@ class McpServer {
   final String description;
   final String category; // Official / Community / Custom
   final String command; // e.g. npx
-  final List<String> args; // e.g. ['-y', '@modelcontextprotocol/server-filesystem']
+  final List<String>
+      args; // e.g. ['-y', '@modelcontextprotocol/server-filesystem']
   final String? envHint; // env var needed, e.g. 'GITHUB_TOKEN'
   final String source; // registry.modelcontextprotocol.io | mcp.so | custom
   bool connected;
@@ -126,6 +151,7 @@ class ChatSession {
   final String id;
   String title;
   String model;
+  String? providerId;
   final List<Message> messages;
   final DateTime createdAt;
 
@@ -133,6 +159,7 @@ class ChatSession {
     required this.id,
     required this.title,
     required this.model,
+    this.providerId,
     List<Message>? messages,
     DateTime? createdAt,
   })  : messages = messages ?? [],
@@ -142,6 +169,7 @@ class ChatSession {
         id: j['id'] as String,
         title: j['title'] as String? ?? 'New chat',
         model: j['model'] as String? ?? 'Select a provider',
+        providerId: j['providerId'] as String?,
         messages: (j['messages'] as List?)
                 ?.map((m) => Message.fromJson(m as Map<String, dynamic>))
                 .toList() ??
@@ -155,43 +183,115 @@ class ChatSession {
         'id': id,
         'title': title,
         'model': model,
+        if (providerId != null) 'providerId': providerId,
         'messages': messages.map((m) => m.toJson()).toList(),
         'createdAt': createdAt.toIso8601String(),
       };
 }
 
-/// ---------- App state (demo, in-memory) ----------
+/// ---------- App state ----------
 
 class AppState extends ChangeNotifier {
   /// Singleton — everything is user-side / on-device.
   static final AppState I = AppState._();
   AppState._() {
+    _seed();
+    _ensureActiveSession();
     _init();
   }
 
   Future<void> _init() async {
+    await loadProviderState();
     await loadSessions();
   }
 
   static const _kSessions = 'ovid_sessions';
   static const _kActive = 'ovid_active_session';
+  static const _kProviders = 'ovid_provider_configs_v1';
+  Future<void> _providerWrite = Future<void>.value();
+
+  Future<void> loadProviderState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kProviders);
+      if (raw == null || raw.isEmpty) return;
+      final stored = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      for (final entry in stored) {
+        final id = entry['id'] as String?;
+        if (id == null || id.isEmpty) continue;
+        final existing = providerById(id);
+        final hasStoredModels = entry.containsKey('models');
+        final models = (entry['models'] as List?)
+                ?.whereType<String>()
+                .where((model) => model.isNotEmpty)
+                .toList() ??
+            <String>[];
+        if (existing != null) {
+          existing
+            ..baseUrl = entry['baseUrl'] as String? ?? existing.baseUrl
+            ..models = hasStoredModels ? models : existing.models;
+          continue;
+        }
+        if (entry['custom'] != true) continue;
+        providers.add(
+          ProviderConfig(
+            id: id,
+            name: entry['name'] as String? ?? 'Custom provider',
+            description: entry['description'] as String? ??
+                'Custom OpenAI-compatible provider',
+            baseUrl: entry['baseUrl'] as String? ?? '',
+            custom: true,
+            isFree: entry['isFree'] as bool? ?? false,
+            models: models,
+            requiresApiKey: entry['requiresApiKey'] as bool? ?? true,
+          ),
+        );
+      }
+    } catch (_) {
+      // Invalid provider metadata must not prevent the app from starting.
+    }
+  }
+
+  Future<void> persistProviderState() async {
+    final encoded = jsonEncode(
+      providers.map((provider) => provider.toPersistedJson()).toList(),
+    );
+    _providerWrite = _providerWrite.then((_) async {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_kProviders, encoded);
+      } catch (_) {}
+    });
+    await _providerWrite;
+  }
 
   Future<void> loadSessions() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getStringList(_kSessions);
       if (raw != null && raw.isNotEmpty) {
+        final loaded = raw
+            .map(
+              (session) => ChatSession.fromJson(
+                jsonDecode(session) as Map<String, dynamic>,
+              ),
+            )
+            .toList();
         sessions
           ..clear()
-          ..addAll(raw.map((s) => ChatSession.fromJson(jsonDecode(s))));
+          ..addAll(loaded);
       }
       activeSessionId = prefs.getString(_kActive);
-      if (activeSessionId == null && sessions.isNotEmpty) {
-        activeSessionId = sessions.first.id;
+      if (!sessions.any((s) => s.id == activeSessionId)) {
+        activeSessionId = sessions.isEmpty ? null : sessions.first.id;
       }
+      for (final session in sessions) {
+        session.providerId ??= _inferProviderId(session.model);
+      }
+      _restoreSelectedModel();
       notifyListeners();
     } catch (_) {
-      // corrupt prefs — start empty
+      _ensureActiveSession();
     }
   }
 
@@ -199,7 +299,9 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(
-          _kSessions, sessions.map((s) => jsonEncode(s.toJson())).toList());
+        _kSessions,
+        sessions.map((s) => jsonEncode(s.toJson())).toList(),
+      );
       if (activeSessionId != null) {
         await prefs.setString(_kActive, activeSessionId!);
       } else {
@@ -214,7 +316,8 @@ class AppState extends ChangeNotifier {
   final List<ProviderConfig> providers = [];
   final List<PluginItem> plugins = [];
   final List<McpServer> mcpServers = [];
-  final List<String> marketplaces = []; // user-added git marketplaces (Claude Code style)
+  final List<String> marketplaces =
+      []; // user-added git marketplaces (Claude Code style)
   final List<ChatSession> sessions = [];
   String? activeSessionId;
 
@@ -222,6 +325,47 @@ class AppState extends ChangeNotifier {
       sessions.where((s) => s.id == activeSessionId).firstOrNull;
 
   ProviderConfig get defaultProvider => providers.first;
+
+  ProviderConfig? providerById(String? id) {
+    if (id == null) return null;
+    for (final provider in providers) {
+      if (provider.id == id) return provider;
+    }
+    return null;
+  }
+
+  ProviderConfig? providerForSession([ChatSession? session]) =>
+      providerById((session ?? activeSession)?.providerId);
+
+  String? _inferProviderId(String model) {
+    final modelId = model.split('·').first.trim();
+    if (modelId.isEmpty || modelId == 'Select a provider') return null;
+    for (final provider in providers) {
+      if (provider.models.contains(modelId)) return provider.id;
+    }
+    return null;
+  }
+
+  void _restoreSelectedModel() {
+    final session = activeSession;
+    final provider = providerForSession(session);
+    if (session != null && provider != null) {
+      provider.selectedModel = session.model;
+    }
+  }
+
+  ChatSession _ensureActiveSession() {
+    final existing = activeSession;
+    if (existing != null) return existing;
+    final session = ChatSession(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      title: 'New chat',
+      model: 'Select a provider',
+    );
+    sessions.insert(0, session);
+    activeSessionId = session.id;
+    return session;
+  }
 
   void setNav(int i) {
     navIndex = i;
@@ -236,9 +380,9 @@ class AppState extends ChangeNotifier {
 
   void newSession() {
     final s = ChatSession(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
       title: 'New chat',
-      model: defaultProvider.selectedModel ?? 'Select a provider',
+      model: 'Select a provider',
     );
     sessions.insert(0, s);
     activeSessionId = s.id;
@@ -262,8 +406,7 @@ class AppState extends ChangeNotifier {
   }
 
   void sendMessage(String text) {
-    final s = activeSession;
-    if (s == null) return;
+    final s = _ensureActiveSession();
     s.messages.add(Message(role: 'user', content: text));
     // Auto-name session from first message (smart: strip markdown/prompt fluff)
     if (s.title == 'New chat' || s.title.isEmpty) {
@@ -277,7 +420,13 @@ class AppState extends ChangeNotifier {
     var t = text.trim();
     // strip markdown headers, code fences, common prefixes
     t = t.replaceAll(RegExp(r'^[#>`*\-\s]+'), '');
-    t = t.replaceFirst(RegExp(r'^(hey|hi|hello|please|plz|can you|could you|help me|i want|i need|write|make|build|create|generate|explain)\b[,: ]*', caseSensitive: false), '');
+    t = t.replaceFirst(
+      RegExp(
+        r'^(hey|hi|hello|please|plz|can you|could you|help me|i want|i need|write|make|build|create|generate|explain)\b[,: ]*',
+        caseSensitive: false,
+      ),
+      '',
+    );
     t = t.trim();
     if (t.isEmpty) return 'New chat';
     final words = t.split(RegExp(r'\s+'));
@@ -286,46 +435,98 @@ class AppState extends ChangeNotifier {
     return words.length > 6 && !title.endsWith('…') ? '$title…' : title;
   }
 
-  void receiveDemoReply(String text) {
-    final s = activeSession;
-    if (s == null) return;
-    s.messages.add(Message(
-      role: 'assistant',
-      kind: MsgKind.reasoning,
-      thinking: true,
-      content: 'Analyzing intent, planning tool usage, drafting response…',
-    ));
-    s.messages.add(Message(
-      role: 'assistant',
-      content: '''Here is a demo reply from Ovid.
-
-**What just happened**
-- Your prompt was received: "$text"
-- A reasoning step ran first (you can toggle it in Settings)
-- Once you add a key in **Settings → Providers**, replies stream live from the real model
-
-**Try next**
-1. Open the model picker (top) and pick an effort variant
-2. Tap `</>` for Studio or 🌐 for Browser
-3. Paste an API key — everything stays on-device''',
-    ));
-    notifyListeners();
-    persistSessions();
-  }
-
-  void removeModel(String provider, String model) {
-    final p = providers.firstWhere((p) => p.name == provider);
+  void removeModel(String providerId, String model) {
+    final p = providerById(providerId);
+    if (p == null) return;
     p.models.remove(model);
-    if (p.selectedModel == model) p.selectedModel = null;
+    if (p.selectedModel != null && _baseModel(p.selectedModel!) == model) {
+      p.selectedModel = null;
+    }
+    for (final session in sessions) {
+      if (session.providerId == providerId &&
+          _baseModel(session.model) == model) {
+        session
+          ..providerId = null
+          ..model = 'Select a provider';
+      }
+    }
     refresh();
+    persistProviderState();
+    persistSessions();
   }
 
-  void setModel(String provider, String model) {
-    providers.firstWhere((p) => p.name == provider).selectedModel = model;
-    final s = activeSession;
-    if (s != null) s.model = model;
+  void reconcileProviderModels(String providerId) {
+    final provider = providerById(providerId);
+    if (provider == null) return;
+    if (provider.selectedModel != null &&
+        !provider.models.contains(_baseModel(provider.selectedModel!))) {
+      provider.selectedModel = null;
+    }
+    for (final session in sessions) {
+      if (session.providerId == providerId &&
+          !provider.models.contains(_baseModel(session.model))) {
+        session
+          ..providerId = null
+          ..model = 'Select a provider';
+      }
+    }
+    refresh();
+    persistProviderState();
+    persistSessions();
+  }
+
+  void setModel(String providerId, String model) {
+    final provider = providerById(providerId);
+    if (provider == null) return;
+    provider.selectedModel = model;
+    final s = _ensureActiveSession();
+    s
+      ..providerId = providerId
+      ..model = model;
     notifyListeners();
     persistSessions();
+  }
+
+  String? addCustomProvider({
+    required String name,
+    required String baseUrl,
+    String apiKey = '',
+  }) {
+    final normalizedName = name.trim();
+    final normalizedUrl = baseUrl.trim();
+    if (normalizedName.isEmpty) return 'Provider name is required.';
+    final uri = Uri.tryParse(normalizedUrl);
+    if (uri == null || !uri.hasScheme || !uri.hasAuthority) {
+      return 'Enter a valid absolute base URL.';
+    }
+    final id = 'custom-${_slug(normalizedName)}';
+    if (providers.any((provider) => provider.id == id)) {
+      return 'A provider with this name already exists.';
+    }
+    providers.add(
+      ProviderConfig(
+        id: id,
+        name: normalizedName,
+        description: 'Custom OpenAI-compatible provider',
+        baseUrl: normalizedUrl,
+        apiKey: apiKey.trim(),
+        custom: true,
+        requiresApiKey: apiKey.trim().isNotEmpty,
+      ),
+    );
+    refresh();
+    persistProviderState();
+    return null;
+  }
+
+  void updateProviderBaseUrl(ProviderConfig provider, String value) {
+    provider.baseUrl = value.trim();
+    persistProviderState();
+  }
+
+  void updateProviderApiKey(ProviderConfig provider, String value) {
+    provider.apiKey = value.trim();
+    refresh();
   }
 
   void refresh() => notifyListeners();
@@ -373,17 +574,19 @@ class AppState extends ChangeNotifier {
     List<String> args = const [],
     String? envHint,
   }) {
-    mcpServers.add(McpServer(
-      name: name.trim(),
-      author: 'you',
-      description: 'Custom MCP server — connects on demand.',
-      category: 'Custom',
-      command: command.trim(),
-      args: args,
-      envHint: envHint,
-      source: 'custom',
-      custom: true,
-    ));
+    mcpServers.add(
+      McpServer(
+        name: name.trim(),
+        author: 'you',
+        description: 'Custom MCP server — connects on demand.',
+        category: 'Custom',
+        command: command.trim(),
+        args: args,
+        envHint: envHint,
+        source: 'custom',
+        custom: true,
+      ),
+    );
     refresh();
   }
 
@@ -392,7 +595,7 @@ class AppState extends ChangeNotifier {
     refresh();
   }
 
-  /// ---------- Dummy content ----------
+  /// ---------- Built-in catalog ----------
   void _seed() {
     providers.addAll([
       ProviderConfig(
@@ -467,13 +670,6 @@ class AppState extends ChangeNotifier {
         models: ['gpt-4.1', 'DeepSeek-R1'],
       ),
       ProviderConfig(
-        name: 'Mistral AI',
-        description: 'Mistral Large, Codestral and open weights. Free experiment tier.',
-        baseUrl: 'https://api.mistral.ai/v1',
-        isFree: true,
-        models: ['mistral-large-latest', 'codestral-latest'],
-      ),
-      ProviderConfig(
         name: 'OpenRouter',
         description: 'One key, 300+ models including free variants.',
         baseUrl: 'https://openrouter.ai/api/v1',
@@ -501,13 +697,14 @@ class AppState extends ChangeNotifier {
       ProviderConfig(
         name: 'Cohere',
         description: 'Command and Embed models.',
-        baseUrl: 'https://api.cohere.com/v2',
+        baseUrl: 'https://api.cohere.ai/compatibility/v1',
         models: [],
       ),
       ProviderConfig(
         name: 'Ollama (local)',
         description: 'Models fully on-device or LAN, no key needed.',
         baseUrl: 'http://localhost:11434/v1',
+        requiresApiKey: false,
         models: [],
       ),
     ]);
@@ -515,289 +712,788 @@ class AppState extends ChangeNotifier {
     plugins.addAll([
       // --- Core tools (DeepSeek web style: everything works out of the box) ---
       PluginItem(
-          name: 'Web Search',
-          author: 'ovidai',
-          description:
-              'Live web results with citations inside every chat. Free, no key.',
-          version: '1.4.0',
-          category: 'Tool',
-          installed: true,
-          enabled: true,
-          installs: 482000),
+        name: 'Web Search',
+        author: 'ovidai',
+        description:
+            'Live web results with citations inside every chat. Free, no key.',
+        version: '1.4.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 482000,
+      ),
       PluginItem(
-          name: 'DeepThink Reasoning',
-          author: 'ovidai',
-          description:
-              'Chain-of-thought mode — model thinks step-by-step before replying, shown as collapsible reasoning.',
-          version: '1.2.1',
-          category: 'Tool',
-          installed: true,
-          enabled: true,
-          installs: 368000),
+        name: 'DeepThink Reasoning',
+        author: 'ovidai',
+        description:
+            'Chain-of-thought mode — model thinks step-by-step before replying, shown as collapsible reasoning.',
+        version: '1.2.1',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 368000,
+      ),
       PluginItem(
-          name: 'Image Studio',
-          author: 'ovidai',
-          description:
-              'In-chat image generation and edit via free endpoints (Pollinations / HF Spaces).',
-          version: '1.2.0',
-          category: 'Tool',
-          installed: true,
-          enabled: true,
-          installs: 419000),
+        name: 'Image Studio',
+        author: 'ovidai',
+        description:
+            'In-chat image generation and edit via free endpoints (Pollinations / HF Spaces).',
+        version: '1.2.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 419000,
+      ),
       PluginItem(
-          name: 'File Reader',
-          author: 'ovidai',
-          description:
-              'Attach PDFs, docs, code files, CSVs — ask questions about them in chat.',
-          version: '1.0.9',
-          category: 'Tool',
-          installed: true,
-          enabled: true,
-          installs: 301000),
+        name: 'File Reader',
+        author: 'ovidai',
+        description:
+            'Attach PDFs, docs, code files, CSVs — ask questions about them in chat.',
+        version: '1.0.9',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 301000,
+      ),
       PluginItem(
-          name: 'Sandbox Runtime',
-          author: 'termux',
-          description:
-              'Full Linux userland on-device: python, node, gcc — isolated and instant.',
-          version: '3.1.0',
-          category: 'Runtime',
-          installed: true,
-          enabled: true,
-          installs: 90300),
+        name: 'Sandbox Runtime',
+        author: 'termux',
+        description:
+            'Full Linux userland on-device: python, node, gcc — isolated and instant.',
+        version: '3.1.0',
+        category: 'Runtime',
+        installed: true,
+        enabled: true,
+        installs: 90300,
+      ),
       PluginItem(
-          name: 'MCP Server Hub',
-          author: 'modelcontextprotocol',
-          description:
-              'Connect any Model Context Protocol server: filesystem, github, postgres, puppeteer…',
-          version: '2.1.0',
-          category: 'MCP',
-          installs: 345000),
+        name: 'MCP Server Hub',
+        author: 'modelcontextprotocol',
+        description:
+            'Connect any Model Context Protocol server: filesystem, github, postgres, puppeteer…',
+        version: '2.1.0',
+        category: 'MCP',
+        installs: 345000,
+      ),
       PluginItem(
-          name: 'Web Fetch & Reader',
-          author: 'ovidai',
-          description:
-              'Turn any URL into clean markdown for the model — articles, docs, threads.',
-          version: '1.0.6',
-          category: 'Tool',
-          installed: true,
-          installs: 517000),
+        name: 'Web Fetch & Reader',
+        author: 'ovidai',
+        description:
+            'Turn any URL into clean markdown for the model — articles, docs, threads.',
+        version: '1.0.6',
+        category: 'Tool',
+        installed: true,
+        installs: 517000,
+      ),
       PluginItem(
-          name: 'Voice Input',
-          author: 'ovidai',
-          description:
-              'Dictate prompts hands-free, on-device speech recognition.',
-          version: '0.9.8',
-          category: 'Tool',
-          installs: 66000),
+        name: 'Voice Input',
+        author: 'ovidai',
+        description:
+            'Dictate prompts hands-free, on-device speech recognition.',
+        version: '0.9.8',
+        category: 'Tool',
+        installs: 66000,
+      ),
       PluginItem(
-          name: 'Multi-Model Compare',
-          author: 'ovidai',
-          description:
-              'Send one prompt to up to 3 models side-by-side, pick the best answer.',
-          version: '0.7.2',
-          category: 'Tool',
-          installs: 128000),
+        name: 'Multi-Model Compare',
+        author: 'ovidai',
+        description:
+            'Send one prompt to up to 3 models side-by-side, pick the best answer.',
+        version: '0.7.2',
+        category: 'Tool',
+        installs: 128000,
+      ),
       PluginItem(
-          name: 'RAG Memory',
-          author: 'ovidai',
-          description:
-              'Long-term vector memory — the agent remembers your projects and prefs.',
-          version: '1.3.0',
-          category: 'Tool',
-          installs: 228000),
+        name: 'RAG Memory',
+        author: 'ovidai',
+        description:
+            'Long-term vector memory — the agent remembers your projects and prefs.',
+        version: '1.3.0',
+        category: 'Tool',
+        installs: 228000,
+      ),
       PluginItem(
-          name: 'Code Runner',
-          author: 'sandbox',
-          description:
-              'Run python/js snippets in chat with output preview — powered by sandbox.',
-          version: '1.1.4',
-          category: 'Runtime',
-          installs: 154000),
+        name: 'Code Runner',
+        author: 'sandbox',
+        description:
+            'Run python/js snippets in chat with output preview — powered by sandbox.',
+        version: '1.1.4',
+        category: 'Runtime',
+        installs: 154000,
+      ),
       PluginItem(
-          name: 'Git Workbench',
-          author: 'ovidai',
-          description:
-              'Clone, branch, commit and push from the Studio IDE.',
-          version: '0.8.3',
-          category: 'Tool',
-          installs: 93000),
+        name: 'Git Workbench',
+        author: 'ovidai',
+        description: 'Clone, branch, commit and push from the Studio IDE.',
+        version: '0.8.3',
+        category: 'Tool',
+        installs: 93000,
+      ),
       PluginItem(
-          name: 'PR Reviewer',
-          author: 'ovidai',
-          description:
-              'Auto-review GitHub PRs with inline fix suggestions.',
-          version: '1.0.2',
-          category: 'Agent',
-          installs: 151000),
+        name: 'PR Reviewer',
+        author: 'ovidai',
+        description: 'Auto-review GitHub PRs with inline fix suggestions.',
+        version: '1.0.2',
+        category: 'Agent',
+        installs: 151000,
+      ),
       PluginItem(
-          name: 'Web Clipper',
-          author: 'ovidai',
-          description:
-              'Save pages, snippets and notes to a searchable knowledge base.',
-          version: '1.1.0',
-          category: 'Tool',
-          installs: 87000),
+        name: 'Web Clipper',
+        author: 'ovidai',
+        description:
+            'Save pages, snippets and notes to a searchable knowledge base.',
+        version: '1.1.0',
+        category: 'Tool',
+        installs: 87000,
+      ),
       PluginItem(
-          name: 'Translate Pro',
-          author: 'ovidai',
-          description:
-              'Document translation with layout preserved, 100+ languages.',
-          version: '2.0.1',
-          category: 'Tool',
-          installs: 264000),
+        name: 'Translate Pro',
+        author: 'ovidai',
+        description:
+            'Document translation with layout preserved, 100+ languages.',
+        version: '2.0.1',
+        category: 'Tool',
+        installs: 264000,
+      ),
       PluginItem(
-          name: 'PDF Tools',
-          author: 'ovidai',
-          description:
-              'Merge, split, compress, summarize PDFs right in chat.',
-          version: '1.5.2',
-          category: 'Tool',
-          installs: 198000),
+        name: 'PDF Tools',
+        author: 'ovidai',
+        description: 'Merge, split, compress, summarize PDFs right in chat.',
+        version: '1.5.2',
+        category: 'Tool',
+        installs: 198000,
+      ),
       PluginItem(
-          name: 'Data Analyst',
-          author: 'ovidai',
-          description:
-              'Upload CSV/Excel, get charts, trends and insights automatically.',
-          version: '1.2.8',
-          category: 'Tool',
-          installs: 176000),
+        name: 'Data Analyst',
+        author: 'ovidai',
+        description:
+            'Upload CSV/Excel, get charts, trends and insights automatically.',
+        version: '1.2.8',
+        category: 'Tool',
+        installs: 176000,
+      ),
       PluginItem(
-          name: 'Study Mode',
-          author: 'ovidai',
-          description:
-              'Turn any chat into flashcards, quizzes and spaced-repetition decks.',
-          version: '0.9.1',
-          category: 'Tool',
-          installs: 143000),
+        name: 'Study Mode',
+        author: 'ovidai',
+        description:
+            'Turn any chat into flashcards, quizzes and spaced-repetition decks.',
+        version: '0.9.1',
+        category: 'Tool',
+        installs: 143000,
+      ),
       PluginItem(
-          name: 'Meeting Notes',
-          author: 'ovidai',
-          description:
-              'Record or upload audio, get clean minutes and action items.',
-          version: '1.1.6',
-          category: 'Tool',
-          installs: 118000),
+        name: 'Meeting Notes',
+        author: 'ovidai',
+        description:
+            'Record or upload audio, get clean minutes and action items.',
+        version: '1.1.6',
+        category: 'Tool',
+        installs: 118000,
+      ),
       PluginItem(
-          name: 'Prompt Library',
-          author: 'ovidai',
-          description:
-              'Community prompts with one-tap use — sorted by task.',
-          version: '1.6.0',
-          category: 'Tool',
-          installs: 231000),
+        name: 'Prompt Library',
+        author: 'ovidai',
+        description: 'Community prompts with one-tap use — sorted by task.',
+        version: '1.6.0',
+        category: 'Tool',
+        installs: 231000,
+      ),
       PluginItem(
-          name: 'Screen Awareness',
-          author: 'ovidai',
-          description:
-              'Ask about anything on your screen — share a screenshot into chat.',
-          version: '0.8.5',
-          category: 'Tool',
-          installs: 74000),
+        name: 'Screen Awareness',
+        author: 'ovidai',
+        description:
+            'Ask about anything on your screen — share a screenshot into chat.',
+        version: '0.8.5',
+        category: 'Tool',
+        installs: 74000,
+      ),
       PluginItem(
-          name: 'Calendar & Tasks',
-          author: 'ovidai',
-          description:
-              'Plan, schedule and get reminders from plain-language chat.',
-          version: '1.0.7',
-          category: 'Tool',
-          installs: 102000),
+        name: 'Calendar & Tasks',
+        author: 'ovidai',
+        description:
+            'Plan, schedule and get reminders from plain-language chat.',
+        version: '1.0.7',
+        category: 'Tool',
+        installs: 102000,
+      ),
     ]);
 
     // community library (dummy bulk)
     const extra = <(String, String, String, String, int)>[
       // ── Top CLI-used plugins/MCP ──
-      ('Puppeteer MCP', 'mcp-community', 'Headless browser automation for agents.', 'MCP', 18200),
-      ('Postgres Tools', 'mcp-community', 'Query and inspect Postgres databases.', 'MCP', 9400),
+      (
+        'Puppeteer MCP',
+        'mcp-community',
+        'Headless browser automation for agents.',
+        'MCP',
+        18200,
+      ),
+      (
+        'Postgres Tools',
+        'mcp-community',
+        'Query and inspect Postgres databases.',
+        'MCP',
+        9400,
+      ),
       ('Figma Bridge', 'figma', 'Read design frames and tokens.', 'MCP', 12600),
-      ('Slack Notify', 'community', 'Send agent updates to Slack channels.', 'Tool', 5100),
-      ('Docker-in-Sandbox', 'sandbox', 'OCI containers inside the sandbox.', 'Runtime', 7700),
-      ('Shell History', 'ovidai', 'Searchable sandbox terminal history.', 'Tool', 3400),
-      ('Rust Toolchain', 'sandbox', 'cargo + rustc prebuilt for the sandbox.', 'Runtime', 4100),
-      ('Go Toolchain', 'sandbox', 'Go 1.23 toolchain, one tap install.', 'Runtime', 3900),
-      ('Linear Sync', 'community', 'Create and update Linear issues from chat.', 'Tool', 2800),
-      ('Sentry Watch', 'community', 'Pull errors into chat and let agents fix them.', 'Tool', 3300),
-      ('Stripe MCP', 'stripe', 'Payments, invoices and customers via MCP.', 'MCP', 5400),
-      ('Vercel Deploy', 'vercel', 'Ship previews straight from the sandbox.', 'Tool', 11300),
-      ('DB Designer', 'community', 'Draw and migrate schemas in chat.', 'Tool', 4700),
-      ('Audio Notes', 'community', 'Transcribe meetings into sessions.', 'Tool', 3600),
-      ('Tailwind Helper', 'community', 'Tailwind-aware UI generation.', 'Tool', 9800),
-      ('Terraform MCP', 'hashicorp', 'Plan and apply infra safely.', 'MCP', 2500),
-      ('Notion Sync', 'community', 'Two-way sync with Notion databases.', 'Tool', 8600),
-      ('WhatsApp Bridge', 'community', 'Let the agent reply on WhatsApp via template.', 'Tool', 6200),
-      ('YouTube Summarizer', 'community', 'Paste a link, get a summary + chapters.', 'Tool', 14700),
-      ('Email Drafts', 'community', 'Generate and queue emails from chat.', 'Tool', 7900),
+      (
+        'Slack Notify',
+        'community',
+        'Send agent updates to Slack channels.',
+        'Tool',
+        5100,
+      ),
+      (
+        'Docker-in-Sandbox',
+        'sandbox',
+        'OCI containers inside the sandbox.',
+        'Runtime',
+        7700,
+      ),
+      (
+        'Shell History',
+        'ovidai',
+        'Searchable sandbox terminal history.',
+        'Tool',
+        3400,
+      ),
+      (
+        'Rust Toolchain',
+        'sandbox',
+        'cargo + rustc prebuilt for the sandbox.',
+        'Runtime',
+        4100,
+      ),
+      (
+        'Go Toolchain',
+        'sandbox',
+        'Go 1.23 toolchain, one tap install.',
+        'Runtime',
+        3900,
+      ),
+      (
+        'Linear Sync',
+        'community',
+        'Create and update Linear issues from chat.',
+        'Tool',
+        2800,
+      ),
+      (
+        'Sentry Watch',
+        'community',
+        'Pull errors into chat and let agents fix them.',
+        'Tool',
+        3300,
+      ),
+      (
+        'Stripe MCP',
+        'stripe',
+        'Payments, invoices and customers via MCP.',
+        'MCP',
+        5400,
+      ),
+      (
+        'Vercel Deploy',
+        'vercel',
+        'Ship previews straight from the sandbox.',
+        'Tool',
+        11300,
+      ),
+      (
+        'DB Designer',
+        'community',
+        'Draw and migrate schemas in chat.',
+        'Tool',
+        4700,
+      ),
+      (
+        'Audio Notes',
+        'community',
+        'Transcribe meetings into sessions.',
+        'Tool',
+        3600,
+      ),
+      (
+        'Tailwind Helper',
+        'community',
+        'Tailwind-aware UI generation.',
+        'Tool',
+        9800,
+      ),
+      (
+        'Terraform MCP',
+        'hashicorp',
+        'Plan and apply infra safely.',
+        'MCP',
+        2500,
+      ),
+      (
+        'Notion Sync',
+        'community',
+        'Two-way sync with Notion databases.',
+        'Tool',
+        8600,
+      ),
+      (
+        'WhatsApp Bridge',
+        'community',
+        'Let the agent reply on WhatsApp via template.',
+        'Tool',
+        6200,
+      ),
+      (
+        'YouTube Summarizer',
+        'community',
+        'Paste a link, get a summary + chapters.',
+        'Tool',
+        14700,
+      ),
+      (
+        'Email Drafts',
+        'community',
+        'Generate and queue emails from chat.',
+        'Tool',
+        7900,
+      ),
       // ── Batch 2: More popular tools/MCP ──
-      ('Exa Search MCP', 'exa', 'Semantic web search — find docs, APIs, papers.', 'MCP', 22100),
-      ('Playwright MCP', 'playwright', 'Modern browser automation with smart waiting.', 'MCP', 19800),
-      ('Discord MCP', 'discord-mcp', 'Read/send Discord messages, manage servers.', 'MCP', 8900),
-      ('Telegram MCP', 'telegram', 'Bot API — send messages, listen to channels.', 'MCP', 7200),
-      ('Obsidian MCP', 'obsidian', 'Read/write Obsidian vault notes.', 'MCP', 6600),
-      ('Firebase MCP', 'firebase', 'Firestore, Auth, Storage — full Firebase access.', 'MCP', 5800),
-      ('Supabase MCP', 'supabase', 'Postgres + Auth + Storage from Supabase.', 'MCP', 9100),
-      ('Airtable MCP', 'airtable', 'Read/write Airtable bases and tables.', 'MCP', 4700),
-      ('Google Drive MCP', 'google', 'Search, read, and upload files to Drive.', 'MCP', 12300),
-      ('GitLab MCP', 'gitlab', 'GitLab repos, MRs, issues — full DevOps.', 'MCP', 6100),
-      ('Jira MCP', 'atlassian', 'Create and update Jira issues and sprints.', 'MCP', 8400),
-      ('Trello MCP', 'atlassian', 'Boards, cards, lists — Trello automation.', 'MCP', 3900),
-      ('Redis MCP', 'redis', 'Key-value store operations and pub/sub.', 'MCP', 2100),
-      ('MongoDB MCP', 'mongodb', 'Document queries, aggregations, indexes.', 'MCP', 5400),
-      ('S3 MCP', 'aws', 'S3 buckets — upload, list, download, presigned URLs.', 'MCP', 7600),
-      ('Cloudflare MCP', 'cloudflare', 'Workers, KV, R2, DNS — edge compute.', 'MCP', 4800),
-      ('Docker MCP', 'docker', 'Manage containers, images, volumes, networks.', 'MCP', 9200),
-      ('Kubernetes MCP', 'k8s', 'Pods, services, deployments — cluster control.', 'MCP', 6800),
-      ('OpenAI DALL·E MCP', 'openai', 'Image generation via DALL·E 3.', 'MCP', 11200),
-      ('ElevenLabs MCP', 'elevenlabs', 'Text-to-speech with realistic voices.', 'MCP', 7100),
-      ('LangChain MCP', 'langchain', 'Chains, agents, memory — full LangChain.', 'MCP', 4400),
-      ('AutoGPT Bridge', 'agpt', 'Chain multiple agents for complex tasks.', 'MCP', 3800),
-      ('Vector DB MCP', 'pinecone', 'Pinecone/Weaviate — vector search & memory.', 'MCP', 5200),
-      ('Appwrite MCP', 'appwrite', 'Auth, DB, storage, functions — backend suite.', 'MCP', 3600),
-      ('PocketBase MCP', 'pocketbase', 'Lightweight backend in a single binary.', 'MCP', 2900),
-      ('Cal.com MCP', 'cal', 'Scheduling, bookings, calendar management.', 'MCP', 4100),
-      ('Zapier MCP', 'zapier', 'Trigger zaps and read automation results.', 'MCP', 6300),
-      ('Make.com MCP', 'make', 'Run Make.com scenarios from agent.', 'MCP', 3400),
-      ('Bitbucket MCP', 'atlassian', 'Repos, PRs, pipelines for Bitbucket.', 'MCP', 4200),
-      ('Vercel MCP', 'vercel', 'Deploy, manage projects, domains via API.', 'MCP', 8100),
-      ('Railway MCP', 'railway', 'Deploy and manage Railway services.', 'MCP', 3200),
-      ('Heroku MCP', 'heroku', 'Dyno management, config vars, addons.', 'MCP', 2600),
-      ('DigitalOcean MCP', 'digitalocean', 'Droplets, App Platform, Spaces, DNS.', 'MCP', 5700),
-      ('Twilio MCP', 'twilio', 'SMS, calls, WhatsApp — messaging APIs.', 'MCP', 5100),
-      ('Discord Bot Builder', 'discord-mcp', 'Build and deploy Discord bots from chat.', 'Agent', 7800),
-      ('Web Scraper Pro', 'ovidai', 'Visual CSS selector → structured data.', 'Tool', 12500),
-      ('API Tester', 'ovidai', 'Build and test REST APIs from chat.', 'Tool', 8900),
-      ('Regex Builder', 'ovidai', 'Natural language → regex with tests.', 'Tool', 6700),
-      ('SQL Formatter', 'ovidai', 'Pretty-print and optimize SQL queries.', 'Tool', 5400),
-      ('JSON Visualizer', 'ovidai', 'Paste JSON → interactive tree explorer.', 'Tool', 7600),
-      ('Env Manager', 'ovidai', 'Manage .env files across repos safely.', 'Tool', 4300),
-      ('Log Analyzer', 'ovidai', 'Parse and explain log files with patterns.', 'Tool', 5100),
-      ('Git Diff Explain', 'ovidai', 'AI explanation of what a diff actually does.', 'Tool', 6800),
-      ('File Converter', 'ovidai', 'Convert between formats: CSV/JSON/YAML/XML.', 'Tool', 8200),
-      ('QR Generator', 'ovidai', 'Generate QR codes for URLs, WiFi, contact cards.', 'Tool', 9700),
-      ('Password Vault', 'ovidai', 'Secure local password manager with autofill.', 'Tool', 11400),
-      ('SSH Key Manager', 'ovidai', 'Generate and manage SSH keys for servers.', 'Tool', 5600),
-      ('Cron Designer', 'ovidai', 'Visual cron schedule builder and explainer.', 'Tool', 4600),
-      ('Markdown Editor', 'ovidai', 'Live-preview markdown editor with export.', 'Tool', 6900),
-      ('Mermaid Diagrams', 'ovidai', 'Flowcharts, sequence diagrams from text.', 'Tool', 10300),
-      ('Excalidraw Bridge', 'excalidraw', 'Draw diagrams in Excalidraw, sync to repo.', 'Tool', 4800),
-      ('Color Palette Gen', 'ovidai', 'Generate accessible color palettes from descriptions.', 'Tool', 7900),
-      ('Icon Library', 'ovidai', 'Search 200k+ icons (Lucide, Material, Feather).', 'Tool', 6200),
-      ('Font Preview', 'ovidai', 'Preview Google Fonts with custom text.', 'Tool', 5500),
-      ('Code Review AI', 'ovidai', 'AI-powered code review with fix suggestions.', 'Agent', 13800),
-      ('Test Writer', 'ovidai', 'Generate unit tests for any function/class.', 'Agent', 9400),
-      ('README Writer', 'ovidai', 'Auto-generate professional README files.', 'Agent', 8700),
-      ('Changelog Gen', 'ovidai', 'Generate changelog from git history.', 'Agent', 4500),
-      ('Commit Msg Helper', 'ovidai', 'AI commit messages following Conventional Commits.', 'Agent', 7300),
-      ('Issue Triager', 'ovidai', 'Categorize and prioritize GitHub issues.', 'Agent', 5600),
-      ('Release Notes', 'ovidai', 'Draft release notes from merged PRs.', 'Agent', 6100),
+      (
+        'Exa Search MCP',
+        'exa',
+        'Semantic web search — find docs, APIs, papers.',
+        'MCP',
+        22100,
+      ),
+      (
+        'Playwright MCP',
+        'playwright',
+        'Modern browser automation with smart waiting.',
+        'MCP',
+        19800,
+      ),
+      (
+        'Discord MCP',
+        'discord-mcp',
+        'Read/send Discord messages, manage servers.',
+        'MCP',
+        8900,
+      ),
+      (
+        'Telegram MCP',
+        'telegram',
+        'Bot API — send messages, listen to channels.',
+        'MCP',
+        7200,
+      ),
+      (
+        'Obsidian MCP',
+        'obsidian',
+        'Read/write Obsidian vault notes.',
+        'MCP',
+        6600,
+      ),
+      (
+        'Firebase MCP',
+        'firebase',
+        'Firestore, Auth, Storage — full Firebase access.',
+        'MCP',
+        5800,
+      ),
+      (
+        'Supabase MCP',
+        'supabase',
+        'Postgres + Auth + Storage from Supabase.',
+        'MCP',
+        9100,
+      ),
+      (
+        'Airtable MCP',
+        'airtable',
+        'Read/write Airtable bases and tables.',
+        'MCP',
+        4700,
+      ),
+      (
+        'Google Drive MCP',
+        'google',
+        'Search, read, and upload files to Drive.',
+        'MCP',
+        12300,
+      ),
+      (
+        'GitLab MCP',
+        'gitlab',
+        'GitLab repos, MRs, issues — full DevOps.',
+        'MCP',
+        6100,
+      ),
+      (
+        'Jira MCP',
+        'atlassian',
+        'Create and update Jira issues and sprints.',
+        'MCP',
+        8400,
+      ),
+      (
+        'Trello MCP',
+        'atlassian',
+        'Boards, cards, lists — Trello automation.',
+        'MCP',
+        3900,
+      ),
+      (
+        'Redis MCP',
+        'redis',
+        'Key-value store operations and pub/sub.',
+        'MCP',
+        2100,
+      ),
+      (
+        'MongoDB MCP',
+        'mongodb',
+        'Document queries, aggregations, indexes.',
+        'MCP',
+        5400,
+      ),
+      (
+        'S3 MCP',
+        'aws',
+        'S3 buckets — upload, list, download, presigned URLs.',
+        'MCP',
+        7600,
+      ),
+      (
+        'Cloudflare MCP',
+        'cloudflare',
+        'Workers, KV, R2, DNS — edge compute.',
+        'MCP',
+        4800,
+      ),
+      (
+        'Docker MCP',
+        'docker',
+        'Manage containers, images, volumes, networks.',
+        'MCP',
+        9200,
+      ),
+      (
+        'Kubernetes MCP',
+        'k8s',
+        'Pods, services, deployments — cluster control.',
+        'MCP',
+        6800,
+      ),
+      (
+        'OpenAI DALL·E MCP',
+        'openai',
+        'Image generation via DALL·E 3.',
+        'MCP',
+        11200,
+      ),
+      (
+        'ElevenLabs MCP',
+        'elevenlabs',
+        'Text-to-speech with realistic voices.',
+        'MCP',
+        7100,
+      ),
+      (
+        'LangChain MCP',
+        'langchain',
+        'Chains, agents, memory — full LangChain.',
+        'MCP',
+        4400,
+      ),
+      (
+        'AutoGPT Bridge',
+        'agpt',
+        'Chain multiple agents for complex tasks.',
+        'MCP',
+        3800,
+      ),
+      (
+        'Vector DB MCP',
+        'pinecone',
+        'Pinecone/Weaviate — vector search & memory.',
+        'MCP',
+        5200,
+      ),
+      (
+        'Appwrite MCP',
+        'appwrite',
+        'Auth, DB, storage, functions — backend suite.',
+        'MCP',
+        3600,
+      ),
+      (
+        'PocketBase MCP',
+        'pocketbase',
+        'Lightweight backend in a single binary.',
+        'MCP',
+        2900,
+      ),
+      (
+        'Cal.com MCP',
+        'cal',
+        'Scheduling, bookings, calendar management.',
+        'MCP',
+        4100,
+      ),
+      (
+        'Zapier MCP',
+        'zapier',
+        'Trigger zaps and read automation results.',
+        'MCP',
+        6300,
+      ),
+      (
+        'Make.com MCP',
+        'make',
+        'Run Make.com scenarios from agent.',
+        'MCP',
+        3400,
+      ),
+      (
+        'Bitbucket MCP',
+        'atlassian',
+        'Repos, PRs, pipelines for Bitbucket.',
+        'MCP',
+        4200,
+      ),
+      (
+        'Vercel MCP',
+        'vercel',
+        'Deploy, manage projects, domains via API.',
+        'MCP',
+        8100,
+      ),
+      (
+        'Railway MCP',
+        'railway',
+        'Deploy and manage Railway services.',
+        'MCP',
+        3200,
+      ),
+      (
+        'Heroku MCP',
+        'heroku',
+        'Dyno management, config vars, addons.',
+        'MCP',
+        2600,
+      ),
+      (
+        'DigitalOcean MCP',
+        'digitalocean',
+        'Droplets, App Platform, Spaces, DNS.',
+        'MCP',
+        5700,
+      ),
+      (
+        'Twilio MCP',
+        'twilio',
+        'SMS, calls, WhatsApp — messaging APIs.',
+        'MCP',
+        5100,
+      ),
+      (
+        'Discord Bot Builder',
+        'discord-mcp',
+        'Build and deploy Discord bots from chat.',
+        'Agent',
+        7800,
+      ),
+      (
+        'Web Scraper Pro',
+        'ovidai',
+        'Visual CSS selector → structured data.',
+        'Tool',
+        12500,
+      ),
+      (
+        'API Tester',
+        'ovidai',
+        'Build and test REST APIs from chat.',
+        'Tool',
+        8900,
+      ),
+      (
+        'Regex Builder',
+        'ovidai',
+        'Natural language → regex with tests.',
+        'Tool',
+        6700,
+      ),
+      (
+        'SQL Formatter',
+        'ovidai',
+        'Pretty-print and optimize SQL queries.',
+        'Tool',
+        5400,
+      ),
+      (
+        'JSON Visualizer',
+        'ovidai',
+        'Paste JSON → interactive tree explorer.',
+        'Tool',
+        7600,
+      ),
+      (
+        'Env Manager',
+        'ovidai',
+        'Manage .env files across repos safely.',
+        'Tool',
+        4300,
+      ),
+      (
+        'Log Analyzer',
+        'ovidai',
+        'Parse and explain log files with patterns.',
+        'Tool',
+        5100,
+      ),
+      (
+        'Git Diff Explain',
+        'ovidai',
+        'AI explanation of what a diff actually does.',
+        'Tool',
+        6800,
+      ),
+      (
+        'File Converter',
+        'ovidai',
+        'Convert between formats: CSV/JSON/YAML/XML.',
+        'Tool',
+        8200,
+      ),
+      (
+        'QR Generator',
+        'ovidai',
+        'Generate QR codes for URLs, WiFi, contact cards.',
+        'Tool',
+        9700,
+      ),
+      (
+        'Password Vault',
+        'ovidai',
+        'Secure local password manager with autofill.',
+        'Tool',
+        11400,
+      ),
+      (
+        'SSH Key Manager',
+        'ovidai',
+        'Generate and manage SSH keys for servers.',
+        'Tool',
+        5600,
+      ),
+      (
+        'Cron Designer',
+        'ovidai',
+        'Visual cron schedule builder and explainer.',
+        'Tool',
+        4600,
+      ),
+      (
+        'Markdown Editor',
+        'ovidai',
+        'Live-preview markdown editor with export.',
+        'Tool',
+        6900,
+      ),
+      (
+        'Mermaid Diagrams',
+        'ovidai',
+        'Flowcharts, sequence diagrams from text.',
+        'Tool',
+        10300,
+      ),
+      (
+        'Excalidraw Bridge',
+        'excalidraw',
+        'Draw diagrams in Excalidraw, sync to repo.',
+        'Tool',
+        4800,
+      ),
+      (
+        'Color Palette Gen',
+        'ovidai',
+        'Generate accessible color palettes from descriptions.',
+        'Tool',
+        7900,
+      ),
+      (
+        'Icon Library',
+        'ovidai',
+        'Search 200k+ icons (Lucide, Material, Feather).',
+        'Tool',
+        6200,
+      ),
+      (
+        'Font Preview',
+        'ovidai',
+        'Preview Google Fonts with custom text.',
+        'Tool',
+        5500,
+      ),
+      (
+        'Code Review AI',
+        'ovidai',
+        'AI-powered code review with fix suggestions.',
+        'Agent',
+        13800,
+      ),
+      (
+        'Test Writer',
+        'ovidai',
+        'Generate unit tests for any function/class.',
+        'Agent',
+        9400,
+      ),
+      (
+        'README Writer',
+        'ovidai',
+        'Auto-generate professional README files.',
+        'Agent',
+        8700,
+      ),
+      (
+        'Changelog Gen',
+        'ovidai',
+        'Generate changelog from git history.',
+        'Agent',
+        4500,
+      ),
+      (
+        'Commit Msg Helper',
+        'ovidai',
+        'AI commit messages following Conventional Commits.',
+        'Agent',
+        7300,
+      ),
+      (
+        'Issue Triager',
+        'ovidai',
+        'Categorize and prioritize GitHub issues.',
+        'Agent',
+        5600,
+      ),
+      (
+        'Release Notes',
+        'ovidai',
+        'Draft release notes from merged PRs.',
+        'Agent',
+        6100,
+      ),
     ];
     plugins.addAll([
       for (final (n, a, d, c, i) in extra)
         PluginItem(
-            name: n,
-            author: a,
-            description: d,
-            version: '1.${(i % 9) + 0}.${i % 7}',
-            category: c,
-            installs: i),
+          name: n,
+          author: a,
+          description: d,
+          version: '1.${(i % 9) + 0}.${i % 7}',
+          category: c,
+          installs: i,
+        ),
     ]);
 
     // --- MCP servers (official registry + community) ---
@@ -889,7 +1585,8 @@ class AppState extends ChangeNotifier {
       McpServer(
         name: 'Playwright',
         author: 'playwright',
-        description: 'Modern browser automation with smart waiting — faster than Puppeteer.',
+        description:
+            'Modern browser automation with smart waiting — faster than Puppeteer.',
         category: 'Official',
         command: 'npx',
         args: ['-y', '@playwright/mcp'],
@@ -1065,8 +1762,6 @@ class AppState extends ChangeNotifier {
     ]);
 
     // user-added marketplaces (Claude Code style)
-    marketplaces.addAll([
-      'ovidai/ovid-plugins',
-    ]);
+    marketplaces.addAll(['ovidai/ovid-plugins']);
   }
 }

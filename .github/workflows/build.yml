@@ -1,13 +1,23 @@
-name: Build Ovid APK
+name: Validate and Build Android
 
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -20,13 +30,26 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.44.9'
           channel: stable
+          cache: true
 
-      - name: Pub get
-        run: flutter pub get
+      - name: Resolve dependencies
+        run: flutter pub get --enforce-lockfile
 
-      - name: Analyze (fail on errors)
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          tests=(test/**/*_test.dart)
+          if (( ${#tests[@]} )); then
+            flutter test
+          else
+            echo "No Flutter tests found; skipping."
+          fi
 
       - name: Build debug APK
         run: flutter build apk --debug
@@ -41,4 +64,5 @@ jobs:
         with:
           name: Ovid-APK-debug
           path: build/app/outputs/flutter-apk/Ovid-debug.apk
+          if-no-files-found: error
           retention-days: 30

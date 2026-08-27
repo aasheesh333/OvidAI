@@ -241,7 +241,7 @@ class _FileTree extends StatelessWidget {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: Listenable.merge([RepoCache.I, AgentService.I]),
-      builder: (_, __) {
+      builder: (_, _) {
         final cache = RepoCache.I;
         final paths = cache.treePaths;
         return Container(
@@ -412,7 +412,7 @@ class _Editor extends StatelessWidget {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: AgentService.I,
-      builder: (_, __) {
+      builder: (_, _) {
         final a = AgentService.I;
         final path = a.activeFilePath ?? 'welcome.md';
         final code = a.fileBuffer[path] ??
@@ -500,7 +500,7 @@ class _Terminal extends StatelessWidget {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: AgentService.I,
-      builder: (_, __) {
+      builder: (_, _) {
         final events = AgentService.I.events
             .where((e) => e.kind == 'shell' || e.kind == 'shellOut')
             .toList();
@@ -569,7 +569,7 @@ class _AccountChip extends StatelessWidget {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: GitHubService.I,
-      builder: (_, __) {
+      builder: (_, _) {
         final gh = GitHubService.I;
         if (!gh.isLoggedIn) {
           return const SizedBox.shrink();
@@ -684,7 +684,7 @@ class _Avatar extends StatelessWidget {
         width: size,
         height: size,
         fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => Container(
+        errorBuilder: (_, _, _) => Container(
           width: size,
           height: size,
           color: Aether.surfaceRaised,

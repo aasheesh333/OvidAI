@@ -2,8 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart'
-    show IconData, Icons, Color;
+import 'package:flutter/material.dart' show IconData, Icons, Color;
 import 'package:webview_flutter/webview_flutter.dart';
 import '../core/theme.dart';
 import 'state.dart';
@@ -22,28 +21,28 @@ enum AgentMode { safe, auto, drive }
 
 extension AgentModeX on AgentMode {
   String get label => switch (this) {
-        AgentMode.safe => 'Safe',
-        AgentMode.auto => 'Auto',
-        AgentMode.drive => 'Drive',
-      };
+    AgentMode.safe => 'Safe',
+    AgentMode.auto => 'Auto',
+    AgentMode.drive => 'Drive',
+  };
   String get hint => switch (this) {
-        AgentMode.safe =>
-          'Read-only. Har shell / browser / write se pehle permission maangega.',
-        AgentMode.auto =>
-          'Shell aur browser khud chalayega. Repo me push se pehle poochega.',
-        AgentMode.drive =>
-          'Full autonomous — kuch bhi, kahin bhi, no confirmation.',
-      };
+    AgentMode.safe =>
+      'Read-only. Har shell / browser / write se pehle permission maangega.',
+    AgentMode.auto =>
+      'Shell aur browser khud chalayega. Repo me push se pehle poochega.',
+    AgentMode.drive =>
+      'Full autonomous — kuch bhi, kahin bhi, no confirmation.',
+  };
   IconData get icon => switch (this) {
-        AgentMode.safe => Icons.shield_outlined,
-        AgentMode.auto => Icons.bolt_outlined,
-        AgentMode.drive => Icons.rocket_launch_outlined,
-      };
+    AgentMode.safe => Icons.shield_outlined,
+    AgentMode.auto => Icons.bolt_outlined,
+    AgentMode.drive => Icons.rocket_launch_outlined,
+  };
   Color get color => switch (this) {
-        AgentMode.safe => Aether.success,
-        AgentMode.auto => Aether.accent,
-        AgentMode.drive => Aether.warn,
-      };
+    AgentMode.safe => Aether.success,
+    AgentMode.auto => Aether.accent,
+    AgentMode.drive => Aether.warn,
+  };
 }
 
 /// Live event jisse screens subscribe hote hain.
@@ -60,7 +59,11 @@ class ApprovalRequest {
   final String summary;
   final String detail;
   final Completer<bool> completer = Completer<bool>();
-  ApprovalRequest({required this.tool, required this.summary, required this.detail});
+  ApprovalRequest({
+    required this.tool,
+    required this.summary,
+    required this.detail,
+  });
 }
 
 /// ═════════════════════════════ OpenAI-compatible LLM bridge ═══════════
@@ -94,9 +97,18 @@ class AgentService extends ChangeNotifier {
   String? previewFile; // local path to index.html for WebView
 
   /// Live WebView binding (set by BrowserScreen) — agent can drive it.
-  WebViewController? _webView;
-  void bindWebView(WebViewController c) { _webView = c; }
-  void unbindWebView() { _webView = null; }
+  final List<WebViewController> _webViews = [];
+  WebViewController? get _webView => _webViews.lastOrNull;
+
+  void bindWebView(WebViewController controller) {
+    _webViews
+      ..remove(controller)
+      ..add(controller);
+  }
+
+  void unbindWebView(WebViewController controller) {
+    _webViews.remove(controller);
+  }
 
   /// Studio live buffers (path → content) written by repo_write,
   /// ya repo_read se load hua. Studio isko render karta hai.
@@ -128,15 +140,17 @@ class AgentService extends ChangeNotifier {
 
   // ── Provider / endpoint resolution ────────────────────────────────────
   ProviderConfig? get _provider {
-    for (final p in AppState.I.providers) {
-      if (p.hasKey &&
-          p.apiKey.isNotEmpty &&
-          p.selectedModel != null &&
-          p.selectedModel!.isNotEmpty) {
-        return p;
-      }
+    final app = AppState.I;
+    final session = app.activeSession;
+    final provider = app.providerForSession(session);
+    if (session == null || provider == null || !provider.isConfigured) {
+      return null;
     }
-    return null;
+    if (session.model.isEmpty || session.model == 'Select a provider') {
+      return null;
+    }
+    provider.selectedModel = session.model;
+    return provider;
   }
 
   Uri _endpoint(ProviderConfig p) {
@@ -171,206 +185,221 @@ class AgentService extends ChangeNotifier {
 
   // Core tools — always available to the agent
   static const _coreTools = [
-        // ── Chrome DevTools MCP-style browser tools (inbuilt WebView) ──
-        {
-          'type': 'function',
-          'function': {
-            'name': 'browser_navigate',
-            'description':
-                'Navigate the inbuilt browser to a URL. Returns page title + first chunk of text. Use instead of browser_open.',
-            'parameters': {
-              'type': 'object',
-              'properties': {'url': {'type': 'string'}},
-              'required': ['url'],
-            },
+    // ── Chrome DevTools MCP-style browser tools (inbuilt WebView) ──
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_navigate',
+        'description':
+            'Navigate the inbuilt browser to a URL. Returns page title + first chunk of text. Use instead of browser_open.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'url': {'type': 'string'},
           },
+          'required': ['url'],
         },
-        {
-          'type': 'function',
-          'function': {
-            'name': 'browser_click',
-            'description':
-                'Click an element on the current page. selector = CSS selector. '
-                'Returns whether the click succeeded.',
-            'parameters': {
-              'type': 'object',
-              'properties': {'selector': {'type': 'string'}},
-              'required': ['selector'],
-            },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_click',
+        'description':
+            'Click an element on the current page. selector = CSS selector. '
+            'Returns whether the click succeeded.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'selector': {'type': 'string'},
           },
+          'required': ['selector'],
         },
-        {
-          'type': 'function',
-          'function': {
-            'name': 'browser_evaluate',
-            'description':
-                'Run JavaScript on the current page and return the result. '
-                'Use for reading values, extracting data, or interacting with the page.',
-            'parameters': {
-              'type': 'object',
-              'properties': {'expression': {'type': 'string'}},
-              'required': ['expression'],
-            },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_evaluate',
+        'description':
+            'Run JavaScript on the current page and return the result. '
+            'Use for reading values, extracting data, or interacting with the page.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'expression': {'type': 'string'},
           },
+          'required': ['expression'],
         },
-        {
-          'type': 'function',
-          'function': {
-            'name': 'browser_read',
-            'description':
-                'Read the current page content as clean text (title + visible text). '
-                'Use after navigate/click to see what the page shows now.',
-            'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_read',
+        'description':
+            'Read the current page content as clean text (title + visible text). '
+            'Use after navigate/click to see what the page shows now.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    // ── Core agent tools ──
+    {
+      'type': 'function',
+      'function': {
+        'name': 'run_shell',
+        'description':
+            'Run any bash command inside the on-device Ubuntu sandbox. '
+            'Full freedom: ls, cat, python, node, git, npm, curl...',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'command': {'type': 'string'},
           },
+          'required': ['command'],
         },
-        // ── Core agent tools ──
-        {
-          'type': 'function',
-          'function': {
-            'name': 'run_shell',
-            'description':
-                'Run any bash command inside the on-device Ubuntu sandbox. '
-                'Full freedom: ls, cat, python, node, git, npm, curl...',
-            'parameters': {
-              'type': 'object',
-              'properties': {
-                'command': {'type': 'string'},
-              },
-              'required': ['command'],
-            },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_open',
+        'description':
+            'Open a URL in the Ovid browser panel. Page text is returned '
+            'to you so you can read/act on it (research, docs, APIs...).',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'url': {'type': 'string'},
           },
+          'required': ['url'],
         },
-        {
-          'type': 'function',
-          'function': {
-            'name': 'browser_open',
-            'description':
-                'Open a URL in the Ovid browser panel. Page text is returned '
-                'to you so you can read/act on it (research, docs, APIs...).',
-            'parameters': {
-              'type': 'object',
-              'properties': {
-                'url': {'type': 'string'},
-              },
-              'required': ['url'],
-            },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'repo_sync',
+        'description':
+            'Sync the user\'s whole connected GitHub repo into the local '
+            'workspace. Call this FIRST when a coding task starts — after '
+            'it you can read/write any file offline.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'repo_tree',
+        'description':
+            'List all file paths in the synced workspace (the whole repo). '
+            'Use it to explore project structure.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'file_read',
+        'description': 'Read a file from the synced workspace.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'path': {'type': 'string'},
           },
+          'required': ['path'],
         },
-        {
-          'type': 'function',
-          'function': {
-            'name': 'repo_sync',
-            'description':
-                'Sync the user\'s whole connected GitHub repo into the local '
-                'workspace. Call this FIRST when a coding task starts — after '
-                'it you can read/write any file offline.',
-            'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'file_write',
+        'description':
+            'Create or update a file in the local workspace. Changes show '
+            'LIVE in the Studio editor immediately. NOT pushed to GitHub '
+            'until commit is called.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'path': {'type': 'string'},
+            'content': {'type': 'string'},
           },
+          'required': ['path', 'content'],
         },
-        {
-          'type': 'function',
-          'function': {
-            'name': 'repo_tree',
-            'description':
-                'List all file paths in the synced workspace (the whole repo). '
-                'Use it to explore project structure.',
-            'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'commit',
+        'description':
+            'Commit all pending local changes and push to the connected '
+            'GitHub repo (one commit, all files).',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'message': {'type': 'string'},
           },
+          'required': ['message'],
         },
-        {
-          'type': 'function',
-          'function': {
-            'name': 'file_read',
-            'description': 'Read a file from the synced workspace.',
-            'parameters': {
-              'type': 'object',
-              'properties': {
-                'path': {'type': 'string'},
-              },
-              'required': ['path'],
-            },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'agent_install_plugin',
+        'description':
+            'Install a plugin by name. Use when the user asks to add a plugin/tool.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'plugin_name': {'type': 'string'},
           },
+          'required': ['plugin_name'],
         },
-        {
-          'type': 'function',
-          'function': {
-            'name': 'file_write',
-            'description':
-                'Create or update a file in the local workspace. Changes show '
-                'LIVE in the Studio editor immediately. NOT pushed to GitHub '
-                'until commit is called.',
-            'parameters': {
-              'type': 'object',
-              'properties': {
-                'path': {'type': 'string'},
-                'content': {'type': 'string'},
-              },
-              'required': ['path', 'content'],
-            },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'agent_install_mcp',
+        'description':
+            'Connect an MCP server by name. Use when the user asks to add an MCP.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'server_name': {'type': 'string'},
           },
+          'required': ['server_name'],
         },
-        {
-          'type': 'function',
-          'function': {
-            'name': 'commit',
-            'description':
-                'Commit all pending local changes and push to the connected '
-                'GitHub repo (one commit, all files).',
-            'parameters': {
-              'type': 'object',
-              'properties': {
-                'message': {'type': 'string'},
-              },
-              'required': ['message'],
-            },
-          },
-        },
-        {
-          'type': 'function',
-          'function': {
-            'name': 'agent_install_plugin',
-            'description': 'Install a plugin by name. Use when the user asks to add a plugin/tool.',
-            'parameters': {
-              'type': 'object',
-              'properties': {'plugin_name': {'type': 'string'}},
-              'required': ['plugin_name'],
-            },
-          },
-        },
-        {
-          'type': 'function',
-          'function': {
-            'name': 'agent_install_mcp',
-            'description': 'Connect an MCP server by name. Use when the user asks to add an MCP.',
-            'parameters': {
-              'type': 'object',
-              'properties': {'server_name': {'type': 'string'}},
-              'required': ['server_name'],
-            },
-          },
-        },
-        {
-          'type': 'function',
-          'function': {
-            'name': 'preview',
-            'description':
-                'Render the web project (index.html + assets) in the live '
-                'preview panel. Use after writing HTML/CSS/JS so the user can '
-                'SEE the app being built (vibe coding).',
-            'parameters': {'type': 'object', 'properties': {}},
-          },
-        },
-      ];
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'preview',
+        'description':
+            'Render the web project (index.html + assets) in the live '
+            'preview panel. Use after writing HTML/CSS/JS so the user can '
+            'SEE the app being built (vibe coding).',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+  ];
 
   // ── Plugin tool definitions (added dynamically when installed) ──
   static const _webSearchTool = {
     'type': 'function',
     'function': {
       'name': 'web_search',
-      'description': 'Search the web. Returns top results with titles and URLs.',
+      'description':
+          'Search the web. Returns top results with titles and URLs.',
       'parameters': {
         'type': 'object',
-        'properties': {'query': {'type': 'string'}},
+        'properties': {
+          'query': {'type': 'string'},
+        },
         'required': ['query'],
       },
     },
@@ -383,7 +412,9 @@ class AgentService extends ChangeNotifier {
       'description': 'Generate an image from a text description.',
       'parameters': {
         'type': 'object',
-        'properties': {'prompt': {'type': 'string'}},
+        'properties': {
+          'prompt': {'type': 'string'},
+        },
         'required': ['prompt'],
       },
     },
@@ -393,10 +424,13 @@ class AgentService extends ChangeNotifier {
     'type': 'function',
     'function': {
       'name': 'read_attachment',
-      'description': 'Read a user-attached file (PDF, doc, code, CSV) and return its text content.',
+      'description':
+          'Read a user-attached file (PDF, doc, code, CSV) and return its text content.',
       'parameters': {
         'type': 'object',
-        'properties': {'filename': {'type': 'string'}},
+        'properties': {
+          'filename': {'type': 'string'},
+        },
         'required': ['filename'],
       },
     },
@@ -409,7 +443,9 @@ class AgentService extends ChangeNotifier {
       'description': 'Fetch a URL and return clean markdown/text content.',
       'parameters': {
         'type': 'object',
-        'properties': {'url': {'type': 'string'}},
+        'properties': {
+          'url': {'type': 'string'},
+        },
         'required': ['url'],
       },
     },
@@ -424,7 +460,10 @@ class AgentService extends ChangeNotifier {
         'type': 'object',
         'properties': {
           'code': {'type': 'string'},
-          'lang': {'type': 'string', 'enum': ['python', 'javascript']},
+          'lang': {
+            'type': 'string',
+            'enum': ['python', 'javascript'],
+          },
         },
         'required': ['code'],
       },
@@ -435,10 +474,13 @@ class AgentService extends ChangeNotifier {
     'type': 'function',
     'function': {
       'name': 'memory_search',
-      'description': 'Search long-term memory for relevant facts, preferences, or project context.',
+      'description':
+          'Search long-term memory for relevant facts, preferences, or project context.',
       'parameters': {
         'type': 'object',
-        'properties': {'query': {'type': 'string'}},
+        'properties': {
+          'query': {'type': 'string'},
+        },
         'required': ['query'],
       },
     },
@@ -471,14 +513,29 @@ class AgentService extends ChangeNotifier {
   Future<void> runTask(String prompt) async {
     final p = _provider;
     final s = AppState.I.activeSession;
-    if (p == null || s == null) return;
+    if (s == null) {
+      _emit('err', 'No active chat session');
+      return;
+    }
+    if (p == null) {
+      final selected = AppState.I.providerForSession(s);
+      final error = selected == null
+          ? 'Select a provider and model before sending a message.'
+          : selected.requiresApiKey && !selected.hasKey
+          ? 'Add an API key for ${selected.name} before sending a message.'
+          : 'The selected provider is not configured correctly.';
+      _emit('err', error);
+      _appendAssistant('Provider setup required: $error');
+      return;
+    }
 
     final runId = DateTime.now().millisecondsSinceEpoch.toString();
     activeRunId = runId;
     events.clear();
     _emit('think', 'planning with ${p.selectedModel} · ${mode.label} mode');
 
-    final sys = '''
+    final sys =
+        '''
 You are Ovid's on-device coding & browsing agent running INSIDE a Flutter app.
 Environment: Android device with an Ubuntu proot sandbox (python3/node/git/gcc),
 a live Browser panel, and the user's connected GitHub repo (${GitHubService.I.login ?? 'github'}).
@@ -489,22 +546,32 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
 Available plugins and MCPs appear dynamically in your tool list based on what the user has installed.
 ''';
 
+    final historyStart = s.messages.length > 12 ? s.messages.length - 12 : 0;
     final msgs = <Map<String, dynamic>>[
       {'role': 'system', 'content': sys},
-      ...s.messages.take(12).map((m) => {
-            'role': m.role == 'user' ? 'user' : 'assistant',
-            'content': m.content.length > 800
-                ? '${m.content.substring(0, 800)}…'
-                : m.content,
-          }),
-      {'role': 'user', 'content': prompt},
+      ...s.messages
+          .skip(historyStart)
+          .map(
+            (m) => {
+              'role': m.role == 'user' ? 'user' : 'assistant',
+              'content': m.content.length > 800
+                  ? '${m.content.substring(0, 800)}…'
+                  : m.content,
+            },
+          ),
     ];
 
     try {
       for (var turn = 0; turn < 12; turn++) {
         _resetLiveBuffers();
-        final msg = await _callLlm(p, msgs);
-        if (msg == null) break;
+        final msg = await _callLlm(p, msgs, s);
+        if (msg == null) {
+          _appendAssistant(
+            'The model request failed. Check the provider key, endpoint, and selected model, then retry.',
+            session: s,
+          );
+          break;
+        }
 
         final toolCalls = msg['tool_calls'] as List?;
         if (toolCalls == null || toolCalls.isEmpty) {
@@ -541,7 +608,7 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
       _finalizeLive();
     } catch (e) {
       _emit('err', '$e');
-      _appendAssistant('⚠️ Agent error: $e');
+      _appendAssistant('Agent error: $e', session: s);
     } finally {
       activeRunId = null;
       notifyListeners();
@@ -557,26 +624,36 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
   }
 
   Future<Map<String, dynamic>?> _callLlm(
-      ProviderConfig p, List<Map<String, dynamic>> msgs) async {
+    ProviderConfig p,
+    List<Map<String, dynamic>> msgs,
+    ChatSession session,
+  ) async {
     HttpClient? client;
     try {
       client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 20);
-      final req = await client.postUrl(_endpoint(p)).timeout(
+      final req = await client
+          .postUrl(_endpoint(p))
+          .timeout(
             const Duration(seconds: 20),
             onTimeout: () => throw Exception('connect timeout'),
           );
-      req.headers.set('Authorization', 'Bearer ${p.apiKey}');
+      if (p.apiKey.isNotEmpty) {
+        req.headers.set('Authorization', 'Bearer ${p.apiKey}');
+      }
       req.headers.set('Content-Type', 'application/json');
       req.headers.set('Accept', 'text/event-stream');
 
       // Strip effort suffix (e.g. "gpt-5.2 · High") → real model id + effort
       final raw = p.selectedModel ?? '';
-      final effMatch = RegExp(r'·\s*(low|medium|high)$', caseSensitive: false)
-          .firstMatch(raw);
-      final modelId =
-          effMatch != null ? raw.substring(0, effMatch.start).trim() : raw;
-      final eff = (effMatch?.group(1) ?? 'medium').toLowerCase();
+      final effMatch = RegExp(
+        r'·\s*(low|medium|high)$',
+        caseSensitive: false,
+      ).firstMatch(raw);
+      final modelId = effMatch != null
+          ? raw.substring(0, effMatch.start).trim()
+          : raw;
+      final effort = effMatch?.group(1)?.toLowerCase();
 
       final body = <String, dynamic>{
         'model': modelId,
@@ -584,9 +661,7 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
         'stream': true,
       };
       if (_tools.isNotEmpty) body['tools'] = _tools;
-      // Reasoning effort — OpenAI/o-series & DeepSeek/Qwen-compatible param.
-      // Only models that support it; others ignore it server-side.
-      body['reasoning_effort'] = eff;
+      if (effort != null) body['reasoning_effort'] = effort;
 
       final bodyStr = jsonEncode(body);
       req.headers.contentLength = utf8.encode(bodyStr).length;
@@ -600,8 +675,10 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
           if (data.length > 65536) break; // bounded error read
         }
         final txt = utf8.decode(data, allowMalformed: true);
-        _emit('err',
-            'LLM ${res.statusCode}: ${txt.substring(0, txt.length.clamp(0, 300))}');
+        _emit(
+          'err',
+          'LLM ${res.statusCode}: ${txt.substring(0, txt.length.clamp(0, 300))}',
+        );
         client.close(force: true);
         return null;
       }
@@ -613,10 +690,12 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
       int totalBytes = 0;
       String? finishReason;
 
-      await for (final raw in res
-          .cast<List<int>>()
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())) {
+      await for (final raw
+          in res
+              .cast<List<int>>()
+              .transform(utf8.decoder)
+              .transform(const LineSplitter())
+              .timeout(const Duration(seconds: 60))) {
         totalBytes += raw.length;
         if (totalBytes > 8 * 1024 * 1024) break; // 8MB hard cap — runaway guard
         final line = raw.trim();
@@ -633,20 +712,21 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
         final choices = j['choices'] as List?;
         if (choices == null || choices.isEmpty) continue;
         final choice = choices[0] as Map<String, dynamic>;
-        final delta = (choice['delta'] ?? choice['message'] ?? {})
-            as Map<String, dynamic>;
+        final delta =
+            (choice['delta'] ?? choice['message'] ?? {})
+                as Map<String, dynamic>;
         finishReason = choice['finish_reason'] as String? ?? finishReason;
 
         final c = delta['content'];
         if (c is String && c.isNotEmpty) {
           contentBuf.write(c);
-          _streamToBubble(c);
+          _streamToBubble(session, c);
         }
         // Reasoning tokens — DeepSeek `reasoning_content` / OpenRouter `reasoning`
         final r = delta['reasoning_content'] ?? delta['reasoning'];
         if (r is String && r.isNotEmpty) {
           reasoningBuf.write(r);
-          _streamReasoning(r);
+          _streamReasoning(session, r);
         }
         // Tool-call argument fragments — accumulate by index
         final tcs = delta['tool_calls'] as List?;
@@ -678,8 +758,11 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
       client.close();
       client = null;
 
-      if (contentBuf.isEmpty && tcAcc.isEmpty) {
-        _emit('err', 'empty response from ${modelId.isEmpty ? 'model' : modelId}');
+      if (contentBuf.isEmpty && reasoningBuf.isEmpty && tcAcc.isEmpty) {
+        _emit(
+          'err',
+          'empty response from ${modelId.isEmpty ? 'model' : modelId}',
+        );
         return null;
       }
       return {
@@ -688,7 +771,7 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
         if (reasoningBuf.isNotEmpty)
           'reasoning_content': reasoningBuf.toString(),
         if (tcAcc.isNotEmpty) 'tool_calls': tcAcc.values.toList(),
-        if (finishReason != null) 'finish_reason': finishReason,
+        'finish_reason': ?finishReason,
       };
     } catch (e) {
       _emit('err', 'stream error: $e');
@@ -704,35 +787,32 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
   ChatSession? _liveSession;
   Message? _liveMsg;
 
-  void _ensureLiveMsg() {
-    final s = AppState.I.activeSession;
-    if (s == null) return;
-    if (_liveSession == s && _liveMsg != null && s.messages.contains(_liveMsg)) {
+  void _ensureLiveMsg(ChatSession s) {
+    if (_liveSession == s &&
+        _liveMsg != null &&
+        s.messages.contains(_liveMsg)) {
       return; // reuse
     }
     _liveMsg = Message(
-        role: 'assistant',
-        kind: MsgKind.reasoning,
-        thinking: true,
-        content: '');
+      role: 'assistant',
+      kind: MsgKind.reasoning,
+      thinking: true,
+      content: '',
+    );
     s.messages.add(_liveMsg!);
     _liveSession = s;
   }
 
-  void _streamToBubble(String tok) {
-    final s = AppState.I.activeSession;
-    if (s == null) return;
-    _ensureLiveMsg();
+  void _streamToBubble(ChatSession s, String tok) {
+    _ensureLiveMsg(s);
     _liveContent.write(tok);
     _liveMsg!.content = _liveContent.toString();
     _liveMsg!.thinking = _liveContent.isEmpty;
     AppState.I.refresh();
   }
 
-  void _streamReasoning(String tok) {
-    final s = AppState.I.activeSession;
-    if (s == null) return;
-    _ensureLiveMsg();
+  void _streamReasoning(ChatSession s, String tok) {
+    _ensureLiveMsg(s);
     _liveReasoning.write(tok);
     _liveMsg!.content = _liveReasoning.toString();
     _liveMsg!.thinking = true;
@@ -765,7 +845,10 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
       case 'run_shell':
         final cmd = args['command'] as String;
         final ok = await _maybeApprove(
-            'run_shell', cmd, 'Command sandbox me chlega:\n\$ $cmd');
+          'run_shell',
+          cmd,
+          'Command sandbox me chlega:\n\$ $cmd',
+        );
         if (!ok) return 'DENIED by user';
         _emit('shell', cmd);
         try {
@@ -782,8 +865,11 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
 
       case 'browser_open':
         final url = args['url'] as String;
-        final ok = await _maybeApprove('browser_open', url,
-            'Browser panel me ye page khulega:\n$url');
+        final ok = await _maybeApprove(
+          'browser_open',
+          url,
+          'Browser panel me ye page khulega:\n$url',
+        );
         if (!ok) return 'DENIED by user';
         _emit('nav', url);
         try {
@@ -796,18 +882,25 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
             // Give the webview time to load before reading text.
             await Future.delayed(const Duration(seconds: 2));
           }
-          final r = await HttpShim.get(Uri.parse(url),
-              headers: {'User-Agent': 'OvidAgent/1.0'});
+          final r = await HttpShim.get(
+            Uri.parse(url),
+            headers: {'User-Agent': 'OvidAgent/1.0'},
+          );
           var body = utf8.decode(r.bytes, allowMalformed: true);
           body = body
-              .replaceAll(RegExp(r'<script[\s\S]*?</script>', multiLine: true), '')
-              .replaceAll(RegExp(r'<style[\s\S]*?</style>', multiLine: true), '')
+              .replaceAll(
+                RegExp(r'<script[\s\S]*?</script>', multiLine: true),
+                '',
+              )
+              .replaceAll(
+                RegExp(r'<style[\s\S]*?</style>', multiLine: true),
+                '',
+              )
               .replaceAll(RegExp(r'<[^>]+>'), ' ')
               .replaceAll(RegExp(r'\s{2,}'), '\n')
               .trim();
           browserUrl = url;
-          browserPageText =
-              body.length > 5000 ? body.substring(0, 5000) : body;
+          browserPageText = body.length > 5000 ? body.substring(0, 5000) : body;
           notifyListeners();
           _emit('page', '${r.status} · ${body.length} chars');
           return browserPageText!;
@@ -818,15 +911,21 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
       // ─── Chrome DevTools MCP tools (inbuilt WebView) ─────────────────
       case 'browser_navigate':
         final url = args['url'] as String;
-        final ok = await _maybeApprove('browser_navigate', url,
-            'Browser me ye page khulega:\n$url');
+        final ok = await _maybeApprove(
+          'browser_navigate',
+          url,
+          'Browser me ye page khulega:\n$url',
+        );
         if (!ok) return 'DENIED by user';
-        if (_webView == null) return 'Browser screen not open. Open the Browser panel first.';
-        _webView!.loadRequest(Uri.parse(url));
+        final webView = _webView;
+        if (webView == null) {
+          return 'Browser screen not open. Open the Browser panel first.';
+        }
+        webView.loadRequest(Uri.parse(url));
         browserUrl = url;
         _emit('nav', url);
         await Future.delayed(const Duration(seconds: 2));
-        final title = await _webView!.getTitle();
+        final title = await webView.getTitle();
         return 'Navigated to $url\nTitle: ${title ?? "unknown"}';
 
       // ─── Plugin tools (dynamic, installed plugins) ────────────────────
@@ -846,12 +945,20 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
         final u = args['url'] as String;
         _emit('nav', 'fetching: $u');
         try {
-          final r = await HttpShim.get(Uri.parse(u),
-              headers: {'User-Agent': 'OvidAgent/1.0'});
+          final r = await HttpShim.get(
+            Uri.parse(u),
+            headers: {'User-Agent': 'OvidAgent/1.0'},
+          );
           var body = utf8.decode(r.bytes, allowMalformed: true);
           body = body
-              .replaceAll(RegExp(r'<script[\s\S]*?</script>', multiLine: true), '')
-              .replaceAll(RegExp(r'<style[\s\S]*?</style>', multiLine: true), '')
+              .replaceAll(
+                RegExp(r'<script[\s\S]*?</script>', multiLine: true),
+                '',
+              )
+              .replaceAll(
+                RegExp(r'<style[\s\S]*?</style>', multiLine: true),
+                '',
+              )
               .replaceAll(RegExp(r'<[^>]+>'), ' ')
               .replaceAll(RegExp(r'\s{2,}'), '\n')
               .trim();
@@ -862,8 +969,11 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
       case 'run_code':
         final code = args['code'] as String;
         final lang = args['lang'] as String? ?? 'python';
-        final ok2 = await _maybeApprove('run_code', code,
-            'Code will run in sandbox:\n$lang\n$code');
+        final ok2 = await _maybeApprove(
+          'run_code',
+          code,
+          'Code will run in sandbox:\n$lang\n$code',
+        );
         if (!ok2) return 'DENIED by user';
         _emit('shell', 'run_code ($lang)');
         try {
@@ -885,7 +995,8 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
         final action = args['action'] as String? ?? 'execute';
         final mcpArgs = args['args'] as Map<String, dynamic>? ?? {};
         _emit('shell', 'MCP: $mcpName → $action');
-        return 'MCP call to $mcpName: $action. Install the actual MCP server for real functionality.';
+        return 'MCP call to $mcpName: $action with ${jsonEncode(mcpArgs)}. '
+            'Install the actual MCP server for real functionality.';
       case 'agent_install_plugin':
         final pluginName = args['plugin_name'] as String;
         _emit('think', 'installing plugin: $pluginName');
@@ -921,16 +1032,18 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
         }
       case 'browser_click':
         final sel = args['selector'] as String;
-        if (_webView == null) return 'Browser screen not open.';
+        final webView = _webView;
+        if (webView == null) return 'Browser screen not open.';
         final js = 'document.querySelector(${jsonEncode(sel)})?.click()';
-        await _webView!.runJavaScript(js);
+        await webView.runJavaScript(js);
         _emit('shell', 'click: $sel');
         return 'Clicked $sel (or attempted)';
       case 'browser_evaluate':
         final expr = args['expression'] as String;
-        if (_webView == null) return 'Browser screen not open.';
+        final webView = _webView;
+        if (webView == null) return 'Browser screen not open.';
         try {
-          final result = await _webView!.runJavaScriptReturningResult(expr);
+          final result = await webView.runJavaScriptReturningResult(expr);
           final text = result.toString();
           _emit('shellOut', 'eval: $expr');
           return text.length > 4000 ? '${text.substring(0, 4000)}…' : text;
@@ -938,13 +1051,15 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
           return 'JS error: $e';
         }
       case 'browser_read':
-        if (_webView == null) {
+        final webView = _webView;
+        if (webView == null) {
           return 'Browser screen not open. Call browser_navigate first.';
         }
         try {
-          final title = await _webView!.getTitle();
-          final result = await _webView!.runJavaScriptReturningResult(
-              'document.body.innerText.substring(0,5000)');
+          final title = await webView.getTitle();
+          final result = await webView.runJavaScriptReturningResult(
+            'document.body.innerText.substring(0,5000)',
+          );
           final raw = result.toString();
           // runJavaScriptReturningResult returns JSON-quoted string — decode it.
           final text = raw.startsWith('"') && raw.endsWith('"')
@@ -995,7 +1110,10 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
         final path = args['path'] as String;
         final content = args['content'] as String;
         final ok = await _maybeApprove(
-            'file_write', path, 'LOCAL EDIT (no push yet):\n$path\n${content.length} chars');
+          'file_write',
+          path,
+          'LOCAL EDIT (no push yet):\n$path\n${content.length} chars',
+        );
         if (!ok) return 'DENIED by user';
         RepoCache.I.write(path, content);
         fileBuffer[path] = content;
@@ -1009,8 +1127,11 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
         final message = (args['message'] ?? 'Ovid agent update') as String;
         if (!RepoCache.I.hasPending) return 'no pending changes';
         final ok = await _maybeApprove(
-            'commit', message, 'PUSH TO GITHUB\n"${RepoCache.I.repoFull}"\n'
-                '${RepoCache.I.dirtyCount} files · "$message"');
+          'commit',
+          message,
+          'PUSH TO GITHUB\n"${RepoCache.I.repoFull}"\n'
+              '${RepoCache.I.dirtyCount} files · "$message"',
+        );
         if (!ok) return 'DENIED by user';
         _emit('file', 'committing ${RepoCache.I.dirtyCount} files…');
         try {
@@ -1045,15 +1166,12 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
   }
 
   // ── APPROVALS (safe / auto mode) ──────────────────────────────────────
-  Future<bool> _maybeApprove(
-      String tool, String summary, String detail) async {
+  Future<bool> _maybeApprove(String tool, String summary, String detail) async {
     switch (mode) {
       case AgentMode.drive:
         return true;
       case AgentMode.auto:
-        return tool != 'commit'
-            ? true
-            : await _askUser(tool, summary, detail);
+        return tool != 'commit' ? true : await _askUser(tool, summary, detail);
       case AgentMode.safe:
         return await _askUser(tool, summary, detail);
     }
@@ -1066,8 +1184,12 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
     return req.completer.future;
   }
 
-  void _appendAssistant(String text, {MsgKind kind = MsgKind.text}) {
-    final s = AppState.I.activeSession;
+  void _appendAssistant(
+    String text, {
+    MsgKind kind = MsgKind.text,
+    ChatSession? session,
+  }) {
+    final s = session ?? AppState.I.activeSession;
     if (s == null || text.trim().isEmpty) return;
     s.messages.add(Message(role: 'assistant', kind: kind, content: text));
     AppState.I.refresh();
@@ -1076,9 +1198,10 @@ Available plugins and MCPs appear dynamically in your tool list based on what th
 
 class HttpShim {
   static Future<({int status, String bodyText, List<int> bytes})> post(
-      Uri u,
-      {Map<String, String>? headers,
-      Object? body}) async {
+    Uri u, {
+    Map<String, String>? headers,
+    Object? body,
+  }) async {
     final client = HttpClient();
     try {
       final req = await client.postUrl(u);
@@ -1101,8 +1224,9 @@ class HttpShim {
   }
 
   static Future<({int status, String bodyText, List<int> bytes})> get(
-      Uri u,
-      {Map<String, String>? headers}) async {
+    Uri u, {
+    Map<String, String>? headers,
+  }) async {
     final client = HttpClient();
     try {
       final req = await client.getUrl(u);

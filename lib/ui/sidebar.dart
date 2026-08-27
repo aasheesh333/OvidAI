@@ -116,7 +116,7 @@ class SessionsSidebar extends StatelessWidget {
             Expanded(
               child: AnimatedBuilder(
                 animation: app,
-                builder: (_, __) => ListView.builder(
+                builder: (_, _) => ListView.builder(
                   padding: const EdgeInsets.symmetric(horizontal: 8),
                   itemCount: app.sessions.length,
                   itemBuilder: (_, i) {
