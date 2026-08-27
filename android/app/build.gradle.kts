@@ -1,9 +1,19 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
     id("com.google.gms.google-services")
     id("com.google.firebase.crashlytics")
+}
+
+// Release signing config — read from CI-injected properties (keystore.properties
+// generated from GitHub secrets) or fall back to debug for local `flutter run`.
+val keystorePropsFile = rootProject.file("keystore.properties")
+val hasReleaseKeys = keystorePropsFile.exists()
+val keystoreProps = Properties().apply {
+    if (hasReleaseKeys) keystorePropsFile.inputStream().use { load(it) }
 }
 
 android {
@@ -24,14 +34,6 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-    }
-
-    // Release signing config — read from CI-injected properties (keystore.properties
-    // generated from GitHub secrets) or fall back to debug for local `flutter run`.
-    val keystorePropsFile = rootProject.file("keystore.properties")
-    val hasReleaseKeys = keystorePropsFile.exists()
-    val keystoreProps = java.util.Properties().apply {
-        if (hasReleaseKeys) keystorePropsFile.inputStream().use { load(it) }
     }
 
     signingConfigs {
