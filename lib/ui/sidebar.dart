@@ -39,7 +39,7 @@ class SessionsSidebar extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 10),
-                  const Text('OvidAI',
+                  const Text('Ovid',
                       style:
                           TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                   const Spacer(),

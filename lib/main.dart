@@ -11,7 +11,7 @@ class OvidApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'OvidAI',
+      title: 'Ovid',
       debugShowCheckedModeBanner: false,
       theme: Aether.theme(),
       home: const _Shell(),

@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OvidAI — Zero to 10 Million Users</title>
+<style>
+  @page {
+    size: A4;
+    margin: 0;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0A0A0C;
+    --surface: #111114;
+    --surface-alt: #17171B;
+    --surface-raised: #1D1D23;
+    --hairline: #26262C;
+    --hairline-strong: #33333B;
+    --text: #EDEDF0;
+    --text-muted: #9B9BA4;
+    --text-faint: #63636C;
+    --accent: #4D6BFE;
+    --accent-soft: rgba(77,107,254,0.10);
+    --success: #3ECF8E;
+    --warn: #E8B44C;
+    --danger: #E5534B;
+    --violet: #9B7BFF;
+    --cyan: #4CC9E8;
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 10.5pt;
+    line-height: 1.55;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .page {
+    width: 210mm;
+    height: 296mm;
+    page-break-after: always;
+    position: relative;
+    overflow: hidden;
+    background: var(--bg);
+    padding: 16mm 16mm 14mm;
+  }
+  .page:last-child { page-break-after: avoid; }
+
+  .mono { font-family: 'JetBrains Mono', 'Courier New', monospace; }
+
+  /* ---------- COVER ---------- */
+  .cover {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    background:
+      radial-gradient(ellipse 80% 50% at 70% 0%, rgba(77,107,254,0.16), transparent 60%),
+      radial-gradient(ellipse 60% 40% at 10% 100%, rgba(155,123,255,0.10), transparent 60%),
+      var(--bg);
+  }
+  .cover-top { padding-top: 8mm; }
+  .logo-row { display: flex; align-items: center; gap: 12px; }
+  .logo-mark {
+    width: 46px; height: 46px;
+    background: linear-gradient(135deg, var(--accent), #7B9BFF);
+    border-radius: 13px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 23px; font-weight: 800; color: #fff;
+    box-shadow: 0 8px 32px rgba(77,107,254,0.35);
+  }
+  .logo-name { font-size: 17pt; font-weight: 700; letter-spacing: -0.3px; }
+  .logo-sub { font-size: 8pt; color: var(--text-faint); letter-spacing: 2.5px; text-transform: uppercase; margin-top: 2px; }
+
+  .cover-mid { padding: 10mm 0; }
+  .cover-kicker {
+    display: inline-block;
+    font-size: 8.5pt; font-weight: 700; letter-spacing: 2px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid rgba(77,107,254,0.35);
+    padding: 5px 14px; border-radius: 20px;
+    margin-bottom: 8mm;
+  }
+  .cover-title {
+    font-size: 40pt; font-weight: 800; line-height: 1.08;
+    letter-spacing: -1.5px; margin-bottom: 6mm;
+  }
+  .cover-title .grad {
+    background: linear-gradient(90deg, var(--accent) 0%, var(--violet) 60%, var(--cyan) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .cover-desc { font-size: 11.5pt; color: var(--text-muted); max-width: 150mm; line-height: 1.7; }
+
+  .cover-stats { display: flex; gap: 5mm; margin-top: 12mm; }
+  .cstat {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-radius: 14px;
+    padding: 5mm;
+  }
+  .cstat .n { font-size: 19pt; font-weight: 800; letter-spacing: -0.5px; }
+  .cstat .n em { font-style: normal; color: var(--accent); }
+  .cstat .l { font-size: 8pt; color: var(--text-faint); margin-top: 2px; letter-spacing: 0.5px; text-transform: uppercase; }
+
+  .cover-foot {
+    display: flex; justify-content: space-between; align-items: center;
+    border-top: 1px solid var(--hairline);
+    padding-top: 5mm;
+    font-size: 8.5pt; color: var(--text-faint);
+  }
+
+  /* ---------- COMMON ---------- */
+  .phead { margin-bottom: 7mm; }
+  .pnum {
+    font-size: 8pt; font-weight: 700; letter-spacing: 2.5px;
+    color: var(--accent); text-transform: uppercase; margin-bottom: 2mm;
+  }
+  .ptitle { font-size: 21pt; font-weight: 800; letter-spacing: -0.7px; line-height: 1.15; }
+  .psub { font-size: 10pt; color: var(--text-muted); margin-top: 2.5mm; max-width: 165mm; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-radius: 14px;
+    padding: 5mm 6mm;
+  }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4mm; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4mm; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3.5mm; }
+
+  .tag {
+    display: inline-block;
+    font-size: 6.8pt; font-weight: 700; letter-spacing: 0.8px;
+    padding: 2px 7px; border-radius: 5px;
+    border: 1px solid;
+    vertical-align: middle;
+  }
+  .tag.free { color: var(--success); border-color: rgba(62,207,142,0.4); background: rgba(62,207,142,0.10); }
+  .tag.byok { color: var(--accent); border-color: rgba(77,107,254,0.4); background: var(--accent-soft); }
+  .tag.warn { color: var(--warn); border-color: rgba(232,180,76,0.4); background: rgba(232,180,76,0.08); }
+  .tag.violet { color: var(--violet); border-color: rgba(155,123,255,0.4); background: rgba(155,123,255,0.10); }
+  .tag.cyan { color: var(--cyan); border-color: rgba(76,201,232,0.4); background: rgba(76,201,232,0.08); }
+
+  .icon-chip {
+    width: 34px; height: 34px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; flex-shrink: 0;
+  }
+
+  h3.sec {
+    font-size: 8.5pt; font-weight: 700; letter-spacing: 2px;
+    color: var(--text-faint); text-transform: uppercase;
+    margin: 6mm 0 3mm;
+  }
+  h3.sec:first-child { margin-top: 0; }
+
+  .footer {
+    position: absolute;
+    bottom: 8mm; left: 16mm; right: 16mm;
+    display: flex; justify-content: space-between;
+    font-size: 7.5pt; color: var(--text-faint);
+    border-top: 1px solid var(--hairline);
+    padding-top: 3mm;
+  }
+  .footer .pg { font-weight: 700; color: var(--text-muted); }
+
+  ul.clean { list-style: none; }
+  ul.clean li { padding-left: 16px; position: relative; margin-bottom: 2mm; color: var(--text-muted); font-size: 9.5pt; }
+  ul.clean li::before { content: '▸'; position: absolute; left: 0; color: var(--accent); }
+  ul.clean li b, ul.clean li strong { color: var(--text); }
+
+  /* ---------- CURRENT APP DIAGRAM ---------- */
+  .app-frame {
+    background: var(--surface);
+    border: 1px solid var(--hairline-strong);
+    border-radius: 16px;
+    overflow: hidden;
+  }
+  .app-topbar {
+    background: var(--surface-alt);
+    padding: 2.5mm 4mm;
+    display: flex; align-items: center; gap: 3mm;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 8pt; color: var(--text-muted);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .app-body { display: grid; grid-template-columns: 34mm 1fr; min-height: 78mm; }
+  .app-side {
+    background: var(--surface);
+    border-right: 1px solid var(--hairline);
+    padding: 3mm;
+  }
+  .side-item {
+    border-radius: 7px; padding: 2mm 2.5mm; margin-bottom: 1.2mm;
+    font-size: 7pt; color: var(--text-muted);
+    background: var(--surface-alt);
+    border: 1px solid var(--hairline);
+  }
+  .side-item.active { border-color: rgba(77,107,254,0.4); background: var(--accent-soft); color: var(--accent); }
+  .app-main { padding: 3mm 4mm; background: var(--bg); }
+  .bubble {
+    border-radius: 9px; padding: 2mm 3mm; margin-bottom: 1.5mm;
+    font-size: 7pt; max-width: 85%;
+  }
+  .bubble.user { background: var(--surface-raised); border: 1px solid var(--hairline); margin-left: auto; color: var(--text-muted); }
+  .bubble.ai { background: transparent; color: var(--text-muted); padding-left: 0; }
+  .bubble.code { background: var(--surface); border: 1px solid var(--hairline); font-family: 'JetBrains Mono', monospace; font-size: 6.3pt; color: var(--success); }
+
+  .feat-card { display: flex; gap: 3.5mm; align-items: flex-start; }
+  .feat-card .t { font-size: 10pt; font-weight: 700; margin-bottom: 1mm; }
+  .feat-card .d { font-size: 8.5pt; color: var(--text-muted); line-height: 1.5; }
+
+  /* ---------- PHASE TIMELINE ---------- */
+  .phase {
+    display: grid; grid-template-columns: 26mm 1fr; gap: 5mm;
+    margin-bottom: 4mm;
+  }
+  .phase-badge {
+    border-radius: 12px; padding: 3.5mm;
+    text-align: center; align-self: start;
+  }
+  .phase-badge .pl { font-size: 6.5pt; font-weight: 700; letter-spacing: 1.5px; opacity: 0.85; }
+  .phase-badge .pn { font-size: 14pt; font-weight: 800; margin-top: 1mm; }
+  .phase-badge .pu { font-size: 7pt; margin-top: 1mm; font-weight: 600; }
+  .p0 { background: var(--accent-soft); border: 1px solid rgba(77,107,254,0.4); color: var(--accent); }
+  .p1 { background: rgba(62,207,142,0.10); border: 1px solid rgba(62,207,142,0.4); color: var(--success); }
+  .p2 { background: rgba(155,123,255,0.10); border: 1px solid rgba(155,123,255,0.4); color: var(--violet); }
+  .p3 { background: rgba(232,180,76,0.08); border: 1px solid rgba(232,180,76,0.4); color: var(--warn); }
+  .p4 { background: rgba(76,201,232,0.08); border: 1px solid rgba(76,201,232,0.4); color: var(--cyan); }
+
+  .phase-card { flex: 1; }
+  .phase-card .pt { font-size: 11pt; font-weight: 700; margin-bottom: 1.5mm; display: flex; align-items: center; gap: 2.5mm; flex-wrap: wrap; }
+  .phase-card .pd { font-size: 8.8pt; color: var(--text-muted); margin-bottom: 2.5mm; line-height: 1.55; }
+
+  .kpi-row { display: flex; gap: 2.5mm; flex-wrap: wrap; }
+  .kpi {
+    font-size: 7.3pt; font-weight: 600;
+    background: var(--surface-alt);
+    border: 1px solid var(--hairline);
+    padding: 1.5mm 3mm; border-radius: 7px;
+    color: var(--text-muted);
+  }
+  .kpi b { color: var(--text); }
+
+  /* ---------- ARCHITECTURE ---------- */
+  .arch { display: flex; flex-direction: column; gap: 3mm; }
+  .arch-layer {
+    border-radius: 14px; padding: 4mm 5mm;
+    border: 1px solid var(--hairline);
+    background: var(--surface);
+  }
+  .arch-layer .al-t { font-size: 8pt; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 2.5mm; display: flex; align-items: center; gap: 2mm; }
+  .arch-boxes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2.5mm; }
+  .arch-box {
+    background: var(--surface-alt);
+    border: 1px solid var(--hairline);
+    border-radius: 9px; padding: 2.8mm 3mm;
+  }
+  .arch-box .ab-t { font-size: 8.5pt; font-weight: 700; }
+  .arch-box .ab-d { font-size: 7pt; color: var(--text-faint); margin-top: 0.8mm; line-height: 1.45; }
+  .arch-arrow { text-align: center; color: var(--text-faint); font-size: 9pt; line-height: 1; }
+
+  .g-blue { color: #7B9BFF; } .g-red { color: #E8736C; }
+  .g-yellow { color: #E8C44C; } .g-green { color: #3ECF8E; }
+
+  /* ---------- TABLE ---------- */
+  table.tbl { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
+  table.tbl th {
+    text-align: left; font-size: 7.3pt; letter-spacing: 1.2px; text-transform: uppercase;
+    color: var(--text-faint); padding: 2.5mm 3mm;
+    border-bottom: 1px solid var(--hairline-strong);
+  }
+  table.tbl td {
+    padding: 2.6mm 3mm; border-bottom: 1px solid var(--hairline);
+    color: var(--text-muted); vertical-align: top;
+  }
+  table.tbl td b { color: var(--text); font-weight: 600; }
+  table.tbl tr:last-child td { border-bottom: none; }
+  table.tbl .r { text-align: right; }
+
+  /* ---------- FUNNEL / SCALE ---------- */
+  .scale-bars { display: flex; flex-direction: column; gap: 2.5mm; }
+  .sbar { display: grid; grid-template-columns: 34mm 1fr 26mm; gap: 3mm; align-items: center; }
+  .sbar .sl { font-size: 8.5pt; font-weight: 700; text-align: right; }
+  .sbar .sb { height: 9mm; border-radius: 7px; display: flex; align-items: center; padding: 0 3.5mm; font-size: 7.5pt; font-weight: 600; }
+  .sbar .sc { font-size: 7.5pt; color: var(--text-faint); }
+
+  .flow { display: flex; align-items: stretch; gap: 2mm; }
+  .flow-step {
+    flex: 1; background: var(--surface-alt);
+    border: 1px solid var(--hairline); border-radius: 10px;
+    padding: 3mm; text-align: center;
+  }
+  .flow-step .fs-i { font-size: 15px; margin-bottom: 1.5mm; }
+  .flow-step .fs-t { font-size: 8pt; font-weight: 700; }
+  .flow-step .fs-d { font-size: 6.8pt; color: var(--text-faint); margin-top: 1mm; line-height: 1.4; }
+  .flow-arr { display: flex; align-items: center; color: var(--accent); font-weight: 800; font-size: 11pt; }
+
+  .callout {
+    border-radius: 12px; padding: 4mm 5mm;
+    background: var(--accent-soft);
+    border: 1px solid rgba(77,107,254,0.35);
+    font-size: 9pt; color: var(--text);
+    line-height: 1.6;
+  }
+  .callout.green { background: rgba(62,207,142,0.08); border-color: rgba(62,207,142,0.35); }
+  .callout.amber { background: rgba(232,180,76,0.07); border-color: rgba(232,180,76,0.35); }
+  .callout b { color: var(--accent); }
+  .callout.green b { color: var(--success); }
+  .callout.amber b { color: var(--warn); }
+
+  .big-quote {
+    font-size: 13pt; font-weight: 700; line-height: 1.5;
+    letter-spacing: -0.3px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ================= PAGE 1 : COVER ================= -->
+<div class="page cover">
+  <div class="cover-top">
+    <div class="logo-row">
+      <div class="logo-mark">O</div>
+      <div>
+        <div class="logo-name">OvidAI</div>
+        <div class="logo-sub">Product &amp; Infrastructure Blueprint</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cover-mid">
+    <div class="cover-kicker">CONFIDENTIAL · STRATEGY DOCUMENT · V1.0</div>
+    <div class="cover-title">
+      Zero to<br><span class="grad">10 Million Users</span>
+    </div>
+    <div class="cover-desc">
+      The complete execution plan to transform OvidAI from a pixel-perfect UI prototype
+      into a production-grade, AI-native super-app — powered almost entirely by
+      <b style="color:#EDEDF0">Google's free-tier infrastructure</b>, a freemium
+      <b style="color:#EDEDF0">Ovid Provider</b> model gateway, and a privacy-first
+      sign-in that syncs only what users love: their chat history.
+    </div>
+
+    <div class="cover-stats">
+      <div class="cstat"><div class="n"><em>10M</em></div><div class="l">Target users</div></div>
+      <div class="cstat"><div class="n">$0<em>→</em></div><div class="l">Infra cost at launch</div></div>
+      <div class="cstat"><div class="n"><em>15+</em></div><div class="l">AI providers (BYOK)</div></div>
+      <div class="cstat"><div class="n"><em>5</em></div><div class="l">Execution phases</div></div>
+    </div>
+  </div>
+
+  <div class="cover-foot">
+    <span>OvidAI · Flutter · Android-first</span>
+    <span>Chat-first. Agent-native. Free by default.</span>
+  </div>
+</div>
+
+<!-- ================= PAGE 2 : CURRENT STATE ================= -->
+<div class="page">
+  <div class="phead">
+    <div class="pnum">01 — Where We Are Today</div>
+    <div class="ptitle">A Beautiful Shell, Waiting for a Brain</div>
+    <div class="psub">OvidAI today is a complete, premium UI/UX prototype (Flutter, ~3,000 lines) with every screen designed — but all data is in-memory demo content. That is our advantage: zero legacy debt, clean slate architecture.</div>
+  </div>
+
+  <div class="grid2" style="grid-template-columns: 1fr 1.1fr; align-items: start;">
+    <div>
+      <h3 class="sec">The App Today — Chat-First Shell</h3>
+      <div class="app-frame">
+        <div class="app-topbar">
+          <span class="dot" style="background:#E5534B"></span>
+          <span class="dot" style="background:#E8B44C"></span>
+          <span class="dot" style="background:#3ECF8E"></span>
+          <span style="margin-left:2mm">OvidAI · deepseek-chat ▾</span>
+        </div>
+        <div class="app-body">
+          <div class="app-side">
+            <div class="side-item active">＋ New session</div>
+            <div class="side-item">Refactor auth middleware</div>
+            <div class="side-item">Neural network diagram</div>
+            <div class="side-item">Weekend trip packing</div>
+            <div class="side-item" style="margin-top:3mm">⚙ Settings</div>
+          </div>
+          <div class="app-main">
+            <div class="bubble user">Can you refactor my Express auth middleware?</div>
+            <div class="bubble ai" style="font-style:italic">⟳ Analyzing intent, planning tool usage…</div>
+            <div class="bubble code">const { verify, sign } =<br>&nbsp;&nbsp;require("jsonwebtoken");<br>// JWT rotation added ✓</div>
+            <div class="bubble ai">Done. Added rotating refresh tokens via x-refresh-token header…</div>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:3mm" class="callout">
+        <b>Design system is production-ready.</b> "Aether" — monochrome dark, single indigo accent (#4D6BFE), Inter + JetBrains Mono, DeepSeek-grade polish. No redesign needed to scale.
+      </div>
+    </div>
+
+    <div>
+      <h3 class="sec">Six Screens Already Designed</h3>
+      <div class="grid2" style="gap:3mm">
+        <div class="card feat-card" style="padding:3.5mm">
+          <div class="icon-chip" style="background:var(--accent-soft)">💬</div>
+          <div><div class="t">Chat</div><div class="d">Sessions, model picker, reasoning chips, code blocks, image-gen cards, attach &amp; voice.</div></div>
+        </div>
+        <div class="card feat-card" style="padding:3.5mm">
+          <div class="icon-chip" style="background:rgba(62,207,142,0.1)">🧩</div>
+          <div><div class="t">Studio</div><div class="d">GitHub-bound file tree, editor tabs, sandbox terminal with agent output.</div></div>
+        </div>
+        <div class="card feat-card" style="padding:3.5mm">
+          <div class="icon-chip" style="background:rgba(155,123,255,0.1)">🌐</div>
+          <div><div class="t">Browser</div><div class="d">Manus-style agent browser — AI logs into sites, user can take over.</div></div>
+        </div>
+        <div class="card feat-card" style="padding:3.5mm">
+          <div class="icon-chip" style="background:rgba(232,180,76,0.1)">🔌</div>
+          <div><div class="t">Plugins</div><div class="d">Marketplace: OpenCode agent, MCP hub, sandbox runtime, 30+ community plugins.</div></div>
+        </div>
+        <div class="card feat-card" style="padding:3.5mm">
+          <div class="icon-chip" style="background:rgba(76,201,232,0.1)">🔑</div>
+          <div><div class="t">Providers</div><div class="d">15 BYOK providers — OpenAI, Anthropic, Gemini, DeepSeek, Groq, Ollama…</div></div>
+        </div>
+        <div class="card feat-card" style="padding:3.5mm">
+          <div class="icon-chip" style="background:var(--accent-soft)">📊</div>
+          <div><div class="t">Usage</div><div class="d">Per-client token &amp; cost analytics across apps and models.</div></div>
+        </div>
+      </div>
+
+      <h3 class="sec">What's Missing (The "Brain")</h3>
+      <ul class="clean">
+        <li><b>No backend</b> — all state is in-memory, lost on restart</li>
+        <li><b>No auth</b> — no user identity, no sync</li>
+        <li><b>No live inference</b> — replies are hardcoded demo strings</li>
+        <li><b>No free models</b> — users must bring their own keys (friction!)</li>
+        <li><b>No persistence</b> — chat history dies with the app</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="footer"><span>OvidAI — Zero to 10M Blueprint</span><span class="pg">02</span></div>
+</div>
+
+<!-- ================= PAGE 3 : THE VISION / STRATEGY ================= -->
+<div class="page">
+  <div class="phead">
+    <div class="pnum">02 — The Core Strategy</div>
+    <div class="ptitle">Free AI for Everyone.<br>Keys for Power Users.</div>
+    <div class="psub">The single biggest growth unlock: a new user opens the app and gets a working AI reply in under 10 seconds — no API key, no credit card. We become the "Ovid Provider" — our own free model gateway, exactly like OpenCode ships free models.</div>
+  </div>
+
+  <h3 class="sec">The Three-Layer Model Strategy</h3>
+  <div class="grid3">
+    <div class="card" style="border-color:rgba(62,207,142,0.4)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2mm">
+        <span style="font-size:11pt;font-weight:800">🎁 Ovid Free</span>
+        <span class="tag free">DEFAULT</span>
+      </div>
+      <div style="font-size:8.8pt;color:var(--text-muted);line-height:1.6">
+        Our own gateway proxies <b style="color:var(--text)">genuinely free models</b> — Gemini 2.5 Flash (AI Studio free tier), Groq Llama, Cerebras, GitHub Models, OpenRouter free variants.
+        <br><br>
+        <b style="color:var(--success)">Per-user daily quota</b> (e.g. 50 msgs/day) enforced by Firebase Auth UID. No key ever needed.
+      </div>
+    </div>
+    <div class="card" style="border-color:rgba(77,107,254,0.4)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2mm">
+        <span style="font-size:11pt;font-weight:800">🔑 BYOK</span>
+        <span class="tag byok">POWER</span>
+      </div>
+      <div style="font-size:8.8pt;color:var(--text-muted);line-height:1.6">
+        The 15 providers already in the UI. User pastes their own key → <b style="color:var(--text)">unlimited usage, zero cost to us</b>. Keys stay on-device (flutter_secure_storage).
+        <br><br>
+        <b style="color:#7B9BFF">This is our margin protector</b> — heavy users self-fund.
+      </div>
+    </div>
+    <div class="card" style="border-color:rgba(155,123,255,0.4)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2mm">
+        <span style="font-size:11pt;font-weight:800">⭐ Ovid Pro</span>
+        <span class="tag violet">₹/$ MRR</span>
+      </div>
+      <div style="font-size:8.8pt;color:var(--text-muted);line-height:1.6">
+        Phase 4+: pooled premium models (GPT-5, Claude, Gemini Pro) with generous limits, priority queue, image gen, longer memory.
+        <br><br>
+        <b style="color:var(--violet)">$5–8/mo via Play Billing</b> — only pitched after the habit forms.
+      </div>
+    </div>
+  </div>
+
+  <h3 class="sec">The Privacy-First Auth Promise (Our Differentiator)</h3>
+  <div class="grid2">
+    <div class="card">
+      <div style="font-weight:700;margin-bottom:2mm;color:var(--success)">✓ What syncs to cloud — chat history only</div>
+      <ul class="clean">
+        <li><b>Chat sessions + messages</b> → Firestore, per-user, encrypted at rest</li>
+        <li><b>Session titles &amp; model choice</b> → seamless multi-device resume</li>
+        <li><b>Free-tier quota counter</b> → per-UID daily allowance</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div style="font-weight:700;margin-bottom:2mm;color:var(--danger)">✗ What NEVER leaves the device</div>
+      <ul class="clean">
+        <li><b>API keys (BYOK)</b> — secure enclave / EncryptedSharedPrefs only</li>
+        <li><b>Code, files, repos</b> — Studio syncs via user's own GitHub, not us</li>
+        <li><b>Browser sessions/cookies</b> — on-device WebView only</li>
+      </ul>
+    </div>
+  </div>
+
+  <div style="margin-top:4mm" class="callout">
+    <b>The sign-in ask is tiny, the value is huge:</b> "Sign in with Google to save your chats &amp; unlock free AI models." One tap (Firebase Auth Google Sign-In), no password, no card. Code history is explicitly excluded — a trust signal developers will love and share.
+  </div>
+
+  <h3 class="sec">Why This Wins Against The Alternatives</h3>
+  <table class="tbl">
+    <tr><th>Competitor pattern</th><th>Their friction</th><th>OvidAI answer</th></tr>
+    <tr><td><b>ChatGPT / Claude apps</b></td><td>Single model, paywall for best models, closed</td><td>15+ providers, free gateway, open plugins</td></tr>
+    <tr><td><b>Raw BYOK clients</b></td><td>Dead on arrival — no key = no value</td><td>Works instantly with Ovid Free models</td></tr>
+    <tr><td><b>OpenCode / Cursor</b></td><td>Desktop-only, developer-only</td><td>Mobile-first, chat-first, for everyone</td></tr>
+  </table>
+
+  <div class="footer"><span>OvidAI — Zero to 10M Blueprint</span><span class="pg">03</span></div>
+</div>
+
+<!-- ================= PAGE 4 : GOOGLE ARCHITECTURE ================= -->
+<div class="page">
+  <div class="phead">
+    <div class="pnum">03 — Target Architecture</div>
+    <div class="ptitle">100% Google Free-Tier Infrastructure</div>
+    <div class="psub">Every layer maps to a Google product with a genuinely usable free tier. At launch we pay $0. The architecture scales to 10M users on the same primitives — we only start paying when revenue already exists.</div>
+  </div>
+
+  <div class="arch">
+    <div class="arch-layer" style="border-color:rgba(77,107,254,0.35)">
+      <div class="al-t"><span class="g-blue">◆</span> Client Layer — Flutter App (what users touch)</div>
+      <div class="arch-boxes">
+        <div class="arch-box"><div class="ab-t">Chat UI</div><div class="ab-d">Existing screens, streaming via SSE/WebSocket</div></div>
+        <div class="arch-box"><div class="ab-t">Secure Vault</div><div class="ab-d">BYOK keys on-device only (Keystore)</div></div>
+        <div class="arch-box"><div class="ab-t">Offline Cache</div><div class="ab-d">Hive/Isar mirror of Firestore chats</div></div>
+        <div class="arch-box"><div class="ab-t">Studio + Browser</div><div class="ab-d">Sandbox, agent WebView — client-side</div></div>
+      </div>
+    </div>
+
+    <div class="arch-arrow">▼ ▼ ▼</div>
+
+    <div class="arch-layer" style="border-color:rgba(232,180,76,0.35)">
+      <div class="al-t"><span class="g-yellow">◆</span> Identity &amp; Sync — Firebase (Spark free plan)</div>
+      <div class="arch-boxes">
+        <div class="arch-box"><div class="ab-t">Firebase Auth</div><div class="ab-d">Google Sign-In, 1 tap. Free: unlimited MAU</div></div>
+        <div class="arch-box"><div class="ab-t">Cloud Firestore</div><div class="ab-d">Chat history per UID. Free: 1GB + 50k reads/day</div></div>
+        <div class="arch-box"><div class="ab-t">FCM Push</div><div class="ab-d">Agent-done alerts, re-engagement. Free: unlimited</div></div>
+        <div class="arch-box"><div class="ab-t">Remote Config</div><div class="ab-d">Model catalog, quotas, kill-switches. Free</div></div>
+      </div>
+    </div>
+
+    <div class="arch-arrow">▼ ▼ ▼</div>
+
+    <div class="arch-layer" style="border-color:rgba(62,207,142,0.35)">
+      <div class="al-t"><span class="g-green">◆</span> Ovid Provider Gateway — Cloud Run (serverless)</div>
+      <div class="arch-boxes">
+        <div class="arch-box"><div class="ab-t">Cloud Run API</div><div class="ab-d">Free: 2M req/mo. OpenAI-compatible /v1/chat</div></div>
+        <div class="arch-box"><div class="ab-t">Quota Guard</div><div class="ab-d">Verify Firebase ID token → check daily limit</div></div>
+        <div class="arch-box"><div class="ab-t">Model Router</div><div class="ab-d">Gemini Flash → Groq → Cerebras failover chain</div></div>
+        <div class="arch-box"><div class="ab-t">Key Pool</div><div class="ab-d">Rotating free-tier keys in Secret Manager</div></div>
+      </div>
+    </div>
+
+    <div class="arch-arrow">▼ ▼ ▼</div>
+
+    <div class="arch-layer" style="border-color:rgba(155,123,255,0.35)">
+      <div class="al-t"><span style="color:var(--violet)">◆</span> Intelligence — Free Model Supply (upstream)</div>
+      <div class="arch-boxes">
+        <div class="arch-box"><div class="ab-t">Gemini 2.5 Flash</div><div class="ab-d">AI Studio free tier — primary workhorse</div></div>
+        <div class="arch-box"><div class="ab-t">Groq LPU</div><div class="ab-d">Llama 3.3 70B free tier — speed demon</div></div>
+        <div class="arch-box"><div class="ab-t">Cerebras / GitHub</div><div class="ab-d">Free-tier overflow capacity</div></div>
+        <div class="arch-box"><div class="ab-t">Gemini Pro (Pro tier)</div><div class="ab-d">Paid upsell path, Vertex AI later</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid3" style="margin-top:4mm">
+    <div class="callout green" style="font-size:8.5pt"><b>$0 at launch.</b><br>Auth unlimited, FCM unlimited, Firestore 1GB, Cloud Run 2M req — all inside free tiers for first ~50k users.</div>
+    <div class="callout" style="font-size:8.5pt"><b>Scale = dial, not rebuild.</b><br>Same services, Blaze pay-as-you-go kicks in gradually. Firestore + Cloud Run handle 10M users by design.</div>
+    <div class="callout amber" style="font-size:8.5pt"><b>Google for Startups.</b><br>Apply for Cloud credits ($2k–$100k tier) to make even the paid phase effectively free for year one.</div>
+  </div>
+
+  <div class="footer"><span>OvidAI — Zero to 10M Blueprint</span><span class="pg">04</span></div>
+</div>
+
+<!-- ================= PAGE 5 : OVID PROVIDER DEEP-DIVE ================= -->
+<div class="page">
+  <div class="phead">
+    <div class="pnum">04 — The Ovid Provider</div>
+    <div class="ptitle">Our Free Model Gateway, Explained</div>
+    <div class="psub">Exactly how OpenCode ships free models: the app talks to one OpenAI-compatible endpoint — ours. The gateway hides every upstream provider, enforces fair limits, and fails over invisibly. Users just see "Ovid Free ● online".</div>
+  </div>
+
+  <h3 class="sec">One Request's Journey (under 2 seconds)</h3>
+  <div class="flow" style="margin-bottom:5mm">
+    <div class="flow-step"><div class="fs-i">📱</div><div class="fs-t">User sends chat</div><div class="fs-d">App attaches Firebase ID token, streams to gateway</div></div>
+    <div class="flow-arr">→</div>
+    <div class="flow-step"><div class="fs-i">🛡️</div><div class="fs-t">Quota Guard</div><div class="fs-d">Verify UID → check Firestore counter (50/day free)</div></div>
+    <div class="flow-arr">→</div>
+    <div class="flow-step"><div class="fs-i">🧠</div><div class="fs-t">Model Router</div><div class="fs-d">Pick best free upstream: Gemini → Groq → Cerebras</div></div>
+    <div class="flow-arr">→</div>
+    <div class="flow-step"><div class="fs-i">🔀</div><div class="fs-t">Stream back</div><div class="fs-d">SSE tokens relayed; upstream keys never exposed</div></div>
+    <div class="flow-arr">→</div>
+    <div class="flow-step"><div class="fs-i">💾</div><div class="fs-t">Save history</div><div class="fs-d">Message appended to user's Firestore session</div></div>
+  </div>
+
+  <div class="grid2" style="align-items:start">
+    <div>
+      <h3 class="sec">Free Quota Design (per user / day)</h3>
+      <table class="tbl">
+        <tr><th>Model tier</th><th>Examples</th><th class="r">Free limit</th></tr>
+        <tr><td><b>⚡ Fast</b></td><td>Gemini 2.5 Flash, Llama 3.3 (Groq)</td><td class="r"><b>50 msgs</b></td></tr>
+        <tr><td><b>🧠 Smart</b></td><td>DeepSeek-R1 (GitHub), gpt-oss-120b</td><td class="r"><b>15 msgs</b></td></tr>
+        <tr><td><b>🖼 Image</b></td><td>Pollinations / HF Spaces</td><td class="r"><b>5 gens</b></td></tr>
+        <tr><td><b>🔑 BYOK</b></td><td>Any of 15 providers</td><td class="r"><b style="color:var(--success)">Unlimited</b></td></tr>
+      </table>
+      <div style="margin-top:3mm" class="callout green" style="font-size:8.5pt">
+        <b>Limits live in Remote Config</b> — tune daily without shipping an app update. Generous on launch day, sustainable forever.
+      </div>
+    </div>
+
+    <div>
+      <h3 class="sec">Why Upstream Stays Free For Us</h3>
+      <ul class="clean">
+        <li><b>Gemini AI Studio free tier</b> — generous RPD per key; pool N keys behind the gateway, rotate on 429</li>
+        <li><b>Groq / Cerebras free tiers</b> — high-RPS LPU inference costs them little, costs us nothing</li>
+        <li><b>GitHub Models</b> — free with GitHub token; OAuth'd users bring quota with them</li>
+        <li><b>OpenRouter :free variants</b> — DeepSeek/Llama free endpoints as final fallback</li>
+        <li><b>Cache aggressively</b> — identical FAQ-style prompts served from Firestore cache, zero inference cost</li>
+      </ul>
+      <div style="margin-top:2mm" class="card" style="padding:3.5mm">
+        <div style="font-size:8.5pt;color:var(--text-muted);line-height:1.6">
+          <b style="color:var(--text)">Cost math at 1M MAU:</b> ~92% of requests hit free upstreams or cache → blended inference cost ≈ <b style="color:var(--success)">&lt; $0.001/user/mo</b>, covered by Pro subscriptions 100× over.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h3 class="sec">What The User Sees (already fits our model picker UI)</h3>
+  <div class="card" style="padding:3.5mm 4mm">
+    <div style="display:flex;gap:2.5mm;flex-wrap:wrap;align-items:center">
+      <span class="tag free">FREE</span>
+      <span style="font-size:9.5pt;font-weight:600">Ovid Provider</span>
+      <span style="font-size:8pt;color:var(--text-faint)">— appears at top of the existing model sheet:</span>
+    </div>
+    <div style="margin-top:2.5mm;display:flex;gap:2mm;flex-wrap:wrap">
+      <span class="kpi">⚡ ovid-flash <b>(Gemini 2.5)</b></span>
+      <span class="kpi">🧠 ovid-think <b>(DeepSeek-R1)</b></span>
+      <span class="kpi">🚀 ovid-turbo <b>(Llama 3.3 70B)</b></span>
+      <span class="kpi">🖼 ovid-canvas <b>(image gen)</b></span>
+    </div>
+  </div>
+
+  <div class="footer"><span>OvidAI — Zero to 10M Blueprint</span><span class="pg">05</span></div>
+</div>
+
+<!-- ================= PAGE 6 : PHASES 0-1 ================= -->
+<div class="page">
+  <div class="phead">
+    <div class="pnum">05 — Execution Roadmap (Part 1)</div>
+    <div class="ptitle">Phase 0 &amp; 1 — Foundation to Launch</div>
+    <div class="psub">From today's UI-only prototype to a live Play Store app with real AI replies, in two focused sprints. Everything here runs on $0 infrastructure.</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-badge p0"><div class="pl">PHASE</div><div class="pn">0</div><div class="pu">Weeks 1–4</div></div>
+    <div class="card phase-card">
+      <div class="pt">🧱 Foundation — Make It Real <span class="tag byok">0 → 1K users</span></div>
+      <div class="pd">Wire the beautiful shell to a beating heart. Ship to closed beta (Play Internal Testing) and dogfood hard.</div>
+      <div class="grid2" style="gap:2.5mm;margin-bottom:2.5mm">
+        <ul class="clean" style="font-size:8.5pt">
+          <li><b>Firebase Auth</b> — 1-tap Google Sign-In gate (skip allowed, quota smaller)</li>
+          <li><b>Firestore sync</b> — sessions/messages per UID, offline cache with Hive</li>
+          <li><b>Cloud Run gateway v1</b> — /v1/chat/completions, Gemini Flash only</li>
+        </ul>
+        <ul class="clean" style="font-size:8.5pt">
+          <li><b>Streaming replies</b> — replace receiveDemoReply() with SSE client</li>
+          <li><b>Quota counter</b> — 50 msg/day, Remote Config driven</li>
+          <li><b>Crashlytics + Analytics</b> — free, from day one</li>
+        </ul>
+      </div>
+      <div class="kpi-row">
+        <span class="kpi">✓ Real AI reply &lt; <b>2s</b></span>
+        <span class="kpi">✓ Chats survive reinstall</span>
+        <span class="kpi">✓ Crash-free &gt; <b>99%</b></span>
+        <span class="kpi">✓ Infra cost <b>$0</b></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-badge p1"><div class="pl">PHASE</div><div class="pn">1</div><div class="pu">Months 2–3</div></div>
+    <div class="card phase-card">
+      <div class="pt">🚀 Public Launch — The Free AI Moment <span class="tag free">1K → 100K users</span></div>
+      <div class="pd">Play Store public release. The hook: "ChatGPT-style app, but free, open, and yours." Ovid Provider goes multi-upstream with failover.</div>
+      <div class="grid2" style="gap:2.5mm;margin-bottom:2.5mm">
+        <ul class="clean" style="font-size:8.5pt">
+          <li><b>Model Router v2</b> — Gemini→Groq→Cerebras→GitHub failover chain</li>
+          <li><b>ovid-think</b> — free reasoning model with visible thinking chips (UI already exists!)</li>
+          <li><b>Image gen live</b> — Pollinations free endpoint into existing image card</li>
+        </ul>
+        <ul class="clean" style="font-size:8.5pt">
+          <li><b>BYOK activation</b> — Providers screen fully functional, keys on-device</li>
+          <li><b>FCM re-engagement</b> — "Your agent finished" + daily idea prompts</li>
+          <li><b>Referral loop</b> — share a chat as a beautiful public link (Firestore + hosting)</li>
+        </ul>
+      </div>
+      <div class="kpi-row">
+        <span class="kpi">✓ D1 retention &gt; <b>40%</b></span>
+        <span class="kpi">✓ K-factor &gt; <b>0.4</b> via shared chats</span>
+        <span class="kpi">✓ Play rating &gt; <b>4.5</b></span>
+        <span class="kpi">✓ Cost still ≈ <b>$0</b></span>
+      </div>
+    </div>
+  </div>
+
+  <h3 class="sec">Launch Growth Engine (no ad spend)</h3>
+  <div class="grid4">
+    <div class="card" style="padding:3.5mm"><div style="font-size:14px">🔗</div><div style="font-weight:700;font-size:9pt;margin:1.5mm 0 1mm">Shareable chats</div><div style="font-size:7.8pt;color:var(--text-muted);line-height:1.5">Every shared answer links back to the app — each user is a distribution node.</div></div>
+    <div class="card" style="padding:3.5mm"><div style="font-size:14px">🎁</div><div style="font-weight:700;font-size:9pt;margin:1.5mm 0 1mm">Free is the marketing</div><div style="font-size:7.8pt;color:var(--text-muted);line-height:1.5">"50 free AI messages a day, no card" is a headline that spreads itself on X/Reddit.</div></div>
+    <div class="card" style="padding:3.5mm"><div style="font-size:14px">🧑‍💻</div><div style="font-weight:700;font-size:9pt;margin:1.5mm 0 1mm">Dev credibility</div><div style="font-size:7.8pt;color:var(--text-muted);line-height:1.5">BYOK + MCP + OpenCode plugin wins the HN/dev crowd who evangelize hardest.</div></div>
+    <div class="card" style="padding:3.5mm"><div style="font-size:14px">🌐</div><div style="font-weight:700;font-size:9pt;margin:1.5mm 0 1mm">ASO + locales</div><div style="font-size:7.8pt;color:var(--text-muted);line-height:1.5">Hindi + English at launch; India-first pricing psychology for Pro later.</div></div>
+  </div>
+
+  <div class="footer"><span>OvidAI — Zero to 10M Blueprint</span><span class="pg">06</span></div>
+</div>
+
+<!-- ================= PAGE 7 : PHASES 2-4 ================= -->
+<div class="page">
+  <div class="phead">
+    <div class="pnum">06 — Execution Roadmap (Part 2)</div>
+    <div class="ptitle">Phase 2–4 — Agents, Monetization, 10M Scale</div>
+    <div class="psub">Turn a chat app into an agent platform, flip on revenue only after the habit is locked, then ride the same Google primitives to eight figures of users.</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-badge p2"><div class="pl">PHASE</div><div class="pn">2</div><div class="pu">Months 4–6</div></div>
+    <div class="card phase-card">
+      <div class="pt">🤖 Agent Platform — Beyond Chat <span class="tag violet">100K → 1M users</span></div>
+      <div class="pd">Activate the screens we already designed: Studio, Browser, Plugins become real. This is the moat — nobody else has mobile-native agents with a sandbox.</div>
+      <div class="grid2" style="gap:2.5mm;margin-bottom:2.5mm">
+        <ul class="clean" style="font-size:8.5pt">
+          <li><b>Sandbox Runtime live</b> — proot/Termux userland; agent runs python/node on-device, $0 server cost</li>
+          <li><b>OpenCode agent plugin</b> — full coding agent against user's GitHub repo</li>
+          <li><b>Agent browser</b> — WebView automation with user take-over (UI ready)</li>
+        </ul>
+        <ul class="clean" style="font-size:8.5pt">
+          <li><b>MCP Hub</b> — connect filesystem, GitHub, Postgres servers from the Plugins screen</li>
+          <li><b>Plugin submissions</b> — community plugins via GitHub PR → Remote Config catalog</li>
+          <li><b>Web + desktop wrappers</b> — Flutter's single codebase, near-zero extra cost</li>
+        </ul>
+      </div>
+      <div class="kpi-row">
+        <span class="kpi">✓ Agent tasks/user/wk &gt; <b>3</b></span>
+        <span class="kpi">✓ 3rd-party plugins &gt; <b>50</b></span>
+        <span class="kpi">✓ Studio MAU &gt; <b>15%</b></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-badge p3"><div class="pl">PHASE</div><div class="pn">3</div><div class="pu">Months 7–9</div></div>
+    <div class="card phase-card">
+      <div class="pt">⭐ Monetization — Ovid Pro <span class="tag warn">1M → 3M users</span></div>
+      <div class="pd">Revenue appears only after daily habit exists. Pro = premium pooled models + headroom, sold via Play Billing (Google handles payments, tax, UPI).</div>
+      <div class="grid2" style="gap:2.5mm;margin-bottom:2.5mm">
+        <ul class="clean" style="font-size:8.5pt">
+          <li><b>Ovid Pro $5–8/mo</b> — Gemini Pro, GPT-5-class pool, 10× limits, priority queue</li>
+          <li><b>Smart paywall</b> — shown only when free quota exhausts (moment of maximum intent)</li>
+        </ul>
+        <ul class="clean" style="font-size:8.5pt">
+          <li><b>Vertex AI migration</b> — paid Gemini via Vertex for Pro pool, committed-use discounts</li>
+          <li><b>Team seats</b> — shared workspaces, pooled BYOK — $12/seat B2B wedge</li>
+        </ul>
+      </div>
+      <div class="kpi-row">
+        <span class="kpi">✓ Free→Pro &gt; <b>3%</b></span>
+        <span class="kpi">✓ MRR &gt; infra cost × <b>5</b></span>
+        <span class="kpi">✓ Churn &lt; <b>4%/mo</b></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-badge p4"><div class="pl">PHASE</div><div class="pn">4</div><div class="pu">Months 10–18</div></div>
+    <div class="card phase-card">
+      <div class="pt">🌍 Scale — 10 Million Users <span class="tag cyan">3M → 10M users</span></div>
+      <div class="pd">Same architecture, bigger dials. Google Cloud's committed-use + startup credits keep unit economics positive the whole way.</div>
+      <div class="grid2" style="gap:2.5mm;margin-bottom:2.5mm">
+        <ul class="clean" style="font-size:8.5pt">
+          <li><b>Multi-region Cloud Run</b> — India, US, EU; &lt;300ms gateway latency globally</li>
+          <li><b>Memory (RAG plugin)</b> — vector recall via Firestore vector search, per-user isolated</li>
+        </ul>
+        <ul class="clean" style="font-size:8.5pt">
+          <li><b>Ovid API for devs</b> — sell our gateway itself; every client app = new distribution</li>
+          <li><b>On-device models</b> — Gemini Nano via AICore for offline/free-tier overflow</li>
+        </ul>
+      </div>
+      <div class="kpi-row">
+        <span class="kpi">✓ <b>10M</b> installs</span>
+        <span class="kpi">✓ Infra &lt; <b>$0.01</b>/user/mo</span>
+        <span class="kpi">✓ Pro ARPU sustains free tier</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer"><span>OvidAI — Zero to 10M Blueprint</span><span class="pg">07</span></div>
+</div>
+
+<!-- ================= PAGE 8 : SCALE MATH + RISKS ================= -->
+<div class="page">
+  <div class="phead">
+    <div class="pnum">07 — The Numbers &amp; The Guardrails</div>
+    <div class="ptitle">Unit Economics That Actually Work</div>
+    <div class="psub">Free users cost us almost nothing because compute happens on-device, on free upstream tiers, or on the user's own keys. Revenue only needs to cover the thin gateway layer.</div>
+  </div>
+
+  <div class="grid2" style="align-items:start">
+    <div>
+      <h3 class="sec">Cost Per User Per Month (at scale)</h3>
+      <div class="scale-bars">
+        <div class="sbar"><div class="sl">Auth</div><div class="sb" style="background:rgba(62,207,142,0.15);width:8%;color:var(--success)">$0</div><div class="sc">Firebase, unlimited</div></div>
+        <div class="sbar"><div class="sl">Chat sync</div><div class="sb" style="background:rgba(77,107,254,0.2);width:22%;color:#7B9BFF">~$0.001</div><div class="sc">Firestore Blaze</div></div>
+        <div class="sbar"><div class="sl">Gateway</div><div class="sb" style="background:rgba(155,123,255,0.2);width:30%;color:var(--violet)">~$0.002</div><div class="sc">Cloud Run requests</div></div>
+        <div class="sbar"><div class="sl">Inference</div><div class="sb" style="background:rgba(232,180,76,0.18);width:55%;color:var(--warn)">~$0.004</div><div class="sc">92% free/cache hits</div></div>
+        <div class="sbar"><div class="sl">Push &amp; CDN</div><div class="sb" style="background:rgba(62,207,142,0.15);width:8%;color:var(--success)">$0</div><div class="sc">FCM unlimited</div></div>
+      </div>
+      <div style="margin-top:3mm" class="callout green" style="font-size:8.8pt">
+        <b>Blended cost ≈ $0.007 / free user / month.</b> A 3% Pro conversion at $6/mo yields ~$0.18 per total user — a <b>25× margin</b> over cost. The free tier is self-funding.
+      </div>
+
+      <h3 class="sec">Where Each Google Tier Breaks (and costs $0 until then)</h3>
+      <table class="tbl">
+        <tr><th>Service</th><th>Free ceiling</th><th>≈ Users covered</th></tr>
+        <tr><td><b>Firebase Auth</b></td><td>Unlimited (Google provider)</td><td class="r"><b>∞</b></td></tr>
+        <tr><td><b>FCM</b></td><td>Unlimited messages</td><td class="r"><b>∞</b></td></tr>
+        <tr><td><b>Firestore</b></td><td>50k reads + 20k writes /day</td><td class="r">~15–25k DAU</td></tr>
+        <tr><td><b>Cloud Run</b></td><td>2M requests /mo</td><td class="r">~30–50k DAU</td></tr>
+        <tr><td><b>Remote Config</b></td><td>Unlimited</td><td class="r"><b>∞</b></td></tr>
+      </table>
+    </div>
+
+    <div>
+      <h3 class="sec">Top Risks &amp; Our Mitigations</h3>
+      <div style="display:flex;flex-direction:column;gap:2.5mm">
+        <div class="card" style="padding:3.5mm">
+          <div style="font-weight:700;font-size:9pt;color:var(--warn);margin-bottom:1mm">⚠ Upstream free tiers shrink</div>
+          <div style="font-size:8.3pt;color:var(--text-muted);line-height:1.55">Multi-upstream router + Remote Config model catalog = swap providers with zero app update. On-device Gemini Nano as permanent fallback.</div>
+        </div>
+        <div class="card" style="padding:3.5mm">
+          <div style="font-weight:700;font-size:9pt;color:var(--warn);margin-bottom:1mm">⚠ Quota abuse / bot farms</div>
+          <div style="font-size:8.3pt;color:var(--text-muted);line-height:1.55">Firebase App Check (free) attests real devices; per-UID + per-IP limits; anonymous accounts get half quota, nudging sign-in.</div>
+        </div>
+        <div class="card" style="padding:3.5mm">
+          <div style="font-weight:700;font-size:9pt;color:var(--warn);margin-bottom:1mm">⚠ Gateway becomes a cost center</div>
+          <div style="font-size:8.3pt;color:var(--text-muted);line-height:1.55">Aggressive semantic cache, prompt-length caps on free tier, and BYOK upsell nudges for heavy users ("add your key → unlimited").</div>
+        </div>
+        <div class="card" style="padding:3.5mm">
+          <div style="font-weight:700;font-size:9pt;color:var(--warn);margin-bottom:1mm">⚠ Trust: "you see my chats"</div>
+          <div style="font-size:8.3pt;color:var(--text-muted);line-height:1.55">Public privacy contract: keys &amp; code never leave device (verifiable — open-source the client). Chat sync is opt-out-able, deletable, exportable.</div>
+        </div>
+        <div class="card" style="padding:3.5mm">
+          <div style="font-weight:700;font-size:9pt;color:var(--warn);margin-bottom:1mm">⚠ Play policy on AI apps</div>
+          <div style="font-size:8.3pt;color:var(--text-muted);line-height:1.55">Content filters at gateway layer, report/block flows, clear AI-generated labeling — compliant from day one.</div>
+        </div>
+      </div>
+
+      <div style="margin-top:3.5mm" class="callout" style="font-size:8.8pt">
+        <b>The one-line strategy:</b> Google runs our backend for free, users' own devices run our agents for free, upstream labs subsidize our models for free — and we charge only the 3% who want the very best.
+      </div>
+    </div>
+  </div>
+
+  <div class="footer"><span>OvidAI — Zero to 10M Blueprint</span><span class="pg">08</span></div>
+</div>
+
+<!-- ================= PAGE 9 : CLOSING ================= -->
+<div class="page cover">
+  <div class="cover-top">
+    <div class="logo-row">
+      <div class="logo-mark">O</div>
+      <div>
+        <div class="logo-name">OvidAI</div>
+        <div class="logo-sub">The Path Forward</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cover-mid">
+    <div class="big-quote">
+      "The UI is done. The design is done.<br>
+      Now we give it a <span class="grad" style="background:linear-gradient(90deg,var(--accent),var(--cyan));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent">heartbeat</span> —
+      one tap of Google Sign-In, one free model,<br>
+      one delighted user at a time."
+    </div>
+
+    <div style="margin-top:10mm" class="grid3">
+      <div class="card" style="padding:4mm">
+        <div style="font-size:8pt;color:var(--text-faint);letter-spacing:1.5px;font-weight:700">THIS WEEK</div>
+        <div style="font-size:10.5pt;font-weight:700;margin:2mm 0">Create the Firebase project</div>
+        <div style="font-size:8.5pt;color:var(--text-muted);line-height:1.6">Auth + Firestore + FCM in one console, one afternoon. The chat history promise starts here.</div>
+      </div>
+      <div class="card" style="padding:4mm">
+        <div style="font-size:8pt;color:var(--text-faint);letter-spacing:1.5px;font-weight:700">THIS MONTH</div>
+        <div style="font-size:10.5pt;font-weight:700;margin:2mm 0">Ship the Ovid Gateway</div>
+        <div style="font-size:8.5pt;color:var(--text-muted);line-height:1.6">One Cloud Run service, one free Gemini key, streaming replies into the existing chat UI.</div>
+      </div>
+      <div class="card" style="padding:4mm">
+        <div style="font-size:8pt;color:var(--text-faint);letter-spacing:1.5px;font-weight:700">THIS QUARTER</div>
+        <div style="font-size:10.5pt;font-weight:700;margin:2mm 0">Launch on Play Store</div>
+        <div style="font-size:8.5pt;color:var(--text-muted);line-height:1.6">"Free AI chat, 15 providers, your keys stay yours." Let the product be the marketing.</div>
+      </div>
+    </div>
+
+    <div class="cover-stats" style="margin-top:8mm">
+      <div class="cstat"><div class="n">P0</div><div class="l">Foundation · wk 1–4</div></div>
+      <div class="cstat"><div class="n">P1</div><div class="l">Launch · mo 2–3</div></div>
+      <div class="cstat"><div class="n">P2</div><div class="l">Agents · mo 4–6</div></div>
+      <div class="cstat"><div class="n">P3</div><div class="l">Pro · mo 7–9</div></div>
+      <div class="cstat"><div class="n">P4</div><div class="l">10M · mo 10–18</div></div>
+    </div>
+  </div>
+
+  <div class="cover-foot">
+    <span>OvidAI — Zero to 10 Million Users · v1.0</span>
+    <span>Chat-first. Agent-native. Free by default.</span>
+  </div>
+</div>
+
+</body>
+</html>

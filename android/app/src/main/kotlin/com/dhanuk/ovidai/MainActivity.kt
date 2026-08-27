@@ -1,4 +1,4 @@
-package ai.ovid.ovid_ai
+package com.dhanuk.ovidai
 
 import io.flutter.embedding.android.FlutterActivity
 

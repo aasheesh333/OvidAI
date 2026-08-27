@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'sandbox_service.dart';
 
 /// ---------- Models ----------
 
@@ -50,6 +51,34 @@ class PluginItem {
   });
 }
 
+/// MCP server entry — separate from plugins because lifecycle is different
+/// (running process, JSON-RPC over stdin/stdout, on-demand connect).
+class McpServer {
+  final String name;
+  final String author;
+  final String description;
+  final String category; // Official / Community / Custom
+  final String command; // e.g. npx
+  final List<String> args; // e.g. ['-y', '@modelcontextprotocol/server-filesystem']
+  final String? envHint; // env var needed, e.g. 'GITHUB_TOKEN'
+  final String source; // registry.modelcontextprotocol.io | mcp.so | custom
+  bool connected;
+  bool custom;
+
+  McpServer({
+    required this.name,
+    required this.author,
+    required this.description,
+    required this.category,
+    required this.command,
+    this.args = const [],
+    this.envHint,
+    this.source = 'registry.modelcontextprotocol.io',
+    this.connected = false,
+    this.custom = false,
+  });
+}
+
 enum MsgKind { text, code, imageGen, reasoning }
 
 class Message {
@@ -97,9 +126,12 @@ class AppState extends ChangeNotifier {
   }
 
   int navIndex = 0; // 0 Chat, 1 Studio, 2 Browser, 3 Plugins, 4 Settings
+  bool sandboxInstalled = false; // proot Ubuntu sandbox on-device
 
   final List<ProviderConfig> providers = [];
   final List<PluginItem> plugins = [];
+  final List<McpServer> mcpServers = [];
+  final List<String> marketplaces = []; // user-added git marketplaces (Claude Code style)
   final List<ChatSession> sessions = [];
   String? activeSessionId;
 
@@ -164,7 +196,7 @@ class AppState extends ChangeNotifier {
     ));
     s.messages.add(Message(
       role: 'assistant',
-      content: '''Here is a demo reply from OvidAI.
+      content: '''Here is a demo reply from Ovid.
 
 **What just happened**
 - Your prompt was received: "$text"
@@ -190,6 +222,65 @@ class AppState extends ChangeNotifier {
 
   String fmtInstalls(int n) =>
       n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}k' : '$n';
+
+  /// ---------- Marketplaces (Claude Code style git repos) ----------
+
+  void sandboxReady() {
+    sandboxInstalled = SandboxService.I.isInstalled;
+    refresh();
+  }
+
+  bool addMarketplace(String repo) {
+    final r = repo.trim();
+    if (r.isEmpty) return false;
+    // Normalize: accept full URL or owner/repo
+    String normalized = r
+        .replaceFirst(RegExp(r'^https?://'), '')
+        .replaceFirst(RegExp(r'^www\.'), '')
+        .replaceFirst(RegExp(r'^github\.com/'), '')
+        .replaceFirst(RegExp(r'\.git$'), '');
+    if (marketplaces.contains(normalized)) return false;
+    marketplaces.add(normalized);
+    refresh();
+    return true;
+  }
+
+  void removeMarketplace(String repo) {
+    marketplaces.remove(repo);
+    refresh();
+  }
+
+  /// ---------- MCP servers ----------
+
+  void toggleMcpServer(McpServer s) {
+    s.connected = !s.connected;
+    refresh();
+  }
+
+  void addCustomMcpServer({
+    required String name,
+    required String command,
+    List<String> args = const [],
+    String? envHint,
+  }) {
+    mcpServers.add(McpServer(
+      name: name.trim(),
+      author: 'you',
+      description: 'Custom MCP server — connects on demand.',
+      category: 'Custom',
+      command: command.trim(),
+      args: args,
+      envHint: envHint,
+      source: 'custom',
+      custom: true,
+    ));
+    refresh();
+  }
+
+  void removeMcpServer(McpServer s) {
+    mcpServers.remove(s);
+    refresh();
+  }
 
   /// ---------- Dummy content ----------
   void _seed() {
@@ -287,31 +378,47 @@ class AppState extends ChangeNotifier {
     ]);
 
     plugins.addAll([
+      // --- Core tools (DeepSeek web style: everything works out of the box) ---
       PluginItem(
-          name: 'OpenCode Agent',
-          author: 'opencode',
+          name: 'Web Search',
+          author: 'ovidai',
           description:
-              'Full agentic coding engine. Plan, edit, run tests inside the proot Ubuntu sandbox.',
-          version: '0.9.4',
-          category: 'Agent',
+              'Live web results with citations inside every chat. Free, no key.',
+          version: '1.4.0',
+          category: 'Tool',
           installed: true,
           enabled: true,
-          installs: 48200),
+          installs: 482000),
       PluginItem(
-          name: 'Claude Code Bridge',
-          author: 'community',
+          name: 'DeepThink Reasoning',
+          author: 'ovidai',
           description:
-              'Use the Claude Code CLI harness with your Anthropic key.',
-          version: '1.7.2',
-          category: 'Agent',
-          installs: 21400),
+              'Chain-of-thought mode — model thinks step-by-step before replying, shown as collapsible reasoning.',
+          version: '1.2.1',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          installs: 368000),
       PluginItem(
-          name: 'Gemini CLI',
-          author: 'community',
-          description: 'Google’s terminal agent wired into OvidAI Studio.',
-          version: '0.4.1',
-          category: 'Agent',
-          installs: 12800),
+          name: 'Image Studio',
+          author: 'ovidai',
+          description:
+              'In-chat image generation and edit via free endpoints (Pollinations / HF Spaces).',
+          version: '1.2.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          installs: 419000),
+      PluginItem(
+          name: 'File Reader',
+          author: 'ovidai',
+          description:
+              'Attach PDFs, docs, code files, CSVs — ask questions about them in chat.',
+          version: '1.0.9',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          installs: 301000),
       PluginItem(
           name: 'Sandbox Runtime',
           author: 'termux',
@@ -329,25 +436,48 @@ class AppState extends ChangeNotifier {
               'Connect any Model Context Protocol server: filesystem, github, postgres, puppeteer…',
           version: '2.1.0',
           category: 'MCP',
-          installs: 34500),
+          installs: 345000),
       PluginItem(
-          name: 'Web Fetch & Search',
+          name: 'Web Fetch & Reader',
           author: 'ovidai',
-          description: 'Let models browse pages and search the web.',
+          description:
+              'Turn any URL into clean markdown for the model — articles, docs, threads.',
           version: '1.0.6',
           category: 'Tool',
           installed: true,
-          installs: 51700),
+          installs: 517000),
       PluginItem(
-          name: 'Image Studio',
+          name: 'Voice Input',
           author: 'ovidai',
           description:
-              'In-chat image generation via free endpoints (Pollinations / HF Spaces).',
-          version: '1.2.0',
+              'Dictate prompts hands-free, on-device speech recognition.',
+          version: '0.9.8',
           category: 'Tool',
-          installed: true,
-          enabled: true,
-          installs: 41900),
+          installs: 66000),
+      PluginItem(
+          name: 'Multi-Model Compare',
+          author: 'ovidai',
+          description:
+              'Send one prompt to up to 3 models side-by-side, pick the best answer.',
+          version: '0.7.2',
+          category: 'Tool',
+          installs: 128000),
+      PluginItem(
+          name: 'RAG Memory',
+          author: 'ovidai',
+          description:
+              'Long-term vector memory — the agent remembers your projects and prefs.',
+          version: '1.3.0',
+          category: 'Tool',
+          installs: 228000),
+      PluginItem(
+          name: 'Code Runner',
+          author: 'sandbox',
+          description:
+              'Run python/js snippets in chat with output preview — powered by sandbox.',
+          version: '1.1.4',
+          category: 'Runtime',
+          installs: 154000),
       PluginItem(
           name: 'Git Workbench',
           author: 'ovidai',
@@ -355,9 +485,88 @@ class AppState extends ChangeNotifier {
               'Clone, branch, commit and push from the Studio IDE.',
           version: '0.8.3',
           category: 'Tool',
-          installs: 9300),
+          installs: 93000),
+      PluginItem(
+          name: 'PR Reviewer',
+          author: 'ovidai',
+          description:
+              'Auto-review GitHub PRs with inline fix suggestions.',
+          version: '1.0.2',
+          category: 'Agent',
+          installs: 151000),
+      PluginItem(
+          name: 'Web Clipper',
+          author: 'ovidai',
+          description:
+              'Save pages, snippets and notes to a searchable knowledge base.',
+          version: '1.1.0',
+          category: 'Tool',
+          installs: 87000),
+      PluginItem(
+          name: 'Translate Pro',
+          author: 'ovidai',
+          description:
+              'Document translation with layout preserved, 100+ languages.',
+          version: '2.0.1',
+          category: 'Tool',
+          installs: 264000),
+      PluginItem(
+          name: 'PDF Tools',
+          author: 'ovidai',
+          description:
+              'Merge, split, compress, summarize PDFs right in chat.',
+          version: '1.5.2',
+          category: 'Tool',
+          installs: 198000),
+      PluginItem(
+          name: 'Data Analyst',
+          author: 'ovidai',
+          description:
+              'Upload CSV/Excel, get charts, trends and insights automatically.',
+          version: '1.2.8',
+          category: 'Tool',
+          installs: 176000),
+      PluginItem(
+          name: 'Study Mode',
+          author: 'ovidai',
+          description:
+              'Turn any chat into flashcards, quizzes and spaced-repetition decks.',
+          version: '0.9.1',
+          category: 'Tool',
+          installs: 143000),
+      PluginItem(
+          name: 'Meeting Notes',
+          author: 'ovidai',
+          description:
+              'Record or upload audio, get clean minutes and action items.',
+          version: '1.1.6',
+          category: 'Tool',
+          installs: 118000),
+      PluginItem(
+          name: 'Prompt Library',
+          author: 'ovidai',
+          description:
+              'Community prompts with one-tap use — sorted by task.',
+          version: '1.6.0',
+          category: 'Tool',
+          installs: 231000),
+      PluginItem(
+          name: 'Screen Awareness',
+          author: 'ovidai',
+          description:
+              'Ask about anything on your screen — share a screenshot into chat.',
+          version: '0.8.5',
+          category: 'Tool',
+          installs: 74000),
+      PluginItem(
+          name: 'Calendar & Tasks',
+          author: 'ovidai',
+          description:
+              'Plan, schedule and get reminders from plain-language chat.',
+          version: '1.0.7',
+          category: 'Tool',
+          installs: 102000),
     ]);
-
 
     // community library (dummy bulk)
     const extra = <(String, String, String, String, int)>[
@@ -365,22 +574,22 @@ class AppState extends ChangeNotifier {
       ('Postgres Tools', 'mcp-community', 'Query and inspect Postgres databases.', 'MCP', 9400),
       ('Figma Bridge', 'figma', 'Read design frames and tokens.', 'MCP', 12600),
       ('Slack Notify', 'community', 'Send agent updates to Slack channels.', 'Tool', 5100),
-      ('RAG Memory', 'ovidai', 'Long-term vector memory for your chats.', 'Tool', 22800),
       ('Docker-in-Sandbox', 'sandbox', 'OCI containers inside the sandbox.', 'Runtime', 7700),
-      ('Aider Bridge', 'community', 'Pair-program with the aider CLI.', 'Agent', 8900),
       ('Shell History', 'ovidai', 'Searchable sandbox terminal history.', 'Tool', 3400),
-      ('Voice Code', 'community', 'Dictate code and commands hands-free.', 'Tool', 6600),
       ('Rust Toolchain', 'sandbox', 'cargo + rustc prebuilt for the sandbox.', 'Runtime', 4100),
       ('Go Toolchain', 'sandbox', 'Go 1.23 toolchain, one tap install.', 'Runtime', 3900),
       ('Linear Sync', 'community', 'Create and update Linear issues from chat.', 'Tool', 2800),
       ('Sentry Watch', 'community', 'Pull errors into chat and let agents fix them.', 'Tool', 3300),
       ('Stripe MCP', 'stripe', 'Payments, invoices and customers via MCP.', 'MCP', 5400),
       ('Vercel Deploy', 'vercel', 'Ship previews straight from the sandbox.', 'Tool', 11300),
-      ('PR Reviewer', 'ovidai', 'Auto-review GitHub PRs with fixes.', 'Agent', 15100),
       ('DB Designer', 'community', 'Draw and migrate schemas in chat.', 'Tool', 4700),
       ('Audio Notes', 'community', 'Transcribe meetings into sessions.', 'Tool', 3600),
       ('Tailwind Helper', 'community', 'Tailwind-aware UI generation.', 'Tool', 9800),
       ('Terraform MCP', 'hashicorp', 'Plan and apply infra safely.', 'MCP', 2500),
+      ('Notion Sync', 'community', 'Two-way sync with Notion databases.', 'Tool', 8600),
+      ('WhatsApp Bridge', 'community', 'Let the agent reply on WhatsApp via template.', 'Tool', 6200),
+      ('YouTube Summarizer', 'community', 'Paste a link, get a summary + chapters.', 'Tool', 14700),
+      ('Email Drafts', 'community', 'Generate and queue emails from chat.', 'Tool', 7900),
     ];
     plugins.addAll([
       for (final (n, a, d, c, i) in extra)
@@ -391,6 +600,89 @@ class AppState extends ChangeNotifier {
             version: '1.${(i % 9) + 0}.${i % 7}',
             category: c,
             installs: i),
+    ]);
+
+    // --- MCP servers (official registry + community) ---
+    mcpServers.addAll([
+      McpServer(
+        name: 'Filesystem',
+        author: 'modelcontextprotocol',
+        description:
+            'Read, write and search files in folders you share with the agent.',
+        category: 'Official',
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-filesystem'],
+      ),
+      McpServer(
+        name: 'GitHub',
+        author: 'modelcontextprotocol',
+        description:
+            'Repos, issues, PRs and actions — full GitHub access for your agent.',
+        category: 'Official',
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-github'],
+        envHint: 'GITHUB_TOKEN',
+      ),
+      McpServer(
+        name: 'Fetch',
+        author: 'modelcontextprotocol',
+        description:
+            'Fetch web pages and convert them to clean markdown for the model.',
+        category: 'Official',
+        command: 'uvx',
+        args: ['mcp-server-fetch'],
+      ),
+      McpServer(
+        name: 'Memory',
+        author: 'modelcontextprotocol',
+        description:
+            'Long-term memory graph — the agent remembers across sessions.',
+        category: 'Official',
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-memory'],
+      ),
+      McpServer(
+        name: 'Puppeteer',
+        author: 'modelcontextprotocol',
+        description:
+            'Headless browser automation — click, scroll, screenshot, scrape.',
+        category: 'Official',
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-puppeteer'],
+      ),
+      McpServer(
+        name: 'Postgres',
+        author: 'modelcontextprotocol',
+        description:
+            'Read-only schema inspection and safe queries on your database.',
+        category: 'Official',
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-postgres'],
+        envHint: 'DATABASE_URL',
+      ),
+      McpServer(
+        name: 'Brave Search',
+        author: 'smithery-ai',
+        description: 'Live web search results straight into the chat.',
+        category: 'Community',
+        command: 'npx',
+        args: ['-y', '@smithery/brave-search'],
+        envHint: 'BRAVE_API_KEY',
+      ),
+      McpServer(
+        name: 'Slack',
+        author: 'community',
+        description: 'Send and read Slack messages from your workspace.',
+        category: 'Community',
+        command: 'npx',
+        args: ['-y', '@smithery/slack-mcp'],
+        envHint: 'SLACK_TOKEN',
+      ),
+    ]);
+
+    // user-added marketplaces (Claude Code style)
+    marketplaces.addAll([
+      'ovidai/ovid-plugins',
     ]);
 
     // --- dummy sessions ---

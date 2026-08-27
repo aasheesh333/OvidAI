@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
 import '../core/theme.dart';
+import '../core/state.dart';
+import '../core/github_service.dart';
+import '../core/agent_service.dart';
+import 'github_login_sheet.dart';
 
 /// Studio — coding harness (DeepSeek-web style): file explorer bound to the
 /// user's connected GitHub repo, editor with dummy code, agent activity rail,
@@ -14,6 +18,17 @@ class StudioScreen extends StatefulWidget {
 class _StudioScreenState extends State<StudioScreen> {
   bool _showFiles = true;
   String _repo = 'orbit/orbit-app';
+
+  @override
+  void initState() {
+    super.initState();
+    // Not logged in yet → show Device Flow login sheet once.
+    if (!GitHubService.I.isLoggedIn) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        showGithubLoginSheet(context);
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -38,17 +53,26 @@ class _StudioScreenState extends State<StudioScreen> {
           const SizedBox(width: 14),
           Padding(
             padding: const EdgeInsets.only(right: 14),
-            child: Row(children: [
-              Container(
-                  width: 7,
-                  height: 7,
-                  decoration: const BoxDecoration(
-                      color: Aether.success, shape: BoxShape.circle)),
-              const SizedBox(width: 6),
-              const Text('Sandbox ready',
-                  style: TextStyle(
-                      fontSize: 11.5, color: Aether.textMuted)),
-            ]),
+            child: AnimatedBuilder(
+              animation: AppState.I,
+              builder: (context, _) => Row(children: [
+                Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                        color: AppState.I.sandboxInstalled
+                            ? Aether.success
+                            : Aether.warn,
+                        shape: BoxShape.circle)),
+                const SizedBox(width: 6),
+                Text(
+                    AppState.I.sandboxInstalled
+                        ? 'Sandbox ready'
+                        : 'Sandbox pending',
+                    style: const TextStyle(
+                        fontSize: 11.5, color: Aether.textMuted)),
+              ]),
+            ),
           ),
         ],
       ),
@@ -259,62 +283,87 @@ class _Tabs extends StatelessWidget {
 class _Editor extends StatelessWidget {
   const _Editor();
 
-  static const code = '''
-import 'package:flutter/material.dart';
-
-void main() => runApp(const OvidApp());
-
-class OvidApp extends StatelessWidget {
-  const OvidApp({super.key});
-
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      theme: ThemeData.dark(),
-      home: const Scaffold(
-        body: Center(child: Text('Hello from the sandbox')),
-      ),
-    );
-  }
-}
-''';
-
-  @override
-  Widget build(BuildContext context) {
-    final lines = code.trimRight().split('\n');
-    return Container(
-      color: Aether.bg,
-      child: ListView.builder(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        itemCount: lines.length,
-        itemBuilder: (_, i) => Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+    return AnimatedBuilder(
+      animation: AgentService.I,
+      builder: (_, __) {
+        final a = AgentService.I;
+        final path = a.activeFilePath ?? 'welcome.md';
+        final code = a.fileBuffer[path] ??
+            "Ovid Agent ready.\n\n"
+                "Ask the AI in chat to:\n"
+                "  • read a file from your connected repo\n"
+                "  • run commands in the sandbox\n"
+                "  • open pages in Browser\n\n"
+                "Everything happens right here — live.";
+        final lines = code.split('\n');
+        return Container(
+          color: Aether.bg,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              SizedBox(
-                width: 32,
-                child: Text('${i + 1}',
-                    textAlign: TextAlign.right,
-                    style: const TextStyle(
-                        fontFamily: Aether.mono,
-                        fontSize: 11.5,
-                        height: 1.6,
-                        color: Aether.textFaint)),
+              // Active file path header
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                color: Aether.surfaceAlt,
+                child: Row(children: [
+                  const Icon(Icons.edit_note,
+                      size: 12, color: Aether.accent),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(path,
+                        style: TextStyle(
+                            fontFamily: Aether.mono,
+                            fontSize: 10.5,
+                            color: Aether.textMuted)),
+                  ),
+                  if (AgentService.I.repoFull != null)
+                    Text(AgentService.I.repoFull!,
+                        style: const TextStyle(
+                            fontFamily: Aether.mono,
+                            fontSize: 10,
+                            color: Aether.textFaint)),
+                ]),
               ),
-              const SizedBox(width: 14),
               Expanded(
-                child: Text(lines[i],
-                    style: const TextStyle(
-                        fontFamily: Aether.mono,
-                        fontSize: 12,
-                        height: 1.6,
-                        color: Aether.text)),
+                child: ListView.builder(
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  itemCount: lines.length,
+                  itemBuilder: (_, i) => Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          width: 32,
+                          child: Text('${i + 1}',
+                              textAlign: TextAlign.right,
+                              style: const TextStyle(
+                                  fontFamily: Aether.mono,
+                                  fontSize: 11.5,
+                                  height: 1.6,
+                                  color: Aether.textFaint)),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: SelectableText(lines[i],
+                              style: const TextStyle(
+                                  fontFamily: Aether.mono,
+                                  fontSize: 12,
+                                  height: 1.6,
+                                  color: Aether.text)),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               ),
             ],
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
@@ -322,64 +371,67 @@ class OvidApp extends StatelessWidget {
 class _Terminal extends StatelessWidget {
   const _Terminal();
 
-  static const out = [
-    '\$ agent run "add unit tests for theme.dart"',
-    '✓ sandbox ready',
-    '✓ pulled latest from orbit/orbit-app',
-    '✓ wrote test/core/theme_test.dart',
-    '✓ 12 tests passed',
-    '✓ pushed commit a3f9c2e to main',
-    '\$ ',
-  ];
-
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 190,
-      color: Aether.surface,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-            color: Aether.surfaceAlt,
-            child: const Row(children: [
-              Icon(Icons.terminal, size: 13, color: Aether.textMuted),
-              SizedBox(width: 8),
-              Text('SANDBOX TERMINAL',
-                  style: TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.8,
-                      color: Aether.textMuted)),
-              Spacer(),
-              Icon(Icons.add, size: 14, color: Aether.textFaint),
-              SizedBox(width: 12),
-              Icon(Icons.keyboard_arrow_up,
-                  size: 16, color: Aether.textFaint),
-            ]),
-          ),
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.all(12),
-              children: [
-                for (final l in out)
-                  Text(l,
+    return AnimatedBuilder(
+      animation: AgentService.I,
+      builder: (_, __) {
+        final events = AgentService.I.events
+            .where((e) => e.kind == 'shell' || e.kind == 'shellOut')
+            .toList();
+        final lines = <String>['\$ ovid sandbox --ready'];
+        for (final e in events) {
+          lines.add(e.kind == 'shell' ? '\$ ${e.text}' : e.text);
+        }
+        if (AgentService.I.busy) lines.add('\$ ');
+        return Container(
+          height: 190,
+          color: Aether.surface,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                color: Aether.surfaceAlt,
+                child: const Row(children: [
+                  Icon(Icons.terminal, size: 13, color: Aether.textMuted),
+                  SizedBox(width: 8),
+                  Text('SANDBOX TERMINAL',
                       style: TextStyle(
-                          fontFamily: Aether.mono,
-                          fontSize: 11.5,
-                          height: 1.6,
-                          color: l.startsWith('\$')
-                              ? Aether.accent
-                              : l.startsWith('✓')
-                                  ? Aether.success
-                                  : Aether.textMuted)),
-              ],
-            ),
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.8,
+                          color: Aether.textMuted)),
+                  Spacer(),
+                  Icon(Icons.add, size: 14, color: Aether.textFaint),
+                  SizedBox(width: 12),
+                  Icon(Icons.keyboard_arrow_up,
+                      size: 16, color: Aether.textFaint),
+                ]),
+              ),
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.all(12),
+                  children: [
+                    for (final l in lines)
+                      Text(l,
+                          style: TextStyle(
+                              fontFamily: Aether.mono,
+                              fontSize: 11.5,
+                              height: 1.6,
+                              color: l.startsWith('\$')
+                                  ? Aether.accent
+                                  : l.startsWith('✓') || l.endsWith('✓')
+                                      ? Aether.success
+                                      : Aether.textMuted)),
+                  ],
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

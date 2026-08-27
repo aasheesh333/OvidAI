@@ -99,7 +99,7 @@ class SettingsScreen extends StatelessWidget {
           const SectionHeader('General'),
           _settingTile(Icons.notifications_outlined, 'Notifications',
               'On'),
-          _settingTile(Icons.info_outline, 'About', 'OvidAI 0.1.0-demo'),
+          _settingTile(Icons.info_outline, 'About', 'Ovid AI 0.1.0-demo'),
         ],
       ),
     );

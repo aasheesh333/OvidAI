@@ -4,8 +4,10 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import 'studio_screen.dart';
+import 'sandbox_setup.dart';
 import 'browser_screen.dart';
 import 'sidebar.dart';
+import '../core/agent_service.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
@@ -61,8 +63,7 @@ class _ChatScreenState extends State<ChatScreen>
                 tooltip: 'Studio — code & terminal',
                 visualDensity: VisualDensity.compact,
                 icon: const Icon(Icons.code, size: 19),
-                onPressed: () => Navigator.of(context).push(
-                    MaterialPageRoute(builder: (_) => const StudioScreen())),
+                onPressed: () => openStudio(context),
               ),
               IconButton(
                 tooltip: 'Browser — agent & login',
@@ -84,6 +85,7 @@ class _ChatScreenState extends State<ChatScreen>
           body: SafeArea(
             child: Column(
               children: [
+                const _AgentActivityBar(),
                 Expanded(
                   child: s == null || s.messages.isEmpty
                       ? _EmptyState(onSuggest: (t) {
@@ -112,9 +114,8 @@ class _ChatScreenState extends State<ChatScreen>
                         _scroll.jumpTo(_scroll.position.maxScrollExtent);
                       }
                     });
-                    Future.delayed(
-                        const Duration(milliseconds: 1400), () {
-                      app.receiveDemoReply(t);
+                    // Launch the real agent (BYOK + tool-use).
+                    AgentService.I.runTask(t).whenComplete(() {
                       if (mounted) setState(() => _typing = false);
                     });
                   },
@@ -660,6 +661,101 @@ class _CopyButton extends StatefulWidget {
   const _CopyButton({required this.code});
   @override
   State<_CopyButton> createState() => _CopyButtonState();
+}
+
+/// Live activity bar — shows the agent's ongoing tool calls
+/// (shell / browser / repo / think). Jumps to Studio or Browser on tap.
+class _AgentActivityBar extends StatelessWidget {
+  const _AgentActivityBar();
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AgentService.I,
+      builder: (_, __) {
+        final a = AgentService.I;
+        if (!a.busy && a.pendingApproval == null) return const SizedBox.shrink();
+        final last =
+            a.events.isEmpty ? null : a.events.last;
+        final msg = a.pendingApproval?.summary ?? last?.text ?? 'working…';
+        final icon = switch (last?.kind) {
+          'shell' || 'shellOut' => Icons.terminal,
+          'nav' || 'page' => Icons.public,
+          'file' => Icons.edit_note,
+          'err' => Icons.error_outline,
+          _ => Icons.psychology_outlined,
+        };
+        final approved = a.pendingApproval != null;
+        return Material(
+          color: approved
+              ? Aether.warn.withValues(alpha: 0.10)
+              : Aether.accentSoft,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            decoration: BoxDecoration(
+              border:
+                  Border(bottom: BorderSide(color: Aether.hairline)),
+            ),
+            child: Row(children: [
+              SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                    strokeWidth: 1.5, color: approved ? Aether.warn : Aether.accent),
+              ),
+              const SizedBox(width: 10),
+              Icon(icon, size: 14, color: Aether.textMuted),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(msg,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 11.5, color: Aether.textMuted,
+                        fontFamily: Aether.mono)),
+              ),
+              if (approved) ...[
+                TextButton(
+                  style: TextButton.styleFrom(
+                      foregroundColor: Aether.danger,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: Size.zero),
+                  child: const Text('Deny', style: TextStyle(fontSize: 11)),
+                  onPressed: () => AgentService.I.approve(false),
+                ),
+                TextButton(
+                  style: TextButton.styleFrom(
+                      foregroundColor: Aether.success,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: Size.zero),
+                  child: const Text('Allow', style: TextStyle(fontSize: 11)),
+                  onPressed: () => AgentService.I.approve(true),
+                ),
+              ] else if (last?.kind == 'shell' || last?.kind == 'shellOut')
+                TextButton(
+                  style: TextButton.styleFrom(
+                      foregroundColor: Aether.accent,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: Size.zero),
+                  child: const Text('Studio', style: TextStyle(fontSize: 11)),
+                  onPressed: () => openStudio(context),
+                )
+              else if (last?.kind == 'nav' || last?.kind == 'page')
+                TextButton(
+                  style: TextButton.styleFrom(
+                      foregroundColor: Aether.accent,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: Size.zero),
+                  child: const Text('Browser', style: TextStyle(fontSize: 11)),
+                  onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const BrowserScreen())),
+                ),
+            ]),
+          ),
+        );
+      },
+    );
+  }
 }
 
 class _CopyButtonState extends State<_CopyButton> {
