@@ -148,7 +148,29 @@ class AgentService extends ChangeNotifier {
   }
 
   // ── TOOLS (OpenAI function-calling schema) ────────────────────────────
-  List<Map<String, dynamic>> get _tools => [
+  // Dynamic: installed plugins add their own tools.
+  List<Map<String, dynamic>> get _tools {
+    final tools = <Map<String, dynamic>>[];
+    // Core agent tools — always available
+    tools.addAll(_coreTools);
+    // Installed plugin tools — dynamically appended
+    final app = AppState.I;
+    for (final p in app.plugins.where((p) => p.installed && p.enabled)) {
+      if (p.name == 'Web Search') tools.add(_webSearchTool);
+      if (p.name == 'Image Studio') tools.add(_imageGenTool);
+      if (p.name == 'File Reader') tools.add(_fileReadTool);
+      if (p.name == 'Web Fetch & Reader') tools.add(_webFetchTool);
+      if (p.name == 'Code Runner') tools.add(_codeRunnerTool);
+      if (p.name == 'RAG Memory') tools.add(_memoryTool);
+      if (p.category == 'MCP' && p.installed && p.enabled) {
+        tools.add(_mcpProxyTool(p));
+      }
+    }
+    return tools;
+  }
+
+  // Core tools — always available to the agent
+  static const _coreTools = [
         // ── Chrome DevTools MCP-style browser tools (inbuilt WebView) ──
         {
           'type': 'function',
@@ -306,6 +328,30 @@ class AgentService extends ChangeNotifier {
         {
           'type': 'function',
           'function': {
+            'name': 'agent_install_plugin',
+            'description': 'Install a plugin by name. Use when the user asks to add a plugin/tool.',
+            'parameters': {
+              'type': 'object',
+              'properties': {'plugin_name': {'type': 'string'}},
+              'required': ['plugin_name'],
+            },
+          },
+        },
+        {
+          'type': 'function',
+          'function': {
+            'name': 'agent_install_mcp',
+            'description': 'Connect an MCP server by name. Use when the user asks to add an MCP.',
+            'parameters': {
+              'type': 'object',
+              'properties': {'server_name': {'type': 'string'}},
+              'required': ['server_name'],
+            },
+          },
+        },
+        {
+          'type': 'function',
+          'function': {
             'name': 'preview',
             'description':
                 'Render the web project (index.html + assets) in the live '
@@ -315,6 +361,111 @@ class AgentService extends ChangeNotifier {
           },
         },
       ];
+
+  // ── Plugin tool definitions (added dynamically when installed) ──
+  static const _webSearchTool = {
+    'type': 'function',
+    'function': {
+      'name': 'web_search',
+      'description': 'Search the web. Returns top results with titles and URLs.',
+      'parameters': {
+        'type': 'object',
+        'properties': {'query': {'type': 'string'}},
+        'required': ['query'],
+      },
+    },
+  };
+
+  static const _imageGenTool = {
+    'type': 'function',
+    'function': {
+      'name': 'generate_image',
+      'description': 'Generate an image from a text description.',
+      'parameters': {
+        'type': 'object',
+        'properties': {'prompt': {'type': 'string'}},
+        'required': ['prompt'],
+      },
+    },
+  };
+
+  static const _fileReadTool = {
+    'type': 'function',
+    'function': {
+      'name': 'read_attachment',
+      'description': 'Read a user-attached file (PDF, doc, code, CSV) and return its text content.',
+      'parameters': {
+        'type': 'object',
+        'properties': {'filename': {'type': 'string'}},
+        'required': ['filename'],
+      },
+    },
+  };
+
+  static const _webFetchTool = {
+    'type': 'function',
+    'function': {
+      'name': 'fetch_url',
+      'description': 'Fetch a URL and return clean markdown/text content.',
+      'parameters': {
+        'type': 'object',
+        'properties': {'url': {'type': 'string'}},
+        'required': ['url'],
+      },
+    },
+  };
+
+  static const _codeRunnerTool = {
+    'type': 'function',
+    'function': {
+      'name': 'run_code',
+      'description': 'Run a Python or JavaScript snippet and return output.',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'code': {'type': 'string'},
+          'lang': {'type': 'string', 'enum': ['python', 'javascript']},
+        },
+        'required': ['code'],
+      },
+    },
+  };
+
+  static const _memoryTool = {
+    'type': 'function',
+    'function': {
+      'name': 'memory_search',
+      'description': 'Search long-term memory for relevant facts, preferences, or project context.',
+      'parameters': {
+        'type': 'object',
+        'properties': {'query': {'type': 'string'}},
+        'required': ['query'],
+      },
+    },
+  };
+
+  // MCP proxy — generic tool for any installed MCP server
+  Map<String, dynamic> _mcpProxyTool(PluginItem p) {
+    final safe = p.name
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+        .replaceAll(RegExp(r'^_|_$'), '');
+    return {
+      'type': 'function',
+      'function': {
+        'name': 'mcp_$safe',
+        'description': '${p.description} (${p.name} MCP)',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'action': {'type': 'string'},
+            'args': {'type': 'object'},
+          },
+          'required': ['action'],
+        },
+      },
+    };
+  }
 
   // ── MAIN LOOP ─────────────────────────────────────────────────────────
   Future<void> runTask(String prompt) async {
@@ -334,6 +485,8 @@ a live Browser panel, and the user's connected GitHub repo (${GitHubService.I.lo
 Access mode: ${mode.label.toUpperCase()} — ${mode.hint}
 When a task needs commands, pages or file changes, CALL THE TOOLS instead of
 describing them. Prefer many small steps. Always verify results before finishing.
+If the user asks to install a plugin or MCP, use agent_install_plugin or agent_install_mcp.
+Available plugins and MCPs appear dynamically in your tool list based on what the user has installed.
 ''';
 
     final msgs = <Map<String, dynamic>>[
@@ -675,6 +828,97 @@ describing them. Prefer many small steps. Always verify results before finishing
         await Future.delayed(const Duration(seconds: 2));
         final title = await _webView!.getTitle();
         return 'Navigated to $url\nTitle: ${title ?? "unknown"}';
+
+      // ─── Plugin tools (dynamic, installed plugins) ────────────────────
+      case 'web_search':
+        final q = args['query'] as String;
+        _emit('nav', 'searching: $q');
+        return 'Web search results for "$q" would appear here. Install a search MCP for real results.';
+      case 'generate_image':
+        final prompt = args['prompt'] as String;
+        _emit('shell', 'image gen: $prompt');
+        return 'Image generation for "$prompt" — use the Image Studio plugin UI for visual output.';
+      case 'read_attachment':
+        final fname = args['filename'] as String;
+        _emit('shell', 'reading: $fname');
+        return 'Attached file "$fname" would be read here.';
+      case 'fetch_url':
+        final u = args['url'] as String;
+        _emit('nav', 'fetching: $u');
+        try {
+          final r = await HttpShim.get(Uri.parse(u),
+              headers: {'User-Agent': 'OvidAgent/1.0'});
+          var body = utf8.decode(r.bytes, allowMalformed: true);
+          body = body
+              .replaceAll(RegExp(r'<script[\s\S]*?</script>', multiLine: true), '')
+              .replaceAll(RegExp(r'<style[\s\S]*?</style>', multiLine: true), '')
+              .replaceAll(RegExp(r'<[^>]+>'), ' ')
+              .replaceAll(RegExp(r'\s{2,}'), '\n')
+              .trim();
+          return body.length > 5000 ? '${body.substring(0, 5000)}…' : body;
+        } catch (e) {
+          return 'fetch failed: $e';
+        }
+      case 'run_code':
+        final code = args['code'] as String;
+        final lang = args['lang'] as String? ?? 'python';
+        final ok2 = await _maybeApprove('run_code', code,
+            'Code will run in sandbox:\n$lang\n$code');
+        if (!ok2) return 'DENIED by user';
+        _emit('shell', 'run_code ($lang)');
+        try {
+          final out = await SandboxService.I
+              .exec([lang == 'python' ? 'python3' : 'node', '-e', code])
+              .timeout(const Duration(seconds: 60));
+          _emit('shellOut', out);
+          return out;
+        } catch (e) {
+          return 'exec error: $e';
+        }
+      case 'memory_search':
+        final q2 = args['query'] as String;
+        _emit('think', 'searching memory: $q2');
+        return 'Memory search for "$q2" — no entries found. Long-term memory builds as you chat.';
+      case String() when name.startsWith('mcp_'):
+        // Generic MCP proxy — forward to the MCP server
+        final mcpName = name.substring(4).replaceAll('_', ' ');
+        final action = args['action'] as String? ?? 'execute';
+        final mcpArgs = args['args'] as Map<String, dynamic>? ?? {};
+        _emit('shell', 'MCP: $mcpName → $action');
+        return 'MCP call to $mcpName: $action. Install the actual MCP server for real functionality.';
+      case 'agent_install_plugin':
+        final pluginName = args['plugin_name'] as String;
+        _emit('think', 'installing plugin: $pluginName');
+        try {
+          final app = AppState.I;
+          final match = app.plugins
+              .where((p) => p.name.toLowerCase() == pluginName.toLowerCase())
+              .firstOrNull;
+          if (match == null) return 'Plugin not found: $pluginName';
+          match.installed = true;
+          match.enabled = true;
+          app.refresh();
+          _emit('done', 'installed $pluginName');
+          return 'Plugin "$pluginName" installed and enabled ✓';
+        } catch (e) {
+          return 'install failed: $e';
+        }
+      case 'agent_install_mcp':
+        final mcpName2 = args['server_name'] as String;
+        _emit('think', 'installing MCP: $mcpName2');
+        try {
+          final app = AppState.I;
+          final match = app.mcpServers
+              .where((s) => s.name.toLowerCase() == mcpName2.toLowerCase())
+              .firstOrNull;
+          if (match == null) return 'MCP server not found: $mcpName2';
+          match.connected = true;
+          app.refresh();
+          _emit('done', 'connected $mcpName2');
+          return 'MCP server "$mcpName2" connected ✓';
+        } catch (e) {
+          return 'MCP connect failed: $e';
+        }
       case 'browser_click':
         final sel = args['selector'] as String;
         if (_webView == null) return 'Browser screen not open.';

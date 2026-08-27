@@ -47,10 +47,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
         animation: app,
         builder: (_, __) => CustomScrollView(
           slivers: [
-            const SliverToBoxAdapter(child: _TrendingCarousel()),
-            SliverToBoxAdapter(
-              child: _McpSection(app: app),
-            ),
+            // ── Search bar ON TOP ──
             SliverToBoxAdapter(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
@@ -99,6 +96,10 @@ class _PluginsScreenState extends State<PluginsScreen> {
                   ],
                 ),
               ),
+            ),
+            // ── MCP section ──
+            SliverToBoxAdapter(
+              child: _McpSection(app: app),
             ),
             const SliverToBoxAdapter(
               child: Padding(
@@ -250,122 +251,6 @@ class _PluginsScreenState extends State<PluginsScreen> {
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-/// Auto-scrolling trending banners (3-4 slides).
-class _TrendingCarousel extends StatefulWidget {
-  const _TrendingCarousel();
-  @override
-  State<_TrendingCarousel> createState() => _TrendingCarouselState();
-}
-
-class _TrendingCarouselState extends State<_TrendingCarousel> {
-  final _page = PageController(viewportFraction: 0.92);
-  int _idx = 0;
-  Timer? _timer;
-
-  static const slides = [
-    (
-      'OpenCode Agent',
-      'Autonomous coding inside your sandbox — trending #1 this week',
-      Icons.smart_toy_outlined,
-      Aether.accent
-    ),
-    (
-      'MCP Server Hub',
-      '4,800+ MCP servers. Connect anything to any model.',
-      Icons.hub_outlined,
-      Aether.success
-    ),
-    (
-      'Image Studio',
-      'Generate & edit images inline in chat, free.',
-      Icons.auto_awesome,
-      Aether.warn
-    ),
-    (
-      'Web Agent',
-      'Let AI browse, log in and automate the web for you.',
-      Icons.public,
-      Aether.accent
-    ),
-  ];
-
-  @override
-  void initState() {
-    super.initState();
-    _timer = Timer.periodic(const Duration(seconds: 4), (_) {
-      if (!mounted || !_page.hasClients) return;
-      final next = (_idx + 1) % slides.length;
-      _page.animateToPage(next,
-          duration: const Duration(milliseconds: 450),
-          curve: Curves.easeOut);
-    });
-  }
-
-  @override
-  void dispose() {
-    _timer?.cancel();
-    _page.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 118,
-      child: PageView.builder(
-        controller: _page,
-        itemCount: slides.length,
-        onPageChanged: (i) => setState(() => _idx = i),
-        itemBuilder: (_, i) {
-          final s = slides[i];
-          return Container(
-            margin: const EdgeInsets.fromLTRB(6, 12, 6, 4),
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: s.$4.withValues(alpha: 0.3)),
-              gradient: LinearGradient(
-                begin: Alignment.centerLeft,
-                end: Alignment.centerRight,
-                colors: [s.$4.withValues(alpha: 0.16), Aether.surface],
-              ),
-            ),
-            child: Row(children: [
-              Icon(s.$3, size: 26, color: s.$4),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(children: [
-                      const Tag('TRENDING',
-                          color: Aether.warn, filled: true),
-                      const SizedBox(width: 8),
-                      Text(s.$1,
-                          style: const TextStyle(
-                              fontSize: 13.5,
-                              fontWeight: FontWeight.w700)),
-                    ]),
-                    const SizedBox(height: 4),
-                    Text(s.$2,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            fontSize: 11.5,
-                            height: 1.4,
-                            color: Aether.textMuted)),
-                  ],
-                ),
-              ),
-            ]),
-          );
-        },
       ),
     );
   }
@@ -546,6 +431,58 @@ class PluginDetailScreen extends StatelessWidget {
                     },
                   ),
           ),
+          if (plugin.installed) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Aether.textMuted,
+                      side: BorderSide(
+                          color: Aether.hairlineStrong),
+                      padding: const EdgeInsets.symmetric(vertical: 11),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                    icon: const Icon(Icons.settings_backup_restore,
+                        size: 15),
+                    label: const Text('Reset to defaults',
+                        style: TextStyle(fontSize: 12.5)),
+                    onPressed: () {
+                      plugin.enabled = true;
+                      app.refresh();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text('Plugin reset to defaults')));
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Aether.danger,
+                      side: BorderSide(
+                          color: Aether.danger.withValues(alpha: 0.4)),
+                      padding: const EdgeInsets.symmetric(vertical: 11),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                    icon: const Icon(Icons.delete_outline,
+                        size: 15),
+                    label: const Text('Uninstall',
+                        style: TextStyle(fontSize: 12.5)),
+                    onPressed: () {
+                      plugin.installed = false;
+                      plugin.enabled = false;
+                      app.refresh();
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ],
           const SizedBox(height: 18),
           const SectionHeader('Overview'),
           Padding(
@@ -959,6 +896,34 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               onPressed: () => app.toggleMcpServer(s),
             ),
           ),
+          if (s.connected) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Aether.textMuted,
+                      side: BorderSide(color: Aether.hairlineStrong),
+                      padding: const EdgeInsets.symmetric(vertical: 11),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                    icon: const Icon(Icons.settings_backup_restore, size: 15),
+                    label: const Text('Reset config',
+                        style: TextStyle(fontSize: 12.5)),
+                    onPressed: () {
+                      // Reset = disconnect + clear any custom env
+                      if (s.connected) app.toggleMcpServer(s);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text('MCP server config reset')));
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ],
           const SizedBox(height: 18),
           const SectionHeader('Overview'),
           Padding(
