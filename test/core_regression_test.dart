@@ -596,4 +596,35 @@ void main() {
       provider.apiKey = originalKey;
     });
   });
+
+  // ── PR3 regression tests: queue, cancel, auto-run-next ────────────────
+  group('PR3: send/stop/queue', () {
+    test('enqueue/edit/remove queued messages', () {
+      final agent = AgentService.I;
+      agent
+        ..clearQueueForTest()
+        ..enqueueMessage('first')
+        ..enqueueMessage('second')
+        ..enqueueMessage('third');
+      expect(agent.queuedMessages, ['first', 'second', 'third']);
+
+      agent.editQueuedMessage(1, 'edited');
+      expect(agent.queuedMessages, ['first', 'edited', 'third']);
+
+      agent.removeQueuedMessage(0);
+      expect(agent.queuedMessages, ['edited', 'third']);
+
+      agent.clearQueueForTest();
+      expect(agent.queuedMessages, isEmpty);
+    });
+
+    test('cancelRun is a no-op when no run is active', () {
+      final agent = AgentService.I;
+      agent.clearQueueForTest();
+      expect(agent.busy, isFalse);
+      // Must not throw.
+      agent.cancelRun();
+      expect(agent.busy, isFalse);
+    });
+  });
 }

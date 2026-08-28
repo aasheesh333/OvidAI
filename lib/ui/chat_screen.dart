@@ -21,7 +21,6 @@ class _ChatScreenState extends State<ChatScreen>
     with SingleTickerProviderStateMixin {
   final _input = TextEditingController();
   final _scroll = ScrollController();
-  bool _typing = false;
 
   @override
   Widget build(BuildContext context) {
@@ -131,20 +130,39 @@ class _ChatScreenState extends State<ChatScreen>
                             _input.text = t;
                           },
                         )
-                      : ListView.builder(
-                          controller: _scroll,
-                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                          itemCount: s.messages.length + (_typing ? 1 : 0),
-                          itemBuilder: (_, i) => i == s.messages.length
-                              ? const _TypingBubble()
-                              : _MessageView(m: s.messages[i]),
+                      : AnimatedBuilder(
+                          animation: AgentService.I,
+                          builder: (_, _) {
+                            final typing = AgentService.I.busy;
+                            return ListView.builder(
+                              controller: _scroll,
+                              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                              itemCount: s.messages.length + (typing ? 1 : 0),
+                              itemBuilder: (_, i) =>
+                                  i == s.messages.length
+                                      ? const _TypingBubble()
+                                      : _MessageView(m: s.messages[i]),
+                            );
+                          },
                         ),
+                ),
+                _QueueDock(
+                  onEdited: () => setState(() {}),
                 ),
                 _InputBar(
                   controller: _input,
+                  running: AgentService.I.busy,
                   onSend: () {
                     final t = _input.text.trim();
-                    if (t.isEmpty || _typing) return;
+                    if (t.isEmpty) return;
+
+                    // ── DSH-web busy behavior: typing while running queues
+                    // the message to auto-run after the current turn. ──
+                    if (AgentService.I.busy) {
+                      AgentService.I.enqueueMessage(t);
+                      _input.clear();
+                      return;
+                    }
 
                     final session = app.activeSession;
                     final provider = app.providerForSession(session);
@@ -188,16 +206,15 @@ class _ChatScreenState extends State<ChatScreen>
 
                     app.sendMessage(t);
                     _input.clear();
-                    setState(() => _typing = true);
                     Future.delayed(const Duration(milliseconds: 60), () {
                       if (_scroll.hasClients) {
                         _scroll.jumpTo(_scroll.position.maxScrollExtent);
                       }
                     });
                     // Launch the real agent (BYOK + tool-use, SSE streaming).
-                    AgentService.I.runTask(t).whenComplete(() {
-                      if (mounted) setState(() => _typing = false);
-                    });
+                    // AgentService.busy drives the send/stop button + typing
+                    // bubble via the AnimatedBuilder below.
+                    AgentService.I.runTask(t);
                   },
                 ),
               ],
@@ -811,8 +828,18 @@ class _MessageView extends StatelessWidget {
 
 class _InputBar extends StatelessWidget {
   final TextEditingController controller;
+  final bool running;
   final VoidCallback onSend;
-  const _InputBar({required this.controller, required this.onSend});
+  const _InputBar({
+    required this.controller,
+    required this.running,
+    required this.onSend,
+  });
+
+  /// DSH-web rule: running + empty draft = Stop; running + draft = Send
+  /// (queue). The queue color (teal) signals "this goes to the queue",
+  /// distinct from the normal accent send.
+  static const _queueColor = Color(0xFF0E9F9F);
 
   void _attachSheet(BuildContext context) {
     showModalBottomSheet(
@@ -932,20 +959,49 @@ class _InputBar extends StatelessWidget {
                 ),
                 onPressed: () {},
               ),
-              Container(
-                decoration: const BoxDecoration(
-                  color: Aether.accent,
-                  shape: BoxShape.circle,
-                ),
-                child: IconButton(
-                  tooltip: 'Send',
-                  icon: const Icon(
-                    Icons.arrow_upward,
-                    size: 18,
-                    color: Colors.white,
-                  ),
-                  onPressed: onSend,
-                ),
+              // ── Stateful primary button (DSH-web InputBar pattern) ──
+              AnimatedBuilder(
+                animation: Listenable.merge([AgentService.I, controller]),
+                builder: (_, _) {
+                  final runningNow = AgentService.I.busy;
+                  final hasDraft = controller.text.trim().isNotEmpty;
+                  final IconData icon;
+                  final Color bg;
+                  final String tip;
+                  if (runningNow && !hasDraft) {
+                    // Running + empty → STOP (red).
+                    icon = Icons.stop_rounded;
+                    bg = Colors.redAccent;
+                    tip = 'Stop generating';
+                  } else if (runningNow && hasDraft) {
+                    // Running + draft → SEND-TO-QUEUE (teal).
+                    icon = Icons.arrow_upward;
+                    bg = _queueColor;
+                    tip = 'Add to queue';
+                  } else {
+                    // Idle → SEND (accent).
+                    icon = Icons.arrow_upward;
+                    bg = Aether.accent;
+                    tip = 'Send';
+                  }
+                  return Container(
+                    decoration: BoxDecoration(
+                      color: bg,
+                      shape: BoxShape.circle,
+                    ),
+                    child: IconButton(
+                      tooltip: tip,
+                      icon: Icon(icon, size: 18, color: Colors.white),
+                      onPressed: () {
+                        if (runningNow && !hasDraft) {
+                          AgentService.I.cancelRun();
+                        } else {
+                          onSend();
+                        }
+                      },
+                    ),
+                  );
+                },
               ),
             ],
           ),
@@ -1008,6 +1064,203 @@ class _TypingBubbleState extends State<_TypingBubble>
               ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// DSH-web QueueDock — a strip above the input bar showing queued messages
+/// with edit/remove actions. Shown only when [AgentService.queuedMessages]
+/// is non-empty.
+class _QueueDock extends StatelessWidget {
+  final VoidCallback onEdited;
+  const _QueueDock({required this.onEdited});
+
+  @override
+  Widget build(BuildContext context) {
+    final agent = AgentService.I;
+    return AnimatedBuilder(
+      animation: agent,
+      builder: (_, _) {
+        final queue = agent.queuedMessages;
+        if (queue.isEmpty) return const SizedBox.shrink();
+        return SafeArea(
+          top: false,
+          child: Container(
+            margin: const EdgeInsets.fromLTRB(12, 0, 12, 0),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Aether.surface,
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(14),
+              ),
+              border: Border.all(color: Aether.hairline),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Header row
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.queue_music,
+                      size: 13,
+                      color: Aether.textMuted,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      '${queue.length} queued message${queue.length > 1 ? 's' : ''}',
+                      style: const TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                        color: Aether.textMuted,
+                      ),
+                    ),
+                    const Spacer(),
+                    GestureDetector(
+                      onTap: () {
+                        for (var i = queue.length - 1; i >= 0; i--) {
+                          agent.removeQueuedMessage(i);
+                        }
+                        onEdited();
+                      },
+                      child: const Text(
+                        'Clear all',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Aether.textFaint,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                // Queued message rows
+                for (var i = 0; i < queue.length; i++)
+                  _QueueRow(
+                    index: i,
+                    text: queue[i],
+                    onEdited: onEdited,
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _QueueRow extends StatefulWidget {
+  final int index;
+  final String text;
+  final VoidCallback onEdited;
+  const _QueueRow({
+    required this.index,
+    required this.text,
+    required this.onEdited,
+  });
+
+  @override
+  State<_QueueRow> createState() => _QueueRowState();
+}
+
+class _QueueRowState extends State<_QueueRow> {
+  bool _editing = false;
+  late final TextEditingController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController(text: widget.text);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final agent = AgentService.I;
+    if (_editing) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _ctrl,
+                autofocus: true,
+                style: const TextStyle(fontSize: 12.5),
+                decoration: InputDecoration(
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 7,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(color: Aether.hairline),
+                  ),
+                ),
+                onSubmitted: (v) {
+                  agent.editQueuedMessage(widget.index, v);
+                  setState(() => _editing = false);
+                  widget.onEdited();
+                },
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close, size: 15),
+              onPressed: () => setState(() => _editing = false),
+            ),
+          ],
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              widget.text,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12.5, color: Aether.text),
+            ),
+          ),
+          GestureDetector(
+            onTap: () {
+              _ctrl.text = widget.text;
+              setState(() => _editing = true);
+            },
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+              child: Icon(
+                Icons.edit_outlined,
+                size: 14,
+                color: Aether.textMuted,
+              ),
+            ),
+          ),
+          GestureDetector(
+            onTap: () {
+              agent.removeQueuedMessage(widget.index);
+              widget.onEdited();
+            },
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+              child: Icon(
+                Icons.delete_outline,
+                size: 14,
+                color: Aether.textMuted,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

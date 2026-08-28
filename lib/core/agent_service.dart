@@ -134,6 +134,61 @@ class AgentService extends ChangeNotifier {
   String? activeRunId;
   ApprovalRequest? pendingApproval;
 
+  // ── CANCELLATION (DSH-web stop button) ────────────────────────────────
+  HttpClientRequest? _activeRequest;
+  bool _cancelRequested = false;
+  bool get cancelRequested => _cancelRequested;
+
+  // ── MESSAGE QUEUE (DSH-web QueueDock) ─────────────────────────────────
+  // When the user submits while a run is active, the message is enqueued
+  // and auto-started after the current run finishes (FIFO).
+  final List<String> _queue = [];
+  List<String> get queuedMessages => List.unmodifiable(_queue);
+
+  /// Stop the current run: aborts the in-flight HTTP request and flags
+  /// every loop turn to exit at the next checkpoint. DSH-web "Stop" UX.
+  void cancelRun() {
+    if (activeRunId == null) return;
+    _cancelRequested = true;
+    try {
+      _activeRequest?.abort();
+    } catch (_) {}
+    _emit('think', 'stop requested — finishing current turn');
+    notifyListeners();
+  }
+
+  /// Enqueue a message to run after the current turn completes.
+  void enqueueMessage(String text) {
+    if (text.trim().isEmpty) return;
+    _queue.add(text);
+    _emit('think', 'queued message ${_queue.length}');
+    notifyListeners();
+  }
+
+  /// Edit a queued message in place.
+  void editQueuedMessage(int index, String newText) {
+    if (index < 0 || index >= _queue.length) return;
+    if (newText.trim().isEmpty) return;
+    _queue[index] = newText;
+    notifyListeners();
+  }
+
+  /// Remove a message from the queue.
+  void removeQueuedMessage(int index) {
+    if (index < 0 || index >= _queue.length) return;
+    _queue.removeAt(index);
+    notifyListeners();
+  }
+
+  /// Test-only helper to reset the queue between tests.
+  @visibleForTesting
+  void clearQueueForTest() {
+    _queue.clear();
+    _cancelRequested = false;
+    activeRunId = null;
+    notifyListeners();
+  }
+
   /// Browser live state
   String? browserUrl;
   String? browserPageText;
@@ -736,8 +791,18 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
 
     try {
       for (var turn = 0; turn < 12; turn++) {
+        if (_cancelRequested) {
+          _emit('done', 'stopped by user');
+          break;
+        }
         _resetLiveBuffers();
         final msg = await _callLlm(p, msgs, s);
+        if (_cancelRequested) {
+          // Surface a clean "stopped" message instead of the failure text.
+          _finalizeLiveStopped();
+          _emit('done', 'stopped by user');
+          break;
+        }
         if (msg == null) {
           _appendAssistant(
             'The model request failed. Check the provider key, endpoint, and selected model, then retry.',
@@ -782,7 +847,20 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
       _appendAssistant('Agent error: $e', session: s);
     } finally {
       activeRunId = null;
+      _cancelRequested = false;
       notifyListeners();
+      // Auto-start the next queued message (DSH queue behavior). A cancel
+      // clears nothing — queued messages still run after the stop.
+      if (_queue.isNotEmpty) {
+        final next = _queue.removeAt(0);
+        // Delay so the UI can settle; also lets listeners see "idle" state.
+        Future.delayed(const Duration(milliseconds: 250), () {
+          // Record the queued message as a user message in the session
+          // (the normal send path does this via AppState.sendMessage).
+          AppState.I.sendMessage(next);
+          runTask(next);
+        });
+      }
     }
   }
 
@@ -792,6 +870,33 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
     _liveReasoning.clear();
     _liveMsg = null;
     _liveSession = null;
+  }
+
+  /// On user stop: promote whatever streamed so far (partial content kept,
+  /// partial reasoning becomes a kept reasoning note) and close the bubble.
+  void _finalizeLiveStopped() {
+    final s = _liveSession;
+    final m = _liveMsg;
+    if (s == null || m == null) {
+      _appendAssistant('⏹ Stopped by user.');
+      return;
+    }
+    if (_liveContent.isNotEmpty) {
+      m.kind = MsgKind.text;
+      m.thinking = false;
+      m.content = '${_liveContent.toString()}\n\n*⏹ stopped by user*';
+    } else if (_liveReasoning.isNotEmpty) {
+      m.kind = MsgKind.reasoning;
+      m.thinking = true;
+      m.content =
+          '${cleanReasoningText(_liveReasoning.toString())}\n\n*⏹ stopped by user*';
+    } else {
+      m.content = '*⏹ stopped by user*';
+    }
+    _liveSession = null;
+    _liveMsg = null;
+    AppState.I.refresh();
+    AppState.I.persistSessions();
   }
 
   Future<Map<String, dynamic>?> _callLlm(
@@ -809,6 +914,12 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
             const Duration(seconds: 20),
             onTimeout: () => throw Exception('connect timeout'),
           );
+      _activeRequest = req;
+      if (_cancelRequested) {
+        client.close(force: true);
+        _activeRequest = null;
+        return null;
+      }
       if (p.apiKey.isNotEmpty) {
         req.headers.set('Authorization', 'Bearer ${p.apiKey}');
       }
@@ -931,6 +1042,7 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
 
       client.close();
       client = null;
+      _activeRequest = null;
 
       if (contentBuf.isEmpty && reasoningBuf.isEmpty && tcAcc.isEmpty) {
         _emit(
@@ -948,9 +1060,15 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
         'finish_reason': ?finishReason,
       };
     } catch (e) {
+      // A user-initiated cancel aborts the request — surface it as stopped,
+      // not as an error.
+      if (_cancelRequested) {
+        return null;
+      }
       _emit('err', 'stream error: $e');
       return null;
     } finally {
+      _activeRequest = null;
       client?.close(force: true);
     }
   }
