@@ -627,4 +627,63 @@ void main() {
       expect(agent.busy, isFalse);
     });
   });
+
+  // ── PR4 regression tests: catalog management + MCP JSON ───────────────
+  group('PR4: catalog + MCP', () {
+    test('add and remove a custom provider', () async {
+      final err = await app.addCustomProvider(
+        name: 'Test Provider',
+        baseUrl: 'https://api.testprovider.example/v1',
+        apiKey: 'sk-test-123',
+      );
+      expect(err, isNull);
+
+      final p = app.providerById('custom-test-provider');
+      expect(p, isNotNull);
+      expect(p!.hasKey, isTrue);
+
+      // Remove it.
+      final rmErr = await app.removeCustomProvider('custom-test-provider');
+      expect(rmErr, isNull);
+      expect(app.providerById('custom-test-provider'), isNull);
+    });
+
+    test('removeCustomProvider rejects built-in providers', () async {
+      final err = await app.removeCustomProvider('openai');
+      expect(err, isNotNull);
+      expect(err, contains('built-in'));
+    });
+
+    test('addCustomMcpServer + updateCustomMcpServer', () {
+      app.addCustomMcpServer(
+        name: 'Test MCP',
+        command: 'npx',
+        args: ['-y', '@test/mcp-server'],
+      );
+      final s = app.mcpServers.firstWhere((e) => e.name == 'Test MCP');
+      expect(s.command, 'npx');
+      expect(s.args, ['-y', '@test/mcp-server']);
+      expect(s.custom, isTrue);
+
+      // Update via the edit path.
+      app.updateCustomMcpServer(
+        s,
+        command: 'uvx',
+        args: ['test-mcp'],
+      );
+      expect(s.command, 'uvx');
+      expect(s.args, ['test-mcp']);
+
+      app.removeMcpServer(s);
+      expect(app.mcpServers.any((e) => e.name == 'Test MCP'), isFalse);
+    });
+
+    test('marketplace URL normalization', () {
+      expect(app.addMarketplace('https://github.com/foo/bar'), isTrue);
+      expect(app.marketplaces, contains('foo/bar'));
+      expect(app.addMarketplace('foo/bar'), isFalse); // duplicate
+      app.removeMarketplace('foo/bar');
+      expect(app.marketplaces, isNot(contains('foo/bar')));
+    });
+  });
 }

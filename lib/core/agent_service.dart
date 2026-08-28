@@ -600,6 +600,141 @@ class AgentService extends ChangeNotifier {
         },
       },
     },
+
+    // ── DSH-harness catalog management (providers/plugins/MCP/marketplace) ──
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_list_providers',
+        'description':
+            'List all configured AI providers with their status (key present, '
+            'model count). Use when the user asks about providers.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_add_provider',
+        'description':
+            'Add a custom OpenAI-compatible provider. Use when the user asks '
+            'to add/set up a new provider (e.g. "add OpenRouter", "use a '
+            'custom API endpoint"). The api_key comes from the user message.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'name': {'type': 'string'},
+            'base_url': {
+              'type': 'string',
+              'description': 'OpenAI-compatible base URL, e.g. https://api.example.com/v1',
+            },
+            'api_key': {
+              'type': 'string',
+              'description': 'API key from the user (optional for local servers)',
+            },
+            'models': {
+              'type': 'array',
+              'items': {'type': 'string'},
+              'description': 'Initial model IDs to register',
+            },
+          },
+          'required': ['name', 'base_url'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_remove_provider',
+        'description':
+            'Remove a custom provider by id. Use when the user asks to delete '
+            'a provider they added.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'provider_id': {'type': 'string'},
+          },
+          'required': ['provider_id'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_list_plugins',
+        'description': 'List all plugins with install/enable status.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_list_mcp',
+        'description': 'List all MCP servers with connection status.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_add_mcp',
+        'description':
+            'Add a custom MCP server (command + args). Use when the user asks '
+            'to add an MCP server not in the catalog.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'name': {'type': 'string'},
+            'command': {
+              'type': 'string',
+              'description': 'e.g. npx, uvx, python3',
+            },
+            'args': {
+              'type': 'array',
+              'items': {'type': 'string'},
+              'description': 'e.g. ["-y", "@modelcontextprotocol/server-github"]',
+            },
+          },
+          'required': ['name', 'command'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_remove_mcp',
+        'description':
+            'Remove a custom MCP server by name (built-in servers can only '
+            'be disconnected).',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'name': {'type': 'string'},
+          },
+          'required': ['name'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_add_marketplace',
+        'description':
+            'Import a plugin marketplace from a GitHub repo (owner/repo with '
+            'a marketplace.json). Use when the user asks to import plugins '
+            'from a GitHub repository.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'repo': {
+              'type': 'string',
+              'description': 'owner/repo, e.g. ovidai/ovid-plugins',
+            },
+          },
+          'required': ['repo'],
+        },
+      },
+    },
     {
       'type': 'function',
       'function': {
@@ -774,6 +909,13 @@ reasoning, or extra detail when the user explicitly asks for it or the task trul
 requires it. When a task needs commands, pages or file changes, CALL THE TOOLS
 instead of describing them. Prefer many small steps. Verify results before finishing.
 If the user asks to install a plugin or MCP, use agent_install_plugin or agent_install_mcp.
+Catalog management: you can list/add/remove providers (catalog_list_providers,
+catalog_add_provider, catalog_remove_provider), list plugins/MCP servers
+(catalog_list_plugins, catalog_list_mcp), add/remove MCP servers
+(catalog_add_mcp, catalog_remove_mcp), and import plugin marketplaces from
+GitHub repos (catalog_add_marketplace). When the user asks to change provider
+settings, add a provider with their key, or manage plugins/MCP — use these
+tools to do it live, don't just explain how.
 ''';
 
     final historyStart = s.messages.length > 12 ? s.messages.length - 12 : 0;
@@ -1229,11 +1371,19 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
       case 'web_search':
         final q = args['query'] as String;
         _emit('nav', 'searching: $q');
-        return 'Web search results for "$q" would appear here. Install a search MCP for real results.';
+        try {
+          return await _webSearch(q);
+        } catch (e) {
+          return 'web search failed: $e';
+        }
       case 'generate_image':
         final prompt = args['prompt'] as String;
         _emit('shell', 'image gen: $prompt');
-        return 'Image generation for "$prompt" — use the Image Studio plugin UI for visual output.';
+        try {
+          return await _generateImage(prompt);
+        } catch (e) {
+          return 'image generation failed: $e';
+        }
       case 'read_attachment':
         final fname = args['filename'] as String;
         _emit('shell', 'reading: $fname');
@@ -1327,6 +1477,107 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
         } catch (e) {
           return 'MCP connect failed: $e';
         }
+
+      // ─── DSH-harness catalog management (providers/plugins/MCP) ──────
+      case 'catalog_list_providers':
+        _emit('think', 'listing providers');
+        final app = AppState.I;
+        return (app.providers.map((p) {
+          final key = p.hasKey ? 'key ✓' : 'no key';
+          return '${p.name} (${p.id}) — $key · ${p.models.length} models '
+              '${p.isConfigured ? '' : '· NOT CONFIGURED'}';
+        }).join('\n'));
+
+      case 'catalog_add_provider':
+        final name = args['name'] as String;
+        final baseUrl = args['base_url'] as String;
+        final apiKey = args['api_key'] as String? ?? '';
+        final models = (args['models'] as List?)
+                ?.whereType<String>()
+                .toList() ??
+            <String>[];
+        _emit('think', 'adding provider: $name');
+        final err = await AppState.I.addCustomProvider(
+          name: name,
+          baseUrl: baseUrl,
+          apiKey: apiKey,
+        );
+        if (err != null) return 'Provider add failed: $err';
+        // Optionally append models to the newly created provider.
+        if (models.isNotEmpty) {
+          final p = AppState.I.providerById('custom-${_slugFor(name)}');
+          if (p != null) {
+            for (final m in models) {
+              if (!p.models.contains(m)) p.models.add(m);
+            }
+            await AppState.I.persistProviderState();
+            AppState.I.refresh();
+          }
+        }
+        _emit('done', 'provider added: $name');
+        return 'Provider "$name" added (${models.length} models). '
+            'User can now select it in the model picker.';
+
+      case 'catalog_remove_provider':
+        final pid = args['provider_id'] as String;
+        _emit('think', 'removing provider: $pid');
+        final ok = await AppState.I.removeCustomProvider(pid);
+        if (ok != null) return 'Remove failed: $ok';
+        _emit('done', 'provider removed: $pid');
+        return 'Provider "$pid" removed.';
+
+      case 'catalog_list_plugins':
+        _emit('think', 'listing plugins');
+        final app = AppState.I;
+        return (app.plugins.map((p) =>
+                '${p.name} — ${p.installed ? 'installed' : 'available'}'
+                '${p.enabled ? ' · enabled' : ''}'))
+            .join('\n');
+
+      case 'catalog_list_mcp':
+        _emit('think', 'listing MCP servers');
+        final app = AppState.I;
+        return (app.mcpServers.map((s) =>
+                '${s.name} — ${s.connected ? 'connected' : 'disconnected'}'
+                ' · ${s.command} ${s.args.join(' ')}'))
+            .join('\n');
+
+      case 'catalog_add_mcp':
+        final name = args['name'] as String;
+        final command = args['command'] as String;
+        final mArgs = (args['args'] as List?)?.whereType<String>().toList() ??
+            <String>[];
+        _emit('think', 'adding MCP server: $name');
+        AppState.I.addCustomMcpServer(
+          name: name,
+          command: command,
+          args: mArgs,
+        );
+        _emit('done', 'MCP server added: $name');
+        return 'MCP server "$name" added. Connect it from the Plugins → MCP '
+            'section (or ask me to connect it).';
+
+      case 'catalog_remove_mcp':
+        final name = args['name'] as String;
+        _emit('think', 'removing MCP server: $name');
+        final match = AppState.I.mcpServers
+            .where((s) => s.name.toLowerCase() == name.toLowerCase())
+            .firstOrNull;
+        if (match == null) return 'MCP server not found: $name';
+        if (!match.custom) {
+          return '"$name" is a built-in server — it can be disconnected but not removed.';
+        }
+        AppState.I.removeMcpServer(match);
+        _emit('done', 'MCP server removed: $name');
+        return 'MCP server "$name" removed.';
+
+      case 'catalog_add_marketplace':
+        final repo = args['repo'] as String;
+        _emit('think', 'importing marketplace: $repo');
+        final msg = await AppState.I.fetchMarketplaceCatalog(repo);
+        AppState.I.addMarketplace(repo);
+        _emit('done', 'marketplace imported: $repo');
+        return msg;
       case 'browser_click':
         final sel = args['selector'] as String;
         final tab = _activeTab;
@@ -1491,6 +1742,70 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
     s.messages.add(Message(role: 'assistant', kind: kind, content: text));
     AppState.I.refresh();
   }
+
+  // ── REAL TOOL HANDLERS (no stubs) ─────────────────────────────────────
+
+  /// Free web search via DuckDuckGo HTML — no API key needed.
+  /// Scrapes the top result titles + snippets.
+  Future<String> _webSearch(String query) async {
+    final url = Uri.parse(
+      'https://html.duckduckgo.com/html/?q=${Uri.encodeQueryComponent(query)}',
+    );
+    final r = await HttpShim.get(
+      url,
+      headers: {'User-Agent': 'OvidAgent/1.0'},
+    );
+    if (r.status != 200) return 'search failed (${r.status})';
+    final html = utf8.decode(r.bytes, allowMalformed: true);
+    // Parse result titles + snippets from the HTML (DuckDuckGo layout).
+    final results = <String>[];
+    final resultRegex = RegExp(
+      r'<a[^>]+class="result__a"[^>]*>(.*?)</a>.*?'
+      r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
+      dotAll: true,
+    );
+    for (final m in resultRegex.allMatches(html)) {
+      if (results.length >= 8) break;
+      final title = _stripHtml(m.group(1) ?? '');
+      final snippet = _stripHtml(m.group(2) ?? '');
+      if (title.isNotEmpty) {
+        results.add('• $title\n  $snippet');
+      }
+    }
+    if (results.isEmpty) return 'No results found for "$query".';
+    return 'Web search: "$query"\n\n${results.join('\n\n')}';
+  }
+
+  /// Free image generation via Pollinations.ai — no key, no signup.
+  /// Returns a markdown image link the chat renderer shows inline.
+  Future<String> _generateImage(String prompt) async {
+    final encoded = Uri.encodeQueryComponent(prompt);
+    final url = 'https://image.pollinations.ai/prompt/$encoded';
+    // Pollinations generates on-demand — the URL IS the image. We just
+    // emit a markdown image so the chat bubble renders it.
+    _emit('done', 'image generated: $prompt');
+    return '![generated image]($url)\n\n*Generated via Pollinations.ai (free, no key).*';
+  }
+
+  /// Strip HTML tags from a snippet for plain-text display.
+  String _stripHtml(String html) {
+    return html
+        .replaceAll(RegExp(r'<[^>]+>'), '')
+        .replaceAll('&amp;', '&')
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&#39;', "'")
+        .replaceAll(RegExp(r'\s{2,}'), ' ')
+        .trim();
+  }
+
+  /// Mirror of the private _slug in state.dart — used to locate custom
+  /// providers by display name ("custom-" + slug).
+  String _slugFor(String value) => value
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+      .replaceAll(RegExp(r'^-+|-+$'), '');
 }
 
 /// Splits a byte stream into UTF-8 lines with a hard total-byte cap.

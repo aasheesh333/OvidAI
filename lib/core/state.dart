@@ -1,7 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'mcp_service.dart';
 import 'sandbox_service.dart';
 
 /// ---------- Models ----------
@@ -81,13 +85,12 @@ class PluginItem {
 /// MCP server entry — separate from plugins because lifecycle is different
 /// (running process, JSON-RPC over stdin/stdout, on-demand connect).
 class McpServer {
-  final String name;
+  String name;
   final String author;
   final String description;
   final String category; // Official / Community / Custom
-  final String command; // e.g. npx
-  final List<String>
-  args; // e.g. ['-y', '@modelcontextprotocol/server-filesystem']
+  String command; // e.g. npx
+  List<String> args; // e.g. ['-y', '@modelcontextprotocol/server-filesystem']
   final String? envHint; // env var needed, e.g. 'GITHUB_TOKEN'
   final String source; // registry.modelcontextprotocol.io | mcp.so | custom
   bool connected;
@@ -611,6 +614,34 @@ class AppState extends ChangeNotifier {
     persistProviderState();
   }
 
+  /// Remove a custom provider by id. Returns an error string on failure,
+  /// null on success.
+  Future<String?> removeCustomProvider(String providerId) async {
+    final p = providerById(providerId);
+    if (p == null) return 'Provider not found: $providerId';
+    if (!p.custom) {
+      return '"${p.name}" is a built-in provider — it cannot be removed, '
+          'only its API key can be cleared.';
+    }
+    // Clean up the stored API key.
+    try {
+      await _secureStorage.delete(key: '$_providerKeyPrefix${p.id}');
+    } catch (_) {}
+    // Clear the model from any session using it.
+    for (final s in sessions) {
+      if (s.providerId == p.id) {
+        s
+          ..providerId = null
+          ..model = 'Select a provider';
+      }
+    }
+    providers.remove(p);
+    refresh();
+    await persistProviderState();
+    await persistSessions();
+    return null;
+  }
+
   Future<void> updateProviderApiKey(
     ProviderConfig provider,
     String value,
@@ -662,10 +693,121 @@ class AppState extends ChangeNotifier {
     refresh();
   }
 
-  /// ---------- MCP servers ----------
+  /// Fetch a marketplace.json from a GitHub repo (raw.githubusercontent.com)
+  /// and merge any plugin/MCP entries into the catalog. Returns a message
+  /// describing what was imported.
+  ///
+  /// Schema (flexible — any subset of keys):
+  /// ```json
+  /// {"plugins":[{"name":"...","author":"...","description":"...",
+  ///   "version":"1.0","category":"Tool","command":"...","args":[...]}],
+  ///  "mcpServers":[{"name":"...","command":"...","args":[...],...}]}
+  /// ```
+  Future<String> fetchMarketplaceCatalog(String repo) async {
+    final normalized = repo.trim();
+    if (normalized.isEmpty) return 'Repository name is empty';
+    final parts = normalized.split('/');
+    if (parts.length < 2) {
+      return 'Expected owner/repo (e.g. ovidai/ovid-plugins)';
+    }
+    final owner = parts[0];
+    final name = parts[1];
+    final urls = [
+      'https://raw.githubusercontent.com/$owner/$name/main/marketplace.json',
+      'https://raw.githubusercontent.com/$owner/$name/master/marketplace.json',
+      'https://raw.githubusercontent.com/$owner/$name/main/plugins.json',
+      'https://raw.githubusercontent.com/$owner/$name/master/plugins.json',
+    ];
+    for (final url in urls) {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 15);
+      try {
+        final req = await client.getUrl(Uri.parse(url)).timeout(
+              const Duration(seconds: 15),
+            );
+        final res = await req.close().timeout(const Duration(seconds: 15));
+        if (res.statusCode != 200) continue;
+        // Bounded read (2 MB cap) — marketplace files are small.
+        final builder = BytesBuilder();
+        await for (final chunk in res) {
+          builder.add(chunk);
+          if (builder.length > 2 * 1024 * 1024) {
+            throw Exception('marketplace.json too large');
+          }
+        }
+        final j =
+            jsonDecode(utf8.decode(builder.takeBytes())) as Map<String, dynamic>;
+        var importedPlugins = 0;
+        var importedMcps = 0;
+        final pluginList = j['plugins'] as List?;
+        if (pluginList != null) {
+          for (final p in pluginList) {
+            if (p is! Map) continue;
+            final pname = p['name'] as String?;
+            if (pname == null) continue;
+            if (plugins.any((e) => e.name == pname)) continue;
+            plugins.add(PluginItem(
+              name: pname,
+              author: p['author'] as String? ?? owner,
+              description: p['description'] as String? ?? '',
+              version: p['version'] as String? ?? '1.0',
+              category: p['category'] as String? ?? 'Tool',
+              installed: false,
+              enabled: false,
+              installs: p['installs'] as int? ?? 0,
+            ));
+            importedPlugins++;
+          }
+        }
+        final mcpList = j['mcpServers'] as List?;
+        if (mcpList != null) {
+          for (final m in mcpList) {
+            if (m is! Map) continue;
+            final mname = m['name'] as String?;
+            if (mname == null) continue;
+            if (mcpServers.any((e) => e.name == mname)) continue;
+            mcpServers.add(McpServer(
+              name: mname,
+              author: m['author'] as String? ?? owner,
+              description: m['description'] as String? ?? '',
+              category: m['category'] as String? ?? 'Community',
+              command: m['command'] as String? ?? 'npx',
+              args: (m['args'] as List?)
+                      ?.whereType<String>()
+                      .toList() ??
+                  const [],
+              envHint: m['envHint'] as String?,
+              source: 'marketplace:$owner/$name',
+              custom: true,
+            ));
+            importedMcps++;
+          }
+        }
+        refresh();
+        return 'Imported $importedPlugins plugin(s) and $importedMcps MCP server(s) from $owner/$name';
+      } catch (_) {
+        continue;
+      } finally {
+        client.close(force: true);
+      }
+    }
+    return 'No marketplace.json found in $owner/$name (tried main, master, plugins.json)';
+  }
 
+  /// ---------- MCP servers ----------
   void toggleMcpServer(McpServer s) {
     s.connected = !s.connected;
+    if (s.connected) {
+      // Spawn the real MCP server process in the sandbox.
+      unawaited(
+        McpService.I.connect(s).then((msg) {
+          s.connected = McpService.I.isConnected(s.name);
+          refresh();
+        }),
+      );
+    } else {
+      unawaited(McpService.I.disconnect(s.name));
+    }
     refresh();
   }
 
@@ -693,6 +835,16 @@ class AppState extends ChangeNotifier {
 
   void removeMcpServer(McpServer s) {
     mcpServers.remove(s);
+    refresh();
+  }
+
+  /// Update an existing custom MCP server's command/args from edited JSON.
+  void updateCustomMcpServer(McpServer s, {
+    required String command,
+    required List<String> args,
+  }) {
+    s.command = command;
+    s.args = args;
     refresh();
   }
 

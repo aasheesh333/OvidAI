@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
@@ -830,6 +832,12 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
         leading: const BackButton(),
         title: Text(s.name),
         actions: [
+          // Pencil — edit the mcp.json config in place (user request).
+          IconButton(
+            tooltip: 'Edit config',
+            icon: const Icon(Icons.edit_outlined, size: 19),
+            onPressed: () => _editConfigJson(context, s),
+          ),
           if (s.custom)
             IconButton(
               tooltip: 'Remove server',
@@ -1013,11 +1021,183 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                       fontSize: 12, color: Aether.textFaint))),
           Expanded(
             child: Text(v,
-                style: const TextStyle(
+                style: TextStyle(
                     fontFamily: Aether.mono,
                     fontSize: 11.5,
                     color: Aether.textMuted)),
           ),
         ],
       );
+
+  /// Opens the mcp.json editor sheet — validates JSON, parses the
+  /// mcpServers entry, and updates the server command/args on save.
+  void _editConfigJson(BuildContext context, McpServer s) {
+    final app = AppState.I;
+    final ctrl = TextEditingController(text: _configJsonFor(s));
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.fromLTRB(
+          16, 16, 16, 16 + MediaQuery.of(ctx).viewInsets.bottom,
+        ),
+        child: SizedBox(
+          height: MediaQuery.of(ctx).size.height * 0.62,
+          child: _McpJsonEditorSheet(
+            controller: ctrl,
+            onSave: (command, args) {
+              app.updateCustomMcpServer(
+                s,
+                command: command,
+                args: args,
+              );
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('mcp.json saved ✓')),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _configJsonFor(McpServer s) {
+    final argsJson = s.args.isEmpty
+        ? '[]'
+        : '[${s.args.map((a) => '"$a"').join(', ')}]';
+    return '{\n'
+        '  "mcpServers": {\n'
+        '    "${s.name.toLowerCase()}": {\n'
+        '      "command": "${s.command}",\n'
+        '      "args": $argsJson'
+        '${s.envHint != null ? ',\n      "env": { "${s.envHint!}": "••••••••" }' : ''}\n'
+        '    }\n'
+        '  }\n'
+        '}';
+  }
+}
+
+/// Bottom-sheet mcp.json editor: multiline TextField + live validation.
+/// Save parses the mcpServers.{name} entry and returns command + args.
+class _McpJsonEditorSheet extends StatefulWidget {
+  final TextEditingController controller;
+  final void Function(String command, List<String> args) onSave;
+  const _McpJsonEditorSheet({
+    required this.controller,
+    required this.onSave,
+  });
+
+  @override
+  State<_McpJsonEditorSheet> createState() => _McpJsonEditorSheetState();
+}
+
+class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
+  String? _error;
+
+  void _validate() {
+    setState(() {
+      _error = _parse(widget.controller.text) == null
+          ? 'Invalid mcp.json — expected {"mcpServers": {"name": {"command": "...", "args": [...]}}}'
+          : null;
+    });
+  }
+
+  ({String command, List<String> args})? _parse(String raw) {
+    try {
+      final j = jsonDecode(raw) as Map<String, dynamic>;
+      final servers = j['mcpServers'] as Map<String, dynamic>?;
+      if (servers == null || servers.isEmpty) return null;
+      final entry = servers.values.first as Map<String, dynamic>;
+      final command = entry['command'] as String?;
+      if (command == null || command.trim().isEmpty) return null;
+      final args = (entry['args'] as List?)
+              ?.whereType<String>()
+              .toList() ??
+          <String>[];
+      return (command: command.trim(), args: args);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            const Icon(Icons.edit_outlined, size: 16, color: Aether.textMuted),
+            const SizedBox(width: 8),
+            const Text(
+              'Edit mcp.json',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+            ),
+            const Spacer(),
+            IconButton(
+              icon: const Icon(Icons.close, size: 18),
+              onPressed: () => Navigator.pop(context),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Edit the server command, args, or env. Saved config is used when the server connects.',
+          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        ),
+        const SizedBox(height: 12),
+        Expanded(
+          child: TextField(
+            controller: widget.controller,
+            maxLines: null,
+            expands: true,
+            textAlignVertical: TextAlignVertical.top,
+            style: TextStyle(fontFamily: Aether.mono, fontSize: 12),
+            decoration: InputDecoration(
+              filled: true,
+              fillColor: Aether.surfaceAlt,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: BorderSide(color: Aether.hairline),
+              ),
+            ),
+            onChanged: (_) => _validate(),
+          ),
+        ),
+        if (_error != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            _error!,
+            style: TextStyle(fontSize: 11, color: Aether.danger),
+          ),
+        ],
+        const SizedBox(height: 12),
+        FilledButton.icon(
+          style: FilledButton.styleFrom(
+            backgroundColor: Aether.accent,
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+          icon: const Icon(Icons.check, size: 16),
+          label: const Text('Save config'),
+          onPressed: () {
+            final parsed = _parse(widget.controller.text);
+            if (parsed == null) {
+              setState(() => _error =
+                  'Invalid mcp.json — check the JSON syntax and try again.');
+              return;
+            }
+            widget.onSave(parsed.command, parsed.args);
+          },
+        ),
+      ],
+    );
+  }
 }

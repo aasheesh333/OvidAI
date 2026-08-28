@@ -58,6 +58,8 @@ class SandboxService {
   }
   Directory? get root => _root;
   Directory? get rootfs => _rootfs;
+  /// Path to the proot binary (null if not installed).
+  String? get prootPath => _proot?.path;
 
   /// Step 0 — resolve writable app path.
   Future<Directory> _ensureRoot() async {
