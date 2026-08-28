@@ -24,8 +24,38 @@ class SandboxService {
   File?    _proot;        // .../ovid/sandbox/proot
   Directory? _rootfs;     // .../ovid/sandbox/rootfs
   bool _installed = false;
+  bool _checked = false;
 
   bool get isInstalled => _installed;
+
+  /// Fast path — check if a previously-completed install exists on disk.
+  ///
+  /// Called once on app start so the user is never asked to re-install
+  /// the sandbox. Verification is lazy: if the files turn out to be
+  /// broken, the first [exec] throws and callers can re-install.
+  Future<bool> checkExisting() async {
+    if (_checked) return _installed;
+    _checked = true;
+    try {
+      final root = await _ensureRoot();
+      final proot = File('${root.path}/proot');
+      final rootfs = Directory('${root.path}/rootfs');
+      if (!proot.existsSync() || !rootfs.existsSync()) return false;
+      // Rootfs must actually have content (not an empty aborted extract).
+      final hasContent = rootfs.listSync(followLinks: false).any((e) {
+        // Bin/ etc/ usr/ — a real Ubuntu base always has these.
+        final n = e.path.split('/').last;
+        return n == 'bin' || n == 'usr' || n == 'etc';
+      });
+      if (!hasContent) return false;
+      _proot = proot;
+      _rootfs = rootfs;
+      _installed = true;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
   Directory? get root => _root;
   Directory? get rootfs => _rootfs;
 

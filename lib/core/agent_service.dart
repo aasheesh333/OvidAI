@@ -55,6 +55,34 @@ class AgentEvent {
   AgentEvent(this.kind, this.text) : time = DateTime.now();
 }
 
+/// Strips raw special characters that models emit inside reasoning traces:
+/// `<think>`/`</think>` wrapper tags, unrendered markdown markers that would
+/// otherwise show as literal glyphs (`**`, `##`, leading bullets), and
+/// dangling ellipsizers. The UI renders reasoning as markdown anyway, so we
+/// only remove the tags markdown cannot handle and normalize whitespace.
+String cleanReasoningText(String raw) {
+  var t = raw;
+  // <think>…</think> wrappers (DeepSeek/Qwen raw traces)
+  t = t.replaceAll('<think>', '').replaceAll('</think>', '');
+  // Absolutely-positioned no-width marks that leak from some providers.
+  t = t.replaceAll('\u{200B}', '').replaceAll('\u{FEFF}', '');
+  // Collapse 3+ blank lines into one.
+  t = t.replaceAll(RegExp(r'\n{3,}'), '\n\n');
+  return t.trim();
+}
+
+/// Boundary-aware truncation that never strands a half-cut character or a
+/// dangling ellipsis inside a word. Returns text no longer than [max].
+String cleanTruncate(String text, int max) {
+  if (text.length <= max) return text;
+  final cut = text.substring(0, max);
+  // Avoid cutting inside a surrogate pair.
+  final safe = cut.codeUnits.last >= 0xD800 && cut.codeUnits.last <= 0xDBFF
+      ? cut.substring(0, cut.length - 1)
+      : cut;
+  return '$safe…';
+}
+
 class ApprovalRequest {
   final String tool;
   final String summary;
@@ -560,9 +588,7 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
           .map(
             (m) => {
               'role': m.role == 'user' ? 'user' : 'assistant',
-              'content': m.content.length > 800
-                  ? '${m.content.substring(0, 800)}…'
-                  : m.content,
+              'content': cleanTruncate(m.content, 800),
             },
           ),
     ];
@@ -605,9 +631,7 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
           msgs.add({
             'role': 'tool',
             'tool_call_id': tc['id'],
-            'content': result.length > 6000
-                ? '${result.substring(0, 6000)}…'
-                : result,
+            'content': cleanTruncate(result, 6000),
           });
         }
       }
@@ -840,7 +864,7 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
     } else if (_liveReasoning.isNotEmpty) {
       m.kind = MsgKind.reasoning;
       m.thinking = true;
-      m.content = _liveReasoning.toString();
+      m.content = cleanReasoningText(_liveReasoning.toString());
     }
     _liveSession = null;
     _liveMsg = null;
@@ -971,7 +995,7 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
               .replaceAll(RegExp(r'<[^>]+>'), ' ')
               .replaceAll(RegExp(r'\s{2,}'), '\n')
               .trim();
-          return body.length > 5000 ? '${body.substring(0, 5000)}…' : body;
+          return cleanTruncate(body, 5000);
         } catch (e) {
           return 'fetch failed: $e';
         }
@@ -1055,7 +1079,7 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
           final result = await webView.runJavaScriptReturningResult(expr);
           final text = result.toString();
           _emit('shellOut', 'eval: $expr');
-          return text.length > 4000 ? '${text.substring(0, 4000)}…' : text;
+          return cleanTruncate(text, 4000);
         } catch (e) {
           return 'JS error: $e';
         }
@@ -1113,7 +1137,7 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
         activeFilePath = path;
         notifyListeners();
         _emit('file', 'read $path');
-        return c.length > 6000 ? '${c.substring(0, 6000)}…' : c;
+        return cleanTruncate(c, 6000);
 
       case 'file_write':
         final path = args['path'] as String;

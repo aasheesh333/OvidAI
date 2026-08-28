@@ -211,11 +211,53 @@ class AppState extends ChangeNotifier {
     await loadProviderState();
     await loadProviderCredentials();
     await loadSessions();
+    await _loadLastSelection();
+    // Check if the sandbox was installed on a previous launch so the
+    // user is never asked to re-install the ~200 MB rootfs.
+    if (await SandboxService.I.checkExisting()) {
+      sandboxInstalled = true;
+    }
+  }
+
+  /// Last model the user picked — carried into new sessions (DSH-style
+  /// default model) and restored across app restarts.
+  String lastSelectedModel = '';
+  String? lastSelectedProviderId;
+
+  Future<void> _loadLastSelection() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      lastSelectedModel = prefs.getString(_kLastModel) ?? '';
+      lastSelectedProviderId = prefs.getString(_kLastProvider);
+      // Backfill from the currently-restored active session if nothing
+      // was persisted yet (upgrade path for existing installs).
+      if (lastSelectedModel.isEmpty) {
+        final s = activeSession;
+        if (s != null && s.model != 'Select a provider') {
+          lastSelectedModel = s.model;
+          lastSelectedProviderId = s.providerId;
+        }
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _persistLastSelection() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (lastSelectedModel.isNotEmpty) {
+        await prefs.setString(_kLastModel, lastSelectedModel);
+      }
+      if (lastSelectedProviderId != null) {
+        await prefs.setString(_kLastProvider, lastSelectedProviderId!);
+      }
+    } catch (_) {}
   }
 
   static const _kSessions = 'ovid_sessions';
   static const _kActive = 'ovid_active_session';
   static const _kProviders = 'ovid_provider_configs_v1';
+  static const _kLastModel = 'ovid_last_model';
+  static const _kLastProvider = 'ovid_last_provider';
   Future<void> _providerWrite = Future<void>.value();
   Future<void> _credentialWrite = Future<void>.value();
 
@@ -384,8 +426,12 @@ class AppState extends ChangeNotifier {
     final session = ChatSession(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       title: 'New chat',
-      model: 'Select a provider',
+      model: lastSelectedModel.isEmpty ? 'Select a provider' : lastSelectedModel,
     );
+    if (lastSelectedModel.isNotEmpty) {
+      session.providerId =
+          lastSelectedProviderId ?? _inferProviderId(lastSelectedModel);
+    }
     sessions.insert(0, session);
     activeSessionId = session.id;
     return session;
@@ -406,10 +452,19 @@ class AppState extends ChangeNotifier {
     final s = ChatSession(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       title: 'New chat',
-      model: 'Select a provider',
+      model: lastSelectedModel.isEmpty ? 'Select a provider' : lastSelectedModel,
     );
+    if (lastSelectedModel.isNotEmpty) {
+      s.providerId =
+          lastSelectedProviderId ?? _inferProviderId(lastSelectedModel);
+    }
     sessions.insert(0, s);
     activeSessionId = s.id;
+    // Restore the selected-model pointer on the provider.
+    if (s.providerId != null) {
+      final p = providerById(s.providerId);
+      if (p != null) p.selectedModel = s.model;
+    }
     notifyListeners();
     persistSessions();
   }
@@ -507,6 +562,10 @@ class AppState extends ChangeNotifier {
     s
       ..providerId = providerId
       ..model = model;
+    // Remember as the default for future sessions + restarts.
+    lastSelectedModel = model;
+    lastSelectedProviderId = providerId;
+    _persistLastSelection();
     notifyListeners();
     persistSessions();
   }
@@ -642,22 +701,22 @@ class AppState extends ChangeNotifier {
     providers.addAll([
       ProviderConfig(
         name: 'OpenAI',
-        description: 'GPT-5, o4 and the full OpenAI platform.',
+        description: 'GPT and o-series models from the OpenAI platform.',
         baseUrl: 'https://api.openai.com/v1',
-        models: ['gpt-5.2', 'o4-mini'],
+        models: ['gpt-4o', 'gpt-4o-mini', 'o3-mini'],
       ),
       ProviderConfig(
         name: 'Anthropic',
         description: 'Claude Opus, Sonnet and Haiku family.',
         baseUrl: 'https://api.anthropic.com/v1',
-        models: ['claude-opus-4-6', 'claude-sonnet-4-6'],
+        models: ['claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'claude-3-7-sonnet-20250219', 'claude-3-5-haiku-20241022'],
       ),
       ProviderConfig(
         name: 'Google Gemini',
-        description: 'Gemini 2.5 series via AI Studio (free tier available).',
+        description: 'Gemini series via AI Studio (free tier available).',
         baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
         isFree: true, // AI Studio free tier — bas API key daalo
-        models: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+        models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'],
       ),
       ProviderConfig(
         name: 'DeepSeek',
@@ -669,7 +728,7 @@ class AppState extends ChangeNotifier {
         name: 'xAI',
         description: 'Grok family from xAI.',
         baseUrl: 'https://api.x.ai/v1',
-        models: ['grok-4', 'grok-4-fast'],
+        models: ['grok-3', 'grok-3-mini'],
       ),
       ProviderConfig(
         name: 'Mistral AI',

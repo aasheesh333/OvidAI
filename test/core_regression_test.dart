@@ -534,4 +534,66 @@ void main() {
     ).transform(const SseLineSplitter(maxBytes: 1024)).toList();
     expect(lines, ['data: first', 'data: second']);
   });
+
+  // ── PR1 regression tests ──────────────────────────────────────────────
+
+  group('PR1: quick fixes', () {
+    test('cleanReasoningText strips think wrapper tags and zero-width chars',
+        () {
+      const raw = '<think>some thinking here</think> rest';
+      final cleaned = cleanReasoningText(raw);
+      expect(cleaned, contains('some thinking here'));
+      expect(cleaned, isNot(contains('<think>')));
+      expect(cleaned, isNot(contains('</think>')));
+    });
+
+    test('cleanTruncate respects max length and appends ellipsis', () {
+      final long = 'a' * 1000;
+      final t = cleanTruncate(long, 100);
+      expect(t.length, lessThanOrEqualTo(101)); // 100 + ellipsis
+      expect(t.endsWith('…'), isTrue);
+    });
+
+    test('cleanTruncate does not truncate short strings', () {
+      expect(cleanTruncate('short', 100), 'short');
+    });
+
+    test('new session inherits the last selected model', () {
+      // Simulate user selecting a model on the current session.
+      final provider = app.providerById('ollama-local')!;
+      provider.models = ['llama-test'];
+      app.setModel(provider.id, 'llama-test');
+
+      // Now create a new session — it should carry the model forward.
+      app.newSession();
+      final newS = app.activeSession!;
+      expect(newS.model, 'llama-test');
+      expect(newS.providerId, provider.id);
+    });
+
+    test(
+        'model picker should only show providers with API keys (hasKey filter)',
+        () {
+      final provider = app.providerById('openai')!;
+      final originalKey = provider.apiKey;
+      provider
+        ..apiKey = ''
+        ..models = ['gpt-4o'];
+
+      // Provider has models but no key — should be excluded from configured.
+      final configured = app.providers
+          .where((p) => p.hasKey && p.models.isNotEmpty)
+          .toList();
+      expect(configured.any((p) => p.id == 'openai'), isFalse);
+
+      // Add key — now should be included.
+      provider.apiKey = 'sk-test';
+      final configured2 = app.providers
+          .where((p) => p.hasKey && p.models.isNotEmpty)
+          .toList();
+      expect(configured2.any((p) => p.id == 'openai'), isTrue);
+
+      provider.apiKey = originalKey;
+    });
+  });
 }

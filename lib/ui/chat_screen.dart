@@ -283,8 +283,11 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
             child: AnimatedBuilder(
               animation: app,
               builder: (_, _) {
-                final providers = app.providers
-                    .where((p) => p.models.isNotEmpty)
+                // Only show providers that have an API key configured AND
+                // at least one model available. Providers without a key
+                // are collapsed into a single hint row at the bottom.
+                final configured = app.providers
+                    .where((p) => p.hasKey && p.models.isNotEmpty)
                     .where(
                       (p) =>
                           q.isEmpty ||
@@ -292,7 +295,10 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                           p.models.any((m) => m.toLowerCase().contains(q)),
                     )
                     .toList();
-                if (providers.isEmpty) {
+                final unconfigured = app.providers
+                    .where((p) => !p.hasKey && p.models.isNotEmpty)
+                    .toList();
+                if (configured.isEmpty && unconfigured.isEmpty) {
                   return Center(
                     child: Padding(
                       padding: const EdgeInsets.all(24),
@@ -311,41 +317,41 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                 return ListView.builder(
                   controller: widget.scrollController,
                   padding: const EdgeInsets.only(bottom: 20),
-                  itemCount: providers.length,
+                  itemCount: configured.length + (unconfigured.isEmpty ? 0 : 1),
                   itemBuilder: (_, i) {
-                    final p = providers[i];
-                    final models = p.models
-                        .where(
-                          (m) =>
-                              q.isEmpty ||
-                              p.name.toLowerCase().contains(q) ||
-                              m.toLowerCase().contains(q),
-                        )
-                        .toList();
-                    if (models.isEmpty) return const SizedBox.shrink();
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(18, 14, 18, 4),
-                          child: Row(
-                            children: [
-                              Text(
-                                p.name,
-                                style: const TextStyle(
-                                  fontSize: 12.5,
-                                  fontWeight: FontWeight.w700,
-                                  color: Aether.textMuted,
+                    if (i < configured.length) {
+                      final p = configured[i];
+                      final models = p.models
+                          .where(
+                            (m) =>
+                                q.isEmpty ||
+                                p.name.toLowerCase().contains(q) ||
+                                m.toLowerCase().contains(q),
+                          )
+                          .toList();
+                      if (models.isEmpty) return const SizedBox.shrink();
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(18, 14, 18, 4),
+                            child: Row(
+                              children: [
+                                Text(
+                                  p.name,
+                                  style: const TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: Aether.textMuted,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(width: 8),
-                              if (p.isFree)
-                                const Tag(
-                                  'FREE',
-                                  color: Aether.success,
-                                  filled: true,
-                                ),
-                              if (p.hasKey) ...[
+                                const SizedBox(width: 8),
+                                if (p.isFree)
+                                  const Tag(
+                                    'FREE',
+                                    color: Aether.success,
+                                    filled: true,
+                                  ),
                                 const SizedBox(width: 6),
                                 const Tag(
                                   'KEY',
@@ -353,12 +359,35 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                                   filled: true,
                                 ),
                               ],
-                            ],
+                            ),
                           ),
-                        ),
-                        for (final m in models)
-                          _ModelTile(providerId: p.id, model: m),
-                      ],
+                          for (final m in models)
+                            _ModelTile(providerId: p.id, model: m),
+                        ],
+                      );
+                    }
+                    // Hint row for providers without keys.
+                    return Padding(
+                      padding: const EdgeInsets.fromLTRB(18, 20, 18, 8),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.key_off,
+                            size: 14,
+                            color: Aether.textFaint,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              '${unconfigured.map((p) => p.name).join(', ')} — add API keys in Settings → Providers to use these models.',
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: Aether.textFaint,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     );
                   },
                 );
@@ -620,25 +649,22 @@ class _MessageView extends StatelessWidget {
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const SizedBox(
-              width: 12,
-              height: 12,
-              child: CircularProgressIndicator(
-                strokeWidth: 1.5,
-                color: Aether.accent,
+            const Padding(
+              padding: EdgeInsets.only(top: 2),
+              child: SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.5,
+                  color: Aether.accent,
+                ),
               ),
             ),
             const SizedBox(width: 9),
             Flexible(
-              child: Text(
-                m.content,
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontStyle: FontStyle.italic,
-                  color: Aether.textMuted,
-                ),
-              ),
+              child: _DshMarkdown(content: m.content),
             ),
           ],
         ),
