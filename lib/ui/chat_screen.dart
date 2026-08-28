@@ -70,13 +70,46 @@ class _ChatScreenState extends State<ChatScreen>
                 icon: const Icon(Icons.code, size: 19),
                 onPressed: () => openStudio(context),
               ),
-              IconButton(
-                tooltip: 'Browser — agent & login',
-                visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.public, size: 19),
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const BrowserScreen()),
-                ),
+              // Browser button with agent-activity status dot (top-right).
+              AnimatedBuilder(
+                animation: AgentService.I,
+                builder: (_, _) {
+                  final a = AgentService.I;
+                  final dotColor = a.browserBusy
+                      ? Aether.accent
+                      : (a.browserReady ? Aether.success : Aether.textFaint);
+                  return Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      IconButton(
+                        tooltip: 'Browser — agent & login',
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(Icons.public, size: 19),
+                        onPressed: () => Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const BrowserScreen(),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        top: 10,
+                        right: 10,
+                        child: Container(
+                          width: 7,
+                          height: 7,
+                          decoration: BoxDecoration(
+                            color: dotColor,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: Aether.bg,
+                              width: 1.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
               ),
               IconButton(
                 tooltip: 'New session',

@@ -257,7 +257,7 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
                     await Navigator.of(context).push(
                       MaterialPageRoute(
                         builder: (_) => BrowserScreen(
-                          initialUrl: uri.toString(),
+                          openUrl: uri.toString(),
                           agentControlled: false,
                         ),
                       ),

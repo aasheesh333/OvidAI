@@ -4,12 +4,26 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show IconData, Icons, Color;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../core/theme.dart';
 import 'state.dart';
 import 'sandbox_service.dart';
 import 'github_service.dart';
 import 'repo_cache.dart';
+
+/// A persistent browser tab — owns its WebView controller lazily so the
+/// page state survives across BrowserScreen open/close cycles.
+class BrowserTab {
+  String url;
+  String? title;
+  bool loading = false;
+  int progress = 0;
+  WebViewController? controller;
+  bool loadedOnce = false;
+
+  BrowserTab({required this.url});
+}
 
 /// ═══════════════════════════════════════════════════════════════════
 /// AGENT ACCESS MODES (Codex-style)
@@ -125,18 +139,145 @@ class AgentService extends ChangeNotifier {
   String? browserPageText;
   String? previewFile; // local path to index.html for WebView
 
-  /// Live WebView binding (set by BrowserScreen) — agent can drive it.
-  final List<WebViewController> _webViews = [];
-  WebViewController? get _webView => _webViews.lastOrNull;
+  // ── PERSISTENT BROWSER (singleton tabs owned by the agent service) ────
+  // The WebView controllers live here — OUTLIVES any BrowserScreen route.
+  // The browser is pre-warmed once on first launch and never reloads when
+  // the user re-opens the panel (state survives), DSH-web style.
+  final List<BrowserTab> browserTabs = [];
+  int activeTabIndex = 0;
+  bool browserBusy = false; // true while an agent browser tool is running
+  static const _kBrowserTabs = 'ovid_browser_tabs';
+  static const _kBrowserActiveTab = 'ovid_browser_active_tab';
+  static const _defaultBrowserUrl = 'https://www.google.com';
 
+  /// True once the browser has ever been opened/pre-warmed in this launch.
+  bool get browserReady => browserTabs.isNotEmpty;
+
+  BrowserTab get _activeTab {
+    if (browserTabs.isEmpty) _newTabInternal(_defaultBrowserUrl);
+    if (activeTabIndex >= browserTabs.length) activeTabIndex = 0;
+    return browserTabs[activeTabIndex];
+  }
+
+  BrowserTab _newTabInternal(String url) {
+    final tab = BrowserTab(url: url);
+    browserTabs.add(tab);
+    activeTabIndex = browserTabs.length - 1;
+    return tab;
+  }
+
+  /// Pre-warm the browser once at app launch so it's instantly ready.
+  /// Called from main() — safe to call repeatedly (no-op after first).
+  Future<void> prewarmBrowser() async {
+    if (browserTabs.isNotEmpty) return;
+    try {
+      // Restore last-session tabs if available.
+      final restored = await _restoreBrowserTabs();
+      if (restored) return;
+      _newTabInternal(_defaultBrowserUrl);
+    } catch (_) {
+      if (browserTabs.isEmpty) _newTabInternal(_defaultBrowserUrl);
+    }
+  }
+
+  Future<bool> _restoreBrowserTabs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final urls = prefs.getStringList(_kBrowserTabs);
+      if (urls == null || urls.isEmpty) return false;
+      for (final u in urls) {
+        browserTabs.add(BrowserTab(url: u));
+      }
+      activeTabIndex = prefs.getInt(_kBrowserActiveTab) ?? 0;
+      if (activeTabIndex >= browserTabs.length) activeTabIndex = 0;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _persistBrowserTabs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(
+        _kBrowserTabs,
+        browserTabs.map((t) => t.url).toList(),
+      );
+      await prefs.setInt(_kBrowserActiveTab, activeTabIndex);
+    } catch (_) {}
+  }
+
+  /// User-facing: open a new tab.
+  void newBrowserTab([String url = _defaultBrowserUrl]) {
+    _newTabInternal(url);
+    _persistBrowserTabs();
+    notifyListeners();
+  }
+
+  /// User-facing: close tab at index. Keeps at least one tab alive.
+  void closeBrowserTab(int index) {
+    if (index < 0 || index >= browserTabs.length) return;
+    browserTabs.removeAt(index);
+    if (browserTabs.isEmpty) {
+      _newTabInternal(_defaultBrowserUrl);
+    } else if (activeTabIndex >= browserTabs.length) {
+      activeTabIndex = browserTabs.length - 1;
+    }
+    _persistBrowserTabs();
+    notifyListeners();
+  }
+
+  /// User/agent-facing: switch the active tab (agent tools target this).
+  void selectBrowserTab(int index) {
+    if (index < 0 || index >= browserTabs.length) return;
+    activeTabIndex = index;
+    _persistBrowserTabs();
+    notifyListeners();
+  }
+
+  /// Agent-facing: get (creating if needed) the controller for a tab.
+  WebViewController controllerForTab(BrowserTab tab) {
+    tab.controller ??= WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageStarted: (url) {
+            tab.url = url;
+            tab.loading = true;
+            tab.progress = 0;
+            notifyListeners();
+          },
+          onProgress: (p) {
+            tab.progress = p;
+            notifyListeners();
+          },
+          onPageFinished: (url) {
+            tab
+              ..url = url
+              ..loading = false;
+            browserUrl = url;
+            notifyListeners();
+            _persistBrowserTabs();
+          },
+          onWebResourceError: (_) {
+            tab.loading = false;
+          },
+        ),
+      );
+    if (!tab.loadedOnce) {
+      tab.loadedOnce = true;
+      tab.controller!.loadRequest(Uri.parse(tab.url));
+    }
+    return tab.controller!;
+  }
+
+  /// Back-compat for existing agent tools (browser_open etc.).
   void bindWebView(WebViewController controller) {
-    _webViews
-      ..remove(controller)
-      ..add(controller);
+    // No-op: controllers are now owned by AgentService tabs directly.
   }
 
   void unbindWebView(WebViewController controller) {
-    _webViews.remove(controller);
+    // No-op: see bindWebView.
   }
 
   /// Studio live buffers (path → content) written by repo_write,
@@ -905,16 +1046,19 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
         );
         if (!ok) return 'DENIED by user';
         _emit('nav', url);
+        browserBusy = true;
+        notifyListeners();
         try {
-          // Drive the live WebView if the Browser screen is open.
-          if (_webView != null) {
-            _webView!.loadRequest(Uri.parse(url));
-            browserUrl = url;
-            notifyListeners();
-            _emit('page', 'loading $url');
-            // Give the webview time to load before reading text.
-            await Future.delayed(const Duration(seconds: 2));
-          }
+          // Drive the persistent browser tab (creates one if needed).
+          final tab = _activeTab;
+          tab.controller ??= controllerForTab(tab);
+          tab.controller!.loadRequest(Uri.parse(url));
+          tab.url = url;
+          browserUrl = url;
+          notifyListeners();
+          _emit('page', 'loading $url');
+          // Give the webview time to load before reading text.
+          await Future.delayed(const Duration(seconds: 2));
           final r = await HttpShim.get(
             Uri.parse(url),
             headers: {'User-Agent': 'OvidAgent/1.0'},
@@ -933,12 +1077,15 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
               .replaceAll(RegExp(r'\s{2,}'), '\n')
               .trim();
           browserUrl = url;
-          browserPageText = body.length > 5000 ? body.substring(0, 5000) : body;
+          browserPageText = cleanTruncate(body, 5000);
           notifyListeners();
           _emit('page', '${r.status} · ${body.length} chars');
           return browserPageText!;
         } catch (e) {
           return 'fetch failed: $e';
+        } finally {
+          browserBusy = false;
+          notifyListeners();
         }
 
       // ─── Chrome DevTools MCP tools (inbuilt WebView) ─────────────────
@@ -950,15 +1097,14 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
           'Browser me ye page khulega:\n$url',
         );
         if (!ok) return 'DENIED by user';
-        final webView = _webView;
-        if (webView == null) {
-          return 'Browser screen not open. Open the Browser panel first.';
-        }
-        webView.loadRequest(Uri.parse(url));
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        tab.controller!.loadRequest(Uri.parse(url));
+        tab.url = url;
         browserUrl = url;
         _emit('nav', url);
         await Future.delayed(const Duration(seconds: 2));
-        final title = await webView.getTitle();
+        final title = await tab.controller!.getTitle();
         return 'Navigated to $url\nTitle: ${title ?? "unknown"}';
 
       // ─── Plugin tools (dynamic, installed plugins) ────────────────────
@@ -1065,18 +1211,20 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
         }
       case 'browser_click':
         final sel = args['selector'] as String;
-        final webView = _webView;
-        if (webView == null) return 'Browser screen not open.';
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
         final js = 'document.querySelector(${jsonEncode(sel)})?.click()';
-        await webView.runJavaScript(js);
+        await tab.controller!.runJavaScript(js);
         _emit('shell', 'click: $sel');
         return 'Clicked $sel (or attempted)';
       case 'browser_evaluate':
         final expr = args['expression'] as String;
-        final webView = _webView;
-        if (webView == null) return 'Browser screen not open.';
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
         try {
-          final result = await webView.runJavaScriptReturningResult(expr);
+          final result = await tab.controller!.runJavaScriptReturningResult(
+            expr,
+          );
           final text = result.toString();
           _emit('shellOut', 'eval: $expr');
           return cleanTruncate(text, 4000);
@@ -1084,13 +1232,11 @@ If the user asks to install a plugin or MCP, use agent_install_plugin or agent_i
           return 'JS error: $e';
         }
       case 'browser_read':
-        final webView = _webView;
-        if (webView == null) {
-          return 'Browser screen not open. Call browser_navigate first.';
-        }
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
         try {
-          final title = await webView.getTitle();
-          final result = await webView.runJavaScriptReturningResult(
+          final title = await tab.controller!.getTitle();
+          final result = await tab.controller!.runJavaScriptReturningResult(
             'document.body.innerText.substring(0,5000)',
           );
           final raw = result.toString();

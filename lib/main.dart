@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'core/agent_service.dart';
 import 'core/firebase_service.dart';
 import 'core/github_service.dart';
 import 'core/state.dart';
@@ -14,6 +15,9 @@ Future<void> main() async {
   // Firebase is optional: if google-services.json isn't injected (local debug),
   // FirebaseService degrades to offline no-ops and the app still runs.
   await FirebaseService.I.initialize();
+  // Pre-warm the persistent browser so it is ready the moment the user (or
+  // the agent) opens it — restores last-session tabs, never reloads on open.
+  unawaited(AgentService.I.prewarmBrowser());
   runApp(const OvidApp());
   WidgetsBinding.instance.addPostFrameCallback((_) {
     unawaited(GitHubService.I.initialize());
