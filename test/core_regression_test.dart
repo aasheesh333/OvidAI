@@ -685,5 +685,42 @@ void main() {
       app.removeMarketplace('foo/bar');
       expect(app.marketplaces, isNot(contains('foo/bar')));
     });
+
+    test('usage log: append persists and aggregates', () async {
+      final before = app.usageLog.length;
+      app.appendUsage(UsageEntry(
+        time: DateTime.now(),
+        providerId: 'openai',
+        providerName: 'OpenAI',
+        model: 'gpt-4o',
+        promptTokens: 100,
+        completionTokens: 50,
+        totalTokens: 150,
+        duration: const Duration(milliseconds: 500),
+      ));
+      app.appendUsage(UsageEntry(
+        time: DateTime.now(),
+        providerId: 'openai',
+        providerName: 'OpenAI',
+        model: 'gpt-4o',
+        promptTokens: 200,
+        completionTokens: 100,
+        totalTokens: 300,
+        duration: const Duration(milliseconds: 700),
+      ));
+      expect(app.usageLog.length, before + 2);
+
+      // Daily activity should be non-degenerate after entries.
+      final daily = app.dailyActivityFor('openai');
+      expect(daily.length, 14);
+      expect(daily.any((d) => d > 0.05), isTrue);
+
+      // JSON round-trip.
+      final e = app.usageLog.last;
+      final j = e.toJson();
+      final back = UsageEntry.fromJson(j);
+      expect(back.model, e.model);
+      expect(back.totalTokens, e.totalTokens);
+    });
   });
 }

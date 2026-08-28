@@ -60,6 +60,52 @@ String _slug(String value) => value
 
 String _baseModel(String value) => value.split('·').first.trim();
 
+/// One metered model call — appended by the agent loop per request.
+/// Persisted (capped history) and aggregated by the Usage screen.
+class UsageEntry {
+  final DateTime time;
+  final String providerId;
+  final String providerName;
+  final String model;
+  final int promptTokens;
+  final int completionTokens;
+  final int totalTokens;
+  final Duration duration;
+
+  UsageEntry({
+    required this.time,
+    required this.providerId,
+    required this.providerName,
+    required this.model,
+    required this.promptTokens,
+    required this.completionTokens,
+    required this.totalTokens,
+    required this.duration,
+  });
+
+  Map<String, dynamic> toJson() => {
+        't': time.toIso8601String(),
+        'pid': providerId,
+        'pn': providerName,
+        'm': model,
+        'pt': promptTokens,
+        'ct': completionTokens,
+        'tt': totalTokens,
+        'd': duration.inMilliseconds,
+      };
+
+  factory UsageEntry.fromJson(Map<String, dynamic> j) => UsageEntry(
+        time: DateTime.tryParse(j['t'] as String? ?? '') ?? DateTime.now(),
+        providerId: j['pid'] as String? ?? '',
+        providerName: j['pn'] as String? ?? '',
+        model: j['m'] as String? ?? '',
+        promptTokens: j['pt'] as int? ?? 0,
+        completionTokens: j['ct'] as int? ?? 0,
+        totalTokens: j['tt'] as int? ?? 0,
+        duration: Duration(milliseconds: j['d'] as int? ?? 0),
+      );
+}
+
 class PluginItem {
   final String name;
   final String author;
@@ -215,6 +261,7 @@ class AppState extends ChangeNotifier {
     await loadProviderCredentials();
     await loadSessions();
     await _loadLastSelection();
+    await _loadUsage();
     // Check if the sandbox was installed on a previous launch so the
     // user is never asked to re-install the ~200 MB rootfs.
     if (await SandboxService.I.checkExisting()) {
@@ -665,6 +712,68 @@ class AppState extends ChangeNotifier {
 
   String fmtInstalls(int n) =>
       n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}k' : '$n';
+
+  /// ---------- Usage log (real token metering) ----------
+  static const _kUsage = 'ovid_usage_log';
+  final List<UsageEntry> usageLog = [];
+  static const _maxUsageEntries = 2000;
+
+  Future<void> _loadUsage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getStringList(_kUsage);
+      if (raw == null) return;
+      usageLog
+        ..clear()
+        ..addAll(
+          raw.map((e) {
+            try {
+              return UsageEntry.fromJson(
+                jsonDecode(e) as Map<String, dynamic>,
+              );
+            } catch (_) {
+              return null;
+            }
+          }).whereType<UsageEntry>(),
+        );
+    } catch (_) {}
+  }
+
+  Future<void> _persistUsage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      // Keep the most recent [_maxUsageEntries].
+      final recent = usageLog.length > _maxUsageEntries
+          ? usageLog.sublist(usageLog.length - _maxUsageEntries)
+          : usageLog;
+      await prefs.setStringList(
+        _kUsage,
+        recent.map((e) => jsonEncode(e.toJson())).toList(),
+      );
+    } catch (_) {}
+  }
+
+  void appendUsage(UsageEntry e) {
+    usageLog.add(e);
+    _persistUsage();
+    refresh();
+  }
+
+  /// Last N days of relative daily activity (heights 0..1) for a provider,
+  /// used by the usage charts.
+  List<double> dailyActivityFor(String providerId, {int days = 14}) {
+    final now = DateTime.now();
+    final counts = List<int>.filled(days, 0);
+    for (final e in usageLog) {
+      if (providerId.isNotEmpty && e.providerId != providerId) continue;
+      final age = now.difference(e.time).inDays;
+      if (age < 0 || age >= days) continue;
+      counts[days - 1 - age] += e.totalTokens.clamp(1, 1 << 40);
+    }
+    final max = counts.reduce((a, b) => a > b ? a : b);
+    if (max == 0) return List<double>.filled(days, 0.05);
+    return counts.map((c) => (c / max).clamp(0.05, 1.0)).toList();
+  }
 
   /// ---------- Marketplaces (Claude Code style git repos) ----------
 

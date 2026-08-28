@@ -939,6 +939,22 @@ tools to do it live, don't just explain how.
         }
         _resetLiveBuffers();
         final msg = await _callLlm(p, msgs, s);
+        // Meter tokens for the Usage screen (real data, DSH StatsLine style).
+        if (msg != null) {
+          final u = msg['usage'] as Map<String, dynamic>?;
+          AppState.I.appendUsage(
+            UsageEntry(
+              time: DateTime.now(),
+              providerId: p.id,
+              providerName: p.name,
+              model: _baseModelOf(p.selectedModel ?? ''),
+              promptTokens: (u?['prompt_tokens'] as num?)?.toInt() ?? 0,
+              completionTokens: (u?['completion_tokens'] as num?)?.toInt() ?? 0,
+              totalTokens: (u?['total_tokens'] as num?)?.toInt() ?? 0,
+              duration: Duration.zero,
+            ),
+          );
+        }
         if (_cancelRequested) {
           // Surface a clean "stopped" message instead of the failure text.
           _finalizeLiveStopped();
@@ -1115,6 +1131,7 @@ tools to do it live, don't just explain how.
       final reasoningBuf = StringBuffer();
       final tcAcc = <int, Map<String, dynamic>>{};
       String? finishReason;
+      Map<String, dynamic>? usage;
 
       await for (final raw
           in res
@@ -1136,6 +1153,10 @@ tools to do it live, don't just explain how.
         } catch (_) {
           continue; // malformed chunk — skip, keep stream alive
         }
+        // Usage chunk — some providers send it with empty choices, so
+        // parse it BEFORE the choices guard.
+        final u = j['usage'];
+        if (u is Map<String, dynamic>) usage = u;
         final choices = j['choices'] as List?;
         if (choices == null || choices.isEmpty) continue;
         final choice = choices[0] as Map<String, dynamic>;
@@ -1200,6 +1221,7 @@ tools to do it live, don't just explain how.
           'reasoning_content': reasoningBuf.toString(),
         if (tcAcc.isNotEmpty) 'tool_calls': tcAcc.values.toList(),
         'finish_reason': ?finishReason,
+        'usage': ?usage,
       };
     } catch (e) {
       // A user-initiated cancel aborts the request — surface it as stopped,
@@ -1806,6 +1828,13 @@ tools to do it live, don't just explain how.
       .toLowerCase()
       .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
       .replaceAll(RegExp(r'^-+|-+$'), '');
+
+  /// Strip the " · High/Low/Medium" effort suffix from a model label.
+  String _baseModelOf(String raw) {
+    final m = RegExp(r'·\s*(low|medium|high)$', caseSensitive: false)
+        .firstMatch(raw);
+    return m != null ? raw.substring(0, m.start).trim() : raw;
+  }
 }
 
 /// Splits a byte stream into UTF-8 lines with a hard total-byte cap.
