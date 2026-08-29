@@ -217,6 +217,21 @@ class SandboxService {
         defaultValue: 'local-dev',
       );
       onPhase(0, 0.0, 'ovid build ........ $buildStamp');
+      // ── ABI check — the proot sandbox ships arm64 binaries only ──
+      final abi = Platform.version;
+      final is64Bit = _isArm64Device();
+      onPhase(
+        0,
+        0.1,
+        is64Bit ? 'device ............ arm64 ✓' : 'device ............ 32-bit',
+      );
+      if (!is64Bit) {
+        throw Exception(
+            'Ye device 32-bit hai — proot Ubuntu sandbox arm64 devices pe '
+            'chalta hai. Phone terminal (General mode) phir bhi kaam karega: '
+            'AI koi bhi toybox command chala sakta hai. 64-bit phone pe '
+            'Studio mode ka full sandbox milega. ($abi)');
+      }
       final stat = await root.stat();
       onPhase(0, 0.25, 'target dir ........ ${statChanged(stat)} ✓');
       final storage = await _freeMb(root);
@@ -487,6 +502,15 @@ class SandboxService {
   String statChanged(FileStat s) => s.type == FileSystemEntityType.directory
       ? 'writable'
       : 'error';
+
+  /// True if the running device is arm64/aarch64 (or x86_64 emulator).
+  /// The proot binary + Ubuntu rootfs we ship are arm64-only.
+  bool _isArm64Device() {
+    // Platform.version on Android looks like:
+    // "3.18.84-… aarch64 Android 6.0 …" — kernel arch is in there.
+    final v = Platform.version.toLowerCase();
+    return v.contains('aarch64') || v.contains('x86_64');
+  }
 
   Future<int?> _freeMb(Directory dir) async {
     try {

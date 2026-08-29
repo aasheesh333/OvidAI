@@ -29,6 +29,9 @@ class MainActivity : FlutterActivity() {
                         // Probe: write a tiny script in app data and try to
                         // exec it via /system/bin/sh. If it works, the W^X
                         // restriction is not enforced on this device/ROM.
+                        // Android 6-9 (API < 29): restriction doesn't exist
+                        // — always allowed, but we probe anyway for ROMs
+                        // with custom SELinux policies (MIUI etc.).
                         val script = File(applicationInfo.dataDir, "ovid_exec_probe.sh")
                         script.writeText("#!/system/bin/sh\nexit 0\n")
                         script.setExecutable(true)

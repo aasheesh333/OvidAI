@@ -28,8 +28,10 @@ android {
 
     defaultConfig {
         applicationId = "com.dhanuk.ovidai"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
+        // Android 6.0+ (API 23) — Flutter default is 24; we support one
+        // version lower for broad device coverage.  The phone terminal
+        // tier works everywhere; the proot sandbox additionally requires
+        // an arm64 device (checked at runtime with a friendly fallback).
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
