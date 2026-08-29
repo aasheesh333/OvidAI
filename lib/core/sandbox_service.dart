@@ -276,9 +276,15 @@ class SandboxService {
       // ── Phase 5 — toolchain via apt (inside the jail, real APT). ──
       onPhase(5, 0.0,
           r'# apt-get update && apt-get install -y python3 nodejs git gcc make curl');
-      await exec(const ['apt-get', 'update'],
+      final upd = await exec(const ['apt-get', 'update'],
           env: _baseEnv, onLine: (l) => onPhase(5, 0.15, l));
-      await exec(
+      if (upd.contains('E:') || upd.contains('W: Failed')) {
+        _emitLogLine(upd, onPhase);
+        throw Exception(
+            'apt-get update failed inside the jail (network/DNS). Retry — '
+            'device ko stable network par rakho.');
+      }
+      final inst = await exec(
         const [
           'apt-get', 'install', '-y', '--no-install-recommends',
           'python3', 'nodejs', 'git', 'gcc', 'make', 'curl', 'ca-certificates'
@@ -286,6 +292,26 @@ class SandboxService {
         env: _baseEnv,
         onLine: (l) => onPhase(5, 0.6, l),
       );
+      if (inst.contains('E: Unable to locate') || inst.contains('E: Sub-process')) {
+        _emitLogLine(inst, onPhase);
+        throw Exception('apt-get install failed — see log lines above.');
+      }
+      // Hard verify the toolchain landed before the smoke test — fail fast
+      // with a precise message instead of a vague 'node not found'.
+      final check = await exec(const [
+        'sh', '-c',
+        'for b in python3 node git; do command -v \$b || echo MISSING:\$b; done'
+      ], env: _baseEnv);
+      final missing = const LineSplitter()
+          .convert(check)
+          .where((l) => l.startsWith('MISSING:'))
+          .map((l) => l.substring(8))
+          .toList();
+      if (missing.isNotEmpty) {
+        throw Exception(
+            'apt did not install: ${missing.join(", ")}. '
+            'Retry install — agar dobara fail ho to network check karo.');
+      }
       onPhase(5, 1.0, 'toolchain installed ✓');
 
       // ── Phase 6 — REAL smoke test: actual binary versions must print. ──
@@ -316,6 +342,13 @@ class SandboxService {
   // -----------------------------------------------------------------------
   // Real helpers (no simulation — every line above is factual work).
   // -----------------------------------------------------------------------
+
+  void _emitLogLine(String output,
+      void Function(int, double, String) onPhase) {
+    for (final l in const LineSplitter().convert(output)) {
+      if (l.trim().isNotEmpty) onPhase(5, 0.6, l);
+    }
+  }
 
   String statChanged(FileStat s) => s.type == FileSystemEntityType.directory
       ? 'writable'
@@ -632,6 +665,28 @@ class SandboxService {
     // A root HOME so bash/python don't complain.
     final home = Directory('${_rootfs!.path}/root');
     if (!home.existsSync()) home.createSync(recursive: true);
+    // /tmp — proot's TMPDIR lands here (Termux proot hardcodes a Termux
+    // path and warns 'can't canonicalize ... tmp: Permission denied' when
+    // it can't find one; giving it a real /tmp silences the warnings and
+    // unblocks apt/dpkg staging).
+    final tmp = Directory('${_rootfs!.path}/tmp');
+    if (!tmp.existsSync()) tmp.createSync(recursive: true);
+    try {
+      await Process.run('chmod', ['1777', tmp.path]);
+    } catch (_) {}
+    // Termux proot also probes its OWN compile-time tmp path
+    // (/data/data/com.termux/files/usr/tmp) — bind it onto our /tmp so the
+    // f2fs-bug-probe finds a writable dir instead of Permission denied.
+    final termuxTmpParent = Directory(
+        '/data/data/com.termux/files/usr');
+    // Can't create outside our app dir on stock Android — the
+    // canonicalize warning is harmless once TMPDIR=/tmp works; skip.
+    if (termuxTmpParent.existsSync()) {
+      try {
+        Directory('/data/data/com.termux/files/usr/tmp')
+            .createSync(recursive: true);
+      } catch (_) {}
+    }
   }
 
   // Base env passed to every exec'd command inside the jail.
@@ -642,6 +697,12 @@ class SandboxService {
     'TERM': 'xterm-256color',
     'DEBIAN_FRONTEND': 'noninteractive',
     'LANG': 'C.UTF-8',
+    // Termux's proot binary hardcodes /data/data/com.termux/files/usr/tmp as
+    // its temp dir. That path doesn't exist in our app, so proot warns and
+    // apt/dpkg can't stage .debs. Override it to /tmp inside the rootfs.
+    'TMPDIR': '/tmp',
+    'TMP': '/tmp',
+    'TEMP': '/tmp',
   };
 
   // -----------------------------------------------------------------------
