@@ -272,12 +272,43 @@ class SandboxService {
       rootfsGz.deleteSync();
       onPhase(3, 1.0, 'configuring base system ✓');
 
+      // ── Exec-bit enforcement ─────────────────────────────────────────
+      // The tar-header chmod batching misses binaries whose entries were
+      // HARDLINKS (File.copySync drops the exec bit → mode 644) and any
+      // entry whose header lacked x bits. proot then fails every guest
+      // exec with 'execve("/usr/bin/sh"): Permission denied'. Belt-and-
+      // braces: blanket-chmod the standard bin dirs so every Ubuntu
+      // binary is executable, regardless of how it was extracted.
+      onPhase(3, 0.95, 'enforcing exec bits on bin dirs …');
+      for (final d in const ['usr/bin', 'bin', 'usr/sbin', 'sbin']) {
+        final dir = Directory('${_rootfs!.path}/$d');
+        if (dir.existsSync()) {
+          try {
+            await Process.run('chmod', ['-R', '0755', dir.path]);
+          } catch (_) {}
+        }
+      }
+      onPhase(3, 1.0, 'configuring base system ✓');
+
       // ── Phase 4 — first boot (DNS + resolv + hostname). ──
       onPhase(4, 0.0, r'$ ovid sandbox --boot');
       await _writeBootstrapConfigs();
       onPhase(4, 0.5, 'creating user workspace ✓');
       onPhase(4, 0.8, 'dns + locale ✓');
       onPhase(4, 1.0, 'ubuntu 24.04 lts running ✓');
+
+      // ── Early exec sanity — catch permission problems HERE, not at
+      // the smoke test.  `exec()` now throws on proot errors, so a bad
+      // chmod shows up as "sandbox exec sanity failed" with the real
+      // proot output instead of 'node not found' two phases later.
+      onPhase(4, 1.0, r'$ sh -c "echo exec-ok"  (sanity probe)');
+      final sanity =
+          await exec(const ['sh', '-c', 'echo ovid-exec-ok'], env: _baseEnv);
+      if (!sanity.contains('ovid-exec-ok')) {
+        throw Exception(
+            'sandbox exec sanity failed: $sanity');
+      }
+      onPhase(4, 1.0, 'sh exec sanity ✓');
 
       // ── Phase 5 — toolchain via apt (inside the jail, real APT). ──
       onPhase(5, 0.0,
@@ -779,6 +810,16 @@ class SandboxService {
       for (final l in const LineSplitter().convert(out)) {
         onLine(l);
       }
+    }
+    // Surface proot-level failures immediately — Phase-5 string matching
+    // used to silently pass when execve() failed ('E:' never appears in
+    // the output). Any 'proot error'/non-zero exec couples with the
+    // combined output into an actionable exception.
+    final prootErr = out.contains('proot error') ||
+        out.contains('fatal error: see');
+    if (prootErr ||
+        (result.exitCode != 0 && out.contains('Permission denied'))) {
+      throw Exception('proot exec failed: ${out.trim()}');
     }
     if (result.exitCode != 0 && out.trim().isEmpty) {
       throw Exception('command exited ${result.exitCode} (no output)');
