@@ -9,6 +9,7 @@ import 'package:http/testing.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/github_service.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
+import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -895,6 +896,68 @@ void main() {
       final a = AgentService.I;
       a.setMode(AgentMode.auto);
       expect(a.mode, AgentMode.auto);
+    });
+  });
+
+  group('PR8: DSH parity — goals, schedules, memory, theme', () {
+    test('ChatSession.goal round-trips through JSON', () {
+      final s = ChatSession(id: 'g1', title: 't', model: 'm');
+      s.goal = {
+        'objective': 'build the feature',
+        'status': 'active',
+        'round': 3,
+        'progressLog': ['r1: started', 'r2: tests pass'],
+        'createdAt': '2026-08-29T00:00:00',
+      };
+      final restored = ChatSession.fromJson(s.toJson());
+      expect(restored.goal?['objective'], 'build the feature');
+      expect(restored.goal?['round'], 3);
+      expect((restored.goal?['progressLog'] as List).length, 2);
+    });
+
+    test('ChatSession.schedules round-trip through JSON', () {
+      final s = ChatSession(id: 's1', title: 't', model: 'm');
+      s.schedules.add({
+        'id': 'sch-1',
+        'prompt': 'check the build',
+        'fireAt': '2026-08-29T12:00:00',
+        'every': 300,
+      });
+      final restored = ChatSession.fromJson(s.toJson());
+      expect(restored.schedules.length, 1);
+      expect(restored.schedules.first['id'], 'sch-1');
+      expect(restored.schedules.first['every'], 300);
+    });
+
+    test('MemoryItem round-trips through JSON', () {
+      final m = MemoryItem(
+        id: 'm1',
+        content: 'user prefers Hindi',
+        createdAt: DateTime(2026, 8, 29),
+      );
+      final restored = MemoryItem.fromJson(m.toJson());
+      expect(restored.content, 'user prefers Hindi');
+      expect(restored.createdAt, DateTime(2026, 8, 29));
+    });
+
+    test('Aether palette flips with Aether.dark', () {
+      Aether.dark = true;
+      final darkBg = Aether.bg;
+      final darkText = Aether.text;
+      Aether.dark = false;
+      final lightBg = Aether.bg;
+      final lightText = Aether.text;
+      Aether.dark = true; // restore default
+      expect(darkBg, isNot(lightBg));
+      expect(darkText, isNot(lightText));
+    });
+
+    test('Aether.theme() builds both modes without throwing', () {
+      Aether.dark = true;
+      expect(Aether.theme().scaffoldBackgroundColor, Aether.bg);
+      Aether.dark = false;
+      expect(Aether.theme().scaffoldBackgroundColor, Aether.bg);
+      Aether.dark = true; // restore default
     });
   });
 }
