@@ -321,18 +321,25 @@ class SandboxService {
       onPhase(5, 1.0, 'toolchain installed ✓');
 
       // ── Phase 6 — REAL smoke test: actual binary versions must print. ──
+      // Use `sh -c` so the shell's PATH lookup resolves binaries — direct
+      // `exec(['node', ...])` goes through proot's OWN path search which
+      // mishandles merged-/usr symlinks on Ubuntu 24.04 ('node' not found
+      // even though `command -v node` in a shell works — see Phase 5 check).
       onPhase(6, 0.0, r'$ smoke test: python3/node/git --version');
-      final py = await exec(const ['python3', '--version'], env: _baseEnv);
+      final py = await exec(const ['sh', '-c', 'python3 --version'],
+          env: _baseEnv);
       if (!py.toLowerCase().contains('python')) {
         throw Exception('smoke test failed: python3 → $py');
       }
       onPhase(6, 0.3, 'python3 → ${py.trim()} ✓');
-      final node = await exec(const ['node', '--version'], env: _baseEnv);
+      final node = await exec(const ['sh', '-c', 'node --version'],
+          env: _baseEnv);
       if (!node.trim().startsWith('v')) {
         throw Exception('smoke test failed: node → $node');
       }
       onPhase(6, 0.6, 'node → ${node.trim()} ✓');
-      final gitv = await exec(const ['git', '--version'], env: _baseEnv);
+      final gitv = await exec(const ['sh', '-c', 'git --version'],
+          env: _baseEnv);
       if (!gitv.toLowerCase().contains('git')) {
         throw Exception('smoke test failed: git → $gitv');
       }
@@ -702,6 +709,15 @@ class SandboxService {
     'TEMP': '/tmp',
   };
 
+  /// Host-side temp dir for proot's OWN machinery (f2fs bug probe + temp
+  /// files it creates BEFORE entering the jail). TMPDIR=/tmp only helps
+  /// inside the jail — proot canonicalizes its temp path on the Android
+  /// HOST where /tmp doesn't exist, so it falls back to Termux's hardcoded
+  /// /data/data/com.termux/... path → 'Permission denied'. PROOT_TMP_DIR
+  /// (documented proot override) must point at a HOST path we can write:
+  /// the sandbox's own tmp dir resolved on the host.
+  String get _prootHostTmp => _rootfs != null ? '${_rootfs!.path}/tmp' : '/tmp';
+
   // -----------------------------------------------------------------------
   // EXEC — run a command inside the proot jail, return {stdout, exitCode}.
   // -----------------------------------------------------------------------
@@ -752,6 +768,8 @@ class SandboxService {
         ...?env,
         // proot itself is dynamically linked — needs our lib dir.
         'LD_LIBRARY_PATH': '$rootPath/lib:/system/lib64:/system/lib',
+        // proot's HOST-side temp (f2fs probe) — not the jail's /tmp.
+        'PROOT_TMP_DIR': _prootHostTmp,
       },
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
@@ -798,6 +816,8 @@ class SandboxService {
       environment: {
         ..._baseEnv,
         'LD_LIBRARY_PATH': '$rootPath/lib:/system/lib64:/system/lib',
+        // proot's HOST-side temp (f2fs probe) — not the jail's /tmp.
+        'PROOT_TMP_DIR': _prootHostTmp,
       },
     );
   }

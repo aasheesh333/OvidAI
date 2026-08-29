@@ -1059,6 +1059,21 @@ class AgentService extends ChangeNotifier {
   }
 
   // ── MAIN LOOP ─────────────────────────────────────────────────────────
+
+  /// DSH/opencode queue behavior: messages queued while a run is active
+  /// join the NEXT LLM request of the CURRENT run — not a separate run
+  /// after full completion. Drains the queue into [msgs] as user turns
+  /// and records them in the session so the chat bubble shows immediately.
+  void _drainQueueIntoMsgs(List<Map<String, dynamic>> msgs) {
+    if (_queue.isEmpty) return;
+    while (_queue.isNotEmpty) {
+      final queued = _queue.removeAt(0);
+      AppState.I.sendMessage(queued);
+      msgs.add({'role': 'user', 'content': queued});
+    }
+    _emit('think', 'queued message joined this run');
+  }
+
   Future<void> runTask(String prompt) async {
     final p = _provider;
     final s = AppState.I.activeSession;
@@ -1181,7 +1196,19 @@ without calling the tool. If denied, tell the user and offer alternatives.
 
         final toolCalls = msg['tool_calls'] as List?;
         if (toolCalls == null || toolCalls.isEmpty) {
-          // FINAL answer — already streamed to the bubble live.
+          // FINAL answer — already streamed to the bubble live.  But if the
+          // user queued messages mid-run (opencode behavior), fold them in
+          // here so the model answers them in the NEXT request of THIS run
+          // instead of the user waiting for a whole new run to spin up.
+          if (_queue.isNotEmpty) {
+            msgs.add({
+              'role': 'assistant',
+              'content': msg['content'] ?? '',
+            });
+            _finalizeLive();
+            _drainQueueIntoMsgs(msgs);
+            continue;
+          }
           _finalizeLive();
           _emit('done', 'completed');
           break;
@@ -1208,6 +1235,10 @@ without calling the tool. If denied, tell the user and offer alternatives.
             'content': cleanTruncate(result, 6000),
           });
         }
+        // Queued mid-run messages join the very next request (opencode
+        // behavior) — injected right after tool results, before the loop's
+        // next _callLlm.
+        _drainQueueIntoMsgs(msgs);
       }
       _finalizeLive();
     } catch (e) {
@@ -1323,7 +1354,17 @@ without calling the tool. If denied, tell the user and offer alternatives.
 
       // Total stream deadline — user-configurable in Settings (default 2 min).
       final streamDeadline = DateTime.now().add(Duration(seconds: AppState.I.responseTimeoutSec));
-      final res = await req.close().timeout(const Duration(seconds: 30));
+      // Time-to-first-response (headers) — also respects the settings value;
+      // slow/reasoning models often take >30s before the first SSE byte.
+      final res = await req.close().timeout(
+        Duration(seconds: AppState.I.responseTimeoutSec),
+        onTimeout: () {
+          lastError = 'no response from ${p.name} for '
+              '${AppState.I.responseTimeoutSec}s — Settings me '
+              '"AI response timeout" badhao ya provider check karo';
+          throw TimeoutException(lastError ?? 'first-byte timeout');
+        },
+      );
       if (res.statusCode != 200) {
         final data = <int>[];
         await for (final c in res) {

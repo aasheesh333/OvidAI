@@ -775,6 +775,104 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
+/// Collapsible thinking/reasoning card — Gemini-web style.
+/// Tap the "Thinking…" header to expand/collapse the body.
+/// Auto-expands while streaming (m.thinking == true), auto-collapses
+/// when the stream completes (m.thinking == false). User toggles persist
+/// for the message lifetime.
+class _ReasoningCard extends StatefulWidget {
+  final Message m;
+  const _ReasoningCard(this.m);
+  @override
+  State<_ReasoningCard> createState() => _ReasoningCardState();
+}
+
+class _ReasoningCardState extends State<_ReasoningCard> {
+  /// null = follow the streaming state (expanded while thinking, collapsed
+  /// when done).  Once the user taps, we lock to their choice.
+  bool? _override;
+
+  @override
+  Widget build(BuildContext context) {
+    final isStreaming = widget.m.thinking;
+    // Default: expanded while streaming, collapsed when done — unless the
+    // user has explicitly toggled.
+    final expanded = _override ?? isStreaming;
+    return Container(
+      decoration: BoxDecoration(
+        color: Aether.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Header — tap to toggle.
+          InkWell(
+            borderRadius: const BorderRadius.only(
+              topLeft: Radius.circular(10),
+              topRight: Radius.circular(10),
+            ),
+            onTap: () => setState(() => _override = !expanded),
+            child: Padding(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                children: [
+                  if (isStreaming)
+                    const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.5,
+                        color: Aether.accent,
+                      ),
+                    )
+                  else
+                    Icon(
+                      expanded
+                          ? Icons.keyboard_arrow_down
+                          : Icons.keyboard_arrow_right,
+                      size: 14,
+                      color: Aether.textFaint,
+                    ),
+                  const SizedBox(width: 8),
+                  Text(
+                    isStreaming ? 'Thinking…' : 'Thoughts',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Aether.textMuted,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const Spacer(),
+                  if (isStreaming)
+                    Text(
+                      'live',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: Aether.textFaint,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          // Body — only when expanded.
+          if (expanded && widget.m.content.trim().isNotEmpty)
+            Container(
+              width: double.infinity,
+              padding:
+                  const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              child: _DshMarkdown(content: widget.m.content),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _MessageView extends StatelessWidget {
   final Message m;
   final dynamic session; // ChatSession
@@ -911,35 +1009,7 @@ class _MessageView extends StatelessWidget {
             : _DshMarkdown(content: m.content),
       );
 
-  Widget _reasoning() => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-        decoration: BoxDecoration(
-          color: Aether.surface,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: Aether.hairline),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Padding(
-              padding: EdgeInsets.only(top: 2),
-              child: SizedBox(
-                width: 12,
-                height: 12,
-                child: CircularProgressIndicator(
-                  strokeWidth: 1.5,
-                  color: Aether.accent,
-                ),
-              ),
-            ),
-            const SizedBox(width: 9),
-            Flexible(
-              child: _DshMarkdown(content: m.content),
-            ),
-          ],
-        ),
-      );
+  Widget _reasoning() => _ReasoningCard(m);
 
   Widget _code() => Container(
         clipBehavior: Clip.antiAlias,
