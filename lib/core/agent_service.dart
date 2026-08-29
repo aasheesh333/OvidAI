@@ -112,11 +112,40 @@ class ApprovalRequest {
   final String summary;
   final String detail;
   final Completer<bool> completer = Completer<bool>();
+  // ── ask_user_question extension (DSH user-questions seam) ──
+  /// When non-null, the UI renders structured questions instead of
+  /// approve/deny.  The completer resolves true when the user submits
+  /// answers; [answers] holds the question-id → answer map.
+  final List<UserQuestion>? questions;
+  final Map<String, String> answers = {};
   ApprovalRequest({
     required this.tool,
     required this.summary,
     required this.detail,
+    this.questions,
   });
+}
+
+/// One structured question for ask_user_question — Gemini-web style.
+class UserQuestion {
+  final String id;
+  final String question;
+  final String? header;
+  final List<QuestionOption> options;
+  final bool multi;
+  UserQuestion({
+    required this.id,
+    required this.question,
+    this.header,
+    this.options = const [],
+    this.multi = false,
+  });
+}
+
+class QuestionOption {
+  final String label;
+  final String? description;
+  const QuestionOption({required this.label, this.description});
 }
 
 /// Per-session Studio state — open tabs, editor buffers, active path.
@@ -426,6 +455,13 @@ class AgentService extends ChangeNotifier {
   /// Elapsed milliseconds of the last completed/failed run — shown on the
   /// final assistant bubble (DSH "2.1s" metadata).
   int? lastRunElapsedMs;
+
+  // ── fs tools state (read-before-write policy, DSH observation gate) ──
+  /// Paths the AI has read via file_read/fs_edit view — str_replace/insert
+  /// require a prior read.  Keyed by session id so sessions don't leak.
+  final Map<String, Set<String>> _readPaths = {};
+  Set<String> _readPathsFor(String sid) =>
+      _readPaths.putIfAbsent(sid, () => {});
 
   DateTime? _runStart;
 
@@ -753,6 +789,171 @@ class AgentService extends ChangeNotifier {
     {
       'type': 'function',
       'function': {
+        'name': 'fs_edit',
+        'description':
+            'Precise file editing — view, create, or replace an exact '
+            'string in a workspace file.  The read-before-write policy '
+            'applies: you must file_read a file before str_replace/insert '
+            'on it.  For create, the file must not already exist.\n'
+            'Ops: view (show file with line numbers), create (new file), '
+            'str_replace (old_str must match EXACTLY once in the file), '
+            'insert (insert text after line N).',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'command': {
+              'type': 'string',
+              'enum': ['view', 'create', 'str_replace', 'insert'],
+            },
+            'path': {'type': 'string'},
+            'file_text': {
+              'type': 'string',
+              'description': 'Content for create op',
+            },
+            'old_str': {
+              'type': 'string',
+              'description': 'Exact string to replace (str_replace op)',
+            },
+            'new_str': {
+              'type': 'string',
+              'description': 'Replacement string (str_replace op)',
+            },
+            'insert_line': {
+              'type': 'integer',
+              'description': 'Line number after which to insert (insert op)',
+            },
+          },
+          'required': ['command', 'path'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'fs_glob',
+        'description':
+            'Find files by glob pattern in the workspace.  '
+            '** matches any depth, * matches one segment.  '
+            'Example: "**/*.dart", "lib/**/*.yaml", "src/*.js".  '
+            'Returns up to 100 matching paths (sorted).',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'pattern': {'type': 'string'},
+            'path': {
+              'type': 'string',
+              'description':
+                  'Directory to search in (default: session workspace root)',
+            },
+          },
+          'required': ['pattern'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'fs_grep',
+        'description':
+            'Search file contents for a regex pattern in the workspace.  '
+            'Returns matching lines with file:line:content format.  '
+            'Cap: 50 matches.  Skips binary files.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'pattern': {'type': 'string'},
+            'path': {
+              'type': 'string',
+              'description':
+                  'Directory or file to search (default: session workspace)',
+            },
+            'context': {
+              'type': 'integer',
+              'description': 'Lines of context before/after each match',
+            },
+          },
+          'required': ['pattern'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'todo_write',
+        'description':
+            'Write the session\'s todo/task list — a checklist the user '
+            'sees live above the chat input.  Each call REPLACES the whole '
+            'list.  Use it to track multi-step work: mark items '
+            'in_progress as you work on them, completed when done.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'todos': {
+              'type': 'array',
+              'items': {
+                'type': 'object',
+                'properties': {
+                  'content': {'type': 'string'},
+                  'status': {
+                    'type': 'string',
+                    'enum': ['pending', 'in_progress', 'completed'],
+                  },
+                },
+                'required': ['content', 'status'],
+              },
+            },
+          },
+          'required': ['todos'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'ask_user_question',
+        'description':
+            'Ask the user structured questions with clickable options — '
+            'use when you need a decision or missing info before '
+            'proceeding.  Each question can have multiple choice options '
+            'or be free-form.  Returns a JSON map of {questionId: answer}.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'questions': {
+              'type': 'array',
+              'items': {
+                'type': 'object',
+                'properties': {
+                  'id': {'type': 'string'},
+                  'question': {'type': 'string'},
+                  'header': {'type': 'string'},
+                  'options': {
+                    'type': 'array',
+                    'items': {
+                      'type': 'object',
+                      'properties': {
+                        'label': {'type': 'string'},
+                        'description': {'type': 'string'},
+                      },
+                      'required': ['label'],
+                    },
+                  },
+                  'multi': {
+                    'type': 'boolean',
+                    'description': 'Allow multiple selections (default false)',
+                  },
+                },
+                'required': ['id', 'question'],
+              },
+            },
+          },
+          'required': ['questions'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
         'name': 'commit',
         'description':
             'Commit all pending local changes and push to the connected '
@@ -760,6 +961,7 @@ class AgentService extends ChangeNotifier {
         'parameters': {
           'type': 'object',
           'properties': {
+
             'message': {'type': 'string'},
           },
           'required': ['message'],
@@ -1081,6 +1283,62 @@ class AgentService extends ChangeNotifier {
     _emit('think', 'queued message joined this run');
   }
 
+  /// Context compaction — summarize older messages into a dense summary
+  /// when history exceeds the threshold.  Uses a non-tool LLM call.
+  /// Re-compacts only after 20+ new messages since last compaction.
+  Future<void> _maybeCompact(ChatSession s, ProviderConfig p) async {
+    // Skip if recently compacted (fewer than 20 new messages).
+    if (s.compactedSummary != null &&
+        s.messages.length - s.compactedAtCount < 20) {
+      return;
+    }
+    _emit('think', 'compacting conversation context…');
+    // Take messages from last compaction point to current - 15 (keep
+    // recent 15 verbatim for continuity).
+    final cutoff = s.messages.length > 15 ? s.messages.length - 15 : 0;
+    final toSummarize = s.messages
+        .sublist(s.compactedAtCount, cutoff)
+        .map((m) =>
+            '${m.role == 'user' ? 'User' : 'Assistant'}: ${cleanTruncate(m.content, 400)}')
+        .join('\n');
+    if (toSummarize.isEmpty) return;
+    try {
+      final summary = await _callLlm(
+        p,
+        [
+          {
+            'role': 'system',
+            'content':
+                'You are a conversation summarizer. Compress the following '
+                    'conversation into a dense summary (max 500 words). '
+                    'Preserve: all facts, decisions made, file paths '
+                    'mentioned, code snippets, pending tasks, user '
+                    'preferences. Write in the same language as the '
+                    'conversation (Hindi/English mix is fine).'
+          },
+          {
+            'role': 'user',
+            'content':
+                '${s.compactedSummary != null ? '[Previous summary]\n${s.compactedSummary}\n\n' : ''}'
+                    '[New messages to incorporate]\n$toSummarize',
+          },
+        ],
+        s,
+        includeTools: false,
+      );
+      if (summary != null && summary['content'] != null) {
+        s.compactedSummary = summary['content'] as String;
+        s.compactedAtCount = cutoff;
+        AppState.I.persistSessions();
+        _emit('think', 'context compacted ✓ '
+            '(${s.messages.length} msgs → summary)');
+      }
+    } catch (e) {
+      // Compaction failure is non-fatal — continue with full history.
+      _emit('think', 'compaction skipped: $e');
+    }
+  }
+
   Future<void> runTask(String prompt) async {
     final p = _provider;
     final s = AppState.I.activeSession;
@@ -1148,9 +1406,24 @@ Execution tiers: run_shell adapts to the user's access mode.
   same in every tier via the catalog_* tools.
 ''';
 
+    // ── Context compaction (DSH compaction package equivalent) ──
+    // If history is long, summarize older messages into a dense context
+    // block so the model sees less tokens but keeps all facts.
+    if (s.messages.length > 30) {
+      await _maybeCompact(s, p);
+    }
+
     final historyStart = s.messages.length > 12 ? s.messages.length - 12 : 0;
     final msgs = <Map<String, dynamic>>[
       {'role': 'system', 'content': sys},
+      // Compacted summary as system-level context (DSH injection style).
+      if (s.compactedSummary != null && s.compactedSummary!.isNotEmpty)
+        {
+          'role': 'system',
+          'content':
+              '[Earlier conversation summary — treat as established context]\n'
+                  '${s.compactedSummary}',
+        },
       ...s.messages
           .skip(historyStart)
           .map(
@@ -2114,9 +2387,28 @@ Execution tiers: run_shell adapts to the user's access mode.
         final path = args['path'] as String;
         final c = RepoCache.I.read(path);
         if (c == null) return 'file not found: $path';
+        final sid = AppState.I.activeSession?.sandboxId ??
+            AppState.I.activeSession?.id ??
+            'default';
+        _readPathsFor(sid).add(path);
         openStudioFile(path, c);
         _emit('file', 'read $path');
         return cleanTruncate(c, 6000);
+
+      case 'fs_edit':
+        return await _handleFsEdit(args);
+
+      case 'fs_glob':
+        return await _handleFsGlob(args);
+
+      case 'fs_grep':
+        return await _handleFsGrep(args);
+
+      case 'todo_write':
+        return await _handleTodoWrite(args);
+
+      case 'ask_user_question':
+        return await _handleAskUserQuestion(args);
 
       case 'file_write':
         final path = args['path'] as String;
@@ -2229,6 +2521,382 @@ Execution tiers: run_shell adapts to the user's access mode.
 
   String _permissionLabel(String perm) =>
       _permLabels[perm] ?? perm.toUpperCase();
+
+  // ── WAVE 1 HANDLERS — fs tools, todo, ask_user_question ─────────────
+
+  /// Resolve a workspace-relative path.  Repo files take precedence; falls
+  /// back to the session's sandbox workdir on the host filesystem.
+  Future<String?> _resolveFsPath(String rel) async {
+    // Repo cache hit?
+    if (RepoCache.I.files.containsKey(rel)) return 'repo:$rel';
+    // Host filesystem under session workdir.
+    final work = await _sessionWorkDir();
+    final f = File('${work.path}/$rel');
+    if (f.existsSync()) return f.path;
+    return null;
+  }
+
+  Future<String> _handleFsEdit(Map<String, dynamic> args) async {
+    final cmd = args['command'] as String;
+    final path = args['path'] as String;
+    final sid = AppState.I.activeSession?.sandboxId ??
+        AppState.I.activeSession?.id ??
+        'default';
+
+    switch (cmd) {
+      case 'view':
+        // Repo file?
+        final repoContent = RepoCache.I.read(path);
+        if (repoContent != null) {
+          _readPathsFor(sid).add(path);
+          _emit('file', 'view $path');
+          return _numberedLines(repoContent, 6000);
+        }
+        // Host file?
+        final host = await _resolveFsPath(path);
+        if (host == null) return 'file not found: $path';
+        final content = await File(host).readAsString();
+        _readPathsFor(sid).add(path);
+        _emit('file', 'view $path');
+        return _numberedLines(content, 6000);
+
+      case 'create':
+        final content = args['file_text'] as String? ?? '';
+        if (RepoCache.I.files.containsKey(path)) {
+          return 'file already exists: $path — use str_replace to edit it';
+        }
+        final work = await _sessionWorkDir();
+        final f = File('${work.path}/$path');
+        if (f.existsSync()) {
+          return 'file already exists: $path — use str_replace to edit it';
+        }
+        final ok = await _maybeApprove(
+          'fs_edit create',
+          path,
+          'CREATE FILE:\n$path\n${content.length} chars',
+        );
+        if (!ok) return 'DENIED by user';
+        f.parent.createSync(recursive: true);
+        f.writeAsStringSync(content);
+        _readPathsFor(sid).add(path);
+        _emit('file', 'created $path');
+        return 'created $path ✓ · ${content.length} chars';
+
+      case 'str_replace':
+        final oldStr = args['old_str'] as String? ?? '';
+        final newStr = args['new_str'] as String? ?? '';
+        if (oldStr.isEmpty) return 'old_str must not be empty';
+        // Read-before-write gate.
+        if (!_readPathsFor(sid).contains(path)) {
+          return 'read-before-write: file_read ya fs_edit view se pehle '
+              '"$path" padho, phir edit karo.';
+        }
+        // Repo file?
+        final repoContent = RepoCache.I.read(path);
+        if (repoContent != null) {
+          final count = _countOccurrences(repoContent, oldStr);
+          if (count == 0) return 'old_str not found in $path';
+          if (count > 1) {
+            return 'old_str matches $count times in $path — make it more '
+                'unique (add surrounding context).';
+          }
+          final updated = repoContent.replaceFirst(oldStr, newStr);
+          final ok = await _maybeApprove(
+            'fs_edit str_replace',
+            path,
+            'EDIT $path:\nold: ${oldStr.length} chars → new: ${newStr.length} chars',
+          );
+          if (!ok) return 'DENIED by user';
+          RepoCache.I.write(path, updated);
+          openStudioFile(path, updated);
+          _emit('file', 'edited $path');
+          return 'edited $path ✓ (str_replace)';
+        }
+        // Host file?
+        final host = await _resolveFsPath(path);
+        if (host == null) return 'file not found: $path';
+        final content = await File(host).readAsString();
+        final count = _countOccurrences(content, oldStr);
+        if (count == 0) return 'old_str not found in $path';
+        if (count > 1) {
+          return 'old_str matches $count times in $path — make it more '
+              'unique (add surrounding context).';
+        }
+        final ok = await _maybeApprove(
+          'fs_edit str_replace',
+          path,
+          'EDIT $path:\nold: ${oldStr.length} chars → new: ${newStr.length} chars',
+        );
+        if (!ok) return 'DENIED by user';
+        File(host).writeAsStringSync(content.replaceFirst(oldStr, newStr));
+        _emit('file', 'edited $path');
+        return 'edited $path ✓ (str_replace)';
+
+      case 'insert':
+        final insertLine = args['insert_line'] as int? ?? 0;
+        final newStr = args['new_str'] as String? ?? '';
+        if (newStr.isEmpty) return 'new_str must not be empty';
+        if (!_readPathsFor(sid).contains(path)) {
+          return 'read-before-write: file_read ya fs_edit view se pehle '
+              '"$path" padho, phir edit karo.';
+        }
+        final repoContent = RepoCache.I.read(path);
+        final host = await _resolveFsPath(path);
+        final raw = repoContent ??
+            (host != null ? await File(host).readAsString() : null);
+        if (raw == null) return 'file not found: $path';
+        final lines = raw.split('\n');
+        if (insertLine < 0 || insertLine > lines.length) {
+          return 'insert_line $insertLine out of range (0..${lines.length})';
+        }
+        lines.insert(insertLine, newStr);
+        final updated = lines.join('\n');
+        final ok = await _maybeApprove(
+          'fs_edit insert',
+          path,
+          'INSERT at line $insertLine in $path:\n$newStr',
+        );
+        if (!ok) return 'DENIED by user';
+        if (repoContent != null) {
+          RepoCache.I.write(path, updated);
+          openStudioFile(path, updated);
+        } else if (host != null) {
+          File(host).writeAsStringSync(updated);
+        }
+        _emit('file', 'edited $path');
+        return 'inserted at line $insertLine in $path ✓';
+
+      default:
+        return 'unknown fs_edit command: $cmd';
+    }
+  }
+
+  String _numberedLines(String content, int max) {
+    final lines = content.split('\n');
+    final buf = StringBuffer();
+    for (var i = 0; i < lines.length; i++) {
+      buf.writeln('${(i + 1).toString().padLeft(4)}: ${lines[i]}');
+      if (buf.length > max) {
+        buf.writeln('… (${lines.length - i - 1} more lines)');
+        break;
+      }
+    }
+    return buf.toString();
+  }
+
+  int _countOccurrences(String text, String sub) {
+    var count = 0;
+    var start = 0;
+    while (true) {
+      final idx = text.indexOf(sub, start);
+      if (idx < 0) break;
+      count++;
+      start = idx + 1;
+    }
+    return count;
+  }
+
+  /// Convert a glob pattern to a RegExp.  ** matches any depth,
+  /// * matches one path segment, ? matches one character.
+  RegExp _globToRegExp(String pattern) {
+    final buf = StringBuffer('^');
+    var i = 0;
+    while (i < pattern.length) {
+      final c = pattern[i];
+      if (c == '*') {
+        if (i + 1 < pattern.length && pattern[i + 1] == '*') {
+          buf.write('.*');
+          i += 2;
+        } else {
+          buf.write('[^/]*');
+          i++;
+        }
+      } else if (c == '?') {
+        buf.write('.');
+        i++;
+      } else if (c == '.') {
+        buf.write(r'\.');
+        i++;
+      } else {
+        buf.write(RegExp.escape(c));
+        i++;
+      }
+    }
+    buf.write('\$');
+    return RegExp(buf.toString(), caseSensitive: false);
+  }
+
+  Future<String> _handleFsGlob(Map<String, dynamic> args) async {
+    final pattern = args['pattern'] as String;
+    final basePath = args['path'] as String?;
+    final re = _globToRegExp(pattern);
+    final results = <String>[];
+
+    // Search repo cache (fast, in-memory).
+    if (basePath == null || basePath.isEmpty || basePath == '.') {
+      for (final p in RepoCache.I.treePaths) {
+        if (re.hasMatch(p)) results.add(p);
+        if (results.length >= 100) break;
+      }
+    }
+    // Search host filesystem under session workdir.
+    final work = await _sessionWorkDir();
+    final searchRoot = basePath != null && basePath.isNotEmpty
+        ? Directory('${work.path}/$basePath')
+        : work;
+    if (searchRoot.existsSync()) {
+      await for (final entity in searchRoot.list(recursive: true)) {
+        if (entity is File) {
+          final rel = entity.path.substring(work.path.length + 1);
+          if (re.hasMatch(rel) && !results.contains(rel)) {
+            results.add(rel);
+            if (results.length >= 100) break;
+          }
+        }
+      }
+    }
+    if (results.isEmpty) return 'no files matching "$pattern"';
+    results.sort();
+    return 'glob "$pattern" → ${results.length} match${results.length > 1 ? 'es' : ''}:\n'
+        '${results.take(100).join('\n')}';
+  }
+
+  Future<String> _handleFsGrep(Map<String, dynamic> args) async {
+    final pattern = args['pattern'] as String;
+    final basePath = args['path'] as String?;
+    final ctxLines = (args['context'] as num?)?.toInt() ?? 0;
+    final re = RegExp(pattern, caseSensitive: false);
+    final results = <String>[];
+    const maxResults = 50;
+
+    // Search repo cache.
+    if (basePath == null || basePath.isEmpty || basePath == '.') {
+      for (final entry in RepoCache.I.files.entries) {
+        if (results.length >= maxResults) break;
+        final lines = entry.value.split('\n');
+        for (var i = 0; i < lines.length; i++) {
+          if (results.length >= maxResults) break;
+          if (re.hasMatch(lines[i])) {
+            _appendGrepMatch(results, entry.key, lines, i, ctxLines);
+          }
+        }
+      }
+    }
+    // Search host filesystem.
+    final work = await _sessionWorkDir();
+    final searchRoot = basePath != null && basePath.isNotEmpty
+        ? Directory('${work.path}/$basePath')
+        : work;
+    if (searchRoot.existsSync() && results.length < maxResults) {
+      await for (final entity in searchRoot.list(recursive: true)) {
+        if (results.length >= maxResults) break;
+        if (entity is! File) continue;
+        // Skip binary files (heuristic: no valid UTF-8 decode).
+        String content;
+        try {
+          content = await entity.readAsString();
+        } catch (_) {
+          continue;
+        }
+        final rel = entity.path.substring(work.path.length + 1);
+        final lines = content.split('\n');
+        for (var i = 0; i < lines.length; i++) {
+          if (results.length >= maxResults) break;
+          if (re.hasMatch(lines[i])) {
+            _appendGrepMatch(results, rel, lines, i, ctxLines);
+          }
+        }
+      }
+    }
+    if (results.isEmpty) return 'no matches for "$pattern"';
+    return 'grep "$pattern" → ${results.length} match${results.length > 1 ? 'es' : ''}:\n'
+        '${results.join('\n')}';
+  }
+
+  void _appendGrepMatch(
+    List<String> results,
+    String file,
+    List<String> lines,
+    int lineIdx,
+    int ctx,
+  ) {
+    for (var c = (lineIdx - ctx).clamp(0, lines.length - 1);
+        c <= (lineIdx + ctx).clamp(0, lines.length - 1);
+        c++) {
+      results.add('$file:${c + 1}: ${lines[c]}');
+    }
+  }
+
+  Future<String> _handleTodoWrite(Map<String, dynamic> args) async {
+    final rawTodos = args['todos'] as List? ?? [];
+    final todos = [
+      for (final t in rawTodos)
+        if (t is Map<String, dynamic>)
+          {
+            'content': t['content'] as String? ?? '',
+            'status': t['status'] as String? ?? 'pending',
+          },
+    ];
+    final s = AppState.I.activeSession;
+    if (s == null) return 'no active session';
+    s.todos.clear();
+    s.todos.addAll(todos);
+    AppState.I.refresh();
+    AppState.I.persistSessions();
+    final done = todos.where((t) => t['status'] == 'completed').length;
+    final inProg = todos.where((t) => t['status'] == 'in_progress').length;
+    _emit('think', 'todo: $done done, $inProg in progress, '
+        '${todos.length - done - inProg} pending');
+    return 'todo list updated: ${todos.length} items '
+        '($done completed, $inProg in progress)';
+  }
+
+  Future<String> _handleAskUserQuestion(Map<String, dynamic> args) async {
+    final rawQs = args['questions'] as List? ?? [];
+    if (rawQs.isEmpty) return 'no questions provided';
+    final questions = [
+      for (final q in rawQs)
+        if (q is Map<String, dynamic>)
+          UserQuestion(
+            id: q['id'] as String? ?? '',
+            question: q['question'] as String? ?? '',
+            header: q['header'] as String?,
+            options: [
+              for (final o in (q['options'] as List? ?? []))
+                if (o is Map<String, dynamic>)
+                  QuestionOption(
+                    label: o['label'] as String? ?? '',
+                    description: o['description'] as String?,
+                  ),
+            ],
+            multi: q['multi'] as bool? ?? false,
+          ),
+    ];
+    _emit('think', 'asking user ${questions.length} question'
+        '${questions.length > 1 ? 's' : ''}…');
+    final answers = await _askQuestions(questions);
+    if (answers == null) return 'user cancelled the questions';
+    final buf = StringBuffer();
+    for (final e in answers.entries) {
+      buf.writeln('${e.key}: ${e.value}');
+    }
+    return 'User answered:\n$buf';
+  }
+
+  Future<Map<String, String>?> _askQuestions(
+      List<UserQuestion> questions) async {
+    final req = ApprovalRequest(
+      tool: 'ask_user_question',
+      summary: 'AI ne ${questions.length} sawal puche hain',
+      detail: questions.map((q) => q.question).join('\n'),
+      questions: questions,
+    );
+    pendingApproval = req;
+    notifyListeners();
+    final ok = await req.completer.future;
+    if (!ok) return null;
+    return req.answers;
+  }
 
   Future<String> _requestSystemPermission(String name) async {
     final Permission? p;

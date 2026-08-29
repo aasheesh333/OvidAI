@@ -272,6 +272,7 @@ class _ChatScreenState extends State<ChatScreen>
                           ],
                         ),
                 ),
+                const _TodoDock(),
                 _QueueDock(
                   onEdited: () => setState(() {}),
                 ),
@@ -1368,6 +1369,169 @@ class _TypingBubbleState extends State<_TypingBubble>
 /// DSH-web QueueDock — a strip above the input bar showing queued messages
 /// with edit/remove actions. Shown only when [AgentService.queuedMessages]
 /// is non-empty.
+/// DSH-web TodoDock — live checklist written by todo_write tool.
+/// Shows above the chat input; each item shows status icon + text.
+/// Collapsed by default; tap header to expand full list.
+class _TodoDock extends StatefulWidget {
+  const _TodoDock();
+
+  @override
+  State<_TodoDock> createState() => _TodoDockState();
+}
+
+class _TodoDockState extends State<_TodoDock> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AppState.I,
+      builder: (_, _) {
+        final todos = AppState.I.activeSession?.todos ?? [];
+        if (todos.isEmpty) return const SizedBox.shrink();
+        final done =
+            todos.where((t) => t['status'] == 'completed').length;
+        final inProg =
+            todos.where((t) => t['status'] == 'in_progress').length;
+        return Container(
+          margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+          decoration: BoxDecoration(
+            color: Aether.surface,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Aether.hairline),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              InkWell(
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(10),
+                  topRight: Radius.circular(10),
+                ),
+                onTap: () => setState(() => _expanded = !_expanded),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                  child: Row(
+                    children: [
+                      Icon(
+                        _expanded
+                            ? Icons.keyboard_arrow_down
+                            : Icons.keyboard_arrow_right,
+                        size: 14,
+                        color: Aether.textFaint,
+                      ),
+                      const SizedBox(width: 6),
+                      const Icon(
+                        Icons.checklist_outlined,
+                        size: 13,
+                        color: Aether.accent,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Tasks · $done/${todos.length} done',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Aether.textMuted,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      if (inProg > 0) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          width: 6,
+                          height: 6,
+                          decoration: const BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Aether.accent,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '$inProg active',
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: Aether.accent,
+                          ),
+                        ),
+                      ],
+                      const Spacer(),
+                      // Progress bar mini.
+                      SizedBox(
+                        width: 40,
+                        height: 4,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(2),
+                          child: LinearProgressIndicator(
+                            value: todos.isEmpty
+                                ? 0
+                                : done / todos.length,
+                            backgroundColor: Aether.hairline,
+                            valueColor: const AlwaysStoppedAnimation(
+                                Aether.success),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              if (_expanded)
+                Container(
+                  constraints: const BoxConstraints(maxHeight: 200),
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                    itemCount: todos.length,
+                    itemBuilder: (_, i) {
+                      final t = todos[i];
+                      final status = t['status'] ?? 'pending';
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 3),
+                        child: Row(
+                          children: [
+                            Icon(
+                              status == 'completed'
+                                  ? Icons.check_circle
+                                  : status == 'in_progress'
+                                      ? Icons.play_circle_outline
+                                      : Icons.radio_button_unchecked,
+                              size: 14,
+                              color: status == 'completed'
+                                  ? Aether.success
+                                  : status == 'in_progress'
+                                      ? Aether.accent
+                                      : Aether.textFaint,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                t['content'] ?? '',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: status == 'completed'
+                                      ? Aether.textFaint
+                                      : Aether.text,
+                                  decoration: status == 'completed'
+                                      ? TextDecoration.lineThrough
+                                      : null,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _QueueDock extends StatelessWidget {
   final VoidCallback onEdited;
   const _QueueDock({required this.onEdited});
@@ -1620,6 +1784,11 @@ class _ApprovalDock extends StatelessWidget {
       builder: (_, _) {
         final req = AgentService.I.pendingApproval;
         if (req == null) return const SizedBox.shrink();
+        // ── ask_user_question mode — structured Q&A card ──
+        if (req.questions != null && req.questions!.isNotEmpty) {
+          return _QuestionsCard(req);
+        }
+        // ── Standard approve/deny card ──
         return Container(
           margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -1670,6 +1839,184 @@ class _ApprovalDock extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Structured Q&A card for ask_user_question — Gemini-web style with
+/// tappable option chips per question and a submit button.
+class _QuestionsCard extends StatefulWidget {
+  final ApprovalRequest req;
+  const _QuestionsCard(this.req);
+
+  @override
+  State<_QuestionsCard> createState() => _QuestionsCardState();
+}
+
+class _QuestionsCardState extends State<_QuestionsCard> {
+  /// question id → selected option labels (multi → Set, single → 1 elem)
+  final Map<String, Set<String>> _selected = {};
+
+  bool get _allAnswered {
+    for (final q in widget.req.questions!) {
+      if (!(_selected[q.id]?.isNotEmpty ?? false)) return false;
+    }
+    return true;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final qs = widget.req.questions!;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Aether.accent.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Aether.accent.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.help_outline, size: 14, color: Aether.accent),
+              SizedBox(width: 6),
+              Text(
+                'AI ke sawal',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Aether.accent,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          for (final q in qs) ...[
+            if (q.header != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6, bottom: 2),
+                child: Text(
+                  q.header!,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    color: Aether.textFaint,
+                  ),
+                ),
+              ),
+            Text(
+              q.question,
+              style: const TextStyle(fontSize: 13, color: Aether.text),
+            ),
+            if (q.options.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final opt in q.options)
+                    _optionChip(q, opt),
+                ],
+              ),
+            ],
+            const SizedBox(height: 8),
+          ],
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton(
+                style: TextButton.styleFrom(
+                  foregroundColor: Aether.danger,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: Size.zero,
+                ),
+                child: const Text('Skip', style: TextStyle(fontSize: 12)),
+                onPressed: () => AgentService.I.approve(false),
+              ),
+              const SizedBox(width: 4),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Aether.accent,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 6,
+                  ),
+                  minimumSize: Size.zero,
+                ),
+                onPressed: _allAnswered
+                    ? () {
+                        for (final e in _selected.entries) {
+                          widget.req.answers[e.key] = e.value.join(', ');
+                        }
+                        AgentService.I.approve(true);
+                      }
+                    : null,
+                child: const Text('Answer', style: TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _optionChip(UserQuestion q, QuestionOption opt) {
+    final sel = _selected.putIfAbsent(q.id, () => {});
+    final isSel = sel.contains(opt.label);
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          if (q.multi) {
+            if (isSel) {
+              sel.remove(opt.label);
+            } else {
+              sel.add(opt.label);
+            }
+          } else {
+            sel
+              ..clear()
+              ..add(opt.label);
+          }
+        });
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: isSel
+              ? Aether.accent.withValues(alpha: 0.2)
+              : Aether.surfaceRaised,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: isSel ? Aether.accent : Aether.hairline,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              opt.label,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: isSel ? FontWeight.w600 : FontWeight.normal,
+                color: isSel ? Aether.accent : Aether.text,
+              ),
+            ),
+            if (opt.description != null)
+              Text(
+                opt.description!,
+                style: const TextStyle(
+                  fontSize: 9,
+                  color: Aether.textFaint,
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

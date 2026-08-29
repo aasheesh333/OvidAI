@@ -223,6 +223,19 @@ class ChatSession {
   /// enables "Share session memory" in Settings.
   String? sandboxId;
 
+  /// Session todo/task list — written by todo_write tool, rendered as a
+  /// live checklist above the chat input.  Persisted with the session.
+  final List<Map<String, String>> todos;
+
+  /// Compacted summary of older conversation — set when history exceeds
+  /// the compaction threshold (~30 messages).  The AI sees this instead of
+  /// the full history.  Persisted.
+  String? compactedSummary;
+
+  /// Message count at the time of last compaction — re-compact only when
+  /// this many NEW messages have arrived since.
+  int compactedAtCount;
+
   final List<Message> messages;
   final DateTime createdAt;
 
@@ -232,9 +245,13 @@ class ChatSession {
     required this.model,
     this.providerId,
     this.sandboxId,
+    this.compactedSummary,
+    this.compactedAtCount = 0,
     List<Message>? messages,
+    List<Map<String, String>>? todos,
     DateTime? createdAt,
   }) : messages = messages ?? [],
+       todos = todos ?? [],
        createdAt = createdAt ?? DateTime.now() {
     sandboxId ??= id;
   }
@@ -245,9 +262,15 @@ class ChatSession {
     model: j['model'] as String? ?? 'Select a provider',
     providerId: j['providerId'] as String?,
     sandboxId: j['sandboxId'] as String?,
+    compactedSummary: j['compactedSummary'] as String?,
+    compactedAtCount: (j['compactedAtCount'] as num?)?.toInt() ?? 0,
     messages:
         (j['messages'] as List?)
             ?.map((m) => Message.fromJson(m as Map<String, dynamic>))
+            .toList() ??
+        [],
+    todos: (j['todos'] as List?)
+            ?.map((t) => Map<String, String>.from(t as Map))
             .toList() ??
         [],
     createdAt: j['createdAt'] != null
@@ -261,6 +284,9 @@ class ChatSession {
     'model': model,
     if (providerId != null) 'providerId': providerId,
     'sandboxId': sandboxId ?? id,
+    if (compactedSummary != null) 'compactedSummary': compactedSummary,
+    if (compactedAtCount > 0) 'compactedAtCount': compactedAtCount,
+    'todos': todos,
     'messages': messages.map((m) => m.toJson()).toList(),
     'createdAt': createdAt.toIso8601String(),
   };
