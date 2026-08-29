@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:archive/archive_io.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
@@ -50,6 +50,43 @@ class SandboxService {
   Directory? _root;       // .../ovid/sandbox
   File?    _proot;        // .../ovid/sandbox/proot
   Directory? _rootfs;     // .../ovid/sandbox/rootfs
+  static const _nativeChannel = MethodChannel('ovid/native');
+
+  /// Android 10+ (API 29+) blocks execve() on files in app-private
+  /// storage for apps targeting SDK ≥ 29 (W^X SELinux policy).  BUT the
+  /// PackageManager's nativeLibraryDir is exempt — .so files extracted
+  /// there carry a special SELinux label that permits exec.  We probe
+  /// once and cache: if app-data exec works (some ROMs don't enforce),
+  /// use the existing rootfs path; otherwise copy the rootfs to
+  /// nativeLibraryDir where exec is guaranteed.
+  bool? _dataExecAllowed;
+  String? _nativeLibDir;
+
+  Future<bool> get _isDataExecAllowed async {
+    if (_dataExecAllowed != null) return _dataExecAllowed!;
+    try {
+      final result =
+          await _nativeChannel.invokeMethod<bool>('isDataExecAllowed');
+      _dataExecAllowed = result ?? false;
+    } catch (_) {
+      // Non-Android or platform channel not ready — assume allowed.
+      _dataExecAllowed = true;
+    }
+    return _dataExecAllowed!;
+  }
+
+  Future<String?> get _nativeLibraryDir async {
+    if (_nativeLibDir != null) return _nativeLibDir;
+    try {
+      final dir =
+          await _nativeChannel.invokeMethod<String>('getNativeLibraryDir');
+      _nativeLibDir = dir;
+    } catch (_) {
+      _nativeLibDir = null;
+    }
+    return _nativeLibDir;
+  }
+
   bool _installed = false;
   bool _checked = false;
 
@@ -60,10 +97,28 @@ class SandboxService {
     if (_checked) return _installed;
     _checked = true;
     try {
-      final root = await _ensureRoot();
-      final proot = File('${root.path}/proot');
-      final rootfs = Directory('${root.path}/rootfs');
-      if (!proot.existsSync() || !rootfs.existsSync()) return false;
+      // Try both locations: nativeLibraryDir (exec-allowed) and app-data.
+      final dataExecOk = await _isDataExecAllowed;
+      final libDir = dataExecOk ? null : await _nativeLibraryDir;
+      final execRoot = (libDir != null)
+          ? Directory('$libDir/ovid')
+          : await _ensureRoot();
+      final proot = File('${execRoot.path}/proot');
+      final rootfs = Directory('${execRoot.path}/rootfs');
+      if (!proot.existsSync() || !rootfs.existsSync()) {
+        // Also check the app-data path as fallback (older installs).
+        if (dataExecOk) {
+          final root = await _ensureRoot();
+          final altProot = File('${root.path}/proot');
+          final altRootfs = Directory('${root.path}/rootfs');
+          if (!altProot.existsSync() || !altRootfs.existsSync()) return false;
+          _proot = altProot;
+          _rootfs = altRootfs;
+          _installed = true;
+          return true;
+        }
+        return false;
+      }
       // proot must be a real ELF (not a still-archived .deb).
       final head = await proot.openRead(0, 4).fold<List<int>>(
           [], (buf, c) => (buf..addAll(c)));
@@ -77,11 +132,11 @@ class SandboxService {
       });
       if (!hasContent) return false;
       // proot needs its runtime libs — check them too.
-      final talloc = File('${root.path}/lib/$_libtallocSo');
-      final shmem = File('${root.path}/lib/$_libshmemSo');
+      final libBase = Directory('${execRoot.path}/lib');
+      final talloc = File('${libBase.path}/$_libtallocSo');
+      final shmem = File('${libBase.path}/$_libshmemSo');
       if (!talloc.existsSync()) {
-        // Symlink may not survive on some FSes — accept the real file too.
-        if (!File('${root.path}/lib/libtalloc.so.2.4.3').existsSync()) {
+        if (!File('${libBase.path}/libtalloc.so.2.4.3').existsSync()) {
           return false;
         }
       }
@@ -130,8 +185,29 @@ class SandboxService {
     final c = client ?? http.Client();
     try {
       final root = await _ensureRoot();
-      _proot = File('${root.path}/proot');
-      _rootfs = Directory('${root.path}/rootfs');
+      // ── W^X probe — Android 10+ may block exec from app-data.  If
+      // blocked, install everything under nativeLibraryDir (exec-allowed).
+      final dataExecOk = await _isDataExecAllowed;
+      final nativeLibDir = dataExecOk ? null : await _nativeLibraryDir;
+      if (!dataExecOk && nativeLibDir == null) {
+        throw Exception(
+            'This Android build blocks running binaries from app storage '
+            'and the native library directory is unavailable — sandbox '
+            'cannot install here.');
+      }
+      final execRoot = (nativeLibDir != null)
+          ? (() {
+              final d = Directory('$nativeLibDir/ovid');
+              if (!d.existsSync()) d.createSync(recursive: true);
+              return d;
+            })()
+          : root;
+      if (!dataExecOk) {
+        onPhase(0, 0.0,
+            'app-data exec blocked → using nativeLibraryDir (exec-allowed)');
+      }
+      _proot = File('${execRoot.path}/proot');
+      _rootfs = Directory('${execRoot.path}/rootfs');
 
       // ── Phase 0 — REAL device checks (storage + network). ──
       onPhase(0, 0.0, r'$ ovid sandbox --preflight');
@@ -178,10 +254,10 @@ class SandboxService {
       // proot ELF needs libtalloc.so.2 + libandroid-shmem.so (we verified
       // via readelf). All three come as .deb; we extract just the files
       // we need into sandbox/ and sandbox/lib/.
-      final libDir = Directory('${root.path}/lib');
+      final libDir = Directory('${execRoot.path}/lib');
       if (!libDir.existsSync()) libDir.createSync(recursive: true);
 
-      final deb = File('${root.path}/proot.deb');
+      final deb = File('${execRoot.path}/proot.deb');
       onPhase(1, 0.0, r'$ fetch proot 5.1.107 (.deb)');
       await _download(
         url: _prootUrl,
@@ -227,7 +303,7 @@ class SandboxService {
       onPhase(1, 0.75, 'libtalloc.so.2 ready ✓');
 
       // libandroid-shmem
-      final shmemDeb = File('${root.path}/libandroid-shmem.deb');
+      final shmemDeb = File('${execRoot.path}/libandroid-shmem.deb');
       onPhase(1, 0.8, r'$ fetch libandroid-shmem 0.7');
       await _download(
         url: _libshmemUrl,
@@ -245,7 +321,7 @@ class SandboxService {
       onPhase(1, 1.0, 'proot engine ready ✓ (incl. talloc + shmem libs)');
 
       // ── Phase 2 — download Ubuntu rootfs (~30 MB gz). ──
-      final rootfsGz = File('${root.path}/rootfs.tar.gz');
+      final rootfsGz = File('${execRoot.path}/rootfs.tar.gz');
       onPhase(2, 0.0, r'$ fetch ubuntu-base 24.04.4 arm64');
       await _download(
         url: _rootfsUrl,
