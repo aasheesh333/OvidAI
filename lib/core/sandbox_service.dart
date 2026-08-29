@@ -170,27 +170,8 @@ class SandboxService {
     if (staging.existsSync()) staging.deleteSync(recursive: true);
     staging.createSync(recursive: true);
     final archive = ZipDecoder().decodeBytes(payloadBytes, verify: false);
-    final symlinks = <String, String>{};
-    var count = 0;
-    for (final f in archive.files) {
-      final name = f.name;
-      if (name == 'SYMLINKS.txt') {
-        final txt = utf8.decode(f.content as List<int>);
-        for (final line in const LineSplitter().convert(txt)) {
-          final parts = line.split('←');
-          if (parts.length == 2) symlinks[parts[0]] = parts[1];
-        }
-        continue;
-      }
-      final target = File('${staging.path}/$name');
-      if (f.isFile) {
-        target.parent.createSync(recursive: true);
-        target.writeAsBytesSync(f.content as List<int>);
-        count++;
-      } else {
-        target.createSync(recursive: true);
-      }
-    }
+    final symlinks = parseSymlinks(archive);
+    final count = extractArchive(archive, staging);
     onPhase(2, 1.0, 'extracted ......... $count files ✓');
 
     // ── chmod executables (TermuxInstaller rule) ──
@@ -244,6 +225,45 @@ class SandboxService {
           'Sandbox installed but native exec failed: $e. '
           'Report this with your device model.');
     }
+  }
+
+  /// Parse SYMLINKS.txt from [archive] → {target: linkPath}.
+  /// Format per TermuxInstaller.java: each line is `target←linkPath`,
+  /// e.g. `/data/data/com.termux/files/usr/bin/dash←bin/sh`.
+  static Map<String, String> parseSymlinks(Archive archive) {
+    final file = archive.findFile('SYMLINKS.txt');
+    if (file == null) return {};
+    final txt = utf8.decode(file.content as List<int>);
+    final symlinks = <String, String>{};
+    for (final line in const LineSplitter().convert(txt)) {
+      final parts = line.split('←');
+      if (parts.length == 2) symlinks[parts[0]] = parts[1];
+    }
+    return symlinks;
+  }
+
+  /// Extract [archive] into [staging].  Handles directory entries (zip
+  /// entries with the directory bit set / trailing slash) as Directory
+  /// creations — treating them as files throws errno 21 (EISDIR) on
+  /// Android.  SYMLINKS.txt is consumed separately, not extracted.
+  /// Returns the number of regular files written.
+  static int extractArchive(Archive archive, Directory staging) {
+    var count = 0;
+    for (final f in archive.files) {
+      final name = f.name;
+      if (name == 'SYMLINKS.txt') continue;
+      if (f.isFile) {
+        final target = File('${staging.path}/$name');
+        target.parent.createSync(recursive: true);
+        target.writeAsBytesSync(f.content as List<int>);
+        count++;
+      } else {
+        // Directory entry — create as Directory, not File (errno 21 fix).
+        final dir = Directory('${staging.path}/$name');
+        dir.createSync(recursive: true);
+      }
+    }
+    return count;
   }
 
   void _rewritePrefixInConfigs(Directory prefix) {

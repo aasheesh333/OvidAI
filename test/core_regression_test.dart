@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:archive/archive.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -1097,6 +1098,56 @@ void main() {
       expect(s.fallbackLog, isA<List<Map<String, String>>>());
       // jailWorkPath constant kept for workspace layout compat.
       expect(SandboxService.jailWorkPath, '/work');
+    });
+
+    // Regression: zip directory entries (e.g. "etc/") were being treated
+    // as file creations → errno 21 (EISDIR) on Android.  This reproduces
+    // the exact failure path: a zip with directory entries + files +
+    // SYMLINKS.txt should extract cleanly.
+    test('sandbox extractArchive: directory entries don\'t throw EISDIR', () {
+      final archive = Archive();
+      // Directory entries (exactly what `zip -r` adds).
+      archive.addFile(ArchiveFile.directory('bin/'));
+      archive.addFile(ArchiveFile.directory('etc/'));
+      archive.addFile(ArchiveFile.directory('lib/apt/methods/'));
+      // Regular files inside those dirs.
+      archive.addFile(ArchiveFile.bytes('bin/bash', utf8.encode('#!/bin/sh')));
+      archive.addFile(ArchiveFile.bytes('etc/apt/sources.list', utf8.encode('deb https://termux.org')));
+      archive.addFile(ArchiveFile.bytes('lib/apt/methods/http', utf8.encode('http-method')));
+      // SYMLINKS.txt — should be skipped during extraction.
+      archive.addFile(ArchiveFile.string('SYMLINKS.txt',
+          '/data/data/com.termux/files/usr/bin/dash←bin/sh\n'));
+
+      final staging = Directory.systemTemp.createTempSync('ovid_extract_test');
+      try {
+        final count = SandboxService.extractArchive(archive, staging);
+        // 3 regular files (SYMLINKS.txt skipped).
+        expect(count, 3);
+        // Directory entries created as dirs, not files.
+        expect(Directory('${staging.path}/bin').existsSync(), isTrue);
+        expect(Directory('${staging.path}/etc').existsSync(), isTrue);
+        expect(Directory('${staging.path}/lib/apt/methods').existsSync(), isTrue);
+        // Files extracted correctly.
+        expect(File('${staging.path}/bin/bash').existsSync(), isTrue);
+        expect(File('${staging.path}/etc/apt/sources.list').readAsStringSync(),
+            'deb https://termux.org');
+        // SYMLINKS.txt NOT extracted to disk.
+        expect(File('${staging.path}/SYMLINKS.txt').existsSync(), isFalse);
+      } finally {
+        staging.deleteSync(recursive: true);
+      }
+    });
+
+    test('sandbox parseSymlinks: Termux format target←linkPath', () {
+      final archive = Archive();
+      archive.addFile(ArchiveFile.string('SYMLINKS.txt', '''
+/data/data/com.termux/files/usr/bin/dash←bin/sh
+/data/data/com.termux/files/usr/bin/busybox←bin/busybox
+'''));
+      final map = SandboxService.parseSymlinks(archive);
+      expect(map.length, 2);
+      expect(map['/data/data/com.termux/files/usr/bin/dash'], 'bin/sh');
+      expect(map['/data/data/com.termux/files/usr/bin/busybox'], 'bin/busybox');
     });
   });
 }
