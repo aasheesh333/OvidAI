@@ -148,6 +148,33 @@ class QuestionOption {
   const QuestionOption({required this.label, this.description});
 }
 
+/// Background job (DSH ctx.jobs equivalent) — a running Process with a
+/// name, output buffer, and lifecycle state.
+class _BgJob {
+  final int id;
+  final String name;
+  final String command;
+  Process? process;
+  bool started = false;
+  bool finished = false;
+  int? exitCode;
+  final StringBuffer output = StringBuffer();
+  _BgJob({required this.id, required this.name, required this.command});
+}
+
+/// Session event (DSH SessionEvent equivalent) — durable facts about what
+/// happened in a session (tool calls, mode changes, errors, approvals).
+class SessionEvent {
+  final String type;
+  final String data;
+  final DateTime timestamp;
+  SessionEvent({
+    required this.type,
+    required this.data,
+    DateTime? timestamp,
+  }) : timestamp = timestamp ?? DateTime.now();
+}
+
 /// Per-session Studio state — open tabs, editor buffers, active path.
 /// Keyed by ChatSession.sandboxId inside AgentService so each chat session
 /// has its own Studio view (DSH-style workspace isolation).
@@ -480,6 +507,11 @@ class AgentService extends ChangeNotifier {
   void _emit(String kind, String text) {
     events.add(AgentEvent(kind, text));
     if (events.length > 120) events.removeRange(0, events.length - 120);
+    // Mirror into the session event log (session_search queries this).
+    _sessionEvents.add(SessionEvent(type: kind, data: text));
+    if (_sessionEvents.length > 500) {
+      _sessionEvents.removeRange(0, _sessionEvents.length - 500);
+    }
     notifyListeners();
   }
 
@@ -948,6 +980,118 @@ class AgentService extends ChangeNotifier {
             },
           },
           'required': ['questions'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'exit_plan_mode',
+        'description':
+            'Present your plan to the user for approval BEFORE executing '
+            'it.  Call this when you have thought through a complex task '
+            'and have a multi-step plan.  The user sees the plan card and '
+            'can approve (you then execute) or give feedback (you revise '
+            'the plan).  Present plans as numbered steps.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'plan': {
+              'type': 'string',
+              'description':
+                  'Your plan as numbered steps (e.g. "1. Read the file\\n'
+                  '2. Fix the bug\\n3. Test the fix")',
+            },
+          },
+          'required': ['plan'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'job_start',
+        'description':
+            'Start a background shell job (long-running command).  Use for '
+            'dev servers, watchers, installs — anything that keeps running '
+            'or takes a while.  Returns a job id immediately.  Use '
+            'job_output to poll its output and job_kill to stop it.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'command': {'type': 'string'},
+            'name': {
+              'type': 'string',
+              'description': 'Short label for the job (e.g. "dev-server")',
+            },
+          },
+          'required': ['command'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'job_list',
+        'description':
+            'List all background jobs with their status (running/finished/'
+            'failed) and last few output lines.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'job_output',
+        'description':
+            'Read the latest output of a background job.  Returns the last '
+            'N lines (default 30).',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'id': {'type': 'integer'},
+            'lines': {
+              'type': 'integer',
+              'description': 'Number of trailing lines to return (default 30)',
+            },
+          },
+          'required': ['id'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'job_kill',
+        'description': 'Stop a running background job by id.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'id': {'type': 'integer'},
+          },
+          'required': ['id'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'session_search',
+        'description':
+            'Search past and current session events — tool calls, shell '
+            'commands, file edits, mode changes, approvals, errors.  Use '
+            'this to recall what happened earlier (e.g. "what commands '
+            'have I run?", "which files were edited?").',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'query': {'type': 'string'},
+            'limit': {
+              'type': 'integer',
+              'description': 'Max results (default 20)',
+            },
+          },
+          'required': ['query'],
         },
       },
     },
@@ -2410,6 +2554,24 @@ Execution tiers: run_shell adapts to the user's access mode.
       case 'ask_user_question':
         return await _handleAskUserQuestion(args);
 
+      case 'exit_plan_mode':
+        return await _handleExitPlanMode(args);
+
+      case 'job_start':
+        return await _handleJobStart(args);
+
+      case 'job_list':
+        return _handleJobList();
+
+      case 'job_output':
+        return _handleJobOutput(args);
+
+      case 'job_kill':
+        return _handleJobKill(args);
+
+      case 'session_search':
+        return _handleSessionSearch(args);
+
       case 'file_write':
         final path = args['path'] as String;
         final content = args['content'] as String;
@@ -2896,6 +3058,181 @@ Execution tiers: run_shell adapts to the user's access mode.
     final ok = await req.completer.future;
     if (!ok) return null;
     return req.answers;
+  }
+
+  // ── WAVE 2 HANDLERS — plan mode, background jobs, session events ────
+
+  /// True if the agent is currently in plan mode (read-only tools only).
+  bool planMode = false;
+
+  Future<String> _handleExitPlanMode(Map<String, dynamic> args) async {
+    final plan = args['plan'] as String? ?? '';
+    _emit('think', 'presenting plan for approval…');
+    final ok = await _askUser(
+      'exit_plan_mode',
+      'Plan approve karein?',
+      'AI ka plan:\n\n$plan\n\n'
+          'Approve karne par plan execute hoga. Deny karne par '
+          'AI plan revise karega.',
+    );
+    if (!ok) {
+      planMode = true; // stay in plan mode
+      return 'User ne plan reject kiya. Plan revise karo aur '
+          'dobara exit_plan_mode call karo.';
+    }
+    planMode = false;
+    _emit('done', 'plan approved ✓ — executing');
+    return 'Plan approved ✓ — ab execute karo.';
+  }
+
+  // ── Background jobs (DSH ctx.jobs equivalent) ──
+  final Map<int, _BgJob> _jobs = {};
+  int _jobCounter = 0;
+
+  Future<String> _handleJobStart(Map<String, dynamic> args) async {
+    final cmd = args['command'] as String;
+    final name = args['name'] as String? ?? 'job';
+    final id = ++_jobCounter;
+    final work = await _sessionWorkDir();
+    final job = _BgJob(id: id, name: name, command: cmd);
+    _jobs[id] = job;
+    _emit('shell', 'job #$id started: $name');
+    try {
+      if (mode == AgentMode.studio && SandboxService.I.isInstalled) {
+        job.process = await Process.start(
+          SandboxService.I.prootPath!,
+          ['-r', SandboxService.I.rootfs!.path, '-0', '--link2symlink',
+           '-b', '/dev', '-b', '/proc', '-b', '/sys',
+           '-w', SandboxService.jailWorkPath,
+           'bash', '-lc', cmd],
+          workingDirectory: work.path,
+          environment: {
+            'HOME': '/root',
+            'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+            'TERM': 'xterm-256color',
+          },
+        );
+      } else {
+        job.process = await Process.start(
+          '/system/bin/sh', ['-c', cmd],
+          workingDirectory: work.path,
+        );
+      }
+      job.started = true;
+      // Stream output into a buffer (capped at 10K chars).
+      job.process!.stdout.transform(utf8.decoder).listen((data) {
+        job.output.write(data);
+        _trimJobOutput(job);
+      });
+      job.process!.stderr.transform(utf8.decoder).listen((data) {
+        job.output.write(data);
+        _trimJobOutput(job);
+      });
+      job.process!.exitCode.then((code) {
+        job.exitCode = code;
+        job.finished = true;
+        _emit('think', 'job #$id finished (exit $code)');
+        notifyListeners();
+      });
+    } catch (e) {
+      job.finished = true;
+      job.exitCode = -1;
+      job.output.write('job start failed: $e');
+    }
+    notifyListeners();
+    return 'Job #$id started: "$name" — $cmd\n'
+        'Use job_output {id: $id} to read output, '
+        'job_kill {id: $id} to stop.';
+  }
+
+  void _trimJobOutput(_BgJob job) {
+    final s = job.output.toString();
+    if (s.length > 10000) {
+      job.output.clear();
+      job.output.write('…(earlier output trimmed)…\n${s.substring(s.length - 8000)}');
+    }
+  }
+
+  String _handleJobList() {
+    if (_jobs.isEmpty) return 'No background jobs running.';
+    final lines = <String>[];
+    for (final j in _jobs.values) {
+      final status = j.finished
+          ? 'finished (exit ${j.exitCode})'
+          : j.started
+              ? 'running'
+              : 'starting';
+      final lastLines = j.output.toString().trim().split('\n');
+      final preview = lastLines.isEmpty || lastLines.last.isEmpty
+          ? '(no output yet)'
+          : lastLines.reversed.take(3).toList().reversed.join(' | ');
+      lines.add('#${j.id} ${j.name} [$status] $preview');
+    }
+    return 'Jobs (${_jobs.length}):\n${lines.join('\n')}';
+  }
+
+  String _handleJobOutput(Map<String, dynamic> args) {
+    final id = (args['id'] as num?)?.toInt() ?? -1;
+    final lines = (args['lines'] as num?)?.toInt() ?? 30;
+    final job = _jobs[id];
+    if (job == null) return 'Job #$id not found.';
+    final out = job.output.toString().trim();
+    if (out.isEmpty) return 'Job #$id has no output yet.';
+    final allLines = const LineSplitter().convert(out);
+    final tail = allLines.length > lines
+        ? allLines.sublist(allLines.length - lines)
+        : allLines;
+    return 'Job #$id (${job.name}) output:\n${tail.join('\n')}';
+  }
+
+  String _handleJobKill(Map<String, dynamic> args) {
+    final id = (args['id'] as num?)?.toInt() ?? -1;
+    final job = _jobs[id];
+    if (job == null) return 'Job #$id not found.';
+    if (job.finished) return 'Job #$id already finished.';
+    try {
+      job.process?.kill(ProcessSignal.sigkill);
+      job.finished = true;
+      job.exitCode = -9;
+      _emit('shell', 'job #$id killed');
+      notifyListeners();
+      return 'Job #$id killed ✓';
+    } catch (e) {
+      return 'Job #$id kill failed: $e';
+    }
+  }
+
+  // ── Session event log (DSH SessionEvent equivalent) ──
+  // _emit() mirrors every agent event into _sessionEvents (capped 500),
+  // so session_search queries both messages and the event log.
+  final List<SessionEvent> _sessionEvents = [];
+
+  String _handleSessionSearch(Map<String, dynamic> args) {
+    final query = (args['query'] as String).toLowerCase();
+    final limit = (args['limit'] as num?)?.toInt() ?? 20;
+    // Search session messages + event log.
+    final s = AppState.I.activeSession;
+    final results = <String>[];
+    // Messages.
+    if (s != null) {
+      for (final m in s.messages) {
+        if (m.content.toLowerCase().contains(query)) {
+          results.add('[${m.role}] ${cleanTruncate(m.content, 120)}');
+          if (results.length >= limit) break;
+        }
+      }
+    }
+    // Events.
+    for (final e in _sessionEvents) {
+      if (e.data.toLowerCase().contains(query) ||
+          e.type.toLowerCase().contains(query)) {
+        results.add('[${e.type}] ${e.data}');
+        if (results.length >= limit) break;
+      }
+    }
+    if (results.isEmpty) return 'No matches for "$query".';
+    return 'session_search "$query" → ${results.length} results:\n'
+        '${results.join('\n')}';
   }
 
   Future<String> _requestSystemPermission(String name) async {
