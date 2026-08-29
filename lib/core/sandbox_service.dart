@@ -40,6 +40,12 @@ class SandboxService {
   /// Paths inside the .debs' data.tar that we extract.
   static const _prootEntryInDeb =
       './data/data/com.termux/files/usr/bin/proot';
+  /// proot's exec LOADER — a separate static ELF the proot binary execve's
+  /// to launch guest binaries.  Without it (and PROOT_LOADER pointing at
+  /// it) proot falls back to its compile-time Termux path or a temp-file
+  /// extraction that dies on noexec mounts: 'execve Permission denied'.
+  static const _loaderEntryInDeb =
+      './data/data/com.termux/files/usr/libexec/proot/loader';
   static const _libtallocSo = 'libtalloc.so.2';
   static const _libtallocPrefix =
       './data/data/com.termux/files/usr/lib/libtalloc.so';
@@ -49,6 +55,7 @@ class SandboxService {
 
   Directory? _root;       // .../ovid/sandbox
   File?    _proot;        // .../ovid/sandbox/proot
+  File?    _prootLoader;  // .../ovid/sandbox/proot-loader (PROOT_LOADER)
   Directory? _rootfs;     // .../ovid/sandbox/rootfs
   static const _nativeChannel = MethodChannel('ovid/native');
 
@@ -114,6 +121,8 @@ class SandboxService {
           if (!altProot.existsSync() || !altRootfs.existsSync()) return false;
           _proot = altProot;
           _rootfs = altRootfs;
+          final altLoader = File('${root.path}/proot-loader');
+          if (altLoader.existsSync()) _prootLoader = altLoader;
           _installed = true;
           return true;
         }
@@ -143,6 +152,9 @@ class SandboxService {
       if (!shmem.existsSync()) return false;
       _proot = proot;
       _rootfs = rootfs;
+      // Restore loader pointer if present.
+      final loader = File('${execRoot.path}/proot-loader');
+      if (loader.existsSync()) _prootLoader = loader;
       _installed = true;
       return true;
     } catch (_) {
@@ -283,6 +295,14 @@ class SandboxService {
       );
       onPhase(1, 0.45, 'extracting proot binary');
       await _extractProotFromDeb(deb, _proot!);
+      // proot's EXEC LOADER — static ELF that proot execve's to launch
+      // guest binaries.  Must be extracted too and reachable via the
+      // PROOT_LOADER env var, else proot dies with 'execve: Permission
+      // denied' (falls back to Termux's compile-time path or a noexec
+      // temp file).
+      _prootLoader = File('${execRoot.path}/proot-loader');
+      await _extractFromDeb(deb, _loaderEntryInDeb, _prootLoader!);
+      await _chmod(_prootLoader!.path, 0x1ED); // 0755 — exec bit REQUIRED
       deb.deleteSync();
       await _chmod(_proot!.path, 0x1ED); // 0755
       _proot = File('${root.path}/proot');
@@ -919,6 +939,14 @@ class SandboxService {
         'LD_LIBRARY_PATH': '$rootPath/lib:/system/lib64:/system/lib',
         // proot's HOST-side temp (f2fs probe) — not the jail's /tmp.
         'PROOT_TMP_DIR': _prootHostTmp,
+        // ── THE FIX: proot execve's its embedded LOADER to launch guest
+        // binaries.  Without PROOT_LOADER it falls back to Termux's
+        // compile-time path (/data/data/com.termux/.../loader) which
+        // doesn't exist → proot extracts to a temp file → if that temp
+        // dir is noexec → execve Permission denied on EVERY command.
+        // Point at our pre-extracted loader file (chmod'd 0755).
+        if (_prootLoader != null && _prootLoader!.existsSync())
+          'PROOT_LOADER': _prootLoader!.path,
       },
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
@@ -977,6 +1005,9 @@ class SandboxService {
         'LD_LIBRARY_PATH': '$rootPath/lib:/system/lib64:/system/lib',
         // proot's HOST-side temp (f2fs probe) — not the jail's /tmp.
         'PROOT_TMP_DIR': _prootHostTmp,
+        // Pre-extracted exec loader (see exec() — THE FIX for EACCES).
+        if (_prootLoader != null && _prootLoader!.existsSync())
+          'PROOT_LOADER': _prootLoader!.path,
       },
     );
   }
