@@ -1609,12 +1609,19 @@ class AgentService extends ChangeNotifier {
   }
 
   /// Subagent dispatch — auto-approves (no user UI for child agents).
+  /// Child INHERITS parent's planMode so it cannot bypass plan
+  /// restrictions via dispatch_agent (read-only tools only while
+  /// the parent is planning).
   Future<String> _dispatchSubagent(String name, Map<String, dynamic> args) async {
     final req = pendingApproval;
+    final parentPlanMode = planMode;
     pendingApproval = null;
-    final result = await _dispatch(name, args);
-    pendingApproval = req;
-    return result;
+    try {
+      return await _dispatch(name, args);
+    } finally {
+      pendingApproval = req;
+      planMode = parentPlanMode;
+    }
   }
 
   Future<void> runTask(String prompt) async {
@@ -3275,6 +3282,9 @@ Execution tiers: run_shell adapts to the user's access mode.
     final parentMode = mode;
     final child = AgentService._internal();
     child._subagentDepth = _subagentDepth + 1;
+    // Child inherits planMode → mutating tools stay blocked while the
+    // parent agent is planning (no plan-mode escape via subagent).
+    child.planMode = planMode;
     if (modeName != null) {
       for (final m in AgentMode.values) {
         if (m.name == modeName) child.mode = m;
@@ -3307,14 +3317,12 @@ Execution tiers: run_shell adapts to the user's access mode.
     _emit('shell', 'job #$id started: $name');
     try {
       if (mode == AgentMode.studio && SandboxService.I.isInstalled) {
-        job.process = await Process.start(
-          SandboxService.I.prootPath!,
-          ['-r', SandboxService.I.rootfs!.path, '-0', '--link2symlink',
-           '-b', '/dev', '-b', '/proc', '-b', '/sys',
-           '-w', SandboxService.jailWorkPath,
-           'bash', '-lc', cmd],
-          workingDirectory: work.path,
-          environment: {
+        // Same env/loader setup as exec() — PROOT_LOADER is required or
+        // every guest execve hits EACCES (noexec temp fallback).
+        job.process = await SandboxService.I.spawn(
+          ['bash', '-lc', cmd],
+          hostWorkDir: work,
+          env: {
             'HOME': '/root',
             'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
             'TERM': 'xterm-256color',

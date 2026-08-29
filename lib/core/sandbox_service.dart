@@ -1009,6 +1009,50 @@ class SandboxService {
         if (_prootLoader != null && _prootLoader!.existsSync())
           'PROOT_LOADER': _prootLoader!.path,
       },
+     );
+   }
+
+  /// Start a background command in the sandbox (for agent job_start) —
+  /// same env/loader setup as [shell] but runs a one-shot command.
+  Future<Process> spawn(
+    List<String> args, {
+    Directory? hostWorkDir,
+    Map<String, String>? env,
+  }) async {
+    if (_proot == null || _rootfs == null) {
+      throw Exception(
+          'sandbox not installed — open Studio once to install it, then retry.');
+    }
+    final bindArgs = <String>[
+      '-b', '/dev',
+      '-b', '/dev/pts',
+      '-b', '/proc',
+      '-b', '/sys',
+    ];
+    if (hostWorkDir != null) {
+      bindArgs.addAll(['-b', '${hostWorkDir.path}:$jailWorkPath']);
+    }
+    final rootPath = _root!.path;
+    return Process.start(
+      _proot!.path,
+      [
+        '-r', _rootfs!.path,
+        '-0',
+        '--link2symlink',
+        ...bindArgs,
+        '-w', hostWorkDir != null ? jailWorkPath : '/root',
+        ...args,
+      ],
+      mode: ProcessStartMode.normal,
+      environment: {
+        ..._baseEnv,
+        ...?env,
+        'LD_LIBRARY_PATH': '$rootPath/lib:/system/lib64:/system/lib',
+        'PROOT_TMP_DIR': _prootHostTmp,
+        // Pre-extracted exec loader — THE EACCES fix (see exec()).
+        if (_prootLoader != null && _prootLoader!.existsSync())
+          'PROOT_LOADER': _prootLoader!.path,
+      },
     );
   }
 
