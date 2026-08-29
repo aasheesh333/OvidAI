@@ -153,6 +153,20 @@ class SandboxService {
       onPhase(0, 1.0, 'network ........... online ✓');
 
       // ── Phase 1 — download + extract proot AND its runtime libs ──
+      onPhase(1, 0.0, r'$ fetch proot 5.1.107 (.deb)');
+      // Recover cleanly from an interrupted previous attempt (partial
+      // .deb/proot/lib files may exist).
+      final staleSh = File('${root.path}/proot');
+      if (await staleSh.exists()) {
+        final head = await staleSh.openRead(0, 8).fold<List<int>>(
+            [], (b, c) => b..addAll(c));
+        // ELF check: 0x7F 'E' 'L' 'F'
+        final isElf = head.length >= 4 && head[0] == 0x7F &&
+            head[1] == 0x45 && head[2] == 0x4C && head[3] == 0x46;
+        if (!isElf) {
+          await staleSh.delete(); // leftover .deb copy from the old buggy path
+        }
+      }
       // proot ELF needs libtalloc.so.2 + libandroid-shmem.so (we verified
       // via readelf). All three come as .deb; we extract just the files
       // we need into sandbox/ and sandbox/lib/.
@@ -236,9 +250,16 @@ class SandboxService {
 
       // ── Phase 3 — extract rootfs in pure Dart (no system tar). ──
       onPhase(3, 0.0, 'extracting ubuntu-base-24.04.4-arm64.tar.gz');
-      if (!_rootfs!.existsSync()) _rootfs!.createSync(recursive: true);
+      // Wipe any partial extract from a previous failed run — stale symlinks
+      // from the old external-storage path caused "Operation not permitted".
+      if (_rootfs!.existsSync()) {
+        try {
+          _rootfs!.deleteSync(recursive: true);
+        } catch (_) {}
+      }
+      _rootfs!.createSync(recursive: true);
       await _extractTarGz(rootfsGz, _rootfs!, (done, totalHint) {
-        onPhase(3, 0.1 + 0.85 * done, 'extracting … $done files');
+        onPhase(3, 0.1 + 0.85 * done, 'extracting … ${totalHint > 0 ? "$totalHint files" : "…"}');
       });
       rootfsGz.deleteSync();
       onPhase(3, 1.0, 'configuring base system ✓');
@@ -371,19 +392,62 @@ class SandboxService {
     throw Exception('data.tar.xz not found inside ${deb.uri.pathSegments.last}');
   }
 
-  /// Stream-decompress a .tar.gz into [dest] — uses the archive package's
-  /// battle-tested extractor (handles symlinks, hardlinks, modes, and never
-  /// holds the whole tar in memory).
+  /// Stream-decompress a .tar.gz into [dest] — resilient in-house extractor.
+  /// The package's extractFileToDisk() lets a single bad symlink abort the
+  /// whole install; here symlink failures are non-fatal (proot's
+  /// --link2symlink repairs hardlinks at run time, and Ubuntu-base's few
+  /// convenience links aren't load-bearing for python3/node/git).
   Future<void> _extractTarGz(
     File gz,
     Directory dest,
     void Function(double done01, int totalHint) onProgress,
   ) async {
+    final input = InputFileStream(gz.path);
+    final out = OutputFileStream('${gz.path}.tar');
+    GZipDecoder().decodeStream(input, out);
+    await input.close();
+    await out.close();
+
+    final tarInput = InputFileStream('${gz.path}.tar');
+    final archive = TarDecoder().decodeStream(tarInput, storeData: false);
     var i = 0;
-    await extractFileToDisk(gz.path, dest.path, callback: (entry) {
+    for (final entry in archive) {
       i++;
+      final name = entry.name;
+      if (name.isEmpty) continue;
+      // Path traversal guard.
+      final norm = name.replaceAll(RegExp(r'^\./'), '');
+      if (norm.contains('..')) continue;
+      final outPath = '${dest.path}/$norm';
+      try {
+        if (entry.isSymbolicLink) {
+          final target = entry.symbolicLink ?? '';
+          if (target.isNotEmpty && !target.startsWith('..') &&
+              !(target.startsWith('/') && target.length > 4096)) {
+            final link = Link(outPath);
+            if (!link.existsSync()) {
+              try {
+                link.createSync(target, recursive: true);
+              } catch (_) {}
+            }
+          }
+        } else if (entry.isFile) {
+          final fileOut = OutputFileStream(outPath);
+          try {
+            entry.writeContent(fileOut);
+          } finally {
+            fileOut.closeSync();
+          }
+        } else {
+          Directory(outPath).createSync(recursive: true);
+        }
+      } catch (_) {
+        // Never let one odd entry abort a 3400-file install.
+      }
       if (i % 100 == 0) onProgress((i % 1500) / 1500, i);
-    });
+    }
+    await tarInput.close();
+    File('${gz.path}.tar').deleteSync();
     onProgress(1.0, i);
   }
 
@@ -548,18 +612,37 @@ class SandboxService {
   // -----------------------------------------------------------------------
   Future<Directory> _ensureRoot() async {
     if (_root != null) return _root!;
-    Directory? base;
+    // MUST live in internal app-private storage:
+    //  • external storage (/sdcard/Android/data/...) is FUSE — symlink()
+    //    returns EPERM, and exec() is noexec. The rootfs is full of
+    //    symlinks (bin/sh → dash etc.), so install there always fails.
+    //  • internal storage (/data/user/0/<pkg>/files) is real ext4/f2fs —
+    //    symlinks + chmod +x both work.
+    Directory base;
     try {
-      base = await getExternalStorageDirectory();
-    } catch (_) {}
-    base ??= await getApplicationDocumentsDirectory().catchError(
-      // Test environments lack the path_provider plugin — fall back to
-      // the system temp dir so unit tests can still isolate workspaces.
-      (_) => Directory.systemTemp,
-    );
+      base = await getApplicationSupportDirectory();
+    } catch (_) {
+      base = await getApplicationDocumentsDirectory().catchError(
+        // Test environments lack the path_provider plugin.
+        (_) => Directory.systemTemp,
+      );
+    }
     final dir = Directory('${base.path}/ovid/sandbox');
     if (!dir.existsSync()) dir.createSync(recursive: true);
+    _staleExternalCleanup();
     _root = dir;
     return dir;
+  }
+
+  /// Remove a leftover install under EXTERNAL storage from older builds —
+  /// it can never work (no symlink/exec on /sdcard) and wastes ~1 GB.
+  void _staleExternalCleanup() {
+    () async {
+      try {
+        final ext = await getExternalStorageDirectory();
+        final old = Directory('${ext?.path}/ovid/sandbox');
+        if (await old.exists()) await old.delete(recursive: true);
+      } catch (_) {}
+    }();
   }
 }
