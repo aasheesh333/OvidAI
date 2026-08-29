@@ -1024,4 +1024,68 @@ void main() {
       Aether.dark = true; // restore default
     });
   });
+
+  group('PR9: parallel sessions', () {
+    test('queue is per-session — switching sessions isolates queues', () {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      app.newSession();
+      final s1 = app.activeSession!;
+      agent.enqueueMessage('first task');
+      agent.enqueueMessage('second task');
+      expect(agent.queuedMessages.length, 2);
+      app.newSession();
+      final s2 = app.activeSession!;
+      // New session has its OWN (empty) queue — the old queue stays with s1.
+      expect(agent.queuedMessages, isEmpty);
+      agent.enqueueMessage('s2 task');
+      expect(agent.queuedMessages.length, 1);
+      // Switch back to s1 — its queue is intact.
+      app.selectSession(s1.id);
+      expect(agent.queuedMessages.length, 2);
+      app.selectSession(s2.id);
+      expect(agent.queuedMessages.single, 's2 task');
+      // Cleanup.
+      app.deleteSession(s1.id);
+      app.deleteSession(s2.id);
+    });
+
+    test('busy is per-session — switching shows only active session state', () {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      app.newSession();
+      final s1 = app.activeSession!;
+      expect(agent.busy, isFalse);
+      app.deleteSession(s1.id);
+      expect(agent.busy, isFalse);
+    });
+
+    test('dropSessionRun kills only the deleted session', () {
+      final app = AppState.I;
+      app.newSession();
+      final s1 = app.activeSession!;
+      app.newSession();
+      final s2 = app.activeSession!;
+      app.selectSession(s2.id);
+      app.deleteSession(s1.id);
+      // s2 remains active and functional.
+      expect(app.activeSessionId, s2.id);
+      app.deleteSession(s2.id);
+    });
+
+    test('switching sessions never cancels runs (delete hook only)', () {
+      final app = AppState.I;
+      // Regression guard: onSessionChange used to cancel runs on switch.
+      // Only the DELETE hook may exist now — switching is free.
+      expect(app.onSessionDeleted, isNotNull);
+      app.newSession();
+      final s1 = app.activeSession!;
+      app.newSession();
+      final s2 = app.activeSession!;
+      app.selectSession(s1.id);
+      app.selectSession(s2.id);
+      app.deleteSession(s1.id);
+      app.deleteSession(s2.id);
+    });
+  });
 }

@@ -700,16 +700,11 @@ class AppState extends ChangeNotifier {
 
   void selectSession(String id) {
     activeSessionId = id;
-    // Agent run/queue state belongs to the previous session — stop it so
-    // the stop button and queue don't leak into the new chat.
-    onSessionChange?.call();
+    // NOTE: runs are per-session (parallel) — switching NEVER stops a
+    // running session (DSH multi-session behavior).
     notifyListeners();
     persistSessions();
   }
-
-  /// Set by AgentService at startup (avoids a circular import) — called
-  /// whenever the active session changes (select/new/delete).
-  void Function()? onSessionChange;
 
   void newSession() {
     final s = ChatSession(
@@ -723,7 +718,6 @@ class AppState extends ChangeNotifier {
     }
     sessions.insert(0, s);
     activeSessionId = s.id;
-    onSessionChange?.call();
     // Restore the selected-model pointer on the provider.
     if (s.providerId != null) {
       final p = providerById(s.providerId);
@@ -738,9 +732,15 @@ class AppState extends ChangeNotifier {
     if (activeSessionId == id) {
       activeSessionId = sessions.isEmpty ? null : sessions.first.id;
     }
+    // The deleted session's run dies with it (its jobs, queue, stream).
+    onSessionDeleted?.call(id);
     notifyListeners();
     persistSessions();
   }
+
+  /// Set by AgentService at startup — drops the deleted session's run
+  /// (avoids a circular import; parallel runs for other sessions live on).
+  void Function(String sessionId)? onSessionDeleted;
 
   /// Remove all messages from [index] onward in the named session
   /// (DSH "Revert"/"Edit & resend" semantics).

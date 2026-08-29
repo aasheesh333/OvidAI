@@ -1859,101 +1859,103 @@ class _InputBar extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+          // DSH composer card: text fills the FULL width on top; the
+          // toolbar (attach / mode chip / mic / send-stop) sits on its own
+          // row below — the text never shares a row with the mode icon.
+          padding: const EdgeInsets.fromLTRB(6, 4, 6, 4),
           decoration: BoxDecoration(
             color: Aether.surfaceAlt,
-            borderRadius: BorderRadius.circular(26),
+            borderRadius: BorderRadius.circular(22),
             border: Border.all(color: Aether.hairline),
           ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              IconButton(
-                tooltip: 'Attach',
-                icon: Icon(
-                  Icons.add_circle_outline,
-                  size: 22,
-                  color: Aether.textMuted,
+              // ── Text area — full card width ──
+              TextField(
+                controller: controller,
+                minLines: 1,
+                maxLines: 5,
+                style: const TextStyle(fontSize: 14),
+                decoration: const InputDecoration(
+                  hintText: 'Ask anything…',
+                  filled: false,
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  contentPadding: EdgeInsets.fromLTRB(10, 8, 10, 4),
                 ),
-                onPressed: () => _attachSheet(context),
+                onSubmitted: (_) => onSend(),
               ),
-              Expanded(
-                child: TextField(
-                  controller: controller,
-                  minLines: 1,
-                  maxLines: 5,
-                  style: const TextStyle(fontSize: 14),
-                  decoration: const InputDecoration(
-                    hintText: 'Ask anything…',
-                    filled: false,
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    contentPadding: EdgeInsets.symmetric(
-                      horizontal: 4,
-                      vertical: 10,
+              // ── Toolbar row ──
+              Row(
+                children: [
+                  IconButton(
+                    tooltip: 'Attach',
+                    icon: Icon(
+                      Icons.add_circle_outline,
+                      size: 22,
+                      color: Aether.textMuted,
                     ),
+                    onPressed: () => _attachSheet(context),
                   ),
-                  onSubmitted: (_) => onSend(),
-                ),
-              ),
-              // DSH-web mode selector — icon + text chip, opens the mode sheet.
-              const Padding(
-                padding: EdgeInsets.only(right: 4),
-                child: _ModeChip(),
-              ),
-              IconButton(
-                tooltip: 'Voice',
-                icon: Icon(
-                  Icons.mic_none,
-                  size: 20,
-                  color: Aether.textMuted,
-                ),
-                onPressed: () {},
-              ),
-              // ── Stateful primary button (DSH-web InputBar pattern) ──
-              AnimatedBuilder(
-                animation: Listenable.merge([AgentService.I, controller]),
-                builder: (_, _) {
-                  final runningNow = AgentService.I.busy;
-                  final hasDraft = controller.text.trim().isNotEmpty;
-                  final IconData icon;
-                  final Color bg;
-                  final String tip;
-                  if (runningNow && !hasDraft) {
-                    // Running + empty → STOP (red).
-                    icon = Icons.stop_rounded;
-                    bg = Colors.redAccent;
-                    tip = 'Stop generating';
-                  } else if (runningNow && hasDraft) {
-                    // Running + draft → SEND-TO-QUEUE (teal).
-                    icon = Icons.arrow_upward;
-                    bg = _queueColor;
-                    tip = 'Add to queue';
-                  } else {
-                    // Idle → SEND (accent).
-                    icon = Icons.arrow_upward;
-                    bg = Aether.accent;
-                    tip = 'Send';
-                  }
-                  return Container(
-                    decoration: BoxDecoration(
-                      color: bg,
-                      shape: BoxShape.circle,
+                  // DSH-web mode selector — icon + text chip, opens the mode sheet.
+                  const _ModeChip(),
+                  const Spacer(),
+                  IconButton(
+                    tooltip: 'Voice',
+                    icon: Icon(
+                      Icons.mic_none,
+                      size: 20,
+                      color: Aether.textMuted,
                     ),
-                    child: IconButton(
-                      tooltip: tip,
-                      icon: Icon(icon, size: 18, color: Colors.white),
-                      onPressed: () {
-                        if (runningNow && !hasDraft) {
-                          AgentService.I.cancelRun();
-                        } else {
-                          onSend();
-                        }
-                      },
-                    ),
-                  );
-                },
+                    onPressed: () {},
+                  ),
+                  // ── Stateful primary button (DSH-web InputBar pattern) ──
+                  AnimatedBuilder(
+                    animation: Listenable.merge([AgentService.I, controller]),
+                    builder: (_, _) {
+                      final runningNow = AgentService.I.busy;
+                      final hasDraft = controller.text.trim().isNotEmpty;
+                      final IconData icon;
+                      final Color bg;
+                      final String tip;
+                      if (runningNow && !hasDraft) {
+                        // Running + empty → STOP (red).
+                        icon = Icons.stop_rounded;
+                        bg = Colors.redAccent;
+                        tip = 'Stop generating';
+                      } else if (runningNow && hasDraft) {
+                        // Running + draft → SEND-TO-QUEUE (teal).
+                        icon = Icons.arrow_upward;
+                        bg = _queueColor;
+                        tip = 'Add to queue';
+                      } else {
+                        // Idle → SEND (accent).
+                        icon = Icons.arrow_upward;
+                        bg = Aether.accent;
+                        tip = 'Send';
+                      }
+                      return Container(
+                        decoration: BoxDecoration(
+                          color: bg,
+                          shape: BoxShape.circle,
+                        ),
+                        child: IconButton(
+                          tooltip: tip,
+                          icon: Icon(icon, size: 18, color: Colors.white),
+                          onPressed: () {
+                            if (runningNow && !hasDraft) {
+                              AgentService.I.cancelRun();
+                            } else {
+                              onSend();
+                            }
+                          },
+                        ),
+                      );
+                    },
+                  ),
+                ],
               ),
             ],
           ),

@@ -162,6 +162,28 @@ class _BgJob {
   _BgJob({required this.id, required this.name, required this.command});
 }
 
+/// Per-session agent run state — one per ChatSession so many sessions run
+/// in parallel without interfering (DSH multi-session parity).  Switching
+/// sessions NEVER stops another session's run.
+class _AgentRun {
+  String? activeRunId;
+  bool cancelRequested = false;
+  HttpClientRequest? activeRequest;
+  final List<String> queue = [];
+  ApprovalRequest? pendingApproval;
+  bool planMode = false;
+  final Map<int, _BgJob> jobs = {};
+  int jobCounter = 0;
+  Message? activeToolMsg;
+  DateTime? runStart;
+  int? lastRunElapsedMs;
+  // Live streaming buffers for this session's bubble.
+  final StringBuffer liveContent = StringBuffer();
+  final StringBuffer liveReasoning = StringBuffer();
+  ChatSession? liveSession;
+  Message? liveMsg;
+}
+
 /// Session event (DSH SessionEvent equivalent) — durable facts about what
 /// happened in a session (tool calls, mode changes, errors, approvals).
 class SessionEvent {
@@ -204,8 +226,8 @@ class AgentService extends ChangeNotifier {
     // Session-local reminder engine (DSH schedule delivery) — ticks
     // every second, no-ops when no schedules exist.
     _startScheduleTimer();
-    // Session switches stop the previous session's run/queue/jobs.
-    AppState.I.onSessionChange = resetForSessionChange;
+    // Deleted sessions lose their run; all others keep running in parallel.
+    AppState.I.onSessionDeleted = dropSessionRun;
   }
   /// Named private constructor for subagent children (same body as [_]).
   AgentService._internal() : this._();
@@ -214,60 +236,78 @@ class AgentService extends ChangeNotifier {
   AgentMode mode = AgentMode.auto;
 
   final List<AgentEvent> events = [];
-  String? activeRunId;
-  ApprovalRequest? pendingApproval;
 
-  // ── CANCELLATION (DSH-web stop button) ────────────────────────────────
-  HttpClientRequest? _activeRequest;
-  bool _cancelRequested = false;
-  bool get cancelRequested => _cancelRequested;
+  // ── PER-SESSION RUN STATE (parallel sessions, DSH parity) ────────────
+  // Every session owns an independent _AgentRun (cancel flag, HTTP
+  // request, queue, approval, jobs, plan mode, live streaming buffers).
+  // 10+ sessions can run at once; switching sessions NEVER stops a run.
+  final Map<String, _AgentRun> _runs = {};
 
-  // ── MESSAGE QUEUE (DSH-web QueueDock) ─────────────────────────────────
-  // When the user submits while a run is active, the message is enqueued
-  // and auto-started after the current run finishes (FIFO).
-  final List<String> _queue = [];
-  List<String> get queuedMessages => List.unmodifiable(_queue);
+  /// The run bound to the current target session.  Subagents (no session)
+  /// use a detached run keyed to ''.
+  _AgentRun get _run => _runs.putIfAbsent(_currentRunKey(), () => _AgentRun());
 
-  /// Stop the current run: aborts the in-flight HTTP request and flags
-  /// every loop turn to exit at the next checkpoint. DSH-web "Stop" UX.
+  String _currentRunKey() => AppState.I.activeSession?.id ?? '';
+
+  // ── Compatibility accessors (UI reads the ACTIVE session's run) ───────
+  String? get activeRunId => _run.activeRunId;
+  set activeRunId(String? v) => _run.activeRunId = v;
+  ApprovalRequest? get pendingApproval => _run.pendingApproval;
+  set pendingApproval(ApprovalRequest? v) => _run.pendingApproval = v;
+  bool get planMode => _run.planMode;
+  set planMode(bool v) => _run.planMode = v;
+  bool get cancelRequested => _run.cancelRequested;
+  bool get _cancelRequested => _run.cancelRequested;
+  set _cancelRequested(bool v) => _run.cancelRequested = v;
+  set _activeRequest(HttpClientRequest? v) => _run.activeRequest = v;
+  List<String> get _queue => _run.queue;
+  List<String> get queuedMessages => List.unmodifiable(_run.queue);
+  Map<int, _BgJob> get _jobs => _run.jobs;
+  int get _jobCounter => _run.jobCounter;
+  set _jobCounter(int v) => _run.jobCounter = v;
+  Message? get _activeToolMsg => _run.activeToolMsg;
+  set _activeToolMsg(Message? v) => _run.activeToolMsg = v;
+  DateTime? get _runStart => _run.runStart;
+  set _runStart(DateTime? v) => _run.runStart = v;
+  int? get lastRunElapsedMs => _run.lastRunElapsedMs;
+  set lastRunElapsedMs(int? v) => _run.lastRunElapsedMs = v;
+
+  /// Stop the current session's run: aborts the in-flight HTTP request
+  /// and flags every loop turn to exit at the next checkpoint.
   void cancelRun() {
-    if (activeRunId == null) return;
-    _cancelRequested = true;
+    final r = _run;
+    if (r.activeRunId == null) return;
+    r.cancelRequested = true;
     // Abort the in-flight request — works while connecting AND while
     // streaming (abort() errors the socket, which surfaces in the SSE
-    // loop; the per-chunk _cancelRequested check then breaks cleanly).
+    // loop; the per-chunk cancel check then breaks cleanly).
     try {
-      _activeRequest?.abort();
+      r.activeRequest?.abort();
     } catch (_) {}
     _emit('think', 'stop requested — finishing current turn');
     notifyListeners();
   }
 
-  /// Called when the user switches or creates a session — any active run
-  /// belongs to the OLD session and must not leak into the new one:
-  /// stop it, drop the queue (queued messages were for the old context),
-  /// resolve any pending approval, and kill background jobs.
-  void resetForSessionChange() {
-    if (activeRunId != null) {
-      cancelRun();
-    }
-    _queue.clear();
-    if (pendingApproval != null) {
+  /// Drop a session's run entirely (called from AppState.deleteSession).
+  void dropSessionRun(String sessionId) {
+    final r = _runs.remove(sessionId);
+    if (r == null) return;
+    r.cancelRequested = true;
+    try {
+      r.activeRequest?.abort();
+    } catch (_) {}
+    if (r.pendingApproval != null) {
       try {
-        pendingApproval!.completer.complete(false);
+        r.pendingApproval!.completer.complete(false);
       } catch (_) {}
-      pendingApproval = null;
     }
-    for (final job in _jobs.values) {
+    for (final job in r.jobs.values) {
       if (!job.finished) {
         try {
           job.process?.kill(ProcessSignal.sigkill);
         } catch (_) {}
-        job.finished = true;
       }
     }
-    _activeToolMsg = null;
-    _resetLiveBuffers();
     notifyListeners();
   }
 
@@ -518,9 +558,6 @@ class AgentService extends ChangeNotifier {
     return SandboxService.I.workDirFor(sid);
   }
 
-  /// Elapsed milliseconds of the last completed/failed run — shown on the
-  /// final assistant bubble (DSH "2.1s" metadata).
-  int? lastRunElapsedMs;
 
   // ── fs tools state (read-before-write policy, DSH observation gate) ──
   /// Paths the AI has read via file_read/fs_edit view — str_replace/insert
@@ -529,13 +566,18 @@ class AgentService extends ChangeNotifier {
   Set<String> _readPathsFor(String sid) =>
       _readPaths.putIfAbsent(sid, () => {});
 
-  DateTime? _runStart;
 
   /// Surface of the last model-layer failure (HTTP status, network error,
   /// timeout) so the UI can show the REAL error instead of a dummy string.
   String? lastError;
 
-  bool get busy => activeRunId != null;
+  /// True while the ACTIVE session has a run in flight — drives the
+  /// typing bubble + stop/send button.  Per-session: another session
+  /// running does NOT make this session look busy.
+  bool get busy => _run.activeRunId != null;
+
+  /// True while ANY session has a run — for global indicators.
+  bool get anyBusy => _runs.values.any((r) => r.activeRunId != null);
 
   void setMode(AgentMode m) {
     mode = m;
@@ -2276,10 +2318,14 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
   }
 
   // ── LIVE BUBBLE streaming (DSH-web style) ─────────────────────────────
-  final StringBuffer _liveContent = StringBuffer();
-  final StringBuffer _liveReasoning = StringBuffer();
-  ChatSession? _liveSession;
-  Message? _liveMsg;
+  // Buffers live on the per-session _AgentRun so parallel sessions keep
+  // independent streaming bubbles.
+  StringBuffer get _liveContent => _run.liveContent;
+  StringBuffer get _liveReasoning => _run.liveReasoning;
+  ChatSession? get _liveSession => _run.liveSession;
+  set _liveSession(ChatSession? v) => _run.liveSession = v;
+  Message? get _liveMsg => _run.liveMsg;
+  set _liveMsg(Message? v) => _run.liveMsg = v;
 
   void _ensureLiveMsg(ChatSession s) {
     if (_liveSession == s &&
@@ -3066,8 +3112,6 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
   // it as a 24px collapsed row (icon + title · summary) that expands to a
   // Terminal/Diff/Read block.
 
-  /// The tool message for the currently-executing call (output streams in).
-  Message? _activeToolMsg;
 
   /// Tool rows that should NOT create a chat card (UI-interactive tools
   /// have their own surfaces — approval dock, questions card, todo dock).
@@ -3582,9 +3626,6 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
 
   // ── WAVE 2 HANDLERS — plan mode, background jobs, session events ────
 
-  /// True if the agent is currently in plan mode (read-only tools only).
-  bool planMode = false;
-
   /// Tools that modify state — blocked during plan mode.
   static const _mutatingTools = {
     'file_write', 'fs_edit', 'run_shell', 'commit', 'git_clone',
@@ -3837,9 +3878,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     }
   }
 
-  // ── Background jobs (DSH ctx.jobs equivalent) ──
-  final Map<int, _BgJob> _jobs = {};
-  int _jobCounter = 0;
+  // ── Background jobs (DSH ctx.jobs equivalent) — state lives on _run ──
 
   Future<String> _handleJobStart(Map<String, dynamic> args) async {
     final cmd = args['command'] as String;
