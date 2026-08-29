@@ -201,6 +201,8 @@ class _SessionStudio {
 ///                  ← tool results loop back to model till final answer
 class AgentService extends ChangeNotifier {
   AgentService._();
+  /// Named private constructor for subagent children (same body as [_]).
+  AgentService._internal() : this._();
   static final AgentService I = AgentService._();
 
   AgentMode mode = AgentMode.auto;
@@ -1098,6 +1100,73 @@ class AgentService extends ChangeNotifier {
     {
       'type': 'function',
       'function': {
+        'name': 'dispatch_agent',
+        'description':
+            'Launch a subagent — a fresh AI agent instance with its own '
+            'context window and tool access.  Use for complex subtasks '
+            'that need focused exploration (e.g. "search the codebase '
+            'for all API endpoints and summarize their auth patterns"). '
+            'The subagent runs to completion and returns its final '
+            'answer.  The subagent does NOT see this chat\'s history — '
+            'pass everything it needs in the prompt.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'prompt': {
+              'type': 'string',
+              'description': 'Detailed task description for the subagent',
+            },
+            'mode': {
+              'type': 'string',
+              'description': 'Agent mode: "studio" (full sandbox) or '
+                  '"quick" (phone terminal). Default: current mode.',
+              'enum': ['studio', 'quick'],
+            },
+          },
+          'required': ['prompt'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'memory_save',
+        'description':
+            'Save a durable memory snippet (a fact, preference, or '
+            'context) that persists across sessions.  Use for user '
+            'preferences, project facts, or important decisions.  '
+            'Search memories with memory_search.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'content': {
+              'type': 'string',
+              'description': 'The memory to store (a concise fact)',
+            },
+          },
+          'required': ['content'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'memory_search',
+        'description':
+            'Search saved memories (user preferences, project facts). '
+            'Returns matching memories with timestamps.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'query': {'type': 'string'},
+          },
+          'required': ['query'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
         'name': 'commit',
         'description':
             'Commit all pending local changes and push to the connected '
@@ -1481,6 +1550,71 @@ class AgentService extends ChangeNotifier {
       // Compaction failure is non-fatal — continue with full history.
       _emit('think', 'compaction skipped: $e');
     }
+  }
+
+  /// Compact subagent loop (no UI events, no session message storage,
+  /// no approval prompts).  Runs the model with tool calls and returns
+  /// the final assistant text.  Used by dispatch_agent.
+  Future<String> runSubagent(String prompt) async {
+    final p = _provider;
+    if (p == null) {
+      final sel = AppState.I.providerForSession(AppState.I.activeSession);
+      if (sel == null) return 'No provider configured for subagent.';
+      return await _runSubagentLoop(sel, prompt);
+    }
+    return await _runSubagentLoop(p, prompt);
+  }
+
+  Future<String> _runSubagentLoop(ProviderConfig p, String prompt) async {
+    final session = AppState.I.activeSession;
+    if (session == null) return 'No active session for subagent.';
+    final sys =
+        'You are a focused subagent. Do the task and give a final answer. '
+        'You have the same tools as the parent agent. Be concise. Match '
+        'the task language. Do not call exit_plan_mode (subagents execute).';
+    final msgs = <Map<String, dynamic>>[
+      {'role': 'system', 'content': sys},
+      {'role': 'user', 'content': prompt},
+    ];
+    for (var turn = 0; turn < 8; turn++) {
+      final msg = await _callLlm(p, msgs, session);
+      if (msg == null) {
+        return 'Subagent model error: ${lastError ?? "unknown"}';
+      }
+      final toolCalls = msg['tool_calls'] as List?;
+      if (toolCalls == null || toolCalls.isEmpty) {
+        return (msg['content'] as String?) ?? '(no answer)';
+      }
+      msgs.add({
+        'role': 'assistant',
+        'content': msg['content'] ?? '',
+        'tool_calls': toolCalls,
+      });
+      for (final tc in toolCalls) {
+        final fn = tc['function'];
+        final name = fn['name'];
+        final args =
+            jsonDecode(fn['arguments'] ?? '{}') as Map<String, dynamic>;
+        // Subagents auto-approve all tools (no UI).
+        final result = await _dispatchSubagent(name, args);
+        msgs.add({
+          'role': 'tool',
+          'tool_call_id': tc['id'] ?? name,
+          'name': name,
+          'content': result,
+        });
+      }
+    }
+    return 'Subagent reached turn limit without final answer.';
+  }
+
+  /// Subagent dispatch — auto-approves (no user UI for child agents).
+  Future<String> _dispatchSubagent(String name, Map<String, dynamic> args) async {
+    final req = pendingApproval;
+    pendingApproval = null;
+    final result = await _dispatch(name, args);
+    pendingApproval = req;
+    return result;
   }
 
   Future<void> runTask(String prompt) async {
@@ -2010,6 +2144,15 @@ Execution tiers: run_shell adapts to the user's access mode.
 
   // ── TOOL DISPATCH (with mode-based approvals) ─────────────────────────
   Future<String> _dispatch(String name, Map<String, dynamic> args) async {
+    // ── Plan mode enforcement (DSH exit_plan_mode flow) ──
+    // While planning, only read-only tools are allowed.  The AI must
+    // present its plan via exit_plan_mode and get user approval first.
+    if (planMode && _isMutatingTool(name)) {
+      return 'PLAN MODE ACTIVE: "$name" is a mutating tool. Read-only tools '
+          'ko use karo (read/list/search/browse), plan final karo, aur '
+          'exit_plan_mode call karo user approval ke liye. After approval, '
+          'execution tools unlock ho jayenge.';
+    }
     switch (name) {
       case 'run_shell':
         final cmd = args['command'] as String;
@@ -2278,6 +2421,19 @@ Execution tiers: run_shell adapts to the user's access mode.
         } catch (e) {
           return 'exec error: $e';
         }
+      case 'dispatch_agent':
+        return await _handleDispatchAgent(args);
+
+      case 'memory_save':
+        final content = args['content'] as String;
+        final item = MemoryItem(
+          id: 'mem-${DateTime.now().millisecondsSinceEpoch}',
+          content: content,
+        );
+        await AppState.I.saveMemory(item);
+        _emit('think', 'memory saved');
+        return 'Memory saved ✓ — "${cleanTruncate(content, 120)}"';
+
       case 'memory_search':
         final q2 = (args['query'] as String).toLowerCase();
         _emit('think', 'searching memory: $q2');
@@ -2285,10 +2441,15 @@ Execution tiers: run_shell adapts to the user's access mode.
         final share = app.shareSessionMemory;
         final current = app.activeSession;
         if (current == null) return 'no active session';
-        // Which messages to search:
-        //   share OFF → only THIS session's messages
-        //   share ON  → ALL sessions' messages (user explicitly enabled it)
         final hits = <String>[];
+        // Durable saved memories first (memory_save items).
+        for (final mem in app.memories.take(50)) {
+          if (mem.content.toLowerCase().contains(q2)) {
+            hits.add('[memory] ${cleanTruncate(mem.content, 120)}');
+            if (hits.length >= 8) break;
+          }
+        }
+        // Then session messages.
         final pool = share
             ? app.sessions.cast<ChatSession>()
             : <ChatSession>[current];
@@ -2305,8 +2466,8 @@ Execution tiers: run_shell adapts to the user's access mode.
         }
         if (hits.isEmpty) {
           return share
-              ? 'No matches for "$q2" across all sessions.'
-              : 'No matches for "$q2" in this session. (Enable "Share session memory" in Settings to search across chats.)';
+              ? 'No matches for "$q2" across memories + all sessions.'
+              : 'No matches for "$q2" in memories + this session. (Enable "Share session memory" in Settings to search across chats.)';
         }
         return hits.join('\n');
       case String() when name.startsWith('mcp_'):
@@ -3065,6 +3226,17 @@ Execution tiers: run_shell adapts to the user's access mode.
   /// True if the agent is currently in plan mode (read-only tools only).
   bool planMode = false;
 
+  /// Tools that modify state — blocked during plan mode.
+  static const _mutatingTools = {
+    'file_write', 'fs_edit', 'run_shell', 'commit', 'git_clone',
+    'git_push', 'request_permission', 'catalog_add_provider',
+    'catalog_remove_provider', 'catalog_add_mcp', 'catalog_remove_mcp',
+    'agent_install_plugin', 'agent_install_mcp', 'catalog_add_marketplace',
+    'todo_write', 'job_start', 'job_kill',
+  };
+
+  bool _isMutatingTool(String name) => _mutatingTools.contains(name);
+
   Future<String> _handleExitPlanMode(Map<String, dynamic> args) async {
     final plan = args['plan'] as String? ?? '';
     _emit('think', 'presenting plan for approval…');
@@ -3083,6 +3255,42 @@ Execution tiers: run_shell adapts to the user's access mode.
     planMode = false;
     _emit('done', 'plan approved ✓ — executing');
     return 'Plan approved ✓ — ab execute karo.';
+  }
+
+  // ── Subagent (DSH dispatch_agent equivalent) ──
+  // A fresh AgentService child instance with its own context window runs
+  // the task to completion and returns its final answer as the tool
+  // result.  The child never touches the parent chat's session.
+  int _subagentDepth = 0;
+  static const _maxSubagentDepth = 2;
+
+  Future<String> _handleDispatchAgent(Map<String, dynamic> args) async {
+    final prompt = args['prompt'] as String;
+    final modeName = args['mode'] as String?;
+    _emit('think', 'dispatching subagent…');
+    if (_subagentDepth >= _maxSubagentDepth) {
+      return 'Subagent depth limit ($_maxSubagentDepth) reached — '
+          'do the task yourself with the tools you have.';
+    }
+    final parentMode = mode;
+    final child = AgentService._internal();
+    child._subagentDepth = _subagentDepth + 1;
+    if (modeName != null) {
+      for (final m in AgentMode.values) {
+        if (m.name == modeName) child.mode = m;
+      }
+    }
+    child._emit('think', 'subagent task: ${cleanTruncate(prompt, 80)}');
+    try {
+      final answer = await child.runSubagent(prompt);
+      _emit('think', 'subagent finished (${answer.length} chars)');
+      return answer;
+    } catch (e) {
+      return 'Subagent failed: $e';
+    } finally {
+      child.dispose();
+      mode = parentMode;
+    }
   }
 
   // ── Background jobs (DSH ctx.jobs equivalent) ──

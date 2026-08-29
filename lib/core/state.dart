@@ -210,6 +210,29 @@ class Message {
   };
 }
 
+/// A durable memory snippet — saved via memory_save, searchable via
+/// memory_search, persisted across sessions (DSH memory equivalent).
+class MemoryItem {
+  final String id;
+  final String content;
+  final DateTime createdAt;
+  MemoryItem({required this.id, required this.content, DateTime? createdAt})
+      : createdAt = createdAt ?? DateTime.now();
+
+  factory MemoryItem.fromJson(Map<String, dynamic> j) => MemoryItem(
+        id: j['id'] as String,
+        content: j['content'] as String,
+        createdAt: DateTime.tryParse(j['createdAt'] as String? ?? '') ??
+            DateTime.now(),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'content': content,
+        'createdAt': createdAt.toIso8601String(),
+      };
+}
+
 class ChatSession {
   final String id;
   String title;
@@ -324,6 +347,7 @@ class AppState extends ChangeNotifier {
       final t = prefs.getInt(_kResponseTimeout);
       if (t != null && t >= 5 && t <= 3600) responseTimeoutSec = t;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
+      await _loadMemories();
     } catch (_) {}
   }
 
@@ -525,6 +549,33 @@ class AppState extends ChangeNotifier {
       []; // user-added git marketplaces (Claude Code style)
   final List<ChatSession> sessions = [];
   String? activeSessionId;
+
+  /// Durable memories saved via memory_save — survive across sessions
+  /// (DSH memory tool equivalent).  Persisted as JSON in SharedPreferences.
+  final List<MemoryItem> memories = [];
+  static const _kMemories = 'ovid_memories';
+
+  Future<void> saveMemory(MemoryItem m) async {
+    memories.add(m);
+    if (memories.length > 200) memories.removeRange(0, memories.length - 200);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+          _kMemories, jsonEncode(memories.map((e) => e.toJson()).toList()));
+    } catch (_) {}
+  }
+
+  Future<void> _loadMemories() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kMemories);
+      if (raw == null) return;
+      final list = jsonDecode(raw) as List;
+      memories
+        ..clear()
+        ..addAll(list.map((e) => MemoryItem.fromJson(e as Map<String, dynamic>)));
+    } catch (_) {}
+  }
 
   ChatSession? get activeSession =>
       sessions.where((s) => s.id == activeSessionId).firstOrNull;
