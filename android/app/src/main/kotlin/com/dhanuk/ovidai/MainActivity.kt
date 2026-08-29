@@ -5,6 +5,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import android.content.Context
 import java.io.File
+import java.util.zip.ZipFile
 
 class MainActivity : FlutterActivity() {
     private val channelName = "ovid/native"
@@ -23,6 +24,33 @@ class MainActivity : FlutterActivity() {
                             result.success(dir)
                         } else {
                             result.error("UNAVAILABLE", "nativeLibraryDir is null", null)
+                        }
+                    }
+                    "readBootstrapPayload" -> {
+                        // The sandbox bootstrap zip ships as
+                        // lib/<abi>/libovid_bootstrap.so INSIDE the APK.
+                        // With extractNativeLibs=false (Flutter default for
+                        // minSdk >= 23) the PackageManager never extracts it
+                        // to nativeLibraryDir — but we don't need it to: the
+                        // payload IS a plain zip, readable straight out of
+                        // the installed APK.  This avoids doubling storage
+                        // (no extracted copy alongside the APK copy).
+                        try {
+                            val apkPath = applicationInfo.sourceDir
+                            val zip = ZipFile(apkPath)
+                            var entry = zip.getEntry("lib/arm64-v8a/libovid_bootstrap.so")
+                            if (entry == null) entry = zip.getEntry("lib/armeabi-v7a/libovid_bootstrap.so")
+                            if (entry == null) entry = zip.getEntry("lib/x86_64/libovid_bootstrap.so")
+                            if (entry == null) {
+                                zip.close()
+                                result.error("MISSING", "no libovid_bootstrap.so in APK", null)
+                            } else {
+                                val bytes = zip.getInputStream(entry).readBytes()
+                                zip.close()
+                                result.success(bytes)
+                            }
+                        } catch (e: Exception) {
+                            result.error("READ_FAIL", "bootstrap read failed: ${e.message}", null)
                         }
                     }
                     "isDataExecAllowed" -> {

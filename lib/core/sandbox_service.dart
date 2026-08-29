@@ -154,20 +154,14 @@ class SandboxService {
       onPhase(0, 0.15, 'runtime ........... native sandbox (API 24+)');
     }
 
-    // ── Locate the bundled payload in nativeLibraryDir ──
-    onPhase(1, 0.0, r'$ locate bundled bootstrap (libovid_bootstrap.so)');
-    final nativeLibDir = await _nativeLibraryDir;
-    if (nativeLibDir == null) {
+    // ── Locate the bundled bootstrap payload ──
+    onPhase(1, 0.0, r'$ read bundled bootstrap (libovid_bootstrap.so)');
+    final payloadBytes = await _readBootstrapPayload();
+    if (payloadBytes == null) {
       throw Exception(
-          'Could not resolve nativeLibraryDir — cannot read the bundled sandbox payload.');
+          'Sandbox payload not found. Reinstall the app — the ABI split '
+          'for this device was not included in the install.');
     }
-    final payload = File('$nativeLibDir/libovid_bootstrap.so');
-    if (!payload.existsSync()) {
-      throw Exception(
-          'Sandbox payload missing at ${payload.path}. Reinstall the app '
-          '(the ABI split for this device was not included).');
-    }
-    final payloadBytes = await payload.readAsBytes();
     onPhase(1, 1.0,
         'payload ........... ${(payloadBytes.length / 1024 / 1024).toStringAsFixed(1)} MB ✓');
 
@@ -300,6 +294,29 @@ class SandboxService {
       final v =
           await _nativeChannel.invokeMethod<String>('getNativeLibraryDir');
       if (v != null && v.isNotEmpty) return v;
+    } catch (_) {}
+    return null;
+  }
+
+  /// Read the bundled bootstrap zip.  With extractNativeLibs=false
+  /// (Flutter default, minSdk ≥ 23) the .so is NOT extracted to
+  /// nativeLibraryDir — so we read the zip entry straight out of the
+  /// installed APK via the platform channel (no double storage).
+  /// Falls back to the extracted file for dev/test environments.
+  Future<Uint8List?> _readBootstrapPayload() async {
+    // Primary: zip entry inside the installed APK.
+    try {
+      final bytes = await _nativeChannel
+          .invokeMethod<Uint8List>('readBootstrapPayload');
+      if (bytes != null && bytes.isNotEmpty) return bytes;
+    } catch (_) {}
+    // Fallback: already-extracted copy (older builds / tests).
+    try {
+      final libDir = await _nativeLibraryDir;
+      if (libDir != null) {
+        final f = File('$libDir/libovid_bootstrap.so');
+        if (f.existsSync()) return f.readAsBytes();
+      }
     } catch (_) {}
     return null;
   }
