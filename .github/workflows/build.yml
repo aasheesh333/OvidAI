@@ -95,13 +95,13 @@ jobs:
           fi
 
       - name: Build debug APK
-        run: flutter build apk --debug
+        run: flutter build apk --debug --dart-define=OVID_BUILD=${{ github.sha }}
 
       - name: Build signed release APK + AAB
         if: env.signing == 'true'
         run: |
-          flutter build apk --release --obfuscate --split-debug-info=build/symbols
-          flutter build appbundle --release --obfuscate --split-debug-info=build/symbols
+          flutter build apk --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }}
+          flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }}
 
       - name: Rename artifacts
         run: |

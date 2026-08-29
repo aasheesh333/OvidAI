@@ -135,6 +135,12 @@ class SandboxService {
 
       // ── Phase 0 — REAL device checks (storage + network). ──
       onPhase(0, 0.0, r'$ ovid sandbox --preflight');
+      // Build stamp — proves which APK is running (dart-define from CI).
+      const buildStamp = String.fromEnvironment(
+        'OVID_BUILD',
+        defaultValue: 'local-dev',
+      );
+      onPhase(0, 0.0, 'ovid build ........ $buildStamp');
       final stat = await root.stat();
       onPhase(0, 0.25, 'target dir ........ ${statChanged(stat)} ✓');
       final storage = await _freeMb(root);
