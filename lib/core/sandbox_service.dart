@@ -182,7 +182,9 @@ class SandboxService {
     // ── Symlinks from SYMLINKS.txt ──
     onPhase(4, 0.0, 'linking tool aliases');
     var linked = 0;
-    symlinks.forEach((target, linkPath) {
+    for (final s in symlinks) {
+      final target = s.target;
+      final linkPath = s.linkPath;
       final link = Link('${staging.path}/$linkPath');
       try {
         link.parent.createSync(recursive: true);
@@ -199,7 +201,7 @@ class SandboxService {
         link.createSync(dest);
         linked++;
       } catch (_) {}
-    });
+    }
     onPhase(4, 1.0, 'linked ............ $linked aliases ✓');
 
     // ── Config: rewrite Termux prefix → our prefix in text configs ──
@@ -212,6 +214,12 @@ class SandboxService {
     staging.renameSync(prefix.path);
     _prefix = prefix;
     _installed = true;
+
+    // ── Create runtime dirs (not in bootstrap payload) ──
+    // bash exec uses workingDirectory=$PREFIX/home; without this dir
+    // chdir fails with ENOENT → "No such file or directory".
+    Directory('${prefix.path}/home').createSync(recursive: true);
+    Directory('${prefix.path}/tmp').createSync(recursive: true);
 
     // ── Sanity: run bash --version natively ──
     onPhase(6, 0.0, r'$ bash --version (native exec sanity)');
@@ -227,17 +235,23 @@ class SandboxService {
     }
   }
 
-  /// Parse SYMLINKS.txt from [archive] → {target: linkPath}.
-  /// Format per TermuxInstaller.java: each line is `target←linkPath`,
-  /// e.g. `/data/data/com.termux/files/usr/bin/dash←bin/sh`.
-  static Map<String, String> parseSymlinks(Archive archive) {
+  /// A parsed symlink: `target` is what the link points to, `linkPath` is
+  /// where the link is created (both as they appear in SYMLINKS.txt).
+  /// TermuxInstaller.java uses `List<Pair<String,String>>` — a Map would
+  /// collapse duplicate targets (1177 lines → 220 unique targets; e.g.
+  /// `coreutils` is the target of 100 different bin/ links).  The record
+  /// list keeps every entry.
+  static List<({String target, String linkPath})> parseSymlinks(
+      Archive archive) {
     final file = archive.findFile('SYMLINKS.txt');
-    if (file == null) return {};
+    if (file == null) return const [];
     final txt = utf8.decode(file.content as List<int>);
-    final symlinks = <String, String>{};
+    final symlinks = <({String target, String linkPath})>[];
     for (final line in const LineSplitter().convert(txt)) {
       final parts = line.split('←');
-      if (parts.length == 2) symlinks[parts[0]] = parts[1];
+      if (parts.length == 2) {
+        symlinks.add((target: parts[0], linkPath: parts[1]));
+      }
     }
     return symlinks;
   }

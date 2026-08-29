@@ -1144,10 +1144,38 @@ void main() {
 /data/data/com.termux/files/usr/bin/dash←bin/sh
 /data/data/com.termux/files/usr/bin/busybox←bin/busybox
 '''));
-      final map = SandboxService.parseSymlinks(archive);
-      expect(map.length, 2);
-      expect(map['/data/data/com.termux/files/usr/bin/dash'], 'bin/sh');
-      expect(map['/data/data/com.termux/files/usr/bin/busybox'], 'bin/busybox');
+      final list = SandboxService.parseSymlinks(archive);
+      expect(list.length, 2);
+      expect(list[0].target, '/data/data/com.termux/files/usr/bin/dash');
+      expect(list[0].linkPath, 'bin/sh');
+      expect(list[1].target, '/data/data/com.termux/files/usr/bin/busybox');
+      expect(list[1].linkPath, 'bin/busybox');
+    });
+
+    // Regression: parseSymlinks used a Map keyed by target — SYMLINKS.txt
+    // has 1177 lines but only 220 unique targets (coreutils alone is the
+    // target of 100 bin/ links).  A Map collapsed them to 220 entries,
+    // breaking ls/cp/mv/etc.  The list must preserve EVERY line.
+    test('sandbox parseSymlinks: duplicate targets preserved (Map→List fix)', () {
+      final archive = Archive();
+      archive.addFile(ArchiveFile.string('SYMLINKS.txt', '''
+coreutils←./bin/ls
+coreutils←./bin/cp
+coreutils←./bin/mv
+coreutils←./bin/cat
+libncursesw.so.6.5←./lib/libtinfo.so
+libncursesw.so.6.5←./lib/libncurses.so.6
+'''));
+      final list = SandboxService.parseSymlinks(archive);
+      // ALL 6 entries must survive — not just 2 unique targets.
+      expect(list.length, 6);
+      final links = list.map((s) => s.linkPath).toSet();
+      expect(links, containsAll(['./bin/ls', './bin/cp', './bin/mv', './bin/cat',
+                                 './lib/libtinfo.so', './lib/libncurses.so.6']));
+      // Every entry's target is coreutils or libncursesw.so.6.5.
+      for (final s in list) {
+        expect(s.target, anyOf('coreutils', 'libncursesw.so.6.5'));
+      }
     });
   });
 }

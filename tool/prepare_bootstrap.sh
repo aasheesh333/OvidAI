@@ -85,9 +85,15 @@ for termux_abi in "${abis[@]}"; do
   for m in "${APT_METHODS[@]}"; do
     [ -f "$d/lib/apt/methods/$m" ] && cp "$d/lib/apt/methods/$m" "$out/lib/apt/methods/$m" || true
   done
-  # Assets: etc (apt config) + terminfo (TERM=xterm)
+  # Assets: etc (apt config) + terminfo (TERM=xterm).
+  # Preserve directory structure: share/terminfo must land at
+  # $out/share/terminfo (cp -r nested path flattens to $out/terminfo,
+  # breaking the ../share/terminfo←./lib/terminfo symlink).
   for ad in "${ASSETS_DIRS[@]}"; do
-    [ -d "$d/$ad" ] && (cd "$d" && cp -r "$ad" "$out/") || true
+    if [ -d "$d/$ad" ]; then
+      mkdir -p "$out/$(dirname "$ad")"
+      cp -r "$d/$ad" "$out/$ad"
+    fi
   done
 
   # Repack as the jniLibs payload zip.  The .so extension is ONLY a
