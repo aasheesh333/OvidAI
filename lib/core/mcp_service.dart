@@ -42,7 +42,9 @@ class McpService {
       final sandbox = SandboxService.I;
       if (!sandbox.isInstalled || sandbox.prootPath == null) {
         throw Exception(
-          'sandbox not installed — open Studio once to install it',
+          'MCP servers need the sandbox. Open Studio once to initialize it '
+          '(fast native setup), then retry. If the sandbox is already '
+          'initialized, this is a bug — report it.',
         );
       }
       final proc = await Process.start(

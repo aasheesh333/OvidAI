@@ -204,6 +204,8 @@ class AgentService extends ChangeNotifier {
     // Session-local reminder engine (DSH schedule delivery) — ticks
     // every second, no-ops when no schedules exist.
     _startScheduleTimer();
+    // Session switches stop the previous session's run/queue/jobs.
+    AppState.I.onSessionChange = resetForSessionChange;
   }
   /// Named private constructor for subagent children (same body as [_]).
   AgentService._internal() : this._();
@@ -231,10 +233,41 @@ class AgentService extends ChangeNotifier {
   void cancelRun() {
     if (activeRunId == null) return;
     _cancelRequested = true;
+    // Abort the in-flight request — works while connecting AND while
+    // streaming (abort() errors the socket, which surfaces in the SSE
+    // loop; the per-chunk _cancelRequested check then breaks cleanly).
     try {
       _activeRequest?.abort();
     } catch (_) {}
     _emit('think', 'stop requested — finishing current turn');
+    notifyListeners();
+  }
+
+  /// Called when the user switches or creates a session — any active run
+  /// belongs to the OLD session and must not leak into the new one:
+  /// stop it, drop the queue (queued messages were for the old context),
+  /// resolve any pending approval, and kill background jobs.
+  void resetForSessionChange() {
+    if (activeRunId != null) {
+      cancelRun();
+    }
+    _queue.clear();
+    if (pendingApproval != null) {
+      try {
+        pendingApproval!.completer.complete(false);
+      } catch (_) {}
+      pendingApproval = null;
+    }
+    for (final job in _jobs.values) {
+      if (!job.finished) {
+        try {
+          job.process?.kill(ProcessSignal.sigkill);
+        } catch (_) {}
+        job.finished = true;
+      }
+    }
+    _activeToolMsg = null;
+    _resetLiveBuffers();
     notifyListeners();
   }
 
@@ -2030,8 +2063,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         client.close(force: true);
         _activeRequest = null;
         return null;
-      }
-      final key = p.cleanApiKey;
+      }      final key = p.cleanApiKey;
       if (key.isNotEmpty) {
         req.headers.set('Authorization', 'Bearer $key');
       }
@@ -2101,13 +2133,22 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         if (mightBeToolRejection) {
           _emit('think',
               'provider rejected tool schema — retrying without tools');
+          // VISIBLE warning (was invisible before — users had no idea why
+          // plugins/MCP/catalog tools "weren't working").
+          _appendAssistant(
+            '⚠️ This provider/model does not support tool calling — '
+            'terminal, plugins, MCP, and catalog tools are unavailable '
+            'for this reply. Switch to a tool-capable model '
+            '(e.g. DeepSeek, GPT-4o, Claude, Gemini) to use them.',
+            session: session,
+          );
           return _callLlm(p, msgs, session, includeTools: false);
         }
         final hint = switch (res.statusCode) {
           401 || 403 => 'API key invalid or expired — re-enter the key in Settings → ${p.name}.',
           404 => 'Model "$modelId" not found on this endpoint — pick it again from the model picker.',
           429 => 'Rate limited — wait a moment and retry.',
-          >= 500 => 'Provider server issue (${p.name}) — thodi der baad retry.',
+          >= 500 => 'Provider server issue (${p.name}) — retry in a moment.',
           _ => '',
         };
         lastError = 'HTTP ${res.statusCode} ${p.name} · $modelId\n'
@@ -2138,6 +2179,11 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         if (line.isEmpty || !line.startsWith('data:')) continue;
         final payload = line.substring(5).trim();
         if (payload == '[DONE]') break;
+        // Per-chunk cancel check — stop button kills the stream mid-flight,
+        // not just between turns.  Keeps whatever streamed so far.
+        if (_cancelRequested) {
+          break;
+        }
 
         Map<String, dynamic>? j;
         try {

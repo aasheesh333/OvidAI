@@ -1739,38 +1739,89 @@ class _InputBar extends StatelessWidget {
   void _attachSheet(BuildContext context) {
     showModalBottomSheet(
       context: context,
-      builder: (_) => SafeArea(
+      builder: (sheetCtx) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             const SizedBox(height: 8),
             _attachOption(
-              context,
+              sheetCtx,
               Icons.photo_library_outlined,
               'Photos & videos',
               'Pick from gallery',
+              () => _comingSoon(sheetCtx, 'Photo picking'),
             ),
             _attachOption(
-              context,
+              sheetCtx,
               Icons.camera_alt_outlined,
               'Camera',
               'Take a photo',
+              () => _comingSoon(sheetCtx, 'Camera capture'),
             ),
             _attachOption(
-              context,
+              sheetCtx,
               Icons.insert_drive_file_outlined,
               'Document',
               'PDF, code, text files',
+              () => _comingSoon(sheetCtx, 'Document attach'),
             ),
             _attachOption(
-              context,
+              sheetCtx,
               Icons.auto_awesome,
               'Generate image',
               'Create with AI in this chat',
+              () {
+                Navigator.pop(sheetCtx);
+                _imagePromptDialog(context);
+              },
             ),
             const SizedBox(height: 8),
           ],
         ),
+      ),
+    );
+  }
+
+  void _comingSoon(BuildContext ctx, String feature) {
+    Navigator.pop(ctx);
+    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+      content: Text(
+          '$feature is coming soon — ask the AI to fetch or create files for now.'),
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
+  void _imagePromptDialog(BuildContext context) {
+    final c = TextEditingController();
+    showDialog<void>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('Generate an image', style: TextStyle(fontSize: 16)),
+        content: TextField(
+          controller: c,
+          autofocus: true,
+          maxLines: 3,
+          minLines: 1,
+          decoration: const InputDecoration(
+            hintText: 'A minimal mountain wallpaper, 4K…',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final prompt = c.text.trim();
+              Navigator.pop(d);
+              if (prompt.isEmpty) return;
+              controller.text = 'Generate an image: $prompt';
+              onSend();
+            },
+            child: const Text('Generate'),
+          ),
+        ],
       ),
     );
   }
@@ -1780,6 +1831,7 @@ class _InputBar extends StatelessWidget {
     IconData icon,
     String title,
     String sub,
+    VoidCallback onTap,
   ) {
     return ListTile(
       leading: Container(
@@ -1796,7 +1848,7 @@ class _InputBar extends StatelessWidget {
         sub,
         style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
       ),
-      onTap: () => Navigator.pop(context),
+      onTap: onTap,
     );
   }
 

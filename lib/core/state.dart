@@ -700,9 +700,16 @@ class AppState extends ChangeNotifier {
 
   void selectSession(String id) {
     activeSessionId = id;
+    // Agent run/queue state belongs to the previous session — stop it so
+    // the stop button and queue don't leak into the new chat.
+    onSessionChange?.call();
     notifyListeners();
     persistSessions();
   }
+
+  /// Set by AgentService at startup (avoids a circular import) — called
+  /// whenever the active session changes (select/new/delete).
+  void Function()? onSessionChange;
 
   void newSession() {
     final s = ChatSession(
@@ -716,6 +723,7 @@ class AppState extends ChangeNotifier {
     }
     sessions.insert(0, s);
     activeSessionId = s.id;
+    onSessionChange?.call();
     // Restore the selected-model pointer on the provider.
     if (s.providerId != null) {
       final p = providerById(s.providerId);
