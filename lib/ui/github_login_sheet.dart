@@ -164,7 +164,7 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
               borderRadius: BorderRadius.circular(13),
               border: Border.all(color: Aether.hairlineStrong),
             ),
-            child: const Icon(Icons.hub_outlined, size: 22, color: Aether.text),
+            child: Icon(Icons.hub_outlined, size: 22, color: Aether.text),
           ),
           const SizedBox(width: 14),
           const Expanded(
@@ -175,7 +175,7 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
           ),
           IconButton(
             visualDensity: VisualDensity.compact,
-            icon: const Icon(Icons.close, size: 18, color: Aether.textFaint),
+            icon: Icon(Icons.close, size: 18, color: Aether.textFaint),
             onPressed: () {
               _cancelled = true;
               _expiryTimer?.cancel();
@@ -199,7 +199,7 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
   Widget _codeView() => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text(
+          Text(
             'Open github.com/login/device on any browser and enter this code:',
             style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
           ),
@@ -237,7 +237,7 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Aether.text,
                     padding: const EdgeInsets.symmetric(vertical: 11),
-                    side: const BorderSide(color: Aether.hairlineStrong),
+                    side: BorderSide(color: Aether.hairlineStrong),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(11),
                     ),
@@ -282,7 +282,7 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
               const SizedBox(width: 10),
               Text(
                 'Waiting · $_remaining remaining · poll #$_attempt',
-                style: const TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
               ),
             ],
           ),
@@ -319,7 +319,7 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
               GitHubService.I.login != null
                   ? '@${GitHubService.I.login} — repos ready in Studio'
                   : 'Your repos are now accessible.',
-              style: const TextStyle(fontSize: 12, color: Aether.textMuted),
+              style: TextStyle(fontSize: 12, color: Aether.textMuted),
             ),
             const SizedBox(height: 16),
             FilledButton(
@@ -339,7 +339,7 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
             style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 4),
-          const Text(
+          Text(
             'The device code expired. Try again.',
             style: TextStyle(fontSize: 12, color: Aether.textMuted),
           ),
@@ -369,7 +369,7 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
           Text(
             _error ?? 'Unknown error',
             textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 12, color: Aether.textMuted),
+            style: TextStyle(fontSize: 12, color: Aether.textMuted),
           ),
           const SizedBox(height: 16),
           FilledButton(

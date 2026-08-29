@@ -45,7 +45,7 @@ class _ProvidersScreenState extends State<ProvidersScreen> {
                 child: TextField(
                   onChanged: (v) => setState(() => _query = v),
                   style: const TextStyle(fontSize: 13),
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     hintText: 'Search providers…',
                     prefixIcon: Icon(
                       Icons.search,
@@ -56,7 +56,7 @@ class _ProvidersScreenState extends State<ProvidersScreen> {
                   ),
                 ),
               ),
-              const Padding(
+              Padding(
                 padding: EdgeInsets.fromLTRB(20, 4, 20, 10),
                 child: Text(
                   'Keys never leave this device. Free providers work with zero setup.',
@@ -117,7 +117,7 @@ void addProviderSheet(BuildContext context) {
             style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 4),
-          const Text(
+          Text(
             'Any OpenAI-compatible endpoint works.',
             style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
           ),
@@ -284,7 +284,7 @@ class _ProviderCardState extends State<ProviderCard> {
             child: Center(
               child: Text(
                 provider.name.substring(0, 1).toUpperCase(),
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 15,
                   fontWeight: FontWeight.w700,
                   color: Aether.textMuted,
@@ -317,14 +317,14 @@ class _ProviderCardState extends State<ProviderCard> {
             provider.baseUrl,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 11, color: Aether.textFaint),
+            style: TextStyle(fontSize: 11, color: Aether.textFaint),
           ),
           children: [
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
                 provider.description,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 12.5,
                   height: 1.45,
                   color: Aether.textMuted,
@@ -362,13 +362,13 @@ class _ProviderCardState extends State<ProviderCard> {
               decoration: InputDecoration(
                 hintText: 'Base URL',
                 helperText: provider.custom ? null : 'Inbuilt — locked',
-                helperStyle: const TextStyle(
+                helperStyle: TextStyle(
                   fontSize: 10,
                   color: Aether.textFaint,
                 ),
                 suffixIcon: provider.custom
                     ? null
-                    : const Icon(
+                    : Icon(
                         Icons.lock_outline,
                         size: 14,
                         color: Aether.textFaint,
@@ -381,7 +381,7 @@ class _ProviderCardState extends State<ProviderCard> {
                 OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Aether.textMuted,
-                    side: const BorderSide(color: Aether.hairlineStrong),
+                    side: BorderSide(color: Aether.hairlineStrong),
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
                       vertical: 8,
@@ -475,7 +475,7 @@ class _ProviderCardState extends State<ProviderCard> {
                 OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Aether.textMuted,
-                    side: const BorderSide(color: Aether.hairlineStrong),
+                    side: BorderSide(color: Aether.hairlineStrong),
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
                       vertical: 8,
@@ -540,7 +540,7 @@ class _ProviderCardState extends State<ProviderCard> {
                   Expanded(
                     child: Text(
                       '${provider.models.length} models available',
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 11.5,
                         color: Aether.textFaint,
                       ),
@@ -577,7 +577,7 @@ class _ProviderCardState extends State<ProviderCard> {
                         ),
                         child: Text(
                           '+${provider.models.length - 8} more',
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 11,
                             color: Aether.textFaint,
                           ),

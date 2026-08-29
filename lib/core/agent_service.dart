@@ -200,7 +200,11 @@ class _SessionStudio {
 
 ///                  ← tool results loop back to model till final answer
 class AgentService extends ChangeNotifier {
-  AgentService._();
+  AgentService._() {
+    // Session-local reminder engine (DSH schedule delivery) — ticks
+    // every second, no-ops when no schedules exist.
+    _startScheduleTimer();
+  }
   /// Named private constructor for subagent children (same body as [_]).
   AgentService._internal() : this._();
   static final AgentService I = AgentService._();
@@ -1012,6 +1016,113 @@ class AgentService extends ChangeNotifier {
     {
       'type': 'function',
       'function': {
+        'name': 'create_goal',
+        'description':
+            'Create one persistent goal when the user\'s request is a '
+            'long-running objective that should continue across multiple '
+            'autonomous rounds (e.g. "build and test this whole feature"). '
+            'While a goal is ACTIVE, each new user message (or "continue") '
+            'starts a new round toward it; update_goal records progress. '
+            'Do NOT create goals for trivial single-turn work.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'objective': {
+              'type': 'string',
+              'description': 'The immutable objective statement',
+            },
+          },
+          'required': ['objective'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'get_goal',
+        'description':
+            'Read the current session goal: objective, status, round, '
+            'and the progress log.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'update_goal',
+        'description':
+            'Update the session goal.  status: "active" (keep working), '
+            '"complete" (objective done — say so to the user), or '
+            '"blocked" (cannot proceed — explain what you need).  Append '
+            'a short progress note each round.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'status': {
+              'type': 'string',
+              'enum': ['active', 'complete', 'blocked'],
+            },
+            'progress': {
+              'type': 'string',
+              'description': 'Short note about this round\'s progress',
+            },
+          },
+          'required': ['status'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'schedule_create',
+        'description':
+            'Create a reminder in this session.  Supply a prompt and '
+            'exactly one selector: after_seconds (delay), at (local '
+            'date-time "YYYY-MM-DD HH:MM"), or every_seconds (repeating, '
+            'min 300).  Delivery is session-local: fires only while this '
+            'chat is open; missed reminders run when you return.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'prompt': {
+              'type': 'string',
+              'description': 'What to do when the reminder fires',
+            },
+            'after_seconds': {'type': 'integer'},
+            'at': {'type': 'string', 'description': '"YYYY-MM-DD HH:MM"'},
+            'every_seconds': {'type': 'integer'},
+          },
+          'required': ['prompt'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'schedule_list',
+        'description': 'List this session\'s active reminders.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'schedule_delete',
+        'description':
+            'Delete one reminder by the exact id from schedule_create/'
+            'schedule_list.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'id': {'type': 'string'},
+          },
+          'required': ['id'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
         'name': 'job_start',
         'description':
             'Start a background shell job (long-running command).  Use for '
@@ -1689,6 +1800,8 @@ Execution tiers: run_shell adapts to the user's access mode.
   is "not found", suggest switching to Studio mode + one-time Ubuntu
   sandbox install (~320 MB). Provider/plugin/MCP management works the
   same in every tier via the catalog_* tools.
+${s.goal != null && s.goal!['status'] == 'active' ? '\nACTIVE GOAL (round ${s.goal!['round']}): "${s.goal!['objective']}". This user message is a goal round — work toward the objective, then update_goal with progress. Do not restate the goal; just advance it.' : ''}
+${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a [reminder] message arrives, treat its prompt as a user request and act on it.' : ''}
 ''';
 
     // ── Context compaction (DSH compaction package equivalent) ──
@@ -2725,6 +2838,24 @@ Execution tiers: run_shell adapts to the user's access mode.
       case 'exit_plan_mode':
         return await _handleExitPlanMode(args);
 
+      case 'create_goal':
+        return _handleCreateGoal(args);
+
+      case 'get_goal':
+        return _handleGetGoal();
+
+      case 'update_goal':
+        return _handleUpdateGoal(args);
+
+      case 'schedule_create':
+        return _handleScheduleCreate(args);
+
+      case 'schedule_list':
+        return _handleScheduleList();
+
+      case 'schedule_delete':
+        return _handleScheduleDelete(args);
+
       case 'job_start':
         return await _handleJobStart(args);
 
@@ -3262,6 +3393,183 @@ Execution tiers: run_shell adapts to the user's access mode.
     planMode = false;
     _emit('done', 'plan approved ✓ — executing');
     return 'Plan approved ✓ — ab execute karo.';
+  }
+
+  // ── GOALS (DSH goal-round equivalent) ──
+  String _handleCreateGoal(Map<String, dynamic> args) {
+    final objective = (args['objective'] as String).trim();
+    final s = AppState.I.activeSession;
+    if (s == null) return 'No active session.';
+    if (s.goal != null && s.goal!['status'] == 'active') {
+      return 'A goal is already ACTIVE in this session: '
+          '"${s.goal!['objective']}". Complete or block it first '
+          '(update_goal).';
+    }
+    s.goal = {
+      'objective': objective,
+      'status': 'active',
+      'round': 0,
+      'progressLog': <String>[],
+      'createdAt': DateTime.now().toIso8601String(),
+    };
+    AppState.I.persistSessions();
+    _emit('think', 'goal created: ${cleanTruncate(objective, 60)}');
+    notifyListeners();
+    return 'Goal created ✓ (round 0). Now work toward it this round; '
+        'call update_goal with a progress note. Future "continue" '
+        'messages start new rounds.';
+  }
+
+  String _handleGetGoal() {
+    final s = AppState.I.activeSession;
+    final g = s?.goal;
+    if (g == null) return 'No goal in this session.';
+    final log = (g['progressLog'] as List?)?.join('\n  ') ?? '';
+    return 'Goal: "${g['objective']}"\nStatus: ${g['status']} · '
+        'Round: ${g['round']}\nProgress log:\n  $log';
+  }
+
+  String _handleUpdateGoal(Map<String, dynamic> args) {
+    final status = args['status'] as String;
+    final progress = args['progress'] as String?;
+    final s = AppState.I.activeSession;
+    final g = s?.goal;
+    if (g == null) return 'No goal in this session.';
+    if (!['active', 'complete', 'blocked'].contains(status)) {
+      return 'Invalid status "$status" — use active/complete/blocked.';
+    }
+    if (progress != null && progress.isNotEmpty) {
+      (g['progressLog'] as List?)?.add('r${g['round']}: $progress');
+      if ((g['progressLog'] as List?)!.length > 50) {
+        (g['progressLog'] as List?)!.removeRange(0, 1);
+      }
+    }
+    g['round'] = ((g['round'] as num?)?.toInt() ?? 0) + 1;
+    g['status'] = status;
+    AppState.I.persistSessions();
+    _emit(
+        'think', 'goal → $status (round ${g['round']})');
+    notifyListeners();
+    return status == 'complete'
+        ? 'Goal marked complete ✓ (round ${g['round']}).'
+        : status == 'blocked'
+            ? 'Goal marked blocked (round ${g['round']}). Tell the user '
+                'what you need to continue.'
+            : 'Goal active, round ${g['round']} recorded. Keep going or '
+                'report to the user.';
+  }
+
+  // ── SCHEDULES (DSH schedule equivalent) ──
+  String _handleScheduleCreate(Map<String, dynamic> args) {
+    final prompt = (args['prompt'] as String).trim();
+    final s = AppState.I.activeSession;
+    if (s == null) return 'No active session.';
+    final after = (args['after_seconds'] as num?)?.toInt();
+    final at = args['at'] as String?;
+    final every = (args['every_seconds'] as num?)?.toInt();
+    final selectors = [after, at, every].where((e) => e != null).length;
+    if (prompt.isEmpty) return 'prompt is required.';
+    if (selectors != 1) {
+      return 'Supply exactly ONE of after_seconds, at, every_seconds.';
+    }
+    if (every != null && every < 300) {
+      return 'every_seconds must be ≥ 300.';
+    }
+    DateTime? fireAt;
+    int? repeatSec;
+    if (after != null && after > 0) {
+      fireAt = DateTime.now().add(Duration(seconds: after));
+    } else if (at != null) {
+      fireAt = DateTime.tryParse(at.replaceAll(' ', 'T'));
+      if (fireAt == null) return 'at must be "YYYY-MM-DD HH:MM".';
+      if (fireAt.isBefore(DateTime.now())) {
+        // DSH semantics: overdue one-shot fires soon after resume.
+        fireAt = DateTime.now().add(const Duration(seconds: 2));
+      }
+    } else {
+      repeatSec = every;
+      fireAt = DateTime.now().add(Duration(seconds: every!));
+    }
+    final id = 'sch-${DateTime.now().millisecondsSinceEpoch}';
+    s.schedules.add({
+      'id': id,
+      'prompt': prompt,
+      'fireAt': fireAt.toIso8601String(),
+      'every': repeatSec,
+    });
+    AppState.I.persistSessions();
+    _startScheduleTimer();
+    _emit('think', 'reminder set: ${cleanTruncate(prompt, 50)}');
+    notifyListeners();
+    return 'Reminder $id created ✓ — fires '
+        '${repeatSec != null ? 'every ${repeatSec}s' : fireAt.toLocal().toString()}';
+  }
+
+  String _handleScheduleList() {
+    final s = AppState.I.activeSession;
+    if (s == null || s.schedules.isEmpty) {
+      return 'No reminders in this session.';
+    }
+    return s.schedules
+        .map((r) => '${r['id']} — '
+            '${r['every'] != null ? 'every ${r['every']}s' : DateTime.parse(r['fireAt'] as String).toLocal()}'
+            ' — ${r['prompt']}')
+        .join('\n');
+  }
+
+  String _handleScheduleDelete(Map<String, dynamic> args) {
+    final id = args['id'] as String;
+    final s = AppState.I.activeSession;
+    if (s == null) return 'No active session.';
+    final before = s.schedules.length;
+    s.schedules.removeWhere((r) => r['id'] == id);
+    AppState.I.persistSessions();
+    if (s.schedules.length == before) {
+      return 'Reminder $id not found (already finished?).';
+    }
+    notifyListeners();
+    return 'Reminder $id deleted ✓';
+  }
+
+  // Fires due reminders into the chat as [schedule] user messages while
+  // the session is live (DSH session-local delivery).
+  Timer? _scheduleTimer;
+
+  void _startScheduleTimer() {
+    _scheduleTimer?.cancel();
+    _scheduleTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _fireDueSchedules();
+    });
+  }
+
+  void _fireDueSchedules() {
+    final s = AppState.I.activeSession;
+    if (s == null || s.schedules.isEmpty) return;
+    final now = DateTime.now();
+    for (final r in List.of(s.schedules)) {
+      final fireAt = DateTime.tryParse(r['fireAt'] as String? ?? '');
+      if (fireAt == null || fireAt.isAfter(now)) continue;
+      final prompt = r['prompt'] as String;
+      final id = r['id'] as String;
+      final every = r['every'] as num?;
+      if (every != null) {
+        // Fixed-rate: creation-aligned, skip missed occurrences.
+        r['fireAt'] = DateTime.now()
+            .add(Duration(seconds: every.toInt()))
+            .toIso8601String();
+      } else {
+        s.schedules.removeWhere((x) => x['id'] == id);
+      }
+      AppState.I.persistSessions();
+      _emit('think', 'reminder $id fired');
+      // Session-local delivery: only inject if this session is active.
+      if (activeRunId == null) {
+        AppState.I.sendMessage('⏰ [reminder $id] $prompt');
+      } else {
+        // Busy — queue joins the current run (DSH queue behavior).
+        enqueueMessage('⏰ [reminder $id] $prompt');
+      }
+    }
   }
 
   // ── Subagent (DSH dispatch_agent equivalent) ──

@@ -55,7 +55,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
                 child: TextField(
                   onChanged: (v) => setState(() => _query = v),
                   style: const TextStyle(fontSize: 13),
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     hintText:
                         'Search 4,800+ community plugins…',
                     prefixIcon: Icon(Icons.search,
@@ -102,7 +102,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
             SliverToBoxAdapter(
               child: _McpSection(app: app),
             ),
-            const SliverToBoxAdapter(
+            SliverToBoxAdapter(
               child: Padding(
                 padding: EdgeInsets.fromLTRB(20, 12, 20, 2),
                 child: Text('ALL PLUGINS',
@@ -167,12 +167,12 @@ class _PluginsScreenState extends State<PluginsScreen> {
                 IconButton(
                   visualDensity: VisualDensity.compact,
                   icon:
-                      const Icon(Icons.close, size: 18, color: Aether.textFaint),
+                      Icon(Icons.close, size: 18, color: Aether.textFaint),
                   onPressed: () => Navigator.pop(ctx),
                 ),
               ]),
               const SizedBox(height: 6),
-              const Text(
+              Text(
                   'Paste any GitHub repo that contains a marketplace.json — '
                   'works exactly like Claude Code plugin marketplaces.',
                   style: TextStyle(fontSize: 12.5, color: Aether.textMuted)),
@@ -183,15 +183,15 @@ class _PluginsScreenState extends State<PluginsScreen> {
                 style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
                 decoration: InputDecoration(
                   hintText: 'owner/repo or https://github.com/owner/repo',
-                  hintStyle: const TextStyle(
+                  hintStyle: TextStyle(
                       fontSize: 12.5, color: Aether.textFaint),
-                  prefixIcon: const Icon(Icons.code, size: 17,
+                  prefixIcon: Icon(Icons.code, size: 17,
                       color: Aether.textFaint),
                 ),
               ),
               if (app.marketplaces.isNotEmpty) ...[
                 const SizedBox(height: 14),
-                const Text('YOUR MARKETPLACES',
+                Text('YOUR MARKETPLACES',
                     style: TextStyle(
                         fontSize: 10,
                         fontWeight: FontWeight.w700,
@@ -209,7 +209,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
                       border: Border.all(color: Aether.hairline),
                     ),
                     child: Row(children: [
-                      const Icon(Icons.inventory_2_outlined,
+                      Icon(Icons.inventory_2_outlined,
                           size: 14, color: Aether.textMuted),
                       const SizedBox(width: 10),
                       Expanded(
@@ -314,13 +314,13 @@ class PluginCard extends StatelessWidget {
                   const SizedBox(height: 3),
                   Text(
                       '${plugin.author} · v${plugin.version} · ${app.fmtInstalls(plugin.installs)} installs',
-                      style: const TextStyle(
+                      style: TextStyle(
                           fontSize: 11, color: Aether.textFaint)),
                   const SizedBox(height: 6),
                   Text(plugin.description,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                           fontSize: 12.5,
                           height: 1.45,
                           color: Aether.textMuted)),
@@ -366,7 +366,7 @@ class PluginDetailScreen extends StatelessWidget {
                 color: Aether.surfaceRaised,
                 borderRadius: BorderRadius.circular(15),
               ),
-              child: const Icon(Icons.extension,
+              child: Icon(Icons.extension,
                   size: 26, color: Aether.textMuted),
             ),
             const SizedBox(width: 14),
@@ -380,7 +380,7 @@ class PluginDetailScreen extends StatelessWidget {
                   const SizedBox(height: 3),
                   Text(
                       '${plugin.author} · v${plugin.version} · ${app.fmtInstalls(plugin.installs)} installs',
-                      style: const TextStyle(
+                      style: TextStyle(
                           fontSize: 11.5, color: Aether.textFaint)),
                 ],
               ),
@@ -489,7 +489,7 @@ class PluginDetailScreen extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20),
             child: Text(plugin.description,
-                style: const TextStyle(
+                style: TextStyle(
                     fontSize: 13.5,
                     height: 1.6,
                     color: Aether.text)),
@@ -503,7 +503,7 @@ class PluginDetailScreen extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 20),
             child: Text(
                 'v${plugin.version} — stability fixes and 20% faster startup.\nEarlier releases available on the plugin registry.',
-                style: const TextStyle(
+                style: TextStyle(
                     fontSize: 12.5,
                     height: 1.6,
                     color: Aether.textMuted)),
@@ -528,7 +528,7 @@ class _Perm extends StatelessWidget {
         const SizedBox(width: 10),
         Expanded(
             child: Text(text,
-                style: const TextStyle(
+                style: TextStyle(
                     fontSize: 12.5, color: Aether.textMuted))),
       ]),
     );
@@ -549,9 +549,9 @@ class _McpSection extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 14, 12, 2),
           child: Row(children: [
-            const Icon(Icons.usb_outlined, size: 15, color: Aether.textFaint),
-            const SizedBox(width: 8),
-            const Flexible(
+            Icon(Icons.usb_outlined, size: 15, color: Aether.textFaint),
+            SizedBox(width: 8),
+            Flexible(
               child: Text('CONNECTED TOOLS · MCP SERVERS',
                   style: TextStyle(
                       fontSize: 10.5,
@@ -622,12 +622,12 @@ class _McpSection extends StatelessWidget {
               ),
               IconButton(
                 visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.close, size: 18, color: Aether.textFaint),
+                icon: Icon(Icons.close, size: 18, color: Aether.textFaint),
                 onPressed: () => Navigator.pop(ctx),
               ),
             ]),
             const SizedBox(height: 6),
-            const Text(
+            Text(
                 'Runs as a local process. Config matches standard mcp.json format.',
                 style: TextStyle(fontSize: 12.5, color: Aether.textMuted)),
             const SizedBox(height: 14),
@@ -730,7 +730,7 @@ class McpCard extends StatelessWidget {
                   color: Aether.surfaceRaised,
                   borderRadius: BorderRadius.circular(8),
                 ),
-                child: const Icon(Icons.usb_outlined,
+                child: Icon(Icons.usb_outlined,
                     size: 15, color: Aether.textMuted),
               ),
               const Spacer(),
@@ -862,7 +862,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                 color: Aether.surfaceRaised,
                 borderRadius: BorderRadius.circular(14),
               ),
-              child: const Icon(Icons.usb_outlined,
+              child: Icon(Icons.usb_outlined,
                   size: 24, color: Aether.textMuted),
             ),
             const SizedBox(width: 14),
@@ -876,7 +876,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                     const SizedBox(height: 3),
                     Text(
                         '${s.author} · ${s.category} · via ${s.source}',
-                        style: const TextStyle(
+                        style: TextStyle(
                             fontSize: 11.5, color: Aether.textFaint)),
                   ]),
             ),
@@ -936,7 +936,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4),
             child: Text(s.description,
-                style: const TextStyle(
+                style: TextStyle(
                     fontSize: 13.5, height: 1.6, color: Aether.text)),
           ),
           if (s.envHint != null) ...[
@@ -954,7 +954,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text('${s.envHint} will be requested when connecting.',
-                      style: const TextStyle(
+                      style: TextStyle(
                           fontSize: 12.5, color: Aether.textMuted)),
                 ),
               ]),
@@ -976,7 +976,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                     padding: const EdgeInsets.symmetric(
                         horizontal: 12, vertical: 8),
                     color: Aether.surfaceAlt,
-                    child: const Text('mcp.json',
+                    child: Text('mcp.json',
                         style: TextStyle(
                             fontSize: 11, color: Aether.textMuted)),
                   ),
@@ -1017,7 +1017,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
           SizedBox(
               width: 78,
               child: Text(k,
-                  style: const TextStyle(
+                  style: TextStyle(
                       fontSize: 12, color: Aether.textFaint))),
           Expanded(
             child: Text(v,
@@ -1132,7 +1132,7 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
       children: [
         Row(
           children: [
-            const Icon(Icons.edit_outlined, size: 16, color: Aether.textMuted),
+            Icon(Icons.edit_outlined, size: 16, color: Aether.textMuted),
             const SizedBox(width: 8),
             const Text(
               'Edit mcp.json',

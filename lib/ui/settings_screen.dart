@@ -64,7 +64,7 @@ class SettingsScreen extends StatelessWidget {
                             signedIn
                                 ? (fb.email ?? 'Signed in')
                                 : 'Local account · keys stay on device',
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 12,
                               color: Aether.textFaint,
                             ),
@@ -80,7 +80,7 @@ class SettingsScreen extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(width: 4),
-                      const Icon(
+                      Icon(
                         Icons.chevron_right,
                         size: 18,
                         color: Aether.textFaint,
@@ -206,6 +206,7 @@ class SettingsScreen extends StatelessWidget {
           _privacyPolicyTile(context),
 
           const SectionHeader('General'),
+          const _ThemeToggle(),
           _settingTile(Icons.notifications_outlined, 'Notifications', 'On'),
           _settingTile(Icons.info_outline, 'About', 'Ovid AI 0.1.0-demo'),
         ],
@@ -225,9 +226,9 @@ class SettingsScreen extends StatelessWidget {
       title: Text(title, style: const TextStyle(fontSize: 14)),
       subtitle: Text(
         subtitle,
-        style: const TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
       ),
-      trailing: const Icon(
+      trailing: Icon(
         Icons.chevron_right,
         size: 18,
         color: Aether.textFaint,
@@ -258,7 +259,7 @@ class SettingsScreen extends StatelessWidget {
       title: Text(title, style: const TextStyle(fontSize: 14)),
       trailing: Text(
         trailing,
-        style: const TextStyle(fontSize: 12, color: Aether.textFaint),
+        style: TextStyle(fontSize: 12, color: Aether.textFaint),
       ),
       onTap: () {},
     );
@@ -267,17 +268,17 @@ class SettingsScreen extends StatelessWidget {
   Widget _privacyPolicyTile(BuildContext context) {
     return ListTile(
       dense: true,
-      leading: const Icon(
+      leading: Icon(
         Icons.privacy_tip_outlined,
         size: 19,
         color: Aether.textMuted,
       ),
       title: const Text('Privacy policy', style: TextStyle(fontSize: 14)),
-      subtitle: const Text(
+      subtitle: Text(
         'dhanuk.page.gd/ovid',
         style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
       ),
-      trailing: const Icon(
+      trailing: Icon(
         Icons.open_in_new,
         size: 16,
         color: Aether.textFaint,
@@ -313,7 +314,7 @@ class _TelemetryTile extends StatelessWidget {
         final fb = FirebaseService.I;
         return SwitchListTile(
           dense: true,
-          secondary: const Icon(
+          secondary: Icon(
             Icons.insights_outlined,
             size: 19,
             color: Aether.textMuted,
@@ -326,7 +327,7 @@ class _TelemetryTile extends StatelessWidget {
             fb.isAvailable
                 ? 'Optional · anonymous · helps fix bugs'
                 : 'Not configured in this build',
-            style: const TextStyle(fontSize: 11.5, color: Aether.textFaint),
+            style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
           ),
           activeTrackColor: Aether.accent,
           value: fb.consentGiven,
@@ -362,7 +363,7 @@ class _SwitchTileState extends State<_SwitchTile> {
       title: Text(widget.title, style: const TextStyle(fontSize: 14)),
       subtitle: Text(
         widget.subtitle,
-        style: const TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
       ),
       trailing: SizedBox(
         height: 26,
@@ -390,14 +391,14 @@ class _ShareMemoryTile extends StatelessWidget {
       animation: app,
       builder: (_, _) => ListTile(
         dense: true,
-        leading: const Icon(Icons.psychology_outlined,
+        leading: Icon(Icons.psychology_outlined,
             size: 19, color: Aether.textMuted),
         title: const Text('Share session memory', style: TextStyle(fontSize: 14)),
         subtitle: Text(
           app.shareSessionMemory
               ? 'ON — the AI can search across all chats (memory_search).'
               : 'OFF — every chat is isolated; the AI sees only this session.',
-          style: const TextStyle(fontSize: 11.5, color: Aether.textFaint),
+          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
         ),
         trailing: SizedBox(
           height: 26,
@@ -414,6 +415,35 @@ class _ShareMemoryTile extends StatelessWidget {
 }
 
 /// AI response timeout picker — real, persisted in AppState (responseTimeoutSec).
+/// Light/dark theme toggle — flips Aether palette app-wide, persisted.
+class _ThemeToggle extends StatelessWidget {
+  const _ThemeToggle();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    return AnimatedBuilder(
+      animation: app,
+      builder: (_, _) => SwitchListTile(
+        dense: true,
+        secondary: Icon(
+          Icons.light_mode_outlined,
+          size: 19,
+          color: Aether.textMuted,
+        ),
+        title: const Text('Light theme', style: TextStyle(fontSize: 14)),
+        subtitle: Text(
+          app.lightTheme ? 'ON — bright surfaces' : 'OFF — dark (default)',
+          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        ),
+        value: app.lightTheme,
+        activeTrackColor: Aether.accent,
+        onChanged: (v) => app.setLightTheme(v),
+      ),
+    );
+  }
+}
+
 class _TimeoutScreen extends StatelessWidget {
   const _TimeoutScreen();
 
@@ -436,7 +466,7 @@ class _TimeoutScreen extends StatelessWidget {
                 'How long the agent may stream before being cut off. '
                 'Long reasoning chains need a generous budget; casual chat '
                 'feels snappier with a short one.',
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 12.5,
                   height: 1.55,
                   color: Aether.textMuted,
@@ -465,7 +495,7 @@ class _TimeoutScreen extends StatelessWidget {
                             300 => 'Long tasks, web research',
                             _ => 'Heavy multi-tool runs',
                           },
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 11,
                             color: Aether.textFaint,
                           ),
@@ -480,7 +510,7 @@ class _TimeoutScreen extends StatelessWidget {
                 padding: const EdgeInsets.all(12),
                 child: Text(
                   'Custom values: pick any number of seconds between 5 s and 60 min.',
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 11,
                     color: Aether.textFaint,
                   ),

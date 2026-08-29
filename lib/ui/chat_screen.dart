@@ -114,7 +114,7 @@ class _ChatScreenState extends State<ChatScreen>
           backgroundColor: Aether.bg,
           drawer: wide
               ? null
-              : const Drawer(
+              : Drawer(
                   width: 288,
                   backgroundColor: Aether.surface,
                   child: SessionsSidebar(),
@@ -134,7 +134,7 @@ class _ChatScreenState extends State<ChatScreen>
                     ),
                   ),
                   const SizedBox(width: 4),
-                  const Icon(
+                  Icon(
                     Icons.unfold_more,
                     size: 16,
                     color: Aether.textFaint,
@@ -394,7 +394,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
     final q = _query.toLowerCase();
 
     return Container(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: Aether.surface,
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
@@ -436,7 +436,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
               style: const TextStyle(fontSize: 13.5),
               decoration: InputDecoration(
                 hintText: 'Search models or providers…',
-                prefixIcon: const Icon(
+                prefixIcon: Icon(
                   Icons.search,
                   size: 17,
                   color: Aether.textFaint,
@@ -521,7 +521,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                               children: [
                                 Text(
                                   p.name,
-                                  style: const TextStyle(
+                                  style: TextStyle(
                                     fontSize: 12.5,
                                     fontWeight: FontWeight.w700,
                                     color: Aether.textMuted,
@@ -616,7 +616,7 @@ class _ModelTile extends StatelessWidget {
     if (!supportsEffort) {
       return ListTile(
         dense: true,
-        leading: const Icon(
+        leading: Icon(
           Icons.smart_toy_outlined,
           size: 18,
           color: Aether.textMuted,
@@ -638,7 +638,7 @@ class _ModelTile extends StatelessWidget {
         dense: true,
         tilePadding: const EdgeInsets.symmetric(horizontal: 16),
         childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-        leading: const Icon(
+        leading: Icon(
           Icons.psychology_outlined,
           size: 18,
           color: Aether.textMuted,
@@ -732,7 +732,7 @@ class _EmptyState extends StatelessWidget {
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 6),
-            const Text(
+            Text(
               'Add an API key in Settings → Providers to get started.',
               style: TextStyle(fontSize: 13, color: Aether.textMuted),
             ),
@@ -759,7 +759,7 @@ class _EmptyState extends StatelessWidget {
                       Expanded(
                         child: Text(
                           s.$2,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 13,
                             color: Aether.textMuted,
                           ),
@@ -963,7 +963,7 @@ class _MessageView extends StatelessWidget {
               padding: const EdgeInsets.only(left: 4),
               child: Text(
                 '${(m.elapsedMs! / 1000).toStringAsFixed(1)}s',
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 10.5,
                   color: Aether.textFaint,
                 ),
@@ -974,7 +974,7 @@ class _MessageView extends StatelessWidget {
               padding: const EdgeInsets.only(left: 4),
               child: Text(
                 _formatTime(m.time),
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 10.5,
                   color: Aether.textFaint,
                 ),
@@ -1001,7 +1001,7 @@ class _MessageView extends StatelessWidget {
         child: isUser
             ? Text(
                 m.content,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 14,
                   height: 1.5,
                   color: Aether.text,
@@ -1030,7 +1030,7 @@ class _MessageView extends StatelessWidget {
                   Text(
                     m.lang ?? 'code',
                     style:
-                        const TextStyle(fontSize: 11, color: Aether.textMuted),
+                        TextStyle(fontSize: 11, color: Aether.textMuted),
                   ),
                   const Spacer(),
                   _CopyButton(code: m.content),
@@ -1042,7 +1042,7 @@ class _MessageView extends StatelessWidget {
               padding: const EdgeInsets.all(12),
               child: Text(
                 m.content,
-                style: const TextStyle(
+                style: TextStyle(
                   fontFamily: Aether.mono,
                   fontSize: 12,
                   height: 1.55,
@@ -1092,11 +1092,11 @@ class _MessageView extends StatelessWidget {
                 children: [
                   Text(
                     m.content,
-                    style: const TextStyle(
+                    style: TextStyle(
                         fontSize: 12.5, color: Aether.textMuted),
                   ),
                   const SizedBox(height: 8),
-                  const Row(
+                  Row(
                     children: [
                       Icon(
                         Icons.download_outlined,
@@ -1191,7 +1191,7 @@ class _InputBar extends StatelessWidget {
       title: Text(title, style: const TextStyle(fontSize: 14)),
       subtitle: Text(
         sub,
-        style: const TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
       ),
       onTap: () => Navigator.pop(context),
     );
@@ -1215,7 +1215,7 @@ class _InputBar extends StatelessWidget {
             children: [
               IconButton(
                 tooltip: 'Attach',
-                icon: const Icon(
+                icon: Icon(
                   Icons.add_circle_outline,
                   size: 22,
                   color: Aether.textMuted,
@@ -1249,7 +1249,7 @@ class _InputBar extends StatelessWidget {
               ),
               IconButton(
                 tooltip: 'Voice',
-                icon: const Icon(
+                icon: Icon(
                   Icons.mic_none,
                   size: 20,
                   color: Aether.textMuted,
@@ -1430,7 +1430,7 @@ class _TodoDockState extends State<_TodoDock> {
                       const SizedBox(width: 6),
                       Text(
                         'Tasks · $done/${todos.length} done',
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 11,
                           color: Aether.textMuted,
                           fontWeight: FontWeight.w500,
@@ -1562,7 +1562,7 @@ class _QueueDock extends StatelessWidget {
                 // Header row
                 Row(
                   children: [
-                    const Icon(
+                    Icon(
                       Icons.queue_music,
                       size: 13,
                       color: Aether.textMuted,
@@ -1570,7 +1570,7 @@ class _QueueDock extends StatelessWidget {
                     const SizedBox(width: 6),
                     Text(
                       '${queue.length} queued message${queue.length > 1 ? 's' : ''}',
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 11.5,
                         fontWeight: FontWeight.w600,
                         color: Aether.textMuted,
@@ -1584,7 +1584,7 @@ class _QueueDock extends StatelessWidget {
                         }
                         onEdited();
                       },
-                      child: const Text(
+                      child: Text(
                         'Clear all',
                         style: TextStyle(
                           fontSize: 11,
@@ -1697,7 +1697,7 @@ class _QueueRowState extends State<_QueueRow> {
               _ctrl.text = widget.text;
               setState(() => _editing = true);
             },
-            child: const Padding(
+            child: Padding(
               padding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
               child: Icon(
                 Icons.edit_outlined,
@@ -1711,7 +1711,7 @@ class _QueueRowState extends State<_QueueRow> {
               agent.removeQueuedMessage(widget.index);
               widget.onEdited();
             },
-            child: const Padding(
+            child: Padding(
               padding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
               child: Icon(
                 Icons.delete_outline,
@@ -1810,7 +1810,7 @@ class _ApprovalDock extends StatelessWidget {
                   req.summary,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 12,
                     color: Aether.text,
                   ),
@@ -1900,7 +1900,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
                 padding: const EdgeInsets.only(top: 6, bottom: 2),
                 child: Text(
                   q.header!,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 10,
                     fontWeight: FontWeight.w600,
                     color: Aether.textFaint,
@@ -1909,7 +1909,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
               ),
             Text(
               q.question,
-              style: const TextStyle(fontSize: 13, color: Aether.text),
+              style: TextStyle(fontSize: 13, color: Aether.text),
             ),
             if (q.options.isNotEmpty) ...[
               const SizedBox(height: 6),
@@ -2009,7 +2009,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
             if (opt.description != null)
               Text(
                 opt.description!,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 9,
                   color: Aether.textFaint,
                 ),
@@ -2086,7 +2086,7 @@ class _ModeChip extends StatelessWidget {
                 title: Text(m.label, style: const TextStyle(fontSize: 13.5)),
                 subtitle: Text(
                   m.hint,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 11,
                     color: Aether.textFaint,
                     height: 1.4,
@@ -2152,34 +2152,34 @@ class _DshMarkdown extends StatelessWidget {
       data: text,
       builders: {'code': _DshInlineCodeBuilder()},
       styleSheet: MarkdownStyleSheet(
-        p: const TextStyle(fontSize: 14, height: 1.55, color: Aether.text),
-        h1: const TextStyle(
+        p: TextStyle(fontSize: 14, height: 1.55, color: Aether.text),
+        h1: TextStyle(
           fontSize: 19,
           fontWeight: FontWeight.w700,
           color: Aether.text,
         ),
-        h2: const TextStyle(
+        h2: TextStyle(
           fontSize: 17,
           fontWeight: FontWeight.w700,
           color: Aether.text,
         ),
-        h3: const TextStyle(
+        h3: TextStyle(
           fontSize: 15.5,
           fontWeight: FontWeight.w600,
           color: Aether.text,
         ),
-        strong: const TextStyle(
+        strong: TextStyle(
           fontWeight: FontWeight.w700,
           color: Aether.text,
         ),
-        em: const TextStyle(fontStyle: FontStyle.italic, color: Aether.text),
+        em: TextStyle(fontStyle: FontStyle.italic, color: Aether.text),
         code: const TextStyle(
           fontFamily: Aether.mono,
           fontSize: 12.5,
           backgroundColor: Colors.transparent,
           color: Aether.accent,
         ),
-        listBullet: const TextStyle(
+        listBullet: TextStyle(
           fontSize: 14,
           height: 1.5,
           color: Aether.text,
@@ -2239,7 +2239,7 @@ class _DshCodeBox extends StatelessWidget {
                 const SizedBox(width: 7),
                 Text(
                   lang,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 11,
                     fontFamily: Aether.mono,
                     color: Aether.textMuted,
@@ -2257,7 +2257,7 @@ class _DshCodeBox extends StatelessWidget {
                 ? _DiffLines(code: code)
                 : Text(
                     code,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: Aether.mono,
                       fontSize: 12,
                       height: 1.55,
@@ -2330,7 +2330,7 @@ class _DshInlineCodeBuilder extends MarkdownElementBuilder {
       ),
       child: Text(
         text,
-        style: const TextStyle(
+        style: TextStyle(
           fontFamily: Aether.mono,
           fontSize: 12,
           color: Aether.text,

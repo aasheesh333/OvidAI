@@ -87,7 +87,7 @@ class _StudioScreenState extends State<StudioScreen> {
               for (final r in repos)
                 ListTile(
                   dense: true,
-                  leading: const Icon(
+                  leading: Icon(
                     Icons.bookmark_border,
                     size: 18,
                     color: Aether.textMuted,
@@ -98,7 +98,7 @@ class _StudioScreenState extends State<StudioScreen> {
                   ),
                   subtitle: Text(
                     '${r['language'] ?? '—'} · ⭐ ${r['stargazers_count'] ?? 0}',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 11,
                       color: Aether.textFaint,
                     ),
@@ -154,7 +154,7 @@ class _StudioScreenState extends State<StudioScreen> {
                         color: Aether.accent,
                       ),
                     )
-                  : const Icon(
+                  : Icon(
                       Icons.sync_rounded,
                       size: 18,
                       color: Aether.textMuted,
@@ -184,7 +184,7 @@ class _StudioScreenState extends State<StudioScreen> {
                     AppState.I.sandboxInstalled
                         ? 'Sandbox ready'
                         : 'Sandbox pending',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 11.5,
                       color: Aether.textMuted,
                     ),
@@ -245,13 +245,13 @@ class _RepoBar extends StatelessWidget {
     return Container(
       height: 40,
       padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: Aether.surface,
         border: Border(bottom: BorderSide(color: Aether.hairline)),
       ),
       child: Row(
         children: [
-          const Icon(Icons.hub_outlined, size: 15, color: Aether.textMuted),
+          Icon(Icons.hub_outlined, size: 15, color: Aether.textMuted),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -267,7 +267,7 @@ class _RepoBar extends StatelessWidget {
             ),
           ),
           if (repo != 'Connect a repo')
-            const Tag('GITHUB', color: Aether.textMuted),
+            Tag('GITHUB', color: Aether.textMuted),
           if (syncing) ...[
             const SizedBox(width: 8),
             const SizedBox(
@@ -329,7 +329,7 @@ class _FileTree extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Padding(
+              Padding(
                 padding: EdgeInsets.fromLTRB(12, 10, 12, 8),
                 child: Text(
                   'FILES',
@@ -427,7 +427,7 @@ class _FileTree extends StatelessWidget {
                   horizontal: 12,
                   vertical: 9,
                 ),
-                decoration: const BoxDecoration(
+                decoration: BoxDecoration(
                   border: Border(top: BorderSide(color: Aether.hairline)),
                 ),
                 child: Row(
@@ -445,7 +445,7 @@ class _FileTree extends StatelessWidget {
                         cache.isReady
                             ? 'Synced · ${cache.files.length} files'
                             : 'Not connected',
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 11,
                           color: Aether.textMuted,
                         ),
@@ -511,7 +511,7 @@ class _Tabs extends StatelessWidget {
             children: [
               Expanded(
                 child: tabs.isEmpty
-                    ? const Padding(
+                    ? Padding(
                         padding: EdgeInsets.symmetric(horizontal: 12),
                         child: Text(
                           'No open files — tap a file in the tree or +',
@@ -535,7 +535,7 @@ class _Tabs extends StatelessWidget {
                               ),
                               decoration: BoxDecoration(
                                 border: Border(
-                                  right: const BorderSide(
+                                  right: BorderSide(
                                     color: Aether.hairline,
                                   ),
                                   top: BorderSide(
@@ -571,7 +571,7 @@ class _Tabs extends StatelessWidget {
                                   GestureDetector(
                                     onTap: () =>
                                         AgentService.I.closeStudioFile(p),
-                                    child: const Padding(
+                                    child: Padding(
                                       padding: EdgeInsets.all(4),
                                       child: Icon(
                                         Icons.close,
@@ -590,7 +590,7 @@ class _Tabs extends StatelessWidget {
               IconButton(
                 tooltip: 'New file',
                 visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.add, size: 16, color: Aether.textMuted),
+                icon: Icon(Icons.add, size: 16, color: Aether.textMuted),
                 onPressed: () => _askNewFile(context),
               ),
             ],
@@ -641,7 +641,7 @@ class _EditorState extends State<_Editor> {
         if (path == null) {
           return Container(
             color: Aether.bg,
-            child: const Center(
+            child: Center(
               child: Padding(
                 padding: EdgeInsets.all(24),
                 child: Text(
@@ -682,7 +682,7 @@ class _EditorState extends State<_Editor> {
                   Expanded(
                     child: Text(
                       path,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontFamily: Aether.mono,
                         fontSize: 10.5,
                         color: Aether.textMuted,
@@ -692,7 +692,7 @@ class _EditorState extends State<_Editor> {
                   if (_dirty)
                     GestureDetector(
                       onTap: _save,
-                      child: const Text(
+                      child: Text(
                         'Save',
                         style: TextStyle(
                           fontSize: 11.5,
@@ -705,7 +705,7 @@ class _EditorState extends State<_Editor> {
                     const SizedBox(width: 10),
                     Text(
                       a.repoFull!,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontFamily: Aether.mono,
                         fontSize: 10,
                         color: Aether.textFaint,
@@ -721,13 +721,13 @@ class _EditorState extends State<_Editor> {
                 maxLines: null,
                 expands: true,
                 keyboardType: TextInputType.multiline,
-                style: const TextStyle(
+                style: TextStyle(
                   fontFamily: Aether.mono,
                   fontSize: 12.5,
                   height: 1.55,
                   color: Aether.text,
                 ),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   contentPadding: EdgeInsets.all(12),
                   isDense: true,
                   filled: true,
@@ -829,9 +829,9 @@ class _TerminalState extends State<_Terminal> {
           color: Aether.surfaceAlt,
           child: Row(
             children: [
-              const Icon(Icons.terminal, size: 13, color: Aether.textMuted),
+              Icon(Icons.terminal, size: 13, color: Aether.textMuted),
               const SizedBox(width: 8),
-              const Text(
+              Text(
                 'SANDBOX TERMINAL',
                 style: TextStyle(
                   fontSize: 10.5,
@@ -847,7 +847,7 @@ class _TerminalState extends State<_Terminal> {
                   final sid = AppState.I.activeSession?.sandboxId ?? 'session';
                   return sid.length > 6 ? sid.substring(0, 6) : sid;
                 })()}',
-                style: const TextStyle(
+                style: TextStyle(
                   fontFamily: Aether.mono,
                   fontSize: 10,
                   color: Aether.textFaint,
@@ -857,7 +857,7 @@ class _TerminalState extends State<_Terminal> {
               if (_history.isNotEmpty)
                 GestureDetector(
                   onTap: () => setState(_history.clear),
-                  child: const Icon(
+                  child: Icon(
                     Icons.delete_outline,
                     size: 14,
                     color: Aether.textFaint,
@@ -908,7 +908,7 @@ class _TerminalState extends State<_Terminal> {
         // Real command input — runs in the Ubuntu sandbox via proot.
         Container(
           padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             border: Border(top: BorderSide(color: Aether.hairline)),
           ),
           child: TextField(
@@ -917,7 +917,7 @@ class _TerminalState extends State<_Terminal> {
             decoration: InputDecoration(
               isDense: true,
               hintText: 'bash \$ …',
-              hintStyle: const TextStyle(
+              hintStyle: TextStyle(
                 fontFamily: Aether.mono,
                 color: Aether.textFaint,
               ),
@@ -1031,7 +1031,7 @@ class _AccountChip extends StatelessWidget {
                         ),
                         Text(
                           '@${gh.login ?? ''}',
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 10.5,
                             color: Aether.textFaint,
                           ),
@@ -1066,12 +1066,12 @@ class _AccountChip extends StatelessWidget {
                 const SizedBox(width: 6),
                 Text(
                   gh.login ?? '',
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 11.5,
                     color: Aether.textMuted,
                   ),
                 ),
-                const Icon(
+                Icon(
                   Icons.expand_more,
                   size: 14,
                   color: Aether.textFaint,

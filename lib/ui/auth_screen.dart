@@ -76,7 +76,7 @@ class _AuthScreenState extends State<AuthScreen> {
       padding: const EdgeInsets.all(24),
       children: [
         const SizedBox(height: 24),
-        const CircleAvatar(
+        CircleAvatar(
           radius: 34,
           backgroundColor: Aether.surfaceRaised,
           child: Icon(Icons.person, size: 36, color: Aether.textMuted),
@@ -94,12 +94,12 @@ class _AuthScreenState extends State<AuthScreen> {
               padding: const EdgeInsets.only(top: 4),
               child: Text(
                 fb.email!,
-                style: const TextStyle(fontSize: 12.5, color: Aether.textFaint),
+                style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
               ),
             ),
           ),
         const SizedBox(height: 8),
-        const Center(
+        Center(
           child: Text(
             'Sync & backup enabled for this account.',
             style: TextStyle(fontSize: 12, color: Aether.textMuted),
@@ -125,7 +125,7 @@ class _AuthScreenState extends State<AuthScreen> {
       padding: const EdgeInsets.all(24),
       children: [
         const SizedBox(height: 16),
-        const Text(
+        Text(
           'Sign in to sync your workspace across devices. Optional — Ovid AI works fully offline with your own API keys.',
           style: TextStyle(fontSize: 13, height: 1.5, color: Aether.textMuted),
         ),

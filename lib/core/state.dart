@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'mcp_service.dart';
+import 'theme.dart';
 import 'sandbox_service.dart';
 
 /// ---------- Models ----------
@@ -255,6 +256,14 @@ class ChatSession {
   /// the full history.  Persisted.
   String? compactedSummary;
 
+  /// Active goal (DSH goal-round equivalent) — created by create_goal,
+  /// advanced by update_goal.  One goal per session at a time.  Persisted.
+  Map<String, dynamic>? goal;
+
+  /// Session-local reminders (DSH schedule equivalent) — created by
+  /// schedule_create, fired by AgentService's timer.  Persisted.
+  List<Map<String, dynamic>> schedules;
+
   /// Message count at the time of last compaction — re-compact only when
   /// this many NEW messages have arrived since.
   int compactedAtCount;
@@ -269,12 +278,15 @@ class ChatSession {
     this.providerId,
     this.sandboxId,
     this.compactedSummary,
+    this.goal,
     this.compactedAtCount = 0,
     List<Message>? messages,
     List<Map<String, String>>? todos,
+    List<Map<String, dynamic>>? schedules,
     DateTime? createdAt,
   }) : messages = messages ?? [],
        todos = todos ?? [],
+       schedules = schedules ?? [],
        createdAt = createdAt ?? DateTime.now() {
     sandboxId ??= id;
   }
@@ -287,6 +299,9 @@ class ChatSession {
     sandboxId: j['sandboxId'] as String?,
     compactedSummary: j['compactedSummary'] as String?,
     compactedAtCount: (j['compactedAtCount'] as num?)?.toInt() ?? 0,
+    goal: j['goal'] == null
+        ? null
+        : Map<String, dynamic>.from(j['goal'] as Map),
     messages:
         (j['messages'] as List?)
             ?.map((m) => Message.fromJson(m as Map<String, dynamic>))
@@ -294,6 +309,10 @@ class ChatSession {
         [],
     todos: (j['todos'] as List?)
             ?.map((t) => Map<String, String>.from(t as Map))
+            .toList() ??
+        [],
+    schedules: (j['schedules'] as List?)
+            ?.map((t) => Map<String, dynamic>.from(t as Map))
             .toList() ??
         [],
     createdAt: j['createdAt'] != null
@@ -309,6 +328,8 @@ class ChatSession {
     'sandboxId': sandboxId ?? id,
     if (compactedSummary != null) 'compactedSummary': compactedSummary,
     if (compactedAtCount > 0) 'compactedAtCount': compactedAtCount,
+    if (goal != null) 'goal': goal,
+    'schedules': schedules,
     'todos': todos,
     'messages': messages.map((m) => m.toJson()).toList(),
     'createdAt': createdAt.toIso8601String(),
@@ -347,6 +368,7 @@ class AppState extends ChangeNotifier {
       final t = prefs.getInt(_kResponseTimeout);
       if (t != null && t >= 5 && t <= 3600) responseTimeoutSec = t;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
+      lightTheme = prefs.getBool(_kTheme) ?? false;
       await _loadMemories();
     } catch (_) {}
   }
@@ -518,6 +540,22 @@ class AppState extends ChangeNotifier {
   /// history ("poori app history", user-opted).
   static const _kShareMemory = 'ovid_share_session_memory';
   bool shareSessionMemory = false;
+
+  // ── Light/dark theme (DSH light/dark preference parity) ──
+  static const _kTheme = 'ovid_light_theme';
+  bool lightTheme = false;
+
+  /// Toggle and persist. The app shell listens and rebuilds the whole
+  /// tree so every Aether.* getter resolves to the new palette.
+  Future<void> setLightTheme(bool v) async {
+    lightTheme = v;
+    Aether.dark = !v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kTheme, v);
+    } catch (_) {}
+  }
 
   Future<void> setShareSessionMemory(bool v) async {
     shareSessionMemory = v;

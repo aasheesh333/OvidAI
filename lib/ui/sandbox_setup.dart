@@ -58,13 +58,13 @@ void _showGate(BuildContext context) {
               ),
               IconButton(
                 visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.close,
+                icon: Icon(Icons.close,
                     size: 18, color: Aether.textFaint),
                 onPressed: () => Navigator.pop(ctx),
               ),
             ]),
             const SizedBox(height: 12),
-            const Text(
+            Text(
               'Ovid Studio needs a one-time sandbox — a real Ubuntu install that '
               'runs fully on this device. After this, the AI can edit files, run '
               'code and push commits straight from chat.',
@@ -89,7 +89,7 @@ void _showGate(BuildContext context) {
                 child: OutlinedButton(
                   style: OutlinedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 13),
-                    side: const BorderSide(color: Aether.hairlineStrong),
+                    side: BorderSide(color: Aether.hairlineStrong),
                     shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12)),
                   ),
@@ -147,7 +147,7 @@ class _SpecRow extends StatelessWidget {
                     fontSize: 12.5, fontWeight: FontWeight.w600)),
             const SizedBox(height: 1),
             Text(sub,
-                style: const TextStyle(
+                style: TextStyle(
                     fontSize: 11.5, color: Aether.textFaint)),
           ],
         ),
@@ -306,7 +306,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                       fontSize: 14.5, fontWeight: FontWeight.w700)),
             ),
             Text('Step ${idx + 1} of ${_phaseNames.length}',
-                style: const TextStyle(
+                style: TextStyle(
                     fontSize: 11, color: Aether.textFaint)),
           ]),
           const SizedBox(height: 14),
@@ -328,13 +328,13 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                     color: Aether.accent)),
             const Spacer(),
             Text(_elapsedLabel,
-                style: const TextStyle(
+                style: TextStyle(
                     fontSize: 11.5, color: Aether.textFaint)),
           ]),
           const SizedBox(height: 16),
           Expanded(child: _terminal()),
           const SizedBox(height: 12),
-          const Text('Keep the app open — this happens only once.',
+          Text('Keep the app open — this happens only once.',
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 11.5, color: Aether.textFaint)),
         ],
@@ -355,12 +355,12 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
         children: [
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: const BoxDecoration(
+            decoration: BoxDecoration(
               color: Aether.surfaceAlt,
               border:
                   Border(bottom: BorderSide(color: Aether.hairline)),
             ),
-            child: const Row(children: [
+            child: Row(children: [
               Icon(Icons.terminal, size: 13, color: Aether.textMuted),
               SizedBox(width: 8),
               Text('SANDBOX SETUP LOG — LIVE',
@@ -373,7 +373,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
           ),
           Expanded(
             child: _log.isEmpty
-                ? const Center(
+                ? Center(
                     child: Text('Starting install…',
                         style: TextStyle(
                             fontSize: 11.5, color: Aether.textFaint)),
@@ -418,7 +418,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             ),
             child: Text(
               _error!,
-              style: const TextStyle(
+              style: TextStyle(
                   fontFamily: Aether.mono,
                   fontSize: 11.5,
                   height: 1.6,
@@ -453,7 +453,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
           const SizedBox(height: 8),
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Close',
+            child: Text('Close',
                 style: TextStyle(fontSize: 12.5, color: Aether.textFaint)),
           ),
         ],
@@ -493,7 +493,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                 style: TextStyle(
                     fontSize: 20, fontWeight: FontWeight.w800)),
             const SizedBox(height: 8),
-            const Text(
+            Text(
               'Ubuntu 24.04 · python3 · node · git · gcc\nAll running privately on this device.',
               textAlign: TextAlign.center,
               style: TextStyle(
@@ -501,14 +501,14 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             ),
             const SizedBox(height: 8),
             Text('Took $_elapsedLabel',
-                style: const TextStyle(
+                style: TextStyle(
                     fontSize: 11.5, color: Aether.textFaint)),
             const SizedBox(height: 18),
             Wrap(
               spacing: 8,
               runSpacing: 8,
               alignment: WrapAlignment.center,
-              children: const [
+              children: [
                 Tag('UBUNTU 24.04', color: Aether.success, filled: true),
                 Tag('1.1 GB', color: Aether.textMuted),
                 Tag('NO ROOT', color: Aether.textMuted),
@@ -535,7 +535,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             const SizedBox(height: 6),
             TextButton(
               onPressed: () => Navigator.pop(context),
-              child: const Text('Back to chat',
+              child: Text('Back to chat',
                   style: TextStyle(fontSize: 12.5, color: Aether.textFaint)),
             ),
           ],

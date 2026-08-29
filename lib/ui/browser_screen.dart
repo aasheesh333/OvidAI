@@ -210,7 +210,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 children: [
                   IconButton(
                     visualDensity: VisualDensity.compact,
-                    icon: const Icon(
+                    icon: Icon(
                       Icons.arrow_back_ios,
                       size: 15,
                       color: Aether.textMuted,
@@ -223,7 +223,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ),
                   IconButton(
                     visualDensity: VisualDensity.compact,
-                    icon: const Icon(
+                    icon: Icon(
                       Icons.arrow_forward_ios,
                       size: 15,
                       color: Aether.textMuted,
@@ -236,7 +236,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ),
                   IconButton(
                     visualDensity: VisualDensity.compact,
-                    icon: const Icon(
+                    icon: Icon(
                       Icons.refresh,
                       size: 17,
                       color: Aether.textMuted,
@@ -265,7 +265,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                             vertical: 9,
                           ),
                           hintText: 'Search or type URL',
-                          hintStyle: const TextStyle(
+                          hintStyle: TextStyle(
                             fontSize: 12,
                             color: Aether.textFaint,
                           ),
@@ -288,7 +288,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ),
                   IconButton(
                     visualDensity: VisualDensity.compact,
-                    icon: const Icon(
+                    icon: Icon(
                       Icons.open_in_browser,
                       size: 17,
                       color: Aether.textMuted,

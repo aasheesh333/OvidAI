@@ -135,13 +135,13 @@ class UsageScreen extends StatelessWidget {
                   border: Border.all(color: Aether.hairline),
                 ),
                 child: Row(children: [
-                  const Icon(
+                  Icon(
                     Icons.data_usage_outlined,
                     size: 15,
                     color: Aether.textFaint,
                   ),
                   const SizedBox(width: 8),
-                  const Text('Total output', style: TextStyle(
+                  Text('Total output', style: TextStyle(
                     fontSize: 11,
                     color: Aether.textFaint,
                   )),
@@ -158,7 +158,7 @@ class UsageScreen extends StatelessWidget {
                 ]),
               ),
 
-              const Padding(
+              Padding(
                 padding: EdgeInsets.fromLTRB(18, 18, 18, 6),
                 child: Text(
                   'BY PROVIDER',
@@ -191,7 +191,7 @@ class UsageScreen extends StatelessWidget {
                   _ProviderTile(provider: p),
 
               if (providers.isNotEmpty)
-                const Padding(
+                Padding(
                   padding: EdgeInsets.fromLTRB(18, 18, 18, 0),
                   child: Text(
                     'Usage tracked from real API responses (token counts from the provider).',
@@ -210,7 +210,7 @@ class UsageScreen extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: const TextStyle(
+          Text(label, style: TextStyle(
             fontSize: 10.5,
             color: Aether.textFaint,
           )),
@@ -260,9 +260,9 @@ class _ProviderTile extends StatelessWidget {
       ]),
       subtitle: Text(
         '${p.requests} requests · ${_fmtK(p.tokensIn)} in · ${_fmtK(p.tokensOut)} out',
-        style: const TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
       ),
-      trailing: const Icon(Icons.chevron_right,
+      trailing: Icon(Icons.chevron_right,
           size: 14, color: Aether.textFaint),
       onTap: () => Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => ProviderUsageScreen(provider: p)),
@@ -307,12 +307,12 @@ class ProviderUsageScreen extends StatelessWidget {
                       fontSize: 16,
                       fontWeight: FontWeight.w700,
                     )),
-                    Text(p.tier, style: const TextStyle(
+                    Text(p.tier, style: TextStyle(
                       fontSize: 12,
                       color: Aether.textFaint,
                     )),
                     Text('${p.requests} requests',
-                        style: const TextStyle(
+                        style: TextStyle(
                             fontSize: 11, color: Aether.textFaint)),
                   ],
                 ),
@@ -371,7 +371,7 @@ class ProviderUsageScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 8),
-              const Row(
+              Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text('14 days ago', style: TextStyle(
@@ -436,7 +436,7 @@ class ProviderUsageScreen extends StatelessWidget {
           fontFamily: Aether.mono,
         )),
         const SizedBox(height: 3),
-        Text(label, style: const TextStyle(
+        Text(label, style: TextStyle(
           fontSize: 10.5,
           color: Aether.textFaint,
         )),
@@ -452,7 +452,7 @@ class _SectionLabel extends StatelessWidget {
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.fromLTRB(18, 16, 18, 8),
         child: Text(text,
-            style: const TextStyle(
+            style: TextStyle(
                 fontSize: 10.5,
                 fontWeight: FontWeight.w700,
                 letterSpacing: 1.2,

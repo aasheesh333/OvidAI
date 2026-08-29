@@ -88,7 +88,7 @@ class SessionsSidebar extends StatelessWidget {
             const SizedBox(height: 14),
 
             // Search (visual)
-            const Padding(
+            Padding(
               padding: EdgeInsets.symmetric(horizontal: 16),
               child: TextField(
                 style: TextStyle(fontSize: 13),
@@ -101,7 +101,7 @@ class SessionsSidebar extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 16),
-            const Padding(
+            Padding(
               padding: EdgeInsets.symmetric(horizontal: 20),
               child: Text('SESSIONS',
                   style: TextStyle(
@@ -140,7 +140,7 @@ class SessionsSidebar extends StatelessWidget {
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: const Row(children: [
+                child: Row(children: [
                   CircleAvatar(
                     radius: 13,
                     backgroundColor: Aether.surfaceRaised,
@@ -226,7 +226,7 @@ class _SessionTile extends StatelessWidget {
                     Text(session.model,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
+                        style: TextStyle(
                             fontSize: 10.5, color: Aether.textFaint)),
                   ],
                 ),

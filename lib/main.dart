@@ -12,6 +12,8 @@ import 'ui/chat_screen.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await AppState.I.initialize();
+  // Apply persisted theme BEFORE first frame (no dark flash on light).
+  Aether.dark = !AppState.I.lightTheme;
   // Firebase is optional: if google-services.json isn't injected (local debug),
   // FirebaseService degrades to offline no-ops and the app still runs.
   await FirebaseService.I.initialize();
@@ -24,8 +26,29 @@ Future<void> main() async {
   });
 }
 
-class OvidApp extends StatelessWidget {
+class OvidApp extends StatefulWidget {
   const OvidApp({super.key});
+  @override
+  State<OvidApp> createState() => _OvidAppState();
+}
+
+class _OvidAppState extends State<OvidApp> {
+  @override
+  void initState() {
+    super.initState();
+    // Rebuild the whole app when the user toggles the theme in Settings.
+    AppState.I.addListener(_onThemeChanged);
+  }
+
+  void _onThemeChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    AppState.I.removeListener(_onThemeChanged);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -98,7 +121,7 @@ class _ShellState extends State<_Shell> {
     return Scaffold(
       drawer: wide
           ? null
-          : const Drawer(
+          : Drawer(
               width: 288,
               backgroundColor: Aether.surface,
               child: SessionsSidebar(),
