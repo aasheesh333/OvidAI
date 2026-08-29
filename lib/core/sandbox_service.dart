@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:archive/archive_io.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
@@ -258,7 +260,7 @@ class SandboxService {
         } catch (_) {}
       }
       _rootfs!.createSync(recursive: true);
-      await _extractTarGz(rootfsGz, _rootfs!, (done, totalHint) {
+      await extractTarGz(rootfsGz, _rootfs!, (done, totalHint) {
         onPhase(3, 0.1 + 0.85 * done, 'extracting … ${totalHint > 0 ? "$totalHint files" : "…"}');
       });
       rootfsGz.deleteSync();
@@ -392,63 +394,208 @@ class SandboxService {
     throw Exception('data.tar.xz not found inside ${deb.uri.pathSegments.last}');
   }
 
-  /// Stream-decompress a .tar.gz into [dest] — resilient in-house extractor.
-  /// The package's extractFileToDisk() lets a single bad symlink abort the
-  /// whole install; here symlink failures are non-fatal (proot's
-  /// --link2symlink repairs hardlinks at run time, and Ubuntu-base's few
-  /// convenience links aren't load-bearing for python3/node/git).
-  Future<void> _extractTarGz(
+  /// Streaming .tar.gz extractor — in-house, resilient, bounded-memory.
+  ///
+  /// Why not the archive package's TarDecoder? With `storeData: false`
+  /// (streaming), any GNU `@LongLink` or PAX `x` entry makes the package
+  /// hit `rawContent!` on null → "Null check operator used on a null
+  /// value" (exactly the device crash we saw). With `storeData: true` it
+  /// loads the whole ~140 MB tar into RAM. Our own 512-byte header walker
+  /// has neither problem:
+  ///   • reads the gunzipped tar via RandomAccessFile in 1 MB chunks
+  ///   • handles regular files, dirs, symlinks, hardlinks (copy),
+  ///     GNU 'L'/'K' long names and PAX 'x'/'g' headers
+  ///   • one odd entry can never abort the install (per-entry try/catch)
+  ///   • collects exec-bit paths and chmods them in batches at the end
+  @visibleForTesting
+  Future<void> extractTarGz(
     File gz,
     Directory dest,
     void Function(double done01, int totalHint) onProgress,
   ) async {
+    // ── 1. gunzip to a plain .tar (streaming) ──
     final input = InputFileStream(gz.path);
-    final out = OutputFileStream('${gz.path}.tar');
+    final tarPath = '${gz.path}.tar';
+    final out = OutputFileStream(tarPath);
     GZipDecoder().decodeStream(input, out);
     await input.close();
     await out.close();
 
-    final tarInput = InputFileStream('${gz.path}.tar');
-    final archive = TarDecoder().decodeStream(tarInput, storeData: false);
-    var i = 0;
-    for (final entry in archive) {
-      i++;
-      final name = entry.name;
-      if (name.isEmpty) continue;
-      // Path traversal guard.
-      final norm = name.replaceAll(RegExp(r'^\./'), '');
-      if (norm.contains('..')) continue;
-      final outPath = '${dest.path}/$norm';
-      try {
-        if (entry.isSymbolicLink) {
-          final target = entry.symbolicLink ?? '';
-          if (target.isNotEmpty && !target.startsWith('..') &&
-              !(target.startsWith('/') && target.length > 4096)) {
-            final link = Link(outPath);
-            if (!link.existsSync()) {
+    // ── 2. walk the tar ──
+    final raf = File(tarPath).openSync();
+    try {
+      final total = raf.lengthSync();
+      var pos = 0;
+      var i = 0;
+      String? pendingLongName;
+      String? pendingLongLink;
+      final execPaths = <String>[];
+
+      String field(Uint8List h, int off, int len) {
+        var e = off + len;
+        while (e > off && (h[e - 1] == 0 || h[e - 1] == 0x20)) {
+          e--;
+        }
+        return latin1.decode(h.sublist(off, e), allowInvalid: true);
+      }
+
+      Uint8List? readAt(int offset, int bytes) {
+        if (offset + bytes > total) return null;
+        raf.setPositionSync(offset);
+        return raf.readSync(bytes);
+      }
+
+      while (true) {
+        final hdr = readAt(pos, 512);
+        if (hdr == null) break;
+        if (hdr.every((b) => b == 0)) break; // EOF zero block
+        final name = field(hdr, 0, 100);
+        final modeStr = field(hdr, 100, 8);
+        final sizeStr = field(hdr, 124, 12);
+        final size =
+            sizeStr.isEmpty ? 0 : (int.tryParse(sizeStr, radix: 8) ?? 0);
+        final mode =
+            modeStr.isEmpty ? 0 : (int.tryParse(modeStr, radix: 8) ?? 0);
+        final typeFlag = hdr[156] == 0 ? '0' : String.fromCharCode(hdr[156]);
+        final linkName = field(hdr, 157, 100);
+        final dataStart = pos + 512;
+        final padded = size % 512 == 0 ? size : size + (512 - size % 512);
+        final nextPos = dataStart + padded;
+
+        try {
+          if (typeFlag == 'L') {
+            // GNU long name — the next entry's real name is this data.
+            final b = readAt(dataStart, size);
+            if (b != null) {
+              var e = b.length;
+              while (e > 0 && b[e - 1] == 0) {
+                e--;
+              }
+              pendingLongName = latin1.decode(b.sublist(0, e),
+                  allowInvalid: true);
+            }
+          } else if (typeFlag == 'K') {
+            final b = readAt(dataStart, size);
+            if (b != null) {
+              var e = b.length;
+              while (e > 0 && b[e - 1] == 0) {
+                e--;
+              }
+              pendingLongLink = latin1.decode(b.sublist(0, e),
+                  allowInvalid: true);
+            }
+          } else if (typeFlag == 'x' || typeFlag == 'X' || typeFlag == 'g') {
+            // PAX extended header — pull path=/linkpath= records.
+            final b = readAt(dataStart, size);
+            if (b != null) {
+              final pax = latin1.decode(b, allowInvalid: true);
+              final pm = RegExp(r' ?path=(.*)\n').firstMatch(pax);
+              if (pm != null) pendingLongName = pm.group(1)!.trim();
+              final lm = RegExp(r' ?linkpath=(.*)\n').firstMatch(pax);
+              if (lm != null) pendingLongLink = lm.group(1)!.trim();
+            }
+          } else if (typeFlag == '0' || typeFlag == '7') {
+            // Regular file.
+            var n = (pendingLongName ?? name);
+            pendingLongName = null;
+            n = _normalizeTarPath(n);
+            if (n.isNotEmpty && !n.contains('..')) {
+              final outPath = '${dest.path}/$n';
+              Directory(outPath).parent.createSync(recursive: true);
+              final sink = File(outPath).openSync(mode: FileMode.writeOnly);
               try {
-                link.createSync(target, recursive: true);
+                var left = size;
+                raf.setPositionSync(dataStart);
+                while (left > 0) {
+                  final chunk = raf.readSync(left > (1 << 20) ? (1 << 20) : left);
+                  if (chunk.isEmpty) break;
+                  sink.writeFromSync(chunk);
+                  left -= chunk.length;
+                }
+              } finally {
+                sink.closeSync();
+              }
+              if (mode & 0x111 != 0) execPaths.add(outPath); // exec bit
+            }
+          } else if (typeFlag == '5') {
+            var n = (pendingLongName ?? name);
+            pendingLongName = null;
+            n = _normalizeTarPath(n);
+            if (n.isNotEmpty && !n.contains('..')) {
+              Directory('${dest.path}/$n').createSync(recursive: true);
+            }
+          } else if (typeFlag == '2') {
+            // Symlink — the reason we moved to internal storage.
+            var n = (pendingLongName ?? name);
+            final target = pendingLongLink ?? linkName;
+            pendingLongName = null;
+            pendingLongLink = null;
+            n = _normalizeTarPath(n);
+            if (n.isNotEmpty && target.isNotEmpty && !n.contains('..')) {
+              final link = Link('${dest.path}/$n');
+              if (!link.existsSync()) {
+                try {
+                  link.createSync(target, recursive: true);
+                } catch (_) {
+                  // Non-fatal: a missing convenience link never blocks
+                  // python3/node/git from running under proot.
+                }
+              }
+            }
+          } else if (typeFlag == '1') {
+            // Hardlink — copy the target so the file exists standalone.
+            var n = (pendingLongName ?? name);
+            final target = pendingLongLink ?? linkName;
+            pendingLongName = null;
+            pendingLongLink = null;
+            n = _normalizeTarPath(n);
+            final t = _normalizeTarPath(target);
+            if (n.isNotEmpty && t.isNotEmpty && !n.contains('..')) {
+              try {
+                final src = File('${dest.path}/$t');
+                if (src.existsSync()) {
+                  final dst = File('${dest.path}/$n');
+                  dst.parent.createSync(recursive: true);
+                  src.copySync(dst.path);
+                }
               } catch (_) {}
             }
           }
-        } else if (entry.isFile) {
-          final fileOut = OutputFileStream(outPath);
-          try {
-            entry.writeContent(fileOut);
-          } finally {
-            fileOut.closeSync();
-          }
-        } else {
-          Directory(outPath).createSync(recursive: true);
+          // Types 3/4/6 (char/block/fifo devices) are skipped — the jail
+          // bind-mounts the host's /dev anyway.
+        } catch (_) {
+          // One odd entry never aborts a 3400-file install.
         }
-      } catch (_) {
-        // Never let one odd entry abort a 3400-file install.
+
+        pos = nextPos;
+        i++;
+        if (i % 100 == 0) onProgress((i % 1500) / 1500, i);
       }
-      if (i % 100 == 0) onProgress((i % 1500) / 1500, i);
+
+      // ── 3. chmod exec-bit files (batched — Android toybox chmod) ──
+      for (var s = 0; s < execPaths.length; s += 100) {
+        final batch = execPaths.skip(s).take(100).toList(growable: false);
+        try {
+          await Process.run('chmod', ['755', ...batch]);
+        } catch (_) {}
+      }
+      onProgress(1.0, i);
+    } finally {
+      raf.closeSync();
+      try {
+        File(tarPath).deleteSync();
+      } catch (_) {}
     }
-    await tarInput.close();
-    File('${gz.path}.tar').deleteSync();
-    onProgress(1.0, i);
+  }
+
+  /// './usr/bin/x' → 'usr/bin/x'; absolute '/x' → 'x'.
+  static String _normalizeTarPath(String p) {
+    var n = p;
+    while (n.startsWith('./')) {
+      n = n.substring(2);
+    }
+    if (n.startsWith('/')) n = n.substring(1);
+    return n;
   }
 
   Future<void> _download({
