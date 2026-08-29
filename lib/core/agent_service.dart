@@ -1270,8 +1270,9 @@ tools to do it live, don't just explain how.
         _activeRequest = null;
         return null;
       }
-      if (p.apiKey.isNotEmpty) {
-        req.headers.set('Authorization', 'Bearer ${p.apiKey}');
+      final key = p.cleanApiKey;
+      if (key.isNotEmpty) {
+        req.headers.set('Authorization', 'Bearer $key');
       }
       req.headers.set('Content-Type', 'application/json');
       req.headers.set('Accept', 'text/event-stream');

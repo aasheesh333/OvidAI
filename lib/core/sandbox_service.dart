@@ -674,19 +674,10 @@ class SandboxService {
     try {
       await Process.run('chmod', ['1777', tmp.path]);
     } catch (_) {}
-    // Termux proot also probes its OWN compile-time tmp path
-    // (/data/data/com.termux/files/usr/tmp) — bind it onto our /tmp so the
-    // f2fs-bug-probe finds a writable dir instead of Permission denied.
-    final termuxTmpParent = Directory(
-        '/data/data/com.termux/files/usr');
-    // Can't create outside our app dir on stock Android — the
-    // canonicalize warning is harmless once TMPDIR=/tmp works; skip.
-    if (termuxTmpParent.existsSync()) {
-      try {
-        Directory('/data/data/com.termux/files/usr/tmp')
-            .createSync(recursive: true);
-      } catch (_) {}
-    }
+    // NOTE: do NOT probe /data/data/com.termux/... — on Android,
+    // existsSync() on another app's private dir THROWS EACCES instead of
+    // returning false (crash: 'Exists failed … Permission denied').
+    // TMPDIR=/tmp above fully covers proot's temp needs.
   }
 
   // Base env passed to every exec'd command inside the jail.

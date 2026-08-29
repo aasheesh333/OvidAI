@@ -243,7 +243,9 @@ class _ProviderCardState extends State<ProviderCard> {
 
   void _updateApiKey(String value) {
     final target = provider;
-    target.apiKey = value.trim();
+    // Strip newlines/control chars on save — a pasted multi-line blob
+    // (e.g. an error message) must never reach the HTTP header layer.
+    target.apiKey = value.replaceAll(RegExp(r'[\s\x00-\x1f\x7f]'), '');
     AppState.I.refresh();
     _keyPersistTimer?.cancel();
     _keyPersistTimer = Timer(const Duration(milliseconds: 400), () {
@@ -408,12 +410,13 @@ class _ProviderCardState extends State<ProviderCard> {
                       if (!url.endsWith('/')) url += '/';
                       // NVIDIA NIM and OpenAI-compatible /models endpoint
                       final uri = Uri.parse('${url}models');
+                      final cleanKey = provider.cleanApiKey;
                       final res = await http
                           .get(
                             uri,
                             headers: {
-                              if (provider.apiKey.isNotEmpty)
-                                'Authorization': 'Bearer ${provider.apiKey}',
+                              if (cleanKey.isNotEmpty)
+                                'Authorization': 'Bearer $cleanKey',
                             },
                           )
                           .timeout(const Duration(seconds: 15));
@@ -453,8 +456,17 @@ class _ProviderCardState extends State<ProviderCard> {
                         );
                       }
                     } catch (e) {
+                      String msg;
+                      if (e is FormatException &&
+                          e.message
+                              .contains('Invalid HTTP header field value')) {
+                        msg = 'API key looks invalid (contains whitespace or '
+                            'extra text). Please re-enter your key.';
+                      } else {
+                        msg = 'Fetch failed: $e';
+                      }
                       messenger.showSnackBar(
-                        SnackBar(content: Text('Fetch failed: $e')),
+                        SnackBar(content: Text(msg)),
                       );
                     }
                   },

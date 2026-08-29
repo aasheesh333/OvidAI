@@ -41,6 +41,15 @@ class ProviderConfig {
   bool get hasKey => apiKey.trim().isNotEmpty;
   bool get isConfigured => !requiresApiKey || hasKey;
 
+  /// Returns the API key with all whitespace and control characters
+  /// removed.  This is the value that should be used in HTTP headers —
+  /// the raw [apiKey] field may contain newlines or other junk if the
+  /// user accidentally pasted a multi-line blob (e.g. an error message)
+  /// into the key field, which would cause a [FormatException] from
+  /// the HTTP layer ("Invalid HTTP header field value").
+  String get cleanApiKey =>
+      apiKey.replaceAll(RegExp(r'[\s\x00-\x1f\x7f]'), '');
+
   Map<String, dynamic> toPersistedJson() => {
     'id': id,
     'name': name,
