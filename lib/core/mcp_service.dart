@@ -144,8 +144,6 @@ class McpService {
   // ── internals ─────────────────────────────────────────────────────────
 
   List<String> _prootArgs(McpServer server) {
-    // Spawn inside the sandbox proot jail — servers are trusted code the
-    // user explicitly connected, same trust level as DSH MCP defaults.
     final sandbox = SandboxService.I;
     if (!sandbox.isInstalled) {
       throw Exception(
@@ -154,7 +152,10 @@ class McpService {
     }
     return [
       '-r', sandbox.rootfs!.path,
+      '-0',                // fake root uid so node/python can install deps
+      '--link2symlink',    // repair hardlinks the tar layer can't represent
       '-b', '/dev',
+      '-b', '/dev/pts',
       '-b', '/proc',
       '-b', '/sys',
       '-b', '/sdcard',

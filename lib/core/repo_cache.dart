@@ -204,6 +204,24 @@ class RepoCache extends ChangeNotifier {
 
   String? read(String path) => files[path];
 
+  /// Public on-demand fetch for a path that exists in the repo tree but was
+  /// never synced into memory (e.g. Studio file-tree tap). Returns the real
+  /// file content and caches it, or null if unreachable.
+  Future<String?> fetchFile(String path) async {
+    if (repoFull == null) return files[path];
+    try {
+      final c = http.Client();
+      try {
+        final contents = await _fetchRaw(repoFull!, _token ?? '', path, c);
+        return contents;
+      } finally {
+        c.close();
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
   bool exists(String path) => files.containsKey(path);
 
   void create(String path, String content) {

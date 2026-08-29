@@ -22,6 +22,80 @@ class _ChatScreenState extends State<ChatScreen>
   final _input = TextEditingController();
   final _scroll = ScrollController();
 
+  /// DSH-web auto-scroll: when the user is at the bottom, we follow the
+  /// stream; as soon as they scroll up we stop moving; when they return to
+  /// the bottom we resume following.
+  bool _atBottom = true;
+  bool _showJumpFab = false;
+
+  // ── Per-session composer drafts ─────────────────────────────────────
+  // Bug fix: the old single controller leaked the draft across sessions —
+  // typing in session A, switching to B, then creating a new session kept
+  // showing A's text. We stash the current text on session switch and
+  // restore the target session's draft (like DeepSeek web / ChatGPT web).
+  final Map<String, String> _drafts = {};
+  String? _boundSessionId;
+
+  void _bindDraft(String sessionId) {
+    if (_boundSessionId == sessionId) return;
+    // Save outgoing session's draft.
+    if (_boundSessionId != null && _input.text.isNotEmpty) {
+      _drafts[_boundSessionId!] = _input.text;
+    } else if (_boundSessionId != null) {
+      _drafts.remove(_boundSessionId);
+    }
+    // Restore incoming session's draft.
+    final draft = _drafts[sessionId] ?? '';
+    if (_input.text != draft) {
+      _input.value = TextEditingValue(
+        text: draft,
+        selection: TextSelection.collapsed(offset: draft.length),
+      );
+    }
+    _boundSessionId = sessionId;
+    // Reset scroll-follow state per session so a fresh session starts at
+    // the bottom, not mid-stream.
+    _atBottom = true;
+    _showJumpFab = false;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    _input.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
+    // 24px dead-zone treats "almost at bottom" as at bottom.
+    final atBottom = pos.maxScrollExtent - pos.pixels < 24;
+    if (atBottom != _atBottom) {
+      setState(() {
+        _atBottom = atBottom;
+        _showJumpFab = !atBottom;
+      });
+    }
+  }
+
+  /// Called from the message-list builder when content changes — keeps the
+  /// stream pinned to the bottom if the user was already at the bottom.
+  void _maybeJumpToBottom() {
+    if (!_atBottom) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) {
+        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = AppState.I;
@@ -29,6 +103,12 @@ class _ChatScreenState extends State<ChatScreen>
       animation: app,
       builder: (_, _) {
         final s = app.activeSession;
+        // Restore the draft that belongs to THIS session — never leak
+        // another session's composer text.
+        if (s != null) {
+          WidgetsBinding.instance
+              .addPostFrameCallback((_) => _bindDraft(s.id));
+        }
         final wide = MediaQuery.of(context).size.width >= 840;
         return Scaffold(
           backgroundColor: Aether.bg,
@@ -122,7 +202,6 @@ class _ChatScreenState extends State<ChatScreen>
           body: SafeArea(
             child: Column(
               children: [
-                const _AgentActivityBar(),
                 Expanded(
                   child: s == null || s.messages.isEmpty
                       ? _EmptyState(
@@ -130,25 +209,73 @@ class _ChatScreenState extends State<ChatScreen>
                             _input.text = t;
                           },
                         )
-                      : AnimatedBuilder(
-                          animation: AgentService.I,
-                          builder: (_, _) {
-                            final typing = AgentService.I.busy;
-                            return ListView.builder(
-                              controller: _scroll,
-                              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                              itemCount: s.messages.length + (typing ? 1 : 0),
-                              itemBuilder: (_, i) =>
-                                  i == s.messages.length
-                                      ? const _TypingBubble()
-                                      : _MessageView(m: s.messages[i]),
-                            );
-                          },
+                      : Stack(
+                          children: [
+                            AnimatedBuilder(
+                              animation: AgentService.I,
+                              builder: (_, _) {
+                                final typing = AgentService.I.busy;
+                                _maybeJumpToBottom();
+                                return ListView.builder(
+                                  controller: _scroll,
+                                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                                  itemCount: s.messages.length + (typing ? 1 : 0),
+                                  itemBuilder: (_, i) =>
+                                      i == s.messages.length
+                                          ? const _TypingBubble()
+                                          : _MessageView(
+                                              m: s.messages[i],
+                                              session: s,
+                                              msgIndex: i,
+                                              onAction: () =>
+                                                  setState(() {}),
+                                              input: _input,
+                                            ),
+                                );
+                              },
+                            ),
+                            // DSH-web "jump to latest" pill — only when the
+                            // user scrolled up while content keeps streaming.
+                            if (_showJumpFab)
+                              Positioned(
+                                bottom: 12,
+                                right: 12,
+                                child: Semantics(
+                                  button: true,
+                                  label: 'Jump to latest',
+                                  child: Material(
+                                    color: Aether.surface,
+                                    elevation: 2,
+                                    borderRadius: BorderRadius.circular(20),
+                                    child: InkWell(
+                                      borderRadius: BorderRadius.circular(20),
+                                      onTap: () {
+                                        _scroll.jumpTo(
+                                          _scroll.position.maxScrollExtent,
+                                        );
+                                      },
+                                      child: const Padding(
+                                        padding: EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 6,
+                                        ),
+                                        child: Icon(
+                                          Icons.arrow_downward,
+                                          size: 16,
+                                          color: Aether.accent,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
                 ),
                 _QueueDock(
                   onEdited: () => setState(() {}),
                 ),
+                const _ApprovalDock(),
                 _InputBar(
                   controller: _input,
                   running: AgentService.I.busy,
@@ -206,7 +333,11 @@ class _ChatScreenState extends State<ChatScreen>
 
                     app.sendMessage(t);
                     _input.clear();
-                    Future.delayed(const Duration(milliseconds: 60), () {
+                    _drafts.remove(session.id);
+                    // New user message → snap to bottom so the user sees the
+                    // answer start, regardless of where they were scrolled.
+                    _atBottom = true;
+                    Future.delayed(const Duration(milliseconds: 80), () {
                       if (_scroll.hasClients) {
                         _scroll.jumpTo(_scroll.position.maxScrollExtent);
                       }
@@ -646,27 +777,117 @@ class _EmptyState extends StatelessWidget {
 
 class _MessageView extends StatelessWidget {
   final Message m;
-  const _MessageView({required this.m});
+  final dynamic session; // ChatSession
+  final int msgIndex;
+  final VoidCallback onAction;
+  final TextEditingController input;
+  const _MessageView({
+    required this.m,
+    required this.session,
+    required this.msgIndex,
+    required this.onAction,
+    required this.input,
+  });
 
   @override
   Widget build(BuildContext context) {
     final isUser = m.role == 'user';
+    final isLast = msgIndex == session.messages.length - 1;
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 12),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.82,
-        ),
-        child: switch (m.kind) {
-          MsgKind.code => _code(),
-          MsgKind.imageGen => _imageGen(),
-          MsgKind.reasoning => _reasoning(),
-          _ => _text(isUser),
-        },
+      child: Column(
+        crossAxisAlignment:
+            isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        children: [
+          Container(
+            margin: const EdgeInsets.only(bottom: 2),
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.of(context).size.width * 0.82,
+            ),
+            child: switch (m.kind) {
+              MsgKind.code => _code(),
+              MsgKind.imageGen => _imageGen(),
+              MsgKind.reasoning => _reasoning(),
+              _ => _text(isUser),
+            },
+          ),
+          // DSH-web message meta + action row: copy / edit / revert / time.
+          if (!m.thinking) _actionRow(context, isUser, isLast),
+        ],
       ),
     );
   }
+
+  Widget _actionRow(BuildContext context, bool isUser, bool isLast) {
+    final items = <Widget>[];
+    void add(IconData icon, String tip, VoidCallback fn) {
+      items.add(InkWell(
+        borderRadius: BorderRadius.circular(4),
+        onTap: fn,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+          child: Icon(icon, size: 13, color: Aether.textFaint),
+        ),
+      ));
+    }
+
+    add(Icons.copy_outlined, 'Copy', () async {
+      await Clipboard.setData(ClipboardData(text: m.content));
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Copied to clipboard'),
+            duration: Duration(milliseconds: 800),
+          ),
+        );
+      }
+    });
+    if (isUser && isLast) {
+      add(Icons.edit_outlined, 'Edit & resend', () {
+        input.text = m.content;
+        AppState.I.deleteMessagesFrom(session.id, msgIndex);
+        onAction();
+      });
+      add(Icons.replay_outlined, 'Revert', () {
+        AppState.I.deleteMessagesFrom(session.id, msgIndex);
+        onAction();
+      });
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8, top: 2),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ...items,
+          if (!isUser && m.elapsedMs != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: Text(
+                '${(m.elapsedMs! / 1000).toStringAsFixed(1)}s',
+                style: const TextStyle(
+                  fontSize: 10.5,
+                  color: Aether.textFaint,
+                ),
+              ),
+            ),
+          if (isUser)
+            Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: Text(
+                _formatTime(m.time),
+                style: const TextStyle(
+                  fontSize: 10.5,
+                  color: Aether.textFaint,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  String _formatTime(DateTime t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
   Widget _text(bool isUser) => Container(
         padding: EdgeInsets.symmetric(
@@ -949,6 +1170,11 @@ class _InputBar extends StatelessWidget {
                   ),
                   onSubmitted: (_) => onSend(),
                 ),
+              ),
+              // DSH-web mode selector — icon + text chip, opens the mode sheet.
+              const Padding(
+                padding: EdgeInsets.only(right: 4),
+                child: _ModeChip(),
               ),
               IconButton(
                 tooltip: 'Voice',
@@ -1273,117 +1499,6 @@ class _CopyButton extends StatefulWidget {
   State<_CopyButton> createState() => _CopyButtonState();
 }
 
-/// Live activity bar — shows the agent's ongoing tool calls
-/// (shell / browser / repo / think). Jumps to Studio or Browser on tap.
-class _AgentActivityBar extends StatelessWidget {
-  const _AgentActivityBar();
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: AgentService.I,
-      builder: (_, _) {
-        final a = AgentService.I;
-        if (!a.busy && a.pendingApproval == null) {
-          return const SizedBox.shrink();
-        }
-        final last = a.events.isEmpty ? null : a.events.last;
-        final msg = a.pendingApproval?.summary ?? last?.text ?? 'working…';
-        final icon = switch (last?.kind) {
-          'shell' || 'shellOut' => Icons.terminal,
-          'nav' || 'page' => Icons.public,
-          'file' => Icons.edit_note,
-          'err' => Icons.error_outline,
-          _ => Icons.psychology_outlined,
-        };
-        final approved = a.pendingApproval != null;
-        return Material(
-          color: approved
-              ? Aether.warn.withValues(alpha: 0.10)
-              : Aether.accentSoft,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            decoration: BoxDecoration(
-              border: Border(bottom: BorderSide(color: Aether.hairline)),
-            ),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 1.5,
-                    color: approved ? Aether.warn : Aether.accent,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Icon(icon, size: 14, color: Aether.textMuted),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    msg,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 11.5,
-                      color: Aether.textMuted,
-                      fontFamily: Aether.mono,
-                    ),
-                  ),
-                ),
-                if (approved) ...[
-                  TextButton(
-                    style: TextButton.styleFrom(
-                      foregroundColor: Aether.danger,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: Size.zero,
-                    ),
-                    child: const Text('Deny', style: TextStyle(fontSize: 11)),
-                    onPressed: () => AgentService.I.approve(false),
-                  ),
-                  TextButton(
-                    style: TextButton.styleFrom(
-                      foregroundColor: Aether.success,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: Size.zero,
-                    ),
-                    child: const Text('Allow', style: TextStyle(fontSize: 11)),
-                    onPressed: () => AgentService.I.approve(true),
-                  ),
-                ] else if (last?.kind == 'shell' || last?.kind == 'shellOut')
-                  TextButton(
-                    style: TextButton.styleFrom(
-                      foregroundColor: Aether.accent,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: Size.zero,
-                    ),
-                    child: const Text('Studio', style: TextStyle(fontSize: 11)),
-                    onPressed: () => openStudio(context),
-                  )
-                else if (last?.kind == 'nav' || last?.kind == 'page')
-                  TextButton(
-                    style: TextButton.styleFrom(
-                      foregroundColor: Aether.accent,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: Size.zero,
-                    ),
-                    child: const Text(
-                      'Browser',
-                      style: TextStyle(fontSize: 11),
-                    ),
-                    onPressed: () => Navigator.of(context).push(
-                      MaterialPageRoute(builder: (_) => const BrowserScreen()),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
 class _CopyButtonState extends State<_CopyButton> {
   bool copied = false;
   @override
@@ -1414,6 +1529,161 @@ class _CopyButtonState extends State<_CopyButton> {
                 color: copied ? Aether.success : Aether.textFaint,
               ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
+/// Approval dock — replaces the old _AgentActivityBar under the AppBar.
+/// Shown only when a tool needs user confirmation. Live agent log stays in
+/// the chat stream itself; approvals float above the input (DSH-web style).
+class _ApprovalDock extends StatelessWidget {
+  const _ApprovalDock();
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AgentService.I,
+      builder: (_, _) {
+        final req = AgentService.I.pendingApproval;
+        if (req == null) return const SizedBox.shrink();
+        return Container(
+          margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: Aether.warn.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Aether.warn.withValues(alpha: 0.4)),
+          ),
+          child: Row(
+            children: [
+              const Icon(
+                Icons.warning_amber_rounded,
+                size: 16,
+                color: Aether.warn,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  req.summary,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Aether.text,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              TextButton(
+                style: TextButton.styleFrom(
+                  foregroundColor: Aether.danger,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: Size.zero,
+                ),
+                child: const Text('Deny', style: TextStyle(fontSize: 12)),
+                onPressed: () => AgentService.I.approve(false),
+              ),
+              TextButton(
+                style: TextButton.styleFrom(
+                  foregroundColor: Aether.success,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: Size.zero,
+                ),
+                child: const Text('Allow', style: TextStyle(fontSize: 12)),
+                onPressed: () => AgentService.I.approve(true),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Permission mode chip (Read-Only / General / Full Access / Studio) —
+/// DSH-web dropdown under the input. Tapping cycles; long-press opens sheet.
+class _ModeChip extends StatelessWidget {
+  const _ModeChip();
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AgentService.I,
+      builder: (_, _) {
+        final m = AgentService.I.mode;
+        return GestureDetector(
+          onTap: () => _showModeSheet(context),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            decoration: BoxDecoration(
+              color: m.color.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: m.color.withValues(alpha: 0.45)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(m.icon, size: 12, color: m.color),
+                const SizedBox(width: 5),
+                Text(
+                  m.label,
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                    color: m.color,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _showModeSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            const Text(
+              'Agent access mode',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            for (final m in AgentMode.values)
+              ListTile(
+                dense: true,
+                leading: Icon(m.icon, size: 18, color: m.color),
+                title: Text(m.label, style: const TextStyle(fontSize: 13.5)),
+                subtitle: Text(
+                  m.hint,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Aether.textFaint,
+                    height: 1.4,
+                  ),
+                ),
+                trailing: AgentService.I.mode == m
+                    ? const Icon(Icons.check, size: 18, color: Aether.accent)
+                    : null,
+                onTap: () {
+                  AgentService.I.setMode(m);
+                  Navigator.pop(context);
+                },
+              ),
+            const SizedBox(height: 8),
           ],
         ),
       ),

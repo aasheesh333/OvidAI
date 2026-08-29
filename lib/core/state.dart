@@ -165,6 +165,7 @@ class Message {
   final String? lang; // for code blocks
   final DateTime time;
   bool thinking; // mutable — live state
+  int? elapsedMs; // assistant: how long this response took
 
   Message({
     required this.role,
@@ -172,6 +173,7 @@ class Message {
     this.content = '',
     this.lang,
     this.thinking = false,
+    this.elapsedMs,
     DateTime? time,
   }) : time = time ?? DateTime.now();
 
@@ -184,6 +186,7 @@ class Message {
     content: j['content'] as String? ?? '',
     lang: j['lang'] as String?,
     thinking: j['thinking'] as bool? ?? false,
+    elapsedMs: (j['elapsedMs'] as num?)?.toInt(),
     time: j['time'] != null ? DateTime.tryParse(j['time'] as String) : null,
   );
 
@@ -193,6 +196,7 @@ class Message {
     'content': content,
     if (lang != null) 'lang': lang,
     if (thinking) 'thinking': thinking,
+    if (elapsedMs != null) 'elapsedMs': elapsedMs,
     'time': time.toIso8601String(),
   };
 }
@@ -202,6 +206,14 @@ class ChatSession {
   String title;
   String model;
   String? providerId;
+
+  /// Per-session sandbox workspace id — used as the working directory inside
+  /// the Ubuntu sandbox (`/root/workspaces/<sandboxId>`). Generated once per
+  /// session; old persisted sessions fall back to [id] (fromJson migration).
+  /// The AI/agent NEVER sees another session's workspace unless the user
+  /// enables "Share session memory" in Settings.
+  String? sandboxId;
+
   final List<Message> messages;
   final DateTime createdAt;
 
@@ -210,16 +222,20 @@ class ChatSession {
     required this.title,
     required this.model,
     this.providerId,
+    this.sandboxId,
     List<Message>? messages,
     DateTime? createdAt,
   }) : messages = messages ?? [],
-       createdAt = createdAt ?? DateTime.now();
+       createdAt = createdAt ?? DateTime.now() {
+    sandboxId ??= id;
+  }
 
   factory ChatSession.fromJson(Map<String, dynamic> j) => ChatSession(
     id: j['id'] as String,
     title: j['title'] as String? ?? 'New chat',
     model: j['model'] as String? ?? 'Select a provider',
     providerId: j['providerId'] as String?,
+    sandboxId: j['sandboxId'] as String?,
     messages:
         (j['messages'] as List?)
             ?.map((m) => Message.fromJson(m as Map<String, dynamic>))
@@ -235,6 +251,7 @@ class ChatSession {
     'title': title,
     'model': model,
     if (providerId != null) 'providerId': providerId,
+    'sandboxId': sandboxId ?? id,
     'messages': messages.map((m) => m.toJson()).toList(),
     'createdAt': createdAt.toIso8601String(),
   };
@@ -264,9 +281,15 @@ class AppState extends ChangeNotifier {
     await _loadUsage();
     // Check if the sandbox was installed on a previous launch so the
     // user is never asked to re-install the ~200 MB rootfs.
-    if (await SandboxService.I.checkExisting()) {
+     if (await SandboxService.I.checkExisting()) {
       sandboxInstalled = true;
     }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final t = prefs.getInt(_kResponseTimeout);
+      if (t != null && t >= 5 && t <= 3600) responseTimeoutSec = t;
+      shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
+    } catch (_) {}
   }
 
   /// Last model the user picked — carried into new sessions (DSH-style
@@ -429,6 +452,37 @@ class AppState extends ChangeNotifier {
   int navIndex = 0; // 0 Chat, 1 Studio, 2 Browser, 3 Plugins, 4 Settings
   bool sandboxInstalled = false; // proot Ubuntu sandbox on-device
 
+  /// Share memory across sessions (persisted, default OFF).
+  ///
+  /// OFF → the AI only sees the current session's messages/workspace.
+  /// ON  → the AI (via memory_search) can search across ALL sessions' chat
+  /// history ("poori app history", user-opted).
+  static const _kShareMemory = 'ovid_share_session_memory';
+  bool shareSessionMemory = false;
+
+  Future<void> setShareSessionMemory(bool v) async {
+    shareSessionMemory = v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kShareMemory, v);
+    } catch (_) {}
+  }
+
+  /// AI response timeout (seconds, user-configurable in Settings).
+  static const _kResponseTimeout = 'ovid_response_timeout_sec';
+  int responseTimeoutSec = 120;
+  static const timeoutPresets = [60, 120, 300, 600];
+
+  Future<void> setResponseTimeout(int sec) async {
+    responseTimeoutSec = sec;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_kResponseTimeout, sec);
+    } catch (_) {}
+  }
+
   final List<ProviderConfig> providers = [];
   final List<PluginItem> plugins = [];
   final List<McpServer> mcpServers = [];
@@ -524,6 +578,26 @@ class AppState extends ChangeNotifier {
     if (activeSessionId == id) {
       activeSessionId = sessions.isEmpty ? null : sessions.first.id;
     }
+    notifyListeners();
+    persistSessions();
+  }
+
+  /// Remove all messages from [index] onward in the named session
+  /// (DSH "Revert"/"Edit & resend" semantics).
+  void deleteMessagesFrom(String sessionId, int index) {
+    final s = sessions.where((x) => x.id == sessionId).firstOrNull;
+    if (s == null) return;
+    final idx = index.clamp(0, s.messages.length);
+    s.messages.removeRange(idx, s.messages.length);
+    notifyListeners();
+    persistSessions();
+  }
+
+  /// Replace the content of an existing message (DSH "Edit" of a user turn).
+  void editMessage(String sessionId, int index, String newContent) {
+    final s = sessions.where((x) => x.id == sessionId).firstOrNull;
+    if (s == null || index < 0 || index >= s.messages.length) return;
+    s.messages[index].content = newContent;
     notifyListeners();
     persistSessions();
   }

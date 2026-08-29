@@ -6,11 +6,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show IconData, Icons, Color;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../core/theme.dart';
 import 'state.dart';
 import 'sandbox_service.dart';
 import 'github_service.dart';
 import 'repo_cache.dart';
+import 'mcp_service.dart';
 
 /// A persistent browser tab — owns its WebView controller lazily so the
 /// page state survives across BrowserScreen open/close cycles.
@@ -26,19 +28,22 @@ class BrowserTab {
 }
 
 /// ═══════════════════════════════════════════════════════════════════
-/// AGENT ACCESS MODES (Codex-style)
+/// AGENT ACCESS MODES (DSH-web style)
 /// ───────────────────────────────────────────────────────────────────
-/// SAFE  → sirf read kare; har action pe user se poochhe
-/// AUTO  → sandbox + browser free; repo writes poochhe
-/// DRIVE → sab kuch free, no confirmation (DSH/Codex full-send)
+/// READ-ONLY → har action pe user se poochhe (shell/write/commit sab)
+/// GENERAL   → shell + browser free; file writes & commits poochhe
+/// FULL      → sab kuch free, no confirmation (DSH/Codex full-send)
+/// STUDIO    → general + full Studio access: files edit, terminal, repo
+///             sync free; sirf publish/commit confirm karta hai
 /// ═══════════════════════════════════════════════════════════════════
-enum AgentMode { safe, auto, drive }
+enum AgentMode { safe, auto, drive, studio }
 
 extension AgentModeX on AgentMode {
   String get label => switch (this) {
-    AgentMode.safe => 'Safe',
-    AgentMode.auto => 'Auto',
-    AgentMode.drive => 'Drive',
+    AgentMode.safe => 'Read-Only',
+    AgentMode.auto => 'General',
+    AgentMode.drive => 'Full Access',
+    AgentMode.studio => 'Studio',
   };
   String get hint => switch (this) {
     AgentMode.safe =>
@@ -47,16 +52,21 @@ extension AgentModeX on AgentMode {
       'Shell aur browser khud chalayega. Repo me push se pehle poochega.',
     AgentMode.drive =>
       'Full autonomous — kuch bhi, kahin bhi, no confirmation.',
+    AgentMode.studio =>
+      'Studio mode — files edit, terminal run, repo access free. '
+      'Publish/commit se pehle confirm karega.',
   };
   IconData get icon => switch (this) {
-    AgentMode.safe => Icons.shield_outlined,
-    AgentMode.auto => Icons.bolt_outlined,
+    AgentMode.safe => Icons.visibility_outlined,
+    AgentMode.auto => Icons.tune_outlined,
     AgentMode.drive => Icons.rocket_launch_outlined,
+    AgentMode.studio => Icons.code_rounded,
   };
   Color get color => switch (this) {
     AgentMode.safe => Aether.success,
     AgentMode.auto => Aether.accent,
     AgentMode.drive => Aether.warn,
+    AgentMode.studio => const Color(0xFF9B7EDE),
   };
 }
 
@@ -107,6 +117,15 @@ class ApprovalRequest {
     required this.summary,
     required this.detail,
   });
+}
+
+/// Per-session Studio state — open tabs, editor buffers, active path.
+/// Keyed by ChatSession.sandboxId inside AgentService so each chat session
+/// has its own Studio view (DSH-style workspace isolation).
+class _SessionStudio {
+  final Map<String, String> fileBuffer = {};
+  final List<String> openFiles = [];
+  String? activeFilePath;
 }
 
 /// ═════════════════════════════ OpenAI-compatible LLM bridge ═══════════
@@ -335,11 +354,84 @@ class AgentService extends ChangeNotifier {
     // No-op: see bindWebView.
   }
 
-  /// Studio live buffers (path → content) written by repo_write,
-  /// ya repo_read se load hua. Studio isko render karta hai.
-  final Map<String, String> fileBuffer = {};
-  String? activeFilePath;
+  // ── PER-SESSION STUDIO STATE ──────────────────────────────────────────
+  // Each chat session owns its own Studio buffers (open-file tabs, editor
+  // content, active path). Session A's files never leak into session B —
+  // the AI's view is scoped to the active session's workspace. The old
+  // global `fileBuffer`/`studioOpenFiles`/`activeFilePath` were the source
+  // of the "same input in new session" bug.
+
+  /// Studio state bucket keyed by session.sandboxId (== session.id).
+  final Map<String, _SessionStudio> _studios = {};
+
+  _SessionStudio _studioFor(String key) =>
+      _studios.putIfAbsent(key, _SessionStudio.new);
+
+  /// Current session's studio (falls back to a throwaway bucket when no
+  /// session is active yet — e.g. before persistence loads).
+  _SessionStudio get _studio {
+    final sid = AppState.I.activeSession?.sandboxId ??
+        AppState.I.activeSession?.id ??
+        '__none__';
+    return _studioFor(sid);
+  }
+
+  /// Studio live buffers (path → content) — scoped to the ACTIVE session.
+  Map<String, String> get fileBuffer => _studio.fileBuffer;
+  String? get activeFilePath => _studio.activeFilePath;
+  set activeFilePath(String? v) => _studio.activeFilePath = v;
   String? repoFull; // e.g. "aasheesh333/Ovid"
+
+  /// Open-file tab list — scoped to the ACTIVE session.
+  List<String> get studioOpenFiles => _studio.openFiles;
+
+  void openStudioFile(String path, String content) {
+    final st = _studio;
+    st.fileBuffer[path] = content;
+    if (!st.openFiles.contains(path)) st.openFiles.add(path);
+    st.activeFilePath = path;
+    notifyListeners();
+  }
+
+  void newStudioFile(String path) {
+    openStudioFile(path, '');
+    // If the repo is synced, mark it created so commit() picks it up.
+    RepoCache.I.create(path, '');
+    notifyListeners();
+  }
+
+  void closeStudioFile(String path) {
+    final st = _studio;
+    st.openFiles.remove(path);
+    if (st.activeFilePath == path) {
+      st.activeFilePath = st.openFiles.isEmpty ? null : st.openFiles.last;
+    }
+    notifyListeners();
+  }
+
+  void selectStudioFile(String path) {
+    if (!_studio.openFiles.contains(path)) return;
+    _studio.activeFilePath = path;
+    notifyListeners();
+  }
+
+  /// Per-session sandbox workspace (host dir). AI shell/code commands run
+  /// with this as `cwd` bound to /work inside the jail.
+  Future<Directory> _sessionWorkDir() async {
+    final s = AppState.I.activeSession;
+    final sid = s?.sandboxId ?? s?.id ?? 'default';
+    return SandboxService.I.workDirFor(sid);
+  }
+
+  /// Elapsed milliseconds of the last completed/failed run — shown on the
+  /// final assistant bubble (DSH "2.1s" metadata).
+  int? lastRunElapsedMs;
+
+  DateTime? _runStart;
+
+  /// Surface of the last model-layer failure (HTTP status, network error,
+  /// timeout) so the UI can show the REAL error instead of a dummy string.
+  String? lastError;
 
   bool get busy => activeRunId != null;
 
@@ -468,6 +560,55 @@ class AgentService extends ChangeNotifier {
         'parameters': {'type': 'object', 'properties': {}},
       },
     },
+    // ── Tab management (user sees the strip in the Browser screen) ──
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_new_tab',
+        'description':
+            'Open a NEW browser tab with a URL and make it active. '
+            'The user sees the tab in the Browser screen strip.',
+        'parameters': {
+          'type': 'object',
+          'properties': {'url': {'type': 'string'}},
+          'required': ['url'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_switch_tab',
+        'description':
+            'Switch the active browser tab by 0-based index '
+            '(use browser_list_tabs to see them).',
+        'parameters': {
+          'type': 'object',
+          'properties': {'index': {'type': 'integer'}},
+          'required': ['index'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_list_tabs',
+        'description': 'List all open browser tabs with index, url, title.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_close_tab',
+        'description': 'Close a browser tab by 0-based index.',
+        'parameters': {
+          'type': 'object',
+          'properties': {'index': {'type': 'integer'}},
+          'required': ['index'],
+        },
+      },
+    },
     // ── Core agent tools ──
     {
       'type': 'function',
@@ -475,13 +616,48 @@ class AgentService extends ChangeNotifier {
         'name': 'run_shell',
         'description':
             'Run any bash command inside the on-device Ubuntu sandbox. '
-            'Full freedom: ls, cat, python, node, git, npm, curl...',
+            'Full freedom: ls, cat, python, node, git, npm, curl... '
+            'Commands run in the CURRENT SESSION workspace (/work) — you '
+            'cannot see other sessions\' files.',
         'parameters': {
           'type': 'object',
           'properties': {
             'command': {'type': 'string'},
           },
           'required': ['command'],
+        },
+      },
+    },
+    // Device permission trigger (user consent gate). The agent calls this
+    // whenever it needs a device-level capability (notifications, camera,
+    // storage, ...). In safe mode the user is asked even for read-only
+    // ops; in other modes the user is ALWAYS asked for device perms.
+    {
+      'type': 'function',
+      'function': {
+        'name': 'request_permission',
+        'description':
+            'Ask the user for a device permission BEFORE using a '
+            'device-backed capability. ALWAYS call this first when a task '
+            'needs notifications, camera, microphone, storage, contacts, '
+            'or location. Returns whether the user granted it.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'permission': {
+              'type': 'string',
+              'enum': [
+                'notifications',
+                'camera',
+                'microphone',
+                'storage',
+                'contacts',
+                'location',
+              ],
+            },
+            'reason': {'type': 'string'},
+          },
+          'required': ['permission', 'reason'],
         },
       },
     },
@@ -891,6 +1067,8 @@ class AgentService extends ChangeNotifier {
 
     final runId = DateTime.now().millisecondsSinceEpoch.toString();
     activeRunId = runId;
+    _runStart = DateTime.now();
+    lastError = null;
     events.clear();
     _emit('think', 'planning with ${p.selectedModel} · ${mode.label} mode');
 
@@ -900,6 +1078,9 @@ You are Ovid's on-device coding & browsing agent running INSIDE a Flutter app.
 Environment: Android device with an Ubuntu proot sandbox (python3/node/git/gcc),
 a live Browser panel, and the user's connected GitHub repo (${GitHubService.I.login ?? 'github'}).
 Access mode: ${mode.label.toUpperCase()} — ${mode.hint}
+Session isolation: this chat has its OWN sandbox workspace (id: ${AppState.I.activeSession?.sandboxId ?? 'default'}).
+Other chats' files are NOT visible to you — don't ask about them, they're
+inaccessible here. ${AppState.I.shareSessionMemory ? 'The user enabled "Share session memory" — you may search across all chats via memory_search.' : ''}
 
 RESPONSE STYLE (default): Be concise and lightweight, like a fast coding assistant.
 Lead with the answer or result. Skip long preambles, restating the question, and
@@ -962,11 +1143,21 @@ tools to do it live, don't just explain how.
           break;
         }
         if (msg == null) {
+          _emit('err', lastError ?? 'unknown model error');
           _appendAssistant(
-            'The model request failed. Check the provider key, endpoint, and selected model, then retry.',
+            '⚠️ ${lastError ?? "The model request failed."}\n\n'
+            'Agar model/provider already configured hai to Settings → AI response timeout badhao, ya dobara try karo.',
             session: s,
           );
+          lastRunElapsedMs = DateTime.now().difference(_runStart ?? DateTime.now()).inMilliseconds;
           break;
+        }
+
+        // Stamp elapsed on the live message bubble.
+        if (_liveMsg != null) {
+          _liveMsg!.elapsedMs =
+              DateTime.now().difference(_runStart ?? DateTime.now()).inMilliseconds;
+          lastRunElapsedMs = _liveMsg!.elapsedMs;
         }
 
         final toolCalls = msg['tool_calls'] as List?;
@@ -1060,8 +1251,9 @@ tools to do it live, don't just explain how.
   Future<Map<String, dynamic>?> _callLlm(
     ProviderConfig p,
     List<Map<String, dynamic>> msgs,
-    ChatSession session,
-  ) async {
+    ChatSession session, {
+    bool includeTools = true,
+  }) async {
     HttpClient? client;
     try {
       client = HttpClient();
@@ -1100,7 +1292,8 @@ tools to do it live, don't just explain how.
         'messages': msgs,
         'stream': true,
       };
-      if (_tools.isNotEmpty) body['tools'] = _tools;
+      final toolList = includeTools ? _tools : const <Map<String, dynamic>>[];
+      if (toolList.isNotEmpty) body['tools'] = toolList;
       if (effort != null) body['reasoning_effort'] = effort;
 
       final bodyStr = jsonEncode(body);
@@ -1108,8 +1301,8 @@ tools to do it live, don't just explain how.
       req.headers.contentLength = bodyBytes.length;
       req.add(bodyBytes);
 
-      // Total stream deadline — 2 min covers connect, headers and body.
-      final streamDeadline = DateTime.now().add(const Duration(minutes: 2));
+      // Total stream deadline — user-configurable in Settings (default 2 min).
+      final streamDeadline = DateTime.now().add(Duration(seconds: AppState.I.responseTimeoutSec));
       final res = await req.close().timeout(const Duration(seconds: 30));
       if (res.statusCode != 200) {
         final data = <int>[];
@@ -1118,11 +1311,36 @@ tools to do it live, don't just explain how.
           if (data.length > 65536) break; // bounded error read
         }
         final txt = utf8.decode(data, allowMalformed: true);
-        _emit(
-          'err',
-          'LLM ${res.statusCode}: ${txt.substring(0, txt.length.clamp(0, 300))}',
-        );
         client.close(force: true);
+        // ── Auto-fallback for providers that reject tool schemas ──
+        // Many compatible endpoints (older OpenRouter models, some
+        // providers' BYOK gateways) return 400/404/422 with
+        // "tools"/"tool_calls"/"function" in the error body. The DSH-web
+        // behaviour is to retry WITHOUT tools so the model still answers.
+        final mightBeToolRejection = (res.statusCode == 400 ||
+                res.statusCode == 404 ||
+                res.statusCode == 422) &&
+            includeTools &&
+            toolList.isNotEmpty &&
+            (txt.contains('tool') ||
+                txt.contains('function') ||
+                txt.contains('tool_choice') ||
+                txt.contains('not supported'));
+        if (mightBeToolRejection) {
+          _emit('think',
+              'provider rejected tool schema — retrying without tools');
+          return _callLlm(p, msgs, session, includeTools: false);
+        }
+        final hint = switch (res.statusCode) {
+          401 || 403 => 'API key invalid/expired — Settings → ${p.name} me key dobara daalo.',
+          404 => 'Model "$modelId" endpoint pe nahi mila — model picker se dobara choose karo.',
+          429 => 'Rate limit — thoda wait karke retry karo.',
+          >= 500 => 'Provider server issue (${p.name}) — thodi der baad retry.',
+          _ => '',
+        };
+        lastError = 'HTTP ${res.statusCode} ${p.name} · $modelId\n'
+            '${hint.isNotEmpty ? '$hint\n' : ''}${cleanTruncate(txt, 180)}';
+        _emit('err', 'LLM ${res.statusCode}: ${txt.substring(0, txt.length.clamp(0, 300))}');
         return null;
       }
 
@@ -1139,8 +1357,10 @@ tools to do it live, don't just explain how.
               .transform(SseLineSplitter(maxBytes: 8 * 1024 * 1024))
               .timeout(
                 streamDeadline.difference(DateTime.now()),
-                onTimeout: (sink) =>
-                    throw TimeoutException('model stream exceeded 2 minutes'),
+                onTimeout: (sink) {
+                  lastError = 'model stream exceeded ${AppState.I.responseTimeoutSec}s — Settings me timeout badhayein';
+                  throw TimeoutException(lastError ?? 'model stream timeout');
+                },
               )) {
         final line = raw.trim();
         if (line.isEmpty || !line.startsWith('data:')) continue;
@@ -1208,10 +1428,8 @@ tools to do it live, don't just explain how.
       _activeRequest = null;
 
       if (contentBuf.isEmpty && reasoningBuf.isEmpty && tcAcc.isEmpty) {
-        _emit(
-          'err',
-          'empty response from ${modelId.isEmpty ? 'model' : modelId}',
-        );
+        lastError ??= 'empty response from ${modelId.isEmpty ? 'model' : modelId}';
+        _emit('err', lastError!);
         return null;
       }
       return {
@@ -1222,6 +1440,7 @@ tools to do it live, don't just explain how.
         if (tcAcc.isNotEmpty) 'tool_calls': tcAcc.values.toList(),
         'finish_reason': ?finishReason,
         'usage': ?usage,
+        'elapsedMs': DateTime.now().difference(_runStart ?? DateTime.now()).inMilliseconds,
       };
     } catch (e) {
       // A user-initiated cancel aborts the request — surface it as stopped,
@@ -1229,7 +1448,8 @@ tools to do it live, don't just explain how.
       if (_cancelRequested) {
         return null;
       }
-      _emit('err', 'stream error: $e');
+      lastError = 'stream error: $e';
+      _emit('err', lastError!);
       return null;
     } finally {
       _activeRequest = null;
@@ -1303,20 +1523,52 @@ tools to do it live, don't just explain how.
         final ok = await _maybeApprove(
           'run_shell',
           cmd,
-          'Command sandbox me chlega:\n\$ $cmd',
+          'Command session workspace me chlega:\n\$ $cmd',
         );
         if (!ok) return 'DENIED by user';
         _emit('shell', cmd);
         try {
+          final work = await _sessionWorkDir();
           final out = await SandboxService.I
-              .exec(['bash', '-lc', cmd])
+              .exec(['bash', '-lc', cmd], hostWorkDir: work)
               .timeout(const Duration(seconds: 60));
           for (final l in const LineSplitter().convert(out.trim())) {
             _emit('shellOut', l);
           }
           return out.isEmpty ? '(no output)' : out;
         } catch (e) {
+          // Friendly actionable message — the model relays this to the user.
+          if ('$e'.contains('not installed')) {
+            return 'sandbox not installed yet. Tell the user: "Studio kholke '
+                'sandbox install karo (one-time, ~320 MB), phir command chalega."';
+          }
           return 'sandbox error: $e';
+        }
+
+      case 'request_permission':
+        final perm = args['permission'] as String;
+        final reason = args['reason'] as String? ?? '';
+        _emit('think', 'requesting device permission: $perm');
+        // ALWAYS ask the user — device permissions are never auto-approved,
+        // even in full-access mode (Play-Store policy compliance).
+        final granted = await _askUser(
+          'request_permission',
+          perm,
+          'AI device permission maang raha hai:\n'
+              '• Permission: $perm\n'
+              '• Reason: $reason\n\n'
+              'Grant karne par system dialog aayegi.',
+        );
+        if (!granted) {
+          _emit('shellOut', '$perm → DENIED by user');
+          return '$perm: DENIED by user';
+        }
+        try {
+          final result = await _requestSystemPermission(perm);
+          _emit('shellOut', '$perm → $result');
+          return '$perm: $result';
+        } catch (e) {
+          return '$perm: request failed: $e';
         }
 
       case 'browser_open':
@@ -1389,6 +1641,47 @@ tools to do it live, don't just explain how.
         final title = await tab.controller!.getTitle();
         return 'Navigated to $url\nTitle: ${title ?? "unknown"}';
 
+      // ── Tab management so the model can drive the user-visible strip ──
+      case 'browser_new_tab':
+        final url = args['url'] as String;
+        final ok = await _maybeApprove(
+          'browser_new_tab',
+          url,
+          'AI naya browser tab kholega:\n$url',
+        );
+        if (!ok) return 'DENIED by user';
+        newBrowserTab(url); // creates tab + loads url, persists to prefs
+        _emit('nav', 'new tab → $url');
+        return 'Opened tab #${browserTabs.length - 1}: $url '
+            '(${browserTabs.length} tabs total)';
+      case 'browser_switch_tab':
+        final idx = (args['index'] as num).toInt();
+        if (idx < 0 || idx >= browserTabs.length) {
+          return 'invalid tab index $idx — call browser_list_tabs first '
+              '(${browserTabs.length} tabs open)';
+        }
+        selectBrowserTab(idx);
+        _emit('nav', 'switched to tab #$idx');
+        return 'Active tab #$idx: ${browserTabs[idx].url}';
+      case 'browser_list_tabs':
+        if (browserTabs.isEmpty) return 'No tabs open.';
+        final b = StringBuffer();
+        for (var i = 0; i < browserTabs.length; i++) {
+          final t = browserTabs[i];
+          b.writeln(
+            '[${i == activeTabIndex ? "*" : " "}] #$i '
+            '${t.title?.isNotEmpty == true ? '${t.title} — ' : ''}${t.url}',
+          );
+        }
+        return b.toString();
+      case 'browser_close_tab':
+        final ci = (args['index'] as num).toInt();
+        if (ci < 0 || ci >= browserTabs.length) return 'invalid tab index $ci';
+        final gone = browserTabs[ci].url;
+        closeBrowserTab(ci);
+        _emit('nav', 'closed tab #$ci');
+        return 'Closed tab #$ci ($gone)';
+
       // ─── Plugin tools (dynamic, installed plugins) ────────────────────
       case 'web_search':
         final q = args['query'] as String;
@@ -1409,7 +1702,23 @@ tools to do it live, don't just explain how.
       case 'read_attachment':
         final fname = args['filename'] as String;
         _emit('shell', 'reading: $fname');
-        return 'Attached file "$fname" would be read here.';
+        // Real check — file must exist in the session workspace.
+        try {
+          final work = await _sessionWorkDir();
+          final f = File('${work.path}/$fname');
+          if (!f.existsSync()) {
+            return 'No file "$fname" in the session workspace. Ask the user '
+                'to share the file path, or create it first with run_shell.';
+          }
+          final bytes = await f.readAsBytes();
+          if (bytes.length > 512 * 1024) {
+            return 'File too large to read directly (${bytes.length} bytes). '
+                'Use run_shell with head/tail instead.';
+          }
+          return utf8.decode(bytes, allowMalformed: true);
+        } catch (e) {
+          return 'read failed: $e';
+        }
       case 'fetch_url':
         final u = args['url'] as String;
         _emit('nav', 'fetching: $u');
@@ -1446,8 +1755,10 @@ tools to do it live, don't just explain how.
         if (!ok2) return 'DENIED by user';
         _emit('shell', 'run_code ($lang)');
         try {
+          final work = await _sessionWorkDir();
           final out = await SandboxService.I
-              .exec([lang == 'python' ? 'python3' : 'node', '-e', code])
+              .exec([lang == 'python' ? 'python3' : 'node', '-e', code],
+                    hostWorkDir: work)
               .timeout(const Duration(seconds: 60));
           _emit('shellOut', out);
           return out;
@@ -1455,17 +1766,54 @@ tools to do it live, don't just explain how.
           return 'exec error: $e';
         }
       case 'memory_search':
-        final q2 = args['query'] as String;
+        final q2 = (args['query'] as String).toLowerCase();
         _emit('think', 'searching memory: $q2');
-        return 'Memory search for "$q2" — no entries found. Long-term memory builds as you chat.';
+        final app = AppState.I;
+        final share = app.shareSessionMemory;
+        final current = app.activeSession;
+        if (current == null) return 'no active session';
+        // Which messages to search:
+        //   share OFF → only THIS session's messages
+        //   share ON  → ALL sessions' messages (user explicitly enabled it)
+        final hits = <String>[];
+        final pool = share
+            ? app.sessions.cast<ChatSession>()
+            : <ChatSession>[current];
+        for (final sess in pool) {
+          for (final m in sess.messages) {
+            if (m.content.toLowerCase().contains(q2)) {
+              final label = share ? '[${sess.title}] ' : '';
+              hits.add(
+                  '$label${m.role}: ${cleanTruncate(m.content.replaceAll('\n', ' '), 120)}');
+              if (hits.length >= 8) break;
+            }
+          }
+          if (hits.length >= 8) break;
+        }
+        if (hits.isEmpty) {
+          return share
+              ? 'No matches for "$q2" across all sessions.'
+              : 'No matches for "$q2" in this session. (Enable "Share session memory" in Settings to search across chats.)';
+        }
+        return hits.join('\n');
       case String() when name.startsWith('mcp_'):
-        // Generic MCP proxy — forward to the MCP server
+        // Real MCP proxy — call through McpService (spawns/connects as needed).
         final mcpName = name.substring(4).replaceAll('_', ' ');
         final action = args['action'] as String? ?? 'execute';
         final mcpArgs = args['args'] as Map<String, dynamic>? ?? {};
         _emit('shell', 'MCP: $mcpName → $action');
-        return 'MCP call to $mcpName: $action with ${jsonEncode(mcpArgs)}. '
-            'Install the actual MCP server for real functionality.';
+        if (!McpService.I.isConnected(mcpName)) {
+          // Find the matching McpServer config and connect for real.
+          final match = AppState.I.mcpServers
+              .where((s) => s.name.toLowerCase().contains(mcpName))
+              .firstOrNull;
+          if (match == null) {
+            return 'MCP server "$mcpName" not configured. Add it in Settings → MCP servers.';
+          }
+          final res = await McpService.I.connect(match);
+          if (!res.contains('connected')) return res;
+        }
+        return await McpService.I.callTool(mcpName, action, mcpArgs);
       case 'agent_install_plugin':
         final pluginName = args['plugin_name'] as String;
         _emit('think', 'installing plugin: $pluginName');
@@ -1670,9 +2018,7 @@ tools to do it live, don't just explain how.
         final path = args['path'] as String;
         final c = RepoCache.I.read(path);
         if (c == null) return 'file not found: $path';
-        fileBuffer[path] = c;
-        activeFilePath = path;
-        notifyListeners();
+        openStudioFile(path, c);
         _emit('file', 'read $path');
         return cleanTruncate(c, 6000);
 
@@ -1686,9 +2032,7 @@ tools to do it live, don't just explain how.
         );
         if (!ok) return 'DENIED by user';
         RepoCache.I.write(path, content);
-        fileBuffer[path] = content;
-        activeFilePath = path;
-        notifyListeners();
+        openStudioFile(path, content);
         _emit('file', 'edited $path');
         return 'written locally ✓ · $path · ${content.length} chars\n'
             'call commit() to push, or preview() to see web build.';
@@ -1741,6 +2085,7 @@ tools to do it live, don't just explain how.
       case AgentMode.drive:
         return true;
       case AgentMode.auto:
+      case AgentMode.studio:
         return tool != 'commit' ? true : await _askUser(tool, summary, detail);
       case AgentMode.safe:
         return await _askUser(tool, summary, detail);
@@ -1763,6 +2108,39 @@ tools to do it live, don't just explain how.
     if (s == null || text.trim().isEmpty) return;
     s.messages.add(Message(role: 'assistant', kind: kind, content: text));
     AppState.I.refresh();
+  }
+
+  // ── Device permission bridge (permission_handler, Play-policy compliant) ──
+  // Permissions are pre-declared in AndroidManifest.xml; at runtime the
+  // system dialog fires from here after the in-chat user consent gate.
+  Future<String> _requestSystemPermission(String name) async {
+    final Permission? p;
+    switch (name) {
+      case 'notifications':
+        p = Permission.notification;
+      case 'camera':
+        p = Permission.camera;
+      case 'microphone':
+        p = Permission.microphone;
+      case 'storage':
+        p = Permission.storage;
+      case 'contacts':
+        p = Permission.contacts;
+      case 'location':
+        p = Permission.locationWhenInUse;
+      default:
+        return 'unknown permission';
+    }
+    // If already granted, short-circuit without a system dialog.
+    if (await p.isGranted) return 'granted';
+    final status = await p.request();
+    if (status.isGranted) return 'granted';
+    if (status.isPermanentlyDenied) {
+      // Send the user to system settings so they can flip it on there.
+      await openAppSettings();
+      return 'denied permanently — opened Settings so you can enable it';
+    }
+    return 'denied';
   }
 
   // ── REAL TOOL HANDLERS (no stubs) ─────────────────────────────────────

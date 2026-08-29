@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../core/firebase_service.dart';
+import '../core/state.dart';
 import '../core/theme.dart';
 import 'auth_screen.dart';
 import 'providers_screen.dart';
@@ -147,6 +148,14 @@ class SettingsScreen extends StatelessWidget {
           _settingTile(Icons.mic_none, 'Voice input', 'On'),
 
           const SectionHeader('Agents & Sandbox'),
+          _navTile(
+            context,
+            Icons.timer_outlined,
+            'AI response timeout',
+            'How long the agent may stream. Lower = snappier, higher = no cutoff of long answers.',
+            const _TimeoutScreen(),
+          ),
+          const _ShareMemoryTile(),
           _settingTile(
             Icons.smart_toy_outlined,
             'Default agent',
@@ -364,6 +373,133 @@ class _SwitchTileState extends State<_SwitchTile> {
         ),
       ),
       onTap: () => setState(() => v = !v),
+    );
+  }
+}
+
+/// Share-session-memory toggle — real, persisted in AppState. OFF by default
+/// so each chat session stays isolated (its own sandbox workspace + memory).
+/// ON lets the AI search across every chat via the memory_search tool.
+class _ShareMemoryTile extends StatelessWidget {
+  const _ShareMemoryTile();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    return AnimatedBuilder(
+      animation: app,
+      builder: (_, _) => ListTile(
+        dense: true,
+        leading: const Icon(Icons.psychology_outlined,
+            size: 19, color: Aether.textMuted),
+        title: const Text('Share session memory', style: TextStyle(fontSize: 14)),
+        subtitle: Text(
+          app.shareSessionMemory
+              ? 'ON — the AI can search across all chats (memory_search).'
+              : 'OFF — every chat is isolated; the AI sees only this session.',
+          style: const TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        ),
+        trailing: SizedBox(
+          height: 26,
+          child: Switch(
+            value: app.shareSessionMemory,
+            activeTrackColor: Aether.accent,
+            onChanged: (v) => app.setShareSessionMemory(v),
+          ),
+        ),
+        onTap: () => app.setShareSessionMemory(!app.shareSessionMemory),
+      ),
+    );
+  }
+}
+
+/// AI response timeout picker — real, persisted in AppState (responseTimeoutSec).
+class _TimeoutScreen extends StatelessWidget {
+  const _TimeoutScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: const Text('AI response timeout'),
+      ),
+      body: AnimatedBuilder(
+        animation: AppState.I,
+        builder: (_, _) {
+          final cur = AppState.I.responseTimeoutSec;
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              Text(
+                'How long the agent may stream before being cut off. '
+                'Long reasoning chains need a generous budget; casual chat '
+                'feels snappier with a short one.',
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  height: 1.55,
+                  color: Aether.textMuted,
+                ),
+              ),
+              const SizedBox(height: 16),
+              RadioGroup<int>(
+                groupValue: cur,
+                onChanged: (v) {
+                  if (v != null) AppState.I.setResponseTimeout(v);
+                },
+                child: Column(
+                  children: [
+                    for (final sec in AppState.timeoutPresets)
+                      RadioListTile<int>(
+                        dense: true,
+                        activeColor: Aether.accent,
+                        title: Text(
+                          sec < 60 ? '$sec seconds' : '${sec ~/ 60} minute${sec > 60 ? 's' : ''}',
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                        subtitle: Text(
+                          switch (sec) {
+                            60 => 'Quick answers',
+                            120 => 'Default — balanced',
+                            300 => 'Long tasks, web research',
+                            _ => 'Heavy multi-tool runs',
+                          },
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Aether.textFaint,
+                          ),
+                        ),
+                        value: sec,
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(
+                  'Custom values: pick any number of seconds between 5 s and 60 min.',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Aether.textFaint,
+                  ),
+                ),
+              ),
+              Slider(
+                value: cur.toDouble().clamp(5.0, 3600.0),
+                min: 5,
+                max: 3600,
+                divisions: 71,
+                activeColor: Aether.accent,
+                inactiveColor: Aether.surfaceAlt,
+                label: '${cur}s',
+                onChanged: (v) => AppState.I.setResponseTimeout(v.round()),
+              ),
+            ],
+          );
+        },
+      ),
     );
   }
 }

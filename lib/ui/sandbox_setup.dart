@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math';
 import 'package:flutter/material.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
@@ -8,12 +7,18 @@ import 'studio_screen.dart';
 
 /// Opens Studio — first-time users go through the sandbox install flow.
 void openStudio(BuildContext context) {
-  if (AppState.I.sandboxInstalled) {
-    Navigator.of(context)
-        .push(MaterialPageRoute(builder: (_) => const StudioScreen()));
-  } else {
-    _showGate(context);
-  }
+  // The gate is decided by a REAL disk check, not a stale in-memory flag.
+  SandboxService.I.checkExisting().then((installed) {
+    AppState.I.sandboxInstalled = installed;
+    if (!context.mounted) return;
+    if (installed) {
+      Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const StudioScreen()));
+    } else {
+      _showGate(context);
+    }
+  });
 }
 
 /// "Code on your phone?" — one-time install permission sheet.
@@ -152,64 +157,10 @@ class _SpecRow extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Setup screen — live simulated install log (proot-distro style).
+// Setup screen — REAL install only (no simulation, no fake progress).
+// Every line shown is a real log line emitted by SandboxService.install;
+// the progress bar tracks the real download/install phase progress.
 // ---------------------------------------------------------------------------
-
-class _Step {
-  final String title;
-  final double dur; // simulated seconds
-  final List<(double, String)> events;
-  const _Step(this.title, this.dur, this.events);
-}
-
-const _steps = [
-  _Step('Checking device', 2.2, [
-    (0.2, r'$ ovid sandbox --check'),
-    (0.6, 'architecture ......... aarch64 ✓'),
-    (1.0, 'android .............. 14 · API 34 ✓'),
-    (1.4, 'storage .............. 38.2 GB free ✓'),
-    (1.8, 'network .............. online ✓'),
-  ]),
-  _Step('Installing proot engine', 4.0, [
-    (0.2, r'$ pkg install proot-distro'),
-    (0.8, 'fetching proot 5.3.1 .................. 1.2 MB ✓'),
-    (1.6, 'fetching proot-distro 3.12 ............ 18 KB ✓'),
-    (2.4, 'unpacking packages ✓'),
-    (3.2, 'proot engine ready ✓'),
-  ]),
-  _Step('Downloading Ubuntu 24.04 LTS', 9.0, [
-    (0.2, r'$ proot-distro install ubuntu-24.04'),
-    (8.5, 'rootfs downloaded ✓ 182.6 MB'),
-  ]),
-  _Step('Extracting rootfs', 5.5, [
-    (0.2, 'extracting ubuntu-core-24.04-arm64.tar.xz'),
-    (5.0, 'configuring base system ✓'),
-  ]),
-  _Step('First boot & user setup', 3.5, [
-    (0.2, r'$ ovid sandbox --boot'),
-    (0.8, 'creating user "ovid" ✓'),
-    (1.6, 'locale en_US.UTF-8 ✓ · dns bridge ✓'),
-    (2.6, 'ubuntu 24.04 LTS running ✓'),
-  ]),
-  _Step('Installing toolchain', 7.0, [
-    (0.2, r'# apt update && apt install -y python3 nodejs git gcc make'),
-    (2.0, 'setting up python3 3.12.3 ✓'),
-    (3.0, 'setting up nodejs 20.14.0 ✓'),
-    (4.0, 'setting up git 2.43.0 ✓'),
-    (5.0, 'setting up gcc 13.2.0 ✓'),
-    (6.0, 'setting up make 4.3 ✓'),
-  ]),
-  _Step('Verifying sandbox', 3.2, [
-    (0.3, r'$ python3 --V   →  Python 3.12.3'),
-    (1.0, r'$ node -v       →  v20.14.0'),
-    (1.7, r'$ git --version →  git version 2.43.0'),
-    (2.4, 'all checks passed ✓'),
-  ]),
-];
-
-const _dlStepIndex = 2; // the big download step
-const _dlTotalMb = 182.6;
-const _totalDur = 34.4; // sum of step durations
 
 class SandboxSetupScreen extends StatefulWidget {
   const SandboxSetupScreen({super.key});
@@ -218,110 +169,48 @@ class SandboxSetupScreen extends StatefulWidget {
 }
 
 class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
+  static const _phaseNames = [
+    'Checking device',
+    'Downloading proot engine',
+    'Downloading Ubuntu rootfs',
+    'Extracting rootfs',
+    'First boot & user setup',
+    'Installing toolchain',
+    'Verifying sandbox',
+  ];
+
   final _log = <String>[];
   final _scroll = ScrollController();
-  Timer? _t;
-  double _elapsed = 0;
-  double _speed = 4.2;
+  int _phase = 0;
+  double _phaseProgress = 0;
   bool _done = false;
-  final _rnd = Random();
-  final List<int> _fired = List.filled(_steps.length, 0);
-  bool _useSim = false; // true when real install can't run (e.g. desktop)
+  String? _error;
+  DateTime? _start;
+  Timer? _ticker;
 
-  int get _stepIdx {
-    double t = 0;
-    for (var i = 0; i < _steps.length; i++) {
-      t += _steps[i].dur;
-      if (_elapsed < t) return i;
-    }
-    return _steps.length - 1;
-  }
-
-  double get _stepT {
-    double t = 0;
-    for (var i = 0; i < _steps.length; i++) {
-      if (_elapsed < t + _steps[i].dur) return _elapsed - t;
-      t += _steps[i].dur;
-    }
-    return _steps.last.dur;
-  }
+  int get _elapsedSec =>
+      _start == null ? 0 : DateTime.now().difference(_start!).inSeconds;
 
   @override
   void initState() {
     super.initState();
-    _t = Timer.periodic(const Duration(milliseconds: 120), (_) => _tick());
-    _runRealInstall();
-  }
-
-  Future<void> _runRealInstall() async {
-    try {
-      var lastPhase = -1;
-      await SandboxService.I.install(onPhase: (phase, p, line) {
-        if (!mounted || _done) return;
-        if (phase != lastPhase) lastPhase = phase;
-        setState(() {
-          _elapsed = phase * (_totalDur / _steps.length) +
-              p * (_totalDur / _steps.length);
-          _log.add(line);
-        });
-      });
-      if (!mounted) return;
-      setState(() {
-        _elapsed = _totalDur;
-        _done = true;
-        _t?.cancel();
-        _log.add('sandbox ready ✓');
-      });
-      AppState.I.sandboxReady();
-    } catch (e) {
-      // Real install unavailable (dev machine / no proot exec) → simulate.
-      debugPrint('real install failed: $e — falling back to simulation');
-      if (!mounted) return;
-      setState(() {
-        _elapsed = 0;
-        _log.clear();
-        for (var i = 0; i < _fired.length; i++) {
-          _fired[i] = 0;
-        }
-        _useSim = true;
-      });
-    }
+    _start = DateTime.now();
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && !_done) setState(() {}); // ticks the ETA/elapsed label
+    });
+    _runInstall();
   }
 
   @override
   void dispose() {
-    _t?.cancel();
+    _ticker?.cancel();
     _scroll.dispose();
     super.dispose();
   }
 
-  void _tick() {
-    if (_done || !_useSim) return;
-    setState(() {
-      _elapsed = min(_elapsed + 0.12, _totalDur);
-      // speed random-walk for the download ticker
-      _speed = (_speed + (_rnd.nextDouble() - 0.5) * 0.5).clamp(1.8, 7.4);
-
-      // fire log events for every step up to current
-      double t = 0;
-      for (var i = 0; i < _steps.length; i++) {
-        final s = _steps[i];
-        final stepElapsed = _elapsed - t;
-        while (_fired[i] < s.events.length &&
-            s.events[_fired[i]].$1 <= stepElapsed) {
-          _log.add(s.events[_fired[i]].$2);
-          _fired[i]++;
-        }
-        t += s.dur;
-      }
-
-      if (_elapsed >= _totalDur) {
-        _done = true;
-        _t?.cancel();
-        _log.add('sandbox ready ✓');
-        AppState.I.sandboxReady();
-      }
-    });
+  void _append(String line) {
+    _log.add(line);
+    setState(() {});
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
         _scroll.jumpTo(_scroll.position.maxScrollExtent);
@@ -329,41 +218,75 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
     });
   }
 
-  String get _dlLine {
-    final p = (_stepT / _steps[_dlStepIndex].dur).clamp(0.0, 1.0);
-    final mb = _dlTotalMb * p;
-    return 'downloading ubuntu-core ... '
-        '${mb.toStringAsFixed(1)} / $_dlTotalMb MB '
-        '(${_speed.toStringAsFixed(1)} MB/s)';
+  Future<void> _runInstall() async {
+    try {
+      await SandboxService.I.install(onPhase: (phase, p, line) {
+        if (!mounted || _done) return;
+        _phase = phase;
+        _phaseProgress = p;
+        _append(line);
+      });
+      if (!mounted) return;
+      setState(() {
+        _done = true;
+      });
+      AppState.I.sandboxReady();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '$e');
+    }
   }
 
-  String get _eta {
-    final remaining = (_totalDur - _elapsed) * 4.2; // feel like real minutes
-    final s = remaining.round();
-    return '~${(s ~/ 60)}:${(s % 60).toString().padLeft(2, '0')} left';
+  double get _overall {
+    if (_done) return 1;
+    // 7 phases of equal weight — coarse but monotonic. Phase progress is
+    // the real byte/tar count reported by the service.
+    return ((_phase + _phaseProgress) / _phaseNames.length).clamp(0.0, 1.0);
+  }
+
+  Color _lineColor(String l) {
+    if (l.startsWith(r'$') || l.startsWith('#')) return Aether.accent;
+    if (l.startsWith('⚠') || l.toLowerCase().contains('error')) {
+      return Aether.danger;
+    }
+    if (l.endsWith('✓') || l.startsWith('✓')) return Aether.success;
+    return Aether.textMuted;
+  }
+
+  String get _elapsedLabel {
+    final s = _elapsedSec;
+    if (s < 60) return '$s s';
+    return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')} min';
   }
 
   @override
   Widget build(BuildContext context) {
     return PopScope(
-      canPop: !_done,
+      canPop: _done || _error != null,
       child: Scaffold(
         backgroundColor: Aether.bg,
         appBar: AppBar(
           leading: IconButton(
             icon: const Icon(Icons.close, size: 20),
-            onPressed: () => Navigator.pop(context),
+            onPressed: () {
+              if (_done || _error == null) Navigator.pop(context);
+            },
           ),
           title: const Text('Setting up sandbox'),
         ),
-        body: SafeArea(child: _done ? _doneView() : _progressView()),
+        body: SafeArea(
+          child: _error != null
+              ? _errorView()
+              : _done
+                  ? _doneView()
+                  : _progressView(),
+        ),
       ),
     );
   }
 
   Widget _progressView() {
-    final step = _steps[_stepIdx];
-    final overall = (_elapsed / _totalDur).clamp(0.0, 1.0);
+    final idx = _phase.clamp(0, _phaseNames.length - 1);
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
       child: Column(
@@ -378,37 +301,33 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: Text(step.title,
+              child: Text(_phaseNames[idx],
                   style: const TextStyle(
                       fontSize: 14.5, fontWeight: FontWeight.w700)),
             ),
-            Text('Step ${_stepIdx + 1} of ${_steps.length}',
+            Text('Step ${idx + 1} of ${_phaseNames.length}',
                 style: const TextStyle(
                     fontSize: 11, color: Aether.textFaint)),
           ]),
           const SizedBox(height: 14),
           ClipRRect(
             borderRadius: BorderRadius.circular(6),
-            child: TweenAnimationBuilder<double>(
-              tween: Tween(begin: overall, end: overall),
-              duration: const Duration(milliseconds: 120),
-              builder: (_, v, _) => LinearProgressIndicator(
-                value: v,
-                minHeight: 6,
-                backgroundColor: Aether.surfaceAlt,
-                valueColor: const AlwaysStoppedAnimation(Aether.accent),
-              ),
+            child: LinearProgressIndicator(
+              value: _overall.clamp(0.01, 1.0),
+              minHeight: 6,
+              backgroundColor: Aether.surfaceAlt,
+              valueColor: const AlwaysStoppedAnimation(Aether.accent),
             ),
           ),
           const SizedBox(height: 8),
           Row(children: [
-            Text('${(overall * 100).toStringAsFixed(0)}%',
+            Text('${(_overall * 100).toStringAsFixed(1)}%',
                 style: const TextStyle(
                     fontSize: 11.5,
                     fontWeight: FontWeight.w700,
                     color: Aether.accent)),
             const Spacer(),
-            Text(_eta,
+            Text(_elapsedLabel,
                 style: const TextStyle(
                     fontSize: 11.5, color: Aether.textFaint)),
           ]),
@@ -424,7 +343,6 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   }
 
   Widget _terminal() {
-    final inDl = !_done && _stepIdx == _dlStepIndex && _stepT > 0.6;
     return Container(
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
@@ -445,50 +363,102 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             child: const Row(children: [
               Icon(Icons.terminal, size: 13, color: Aether.textMuted),
               SizedBox(width: 8),
-              Text('SANDBOX SETUP LOG',
+              Text('SANDBOX SETUP LOG — LIVE',
                   style: TextStyle(
                       fontSize: 10.5,
                       fontWeight: FontWeight.w700,
                       letterSpacing: 0.8,
                       color: Aether.textMuted)),
-              Spacer(),
-              Icon(Icons.more_horiz, size: 14, color: Aether.textFaint),
             ]),
           ),
           Expanded(
-            child: ListView.builder(
-              controller: _scroll,
-              padding: const EdgeInsets.all(12),
-              itemCount: _log.length + (inDl ? 1 : 0),
-              itemBuilder: (_, i) {
-                if (inDl && i == _log.length) {
-                  return Text(_dlLine,
-                      style: const TextStyle(
+            child: _log.isEmpty
+                ? const Center(
+                    child: Text('Starting install…',
+                        style: TextStyle(
+                            fontSize: 11.5, color: Aether.textFaint)),
+                  )
+                : ListView.builder(
+                    controller: _scroll,
+                    padding: const EdgeInsets.all(12),
+                    itemCount: _log.length,
+                    itemBuilder: (_, i) => Text(
+                      _log[i],
+                      style: TextStyle(
                           fontFamily: Aether.mono,
                           fontSize: 11,
                           height: 1.6,
-                          color: Aether.warn));
-                }
-                final l = _log[i];
-                return Text(l,
-                    style: TextStyle(
-                        fontFamily: Aether.mono,
-                        fontSize: 11,
-                        height: 1.6,
-                        color: _lineColor(l)));
-              },
-            ),
+                          color: _lineColor(_log[i])),
+                    ),
+                  ),
           ),
         ],
       ),
     );
   }
 
-  Color _lineColor(String l) {
-    if (l.startsWith(r'$') || l.startsWith('#')) return Aether.accent;
-    if (l.endsWith('✓')) return Aether.success;
-    if (l.contains('→')) return Aether.text;
-    return Aether.textMuted;
+  Widget _errorView() {
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SizedBox(height: 16),
+          const Icon(Icons.error_outline, size: 40, color: Aether.danger),
+          const SizedBox(height: 12),
+          const Text('Install interrupted',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Aether.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Aether.hairline),
+            ),
+            child: Text(
+              _error!,
+              style: const TextStyle(
+                  fontFamily: Aether.mono,
+                  fontSize: 11.5,
+                  height: 1.6,
+                  color: Aether.textMuted),
+            ),
+          ),
+          const Spacer(),
+          if (_log.isNotEmpty)
+            Expanded(child: _terminal()),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            style: FilledButton.styleFrom(
+              backgroundColor: Aether.accent,
+              padding: const EdgeInsets.symmetric(vertical: 13),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
+            ),
+            icon: const Icon(Icons.refresh, size: 17),
+            label: const Text('Retry install'),
+            onPressed: () {
+              setState(() {
+                _log.clear();
+                _error = null;
+                _phase = 0;
+                _phaseProgress = 0;
+                _done = false;
+                _start = DateTime.now();
+              });
+              _runInstall();
+            },
+          ),
+          const SizedBox(height: 8),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close',
+                style: TextStyle(fontSize: 12.5, color: Aether.textFaint)),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _doneView() {
@@ -529,6 +499,10 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
               style: TextStyle(
                   fontSize: 12.5, height: 1.6, color: Aether.textMuted),
             ),
+            const SizedBox(height: 8),
+            Text('Took $_elapsedLabel',
+                style: const TextStyle(
+                    fontSize: 11.5, color: Aether.textFaint)),
             const SizedBox(height: 18),
             Wrap(
               spacing: 8,

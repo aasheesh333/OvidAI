@@ -4,12 +4,13 @@ import '../core/state.dart';
 import '../core/github_service.dart';
 import '../core/agent_service.dart';
 import '../core/repo_cache.dart';
+import '../core/sandbox_service.dart';
 import 'github_login_sheet.dart';
 
 /// Studio — coding harness (DeepSeek-web style): file explorer bound to the
-/// user's connected GitHub repo, editor with dummy code, agent activity rail,
-/// and a sandbox terminal. The user never sees OS/infra details — only
-/// "Sandbox ● ready".
+/// user's connected GitHub repo, real editable editor with per-session
+/// buffers, agent-visible tabs, and a live Ubuntu sandbox terminal. The
+/// user never sees OS/infra details — only "Sandbox ● ready".
 class StudioScreen extends StatefulWidget {
   const StudioScreen({super.key});
   @override
@@ -139,14 +140,27 @@ class _StudioScreenState extends State<StudioScreen> {
             ),
             onPressed: () => setState(() => _showFiles = !_showFiles),
           ),
-          const Icon(Icons.play_arrow_rounded, size: 22, color: Aether.success),
-          const SizedBox(width: 14),
-          const Icon(
-            Icons.account_tree_outlined,
-            size: 18,
-            color: Aether.textMuted,
-          ),
-          const SizedBox(width: 14),
+          // Sync button — pull latest repo into workspace (real).
+          if (_repo != null)
+            IconButton(
+              tooltip: 'Sync repo',
+              visualDensity: VisualDensity.compact,
+              icon: _syncing
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.5,
+                        color: Aether.accent,
+                      ),
+                    )
+                  : const Icon(
+                      Icons.sync_rounded,
+                      size: 18,
+                      color: Aether.textMuted,
+                    ),
+              onPressed: _syncing ? null : _autoSync,
+            ),
           // ── GitHub account chip + sign out ──
           const _AccountChip(),
           Padding(
@@ -208,7 +222,7 @@ class _StudioScreenState extends State<StudioScreen> {
               ),
             ),
             const Divider(height: 1),
-            const _Terminal(),
+            SizedBox(height: 240, child: const _Terminal()),
           ],
         ),
       ),
@@ -287,6 +301,22 @@ class _RepoBar extends StatelessWidget {
 class _FileTree extends StatelessWidget {
   const _FileTree();
 
+  /// Fallback for a repo path whose content isn't pre-cached — fetch the
+  /// real file content from GitHub via the RepoCache read API (disks-first).
+  Future<void> _openUnknownFile(BuildContext context, String path) async {
+    final cached = RepoCache.I.read(path);
+    if (cached != null) {
+      AgentService.I.openStudioFile(path, cached);
+      return;
+    }
+    try {
+      final content = await RepoCache.I.fetchFile(path);
+      AgentService.I.openStudioFile(path, content ?? '');
+    } catch (_) {
+      AgentService.I.openStudioFile(path, '');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -339,11 +369,14 @@ class _FileTree extends StatelessWidget {
                           final active = AgentService.I.activeFilePath == p;
                           return InkWell(
                             onTap: () {
-                              AgentService.I.activeFilePath = p;
-                              if (!isDir && cache.files[p] != null) {
-                                AgentService.I.fileBuffer[p] = cache.files[p]!;
+                              final cached = cache.files[p];
+                              if (!isDir && cached != null) {
+                                AgentService.I.openStudioFile(p, cached);
+                              } else if (!isDir) {
+                                // File exists only as a repo tree path —
+                                // pull its real content from the workspace.
+                                _openUnknownFile(context, p);
                               }
-                              AgentService.I.refreshNow();
                             },
                             child: Container(
                               color: active
@@ -431,57 +464,172 @@ class _FileTree extends StatelessWidget {
 
 class _Tabs extends StatelessWidget {
   const _Tabs();
+
+  Future<void> _askNewFile(BuildContext context) async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<String>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('New file', style: TextStyle(fontSize: 15)),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          style: const TextStyle(fontFamily: Aether.mono, fontSize: 13),
+          decoration: const InputDecoration(
+            hintText: 'path/to/file.dart',
+            isDense: true,
+          ),
+          onSubmitted: (v) => Navigator.pop(d, v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(d, ctrl.text.trim()),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
+    if (ok == null || ok.isEmpty) return;
+    AgentService.I.newStudioFile(ok);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final tabs = ['main.dart', 'theme.dart', 'README.md'];
-    return Container(
-      height: 38,
-      color: Aether.surface,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        itemCount: tabs.length,
-        itemBuilder: (_, i) {
-          final active = i == 0;
-          return Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            decoration: BoxDecoration(
-              border: Border(
-                right: const BorderSide(color: Aether.hairline),
-                top: BorderSide(
-                  color: active ? Aether.accent : Colors.transparent,
-                  width: 2,
-                ),
+    return AnimatedBuilder(
+      animation: AgentService.I,
+      builder: (_, _) {
+        final tabs = AgentService.I.studioOpenFiles;
+        final active = AgentService.I.activeFilePath;
+        return Container(
+          height: 38,
+          color: Aether.surface,
+          child: Row(
+            children: [
+              Expanded(
+                child: tabs.isEmpty
+                    ? const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 12),
+                        child: Text(
+                          'No open files — tap a file in the tree or +',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Aether.textFaint,
+                          ),
+                        ),
+                      )
+                    : ListView.builder(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: tabs.length,
+                        itemBuilder: (_, i) {
+                          final p = tabs[i];
+                          final sel = p == active;
+                          return GestureDetector(
+                            onTap: () => AgentService.I.selectStudioFile(p),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                              ),
+                              decoration: BoxDecoration(
+                                border: Border(
+                                  right: const BorderSide(
+                                    color: Aether.hairline,
+                                  ),
+                                  top: BorderSide(
+                                    color: sel
+                                        ? Aether.accent
+                                        : Colors.transparent,
+                                    width: 2,
+                                  ),
+                                ),
+                                color: sel ? Aether.bg : Aether.surface,
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.description_outlined,
+                                    size: 13,
+                                    color: sel
+                                        ? Aether.text
+                                        : Aether.textFaint,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    p.split('/').last,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontFamily: Aether.mono,
+                                      color: sel
+                                          ? Aether.text
+                                          : Aether.textMuted,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  GestureDetector(
+                                    onTap: () =>
+                                        AgentService.I.closeStudioFile(p),
+                                    child: const Padding(
+                                      padding: EdgeInsets.all(4),
+                                      child: Icon(
+                                        Icons.close,
+                                        size: 12,
+                                        color: Aether.textFaint,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
               ),
-              color: active ? Aether.bg : Aether.surface,
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  Icons.description_outlined,
-                  size: 13,
-                  color: active ? Aether.text : Aether.textFaint,
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  tabs[i],
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: active ? Aether.text : Aether.textMuted,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                const Icon(Icons.close, size: 12, color: Aether.textFaint),
-              ],
-            ),
-          );
-        },
-      ),
+              IconButton(
+                tooltip: 'New file',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.add, size: 16, color: Aether.textMuted),
+                onPressed: () => _askNewFile(context),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
 
-class _Editor extends StatelessWidget {
+class _Editor extends StatefulWidget {
   const _Editor();
+
+  @override
+  State<_Editor> createState() => _EditorState();
+}
+
+class _EditorState extends State<_Editor> {
+  final _ctrl = TextEditingController();
+  String? _boundPath;
+  bool _dirty = false;
+
+  void _bind(String path, String content) {
+    // Reposition caret: only rewrite the text when the underlying buffer
+    // actually changed (agent file_write or a fresh open), not per keystroke.
+    if (_boundPath == path && _ctrl.text == content) return;
+    if (_boundPath != path) _dirty = false;
+    _boundPath = path;
+    _ctrl.value = TextEditingValue(
+      text: content,
+      selection: TextSelection.collapsed(offset: content.length),
+    );
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -489,178 +637,315 @@ class _Editor extends StatelessWidget {
       animation: AgentService.I,
       builder: (_, _) {
         final a = AgentService.I;
-        final path = a.activeFilePath ?? 'welcome.md';
-        final code =
-            a.fileBuffer[path] ??
-            "Ovid Agent ready.\n\n"
-                "Ask the AI in chat to:\n"
-                "  • read a file from your connected repo\n"
-                "  • run commands in the sandbox\n"
-                "  • open pages in Browser\n\n"
-                "Everything happens right here — live.";
-        final lines = code.split('\n');
-        return Container(
-          color: Aether.bg,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Active file path header
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 5,
-                ),
-                color: Aether.surfaceAlt,
-                child: Row(
-                  children: [
-                    const Icon(Icons.edit_note, size: 12, color: Aether.accent),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        path,
-                        style: TextStyle(
-                          fontFamily: Aether.mono,
-                          fontSize: 10.5,
-                          color: Aether.textMuted,
-                        ),
-                      ),
-                    ),
-                    if (AgentService.I.repoFull != null)
-                      Text(
-                        AgentService.I.repoFull!,
-                        style: const TextStyle(
-                          fontFamily: Aether.mono,
-                          fontSize: 10,
-                          color: Aether.textFaint,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: ListView.builder(
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                  itemCount: lines.length,
-                  itemBuilder: (_, i) => Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        SizedBox(
-                          width: 32,
-                          child: Text(
-                            '${i + 1}',
-                            textAlign: TextAlign.right,
-                            style: const TextStyle(
-                              fontFamily: Aether.mono,
-                              fontSize: 11.5,
-                              height: 1.6,
-                              color: Aether.textFaint,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: SelectableText(
-                            lines[i],
-                            style: const TextStyle(
-                              fontFamily: Aether.mono,
-                              fontSize: 12,
-                              height: 1.6,
-                              color: Aether.text,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+        final path = a.activeFilePath;
+        if (path == null) {
+          return Container(
+            color: Aether.bg,
+            child: const Center(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Text(
+                  'Ovid Studio\n\n• Pick a file from the tree, or + to create one\n'
+                  '• Ask the AI in chat to read/edit files — they open here as tabs\n'
+                  '• Terminal below runs inside the Ubuntu sandbox',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    height: 1.7,
+                    color: Aether.textFaint,
                   ),
                 ),
               ),
-            ],
-          ),
+            ),
+          );
+        }
+        final content = a.fileBuffer[path] ?? RepoCache.I.read(path) ?? '';
+        _bind(path, content);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Active file path header (real path, real repo name)
+            Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 5,
+              ),
+              color: Aether.surfaceAlt,
+              child: Row(
+                children: [
+                  Icon(
+                    _dirty ? Icons.circle : Icons.edit_note,
+                    size: 12,
+                    color: _dirty ? Aether.warn : Aether.accent,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      path,
+                      style: const TextStyle(
+                        fontFamily: Aether.mono,
+                        fontSize: 10.5,
+                        color: Aether.textMuted,
+                      ),
+                    ),
+                  ),
+                  if (_dirty)
+                    GestureDetector(
+                      onTap: _save,
+                      child: const Text(
+                        'Save',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: Aether.accent,
+                        ),
+                      ),
+                    ),
+                  if (a.repoFull != null) ...[
+                    const SizedBox(width: 10),
+                    Text(
+                      a.repoFull!,
+                      style: const TextStyle(
+                        fontFamily: Aether.mono,
+                        fontSize: 10,
+                        color: Aether.textFaint,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            Expanded(
+              child: TextField(
+                controller: _ctrl,
+                maxLines: null,
+                expands: true,
+                keyboardType: TextInputType.multiline,
+                style: const TextStyle(
+                  fontFamily: Aether.mono,
+                  fontSize: 12.5,
+                  height: 1.55,
+                  color: Aether.text,
+                ),
+                decoration: const InputDecoration(
+                  contentPadding: EdgeInsets.all(12),
+                  isDense: true,
+                  filled: true,
+                  fillColor: Aether.bg,
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                ),
+                onChanged: (v) {
+                  final a2 = AgentService.I;
+                  a2.fileBuffer[_boundPath!] = v;
+                  setState(() => _dirty = true);
+                },
+              ),
+            ),
+          ],
         );
       },
     );
   }
+
+  void _save() {
+    final p = _boundPath;
+    if (p == null) return;
+    RepoCache.I.write(p, _ctrl.text);
+    AgentService.I.refreshNow();
+    setState(() => _dirty = false);
+  }
 }
 
-class _Terminal extends StatelessWidget {
+class _Terminal extends StatefulWidget {
   const _Terminal();
 
   @override
+  State<_Terminal> createState() => _TerminalState();
+}
+
+class _TerminalState extends State<_Terminal> {
+  final _input = TextEditingController();
+  final _scroll = ScrollController();
+  final _history = <String>[];
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _input.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) {
+        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      }
+    });
+  }
+
+  Future<void> _run(String cmd) async {
+    final c = cmd.trim();
+    if (c.isEmpty || _busy) return;
+    _input.clear();
+    setState(() {
+      _history.add('\$ $c');
+      _busy = true;
+    });
+    _scrollToBottom();
+    try {
+      final sessionId = AppState.I.activeSession?.sandboxId ?? 'default';
+      final workDir = await SandboxService.I.workDirFor(sessionId);
+      final out = await SandboxService.I.exec(
+        ['bash', '-lc', c],
+        hostWorkDir: workDir,
+        onLine: (l) {
+          if (!mounted) return;
+          setState(() => _history.add(l));
+          _scrollToBottom();
+        },
+      );
+      if (out.trim().isEmpty) {
+        setState(() => _history.add('(no output)'));
+      }
+    } catch (e) {
+      setState(() => _history.add('⚠ $e'));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+      _scrollToBottom();
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: AgentService.I,
-      builder: (_, _) {
-        final events = AgentService.I.events
-            .where((e) => e.kind == 'shell' || e.kind == 'shellOut')
-            .toList();
-        final lines = <String>['\$ ovid sandbox --ready'];
-        for (final e in events) {
-          lines.add(e.kind == 'shell' ? '\$ ${e.text}' : e.text);
-        }
-        if (AgentService.I.busy) lines.add('\$ ');
-        return Container(
-          height: 190,
-          color: Aether.surface,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+    final agent = AgentService.I;
+    return Column(
+      children: [
+        Container(
+          height: 34,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          color: Aether.surfaceAlt,
+          child: Row(
             children: [
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 7,
-                ),
-                color: Aether.surfaceAlt,
-                child: const Row(
-                  children: [
-                    Icon(Icons.terminal, size: 13, color: Aether.textMuted),
-                    SizedBox(width: 8),
-                    Text(
-                      'SANDBOX TERMINAL',
-                      style: TextStyle(
-                        fontSize: 10.5,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 0.8,
-                        color: Aether.textMuted,
-                      ),
-                    ),
-                    Spacer(),
-                    Icon(Icons.add, size: 14, color: Aether.textFaint),
-                    SizedBox(width: 12),
-                    Icon(
-                      Icons.keyboard_arrow_up,
-                      size: 16,
-                      color: Aether.textFaint,
-                    ),
-                  ],
+              const Icon(Icons.terminal, size: 13, color: Aether.textMuted),
+              const SizedBox(width: 8),
+              const Text(
+                'SANDBOX TERMINAL',
+                style: TextStyle(
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.8,
+                  color: Aether.textMuted,
                 ),
               ),
-              Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.all(12),
-                  children: [
-                    for (final l in lines)
-                      Text(
-                        l,
-                        style: TextStyle(
-                          fontFamily: Aether.mono,
-                          fontSize: 11.5,
-                          height: 1.6,
-                          color: l.startsWith('\$')
-                              ? Aether.accent
-                              : l.startsWith('✓') || l.endsWith('✓')
-                              ? Aether.success
-                              : Aether.textMuted,
-                        ),
-                      ),
-                  ],
+              const Spacer(),
+              // Per-session cwd chip
+              Text(
+                '/work · ws_${(() {
+                  final sid = AppState.I.activeSession?.sandboxId ?? 'session';
+                  return sid.length > 6 ? sid.substring(0, 6) : sid;
+                })()}',
+                style: const TextStyle(
+                  fontFamily: Aether.mono,
+                  fontSize: 10,
+                  color: Aether.textFaint,
                 ),
               ),
+              const SizedBox(width: 10),
+              if (_history.isNotEmpty)
+                GestureDetector(
+                  onTap: () => setState(_history.clear),
+                  child: const Icon(
+                    Icons.delete_outline,
+                    size: 14,
+                    color: Aether.textFaint,
+                  ),
+                ),
             ],
           ),
-        );
-      },
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: ListView.builder(
+            controller: _scroll,
+            padding: const EdgeInsets.all(12),
+            itemCount: _history.length + (agent.busy ? 1 : 0),
+            itemBuilder: (_, i) {
+              if (i == _history.length) {
+                return const Padding(
+                  padding: EdgeInsets.only(top: 2),
+                  child: SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 1.5,
+                      color: Aether.accent,
+                    ),
+                  ),
+                );
+              }
+              final l = _history[i];
+              return SelectableText(
+                l,
+                style: TextStyle(
+                  fontFamily: Aether.mono,
+                  fontSize: 11.5,
+                  height: 1.6,
+                  color: l.startsWith('\$')
+                      ? Aether.accent
+                      : l.startsWith('⚠')
+                      ? Aether.danger
+                      : l.endsWith('✓') || l.startsWith('✓')
+                      ? Aether.success
+                      : Aether.textMuted,
+                ),
+              );
+            },
+          ),
+        ),
+        // Real command input — runs in the Ubuntu sandbox via proot.
+        Container(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+          decoration: const BoxDecoration(
+            border: Border(top: BorderSide(color: Aether.hairline)),
+          ),
+          child: TextField(
+            controller: _input,
+            style: const TextStyle(fontFamily: Aether.mono, fontSize: 12.5),
+            decoration: InputDecoration(
+              isDense: true,
+              hintText: 'bash \$ …',
+              hintStyle: const TextStyle(
+                fontFamily: Aether.mono,
+                color: Aether.textFaint,
+              ),
+              border: InputBorder.none,
+              enabledBorder: InputBorder.none,
+              focusedBorder: InputBorder.none,
+              prefixIcon: const Icon(
+                Icons.chevron_right,
+                size: 16,
+                color: Aether.accent,
+              ),
+              suffixIcon: _busy
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.5,
+                        color: Aether.accent,
+                      ),
+                    )
+                  : null,
+            ),
+            textInputAction: TextInputAction.send,
+            onSubmitted: _run,
+            enabled: !_busy,
+          ),
+        ),
+      ],
     );
   }
 }
