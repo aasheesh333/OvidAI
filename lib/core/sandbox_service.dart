@@ -25,17 +25,36 @@ class SandboxService {
   SandboxService._();
   static final SandboxService I = SandboxService._();
 
-  // Real verified download URLs (arm64).
-  static const _prootUrl =
-      'https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.1.107.92_aarch64.deb';
-  // proot is dynamically linked against these two Termux libs, so we ship
-  // them next to the binary (/sandbox/lib) and set LD_LIBRARY_PATH at exec.
-  static const _libtallocUrl =
-      'https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.4.3_aarch64.deb';
-  static const _libshmemUrl =
-      'https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-shmem/libandroid-shmem_0.7_aarch64.deb';
-  static const _rootfsUrl =
-      'https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.4-base-arm64.tar.gz';
+  // Real verified download URLs — arch-dependent (arm64 + 32-bit arm,
+  // Termux-style: works on every device like Termux proot does).
+  static const _urls64 = (
+    proot:
+        'https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.1.107.92_aarch64.deb',
+    libtalloc:
+        'https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.4.3_aarch64.deb',
+    libshmem:
+        'https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-shmem/libandroid-shmem_0.7_aarch64.deb',
+    rootfs:
+        'https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.4-base-arm64.tar.gz',
+  );
+  static const _urls32 = (
+    proot:
+        'https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.1.107.92_arm.deb',
+    libtalloc:
+        'https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.4.3_arm.deb',
+    libshmem:
+        'https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-shmem/libandroid-shmem_0.7_arm.deb',
+    rootfs:
+        'https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.4-base-armhf.tar.gz',
+  );
+  String get _prootUrl =>
+      _deviceArch == 'arm' ? _urls32.proot : _urls64.proot;
+  String get _libtallocUrl =>
+      _deviceArch == 'arm' ? _urls32.libtalloc : _urls64.libtalloc;
+  String get _libshmemUrl =>
+      _deviceArch == 'arm' ? _urls32.libshmem : _urls64.libshmem;
+  String get _rootfsUrl =>
+      _deviceArch == 'arm' ? _urls32.rootfs : _urls64.rootfs;
 
   /// Paths inside the .debs' data.tar that we extract.
   static const _prootEntryInDeb =
@@ -229,20 +248,15 @@ class SandboxService {
         defaultValue: 'local-dev',
       );
       onPhase(0, 0.0, 'ovid build ........ $buildStamp');
-      // ── ABI check — the proot sandbox ships arm64 binaries only ──
-      final abi = Platform.version;
-      final is64Bit = _isArm64Device();
-      onPhase(
-        0,
-        0.1,
-        is64Bit ? 'device ............ arm64 ✓' : 'device ............ 32-bit',
-      );
-      if (!is64Bit) {
+      // ── ABI check — sandbox ships both arm64 + arm(32) proot binaries ──
+      final arch = _deviceArch;
+      onPhase(0, 0.1, 'device ............ $arch ✓'
+          '${arch == 'arm' ? ' (32-bit: armhf packages)' : ''}');
+      if (arch == 'unknown') {
         throw Exception(
-            'Ye device 32-bit hai — proot Ubuntu sandbox arm64 devices pe '
-            'chalta hai. Phone terminal (General mode) phir bhi kaam karega: '
-            'AI koi bhi toybox command chala sakta hai. 64-bit phone pe '
-            'Studio mode ka full sandbox milega. ($abi)');
+            'Could not detect device architecture. Phone terminal (General '
+            'mode) phir bhi kaam karega: AI koi bhi toybox command chala '
+            'sakta hai. (${Platform.version})');
       }
       final stat = await root.stat();
       onPhase(0, 0.25, 'target dir ........ ${statChanged(stat)} ✓');
@@ -357,7 +371,7 @@ class SandboxService {
 
       // ── Phase 2 — download Ubuntu rootfs (~30 MB gz). ──
       final rootfsGz = File('${execRoot.path}/rootfs.tar.gz');
-      onPhase(2, 0.0, r'$ fetch ubuntu-base 24.04.4 arm64');
+      onPhase(2, 0.0, r'$ fetch ubuntu-base 24.04.4 ($arch)');
       await _download(
         url: _rootfsUrl,
         sink: rootfsGz.openWrite(),
@@ -368,7 +382,7 @@ class SandboxService {
       onPhase(2, 1.0, 'rootfs downloaded ✓');
 
       // ── Phase 3 — extract rootfs in pure Dart (no system tar). ──
-      onPhase(3, 0.0, 'extracting ubuntu-base-24.04.4-arm64.tar.gz');
+      onPhase(3, 0.0, 'extracting rootfs tarball');
       // Wipe any partial extract from a previous failed run — stale symlinks
       // from the old external-storage path caused "Operation not permitted".
       if (_rootfs!.existsSync()) {
@@ -523,14 +537,38 @@ class SandboxService {
       ? 'writable'
       : 'error';
 
-  /// True if the running device is arm64/aarch64 (or x86_64 emulator).
-  /// The proot binary + Ubuntu rootfs we ship are arm64-only.
-  bool _isArm64Device() {
-    // Platform.version on Android looks like:
-    // "3.18.84-… aarch64 Android 6.0 …" — kernel arch is in there.
+  /// Device architecture for the sandbox — matches the running ENGINE's
+  /// arch (Termux-style: the process must be able to exec the binaries).
+  /// Platform.version on Android looks like:
+  ///   "3.18.84-… on "android_arm64"" → 64-bit
+  ///   "… on "android_arm""         → 32-bit
+  /// Some 64-bit devices report a legacy 32-bit `ro.product.cpu.abi`, so
+  /// the ENGINE string is the only reliable source (it is what actually
+  /// runs the proot binary).  Emulator x86_64 → treat as arm64? No —
+  /// x86_64 emulators run arm64 binaries via translation, and the user's
+  /// device string is authoritative.
+  String get _deviceArch {
     final v = Platform.version.toLowerCase();
-    return v.contains('aarch64') || v.contains('x86_64');
+    if (v.contains('android_arm64') || v.contains('aarch64') ||
+        v.contains('x86_64')) {
+      return 'arm64';
+    }
+    if (v.contains('android_arm') || v.contains('armv7') ||
+        v.contains('armv8')) {
+      return 'arm';
+    }
+    // Unknown — try the ABI system property as a last resort.
+    try {
+      final r = Process.runSync('/system/bin/getprop', ['ro.product.cpu.abi']);
+      final abi = r.stdout.toString().trim().toLowerCase();
+      if (abi.contains('arm64') || abi.contains('x86_64')) return 'arm64';
+      if (abi.contains('arm')) return 'arm';
+    } catch (_) {}
+    return 'arm64'; // safe default — the overwhelming majority today
   }
+
+  /// Device arch for tests/UI: 'arm64', 'arm', or 'unknown'.
+  String get deviceArch => _deviceArch;
 
   Future<int?> _freeMb(Directory dir) async {
     try {

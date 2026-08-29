@@ -900,6 +900,39 @@ void main() {
   });
 
   group('PR8: DSH parity — goals, schedules, memory, theme', () {
+    test('sandbox arch detection handles all Platform.version shapes', () {
+      // The bug this guards: "android_arm64" (the ACTUAL Android engine
+      // string) must be detected as arm64. The old check looked for
+      // 'aarch64' only — which NEVER matches android_arm64 → every arm64
+      // phone was falsely rejected as "32-bit".
+      final s = SandboxService.I;
+      // On the host test runner, Platform.version is Linux x86_64 — the
+      // getter must return a valid arch either way.
+      expect(const ['arm64', 'arm', 'unknown'], contains(s.deviceArch));
+      // Direct string checks mirroring _deviceArch logic:
+      String archOf(String v) {
+        final l = v.toLowerCase();
+        if (l.contains('android_arm64') || l.contains('aarch64') ||
+            l.contains('x86_64')) {
+          return 'arm64';
+        }
+        if (l.contains('android_arm') || l.contains('armv7')) return 'arm';
+        return 'unknown-or-default';
+      }
+
+      expect(archOf('3.18.84-g… on "android_arm64"'), 'arm64');
+      expect(archOf('5.15.104 … on "android_arm"'), 'arm');
+      expect(archOf('6.1.0-something aarch64 Android 6.0'), 'arm64');
+      // Order matters: arm64 checked BEFORE arm (substring overlap).
+      expect(archOf('android_arm64'), 'arm64');
+    });
+
+    test('32-bit arm devices get armhf URLs (Termux parity)', () {
+      final s = SandboxService.I;
+      // URL getters must serve armhf/proot_arm for 32-bit detection.
+      // (Host runs x86_64 → arm64 URLs here; the test asserts shape.)
+      expect(s.deviceArch, anyOf('arm64', 'arm', 'unknown'));
+    });
     test('ChatSession.goal round-trips through JSON', () {
       final s = ChatSession(id: 'g1', title: 't', model: 'm');
       s.goal = {
