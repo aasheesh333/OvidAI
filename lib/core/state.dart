@@ -269,7 +269,7 @@ class ChatSession {
   String? providerId;
 
   /// Per-session sandbox workspace id — used as the working directory inside
-  /// the Ubuntu sandbox (`/root/workspaces/<sandboxId>`). Generated once per
+  /// the native sandbox (per-session workspace dirs). Generated once per
   /// session; old persisted sessions fall back to [id] (fromJson migration).
   /// The AI/agent NEVER sees another session's workspace unless the user
   /// enables "Share session memory" in Settings.
@@ -559,7 +559,7 @@ class AppState extends ChangeNotifier {
   }
 
   int navIndex = 0; // 0 Chat, 1 Studio, 2 Browser, 3 Plugins, 4 Settings
-  bool sandboxInstalled = false; // proot Ubuntu sandbox on-device
+  bool sandboxInstalled = false; // native bionic sandbox on-device
 
   /// Share memory across sessions (persisted, default OFF).
   ///

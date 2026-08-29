@@ -80,6 +80,11 @@ jobs:
       - name: Resolve dependencies
         run: flutter pub get --enforce-lockfile
 
+      - name: Package native sandbox bootstrap (per-ABI jniLibs payload)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq zip unzip >/dev/null
+          bash tool/prepare_bootstrap.sh
+
       - name: Analyze
         run: flutter analyze
 

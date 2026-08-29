@@ -647,7 +647,7 @@ class _EditorState extends State<_Editor> {
                 child: Text(
                   'Ovid Studio\n\n• Pick a file from the tree, or + to create one\n'
                   '• Ask the AI in chat to read/edit files — they open here as tabs\n'
-                  '• Terminal below runs inside the Ubuntu sandbox',
+                  '• Terminal below runs inside the native Linux sandbox',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 12.5,
@@ -905,7 +905,7 @@ class _TerminalState extends State<_Terminal> {
             },
           ),
         ),
-        // Real command input — runs in the Ubuntu sandbox via proot.
+        // Real command input — runs natively in the sandbox.
         Container(
           padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
           decoration: BoxDecoration(

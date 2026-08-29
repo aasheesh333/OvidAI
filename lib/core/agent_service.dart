@@ -770,13 +770,13 @@ class AgentService extends ChangeNotifier {
         'description':
             'Run a shell command. TWO execution tiers depending on the '
             'user\'s access mode:\n'
-            '• Studio mode → full Ubuntu sandbox (bash, python, node, git, '
-            'npm, gcc — commands run in the session workspace /work).\n'
+            '• Studio mode → native Linux sandbox (bash, python, node, git '
+            'via apt — commands run in the session workspace).\n'
             '• Other modes → phone terminal (Android device shell: ls, cat, '
             'grep, cp, mv, ps, uname, toybox utilities — instant, no '
             'install).\n'
             'If a phone-terminal command reports "not found", tell the user '
-            'to switch to Studio mode and install the Ubuntu sandbox for '
+            'to switch to Studio mode and install the native sandbox for '
             'full tooling. Commands always run in the CURRENT SESSION '
             'workspace — you cannot see other sessions\' files.',
         'parameters': {
@@ -1843,7 +1843,7 @@ class AgentService extends ChangeNotifier {
     final sys =
         '''
 You are Ovid's on-device coding & browsing agent running INSIDE a Flutter app.
-Environment: Android device with an Ubuntu proot sandbox (python3/node/git/gcc),
+Environment: Android device with a native Linux sandbox (python3/node/git via apt),
 a live Browser panel, and the user's connected GitHub repo (${GitHubService.I.login ?? 'github'}).
 Access mode: ${mode.label.toUpperCase()} — ${mode.hint}
 Session isolation: this chat has its OWN sandbox workspace (id: ${AppState.I.activeSession?.sandboxId ?? 'default'}).
@@ -1873,12 +1873,12 @@ request_permission FIRST with a clear reason. The user approves in-chat,
 then the system dialog appears. Never claim a permission was granted
 without calling the tool. If denied, tell the user and offer alternatives.
 Execution tiers: run_shell adapts to the user's access mode.
-• Studio mode → full Ubuntu sandbox (bash/python/node/git/npm/gcc) in the
-  session workspace /work.
+• Studio mode → native Linux sandbox (bash/python/node/git via apt) in the
+  session workspace.
 • Any other mode → instant phone terminal (Android device shell + toybox:
   ls/cat/grep/cp/mv/ps/uname...). No python/gcc/apt here — if a command
-  is "not found", suggest switching to Studio mode + one-time Ubuntu
-  sandbox install (~320 MB). Provider/plugin/MCP management works the
+  is "not found", suggest switching to Studio mode + one-time native
+  sandbox setup (fast, bundled). Provider/plugin/MCP management works the
   same in every tier via the catalog_* tools.
 ${s.goal != null && s.goal!['status'] == 'active' ? '\nACTIVE GOAL (round ${s.goal!['round']}): "${s.goal!['objective']}". This user message is a goal round — work toward the objective, then update_goal with progress. Do not restate the goal; just advance it.' : ''}
 ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a [reminder] message arrives, treat its prompt as a user request and act on it.' : ''}
@@ -2396,14 +2396,14 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         final ok = await _maybeApprove(
           'run_shell',
           cmd,
-          'Command will run in ${mode == AgentMode.studio ? "the Ubuntu sandbox" : "the phone terminal (device shell)"}:\n\$ $cmd',
+          'Command will run in ${mode == AgentMode.studio ? "the native sandbox" : "the phone terminal (device shell)"}:\n\$ $cmd',
         );
         if (!ok) return 'DENIED by user';
         _emit('shell', cmd);
         try {
           final work = await _sessionWorkDir();
           if (mode == AgentMode.studio) {
-            // Studio tier — full Ubuntu proot sandbox.
+            // Studio tier — native bionic sandbox (bash/python/node/apt).
             final out = await SandboxService.I
                 .exec(['bash', '-lc', cmd], hostWorkDir: work)
                 .timeout(const Duration(seconds: 60));
@@ -2420,8 +2420,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
             _emit('shellOut', l);
           }
           final hint = out.contains('not found') || out.contains('not: found')
-              ? '\n\n[phone terminal: sirf Android toybox commands hain — '
-                  'use Studio mode + install the Ubuntu sandbox for python/gcc/apt]'
+              ? '\n\n[phone terminal: only Android toybox commands here — '
+                  'use Studio mode + the native sandbox for python/node/apt]'
               : '';
           return (out.isEmpty ? '(no output)' : out) + hint;
         } catch (e) {

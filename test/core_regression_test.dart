@@ -1087,5 +1087,16 @@ void main() {
       app.deleteSession(s1.id);
       app.deleteSession(s2.id);
     });
+
+    test('native sandbox: public surface + env contract', () {
+      final s = SandboxService.I;
+      // Public API used by MCP/agent must exist and be null-safe pre-install.
+      expect(s.prefixPath, anyOf(isNull, isA<String>()));
+      expect(s.bashPath, anyOf(isNull, isA<String>()));
+      expect(s.deviceArch, anyOf('arm64', 'arm', 'unknown'));
+      expect(s.fallbackLog, isA<List<Map<String, String>>>());
+      // jailWorkPath constant kept for workspace layout compat.
+      expect(SandboxService.jailWorkPath, '/work');
+    });
   });
 }

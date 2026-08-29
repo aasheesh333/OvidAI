@@ -10,7 +10,7 @@ import 'state.dart';
 /// `tools/list`, and bridges `tools/call` for the agent.
 ///
 /// Process model: one Process per connected server, started via
-/// SandboxService.exec-style proot spawn so servers run in the Ubuntu jail.
+/// SandboxService.spawn — servers run inside the native sandbox env.
 /// Lifecycle is lazy — `connect()` spawns + handshakes, `disconnect()` kills.
 class McpService {
   McpService._();
@@ -37,19 +37,20 @@ class McpService {
 
     final rs = _RunningServer(server: server);
     try {
-      // Spawn inside the sandbox proot jail — servers are trusted code the
+      // Spawn inside the native sandbox — servers are trusted code the
       // user explicitly connected, same trust level as DSH MCP defaults.
       final sandbox = SandboxService.I;
-      if (!sandbox.isInstalled || sandbox.prootPath == null) {
+      if (!sandbox.isInstalled || sandbox.prefixPath == null) {
         throw Exception(
           'MCP servers need the sandbox. Open Studio once to initialize it '
           '(fast native setup), then retry. If the sandbox is already '
           'initialized, this is a bug — report it.',
         );
       }
-      final proc = await Process.start(
-        sandbox.prootPath!,
-        _prootArgs(server),
+      // Native exec — the server command runs through the sandbox env
+      // (PATH/LD_LIBRARY_PATH/LD_PRELOAD set by SandboxService.spawn).
+      final proc = await sandbox.spawn(
+        [server.command, ...server.args],
       );
       rs.process = proc;
 
@@ -144,27 +145,6 @@ class McpService {
   }
 
   // ── internals ─────────────────────────────────────────────────────────
-
-  List<String> _prootArgs(McpServer server) {
-    final sandbox = SandboxService.I;
-    if (!sandbox.isInstalled) {
-      throw Exception(
-        'sandbox not installed — install it from Studio first',
-      );
-    }
-    return [
-      '-r', sandbox.rootfs!.path,
-      '-0',                // fake root uid so node/python can install deps
-      '--link2symlink',    // repair hardlinks the tar layer can't represent
-      '-b', '/dev',
-      '-b', '/dev/pts',
-      '-b', '/proc',
-      '-b', '/sys',
-      '-b', '/sdcard',
-      server.command,
-      ...server.args,
-    ];
-  }
 
   int _nextId = 1;
 

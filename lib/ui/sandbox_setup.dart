@@ -65,21 +65,21 @@ void _showGate(BuildContext context) {
             ]),
             const SizedBox(height: 12),
             Text(
-              'Ovid Studio needs a one-time sandbox — a real Ubuntu install that '
-              'runs fully on this device. After this, the AI can edit files, run '
-              'code and push commits straight from chat.',
+              'Ovid Studio needs a one-time sandbox — a native Linux environment '
+              'bundled with the app (no big download). After this, the AI can edit '
+              'files, run code and push commits straight from chat.',
               style: TextStyle(
                   fontSize: 13, height: 1.55, color: Aether.textMuted),
             ),
             const SizedBox(height: 16),
-            const _SpecRow(Icons.dns_outlined, 'Ubuntu 24.04 LTS',
-                'Full Linux userland — no root access needed'),
+            const _SpecRow(Icons.dns_outlined, 'Native Linux tools',
+                'bash · coreutils · apt — bionic-native, no root needed'),
             const SizedBox(height: 10),
             const _SpecRow(Icons.construction_outlined, 'Toolchain',
-                'python3 · node · gcc · git · make · curl'),
+                'apt installs python3 · node · git on demand — like Termux'),
             const SizedBox(height: 10),
-            const _SpecRow(Icons.download_outlined, 'One-time download',
-                '≈ 320 MB · 2–4 min on 4G · 1.1 GB installed'),
+            const _SpecRow(Icons.offline_bolt_outlined, 'Bundled payload',
+                '≈ 16 MB shipped in the app · installs in seconds · no internet needed'),
             const SizedBox(height: 10),
             const _SpecRow(Icons.lock_outline, 'Private',
                 'Everything runs and stays on this device'),
@@ -171,12 +171,12 @@ class SandboxSetupScreen extends StatefulWidget {
 class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   static const _phaseNames = [
     'Checking device',
-    'Downloading proot engine',
-    'Downloading Ubuntu rootfs',
-    'Extracting rootfs',
-    'First boot & user setup',
-    'Installing toolchain',
-    'Verifying sandbox',
+    'Locating bundled bootstrap',
+    'Extracting sandbox payload',
+    'Setting exec bits',
+    'Linking tool aliases',
+    'Configuring prefix',
+    'Verifying native exec',
   ];
 
   final _log = <String>[];
@@ -494,7 +494,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                     fontSize: 20, fontWeight: FontWeight.w800)),
             const SizedBox(height: 8),
             Text(
-              'Ubuntu 24.04 · python3 · node · git · gcc\nAll running privately on this device.',
+              'Native sandbox · bash · coreutils · apt\npython/node/git install on demand — all on-device.',
               textAlign: TextAlign.center,
               style: TextStyle(
                   fontSize: 12.5, height: 1.6, color: Aether.textMuted),
