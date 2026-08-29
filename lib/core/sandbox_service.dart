@@ -273,14 +273,28 @@ class SandboxService {
       onPhase(3, 1.0, 'configuring base system ✓');
 
       // ── Exec-bit enforcement ─────────────────────────────────────────
-      // The tar-header chmod batching misses binaries whose entries were
-      // HARDLINKS (File.copySync drops the exec bit → mode 644) and any
-      // entry whose header lacked x bits. proot then fails every guest
-      // exec with 'execve("/usr/bin/sh"): Permission denied'. Belt-and-
-      // braces: blanket-chmod the standard bin dirs so every Ubuntu
-      // binary is executable, regardless of how it was extracted.
-      onPhase(3, 0.95, 'enforcing exec bits on bin dirs …');
-      for (final d in const ['usr/bin', 'bin', 'usr/sbin', 'sbin']) {
+      // Ubuntu base tarballs store binaries in TWO ways:
+      //  1. Regular files with exec bits in tar headers (we chmod these)
+      //  2. HARDLINKS (File.copySync drops exec bit → mode 644)
+      //
+      // The ELF INTERPRETER (/lib64/ld-linux-*.so.1) lives in usr/lib —
+      // if THAT file loses its exec bit, the kernel can't load ANY
+      // dynamically-linked guest binary → 'execve: Permission denied'
+      // on every command, even though the binaries themselves are 0755.
+      //
+      // Belt-and-braces: blanket-chmod bin AND lib dirs so every Ubuntu
+      // binary + shared library + ELF interpreter is executable.
+      onPhase(3, 0.95, 'enforcing exec bits (bin + lib dirs) …');
+      for (final d in const [
+        'usr/bin',
+        'bin',
+        'usr/sbin',
+        'sbin',
+        'usr/lib',
+        'usr/lib64',
+        'lib',
+        'lib64',
+      ]) {
         final dir = Directory('${_rootfs!.path}/$d');
         if (dir.existsSync()) {
           try {
@@ -634,6 +648,10 @@ class SandboxService {
                   final dst = File('${dest.path}/$n');
                   dst.parent.createSync(recursive: true);
                   src.copySync(dst.path);
+                  // copySync drops the exec bit (mode 644).  Preserve it:
+                  // if the SOURCE is a binary (has exec bit in its tar
+                  // header → already in execPaths), mark the COPY too.
+                  if (mode & 0x111 != 0) execPaths.add(dst.path);
                 }
               } catch (_) {}
             }
