@@ -630,8 +630,9 @@ class AgentService extends ChangeNotifier {
     },
     // Device permission trigger (user consent gate). The agent calls this
     // whenever it needs a device-level capability (notifications, camera,
-    // storage, ...). In safe mode the user is asked even for read-only
-    // ops; in other modes the user is ALWAYS asked for device perms.
+    // storage, contacts, calendar, sms, phone, bluetooth, sensors, ...).
+    // In safe mode the user is asked even for read-only ops; in other modes
+    // the user is ALWAYS asked for device perms.
     {
       'type': 'function',
       'function': {
@@ -639,8 +640,11 @@ class AgentService extends ChangeNotifier {
         'description':
             'Ask the user for a device permission BEFORE using a '
             'device-backed capability. ALWAYS call this first when a task '
-            'needs notifications, camera, microphone, storage, contacts, '
-            'or location. Returns whether the user granted it.',
+            'needs any device access: notifications, camera, microphone, '
+            'media files (photos/videos/audio), storage, contacts, calendar, '
+            'location, phone/calls, SMS, bluetooth, activity recognition, '
+            'or body sensors. Returns granted/denied. If denied, tell the '
+            'user what the permission was for and let them decide.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -651,8 +655,17 @@ class AgentService extends ChangeNotifier {
                 'camera',
                 'microphone',
                 'storage',
+                'photos',
+                'videos',
+                'audio',
                 'contacts',
+                'calendar',
                 'location',
+                'phone',
+                'sms',
+                'bluetooth',
+                'activity_recognition',
+                'sensors',
               ],
             },
             'reason': {'type': 'string'},
@@ -1097,6 +1110,12 @@ catalog_add_provider, catalog_remove_provider), list plugins/MCP servers
 GitHub repos (catalog_add_marketplace). When the user asks to change provider
 settings, add a provider with their key, or manage plugins/MCP — use these
 tools to do it live, don't just explain how.
+Device permissions: if a task needs any device capability (notifications,
+camera, microphone, media/photos/videos/audio, storage, contacts, calendar,
+location, phone/calls, SMS, bluetooth, activity, sensors) — call
+request_permission FIRST with a clear reason. The user approves in-chat,
+then the system dialog appears. Never claim a permission was granted
+without calling the tool. If denied, tell the user and offer alternatives.
 ''';
 
     final historyStart = s.messages.length > 12 ? s.messages.length - 12 : 0;
@@ -1549,16 +1568,17 @@ tools to do it live, don't just explain how.
       case 'request_permission':
         final perm = args['permission'] as String;
         final reason = args['reason'] as String? ?? '';
+        final label = _permissionLabel(perm);
         _emit('think', 'requesting device permission: $perm');
         // ALWAYS ask the user — device permissions are never auto-approved,
         // even in full-access mode (Play-Store policy compliance).
         final granted = await _askUser(
           'request_permission',
           perm,
-          'AI device permission maang raha hai:\n'
+          'AI ko device permission chahiye: $label\n'
               '• Permission: $perm\n'
-              '• Reason: $reason\n\n'
-              'Grant karne par system dialog aayegi.',
+              '• Reason: ${reason.isEmpty ? '(AI ne reason nahi diya)' : reason}\n\n'
+              'Allow karne par Android system dialog aayegi.',
         );
         if (!granted) {
           _emit('shellOut', '$perm → DENIED by user');
@@ -2114,6 +2134,27 @@ tools to do it live, don't just explain how.
   // ── Device permission bridge (permission_handler, Play-policy compliant) ──
   // Permissions are pre-declared in AndroidManifest.xml; at runtime the
   // system dialog fires from here after the in-chat user consent gate.
+  static const Map<String, String> _permLabels = {
+    'notifications': 'Notifications',
+    'camera': 'Camera',
+    'microphone': 'Microphone',
+    'storage': 'Storage (files)',
+    'photos': 'Photos',
+    'videos': 'Videos',
+    'audio': 'Music & audio files',
+    'contacts': 'Contacts',
+    'calendar': 'Calendar',
+    'location': 'Location',
+    'phone': 'Phone / calls',
+    'sms': 'SMS',
+    'bluetooth': 'Bluetooth (nearby devices)',
+    'activity_recognition': 'Physical activity',
+    'sensors': 'Body sensors',
+  };
+
+  String _permissionLabel(String perm) =>
+      _permLabels[perm] ?? perm.toUpperCase();
+
   Future<String> _requestSystemPermission(String name) async {
     final Permission? p;
     switch (name) {
@@ -2124,11 +2165,35 @@ tools to do it live, don't just explain how.
       case 'microphone':
         p = Permission.microphone;
       case 'storage':
+        // Legacy storage (≤ Android 12) — on 13+ this maps to media perms.
         p = Permission.storage;
+      case 'photos':
+        p = Permission.photos;
+      case 'videos':
+        p = Permission.videos;
+      case 'audio':
+        p = Permission.audio;
       case 'contacts':
         p = Permission.contacts;
+      case 'calendar':
+        // Full access (READ + WRITE) — both declared in the manifest.
+        p = Permission.calendarFullAccess;
       case 'location':
         p = Permission.locationWhenInUse;
+      case 'phone':
+        // permission_handler's "phone" group covers CALL_PHONE +
+        // READ_PHONE_STATE (both declared in the manifest).
+        p = Permission.phone;
+      case 'sms':
+        p = Permission.sms;
+      case 'bluetooth':
+        // SCAN + CONNECT both declared; request the connect one (it also
+        // triggers the nearby-devices dialog).
+        p = Permission.bluetoothConnect;
+      case 'activity_recognition':
+        p = Permission.activityRecognition;
+      case 'sensors':
+        p = Permission.sensors;
       default:
         return 'unknown permission';
     }
