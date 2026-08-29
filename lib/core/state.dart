@@ -166,7 +166,7 @@ class McpServer {
   });
 }
 
-enum MsgKind { text, code, imageGen, reasoning }
+enum MsgKind { text, code, imageGen, reasoning, tool, turnTail }
 
 class Message {
   final String role; // 'user' | 'assistant'
@@ -177,6 +177,19 @@ class Message {
   bool thinking; // mutable — live state
   int? elapsedMs; // assistant: how long this response took
 
+  // ── Tool-card fields (MsgKind.tool) — DSH ToolRow parity ──
+  /// Tool name ('run_shell', 'fs_edit', 'dispatch_agent', …).
+  final String? toolName;
+  /// One-line title shown on the collapsed row ("bash", "Edit lib/x.dart").
+  String? toolTitle;
+  /// Ellipsized summary on the collapsed row (command / path / output line).
+  String? toolSummary;
+  /// Full detail body (command + output / diff / result) for the expanded
+  /// state.  Mutated while the tool streams output.
+  String? toolDetail;
+  /// running | ok | error | stopped — drives the row's state dot + sweep.
+  String toolState;
+
   Message({
     required this.role,
     this.kind = MsgKind.text,
@@ -184,6 +197,11 @@ class Message {
     this.lang,
     this.thinking = false,
     this.elapsedMs,
+    this.toolName,
+    this.toolTitle,
+    this.toolSummary,
+    this.toolDetail,
+    this.toolState = 'running',
     DateTime? time,
   }) : time = time ?? DateTime.now();
 
@@ -197,6 +215,11 @@ class Message {
     lang: j['lang'] as String?,
     thinking: j['thinking'] as bool? ?? false,
     elapsedMs: (j['elapsedMs'] as num?)?.toInt(),
+    toolName: j['toolName'] as String?,
+    toolTitle: j['toolTitle'] as String?,
+    toolSummary: j['toolSummary'] as String?,
+    toolDetail: j['toolDetail'] as String?,
+    toolState: j['toolState'] as String? ?? 'ok',
     time: j['time'] != null ? DateTime.tryParse(j['time'] as String) : null,
   );
 
@@ -207,6 +230,11 @@ class Message {
     if (lang != null) 'lang': lang,
     if (thinking) 'thinking': thinking,
     if (elapsedMs != null) 'elapsedMs': elapsedMs,
+    if (toolName != null) 'toolName': toolName,
+    if (toolTitle != null) 'toolTitle': toolTitle,
+    if (toolSummary != null) 'toolSummary': toolSummary,
+    if (toolDetail != null) 'toolDetail': toolDetail,
+    if (toolState != 'ok') 'toolState': toolState,
     'time': time.toIso8601String(),
   };
 }

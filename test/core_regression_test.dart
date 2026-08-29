@@ -933,6 +933,37 @@ void main() {
       // (Host runs x86_64 → arm64 URLs here; the test asserts shape.)
       expect(s.deviceArch, anyOf('arm64', 'arm', 'unknown'));
     });
+
+    test('MsgKind.tool + turnTail round-trip through JSON', () {
+      final m = Message(
+        role: 'assistant',
+        kind: MsgKind.tool,
+        toolName: 'run_shell',
+        toolTitle: 'bash',
+        toolSummary: 'ls -la',
+        toolDetail: 'total 12\ndrwxr-xr-x',
+        toolState: 'ok',
+      );
+      final restored = Message.fromJson(m.toJson());
+      expect(restored.kind, MsgKind.tool);
+      expect(restored.toolName, 'run_shell');
+      expect(restored.toolState, 'ok');
+      expect(restored.toolDetail, contains('drwxr'));
+      final tail = Message(role: 'assistant', kind: MsgKind.turnTail, content: '2.4s');
+      expect(Message.fromJson(tail.toJson()).kind, MsgKind.turnTail);
+    });
+
+    test('tool icon + title mapping (DSH ToolRow parity)', () {
+      expect(AgentService.toolIcon('run_shell'), 'terminal');
+      expect(AgentService.toolIcon('fs_edit'), 'edit');
+      expect(AgentService.toolIcon('file_read'), 'read');
+      expect(AgentService.toolIcon('web_search'), 'search');
+      expect(AgentService.toolIcon('browser_open'), 'web');
+      expect(AgentService.toolIcon('dispatch_agent'), 'agent');
+      expect(AgentService.toolIcon('unknown_tool'), 'api');
+      expect(AgentService.toolTitleFor('run_shell'), 'bash');
+      expect(AgentService.toolTitleFor('dispatch_agent'), 'Subagent');
+    });
     test('ChatSession.goal round-trips through JSON', () {
       final s = ChatSession(id: 'g1', title: 't', model: 'm');
       s.goal = {

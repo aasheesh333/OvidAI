@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
@@ -11,6 +12,199 @@ import '../core/agent_service.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
+/// DSH turn-process folding: consecutive assistant tool/reasoning
+/// messages collapse into a single expandable strip ("N tool calls ·
+/// Thought for a while") that sits right before the final answer.
+/// The LAST tool/reasoning run (no text after it yet, or the last tool
+/// in a run still in progress) stays unfolded — same as DSH Compact.
+sealed class _ChatItem {}
+class _SingleItem extends _ChatItem {
+  final Message m;
+  final int index;
+  _SingleItem(this.m, this.index);
+}
+class _FoldedGroup extends _ChatItem {
+  final List<Message> msgs;
+  final List<int> indices;
+  _FoldedGroup(this.msgs, this.indices);
+}
+
+List<_ChatItem> _foldMessages(List<Message> messages) {
+  final out = <_ChatItem>[];
+  var i = 0;
+  while (i < messages.length) {
+    final m = messages[i];
+    final foldable = m.role == 'assistant' &&
+        (m.kind == MsgKind.tool || m.kind == MsgKind.reasoning) &&
+        !m.thinking;
+    if (!foldable) {
+      out.add(_SingleItem(m, i));
+      i++;
+      continue;
+    }
+    // Collect the foldable run.
+    final group = <Message>[];
+    final idx = <int>[];
+    while (i < messages.length &&
+        messages[i].role == 'assistant' &&
+        (messages[i].kind == MsgKind.tool ||
+            messages[i].kind == MsgKind.reasoning) &&
+        !messages[i].thinking) {
+      group.add(messages[i]);
+      idx.add(i);
+      i++;
+    }
+    // Look ahead: if the NEXT message is assistant text, this group is
+    // complete → fold it.  If the group runs to the end (or before a
+    // user message), keep it unfolded (still in progress / latest).
+    final nextIsAnswer =
+        i < messages.length && messages[i].kind == MsgKind.text;
+    if (group.length >= 2 && nextIsAnswer) {
+      out.add(_FoldedGroup(group, idx));
+    } else {
+      for (var j = 0; j < group.length; j++) {
+        out.add(_SingleItem(group[j], idx[j]));
+      }
+    }
+  }
+  return out;
+}
+
+Widget _buildItem(_ChatItem item, dynamic s,
+    {required VoidCallback onAction, required TextEditingController input}) {
+  if (item is _SingleItem) {
+    return _MessageView(
+      m: item.m,
+      session: s,
+      msgIndex: item.index,
+      onAction: onAction,
+      input: input,
+    );
+  }
+  final g = item as _FoldedGroup;
+  return _TurnProcessStrip(group: g.msgs);
+}
+
+/// DSH StatsLine parity — pipe-separated line docked above the composer:
+/// "3 turns · LLM 12.4s · Input 8.2K tok · Output 1.4K tok".  Hidden
+/// when the session has no usage yet (empty-state stays clean).
+class _StatsLine extends StatelessWidget {
+  const _StatsLine();
+
+  String _fmtTok(int t) {
+    if (t >= 1000) return '${(t / 1000).toStringAsFixed(1)}K';
+    return '$t';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AppState.I,
+      builder: (_, _) {
+        final usage = AppState.I.usageLog;
+        if (usage.isEmpty) return const SizedBox.shrink();
+        final today = usage.where((e) {
+          final d = e.time;
+          final now = DateTime.now();
+          return d.year == now.year && d.month == now.month && d.day == now.day;
+        }).toList();
+        final input = usage.fold<int>(0, (a, e) => a + e.promptTokens);
+        final output = usage.fold<int>(0, (a, e) => a + e.completionTokens);
+        final parts = <String>[
+          '${today.length} turn${today.length == 1 ? '' : 's'} today',
+          if (AgentService.I.lastRunElapsedMs != null)
+            'last ${(AgentService.I.lastRunElapsedMs! / 1000).toStringAsFixed(1)}s',
+          'Input ${_fmtTok(input)} tok · Output ${_fmtTok(output)} tok',
+        ];
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(16, 3, 16, 3),
+          alignment: Alignment.center,
+          child: Text(
+            parts.join('  |  '),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// DSH turn-process strip — "N tool calls · Thought for a while" with a
+/// chevron; expands to show every folded tool card + reasoning card.
+/// Default collapsed (DSH Compact mode).
+class _TurnProcessStrip extends StatefulWidget {
+  final List<Message> group;
+  const _TurnProcessStrip({required this.group});
+  @override
+  State<_TurnProcessStrip> createState() => _TurnProcessStripState();
+}
+
+class _TurnProcessStripState extends State<_TurnProcessStrip> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final g = widget.group;
+    final toolCount = g.where((m) => m.kind == MsgKind.tool).length;
+    final hasReasoning = g.any((m) => m.kind == MsgKind.reasoning);
+    final subagents =
+        g.where((m) => m.toolName == 'dispatch_agent').length;
+    final label = [
+      if (toolCount > 0) '$toolCount tool call${toolCount == 1 ? '' : 's'}',
+      if (hasReasoning) 'Thought for a while',
+      if (subagents > 0) '$subagents subagent${subagents == 1 ? '' : 's'}',
+    ].join(' · ');
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: Aether.hairline)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _open = !_open),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 7),
+              child: Row(
+                children: [
+                  Icon(
+                    _open
+                        ? Icons.keyboard_arrow_down
+                        : Icons.keyboard_arrow_right,
+                    size: 15,
+                    color: Aether.textFaint,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    label.isEmpty ? 'Work done' : label,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Aether.textMuted,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_open)
+            ...g.map((m) => Padding(
+                  padding: const EdgeInsets.only(left: 8),
+                  child: m.kind == MsgKind.reasoning
+                      ? _ReasoningCard(m)
+                      : _ToolCard(m),
+                )),
+        ],
+      ),
+    );
+  }
+}
+
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
   @override
@@ -216,19 +410,20 @@ class _ChatScreenState extends State<ChatScreen>
                               builder: (_, _) {
                                 final typing = AgentService.I.busy;
                                 _maybeJumpToBottom();
+                                // DSH turn-process folding: consecutive
+                                // tool/reasoning items collapse into a
+                                // single strip before the final answer.
+                                final items = _foldMessages(s.messages);
                                 return ListView.builder(
                                   controller: _scroll,
                                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                                  itemCount: s.messages.length + (typing ? 1 : 0),
+                                  itemCount: items.length + (typing ? 1 : 0),
                                   itemBuilder: (_, i) =>
-                                      i == s.messages.length
+                                      i == items.length
                                           ? const _TypingBubble()
-                                          : _MessageView(
-                                              m: s.messages[i],
-                                              session: s,
-                                              msgIndex: i,
-                                              onAction: () =>
-                                                  setState(() {}),
+                                          : _buildItem(
+                                              items[i], s,
+                                              onAction: () => setState(() {}),
                                               input: _input,
                                             ),
                                 );
@@ -273,6 +468,7 @@ class _ChatScreenState extends State<ChatScreen>
                         ),
                 ),
                 const _TodoDock(),
+                const _StatsLine(),
                 _QueueDock(
                   onEdited: () => setState(() {}),
                 ),
@@ -691,17 +887,68 @@ class _ModelTile extends StatelessWidget {
   }
 }
 
+/// 50+ prompt suggestions — 4 random ones show per empty-state render.
+const _suggestionPool = [
+  ('⚡', 'Build a Flutter login screen'),
+  ('🧠', 'Explain transformers simply'),
+  ('🖼', 'Generate a minimal wallpaper'),
+  ('💻', 'Write a Python web scraper'),
+  ('🔍', 'Search the web for today\'s AI news'),
+  ('📄', 'Summarize this PDF for me'),
+  ('🐛', 'Debug this crash log'),
+  ('📊', 'Analyze this CSV and chart the trends'),
+  ('🎨', 'Design a color palette for a fintech app'),
+  ('🌐', 'Translate this text to French'),
+  ('📝', 'Draft a professional email to my manager'),
+  ('🧮', 'Solve this calculus problem step by step'),
+  ('🚀', 'Explain how rockets work like I\'m 10'),
+  ('🔧', 'Refactor this function for readability'),
+  ('📱', 'Create an app idea for productivity'),
+  ('🗂', 'Organize my project folder structure'),
+  ('🔐', 'Explain OAuth 2.0 in simple terms'),
+  ('🧪', 'Write unit tests for this class'),
+  ('🎯', 'Help me set SMART goals for this month'),
+  ('🤖', 'How do neural networks learn?'),
+  ('📈', 'Explain the difference between stocks and bonds'),
+  ('🎮', 'Design a simple 2D game concept'),
+  ('🏠', 'Plan a smart home automation setup'),
+  ('✈️', 'Create a 5-day itinerary for Tokyo'),
+  ('🍳', 'Give me a recipe using only 5 ingredients'),
+  ('📚', 'Recommend 5 books on machine learning'),
+  ('🎵', 'Write a haiku about programming'),
+  ('🗺', 'Compare Dijkstra vs A* pathfinding'),
+  ('💼', 'Review my resume summary'),
+  ('🧘', 'Create a 10-minute morning routine'),
+  ('🔬', 'Explain CRISPR gene editing'),
+  ('📦', 'Write a Dockerfile for a Node app'),
+  ('🌊', 'Explain ocean tides simply'),
+  ('⚙️', 'Optimize this SQL query'),
+  ('🗣', 'Practice Spanish conversation with me'),
+  ('🎭', 'Write a short dialogue between two friends'),
+  ('📐', 'Calculate the area of this irregular shape'),
+  ('🔮', 'Predict 3 AI trends for next year'),
+  ('🏃', 'Design a beginner running plan'),
+  ('💡', 'Brainstorm 10 startup ideas in health tech'),
+  ('📷', 'Explain camera aperture like I\'m new to photography'),
+  ('🌍', 'Compare renewable energy sources'),
+  ('🛠', 'Fix this TypeScript error'),
+  ('🧑‍🏫', 'Teach me binary search with an example'),
+  ('📰', 'Summarize the key points of this article'),
+  ('🎲', 'Explain probability with dice examples'),
+  ('🏗', 'Design a database schema for a blog'),
+  ('🌱', 'How do I start composting at home?'),
+  ('📅', 'Plan my week around these 5 tasks'),
+  ('🔑', 'Generate a secure password policy'),
+  ('🧊', 'Explain the water cycle'),
+];
+
 class _EmptyState extends StatelessWidget {
   final void Function(String)? onSuggest;
   const _EmptyState({this.onSuggest});
   @override
   Widget build(BuildContext context) {
-    const suggestions = [
-      ('⚡', 'Build a Flutter login screen'),
-      ('🧠', 'Explain transformers simply'),
-      ('🖼', 'Generate a minimal wallpaper'),
-      ('💻', 'Write a Python web scraper'),
-    ];
+    final shuffled = [..._suggestionPool]..shuffle();
+    final suggestions = shuffled.take(4).toList();
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
@@ -874,6 +1121,353 @@ class _ReasoningCardState extends State<_ReasoningCard> {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// DSH ToolRow parity — live tool-call cards in the chat transcript.
+// Collapsed: 24px row  [14px icon]  Title  ·  summary  [state dot]
+//   running → glare-sweep shimmer across the row
+//   error   → red state dot replaces the icon
+// Expanded: detail body — TerminalBlock (terminal icon tools),
+//   DiffBlock (edit/write tools), or a plain IN/OUT body otherwise.
+// Icons mirror the DSH web icon set (think/search/browse/edit/terminal/
+// globe/sparkle/checklist/question/bolt).
+// ═══════════════════════════════════════════════════════════════════════
+class _ToolCard extends StatefulWidget {
+  final Message m;
+  const _ToolCard(this.m);
+  @override
+  State<_ToolCard> createState() => _ToolCardState();
+}
+
+class _ToolCardState extends State<_ToolCard>
+    with SingleTickerProviderStateMixin {
+  bool _open = false;
+  late final AnimationController _sweep;
+
+  @override
+  void initState() {
+    super.initState();
+    // DSH "running" affordance: continuous glare sweep (2.6s linear).
+    _sweep = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2600),
+    );
+    if (widget.m.toolState == 'running') _sweep.repeat();
+  }
+
+  @override
+  void dispose() {
+    _sweep.dispose();
+    super.dispose();
+  }
+
+  static IconData _iconFor(String kind) => switch (kind) {
+        'web' => Icons.public,
+        'read' => Icons.description_outlined,
+        'edit' => Icons.edit_outlined,
+        'terminal' => Icons.terminal,
+        'code' => Icons.code,
+        'search' => Icons.search,
+        'sparkle' => Icons.auto_awesome,
+        'agent' => Icons.smart_toy_outlined,
+        'git' => Icons.source_outlined,
+        'goal' => Icons.flag_outlined,
+        'schedule' => Icons.schedule_outlined,
+        'memory' => Icons.psychology_outlined,
+        _ => Icons.bolt_outlined,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final m = widget.m;
+    final running = m.toolState == 'running';
+    if (!running && _sweep.isAnimating) _sweep.stop();
+    final failed = m.toolState == 'error';
+    final stopped = m.toolState == 'stopped';
+    final iconKind = AgentService.toolIcon(m.toolName ?? '');
+    final hasDetail = (m.toolDetail ?? '').trim().isNotEmpty;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      decoration: BoxDecoration(
+        color: Aether.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: failed
+              ? Aether.dangerC.withValues(alpha: 0.4)
+              : Aether.hairline,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: hasDetail ? () => setState(() => _open = !_open) : null,
+            child: SizedBox(
+              height: 30,
+              child: Row(
+                children: [
+                  const SizedBox(width: 10),
+                  if (failed)
+                    _StateDot(Aether.dangerC)
+                  else if (stopped)
+                    _StateDot(Aether.warn)
+                  else if (running)
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.5,
+                        color: Aether.accent,
+                      ),
+                    )
+                  else
+                    Icon(_iconFor(iconKind),
+                        size: 14, color: Aether.textMuted),
+                  const SizedBox(width: 7),
+                  Text(
+                    m.toolTitle ?? m.toolName ?? 'tool',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: failed ? Aether.dangerC : Aether.text,
+                    ),
+                  ),
+                  if ((m.toolSummary ?? '').isNotEmpty) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 7),
+                      child: Container(
+                        width: 2,
+                        height: 2,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Aether.textFaint,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: Text(
+                        m.toolSummary!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: failed ? Aether.dangerC : Aether.textMuted,
+                          fontFamily: Aether.mono,
+                        ),
+                      ),
+                    ),
+                  ] else
+                    const Spacer(),
+                  if (hasDetail)
+                    Icon(
+                      _open
+                          ? Icons.keyboard_arrow_down
+                          : Icons.keyboard_arrow_right,
+                      size: 16,
+                      color: Aether.textFaint,
+                    ),
+                  const SizedBox(width: 8),
+                ],
+              ),
+            ),
+          ),
+          // Glare sweep while running (DSH 300px band).
+          if (running)
+            AnimatedBuilder(
+              animation: _sweep,
+              builder: (_, _) => Container(
+                height: 1.5,
+                margin: const EdgeInsets.symmetric(horizontal: 10),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment(-1 + 2 * _sweep.value, 0),
+                    end: Alignment(-0.6 + 2 * _sweep.value, 0),
+                    colors: [
+                      Colors.transparent,
+                      Aether.accent.withValues(alpha: 0.5),
+                      Colors.transparent,
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          // Expanded detail — Terminal / Diff / plain body.
+          if (_open && hasDetail) _DetailBody(m: m),
+        ],
+      ),
+    );
+  }
+}
+
+/// 8px state dot (DSH StateDot) — replaces the icon on error/stopped.
+class _StateDot extends StatelessWidget {
+  final Color color;
+  const _StateDot(this.color);
+  @override
+  Widget build(BuildContext context) => Container(
+        width: 8,
+        height: 8,
+        decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+      );
+}
+
+/// Expanded tool body: terminal-style for shell/code/jobs, diff-style for
+/// edits/writes, plain mono body otherwise.  16-line cap with a
+/// "N more lines" fold toggle (DSH TerminalBlock behavior).
+class _DetailBody extends StatefulWidget {
+  final Message m;
+  const _DetailBody({required this.m});
+  @override
+  State<_DetailBody> createState() => _DetailBodyState();
+}
+
+class _DetailBodyState extends State<_DetailBody> {
+  bool _expandedAll = false;
+  static const _cap = 16;
+
+  @override
+  Widget build(BuildContext context) {
+    final m = widget.m;
+    final kind = AgentService.toolIcon(m.toolName ?? '');
+    final detail = m.toolDetail!.trimRight();
+    final lines = const LineSplitter().convert(detail);
+    final capped = !_expandedAll && lines.length > _cap;
+    final shown =
+        capped ? lines.sublist(lines.length - _cap) : lines;
+
+    final isDiff = kind == 'edit' ||
+        m.toolName == 'commit' ||
+        detail.split('\n').take(8).any((l) =>
+            l.startsWith('+ ') || l.startsWith('- ') ||
+            l.startsWith('+') && !l.startsWith('++') ||
+            l.startsWith('-') && !l.startsWith('--'));
+    final isTerminal =
+        kind == 'terminal' || kind == 'code' || kind == 'agent';
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+      decoration: BoxDecoration(
+        color: Aether.surfaceAlt,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (isTerminal)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+              child: Text(
+                '\$ ${m.toolSummary ?? ''}',
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontFamily: Aether.mono,
+                  fontSize: 11.5,
+                  color: Aether.textMuted,
+                ),
+              ),
+            ),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 340),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(10, 4, 10, 8),
+              child: isDiff
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: shown
+                          .map((l) => _DiffLine(l))
+                          .toList(),
+                    )
+                  : Text(
+                      shown.join('\n'),
+                      style: TextStyle(
+                        fontFamily: Aether.mono,
+                        fontSize: 11.5,
+                        height: 1.45,
+                        color: m.toolState == 'error'
+                            ? Aether.dangerC
+                            : Aether.text,
+                      ),
+                    ),
+            ),
+          ),
+          if (capped)
+            InkWell(
+              onTap: () => setState(() => _expandedAll = true),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+                child: Text(
+                  '… ${lines.length - _cap} more lines (tap to expand)',
+                  style: TextStyle(fontSize: 11, color: Aether.accent),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One diff line — green + / red − like DSH DiffBlock.
+class _DiffLine extends StatelessWidget {
+  final String line;
+  const _DiffLine(this.line);
+  @override
+  Widget build(BuildContext context) {
+    final isAdd = line.startsWith('+') && !line.startsWith('++');
+    final isDel = line.startsWith('-') && !line.startsWith('--');
+    final color = isAdd
+        ? Aether.successC
+        : isDel
+            ? Aether.dangerC
+            : Aether.text;
+    final bg = isAdd
+        ? Aether.successC.withValues(alpha: 0.08)
+        : isDel
+            ? Aether.dangerC.withValues(alpha: 0.08)
+            : Colors.transparent;
+    return Container(
+      width: double.infinity,
+      color: bg,
+      child: Text(
+        line,
+        style: TextStyle(
+          fontFamily: Aether.mono,
+          fontSize: 11.5,
+          height: 1.45,
+          color: color,
+        ),
+      ),
+    );
+  }
+}
+
+/// DSH turn-tail row — faint footer under the final assistant answer of a
+/// turn: elapsed time (+ token stats when available).
+class _TurnTailRow extends StatelessWidget {
+  final Message m;
+  const _TurnTailRow(this.m);
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, bottom: 8),
+      child: Row(
+        children: [
+          Icon(Icons.schedule, size: 11, color: Aether.textFaint),
+          const SizedBox(width: 4),
+          Text(
+            m.content,
+            style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _MessageView extends StatelessWidget {
   final Message m;
   final dynamic session; // ChatSession
@@ -907,6 +1501,8 @@ class _MessageView extends StatelessWidget {
               MsgKind.code => _code(),
               MsgKind.imageGen => _imageGen(),
               MsgKind.reasoning => _reasoning(),
+              MsgKind.tool => _toolCard(),
+              MsgKind.turnTail => _turnTail(),
               _ => _text(isUser),
             },
           ),
@@ -1011,6 +1607,13 @@ class _MessageView extends StatelessWidget {
       );
 
   Widget _reasoning() => _ReasoningCard(m);
+
+  /// DSH ToolRow parity — collapsed 24px row (icon + title · summary)
+  /// expanding to a Terminal/Diff/plain detail block.
+  Widget _toolCard() => _ToolCard(m);
+
+  /// DSH turn-tail parity — faint footer row (elapsed · stats).
+  Widget _turnTail() => _TurnTailRow(m);
 
   Widget _code() => Container(
         clipBehavior: Clip.antiAlias,
@@ -1788,6 +2391,10 @@ class _ApprovalDock extends StatelessWidget {
         if (req.questions != null && req.questions!.isNotEmpty) {
           return _QuestionsCard(req);
         }
+        // ── Plan review (exit_plan_mode) — DSH PlanReviewPanel style ──
+        if (req.tool == 'exit_plan_mode') {
+          return _PlanReviewCard(req);
+        }
         // ── Standard approve/deny card ──
         return Container(
           margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
@@ -1807,12 +2414,16 @@ class _ApprovalDock extends StatelessWidget {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  req.summary,
-                  maxLines: 2,
+                  req.detail.isNotEmpty && req.detail != req.summary
+                      ? req.detail
+                      : req.summary,
+                  maxLines: 8,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 12,
+                    height: 1.4,
                     color: Aether.text,
+                    fontFamily: Aether.mono,
                   ),
                 ),
               ),
@@ -1839,6 +2450,95 @@ class _ApprovalDock extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// DSH PlanReviewPanel parity — shows the actual plan markdown with
+/// Decline / Approve buttons (fixes: the plan was never rendered before).
+class _PlanReviewCard extends StatelessWidget {
+  final ApprovalRequest req;
+  const _PlanReviewCard(this.req);
+
+  @override
+  Widget build(BuildContext context) {
+    // Strip the framing lines _handleExitPlanMode wrapped the plan in.
+    var plan = req.detail;
+    const prefix = 'AI ka plan:\n\n';
+    if (plan.startsWith(prefix)) plan = plan.substring(prefix.length);
+    final cut = plan.indexOf('\n\nApprove karne par');
+    if (cut > 0) plan = plan.substring(0, cut);
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      decoration: BoxDecoration(
+        color: Aether.accent.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Aether.accent.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header strip.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+            child: Row(
+              children: [
+                _StateDot(Aether.accent),
+                const SizedBox(width: 7),
+                Text(
+                  'Plan review',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: Aether.text,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // The plan body (markdown).
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 260),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
+              child: _DshMarkdown(content: plan),
+            ),
+          ),
+          const SizedBox(height: 4),
+          // Buttons.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Aether.dangerC,
+                    side: BorderSide(color: Aether.dangerC.withValues(alpha: 0.5)),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  onPressed: () => AgentService.I.approve(false),
+                  child: const Text('Decline', style: TextStyle(fontSize: 12)),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Aether.accent,
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  onPressed: () => AgentService.I.approve(true),
+                  child: const Text('Approve', style: TextStyle(fontSize: 12)),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1884,7 +2584,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
               Icon(Icons.help_outline, size: 14, color: Aether.accent),
               SizedBox(width: 6),
               Text(
-                'AI ke sawal',
+                'Questions from the AI',
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w600,

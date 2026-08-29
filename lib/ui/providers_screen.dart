@@ -333,7 +333,7 @@ class _ProviderCardState extends State<ProviderCard> {
             ),
             const SizedBox(height: 12),
             // API key — ALWAYS shown. Free tiers (Groq/Gemini/Mistral/OpenRouter)
-            // bhi key maangte hain; "free" sirf cost ka matlab hai.
+            // still need a key; "free" only means no cost.
             TextField(
               obscureText: true,
               style: const TextStyle(fontSize: 13.5),

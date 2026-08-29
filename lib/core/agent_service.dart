@@ -30,8 +30,8 @@ class BrowserTab {
 /// ═══════════════════════════════════════════════════════════════════
 /// AGENT ACCESS MODES (DSH-web style)
 /// ───────────────────────────────────────────────────────────────────
-/// READ-ONLY → har action pe user se poochhe (shell/write/commit sab)
-/// GENERAL   → shell + browser free; file writes & commits poochhe
+/// READ-ONLY → asks user before every action (shell/write/commit all)
+/// GENERAL   → shell + browser free; asks for file writes & commits
 /// FULL      → sab kuch free, no confirmation (DSH/Codex full-send)
 /// STUDIO    → general + full Studio access: files edit, terminal, repo
 ///             sync free; sirf publish/commit confirm karta hai
@@ -47,14 +47,14 @@ extension AgentModeX on AgentMode {
   };
   String get hint => switch (this) {
     AgentMode.safe =>
-      'Read-only. Har shell / browser / write se pehle permission maangega.',
+      'Read-only. Asks for permission before every shell, browser, or write action.',
     AgentMode.auto =>
-      'Shell aur browser khud chalayega. Repo me push se pehle poochega.',
+      'Runs shell and browser freely. Asks before pushing to the repo.',
     AgentMode.drive =>
       'Full autonomous — kuch bhi, kahin bhi, no confirmation.',
     AgentMode.studio =>
       'Studio mode — files edit, terminal run, repo access free. '
-      'Publish/commit se pehle confirm karega.',
+      'Asks for confirmation before publishing or committing.',
   };
   IconData get icon => switch (this) {
     AgentMode.safe => Icons.visibility_outlined,
@@ -517,6 +517,10 @@ class AgentService extends ChangeNotifier {
     _sessionEvents.add(SessionEvent(type: kind, data: text));
     if (_sessionEvents.length > 500) {
       _sessionEvents.removeRange(0, _sessionEvents.length - 500);
+    }
+    // DSH ToolRow parity: shell output streams into the live tool card.
+    if (kind == 'shellOut' && _activeToolMsg != null) {
+      _toolStream('$text\n');
     }
     notifyListeners();
   }
@@ -1638,7 +1642,7 @@ class AgentService extends ChangeNotifier {
                     'Preserve: all facts, decisions made, file paths '
                     'mentioned, code snippets, pending tasks, user '
                     'preferences. Write in the same language as the '
-                    'conversation (Hindi/English mix is fine).'
+                    'conversation.'
           },
           {
             'role': 'user',
@@ -1773,8 +1777,9 @@ inaccessible here. ${AppState.I.shareSessionMemory ? 'The user enabled "Share se
 
 RESPONSE STYLE (default): Be concise and lightweight, like a fast coding assistant.
 Lead with the answer or result. Skip long preambles, restating the question, and
-filler. Use short bullet points or code blocks only when they help. Match the
-user's language (Hindi/English). Only give long explanations, step-by-step
+filler. Use short bullet points or code blocks only when they help. Reply in
+the same language the user writes in (default English). Only give long
+explanations, step-by-step
 reasoning, or extra detail when the user explicitly asks for it or the task truly
 requires it. When a task needs commands, pages or file changes, CALL THE TOOLS
 instead of describing them. Prefer many small steps. Verify results before finishing.
@@ -1866,7 +1871,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           _emit('err', lastError ?? 'unknown model error');
           _appendAssistant(
             '⚠️ ${lastError ?? "The model request failed."}\n\n'
-            'Agar model/provider already configured hai to Settings → AI response timeout badhao, ya dobara try karo.',
+            'If the model/provider is already configured, increase "AI response timeout" in Settings, or try again.',
             session: s,
           );
           lastRunElapsedMs = DateTime.now().difference(_runStart ?? DateTime.now()).inMilliseconds;
@@ -1914,7 +1919,27 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           final name = fn['name'];
           final args =
               jsonDecode(fn['arguments'] ?? '{}') as Map<String, dynamic>;
-          final result = await _dispatch(name, args);
+          // DSH ToolRow parity: live tool card in the chat stream.
+          final toolMsg = _silentTools.contains(name)
+              ? null
+              : _toolStart(name, _toolArgSummary(name, args));
+          String result;
+          try {
+            result = await _dispatch(name, args);
+            if (toolMsg != null) {
+              _toolFinish(
+                state: result.startsWith('DENIED')
+                    ? 'stopped'
+                    : _looksLikeToolError(result)
+                        ? 'error'
+                        : 'ok',
+                detail: toolMsg.toolDetail ?? cleanTruncate(result, 8000),
+              );
+            }
+          } catch (e) {
+            result = 'tool error: $e';
+            if (toolMsg != null) _toolFinish(state: 'error', detail: result);
+          }
           msgs.add({
             'role': 'tool',
             'tool_call_id': tc['id'],
@@ -2047,7 +2072,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         onTimeout: () {
           lastError = 'no response from ${p.name} for '
               '${AppState.I.responseTimeoutSec}s — Settings me '
-              '"AI response timeout" badhao ya provider check karo';
+              'Increase "AI response timeout" or check the provider';
           throw TimeoutException(lastError ?? 'first-byte timeout');
         },
       );
@@ -2079,9 +2104,9 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           return _callLlm(p, msgs, session, includeTools: false);
         }
         final hint = switch (res.statusCode) {
-          401 || 403 => 'API key invalid/expired — Settings → ${p.name} me key dobara daalo.',
-          404 => 'Model "$modelId" endpoint pe nahi mila — model picker se dobara choose karo.',
-          429 => 'Rate limit — thoda wait karke retry karo.',
+          401 || 403 => 'API key invalid or expired — re-enter the key in Settings → ${p.name}.',
+          404 => 'Model "$modelId" not found on this endpoint — pick it again from the model picker.',
+          429 => 'Rate limited — wait a moment and retry.',
           >= 500 => 'Provider server issue (${p.name}) — thodi der baad retry.',
           _ => '',
         };
@@ -2268,10 +2293,10 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     // While planning, only read-only tools are allowed.  The AI must
     // present its plan via exit_plan_mode and get user approval first.
     if (planMode && _isMutatingTool(name)) {
-      return 'PLAN MODE ACTIVE: "$name" is a mutating tool. Read-only tools '
-          'ko use karo (read/list/search/browse), plan final karo, aur '
-          'exit_plan_mode call karo user approval ke liye. After approval, '
-          'execution tools unlock ho jayenge.';
+      return 'PLAN MODE ACTIVE: "$name" is a mutating tool. Use read-only '
+          '(read/list/search/browse) tools to explore, finalize your plan, '
+          'and call exit_plan_mode for user approval. After approval, '
+          'execution tools unlock.';
     }
     switch (name) {
       case 'run_shell':
@@ -2279,7 +2304,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         final ok = await _maybeApprove(
           'run_shell',
           cmd,
-          'Command ${mode == AgentMode.studio ? "Ubuntu sandbox me" : "phone terminal (device shell) me"} chlega:\n\$ $cmd',
+          'Command will run in ${mode == AgentMode.studio ? "the Ubuntu sandbox" : "the phone terminal (device shell)"}:\n\$ $cmd',
         );
         if (!ok) return 'DENIED by user';
         _emit('shell', cmd);
@@ -2304,17 +2329,14 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           }
           final hint = out.contains('not found') || out.contains('not: found')
               ? '\n\n[phone terminal: sirf Android toybox commands hain — '
-                  'python/gcc/apt ke liye Studio mode me Ubuntu sandbox '
-                  'install karo]'
+                  'use Studio mode + install the Ubuntu sandbox for python/gcc/apt]'
               : '';
           return (out.isEmpty ? '(no output)' : out) + hint;
         } catch (e) {
           // Friendly actionable message — the model relays this to the user.
           if ('$e'.contains('not installed')) {
             return mode == AgentMode.studio
-                ? 'sandbox not installed yet. Tell the user: "Studio kholke '
-                    'sandbox install karo (one-time, ~320 MB), phir command '
-                    'chalega."'
+                ? 'sandbox not installed yet. Tell the user: "Open Studio and install the sandbox (one-time, ~320 MB), then the command will work."'
                 : 'phone terminal error: $e';
           }
           return 'sandbox error: $e';
@@ -2332,7 +2354,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           perm,
           'AI ko device permission chahiye: $label\n'
               '• Permission: $perm\n'
-              '• Reason: ${reason.isEmpty ? '(AI ne reason nahi diya)' : reason}\n\n'
+              '• Reason: ${reason.isEmpty ? '(no reason given)' : reason}\n\n'
               'Allow karne par Android system dialog aayegi.',
         );
         if (!granted) {
@@ -2959,6 +2981,159 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     AppState.I.refresh();
   }
 
+  /// One-line arg summary for the collapsed tool row (command / path /
+  /// prompt — whatever best identifies the call).
+  String _toolArgSummary(String name, Map<String, dynamic> args) {
+    final pick = switch (name) {
+      'run_shell' || 'job_start' => args['command'],
+      'run_code' => args['code'] ?? args['program'],
+      'fetch_url' || 'browser_open' || 'browser_navigate' => args['url'],
+      'web_search' || 'memory_search' || 'session_search' => args['query'],
+      'dispatch_agent' => args['prompt'],
+      'commit' => args['message'],
+      'generate_image' => args['prompt'],
+      'browser_evaluate' => args['script'] ?? args['expression'],
+      'browser_click' => args['selector'],
+      'create_goal' => args['objective'],
+      'schedule_create' => args['prompt'],
+      'memory_save' => args['content'],
+      _ => args['path'] ?? args['pattern'] ?? args['file'],
+    };
+    return (pick as String?) ?? '';
+  }
+
+  /// Heuristic: tool result text that reads as a failure → error state dot.
+  bool _looksLikeToolError(String result) {
+    final l = result.toLowerCase();
+    return l.startsWith('error') ||
+        l.startsWith('tool error') ||
+        l.contains('not found') ||
+        l.contains('permission denied') ||
+        l.contains('failed:') ||
+        l.contains('exception:');
+  }
+
+  // ── Tool-call chat cards (DSH ToolRow parity) ──────────────────────────
+  // Every _dispatch call creates a live tool message in the chat stream:
+  // it starts as state 'running' (sweep animation) and settles to
+  // ok/error/stopped with the final output in toolDetail.  The UI renders
+  // it as a 24px collapsed row (icon + title · summary) that expands to a
+  // Terminal/Diff/Read block.
+
+  /// The tool message for the currently-executing call (output streams in).
+  Message? _activeToolMsg;
+
+  /// Tool rows that should NOT create a chat card (UI-interactive tools
+  /// have their own surfaces — approval dock, questions card, todo dock).
+  static const _silentTools = {
+    'ask_user_question', 'todo_write', 'exit_plan_mode', 'request_permission',
+  };
+
+  /// Row presentation per tool — icon + how to title it.
+  static String toolIcon(String toolName) {
+    if (toolName.startsWith('browser_')) return 'web';
+    if (toolName.startsWith('fs_') || toolName.startsWith('file_')) {
+      return toolName.contains('edit') || toolName.contains('write')
+          ? 'edit'
+          : 'read';
+    }
+    return switch (toolName) {
+      'run_shell' => 'terminal',
+      'run_code' => 'code',
+      'job_start' || 'job_kill' || 'job_list' || 'job_output' => 'terminal',
+      'web_search' || 'fs_grep' || 'fs_glob' || 'session_search' ||
+      'memory_search' => 'search',
+      'fetch_url' => 'web',
+      'generate_image' => 'sparkle',
+      'dispatch_agent' => 'agent',
+      'commit' || 'repo_sync' || 'repo_tree' => 'git',
+      'create_goal' || 'update_goal' || 'get_goal' => 'goal',
+      'schedule_create' || 'schedule_list' || 'schedule_delete' => 'schedule',
+      'memory_save' => 'memory',
+      'read_attachment' || 'preview' => 'read',
+      _ => 'api',
+    };
+  }
+
+  /// Human title for the collapsed row.
+  static String toolTitleFor(String toolName) => switch (toolName) {
+        'run_shell' => 'bash',
+        'run_code' => 'Run code',
+        'file_read' => 'Read',
+        'file_write' => 'Write',
+        'fs_edit' => 'Edit',
+        'fs_glob' => 'Glob',
+        'fs_grep' => 'Grep',
+        'web_search' => 'Search',
+        'fetch_url' => 'Fetch',
+        'session_search' => 'Search session',
+        'memory_search' => 'Search memory',
+        'memory_save' => 'Save memory',
+        'dispatch_agent' => 'Subagent',
+        'commit' => 'Commit',
+        'repo_sync' => 'Sync repo',
+        'repo_tree' => 'Repo tree',
+        'job_start' => 'Start job',
+        'job_output' => 'Job output',
+        'job_list' => 'Jobs',
+        'job_kill' => 'Kill job',
+        'create_goal' => 'Create goal',
+        'update_goal' => 'Update goal',
+        'get_goal' => 'Goal',
+        'schedule_create' => 'Create reminder',
+        'schedule_list' => 'Reminders',
+        'schedule_delete' => 'Delete reminder',
+        'generate_image' => 'Generate image',
+        'read_attachment' => 'Read attachment',
+        'preview' => 'Preview',
+        _ => toolName.startsWith('mcp_')
+            ? toolName.replaceAll('mcp_', '').replaceAll('_', ' ')
+            : toolName.replaceAll('_', ' '),
+      };
+
+  Message _toolStart(String toolName, String summary) {
+    final s = AppState.I.activeSession;
+    if (s == null) return Message(role: 'assistant', kind: MsgKind.tool);
+    final m = Message(
+      role: 'assistant',
+      kind: MsgKind.tool,
+      toolName: toolName,
+      toolTitle: toolTitleFor(toolName),
+      toolSummary: cleanTruncate(summary.replaceAll('\n', ' '), 140),
+      toolState: 'running',
+    );
+    s.messages.add(m);
+    _activeToolMsg = m;
+    AppState.I.refresh();
+    return m;
+  }
+
+  void _toolStream(String chunk) {
+    final m = _activeToolMsg;
+    if (m == null) return;
+    m.toolDetail = '${m.toolDetail ?? ''}$chunk';
+    if ((m.toolDetail?.length ?? 0) > 12000) {
+      m.toolDetail = '…(earlier output trimmed)…\n'
+          '${m.toolDetail!.substring(m.toolDetail!.length - 10000)}';
+    }
+    // Keep the collapsed-row summary current with the latest output line.
+    final lastLine = m.toolDetail!.trim().split('\n').lastOrNull;
+    if (lastLine != null && lastLine.isNotEmpty) {
+      m.toolSummary = cleanTruncate(lastLine, 140);
+    }
+    AppState.I.refresh();
+  }
+
+  void _toolFinish({String state = 'ok', String? detail, String? summary}) {
+    final m = _activeToolMsg;
+    _activeToolMsg = null;
+    if (m == null) return;
+    if (detail != null && m.toolDetail == null) m.toolDetail = detail;
+    if (summary != null) m.toolSummary = cleanTruncate(summary.replaceAll('\n', ' '), 140);
+    m.toolState = state;
+    AppState.I.refresh();
+  }
+
   // ── Device permission bridge (permission_handler, Play-policy compliant) ──
   // Permissions are pre-declared in AndroidManifest.xml; at runtime the
   // system dialog fires from here after the in-chat user consent gate.
@@ -3050,7 +3225,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         // Read-before-write gate.
         if (!_readPathsFor(sid).contains(path)) {
           return 'read-before-write: file_read ya fs_edit view se pehle '
-              '"$path" padho, phir edit karo.';
+              '"$path" read it first, then edit.';
         }
         // Repo file?
         final repoContent = RepoCache.I.read(path);
@@ -3099,7 +3274,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         if (newStr.isEmpty) return 'new_str must not be empty';
         if (!_readPathsFor(sid).contains(path)) {
           return 'read-before-write: file_read ya fs_edit view se pehle '
-              '"$path" padho, phir edit karo.';
+              '"$path" read it first, then edit.';
         }
         final repoContent = RepoCache.I.read(path);
         final host = await _resolveFsPath(path);
@@ -3348,7 +3523,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
       List<UserQuestion> questions) async {
     final req = ApprovalRequest(
       tool: 'ask_user_question',
-      summary: 'AI ne ${questions.length} sawal puche hain',
+      summary: 'The AI asked ${questions.length} question(s)',
       detail: questions.map((q) => q.question).join('\n'),
       questions: questions,
     );
@@ -3380,19 +3555,16 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     _emit('think', 'presenting plan for approval…');
     final ok = await _askUser(
       'exit_plan_mode',
-      'Plan approve karein?',
-      'AI ka plan:\n\n$plan\n\n'
-          'Approve karne par plan execute hoga. Deny karne par '
-          'AI plan revise karega.',
+      'Approve this plan?',
+      'The AI\'s plan:\n\n$plan\n\nApproving runs the plan; declining asks the AI to revise it.',
     );
     if (!ok) {
       planMode = true; // stay in plan mode
-      return 'User ne plan reject kiya. Plan revise karo aur '
-          'dobara exit_plan_mode call karo.';
+      return 'The user rejected the plan. Revise it and call exit_plan_mode again.';
     }
     planMode = false;
     _emit('done', 'plan approved ✓ — executing');
-    return 'Plan approved ✓ — ab execute karo.';
+    return 'Plan approved ✓ — now execute it.';
   }
 
   // ── GOALS (DSH goal-round equivalent) ──
@@ -3598,6 +3770,14 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         if (m.name == modeName) child.mode = m;
       }
     }
+    // Pipe the child's internal events into the parent's live subagent
+    // tool card so the user sees what the subagent is doing.
+    child.addListener(() {
+      if (_activeToolMsg != null && child.events.isNotEmpty) {
+        final e = child.events.last;
+        _toolStream('${e.kind}: ${e.text}\n');
+      }
+    });
     child._emit('think', 'subagent task: ${cleanTruncate(prompt, 80)}');
     try {
       final answer = await child.runSubagent(prompt);

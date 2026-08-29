@@ -255,8 +255,8 @@ class SandboxService {
       if (arch == 'unknown') {
         throw Exception(
             'Could not detect device architecture. Phone terminal (General '
-            'mode) phir bhi kaam karega: AI koi bhi toybox command chala '
-            'sakta hai. (${Platform.version})');
+            'mode) still works: the AI can run any toybox command. '
+            '(${Platform.version})');
       }
       final stat = await root.stat();
       onPhase(0, 0.25, 'target dir ........ ${statChanged(stat)} ✓');
@@ -486,7 +486,7 @@ class SandboxService {
       if (missing.isNotEmpty) {
         throw Exception(
             'apt did not install: ${missing.join(", ")}. '
-            'Retry install — agar dobara fail ho to network check karo.');
+            'Retry install — check your network connection and try again.');
       }
       onPhase(5, 1.0, 'toolchain installed ✓');
 
