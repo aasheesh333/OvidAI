@@ -615,10 +615,17 @@ class AgentService extends ChangeNotifier {
       'function': {
         'name': 'run_shell',
         'description':
-            'Run any bash command inside the on-device Ubuntu sandbox. '
-            'Full freedom: ls, cat, python, node, git, npm, curl... '
-            'Commands run in the CURRENT SESSION workspace (/work) — you '
-            'cannot see other sessions\' files.',
+            'Run a shell command. TWO execution tiers depending on the '
+            'user\'s access mode:\n'
+            '• Studio mode → full Ubuntu sandbox (bash, python, node, git, '
+            'npm, gcc — commands run in the session workspace /work).\n'
+            '• Other modes → phone terminal (Android device shell: ls, cat, '
+            'grep, cp, mv, ps, uname, toybox utilities — instant, no '
+            'install).\n'
+            'If a phone-terminal command reports "not found", tell the user '
+            'to switch to Studio mode and install the Ubuntu sandbox for '
+            'full tooling. Commands always run in the CURRENT SESSION '
+            'workspace — you cannot see other sessions\' files.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -1131,6 +1138,14 @@ location, phone/calls, SMS, bluetooth, activity, sensors) — call
 request_permission FIRST with a clear reason. The user approves in-chat,
 then the system dialog appears. Never claim a permission was granted
 without calling the tool. If denied, tell the user and offer alternatives.
+Execution tiers: run_shell adapts to the user's access mode.
+• Studio mode → full Ubuntu sandbox (bash/python/node/git/npm/gcc) in the
+  session workspace /work.
+• Any other mode → instant phone terminal (Android device shell + toybox:
+  ls/cat/grep/cp/mv/ps/uname...). No python/gcc/apt here — if a command
+  is "not found", suggest switching to Studio mode + one-time Ubuntu
+  sandbox install (~320 MB). Provider/plugin/MCP management works the
+  same in every tier via the catalog_* tools.
 ''';
 
     final historyStart = s.messages.length > 12 ? s.messages.length - 12 : 0;
@@ -1584,24 +1599,43 @@ without calling the tool. If denied, tell the user and offer alternatives.
         final ok = await _maybeApprove(
           'run_shell',
           cmd,
-          'Command session workspace me chlega:\n\$ $cmd',
+          'Command ${mode == AgentMode.studio ? "Ubuntu sandbox me" : "phone terminal (device shell) me"} chlega:\n\$ $cmd',
         );
         if (!ok) return 'DENIED by user';
         _emit('shell', cmd);
         try {
           final work = await _sessionWorkDir();
+          if (mode == AgentMode.studio) {
+            // Studio tier — full Ubuntu proot sandbox.
+            final out = await SandboxService.I
+                .exec(['bash', '-lc', cmd], hostWorkDir: work)
+                .timeout(const Duration(seconds: 60));
+            for (final l in const LineSplitter().convert(out.trim())) {
+              _emit('shellOut', l);
+            }
+            return out.isEmpty ? '(no output)' : out;
+          }
+          // Phone terminal tier — device shell, no install needed.
           final out = await SandboxService.I
-              .exec(['bash', '-lc', cmd], hostWorkDir: work)
+              .execHost(cmd, hostWorkDir: work)
               .timeout(const Duration(seconds: 60));
           for (final l in const LineSplitter().convert(out.trim())) {
             _emit('shellOut', l);
           }
-          return out.isEmpty ? '(no output)' : out;
+          final hint = out.contains('not found') || out.contains('not: found')
+              ? '\n\n[phone terminal: sirf Android toybox commands hain — '
+                  'python/gcc/apt ke liye Studio mode me Ubuntu sandbox '
+                  'install karo]'
+              : '';
+          return (out.isEmpty ? '(no output)' : out) + hint;
         } catch (e) {
           // Friendly actionable message — the model relays this to the user.
           if ('$e'.contains('not installed')) {
-            return 'sandbox not installed yet. Tell the user: "Studio kholke '
-                'sandbox install karo (one-time, ~320 MB), phir command chalega."';
+            return mode == AgentMode.studio
+                ? 'sandbox not installed yet. Tell the user: "Studio kholke '
+                    'sandbox install karo (one-time, ~320 MB), phir command '
+                    'chalega."'
+                : 'phone terminal error: $e';
           }
           return 'sandbox error: $e';
         }

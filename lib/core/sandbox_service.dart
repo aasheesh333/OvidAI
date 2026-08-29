@@ -900,6 +900,59 @@ class SandboxService {
     return dir;
   }
 
+  // -----------------------------------------------------------------------
+  // HOST TERMINAL — non-proot phone shell (Termux-style, no install).
+  // -----------------------------------------------------------------------
+
+  /// Runs [cmd] on the DEVICE shell directly (no proot, no Ubuntu rootfs).
+  ///
+  /// This is the "phone terminal" tier: Android's own /system/bin/sh with
+  /// toybox utilities (ls, cp, mv, cat, grep, ps, uname, ping, curl-less
+  /// etc.).  It works instantly in every mode — no sandbox install needed.
+  /// Limits: only toybox commands; no apt/python/gcc (those need the Studio
+  /// proot sandbox).  Commands run in the app's private storage with the
+  /// app's UID, so Android sandbox rules apply (no access outside app dirs
+  /// unless the user granted storage/media permissions).
+  ///
+  /// Returns combined stdout+stderr for the agent.
+  Future<String> execHost(
+    String cmd, {
+    Directory? hostWorkDir,
+    Map<String, String>? env,
+  }) async {
+    final work = hostWorkDir ?? await _ensureRoot();
+    final result = await Process.run(
+      '/system/bin/sh',
+      ['-c', cmd],
+      workingDirectory: work.path,
+      environment: {
+        'HOME': work.path,
+        'TMPDIR': work.path,
+        'PATH': '/system/bin:/system/xbin:/vendor/bin:\$PATH',
+        'TERM': 'xterm-256color',
+        'LANG': 'C.UTF-8',
+        ...?env,
+      },
+      stdoutEncoding: utf8,
+      stderrEncoding: utf8,
+    );
+    final out = '${result.stdout}${result.stderr}';
+    if (result.exitCode != 0 && out.trim().isEmpty) {
+      return '(no output, exit ${result.exitCode})';
+    }
+    return out;
+  }
+
+  /// True if the device shell can run commands at all (probe with `echo`).
+  Future<bool> hostShellAvailable() async {
+    try {
+      final out = await execHost('echo ovid-host-ok');
+      return out.contains('ovid-host-ok');
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Remove a leftover install under EXTERNAL storage from older builds —
   /// it can never work (no symlink/exec on /sdcard) and wastes ~1 GB.
   void _staleExternalCleanup() {
