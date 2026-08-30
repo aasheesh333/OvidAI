@@ -127,7 +127,11 @@ class UsageScreen extends StatelessWidget {
         ..requests += 1
         ..tokensIn += e.promptTokens
         ..tokensOut += e.completionTokens;
-      final cost = _Pricing.estimate(e.model, e.promptTokens, e.completionTokens);
+      final cost = _Pricing.estimate(
+        e.model,
+        e.promptTokens,
+        e.completionTokens,
+      );
       if (cost != null) {
         p
           ..costUsd += cost
@@ -199,16 +203,18 @@ class UsageScreen extends StatelessWidget {
                   borderRadius: BorderRadius.circular(14),
                   border: Border.all(color: Aether.hairline),
                 ),
-                child: Row(children: [
-                  _stat(
-                    'Est. cost',
-                    anyPriced ? _Pricing.fmt(costUsd) : '—',
-                    big: true,
-                  ),
-                  _stat('Today', _fmtTok(todayTokens)),
-                  _stat('Requests', '$reqs'),
-                  _stat('Providers', '${providers.length}'),
-                ]),
+                child: Row(
+                  children: [
+                    _stat(
+                      'Est. cost',
+                      anyPriced ? _Pricing.fmt(costUsd) : '—',
+                      big: true,
+                    ),
+                    _stat('Today', _fmtTok(todayTokens)),
+                    _stat('Requests', '$reqs'),
+                    _stat('Providers', '${providers.length}'),
+                  ],
+                ),
               ),
               if (anyPriced)
                 Padding(
@@ -232,28 +238,30 @@ class UsageScreen extends StatelessWidget {
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: Aether.hairline),
                 ),
-                child: Row(children: [
-                  Icon(
-                    Icons.data_usage_outlined,
-                    size: 15,
-                    color: Aether.textFaint,
-                  ),
-                  const SizedBox(width: 8),
-                  Text('Input · output', style: TextStyle(
-                    fontSize: 11,
-                    color: Aether.textFaint,
-                  )),
-                  const Spacer(),
-                  Text(
-                    '${_fmtTok(tokensIn)} in · ${_fmtTok(tokensOut)} out',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      fontFamily: Aether.mono,
-                      color: Aether.text,
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.data_usage_outlined,
+                      size: 15,
+                      color: Aether.textFaint,
                     ),
-                  ),
-                ]),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Input · output',
+                      style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                    ),
+                    const Spacer(),
+                    Text(
+                      '${_fmtTok(tokensIn)} in · ${_fmtTok(tokensOut)} out',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        fontFamily: Aether.mono,
+                        color: Aether.text,
+                      ),
+                    ),
+                  ],
+                ),
               ),
 
               Padding(
@@ -285,8 +293,7 @@ class UsageScreen extends StatelessWidget {
                   ),
                 )
               else
-                for (final p in providers)
-                  _ProviderTile(provider: p),
+                for (final p in providers) _ProviderTile(provider: p),
 
               if (providers.isNotEmpty)
                 Padding(
@@ -303,19 +310,21 @@ class UsageScreen extends StatelessWidget {
     );
   }
 
-  static String _fmtTok(int n) =>
-      n >= 1000000 ? '${(n / 1000000).toStringAsFixed(2)}M'
-      : n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}K' : '$n';
+  static String _fmtTok(int n) => n >= 1000000
+      ? '${(n / 1000000).toStringAsFixed(2)}M'
+      : n >= 1000
+      ? '${(n / 1000).toStringAsFixed(1)}K'
+      : '$n';
 
   Widget _stat(String label, String value, {bool big = false}) {
     return Expanded(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: TextStyle(
-            fontSize: 10.5,
-            color: Aether.textFaint,
-          )),
+          Text(
+            label,
+            style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+          ),
           const SizedBox(height: 4),
           Text(
             value,
@@ -346,35 +355,31 @@ class _ProviderTile extends StatelessWidget {
         backgroundColor: p.color.withValues(alpha: 0.12),
         child: Icon(p.icon, size: 17, color: p.color),
       ),
-      title: Row(children: [
-        Flexible(
-          child: Text(p.providerName, style: const TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-          )),
-        ),
-        const SizedBox(width: 8),
-        Tag(
-          p.tier,
-          color: Aether.textMuted,
-          filled: false,
-        ),
-      ]),
+      title: Row(
+        children: [
+          Flexible(
+            child: Text(
+              p.providerName,
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Tag(p.tier, color: Aether.textMuted, filled: false),
+        ],
+      ),
       subtitle: Text(
         '${p.requests} requests · ${_fmtK(p.tokensIn)} in · ${_fmtK(p.tokensOut)} out'
         '${p.hasPricedModel ? ' · ≈ ${_Pricing.fmt(p.costUsd)}' : ''}',
         style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
       ),
-      trailing: Icon(Icons.chevron_right,
-          size: 14, color: Aether.textFaint),
+      trailing: Icon(Icons.chevron_right, size: 14, color: Aether.textFaint),
       onTap: () => Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => ProviderUsageScreen(provider: p)),
       ),
     );
   }
 
-  String _fmtK(int n) =>
-      n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}K' : '$n';
+  String _fmtK(int n) => n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}K' : '$n';
 }
 
 /// Detailed per-provider usage screen.
@@ -395,32 +400,38 @@ class ProviderUsageScreen extends StatelessWidget {
           // header
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-            child: Row(children: [
-              CircleAvatar(
-                radius: 24,
-                backgroundColor: p.color.withValues(alpha: 0.12),
-                child: Icon(p.icon, size: 22, color: p.color),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(p.providerName, style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
-                    )),
-                    Text(p.tier, style: TextStyle(
-                      fontSize: 12,
-                      color: Aether.textFaint,
-                    )),
-                    Text('${p.requests} requests',
-                        style: TextStyle(
-                            fontSize: 11, color: Aether.textFaint)),
-                  ],
+            child: Row(
+              children: [
+                CircleAvatar(
+                  radius: 24,
+                  backgroundColor: p.color.withValues(alpha: 0.12),
+                  child: Icon(p.icon, size: 22, color: p.color),
                 ),
-              ),
-            ]),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        p.providerName,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      Text(
+                        p.tier,
+                        style: TextStyle(fontSize: 12, color: Aether.textFaint),
+                      ),
+                      Text(
+                        '${p.requests} requests',
+                        style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
 
           // quick stats
@@ -432,15 +443,17 @@ class ProviderUsageScreen extends StatelessWidget {
               borderRadius: BorderRadius.circular(14),
               border: Border.all(color: Aether.hairline),
             ),
-            child: Row(children: [
-              _cell('Requests', '${p.requests}'),
-              _cell('Tokens in', _fmtK(p.tokensIn)),
-              _cell('Tokens out', _fmtK(p.tokensOut)),
-              _cell(
-                'Est. cost',
-                p.hasPricedModel ? '≈ ${_Pricing.fmt(p.costUsd)}' : '—',
-              ),
-            ]),
+            child: Row(
+              children: [
+                _cell('Requests', '${p.requests}'),
+                _cell('Tokens in', _fmtK(p.tokensIn)),
+                _cell('Tokens out', _fmtK(p.tokensOut)),
+                _cell(
+                  'Est. cost',
+                  p.hasPricedModel ? '≈ ${_Pricing.fmt(p.costUsd)}' : '—',
+                ),
+              ],
+            ),
           ),
 
           const _SectionLabel('LAST 14 DAYS'),
@@ -452,46 +465,52 @@ class ProviderUsageScreen extends StatelessWidget {
               borderRadius: BorderRadius.circular(14),
               border: Border.all(color: Aether.hairline),
             ),
-            child: Column(children: [
-              SizedBox(
-                height: 72,
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    for (final d in daily)
-                      Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 2.5),
-                          child: FractionallySizedBox(
-                            heightFactor: d,
-                            alignment: Alignment.bottomCenter,
-                            child: Container(
-                              decoration: BoxDecoration(
-                                color: p.color.withValues(alpha: 0.35 + d * 0.5),
-                                borderRadius: BorderRadius.circular(3),
+            child: Column(
+              children: [
+                SizedBox(
+                  height: 72,
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      for (final d in daily)
+                        Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 2.5,
+                            ),
+                            child: FractionallySizedBox(
+                              heightFactor: d,
+                              alignment: Alignment.bottomCenter,
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: p.color.withValues(
+                                    alpha: 0.35 + d * 0.5,
+                                  ),
+                                  borderRadius: BorderRadius.circular(3),
+                                ),
                               ),
                             ),
                           ),
                         ),
-                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      '14 days ago',
+                      style: TextStyle(fontSize: 9.5, color: Aether.textFaint),
+                    ),
+                    Text(
+                      'Today',
+                      style: TextStyle(fontSize: 9.5, color: Aether.textFaint),
+                    ),
                   ],
                 ),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text('14 days ago', style: TextStyle(
-                    fontSize: 9.5,
-                    color: Aether.textFaint,
-                  )),
-                  Text('Today', style: TextStyle(
-                    fontSize: 9.5,
-                    color: Aether.textFaint,
-                  )),
-                ],
-              ),
-            ]),
+              ],
+            ),
           ),
 
           const _SectionLabel('PER MODEL'),
@@ -514,29 +533,33 @@ class ProviderUsageScreen extends StatelessWidget {
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(color: Aether.hairline),
               ),
-              child: Column(children: [
-                const _Row(
-                  h: true,
-                  cells: ['MODEL', 'REQ', 'TOKENS', '≈ COST'],
-                  flexes: [5, 2, 3, 3],
-                ),
-                const Divider(height: 12),
-                for (final m in p.models)
-                  _Row(cells: [
-                    m.$1,
-                    '${m.$2}',
-                    _fmtK(m.$3),
-                    _modelCost(p.providerId, m.$1),
-                  ], flexes: const [5, 2, 3, 3]),
-              ]),
+              child: Column(
+                children: [
+                  const _Row(
+                    h: true,
+                    cells: ['MODEL', 'REQ', 'TOKENS', '≈ COST'],
+                    flexes: [5, 2, 3, 3],
+                  ),
+                  const Divider(height: 12),
+                  for (final m in p.models)
+                    _Row(
+                      cells: [
+                        m.$1,
+                        '${m.$2}',
+                        _fmtK(m.$3),
+                        _modelCost(p.providerId, m.$1),
+                      ],
+                      flexes: const [5, 2, 3, 3],
+                    ),
+                ],
+              ),
             ),
         ],
       ),
     );
   }
 
-  String _fmtK(int n) =>
-      n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}K' : '$n';
+  String _fmtK(int n) => n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}K' : '$n';
 
   /// Approx USD cost for ONE model on this provider, computed from the raw
   /// log (per-model in/out split lives there, not in the aggregate tuple).
@@ -553,18 +576,23 @@ class ProviderUsageScreen extends StatelessWidget {
 
   Widget _cell(String label, String value) {
     return Expanded(
-      child: Column(children: [
-        Text(value, style: const TextStyle(
-          fontSize: 15,
-          fontWeight: FontWeight.w700,
-          fontFamily: Aether.mono,
-        )),
-        const SizedBox(height: 3),
-        Text(label, style: TextStyle(
-          fontSize: 10.5,
-          color: Aether.textFaint,
-        )),
-      ]),
+      child: Column(
+        children: [
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              fontFamily: Aether.mono,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            label,
+            style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -574,14 +602,17 @@ class _SectionLabel extends StatelessWidget {
   const _SectionLabel(this.text);
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(18, 16, 18, 8),
-        child: Text(text,
-            style: TextStyle(
-                fontSize: 10.5,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.2,
-                color: Aether.textFaint)),
-      );
+    padding: const EdgeInsets.fromLTRB(18, 16, 18, 8),
+    child: Text(
+      text,
+      style: TextStyle(
+        fontSize: 10.5,
+        fontWeight: FontWeight.w700,
+        letterSpacing: 1.2,
+        color: Aether.textFaint,
+      ),
+    ),
+  );
 }
 
 class _Row extends StatelessWidget {
@@ -593,11 +624,13 @@ class _Row extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(children: [
-        for (var i = 0; i < cells.length; i++)
-          Expanded(
-            flex: flexes[i],
-            child: Text(cells[i],
+      child: Row(
+        children: [
+          for (var i = 0; i < cells.length; i++)
+            Expanded(
+              flex: flexes[i],
+              child: Text(
+                cells[i],
                 overflow: TextOverflow.ellipsis,
                 textAlign: i == 0 ? TextAlign.left : TextAlign.right,
                 style: TextStyle(
@@ -606,9 +639,11 @@ class _Row extends StatelessWidget {
                   fontWeight: h ? FontWeight.w700 : FontWeight.w400,
                   letterSpacing: h ? 1.1 : 0,
                   color: h ? Aether.textFaint : Aether.text,
-                )),
-          ),
-      ]),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

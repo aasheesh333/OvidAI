@@ -542,14 +542,16 @@ void main() {
   // ── PR1 regression tests ──────────────────────────────────────────────
 
   group('PR1: quick fixes', () {
-    test('cleanReasoningText strips think wrapper tags and zero-width chars',
-        () {
-      const raw = '<think>some thinking here</think> rest';
-      final cleaned = cleanReasoningText(raw);
-      expect(cleaned, contains('some thinking here'));
-      expect(cleaned, isNot(contains('<think>')));
-      expect(cleaned, isNot(contains('</think>')));
-    });
+    test(
+      'cleanReasoningText strips think wrapper tags and zero-width chars',
+      () {
+        const raw = '<think>some thinking here</think> rest';
+        final cleaned = cleanReasoningText(raw);
+        expect(cleaned, contains('some thinking here'));
+        expect(cleaned, isNot(contains('<think>')));
+        expect(cleaned, isNot(contains('</think>')));
+      },
+    );
 
     test('cleanTruncate respects max length and appends ellipsis', () {
       final long = 'a' * 1000;
@@ -576,29 +578,30 @@ void main() {
     });
 
     test(
-        'model picker should only show providers with API keys (hasKey filter)',
-        () {
-      final provider = app.providerById('openai')!;
-      final originalKey = provider.apiKey;
-      provider
-        ..apiKey = ''
-        ..models = ['gpt-4o'];
+      'model picker should only show providers with API keys (hasKey filter)',
+      () {
+        final provider = app.providerById('openai')!;
+        final originalKey = provider.apiKey;
+        provider
+          ..apiKey = ''
+          ..models = ['gpt-4o'];
 
-      // Provider has models but no key — should be excluded from configured.
-      final configured = app.providers
-          .where((p) => p.hasKey && p.models.isNotEmpty)
-          .toList();
-      expect(configured.any((p) => p.id == 'openai'), isFalse);
+        // Provider has models but no key — should be excluded from configured.
+        final configured = app.providers
+            .where((p) => p.hasKey && p.models.isNotEmpty)
+            .toList();
+        expect(configured.any((p) => p.id == 'openai'), isFalse);
 
-      // Add key — now should be included.
-      provider.apiKey = 'sk-test';
-      final configured2 = app.providers
-          .where((p) => p.hasKey && p.models.isNotEmpty)
-          .toList();
-      expect(configured2.any((p) => p.id == 'openai'), isTrue);
+        // Add key — now should be included.
+        provider.apiKey = 'sk-test';
+        final configured2 = app.providers
+            .where((p) => p.hasKey && p.models.isNotEmpty)
+            .toList();
+        expect(configured2.any((p) => p.id == 'openai'), isTrue);
 
-      provider.apiKey = originalKey;
-    });
+        provider.apiKey = originalKey;
+      },
+    );
   });
 
   // ── PR3 regression tests: queue, cancel, auto-run-next ────────────────
@@ -670,11 +673,7 @@ void main() {
       expect(s.custom, isTrue);
 
       // Update via the edit path.
-      app.updateCustomMcpServer(
-        s,
-        command: 'uvx',
-        args: ['test-mcp'],
-      );
+      app.updateCustomMcpServer(s, command: 'uvx', args: ['test-mcp']);
       expect(s.command, 'uvx');
       expect(s.args, ['test-mcp']);
 
@@ -692,26 +691,30 @@ void main() {
 
     test('usage log: append persists and aggregates', () async {
       final before = app.usageLog.length;
-      app.appendUsage(UsageEntry(
-        time: DateTime.now(),
-        providerId: 'openai',
-        providerName: 'OpenAI',
-        model: 'gpt-4o',
-        promptTokens: 100,
-        completionTokens: 50,
-        totalTokens: 150,
-        duration: const Duration(milliseconds: 500),
-      ));
-      app.appendUsage(UsageEntry(
-        time: DateTime.now(),
-        providerId: 'openai',
-        providerName: 'OpenAI',
-        model: 'gpt-4o',
-        promptTokens: 200,
-        completionTokens: 100,
-        totalTokens: 300,
-        duration: const Duration(milliseconds: 700),
-      ));
+      app.appendUsage(
+        UsageEntry(
+          time: DateTime.now(),
+          providerId: 'openai',
+          providerName: 'OpenAI',
+          model: 'gpt-4o',
+          promptTokens: 100,
+          completionTokens: 50,
+          totalTokens: 150,
+          duration: const Duration(milliseconds: 500),
+        ),
+      );
+      app.appendUsage(
+        UsageEntry(
+          time: DateTime.now(),
+          providerId: 'openai',
+          providerName: 'OpenAI',
+          model: 'gpt-4o',
+          promptTokens: 200,
+          completionTokens: 100,
+          totalTokens: 300,
+          duration: const Duration(milliseconds: 700),
+        ),
+      );
       expect(app.usageLog.length, before + 2);
 
       // Daily activity should be non-degenerate after entries.
@@ -760,16 +763,18 @@ void main() {
       expect(app2.responseTimeoutSec, inInclusiveRange(5, 3600));
     });
 
-    test('AgentMode labels match DSH (Read-Only/General/Full Access/Studio)',
-        () {
-      expect(AgentMode.safe.label, 'Read-Only');
-      expect(AgentMode.auto.label, 'General');
-      expect(AgentMode.drive.label, 'Full Access');
-      expect(AgentMode.studio.label, 'Studio');
-      expect(AgentMode.values.length, 4);
-      // Studio auto-approves everything except commit.
-      expect(AgentMode.studio.hint, contains('Studio'));
-    });
+    test(
+      'AgentMode labels match DSH (Read-Only/General/Full Access/Studio)',
+      () {
+        expect(AgentMode.safe.label, 'Read-Only');
+        expect(AgentMode.auto.label, 'General');
+        expect(AgentMode.drive.label, 'Full Access');
+        expect(AgentMode.studio.label, 'Studio');
+        expect(AgentMode.values.length, 4);
+        // Studio auto-approves everything except commit.
+        expect(AgentMode.studio.hint, contains('Studio'));
+      },
+    );
 
     test('Studio open-file tabs: open/close/select', () {
       final a = AgentService.I;
@@ -820,7 +825,11 @@ void main() {
       expect(back.sandboxId, 'idA');
 
       // Old JSON without sandboxId → falls back to id (migration path).
-      final legacy = ChatSession.fromJson({'id': 'old', 'title': 't', 'model': 'm'});
+      final legacy = ChatSession.fromJson({
+        'id': 'old',
+        'title': 't',
+        'model': 'm',
+      });
       expect(legacy.sandboxId, 'old');
     });
 
@@ -890,7 +899,10 @@ void main() {
       a.closeBrowserTab(a.browserTabs.length - 1);
       // Either back to initialCount, or a fresh default tab was recreated
       // (closeBrowserTab always keeps one tab alive).
-      expect(a.browserTabs.length, anyOf(initialCount, initialCount == 0 ? 1 : initialCount));
+      expect(
+        a.browserTabs.length,
+        anyOf(initialCount, initialCount == 0 ? 1 : initialCount),
+      );
     });
 
     test('run_shell tool mentions the per-session workspace', () {
@@ -914,7 +926,8 @@ void main() {
       // Direct string checks mirroring _deviceArch logic:
       String archOf(String v) {
         final l = v.toLowerCase();
-        if (l.contains('android_arm64') || l.contains('aarch64') ||
+        if (l.contains('android_arm64') ||
+            l.contains('aarch64') ||
             l.contains('x86_64')) {
           return 'arm64';
         }
@@ -951,8 +964,25 @@ void main() {
       expect(restored.toolName, 'run_shell');
       expect(restored.toolState, 'ok');
       expect(restored.toolDetail, contains('drwxr'));
-      final tail = Message(role: 'assistant', kind: MsgKind.turnTail, content: '2.4s');
+      final tail = Message(
+        role: 'assistant',
+        kind: MsgKind.turnTail,
+        content: '2.4s',
+      );
       expect(Message.fromJson(tail.toJson()).kind, MsgKind.turnTail);
+    });
+
+    test('MsgKind.compact row round-trips through JSON (DSH transcript)', () {
+      final c = Message(
+        role: 'assistant',
+        kind: MsgKind.compact,
+        content: 'Context compacted · 24 messages (~31.4K tokens)',
+        toolDetail: '## Summary\n…',
+      );
+      final r = Message.fromJson(c.toJson());
+      expect(r.kind, MsgKind.compact);
+      expect(r.content, contains('Context compacted'));
+      expect(r.toolDetail, contains('Summary'));
     });
 
     test('tool icon + title mapping (DSH ToolRow parity)', () {
@@ -967,30 +997,37 @@ void main() {
       expect(AgentService.toolTitleFor('dispatch_agent'), 'Subagent');
     });
 
-    test('per-model context windows (DSH compaction parity, all providers)',
-        () {
-      // Known families → their declared windows.
-      expect(AgentService.contextWindowFor('deepseek-chat'), 128000);
-      expect(AgentService.contextWindowFor('deepseek-reasoner'), 128000);
-      expect(AgentService.contextWindowFor('gpt-4o'), 128000);
-      expect(AgentService.contextWindowFor('gpt-4.1'), 1048576);
-      expect(AgentService.contextWindowFor('claude-opus-4-20250514'), 200000);
-      expect(AgentService.contextWindowFor('gemini-2.5-flash'), 1048576);
-      expect(AgentService.contextWindowFor('grok-3'), 256000);
-      expect(AgentService.contextWindowFor('nvidia/nemotron-3-super'), 1048576);
-      // Variant suffixes (· Medium) fall back to the base model window.
-      expect(AgentService.contextWindowFor('deepseek-chat · High'), 128000);
-      // Custom-provider / unknown models get the DSH 1M default.
-      expect(AgentService.contextWindowFor('my-custom-model-x1'), 1000000);
-      expect(AgentService.contextWindowFor(''), 1000000);
-    });
+    test(
+      'per-model context windows (DSH compaction parity, all providers)',
+      () {
+        // Known families → their declared windows.
+        expect(AgentService.contextWindowFor('deepseek-chat'), 128000);
+        expect(AgentService.contextWindowFor('deepseek-reasoner'), 128000);
+        expect(AgentService.contextWindowFor('gpt-4o'), 128000);
+        expect(AgentService.contextWindowFor('gpt-4.1'), 1048576);
+        expect(AgentService.contextWindowFor('claude-opus-4-20250514'), 200000);
+        expect(AgentService.contextWindowFor('gemini-2.5-flash'), 1048576);
+        expect(AgentService.contextWindowFor('grok-3'), 256000);
+        expect(
+          AgentService.contextWindowFor('nvidia/nemotron-3-super'),
+          1048576,
+        );
+        // Variant suffixes (· Medium) fall back to the base model window.
+        expect(AgentService.contextWindowFor('deepseek-chat · High'), 128000);
+        // Custom-provider / unknown models get the DSH 1M default.
+        expect(AgentService.contextWindowFor('my-custom-model-x1'), 1000000);
+        expect(AgentService.contextWindowFor(''), 1000000);
+      },
+    );
 
-    test('token estimate heuristic (DSH token-meter: 4 chars/token + overhead)',
-        () {
-      expect(AgentService.estimateMessageTokens(''), 4);
-      expect(AgentService.estimateMessageTokens('a' * 100), 29);
-      expect(AgentService.estimateMessageTokens('x' * 400000), 100004);
-    });
+    test(
+      'token estimate heuristic (DSH token-meter: 4 chars/token + overhead)',
+      () {
+        expect(AgentService.estimateMessageTokens(''), 4);
+        expect(AgentService.estimateMessageTokens('a' * 100), 29);
+        expect(AgentService.estimateMessageTokens('x' * 400000), 100004);
+      },
+    );
     test('ChatSession.goal round-trips through JSON', () {
       final s = ChatSession(id: 'g1', title: 't', model: 'm');
       s.goal = {
@@ -1138,11 +1175,22 @@ void main() {
       archive.addFile(ArchiveFile.directory('lib/apt/methods/'));
       // Regular files inside those dirs.
       archive.addFile(ArchiveFile.bytes('bin/bash', utf8.encode('#!/bin/sh')));
-      archive.addFile(ArchiveFile.bytes('etc/apt/sources.list', utf8.encode('deb https://termux.org')));
-      archive.addFile(ArchiveFile.bytes('lib/apt/methods/http', utf8.encode('http-method')));
+      archive.addFile(
+        ArchiveFile.bytes(
+          'etc/apt/sources.list',
+          utf8.encode('deb https://termux.org'),
+        ),
+      );
+      archive.addFile(
+        ArchiveFile.bytes('lib/apt/methods/http', utf8.encode('http-method')),
+      );
       // SYMLINKS.txt — should be skipped during extraction.
-      archive.addFile(ArchiveFile.string('SYMLINKS.txt',
-          '/data/data/com.termux/files/usr/bin/dash←bin/sh\n'));
+      archive.addFile(
+        ArchiveFile.string(
+          'SYMLINKS.txt',
+          '/data/data/com.termux/files/usr/bin/dash←bin/sh\n',
+        ),
+      );
 
       final staging = Directory.systemTemp.createTempSync('ovid_extract_test');
       try {
@@ -1152,11 +1200,16 @@ void main() {
         // Directory entries created as dirs, not files.
         expect(Directory('${staging.path}/bin').existsSync(), isTrue);
         expect(Directory('${staging.path}/etc').existsSync(), isTrue);
-        expect(Directory('${staging.path}/lib/apt/methods').existsSync(), isTrue);
+        expect(
+          Directory('${staging.path}/lib/apt/methods').existsSync(),
+          isTrue,
+        );
         // Files extracted correctly.
         expect(File('${staging.path}/bin/bash').existsSync(), isTrue);
-        expect(File('${staging.path}/etc/apt/sources.list').readAsStringSync(),
-            'deb https://termux.org');
+        expect(
+          File('${staging.path}/etc/apt/sources.list').readAsStringSync(),
+          'deb https://termux.org',
+        );
         // SYMLINKS.txt NOT extracted to disk.
         expect(File('${staging.path}/SYMLINKS.txt').existsSync(), isFalse);
       } finally {
@@ -1166,10 +1219,12 @@ void main() {
 
     test('sandbox parseSymlinks: Termux format target←linkPath', () {
       final archive = Archive();
-      archive.addFile(ArchiveFile.string('SYMLINKS.txt', '''
+      archive.addFile(
+        ArchiveFile.string('SYMLINKS.txt', '''
 /data/data/com.termux/files/usr/bin/dash←bin/sh
 /data/data/com.termux/files/usr/bin/busybox←bin/busybox
-'''));
+'''),
+      );
       final list = SandboxService.parseSymlinks(archive);
       expect(list.length, 2);
       expect(list[0].target, '/data/data/com.termux/files/usr/bin/dash');
@@ -1182,27 +1237,41 @@ void main() {
     // has 1177 lines but only 220 unique targets (coreutils alone is the
     // target of 100 bin/ links).  A Map collapsed them to 220 entries,
     // breaking ls/cp/mv/etc.  The list must preserve EVERY line.
-    test('sandbox parseSymlinks: duplicate targets preserved (Map→List fix)', () {
-      final archive = Archive();
-      archive.addFile(ArchiveFile.string('SYMLINKS.txt', '''
+    test(
+      'sandbox parseSymlinks: duplicate targets preserved (Map→List fix)',
+      () {
+        final archive = Archive();
+        archive.addFile(
+          ArchiveFile.string('SYMLINKS.txt', '''
 coreutils←./bin/ls
 coreutils←./bin/cp
 coreutils←./bin/mv
 coreutils←./bin/cat
 libncursesw.so.6.5←./lib/libtinfo.so
 libncursesw.so.6.5←./lib/libncurses.so.6
-'''));
-      final list = SandboxService.parseSymlinks(archive);
-      // ALL 6 entries must survive — not just 2 unique targets.
-      expect(list.length, 6);
-      final links = list.map((s) => s.linkPath).toSet();
-      expect(links, containsAll(['./bin/ls', './bin/cp', './bin/mv', './bin/cat',
-                                 './lib/libtinfo.so', './lib/libncurses.so.6']));
-      // Every entry's target is coreutils or libncursesw.so.6.5.
-      for (final s in list) {
-        expect(s.target, anyOf('coreutils', 'libncursesw.so.6.5'));
-      }
-    });
+'''),
+        );
+        final list = SandboxService.parseSymlinks(archive);
+        // ALL 6 entries must survive — not just 2 unique targets.
+        expect(list.length, 6);
+        final links = list.map((s) => s.linkPath).toSet();
+        expect(
+          links,
+          containsAll([
+            './bin/ls',
+            './bin/cp',
+            './bin/mv',
+            './bin/cat',
+            './lib/libtinfo.so',
+            './lib/libncurses.so.6',
+          ]),
+        );
+        // Every entry's target is coreutils or libncursesw.so.6.5.
+        for (final s in list) {
+          expect(s.target, anyOf('coreutils', 'libncursesw.so.6.5'));
+        }
+      },
+    );
 
     // ── PR10: working MCP/plugins + first-launch setup + per-session state ──
 
@@ -1212,22 +1281,26 @@ libncursesw.so.6.5←./lib/libncurses.so.6
     // fails loudly when the sandbox isn't there.  Here: the catalog tool
     // result must reflect the REAL connection state (unavailable sandbox
     // → explicit failure, never a fake ✓).
-    test('agent_install_mcp reports real connect result (no bool-flip)', () async {
-      final app = AppState.I;
-      final s = app.mcpServers.firstWhere(
+    test(
+      'agent_install_mcp reports real connect result (no bool-flip)',
+      () async {
+        final app = AppState.I;
+        final s = app.mcpServers.firstWhere(
           (m) => m.name == 'Filesystem',
-          orElse: () => app.mcpServers.first);
-      final wasConnected = s.connected;
-      try {
-        // McpService.connect with no sandbox → returns 'connect failed: …'
-        final res = await McpService.I.connect(s);
-        expect(res.toLowerCase(), contains('failed'));
-        // And the server is NOT marked connected.
-        expect(McpService.I.isConnected(s.name), isFalse);
-      } finally {
-        s.connected = wasConnected;
-      }
-    });
+          orElse: () => app.mcpServers.first,
+        );
+        final wasConnected = s.connected;
+        try {
+          // McpService.connect with no sandbox → returns 'connect failed: …'
+          final res = await McpService.I.connect(s);
+          expect(res.toLowerCase(), contains('failed'));
+          // And the server is NOT marked connected.
+          expect(McpService.I.isConnected(s.name), isFalse);
+        } finally {
+          s.connected = wasConnected;
+        }
+      },
+    );
 
     // Regression: custom MCP servers used to vanish on restart (no
     // persistence).  The fix persists them; here we verify the save/load
@@ -1245,9 +1318,12 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       final prefs = await SharedPreferences.getInstance();
       final saved = prefs.getStringList('ovid_custom_mcp_servers_v1');
       expect(saved, isNotNull);
-      expect(saved!.any((j) => (jsonDecode(j)
-              as Map<String, dynamic>)['name'] == name),
-          isTrue);
+      expect(
+        saved!.any(
+          (j) => (jsonDecode(j) as Map<String, dynamic>)['name'] == name,
+        ),
+        isTrue,
+      );
       // Clean up (also exercises remove persistence).
       final added = app.mcpServers.firstWhere((s) => s.name == name);
       app.removeMcpServer(added);
@@ -1287,7 +1363,10 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       final app = AppState.I;
       const name = 'test-custom-plugin-x1';
       app.addCustomPlugin(
-          name: name, description: 'A test plugin', category: 'Tool');
+        name: name,
+        description: 'A test plugin',
+        category: 'Tool',
+      );
       expect(app.plugins.any((p) => p.name == name), isTrue);
       final created = app.plugins.firstWhere((p) => p.name == name);
       expect(created.installed, isTrue);
@@ -1297,9 +1376,11 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       final saved = prefs.getStringList('ovid_custom_plugins_v1');
       expect(saved, isNotNull);
       expect(
-          saved!.any((j) =>
-              (jsonDecode(j) as Map<String, dynamic>)['name'] == name),
-          isTrue);
+        saved!.any(
+          (j) => (jsonDecode(j) as Map<String, dynamic>)['name'] == name,
+        ),
+        isTrue,
+      );
       // Clean up.
       app.plugins.removeWhere((p) => p.name == name);
       await app.persistPluginState();
@@ -1318,16 +1399,20 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       try {
         app.setRepoForSession(s.id, 'user/repo-a');
         expect(app.getRepoForSession(s.id), 'user/repo-a');
-        expect(app.getRepoForSession(s.id, fallback: 'global/repo'),
-            'user/repo-a'); // session wins
+        expect(
+          app.getRepoForSession(s.id, fallback: 'global/repo'),
+          'user/repo-a',
+        ); // session wins
         // Persisted through ChatSession.toJson.
         expect(s.toJson()['repo'], 'user/repo-a');
         // Another session (no repo of its own) falls back to the global.
         final s2 = app.sessions[1];
         final old2 = s2.repo;
         s2.repo = null; // ensure fallback path
-        expect(app.getRepoForSession(s2.id, fallback: 'global/repo'),
-            'global/repo');
+        expect(
+          app.getRepoForSession(s2.id, fallback: 'global/repo'),
+          'global/repo',
+        );
         s2.repo = old2;
       } finally {
         s.repo = old;
@@ -1338,14 +1423,21 @@ libncursesw.so.6.5←./lib/libncurses.so.6
     // still deserialize — migration path).
     test('ChatSession.repo: JSON round-trip + legacy migration', () {
       final s = ChatSession(
-          id: 'r1', title: 't', model: 'm', repo: 'user/repo-b');
+        id: 'r1',
+        title: 't',
+        model: 'm',
+        repo: 'user/repo-b',
+      );
       final j = s.toJson();
       expect(j['repo'], 'user/repo-b');
       final back = ChatSession.fromJson(j);
       expect(back.repo, 'user/repo-b');
       // Legacy JSON without repo → null (falls back to global at use site).
-      final legacy = ChatSession.fromJson(
-          {'id': 'r2', 'title': 't', 'model': 'm'});
+      final legacy = ChatSession.fromJson({
+        'id': 'r2',
+        'title': 't',
+        'model': 'm',
+      });
       expect(legacy.repo, isNull);
     });
 
@@ -1421,35 +1513,41 @@ libncursesw.so.6.5←./lib/libncurses.so.6
     // attachFile copies into the session workspace and stages a
     // pendingAttachment; clearAttachment resets it. Oversize/missing files
     // return an error string (never throw).
-    test('attachFile: stages, copies to workspace, clears; errors safe', () async {
-      final agent = AgentService.I;
-      final tmp = Directory.systemTemp.createTempSync('ovid_att');
-      // Unique name per run — the session workspace persists across tests,
-      // and attachFile de-dupes by suffixing when the name already exists.
-      final unique = 'notes_${DateTime.now().microsecondsSinceEpoch}.txt';
-      try {
-        final src = File('${tmp.path}/$unique')
-          ..writeAsStringSync('hello attachment');
-        final err = await agent.attachFile(src.path, unique);
-        expect(err, isNull);
-        final att = agent.pendingAttachment;
-        expect(att, isNotNull);
-        expect(att!.name, unique);
-        expect(att.size, greaterThan(0));
-        // The file was copied INTO the session workspace (different path).
-        expect(att.path, isNot(src.path));
-        expect(File(att.path).existsSync(), isTrue);
-        // Clear resets.
-        agent.clearAttachment();
-        expect(agent.pendingAttachment, isNull);
-        // Missing file → error string, no throw.
-        final missing = await agent.attachFile('${tmp.path}/nope.xyz', 'nope.xyz');
-        expect(missing, isNotNull);
-        expect(agent.pendingAttachment, isNull);
-      } finally {
-        tmp.deleteSync(recursive: true);
-        agent.clearAttachment();
-      }
-    });
+    test(
+      'attachFile: stages, copies to workspace, clears; errors safe',
+      () async {
+        final agent = AgentService.I;
+        final tmp = Directory.systemTemp.createTempSync('ovid_att');
+        // Unique name per run — the session workspace persists across tests,
+        // and attachFile de-dupes by suffixing when the name already exists.
+        final unique = 'notes_${DateTime.now().microsecondsSinceEpoch}.txt';
+        try {
+          final src = File('${tmp.path}/$unique')
+            ..writeAsStringSync('hello attachment');
+          final err = await agent.attachFile(src.path, unique);
+          expect(err, isNull);
+          final att = agent.pendingAttachment;
+          expect(att, isNotNull);
+          expect(att!.name, unique);
+          expect(att.size, greaterThan(0));
+          // The file was copied INTO the session workspace (different path).
+          expect(att.path, isNot(src.path));
+          expect(File(att.path).existsSync(), isTrue);
+          // Clear resets.
+          agent.clearAttachment();
+          expect(agent.pendingAttachment, isNull);
+          // Missing file → error string, no throw.
+          final missing = await agent.attachFile(
+            '${tmp.path}/nope.xyz',
+            'nope.xyz',
+          );
+          expect(missing, isNotNull);
+          expect(agent.pendingAttachment, isNull);
+        } finally {
+          tmp.deleteSync(recursive: true);
+          agent.clearAttachment();
+        }
+      },
+    );
   });
 }

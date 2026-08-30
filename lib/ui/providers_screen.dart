@@ -362,10 +362,7 @@ class _ProviderCardState extends State<ProviderCard> {
               decoration: InputDecoration(
                 hintText: 'Base URL',
                 helperText: provider.custom ? null : 'Inbuilt — locked',
-                helperStyle: TextStyle(
-                  fontSize: 10,
-                  color: Aether.textFaint,
-                ),
+                helperStyle: TextStyle(fontSize: 10, color: Aether.textFaint),
                 suffixIcon: provider.custom
                     ? null
                     : Icon(
@@ -458,16 +455,16 @@ class _ProviderCardState extends State<ProviderCard> {
                     } catch (e) {
                       String msg;
                       if (e is FormatException &&
-                          e.message
-                              .contains('Invalid HTTP header field value')) {
-                        msg = 'API key looks invalid (contains whitespace or '
+                          e.message.contains(
+                            'Invalid HTTP header field value',
+                          )) {
+                        msg =
+                            'API key looks invalid (contains whitespace or '
                             'extra text). Please re-enter your key.';
                       } else {
                         msg = 'Fetch failed: $e';
                       }
-                      messenger.showSnackBar(
-                        SnackBar(content: Text(msg)),
-                      );
+                      messenger.showSnackBar(SnackBar(content: Text(msg)));
                     }
                   },
                 ),
@@ -540,10 +537,7 @@ class _ProviderCardState extends State<ProviderCard> {
                   Expanded(
                     child: Text(
                       '${provider.models.length} models available',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        color: Aether.textFaint,
-                      ),
+                      style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
                     ),
                   ),
               ],

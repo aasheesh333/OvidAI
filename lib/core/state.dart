@@ -48,8 +48,7 @@ class ProviderConfig {
   /// user accidentally pasted a multi-line blob (e.g. an error message)
   /// into the key field, which would cause a [FormatException] from
   /// the HTTP layer ("Invalid HTTP header field value").
-  String get cleanApiKey =>
-      apiKey.replaceAll(RegExp(r'[\s\x00-\x1f\x7f]'), '');
+  String get cleanApiKey => apiKey.replaceAll(RegExp(r'[\s\x00-\x1f\x7f]'), '');
 
   Map<String, dynamic> toPersistedJson() => {
     'id': id,
@@ -94,26 +93,26 @@ class UsageEntry {
   });
 
   Map<String, dynamic> toJson() => {
-        't': time.toIso8601String(),
-        'pid': providerId,
-        'pn': providerName,
-        'm': model,
-        'pt': promptTokens,
-        'ct': completionTokens,
-        'tt': totalTokens,
-        'd': duration.inMilliseconds,
-      };
+    't': time.toIso8601String(),
+    'pid': providerId,
+    'pn': providerName,
+    'm': model,
+    'pt': promptTokens,
+    'ct': completionTokens,
+    'tt': totalTokens,
+    'd': duration.inMilliseconds,
+  };
 
   factory UsageEntry.fromJson(Map<String, dynamic> j) => UsageEntry(
-        time: DateTime.tryParse(j['t'] as String? ?? '') ?? DateTime.now(),
-        providerId: j['pid'] as String? ?? '',
-        providerName: j['pn'] as String? ?? '',
-        model: j['m'] as String? ?? '',
-        promptTokens: j['pt'] as int? ?? 0,
-        completionTokens: j['ct'] as int? ?? 0,
-        totalTokens: j['tt'] as int? ?? 0,
-        duration: Duration(milliseconds: j['d'] as int? ?? 0),
-      );
+    time: DateTime.tryParse(j['t'] as String? ?? '') ?? DateTime.now(),
+    providerId: j['pid'] as String? ?? '',
+    providerName: j['pn'] as String? ?? '',
+    model: j['m'] as String? ?? '',
+    promptTokens: j['pt'] as int? ?? 0,
+    completionTokens: j['ct'] as int? ?? 0,
+    totalTokens: j['tt'] as int? ?? 0,
+    duration: Duration(milliseconds: j['d'] as int? ?? 0),
+  );
 }
 
 class PluginItem {
@@ -166,7 +165,7 @@ class McpServer {
   });
 }
 
-enum MsgKind { text, code, imageGen, reasoning, tool, turnTail }
+enum MsgKind { text, code, imageGen, reasoning, tool, turnTail, compact }
 
 class Message {
   final String role; // 'user' | 'assistant'
@@ -180,13 +179,17 @@ class Message {
   // ── Tool-card fields (MsgKind.tool) — DSH ToolRow parity ──
   /// Tool name ('run_shell', 'fs_edit', 'dispatch_agent', …).
   final String? toolName;
+
   /// One-line title shown on the collapsed row ("bash", "Edit lib/x.dart").
   String? toolTitle;
+
   /// Ellipsized summary on the collapsed row (command / path / output line).
   String? toolSummary;
+
   /// Full detail body (command + output / diff / result) for the expanded
   /// state.  Mutated while the tool streams output.
   String? toolDetail;
+
   /// running | ok | error | stopped — drives the row's state dot + sweep.
   String toolState;
 
@@ -246,20 +249,20 @@ class MemoryItem {
   final String content;
   final DateTime createdAt;
   MemoryItem({required this.id, required this.content, DateTime? createdAt})
-      : createdAt = createdAt ?? DateTime.now();
+    : createdAt = createdAt ?? DateTime.now();
 
   factory MemoryItem.fromJson(Map<String, dynamic> j) => MemoryItem(
-        id: j['id'] as String,
-        content: j['content'] as String,
-        createdAt: DateTime.tryParse(j['createdAt'] as String? ?? '') ??
-            DateTime.now(),
-      );
+    id: j['id'] as String,
+    content: j['content'] as String,
+    createdAt:
+        DateTime.tryParse(j['createdAt'] as String? ?? '') ?? DateTime.now(),
+  );
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'content': content,
-        'createdAt': createdAt.toIso8601String(),
-      };
+    'id': id,
+    'content': content,
+    'createdAt': createdAt.toIso8601String(),
+  };
 }
 
 class ChatSession {
@@ -342,11 +345,13 @@ class ChatSession {
             ?.map((m) => Message.fromJson(m as Map<String, dynamic>))
             .toList() ??
         [],
-    todos: (j['todos'] as List?)
+    todos:
+        (j['todos'] as List?)
             ?.map((t) => Map<String, String>.from(t as Map))
             .toList() ??
         [],
-    schedules: (j['schedules'] as List?)
+    schedules:
+        (j['schedules'] as List?)
             ?.map((t) => Map<String, dynamic>.from(t as Map))
             .toList() ??
         [],
@@ -400,17 +405,21 @@ class AppState extends ChangeNotifier {
     await _loadPluginState();
     // Check if the sandbox was installed on a previous launch so the
     // user is never asked to re-install the ~200 MB rootfs.
-     if (await SandboxService.I.checkExisting()) {
+    if (await SandboxService.I.checkExisting()) {
       sandboxInstalled = true;
     }
     try {
       final prefs = await SharedPreferences.getInstance();
       final t = prefs.getInt(_kResponseTimeout);
       if (t != null && t >= 5 && t <= 3600) responseTimeoutSec = t;
+      contextWindowOverride = prefs.getInt(_kContextWindowOverride) ?? 0;
+      maxOutputTokens = prefs.getInt(_kMaxOutputTokens) ?? 0;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
       lightTheme = prefs.getBool(_kTheme) ?? false;
-      chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0)
-          .clamp(chatFontScaleMin, chatFontScaleMax);
+      chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0).clamp(
+        chatFontScaleMin,
+        chatFontScaleMax,
+      );
       await _loadMemories();
     } catch (_) {}
   }
@@ -610,7 +619,6 @@ class AppState extends ChangeNotifier {
     } catch (_) {}
   }
 
-
   /// Toggle and persist. The app shell listens and rebuilds the whole
   /// tree so every Aether.* getter resolves to the new palette.
   Future<void> setLightTheme(bool v) async {
@@ -636,6 +644,37 @@ class AppState extends ChangeNotifier {
   static const _kResponseTimeout = 'ovid_response_timeout_sec';
   int responseTimeoutSec = 120;
   static const timeoutPresets = [60, 120, 300, 600];
+
+  // ── Context window + output caps (user-configurable, DSH settings) ─
+  /// 0 = auto (per-model table, 1M fallback).  Any positive value is the
+  /// user's explicit override for the ACTIVE model's context window —
+  /// used by compaction pressure and the "% of context" ring.  Never a
+  /// random value: auto unless the user picked a number in Settings.
+  static const _kContextWindowOverride = 'ovid_context_window_override';
+  int contextWindowOverride = 0;
+
+  /// 0 = auto (no max_tokens field sent).  Positive = max completion
+  /// tokens requested from the provider.
+  static const _kMaxOutputTokens = 'ovid_max_output_tokens';
+  int maxOutputTokens = 0;
+
+  Future<void> setContextWindowOverride(int tokens) async {
+    contextWindowOverride = tokens;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_kContextWindowOverride, tokens);
+    } catch (_) {}
+  }
+
+  Future<void> setMaxOutputTokens(int tokens) async {
+    maxOutputTokens = tokens;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_kMaxOutputTokens, tokens);
+    } catch (_) {}
+  }
 
   Future<void> setResponseTimeout(int sec) async {
     responseTimeoutSec = sec;
@@ -665,7 +704,9 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
-          _kMemories, jsonEncode(memories.map((e) => e.toJson()).toList()));
+        _kMemories,
+        jsonEncode(memories.map((e) => e.toJson()).toList()),
+      );
     } catch (_) {}
   }
 
@@ -677,7 +718,9 @@ class AppState extends ChangeNotifier {
       final list = jsonDecode(raw) as List;
       memories
         ..clear()
-        ..addAll(list.map((e) => MemoryItem.fromJson(e as Map<String, dynamic>)));
+        ..addAll(
+          list.map((e) => MemoryItem.fromJson(e as Map<String, dynamic>)),
+        );
     } catch (_) {}
   }
 
@@ -720,7 +763,9 @@ class AppState extends ChangeNotifier {
     final session = ChatSession(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       title: 'New chat',
-      model: lastSelectedModel.isEmpty ? 'Select a provider' : lastSelectedModel,
+      model: lastSelectedModel.isEmpty
+          ? 'Select a provider'
+          : lastSelectedModel,
     );
     if (lastSelectedModel.isNotEmpty) {
       session.providerId =
@@ -755,7 +800,9 @@ class AppState extends ChangeNotifier {
     final s = ChatSession(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       title: 'New chat',
-      model: lastSelectedModel.isEmpty ? 'Select a provider' : lastSelectedModel,
+      model: lastSelectedModel.isEmpty
+          ? 'Select a provider'
+          : lastSelectedModel,
     );
     if (lastSelectedModel.isNotEmpty) {
       s.providerId =
@@ -1011,9 +1058,7 @@ class AppState extends ChangeNotifier {
         ..addAll(
           raw.map((e) {
             try {
-              return UsageEntry.fromJson(
-                jsonDecode(e) as Map<String, dynamic>,
-              );
+              return UsageEntry.fromJson(jsonDecode(e) as Map<String, dynamic>);
             } catch (_) {
               return null;
             }
@@ -1114,9 +1159,9 @@ class AppState extends ChangeNotifier {
       final client = HttpClient()
         ..connectionTimeout = const Duration(seconds: 15);
       try {
-        final req = await client.getUrl(Uri.parse(url)).timeout(
-              const Duration(seconds: 15),
-            );
+        final req = await client
+            .getUrl(Uri.parse(url))
+            .timeout(const Duration(seconds: 15));
         final res = await req.close().timeout(const Duration(seconds: 15));
         if (res.statusCode != 200) continue;
         // Bounded read (2 MB cap) — marketplace files are small.
@@ -1128,7 +1173,8 @@ class AppState extends ChangeNotifier {
           }
         }
         final j =
-            jsonDecode(utf8.decode(builder.takeBytes())) as Map<String, dynamic>;
+            jsonDecode(utf8.decode(builder.takeBytes()))
+                as Map<String, dynamic>;
         var importedPlugins = 0;
         var importedMcps = 0;
         final pluginList = j['plugins'] as List?;
@@ -1138,16 +1184,18 @@ class AppState extends ChangeNotifier {
             final pname = p['name'] as String?;
             if (pname == null) continue;
             if (plugins.any((e) => e.name == pname)) continue;
-            plugins.add(PluginItem(
-              name: pname,
-              author: p['author'] as String? ?? owner,
-              description: p['description'] as String? ?? '',
-              version: p['version'] as String? ?? '1.0',
-              category: p['category'] as String? ?? 'Tool',
-              installed: false,
-              enabled: false,
-              installs: p['installs'] as int? ?? 0,
-            ));
+            plugins.add(
+              PluginItem(
+                name: pname,
+                author: p['author'] as String? ?? owner,
+                description: p['description'] as String? ?? '',
+                version: p['version'] as String? ?? '1.0',
+                category: p['category'] as String? ?? 'Tool',
+                installed: false,
+                enabled: false,
+                installs: p['installs'] as int? ?? 0,
+              ),
+            );
             importedPlugins++;
           }
         }
@@ -1158,20 +1206,21 @@ class AppState extends ChangeNotifier {
             final mname = m['name'] as String?;
             if (mname == null) continue;
             if (mcpServers.any((e) => e.name == mname)) continue;
-            mcpServers.add(McpServer(
-              name: mname,
-              author: m['author'] as String? ?? owner,
-              description: m['description'] as String? ?? '',
-              category: m['category'] as String? ?? 'Community',
-              command: m['command'] as String? ?? 'npx',
-              args: (m['args'] as List?)
-                      ?.whereType<String>()
-                      .toList() ??
-                  const [],
-              envHint: m['envHint'] as String?,
-              source: 'marketplace:$owner/$name',
-              custom: true,
-            ));
+            mcpServers.add(
+              McpServer(
+                name: mname,
+                author: m['author'] as String? ?? owner,
+                description: m['description'] as String? ?? '',
+                category: m['category'] as String? ?? 'Community',
+                command: m['command'] as String? ?? 'npx',
+                args:
+                    (m['args'] as List?)?.whereType<String>().toList() ??
+                    const [],
+                envHint: m['envHint'] as String?,
+                source: 'marketplace:$owner/$name',
+                custom: true,
+              ),
+            );
             importedMcps++;
           }
         }
@@ -1233,7 +1282,8 @@ class AppState extends ChangeNotifier {
   }
 
   /// Update an existing custom MCP server's command/args from edited JSON.
-  void updateCustomMcpServer(McpServer s, {
+  void updateCustomMcpServer(
+    McpServer s, {
     required String command,
     required List<String> args,
   }) {
@@ -1249,12 +1299,14 @@ class AppState extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       final customs = mcpServers
           .where((s) => s.custom)
-          .map((s) => jsonEncode({
-                'name': s.name,
-                'command': s.command,
-                'args': s.args,
-                'envHint': s.envHint,
-              }))
+          .map(
+            (s) => jsonEncode({
+              'name': s.name,
+              'command': s.command,
+              'args': s.args,
+              'envHint': s.envHint,
+            }),
+          )
           .toList();
       await prefs.setStringList(_kCustomMcpServers, customs);
     } catch (_) {}
@@ -1269,17 +1321,19 @@ class AppState extends ChangeNotifier {
         final m = jsonDecode(j) as Map<String, dynamic>;
         final name = m['name'] as String;
         if (mcpServers.any((s) => s.name == name)) continue;
-        mcpServers.add(McpServer(
-          name: name,
-          author: 'you',
-          description: 'Custom MCP server — connects on demand.',
-          category: 'Custom',
-          command: m['command'] as String? ?? 'npx',
-          args: (m['args'] as List?)?.cast<String>() ?? const [],
-          envHint: m['envHint'] as String?,
-          source: 'custom',
-          custom: true,
-        ));
+        mcpServers.add(
+          McpServer(
+            name: name,
+            author: 'you',
+            description: 'Custom MCP server — connects on demand.',
+            category: 'Custom',
+            command: m['command'] as String? ?? 'npx',
+            args: (m['args'] as List?)?.cast<String>() ?? const [],
+            envHint: m['envHint'] as String?,
+            source: 'custom',
+            custom: true,
+          ),
+        );
       }
       refresh();
     } catch (_) {}
@@ -1324,13 +1378,15 @@ class AppState extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       final customs = plugins
           .where((p) => p.author == 'you')
-          .map((p) => jsonEncode({
-                'name': p.name,
-                'description': p.description,
-                'category': p.category,
-                'installed': p.installed,
-                'enabled': p.enabled,
-              }))
+          .map(
+            (p) => jsonEncode({
+              'name': p.name,
+              'description': p.description,
+              'category': p.category,
+              'installed': p.installed,
+              'enabled': p.enabled,
+            }),
+          )
           .toList();
       await prefs.setStringList(_kCustomPlugins, customs);
     } catch (_) {}
@@ -1446,7 +1502,12 @@ class AppState extends ChangeNotifier {
         name: 'Anthropic',
         description: 'Claude Opus, Sonnet and Haiku family.',
         baseUrl: 'https://api.anthropic.com/v1',
-        models: ['claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'claude-3-7-sonnet-20250219', 'claude-3-5-haiku-20241022'],
+        models: [
+          'claude-sonnet-4-20250514',
+          'claude-opus-4-20250514',
+          'claude-3-7-sonnet-20250219',
+          'claude-3-5-haiku-20241022',
+        ],
       ),
       ProviderConfig(
         name: 'Google Gemini',

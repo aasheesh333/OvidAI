@@ -155,235 +155,234 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
   }
 
   Widget _header() => Row(
-        children: [
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: Aether.surfaceAlt,
-              borderRadius: BorderRadius.circular(13),
-              border: Border.all(color: Aether.hairlineStrong),
-            ),
-            child: Icon(Icons.hub_outlined, size: 22, color: Aether.text),
-          ),
-          const SizedBox(width: 14),
-          const Expanded(
-            child: Text(
-              'Connect GitHub',
-              style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700),
-            ),
-          ),
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            icon: Icon(Icons.close, size: 18, color: Aether.textFaint),
-            onPressed: () {
-              _cancelled = true;
-              _expiryTimer?.cancel();
-              Navigator.pop(context);
-            },
-          ),
-        ],
-      );
+    children: [
+      Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: Aether.surfaceAlt,
+          borderRadius: BorderRadius.circular(13),
+          border: Border.all(color: Aether.hairlineStrong),
+        ),
+        child: Icon(Icons.hub_outlined, size: 22, color: Aether.text),
+      ),
+      const SizedBox(width: 14),
+      const Expanded(
+        child: Text(
+          'Connect GitHub',
+          style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700),
+        ),
+      ),
+      IconButton(
+        visualDensity: VisualDensity.compact,
+        icon: Icon(Icons.close, size: 18, color: Aether.textFaint),
+        onPressed: () {
+          _cancelled = true;
+          _expiryTimer?.cancel();
+          Navigator.pop(context);
+        },
+      ),
+    ],
+  );
 
   Widget _startingView() => const Padding(
-        padding: EdgeInsets.symmetric(vertical: 28),
-        child: Center(
-          child: SizedBox(
-            width: 26,
-            height: 26,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-        ),
-      );
+    padding: EdgeInsets.symmetric(vertical: 28),
+    child: Center(
+      child: SizedBox(
+        width: 26,
+        height: 26,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      ),
+    ),
+  );
 
   Widget _codeView() => Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            'Open github.com/login/device on any browser and enter this code:',
-            style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-          ),
-          const SizedBox(height: 14),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-            decoration: BoxDecoration(
-              color: Aether.surfaceAlt,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: Aether.accent.withValues(alpha: 0.4)),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                SelectableText(
-                  _userCode,
-                  style: TextStyle(
-                    fontFamily: Aether.mono,
-                    fontSize: 26,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 4,
-                    color: Aether.accent,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                _CopyChip(text: _userCode),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Aether.text,
-                    padding: const EdgeInsets.symmetric(vertical: 11),
-                    side: BorderSide(color: Aether.hairlineStrong),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(11),
-                    ),
-                  ),
-                  icon: const Icon(Icons.open_in_new, size: 15),
-                  label: const Text(
-                    'Open github.com/login/device',
-                    style: TextStyle(fontSize: 12),
-                  ),
-                  onPressed: () async {
-                    final uri = Uri.parse(
-                      _verifyUri.isEmpty
-                          ? 'https://github.com/login/device'
-                          : _verifyUri,
-                    );
-                    if (!context.mounted) return;
-                    await Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => BrowserScreen(
-                          openUrl: uri.toString(),
-                          agentControlled: false,
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 18),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(
-                  strokeWidth: 1.8,
-                  color: Aether.accent,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Text(
-                'Waiting · $_remaining remaining · poll #$_attempt',
-                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-        ],
-      );
-
-  Widget _doneView() => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 22),
-        child: Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Text(
+        'Open github.com/login/device on any browser and enter this code:',
+        style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+      ),
+      const SizedBox(height: 14),
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+        decoration: BoxDecoration(
+          color: Aether.surfaceAlt,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Aether.accent.withValues(alpha: 0.4)),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Container(
-              width: 54,
-              height: 54,
-              decoration: BoxDecoration(
-                color: Aether.success.withValues(alpha: 0.12),
-                shape: BoxShape.circle,
-                border:
-                    Border.all(color: Aether.success.withValues(alpha: 0.5)),
-              ),
-              child: const Icon(
-                Icons.check_rounded,
-                size: 30,
-                color: Aether.success,
+            SelectableText(
+              _userCode,
+              style: TextStyle(
+                fontFamily: Aether.mono,
+                fontSize: 26,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 4,
+                color: Aether.accent,
               ),
             ),
-            const SizedBox(height: 14),
-            const Text(
-              'GitHub connected',
-              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              GitHubService.I.login != null
-                  ? '@${GitHubService.I.login} — repos ready in Studio'
-                  : 'Your repos are now accessible.',
-              style: TextStyle(fontSize: 12, color: Aether.textMuted),
-            ),
-            const SizedBox(height: 16),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Continue'),
-            ),
+            const SizedBox(width: 12),
+            _CopyChip(text: _userCode),
           ],
         ),
-      );
+      ),
+      const SizedBox(height: 12),
+      Row(
+        children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Aether.text,
+                padding: const EdgeInsets.symmetric(vertical: 11),
+                side: BorderSide(color: Aether.hairlineStrong),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(11),
+                ),
+              ),
+              icon: const Icon(Icons.open_in_new, size: 15),
+              label: const Text(
+                'Open github.com/login/device',
+                style: TextStyle(fontSize: 12),
+              ),
+              onPressed: () async {
+                final uri = Uri.parse(
+                  _verifyUri.isEmpty
+                      ? 'https://github.com/login/device'
+                      : _verifyUri,
+                );
+                if (!context.mounted) return;
+                await Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => BrowserScreen(
+                      openUrl: uri.toString(),
+                      agentControlled: false,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 18),
+      Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const SizedBox(
+            width: 14,
+            height: 14,
+            child: CircularProgressIndicator(
+              strokeWidth: 1.8,
+              color: Aether.accent,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            'Waiting · $_remaining remaining · poll #$_attempt',
+            style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+          ),
+        ],
+      ),
+      const SizedBox(height: 8),
+    ],
+  );
+
+  Widget _doneView() => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 22),
+    child: Column(
+      children: [
+        Container(
+          width: 54,
+          height: 54,
+          decoration: BoxDecoration(
+            color: Aether.success.withValues(alpha: 0.12),
+            shape: BoxShape.circle,
+            border: Border.all(color: Aether.success.withValues(alpha: 0.5)),
+          ),
+          child: const Icon(
+            Icons.check_rounded,
+            size: 30,
+            color: Aether.success,
+          ),
+        ),
+        const SizedBox(height: 14),
+        const Text(
+          'GitHub connected',
+          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          GitHubService.I.login != null
+              ? '@${GitHubService.I.login} — repos ready in Studio'
+              : 'Your repos are now accessible.',
+          style: TextStyle(fontSize: 12, color: Aether.textMuted),
+        ),
+        const SizedBox(height: 16),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('Continue'),
+        ),
+      ],
+    ),
+  );
 
   Widget _expiredView() => Column(
-        children: [
-          const Icon(Icons.timer_off_outlined, size: 36, color: Aether.warn),
-          const SizedBox(height: 12),
-          const Text(
-            'Code expired',
-            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+    children: [
+      const Icon(Icons.timer_off_outlined, size: 36, color: Aether.warn),
+      const SizedBox(height: 12),
+      const Text(
+        'Code expired',
+        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: 4),
+      Text(
+        'The device code expired. Try again.',
+        style: TextStyle(fontSize: 12, color: Aether.textMuted),
+      ),
+      const SizedBox(height: 16),
+      FilledButton(
+        onPressed: _start,
+        style: FilledButton.styleFrom(
+          backgroundColor: Aether.accent,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(11),
           ),
-          const SizedBox(height: 4),
-          Text(
-            'The device code expired. Try again.',
-            style: TextStyle(fontSize: 12, color: Aether.textMuted),
-          ),
-          const SizedBox(height: 16),
-          FilledButton(
-            onPressed: _start,
-            style: FilledButton.styleFrom(
-              backgroundColor: Aether.accent,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(11),
-              ),
-            ),
-            child: const Text('Retry'),
-          ),
-        ],
-      );
+        ),
+        child: const Text('Retry'),
+      ),
+    ],
+  );
 
   Widget _errorView() => Column(
-        children: [
-          const Icon(Icons.error_outline, size: 36, color: Aether.danger),
-          const SizedBox(height: 12),
-          const Text(
-            'Something went wrong',
-            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+    children: [
+      const Icon(Icons.error_outline, size: 36, color: Aether.danger),
+      const SizedBox(height: 12),
+      const Text(
+        'Something went wrong',
+        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: 4),
+      Text(
+        _error ?? 'Unknown error',
+        textAlign: TextAlign.center,
+        style: TextStyle(fontSize: 12, color: Aether.textMuted),
+      ),
+      const SizedBox(height: 16),
+      FilledButton(
+        onPressed: _start,
+        style: FilledButton.styleFrom(
+          backgroundColor: Aether.accent,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(11),
           ),
-          const SizedBox(height: 4),
-          Text(
-            _error ?? 'Unknown error',
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 12, color: Aether.textMuted),
-          ),
-          const SizedBox(height: 16),
-          FilledButton(
-            onPressed: _start,
-            style: FilledButton.styleFrom(
-              backgroundColor: Aether.accent,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(11),
-              ),
-            ),
-            child: const Text('Retry'),
-          ),
-        ],
-      );
+        ),
+        child: const Text('Retry'),
+      ),
+    ],
+  );
 }
 
 enum _State { idle, starting, codeShown, done, expired, error }

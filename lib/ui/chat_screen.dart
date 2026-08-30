@@ -19,11 +19,13 @@ import '../core/agent_service.dart';
 /// The LAST tool/reasoning run (no text after it yet, or the last tool
 /// in a run still in progress) stays unfolded — same as DSH Compact.
 sealed class _ChatItem {}
+
 class _SingleItem extends _ChatItem {
   final Message m;
   final int index;
   _SingleItem(this.m, this.index);
 }
+
 class _FoldedGroup extends _ChatItem {
   final List<Message> msgs;
   final List<int> indices;
@@ -35,7 +37,8 @@ List<_ChatItem> _foldMessages(List<Message> messages) {
   var i = 0;
   while (i < messages.length) {
     final m = messages[i];
-    final foldable = m.role == 'assistant' &&
+    final foldable =
+        m.role == 'assistant' &&
         (m.kind == MsgKind.tool || m.kind == MsgKind.reasoning) &&
         !m.thinking;
     if (!foldable) {
@@ -105,8 +108,10 @@ class _RowInState extends State<_RowIn> with SingleTickerProviderStateMixin {
     return FadeTransition(
       opacity: curved,
       child: SlideTransition(
-        position: Tween<Offset>(begin: const Offset(0, 0.04), end: Offset.zero)
-            .animate(curved),
+        position: Tween<Offset>(
+          begin: const Offset(0, 0.04),
+          end: Offset.zero,
+        ).animate(curved),
         child: widget.child,
       ),
     );
@@ -199,8 +204,12 @@ class _ShimmerTextState extends State<_ShimmerText>
   }
 }
 
-Widget _buildItem(_ChatItem item, dynamic s,
-    {required VoidCallback onAction, required TextEditingController input}) {
+Widget _buildItem(
+  _ChatItem item,
+  dynamic s, {
+  required VoidCallback onAction,
+  required TextEditingController input,
+}) {
   if (item is _SingleItem) {
     return _RowIn(
       child: _MessageView(
@@ -245,7 +254,7 @@ class _StatsLine extends StatelessWidget {
         // DSH footer ring — % of THIS model's context window in use,
         // measured from the last billed promptTokens (exact) or the
         // chars/4 heuristic fallback.
-        final window = AgentService.contextWindowFor(s.model);
+        final window = AgentService.contextWindowForSession(s);
         final used = AgentService.I.measuredContextTokens(s);
         final frac = (used / window).clamp(0.0, 1.0);
         final pct = frac * 100;
@@ -253,8 +262,8 @@ class _StatsLine extends StatelessWidget {
         final ringColor = frac >= 0.8
             ? Aether.dangerC
             : frac >= 0.55
-                ? Aether.warn
-                : Aether.success;
+            ? Aether.warn
+            : Aether.success;
         return Container(
           width: double.infinity,
           padding: const EdgeInsets.fromLTRB(16, 3, 16, 3),
@@ -290,8 +299,7 @@ class _StatsLine extends StatelessWidget {
                       child: CircularProgressIndicator(
                         value: frac,
                         strokeWidth: 2,
-                        backgroundColor:
-                            Aether.hairline,
+                        backgroundColor: Aether.hairline,
                         valueColor: AlwaysStoppedAnimation(ringColor),
                         strokeCap: StrokeCap.round,
                       ),
@@ -334,12 +342,20 @@ class _TurnProcessStripState extends State<_TurnProcessStrip> {
     final g = widget.group;
     final toolCount = g.where((m) => m.kind == MsgKind.tool).length;
     final hasReasoning = g.any((m) => m.kind == MsgKind.reasoning);
-    final subagents =
-        g.where((m) => m.toolName == 'dispatch_agent').length;
+    final subagents = g.where((m) => m.toolName == 'dispatch_agent').length;
+    final runningSubagents = g
+        .where(
+          (m) => m.toolName == 'dispatch_agent' && m.toolState == 'running',
+        )
+        .length;
     final label = [
-      if (toolCount > 0) '$toolCount tool call${toolCount == 1 ? '' : 's'}',
+      if (subagents > 0)
+        // DSH presentation: "{count} subagents (running)".
+        '$subagents subagent${subagents == 1 ? '' : 's'}'
+            '${runningSubagents > 0 ? ' running' : ''}',
+      if (toolCount - subagents > 0)
+        '${toolCount - subagents} tool call${toolCount - subagents == 1 ? '' : 's'}',
       if (hasReasoning) 'Thought for a while',
-      if (subagents > 0) '$subagents subagent${subagents == 1 ? '' : 's'}',
     ].join(' · ');
     return Container(
       margin: const EdgeInsets.only(bottom: 4),
@@ -376,12 +392,14 @@ class _TurnProcessStripState extends State<_TurnProcessStrip> {
             ),
           ),
           if (_open)
-            ...g.map((m) => Padding(
-                  padding: const EdgeInsets.only(left: 8),
-                  child: m.kind == MsgKind.reasoning
-                      ? _ReasoningCard(m)
-                      : _ToolCard(m),
-                )),
+            ...g.map(
+              (m) => Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: m.kind == MsgKind.reasoning
+                    ? _ReasoningCard(m)
+                    : _ToolCard(m),
+              ),
+            ),
         ],
       ),
     );
@@ -490,8 +508,7 @@ class _ChatScreenState extends State<ChatScreen>
         // Restore the draft that belongs to THIS session — never leak
         // another session's composer text.
         if (s != null) {
-          WidgetsBinding.instance
-              .addPostFrameCallback((_) => _bindDraft(s.id));
+          WidgetsBinding.instance.addPostFrameCallback((_) => _bindDraft(s.id));
         }
         final wide = MediaQuery.of(context).size.width >= 840;
         return Scaffold(
@@ -518,11 +535,7 @@ class _ChatScreenState extends State<ChatScreen>
                     ),
                   ),
                   const SizedBox(width: 4),
-                  Icon(
-                    Icons.unfold_more,
-                    size: 16,
-                    color: Aether.textFaint,
-                  ),
+                  Icon(Icons.unfold_more, size: 16, color: Aether.textFaint),
                 ],
               ),
             ),
@@ -563,10 +576,7 @@ class _ChatScreenState extends State<ChatScreen>
                           decoration: BoxDecoration(
                             color: dotColor,
                             shape: BoxShape.circle,
-                            border: Border.all(
-                              color: Aether.bg,
-                              width: 1.5,
-                            ),
+                            border: Border.all(color: Aether.bg, width: 1.5),
                           ),
                         ),
                       ),
@@ -602,7 +612,8 @@ class _ChatScreenState extends State<ChatScreen>
                                 // (pointerCount >= 2), not 1-finger scroll.
                                 if (d.pointerCount < 2) return;
                                 app.setChatFontScale(
-                                    _pinchStartScale * d.scale);
+                                  _pinchStartScale * d.scale,
+                                );
                               },
                               child: MediaQuery(
                                 // Apply the font scale to the message list
@@ -611,7 +622,8 @@ class _ChatScreenState extends State<ChatScreen>
                                 // this MediaQuery, so they stay fixed.
                                 data: MediaQuery.of(context).copyWith(
                                   textScaler: TextScaler.linear(
-                                      app.chatFontScale),
+                                    app.chatFontScale,
+                                  ),
                                 ),
                                 child: AnimatedBuilder(
                                   animation: AgentService.I,
@@ -625,16 +637,22 @@ class _ChatScreenState extends State<ChatScreen>
                                     // DSH "Produced" card — files written by
                                     // this run surface as a card under the
                                     // final answer (tap → Studio).
-                                    final produced = AgentService.I.producedFiles;
+                                    final produced =
+                                        AgentService.I.producedFiles;
                                     final showProduced =
                                         !typing && produced.isNotEmpty;
-                                    final count = items.length +
+                                    final count =
+                                        items.length +
                                         (typing ? 1 : 0) +
                                         (showProduced ? 1 : 0);
                                     return ListView.builder(
                                       controller: _scroll,
                                       padding: const EdgeInsets.fromLTRB(
-                                          16, 8, 16, 16),
+                                        16,
+                                        8,
+                                        16,
+                                        16,
+                                      ),
                                       itemCount: count,
                                       itemBuilder: (_, i) {
                                         if (i == items.length) {
@@ -642,13 +660,14 @@ class _ChatScreenState extends State<ChatScreen>
                                               ? const _TypingBubble()
                                               : _RowIn(
                                                   child: _ProducedFilesCard(
-                                                      files: produced),
+                                                    files: produced,
+                                                  ),
                                                 );
                                         }
                                         return _buildItem(
-                                          items[i], s,
-                                          onAction: () =>
-                                              setState(() {}),
+                                          items[i],
+                                          s,
+                                          onAction: () => setState(() {}),
                                           input: _input,
                                         );
                                       },
@@ -697,9 +716,7 @@ class _ChatScreenState extends State<ChatScreen>
                 ),
                 const _TodoDock(),
                 const _StatsLine(),
-                _QueueDock(
-                  onEdited: () => setState(() {}),
-                ),
+                _QueueDock(onEdited: () => setState(() {})),
                 const _ApprovalDock(),
                 _InputBar(
                   controller: _input,
@@ -1034,7 +1051,8 @@ class _ModelTile extends StatelessWidget {
     final app = AppState.I;
     final session = app.activeSession;
     final current = session?.model ?? '';
-    final selected = session?.providerId == providerId &&
+    final selected =
+        session?.providerId == providerId &&
         (current == model || current.startsWith('$model ·'));
 
     if (!supportsEffort) {
@@ -1085,7 +1103,8 @@ class _ModelTile extends StatelessWidget {
               for (final v in variants)
                 ChoiceChip(
                   label: Text(v, style: const TextStyle(fontSize: 12)),
-                  selected: current ==
+                  selected:
+                      current ==
                       (v == 'Medium' ? '$model · Medium' : '$model · $v'),
                   onSelected: (_) {
                     app.setModel(
@@ -1098,7 +1117,8 @@ class _ModelTile extends StatelessWidget {
                   selectedColor: Aether.accentSoft,
                   backgroundColor: Aether.surfaceAlt,
                   side: BorderSide(
-                    color: current ==
+                    color:
+                        current ==
                             (v == 'Medium' ? '$model · Medium' : '$model · $v')
                         ? Aether.accent
                         : Aether.hairline,
@@ -1174,7 +1194,9 @@ class _EmptyState extends StatelessWidget {
                       ),
                       Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 9, vertical: 2),
+                          horizontal: 9,
+                          vertical: 2,
+                        ),
                         decoration: BoxDecoration(
                           color: Aether.accent.withValues(alpha: 0.12),
                           borderRadius: BorderRadius.circular(24),
@@ -1252,8 +1274,7 @@ class _ReasoningCardState extends State<_ReasoningCard> {
             ),
             onTap: () => setState(() => _override = !expanded),
             child: Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               child: Row(
                 children: [
                   if (isStreaming)
@@ -1289,10 +1310,7 @@ class _ReasoningCardState extends State<_ReasoningCard> {
                   if (isStreaming)
                     Text(
                       'live',
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: Aether.textFaint,
-                      ),
+                      style: TextStyle(fontSize: 10, color: Aether.textFaint),
                     ),
                 ],
               ),
@@ -1302,8 +1320,7 @@ class _ReasoningCardState extends State<_ReasoningCard> {
           if (expanded && widget.m.content.trim().isNotEmpty)
             Container(
               width: double.infinity,
-              padding:
-                  const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
               child: _DshMarkdown(content: widget.m.content),
             ),
         ],
@@ -1352,20 +1369,20 @@ class _ToolCardState extends State<_ToolCard>
   }
 
   static IconData _iconFor(String kind) => switch (kind) {
-        'web' => Icons.public,
-        'read' => Icons.description_outlined,
-        'edit' => Icons.edit_outlined,
-        'terminal' => Icons.terminal,
-        'code' => Icons.code,
-        'search' => Icons.search,
-        'sparkle' => Icons.auto_awesome,
-        'agent' => Icons.smart_toy_outlined,
-        'git' => Icons.source_outlined,
-        'goal' => Icons.flag_outlined,
-        'schedule' => Icons.schedule_outlined,
-        'memory' => Icons.psychology_outlined,
-        _ => Icons.bolt_outlined,
-      };
+    'web' => Icons.public,
+    'read' => Icons.description_outlined,
+    'edit' => Icons.edit_outlined,
+    'terminal' => Icons.terminal,
+    'code' => Icons.code,
+    'search' => Icons.search,
+    'sparkle' => Icons.auto_awesome,
+    'agent' => Icons.smart_toy_outlined,
+    'git' => Icons.source_outlined,
+    'goal' => Icons.flag_outlined,
+    'schedule' => Icons.schedule_outlined,
+    'memory' => Icons.psychology_outlined,
+    _ => Icons.bolt_outlined,
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -1406,8 +1423,7 @@ class _ToolCardState extends State<_ToolCard>
                   else if (running)
                     const _ChaseDot(Aether.accent)
                   else
-                    Icon(_iconFor(iconKind),
-                        size: 14, color: Aether.textMuted),
+                    Icon(_iconFor(iconKind), size: 14, color: Aether.textMuted),
                   const SizedBox(width: 7),
                   Text(
                     m.toolTitle ?? m.toolName ?? 'tool',
@@ -1501,10 +1517,10 @@ class _StateDot extends StatelessWidget {
   const _StateDot(this.color);
   @override
   Widget build(BuildContext context) => Container(
-        width: 8,
-        height: 8,
-        decoration: BoxDecoration(shape: BoxShape.circle, color: color),
-      );
+    width: 8,
+    height: 8,
+    decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+  );
 }
 
 /// Expanded tool body: terminal-style for shell/code/jobs, diff-style for
@@ -1528,17 +1544,22 @@ class _DetailBodyState extends State<_DetailBody> {
     final detail = m.toolDetail!.trimRight();
     final lines = const LineSplitter().convert(detail);
     final capped = !_expandedAll && lines.length > _cap;
-    final shown =
-        capped ? lines.sublist(lines.length - _cap) : lines;
+    final shown = capped ? lines.sublist(lines.length - _cap) : lines;
 
-    final isDiff = kind == 'edit' ||
+    final isDiff =
+        kind == 'edit' ||
         m.toolName == 'commit' ||
-        detail.split('\n').take(8).any((l) =>
-            l.startsWith('+ ') || l.startsWith('- ') ||
-            l.startsWith('+') && !l.startsWith('++') ||
-            l.startsWith('-') && !l.startsWith('--'));
-    final isTerminal =
-        kind == 'terminal' || kind == 'code' || kind == 'agent';
+        detail
+            .split('\n')
+            .take(8)
+            .any(
+              (l) =>
+                  l.startsWith('+ ') ||
+                  l.startsWith('- ') ||
+                  l.startsWith('+') && !l.startsWith('++') ||
+                  l.startsWith('-') && !l.startsWith('--'),
+            );
+    final isTerminal = kind == 'terminal' || kind == 'code' || kind == 'agent';
 
     return Container(
       width: double.infinity,
@@ -1572,9 +1593,7 @@ class _DetailBodyState extends State<_DetailBody> {
               child: isDiff
                   ? Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
-                      children: shown
-                          .map((l) => _DiffLine(l))
-                          .toList(),
+                      children: shown.map((l) => _DiffLine(l)).toList(),
                     )
                   : Text(
                       shown.join('\n'),
@@ -1617,13 +1636,13 @@ class _DiffLine extends StatelessWidget {
     final color = isAdd
         ? Aether.successC
         : isDel
-            ? Aether.dangerC
-            : Aether.text;
+        ? Aether.dangerC
+        : Aether.text;
     final bg = isAdd
         ? Aether.successC.withValues(alpha: 0.08)
         : isDel
-            ? Aether.dangerC.withValues(alpha: 0.08)
-            : Colors.transparent;
+        ? Aether.dangerC.withValues(alpha: 0.08)
+        : Colors.transparent;
     return Container(
       width: double.infinity,
       color: bg,
@@ -1640,6 +1659,92 @@ class _DiffLine extends StatelessWidget {
   }
 }
 
+/// DSH compaction row — a faint inline event row, collapsed by default:
+/// "↻ Context compacted — N messages (~X tokens)"; tap to view the
+/// compacted summary (DSH "View compaction summary").
+class _CompactionRow extends StatefulWidget {
+  final Message m;
+  const _CompactionRow(this.m);
+  @override
+  State<_CompactionRow> createState() => _CompactionRowState();
+}
+
+class _CompactionRowState extends State<_CompactionRow> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final m = widget.m;
+    final hasSummary = (m.toolDetail ?? '').trim().isNotEmpty;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(6),
+            onTap: hasSummary ? () => setState(() => _open = !_open) : null,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Row(
+                children: [
+                  Icon(
+                    _open
+                        ? Icons.keyboard_arrow_down
+                        : Icons.keyboard_arrow_right,
+                    size: 14,
+                    color: Aether.textFaint,
+                  ),
+                  const SizedBox(width: 4),
+                  Icon(Icons.compress_outlined, size: 13, color: Aether.accent),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      m.content,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: Aether.textMuted,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                  if (hasSummary)
+                    Text(
+                      'View summary',
+                      style: TextStyle(fontSize: 10.5, color: Aether.accent),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          if (_open && hasSummary)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(bottom: 2),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Aether.surfaceAlt,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Aether.hairline),
+              ),
+              child: Text(
+                m.toolDetail!,
+                style: TextStyle(
+                  fontFamily: Aether.mono,
+                  fontSize: 11,
+                  height: 1.45,
+                  color: Aether.textMuted,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 /// DSH "Produced" parity — card under the final answer listing files the
 /// agent created/edited this run.  Tap a file to open it in Studio.
 class _ProducedFilesCard extends StatelessWidget {
@@ -1649,8 +1754,8 @@ class _ProducedFilesCard extends StatelessWidget {
   String _fmtSize(int b) => b >= 1048576
       ? '${(b / 1048576).toStringAsFixed(1)} MB'
       : b >= 1024
-          ? '${(b / 1024).toStringAsFixed(1)} KB'
-          : '$b B';
+      ? '${(b / 1024).toStringAsFixed(1)} KB'
+      : '$b B';
 
   @override
   Widget build(BuildContext context) {
@@ -1668,8 +1773,11 @@ class _ProducedFilesCard extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(12, 9, 12, 5),
             child: Row(
               children: [
-                const Icon(Icons.upload_file_outlined,
-                    size: 13, color: Aether.success),
+                const Icon(
+                  Icons.upload_file_outlined,
+                  size: 13,
+                  color: Aether.success,
+                ),
                 const SizedBox(width: 6),
                 Text(
                   'Produced · ${files.length} file${files.length == 1 ? '' : 's'}',
@@ -1687,12 +1795,17 @@ class _ProducedFilesCard extends StatelessWidget {
             InkWell(
               onTap: () => openStudio(context),
               child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
                 child: Row(
                   children: [
-                    Icon(Icons.insert_drive_file_outlined,
-                        size: 14, color: Aether.accent),
+                    Icon(
+                      Icons.insert_drive_file_outlined,
+                      size: 14,
+                      color: Aether.accent,
+                    ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
@@ -1709,8 +1822,7 @@ class _ProducedFilesCard extends StatelessWidget {
                     const SizedBox(width: 8),
                     Text(
                       _fmtSize(f.size),
-                      style: TextStyle(
-                          fontSize: 10.5, color: Aether.textFaint),
+                      style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
                     ),
                   ],
                 ),
@@ -1767,8 +1879,9 @@ class _MessageView extends StatelessWidget {
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Column(
-        crossAxisAlignment:
-            isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        crossAxisAlignment: isUser
+            ? CrossAxisAlignment.end
+            : CrossAxisAlignment.start,
         children: [
           Container(
             margin: const EdgeInsets.only(bottom: 2),
@@ -1781,11 +1894,15 @@ class _MessageView extends StatelessWidget {
               MsgKind.reasoning => _reasoning(),
               MsgKind.tool => _toolCard(),
               MsgKind.turnTail => _turnTail(),
+              MsgKind.compact => _CompactionRow(m),
               _ => _text(isUser),
             },
           ),
           // DSH-web message meta + action row: copy / edit / revert / time.
-          if (!m.thinking) _actionRow(context, isUser, isLast),
+          // (Suppressed on compaction event rows — they are apparatus, not
+          // conversation turns.)
+          if (!m.thinking && m.kind != MsgKind.compact)
+            _actionRow(context, isUser, isLast),
         ],
       ),
     );
@@ -1794,14 +1911,16 @@ class _MessageView extends StatelessWidget {
   Widget _actionRow(BuildContext context, bool isUser, bool isLast) {
     final items = <Widget>[];
     void add(IconData icon, String tip, VoidCallback fn) {
-      items.add(InkWell(
-        borderRadius: BorderRadius.circular(4),
-        onTap: fn,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
-          child: Icon(icon, size: 13, color: Aether.textFaint),
+      items.add(
+        InkWell(
+          borderRadius: BorderRadius.circular(4),
+          onTap: fn,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+            child: Icon(icon, size: 13, color: Aether.textFaint),
+          ),
         ),
-      ));
+      );
     }
 
     add(Icons.copy_outlined, 'Copy', () async {
@@ -1837,10 +1956,7 @@ class _MessageView extends StatelessWidget {
               padding: const EdgeInsets.only(left: 4),
               child: Text(
                 '${(m.elapsedMs! / 1000).toStringAsFixed(1)}s',
-                style: TextStyle(
-                  fontSize: 10.5,
-                  color: Aether.textFaint,
-                ),
+                style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
               ),
             ),
           if (isUser)
@@ -1848,10 +1964,7 @@ class _MessageView extends StatelessWidget {
               padding: const EdgeInsets.only(left: 4),
               child: Text(
                 _formatTime(m.time),
-                style: TextStyle(
-                  fontSize: 10.5,
-                  color: Aether.textFaint,
-                ),
+                style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
               ),
             ),
         ],
@@ -1863,30 +1976,26 @@ class _MessageView extends StatelessWidget {
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
   Widget _text(bool isUser) => Container(
-        padding: EdgeInsets.symmetric(
-          horizontal: isUser ? 14 : 4,
-          vertical: isUser ? 10 : 4,
-        ),
-        decoration: BoxDecoration(
-          // DSH-web user bubble: a SOFT accent-tinted fill, fully rounded,
-          // NO hard border (the bordered "wireframe box" was the visual
-          // mismatch the user flagged). Assistant stays borderless prose.
-          color: isUser
-              ? Aether.accent.withValues(alpha: 0.16)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(18),
-        ),
-        child: isUser
-            ? Text(
-                m.content,
-                style: TextStyle(
-                  fontSize: 14.5,
-                  height: 1.5,
-                  color: Aether.text,
-                ),
-              )
-            : _DshMarkdown(content: m.content),
-      );
+    padding: EdgeInsets.symmetric(
+      horizontal: isUser ? 14 : 4,
+      vertical: isUser ? 10 : 4,
+    ),
+    decoration: BoxDecoration(
+      // DSH-web user bubble: a SOFT accent-tinted fill, fully rounded,
+      // NO hard border (the bordered "wireframe box" was the visual
+      // mismatch the user flagged). Assistant stays borderless prose.
+      color: isUser
+          ? Aether.accent.withValues(alpha: 0.16)
+          : Colors.transparent,
+      borderRadius: BorderRadius.circular(18),
+    ),
+    child: isUser
+        ? Text(
+            m.content,
+            style: TextStyle(fontSize: 14.5, height: 1.5, color: Aether.text),
+          )
+        : _DshMarkdown(content: m.content),
+  );
 
   Widget _reasoning() => _ReasoningCard(m);
 
@@ -1898,109 +2007,105 @@ class _MessageView extends StatelessWidget {
   Widget _turnTail() => _TurnTailRow(m);
 
   Widget _code() => Container(
-        clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(
-          color: Aether.surface,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Aether.hairline),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              color: Aether.surfaceAlt,
-              child: Row(
-                children: [
-                  Text(
-                    m.lang ?? 'code',
-                    style:
-                        TextStyle(fontSize: 11, color: Aether.textMuted),
-                  ),
-                  const Spacer(),
-                  _CopyButton(code: m.content),
-                ],
+    clipBehavior: Clip.antiAlias,
+    decoration: BoxDecoration(
+      color: Aether.surface,
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: Aether.hairline),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          color: Aether.surfaceAlt,
+          child: Row(
+            children: [
+              Text(
+                m.lang ?? 'code',
+                style: TextStyle(fontSize: 11, color: Aether.textMuted),
               ),
-            ),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.all(12),
-              child: Text(
-                m.content,
-                style: TextStyle(
-                  fontFamily: Aether.mono,
-                  fontSize: 12,
-                  height: 1.55,
-                  color: Aether.text,
-                ),
-              ),
-            ),
-          ],
+              const Spacer(),
+              _CopyButton(code: m.content),
+            ],
+          ),
         ),
-      );
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.all(12),
+          child: Text(
+            m.content,
+            style: TextStyle(
+              fontFamily: Aether.mono,
+              fontSize: 12,
+              height: 1.55,
+              color: Aether.text,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 
   Widget _imageGen() => Container(
-        clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(
-          color: Aether.surface,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Aether.hairline),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // dummy generated image
-            AspectRatio(
-              aspectRatio: 1,
-              child: Container(
-                decoration: const BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [
-                      Color(0xFF1B1F3B),
-                      Color(0xFF0E2A4A),
-                      Color(0xFF111114),
-                    ],
-                  ),
-                ),
-                child: const Center(
-                  child:
-                      Icon(Icons.auto_awesome, color: Aether.accent, size: 40),
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    m.content,
-                    style: TextStyle(
-                        fontSize: 12.5, color: Aether.textMuted),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Icon(
-                        Icons.download_outlined,
-                        size: 15,
-                        color: Aether.textFaint,
-                      ),
-                      SizedBox(width: 14),
-                      Icon(Icons.refresh, size: 15, color: Aether.textFaint),
-                      SizedBox(width: 14),
-                      Icon(Icons.open_in_full,
-                          size: 14, color: Aether.textFaint),
-                    ],
-                  ),
+    clipBehavior: Clip.antiAlias,
+    decoration: BoxDecoration(
+      color: Aether.surface,
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: Aether.hairline),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // dummy generated image
+        AspectRatio(
+          aspectRatio: 1,
+          child: Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Color(0xFF1B1F3B),
+                  Color(0xFF0E2A4A),
+                  Color(0xFF111114),
                 ],
               ),
             ),
-          ],
+            child: const Center(
+              child: Icon(Icons.auto_awesome, color: Aether.accent, size: 40),
+            ),
+          ),
         ),
-      );
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                m.content,
+                style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Icon(
+                    Icons.download_outlined,
+                    size: 15,
+                    color: Aether.textFaint,
+                  ),
+                  SizedBox(width: 14),
+                  Icon(Icons.refresh, size: 15, color: Aether.textFaint),
+                  SizedBox(width: 14),
+                  Icon(Icons.open_in_full, size: 14, color: Aether.textFaint),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 /// Staged-attachment preview chip shown above the composer text field.
@@ -2024,8 +2129,8 @@ class _AttachmentChip extends StatelessWidget {
   String _fmtSize(int b) => b >= 1048576
       ? '${(b / 1048576).toStringAsFixed(1)} MB'
       : b >= 1024
-          ? '${(b / 1024).toStringAsFixed(0)} KB'
-          : '$b B';
+      ? '${(b / 1024).toStringAsFixed(0)} KB'
+      : '$b B';
 
   @override
   Widget build(BuildContext context) {
@@ -2053,7 +2158,9 @@ class _AttachmentChip extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                      fontSize: 12.5, fontWeight: FontWeight.w600),
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
               const SizedBox(width: 6),
@@ -2146,11 +2253,14 @@ class _InputBarState extends State<_InputBar> {
 
   void _comingSoon(BuildContext ctx, String feature) {
     Navigator.pop(ctx);
-    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-      content: Text(
-          '$feature is coming soon — ask the AI to fetch or create files for now.'),
-      behavior: SnackBarBehavior.floating,
-    ));
+    ScaffoldMessenger.of(ctx).showSnackBar(
+      SnackBar(
+        content: Text(
+          '$feature is coming soon — ask the AI to fetch or create files for now.',
+        ),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   /// Pick a document (PDF/code/text/CSV) and stage it as an attachment.
@@ -2159,9 +2269,29 @@ class _InputBarState extends State<_InputBar> {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: const [
-        'pdf', 'txt', 'md', 'csv', 'json', 'dart', 'py', 'js', 'ts',
-        'html', 'css', 'xml', 'yaml', 'yml', 'java', 'kt', 'c', 'cpp',
-        'h', 'sh', 'log', 'doc', 'docx',
+        'pdf',
+        'txt',
+        'md',
+        'csv',
+        'json',
+        'dart',
+        'py',
+        'js',
+        'ts',
+        'html',
+        'css',
+        'xml',
+        'yaml',
+        'yml',
+        'java',
+        'kt',
+        'c',
+        'cpp',
+        'h',
+        'sh',
+        'log',
+        'doc',
+        'docx',
       ],
       withData: false,
     );
@@ -2197,11 +2327,13 @@ class _InputBarState extends State<_InputBar> {
   void _toast(String msg) {
     final ctx = _ctx;
     if (ctx == null || !ctx.mounted) return;
-    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-      content: Text(msg),
-      behavior: SnackBarBehavior.floating,
-      duration: const Duration(seconds: 2),
-    ));
+    ScaffoldMessenger.of(ctx).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 
   // The composer needs a context for toasts that outlives the bottom sheet.
@@ -2440,10 +2572,8 @@ class _TodoDockState extends State<_TodoDock> {
       builder: (_, _) {
         final todos = AppState.I.activeSession?.todos ?? [];
         if (todos.isEmpty) return const SizedBox.shrink();
-        final done =
-            todos.where((t) => t['status'] == 'completed').length;
-        final inProg =
-            todos.where((t) => t['status'] == 'in_progress').length;
+        final done = todos.where((t) => t['status'] == 'completed').length;
+        final inProg = todos.where((t) => t['status'] == 'in_progress').length;
         return Container(
           margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
           decoration: BoxDecoration(
@@ -2461,8 +2591,10 @@ class _TodoDockState extends State<_TodoDock> {
                 ),
                 onTap: () => setState(() => _expanded = !_expanded),
                 child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 7,
+                  ),
                   child: Row(
                     children: [
                       Icon(
@@ -2514,12 +2646,11 @@ class _TodoDockState extends State<_TodoDock> {
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(2),
                           child: LinearProgressIndicator(
-                            value: todos.isEmpty
-                                ? 0
-                                : done / todos.length,
+                            value: todos.isEmpty ? 0 : done / todos.length,
                             backgroundColor: Aether.hairline,
                             valueColor: const AlwaysStoppedAnimation(
-                                Aether.success),
+                              Aether.success,
+                            ),
                           ),
                         ),
                       ),
@@ -2545,14 +2676,14 @@ class _TodoDockState extends State<_TodoDock> {
                               status == 'completed'
                                   ? Icons.check_circle
                                   : status == 'in_progress'
-                                      ? Icons.play_circle_outline
-                                      : Icons.radio_button_unchecked,
+                                  ? Icons.play_circle_outline
+                                  : Icons.radio_button_unchecked,
                               size: 14,
                               color: status == 'completed'
                                   ? Aether.success
                                   : status == 'in_progress'
-                                      ? Aether.accent
-                                      : Aether.textFaint,
+                                  ? Aether.accent
+                                  : Aether.textFaint,
                             ),
                             const SizedBox(width: 8),
                             Expanded(
@@ -2613,11 +2744,7 @@ class _QueueDock extends StatelessWidget {
                 // Header row
                 Row(
                   children: [
-                    Icon(
-                      Icons.queue_music,
-                      size: 13,
-                      color: Aether.textMuted,
-                    ),
+                    Icon(Icons.queue_music, size: 13, color: Aether.textMuted),
                     const SizedBox(width: 6),
                     Text(
                       '${queue.length} queued message${queue.length > 1 ? 's' : ''}',
@@ -2637,10 +2764,7 @@ class _QueueDock extends StatelessWidget {
                       },
                       child: Text(
                         'Clear all',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Aether.textFaint,
-                        ),
+                        style: TextStyle(fontSize: 11, color: Aether.textFaint),
                       ),
                     ),
                   ],
@@ -2648,11 +2772,7 @@ class _QueueDock extends StatelessWidget {
                 const SizedBox(height: 6),
                 // Queued message rows
                 for (var i = 0; i < queue.length; i++)
-                  _QueueRow(
-                    index: i,
-                    text: queue[i],
-                    onEdited: onEdited,
-                  ),
+                  _QueueRow(index: i, text: queue[i], onEdited: onEdited),
               ],
             ),
           ),
@@ -2821,7 +2941,6 @@ class _CopyButtonState extends State<_CopyButton> {
   }
 }
 
-
 /// Approval dock — replaces the old _AgentActivityBar under the AppBar.
 /// Shown only when a tool needs user confirmation. Live agent log stays in
 /// the chat stream itself; approvals float above the input (DSH-web style).
@@ -2963,8 +3082,13 @@ class _PlanReviewCard extends StatelessWidget {
                 OutlinedButton(
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Aether.dangerC,
-                    side: BorderSide(color: Aether.dangerC.withValues(alpha: 0.5)),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    side: BorderSide(
+                      color: Aether.dangerC.withValues(alpha: 0.5),
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 8,
+                    ),
                     minimumSize: Size.zero,
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
@@ -2975,7 +3099,10 @@ class _PlanReviewCard extends StatelessWidget {
                 FilledButton(
                   style: FilledButton.styleFrom(
                     backgroundColor: Aether.accent,
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 8,
+                    ),
                     minimumSize: Size.zero,
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
@@ -3064,10 +3191,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
               Wrap(
                 spacing: 6,
                 runSpacing: 6,
-                children: [
-                  for (final opt in q.options)
-                    _optionChip(q, opt),
-                ],
+                children: [for (final opt in q.options) _optionChip(q, opt)],
               ),
             ],
             const SizedBox(height: 8),
@@ -3138,9 +3262,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
               ? Aether.accent.withValues(alpha: 0.2)
               : Aether.surfaceRaised,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: isSel ? Aether.accent : Aether.hairline,
-          ),
+          border: Border.all(color: isSel ? Aether.accent : Aether.hairline),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -3157,10 +3279,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
             if (opt.description != null)
               Text(
                 opt.description!,
-                style: TextStyle(
-                  fontSize: 9,
-                  color: Aether.textFaint,
-                ),
+                style: TextStyle(fontSize: 9, color: Aether.textFaint),
               ),
           ],
         ),
@@ -3373,10 +3492,7 @@ class _DshMarkdown extends StatelessWidget {
           fontWeight: FontWeight.w600,
           color: Aether.text,
         ),
-        strong: TextStyle(
-          fontWeight: FontWeight.w700,
-          color: Aether.text,
-        ),
+        strong: TextStyle(fontWeight: FontWeight.w700, color: Aether.text),
         em: TextStyle(fontStyle: FontStyle.italic, color: Aether.text),
         code: const TextStyle(
           fontFamily: Aether.mono,
@@ -3384,11 +3500,7 @@ class _DshMarkdown extends StatelessWidget {
           backgroundColor: Colors.transparent,
           color: Aether.accent,
         ),
-        listBullet: TextStyle(
-          fontSize: 14,
-          height: 1.5,
-          color: Aether.text,
-        ),
+        listBullet: TextStyle(fontSize: 14, height: 1.5, color: Aether.text),
         listIndent: 18,
         blockquoteDecoration: BoxDecoration(
           border: Border(
@@ -3494,8 +3606,8 @@ class _DiffLines extends StatelessWidget {
             color: l.startsWith('+')
                 ? Aether.success.withValues(alpha: 0.10)
                 : l.startsWith('-')
-                    ? Aether.danger.withValues(alpha: 0.10)
-                    : Colors.transparent,
+                ? Aether.danger.withValues(alpha: 0.10)
+                : Colors.transparent,
             child: Text(
               l,
               style: TextStyle(
@@ -3505,8 +3617,8 @@ class _DiffLines extends StatelessWidget {
                 color: l.startsWith('+')
                     ? Aether.success
                     : l.startsWith('-')
-                        ? Aether.danger
-                        : Aether.textMuted,
+                    ? Aether.danger
+                    : Aether.textMuted,
               ),
             ),
           ),
@@ -3524,7 +3636,8 @@ class _DshInlineCodeBuilder extends MarkdownElementBuilder {
     TextStyle? preferredStyle,
     TextStyle? parentStyle,
   ) {
-    final text = element.children?.map((c) => c.textContent).join() ??
+    final text =
+        element.children?.map((c) => c.textContent).join() ??
         element.textContent;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),

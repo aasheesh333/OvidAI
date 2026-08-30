@@ -98,10 +98,7 @@ class _StudioScreenState extends State<StudioScreen> {
                   ),
                   subtitle: Text(
                     '${r['language'] ?? '—'} · ⭐ ${r['stargazers_count'] ?? 0}',
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: Aether.textFaint,
-                    ),
+                    style: TextStyle(fontSize: 11, color: Aether.textFaint),
                   ),
                   onTap: () => Navigator.pop(context, r['full_name'] as String),
                 ),
@@ -154,11 +151,7 @@ class _StudioScreenState extends State<StudioScreen> {
                         color: Aether.accent,
                       ),
                     )
-                  : Icon(
-                      Icons.sync_rounded,
-                      size: 18,
-                      color: Aether.textMuted,
-                    ),
+                  : Icon(Icons.sync_rounded, size: 18, color: Aether.textMuted),
               onPressed: _syncing ? null : _autoSync,
             ),
           // ── GitHub account chip + sign out ──
@@ -184,10 +177,7 @@ class _StudioScreenState extends State<StudioScreen> {
                     AppState.I.sandboxInstalled
                         ? 'Sandbox ready'
                         : 'Sandbox pending',
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: Aether.textMuted,
-                    ),
+                    style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
                   ),
                 ],
               ),
@@ -266,8 +256,7 @@ class _RepoBar extends StatelessWidget {
               ),
             ),
           ),
-          if (repo != 'Connect a repo')
-            Tag('GITHUB', color: Aether.textMuted),
+          if (repo != 'Connect a repo') Tag('GITHUB', color: Aether.textMuted),
           if (syncing) ...[
             const SizedBox(width: 8),
             const SizedBox(
@@ -445,10 +434,7 @@ class _FileTree extends StatelessWidget {
                         cache.isReady
                             ? 'Synced · ${cache.files.length} files'
                             : 'Not connected',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Aether.textMuted,
-                        ),
+                        style: TextStyle(fontSize: 11, color: Aether.textMuted),
                       ),
                     ),
                   ],
@@ -535,9 +521,7 @@ class _Tabs extends StatelessWidget {
                               ),
                               decoration: BoxDecoration(
                                 border: Border(
-                                  right: BorderSide(
-                                    color: Aether.hairline,
-                                  ),
+                                  right: BorderSide(color: Aether.hairline),
                                   top: BorderSide(
                                     color: sel
                                         ? Aether.accent
@@ -552,9 +536,7 @@ class _Tabs extends StatelessWidget {
                                   Icon(
                                     Icons.description_outlined,
                                     size: 13,
-                                    color: sel
-                                        ? Aether.text
-                                        : Aether.textFaint,
+                                    color: sel ? Aether.text : Aether.textFaint,
                                   ),
                                   const SizedBox(width: 6),
                                   Text(
@@ -666,10 +648,7 @@ class _EditorState extends State<_Editor> {
           children: [
             // Active file path header (real path, real repo name)
             Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 5,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
               color: Aether.surfaceAlt,
               child: Row(
                 children: [
@@ -1066,16 +1045,9 @@ class _AccountChip extends StatelessWidget {
                 const SizedBox(width: 6),
                 Text(
                   gh.login ?? '',
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    color: Aether.textMuted,
-                  ),
+                  style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
                 ),
-                Icon(
-                  Icons.expand_more,
-                  size: 14,
-                  color: Aether.textFaint,
-                ),
+                Icon(Icons.expand_more, size: 14, color: Aether.textFaint),
               ],
             ),
           ),

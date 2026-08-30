@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../core/agent_service.dart';
 import '../core/firebase_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
@@ -155,6 +156,13 @@ class SettingsScreen extends StatelessWidget {
             'How long the agent may stream. Lower = snappier, higher = no cutoff of long answers.',
             const _TimeoutScreen(),
           ),
+          _navTile(
+            context,
+            Icons.memory_outlined,
+            'Context & output',
+            'Context window override (per-model auto by default) and max output tokens. Drives auto-compaction + the % context ring.',
+            const _ContextModelScreen(),
+          ),
           const _ShareMemoryTile(),
           _settingTile(
             Icons.smart_toy_outlined,
@@ -228,11 +236,7 @@ class SettingsScreen extends StatelessWidget {
         subtitle,
         style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
       ),
-      trailing: Icon(
-        Icons.chevron_right,
-        size: 18,
-        color: Aether.textFaint,
-      ),
+      trailing: Icon(Icons.chevron_right, size: 18, color: Aether.textFaint),
       onTap: () =>
           Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen)),
     );
@@ -278,11 +282,7 @@ class SettingsScreen extends StatelessWidget {
         'dhanuk.page.gd/ovid',
         style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
       ),
-      trailing: Icon(
-        Icons.open_in_new,
-        size: 16,
-        color: Aether.textFaint,
-      ),
+      trailing: Icon(Icons.open_in_new, size: 16, color: Aether.textFaint),
       onTap: () => showDialog<void>(
         context: context,
         builder: (d) => AlertDialog(
@@ -391,9 +391,15 @@ class _ShareMemoryTile extends StatelessWidget {
       animation: app,
       builder: (_, _) => ListTile(
         dense: true,
-        leading: Icon(Icons.psychology_outlined,
-            size: 19, color: Aether.textMuted),
-        title: const Text('Share session memory', style: TextStyle(fontSize: 14)),
+        leading: Icon(
+          Icons.psychology_outlined,
+          size: 19,
+          color: Aether.textMuted,
+        ),
+        title: const Text(
+          'Share session memory',
+          style: TextStyle(fontSize: 14),
+        ),
         subtitle: Text(
           app.shareSessionMemory
               ? 'ON — the AI can search across all chats (memory_search).'
@@ -485,7 +491,9 @@ class _TimeoutScreen extends StatelessWidget {
                         dense: true,
                         activeColor: Aether.accent,
                         title: Text(
-                          sec < 60 ? '$sec seconds' : '${sec ~/ 60} minute${sec > 60 ? 's' : ''}',
+                          sec < 60
+                              ? '$sec seconds'
+                              : '${sec ~/ 60} minute${sec > 60 ? 's' : ''}',
                           style: const TextStyle(fontSize: 14),
                         ),
                         subtitle: Text(
@@ -510,10 +518,7 @@ class _TimeoutScreen extends StatelessWidget {
                 padding: const EdgeInsets.all(12),
                 child: Text(
                   'Custom values: pick any number of seconds between 5 s and 60 min.',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Aether.textFaint,
-                  ),
+                  style: TextStyle(fontSize: 11, color: Aether.textFaint),
                 ),
               ),
               Slider(
@@ -526,6 +531,130 @@ class _TimeoutScreen extends StatelessWidget {
                 label: '${cur}s',
                 onChanged: (v) => AppState.I.setResponseTimeout(v.round()),
               ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Context & output — user control over context window + output caps.
+class _ContextModelScreen extends StatelessWidget {
+  const _ContextModelScreen();
+
+  static const _windowPresets = <(int, String)>[
+    (0, 'Auto (per-model)'),
+    (32768, '32K'),
+    (65536, '64K'),
+    (128000, '128K'),
+    (200000, '200K'),
+    (262144, '256K'),
+    (524288, '512K'),
+    (1000000, '1M'),
+  ];
+  static const _outPresets = <(int, String)>[
+    (0, 'Auto (provider default)'),
+    (2048, '2K'),
+    (4096, '4K'),
+    (8192, '8K'),
+    (16384, '16K'),
+    (32768, '32K'),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: const Text('Context & output'),
+      ),
+      body: AnimatedBuilder(
+        animation: AppState.I,
+        builder: (_, _) {
+          final app = AppState.I;
+          final s = app.activeSession;
+          final autoWindow = AgentService.contextWindowFor(s?.model ?? '');
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              Text(
+                'The context window drives auto-compaction (at 80% of the '
+                'window the oldest messages are folded into a summary) and '
+                'the % context ring above the composer. Values are exact '
+                'deterministic choices — nothing is guessed or randomized.',
+                style: TextStyle(
+                  fontSize: 12.5,
+                  height: 1.55,
+                  color: Aether.textMuted,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const SectionHeader('Context window'),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 18),
+                child: Text(
+                  'Current model: ${s?.model ?? '—'}\n'
+                  'Auto-detected window: ${(autoWindow / 1000).toStringAsFixed(0)}K tokens',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    height: 1.55,
+                    color: Aether.textFaint,
+                  ),
+                ),
+              ),
+              RadioGroup<int>(
+                groupValue: app.contextWindowOverride,
+                onChanged: (v) => AppState.I.setContextWindowOverride(v ?? 0),
+                child: Column(
+                  children: [
+                    for (final (v, label) in _windowPresets)
+                      RadioListTile<int>(
+                        dense: true,
+                        activeColor: Aether.accent,
+                        title: Text(
+                          label,
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                        value: v,
+                      ),
+                  ],
+                ),
+              ),
+              const SectionHeader('Max output tokens'),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 18),
+                child: Text(
+                  'Cap the model\'s response length. Auto lets the provider '
+                  'decide. Large caps can cost more per turn.',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    height: 1.5,
+                    color: Aether.textFaint,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 4),
+              RadioGroup<int>(
+                groupValue: app.maxOutputTokens,
+                onChanged: (v) => AppState.I.setMaxOutputTokens(v ?? 0),
+                child: Column(
+                  children: [
+                    for (final (v, label) in _outPresets)
+                      RadioListTile<int>(
+                        dense: true,
+                        activeColor: Aether.accent,
+                        title: Text(
+                          label,
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                        value: v,
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
             ],
           );
         },

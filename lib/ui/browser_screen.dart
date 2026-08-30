@@ -12,20 +12,13 @@ import '../core/agent_service.dart';
 class BrowserScreen extends StatefulWidget {
   final String? openUrl;
   final bool agentControlled;
-  const BrowserScreen({
-    super.key,
-    this.openUrl,
-    this.agentControlled = true,
-  });
+  const BrowserScreen({super.key, this.openUrl, this.agentControlled = true});
 
   /// Push the browser, optionally navigating the active tab to [url].
-  static Future<void> open(
-    BuildContext context, {
-    String? url,
-  }) async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => BrowserScreen(openUrl: url)),
-    );
+  static Future<void> open(BuildContext context, {String? url}) async {
+    await Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => BrowserScreen(openUrl: url)));
   }
 
   @override
@@ -75,8 +68,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   BrowserTab? get _activeTab =>
       _agent.activeTabIndex < _agent.browserTabs.length
-          ? _agent.browserTabs[_agent.activeTabIndex]
-          : null;
+      ? _agent.browserTabs[_agent.activeTabIndex]
+      : null;
 
   @override
   void dispose() {
@@ -326,7 +319,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   String _tabLabel(BrowserTab t) {
     final host = Uri.tryParse(t.url)?.host ?? '';
-    return t.title?.isNotEmpty == true ? t.title! : (host.isNotEmpty ? host : t.url);
+    return t.title?.isNotEmpty == true
+        ? t.title!
+        : (host.isNotEmpty ? host : t.url);
   }
 }
 
@@ -351,10 +346,7 @@ class _AgentDot extends StatelessWidget {
     return Container(
       width: 10,
       height: 10,
-      decoration: BoxDecoration(
-        color: Aether.success,
-        shape: BoxShape.circle,
-      ),
+      decoration: BoxDecoration(color: Aether.success, shape: BoxShape.circle),
     );
   }
 }

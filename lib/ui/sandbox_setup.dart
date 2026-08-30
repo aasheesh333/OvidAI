@@ -20,8 +20,9 @@ void openStudio(BuildContext context) {
         context,
       ).push(MaterialPageRoute(builder: (_) => const StudioScreen()));
     } else {
-      Navigator.of(context).push(MaterialPageRoute(
-          builder: (_) => const SandboxSetupScreen()));
+      Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const SandboxSetupScreen()));
     }
   });
 }
@@ -97,12 +98,14 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
 
   Future<void> _runInstall() async {
     try {
-      await SandboxService.I.install(onPhase: (phase, p, line) {
-        if (!mounted || _done) return;
-        _phase = phase;
-        _phaseProgress = p;
-        _append(line);
-      });
+      await SandboxService.I.install(
+        onPhase: (phase, p, line) {
+          if (!mounted || _done) return;
+          _phase = phase;
+          _phaseProgress = p;
+          _append(line);
+        },
+      );
       if (!mounted) return;
       setState(() {
         _done = true;
@@ -153,16 +156,18 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                     if (_done || _error == null) Navigator.pop(context);
                   },
                 ),
-          title: Text(widget.gateMode
-              ? 'Setting up Ovid — one time'
-              : 'Setting up sandbox'),
+          title: Text(
+            widget.gateMode
+                ? 'Setting up Ovid — one time'
+                : 'Setting up sandbox',
+          ),
         ),
         body: SafeArea(
           child: _error != null
               ? _errorView()
               : _done
-                  ? _doneView()
-                  : _progressView(),
+              ? _doneView()
+              : _progressView(),
         ),
       ),
     );
@@ -175,23 +180,32 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(children: [
-            const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                  strokeWidth: 2, color: Aether.accent),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(_phaseNames[idx],
+          Row(
+            children: [
+              const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Aether.accent,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  _phaseNames[idx],
                   style: const TextStyle(
-                      fontSize: 14.5, fontWeight: FontWeight.w700)),
-            ),
-            Text('Step ${idx + 1} of ${_phaseNames.length}',
-                style: TextStyle(
-                    fontSize: 11, color: Aether.textFaint)),
-          ]),
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              Text(
+                'Step ${idx + 1} of ${_phaseNames.length}',
+                style: TextStyle(fontSize: 11, color: Aether.textFaint),
+              ),
+            ],
+          ),
           const SizedBox(height: 14),
           ClipRRect(
             borderRadius: BorderRadius.circular(6),
@@ -203,23 +217,31 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             ),
           ),
           const SizedBox(height: 8),
-          Row(children: [
-            Text('${(_overall * 100).toStringAsFixed(1)}%',
+          Row(
+            children: [
+              Text(
+                '${(_overall * 100).toStringAsFixed(1)}%',
                 style: const TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w700,
-                    color: Aether.accent)),
-            const Spacer(),
-            Text(_elapsedLabel,
-                style: TextStyle(
-                    fontSize: 11.5, color: Aether.textFaint)),
-          ]),
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w700,
+                  color: Aether.accent,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                _elapsedLabel,
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+            ],
+          ),
           const SizedBox(height: 16),
           Expanded(child: _terminal()),
           const SizedBox(height: 12),
-          Text('Keep the app open — this happens only once.',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 11.5, color: Aether.textFaint)),
+          Text(
+            'Keep the app open — this happens only once.',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+          ),
         ],
       ),
     );
@@ -240,26 +262,31 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
               color: Aether.surfaceAlt,
-              border:
-                  Border(bottom: BorderSide(color: Aether.hairline)),
+              border: Border(bottom: BorderSide(color: Aether.hairline)),
             ),
-            child: Row(children: [
-              Icon(Icons.terminal, size: 13, color: Aether.textMuted),
-              SizedBox(width: 8),
-              Text('SANDBOX SETUP LOG — LIVE',
+            child: Row(
+              children: [
+                Icon(Icons.terminal, size: 13, color: Aether.textMuted),
+                SizedBox(width: 8),
+                Text(
+                  'SANDBOX SETUP LOG — LIVE',
                   style: TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.8,
-                      color: Aether.textMuted)),
-            ]),
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.8,
+                    color: Aether.textMuted,
+                  ),
+                ),
+              ],
+            ),
           ),
           Expanded(
             child: _log.isEmpty
                 ? Center(
-                    child: Text('Starting install…',
-                        style: TextStyle(
-                            fontSize: 11.5, color: Aether.textFaint)),
+                    child: Text(
+                      'Starting install…',
+                      style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                    ),
                   )
                 : ListView.builder(
                     controller: _scroll,
@@ -268,10 +295,11 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                     itemBuilder: (_, i) => Text(
                       _log[i],
                       style: TextStyle(
-                          fontFamily: Aether.mono,
-                          fontSize: 11,
-                          height: 1.6,
-                          color: _lineColor(_log[i])),
+                        fontFamily: Aether.mono,
+                        fontSize: 11,
+                        height: 1.6,
+                        color: _lineColor(_log[i]),
+                      ),
                     ),
                   ),
           ),
@@ -289,8 +317,10 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
           const SizedBox(height: 16),
           const Icon(Icons.error_outline, size: 40, color: Aether.danger),
           const SizedBox(height: 12),
-          const Text('Install interrupted',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          const Text(
+            'Install interrupted',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+          ),
           const SizedBox(height: 8),
           Container(
             padding: const EdgeInsets.all(12),
@@ -302,22 +332,23 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             child: Text(
               _error!,
               style: TextStyle(
-                  fontFamily: Aether.mono,
-                  fontSize: 11.5,
-                  height: 1.6,
-                  color: Aether.textMuted),
+                fontFamily: Aether.mono,
+                fontSize: 11.5,
+                height: 1.6,
+                color: Aether.textMuted,
+              ),
             ),
           ),
           const Spacer(),
-          if (_log.isNotEmpty)
-            Expanded(child: _terminal()),
+          if (_log.isNotEmpty) Expanded(child: _terminal()),
           const SizedBox(height: 12),
           FilledButton.icon(
             style: FilledButton.styleFrom(
               backgroundColor: Aether.accent,
               padding: const EdgeInsets.symmetric(vertical: 13),
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12)),
+                borderRadius: BorderRadius.circular(12),
+              ),
             ),
             icon: const Icon(Icons.refresh, size: 17),
             label: const Text('Retry install'),
@@ -336,8 +367,10 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
           const SizedBox(height: 8),
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text('Close',
-                style: TextStyle(fontSize: 12.5, color: Aether.textFaint)),
+            child: Text(
+              'Close',
+              style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
+            ),
           ),
         ],
       ),
@@ -364,28 +397,37 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                     color: Aether.success.withValues(alpha: 0.12),
                     shape: BoxShape.circle,
                     border: Border.all(
-                        color: Aether.success.withValues(alpha: 0.5)),
+                      color: Aether.success.withValues(alpha: 0.5),
+                    ),
                   ),
-                  child: const Icon(Icons.check_rounded,
-                      size: 38, color: Aether.success),
+                  child: const Icon(
+                    Icons.check_rounded,
+                    size: 38,
+                    color: Aether.success,
+                  ),
                 ),
               ),
             ),
             const SizedBox(height: 20),
-            const Text('Sandbox ready',
-                style: TextStyle(
-                    fontSize: 20, fontWeight: FontWeight.w800)),
+            const Text(
+              'Sandbox ready',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+            ),
             const SizedBox(height: 8),
             Text(
               'Native sandbox · bash · coreutils · apt\npython/node/git install on demand — all on-device.',
               textAlign: TextAlign.center,
               style: TextStyle(
-                  fontSize: 12.5, height: 1.6, color: Aether.textMuted),
+                fontSize: 12.5,
+                height: 1.6,
+                color: Aether.textMuted,
+              ),
             ),
             const SizedBox(height: 8),
-            Text('Took $_elapsedLabel',
-                style: TextStyle(
-                    fontSize: 11.5, color: Aether.textFaint)),
+            Text(
+              'Took $_elapsedLabel',
+              style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+            ),
             const SizedBox(height: 18),
             Wrap(
               spacing: 8,
@@ -405,23 +447,28 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                   backgroundColor: Aether.accent,
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(13)),
+                    borderRadius: BorderRadius.circular(13),
+                  ),
                 ),
                 icon: const Icon(Icons.code, size: 18),
                 label: Text(
-                    widget.gateMode ? 'Start chatting' : 'Open Studio',
-                    style: const TextStyle(fontSize: 14)),
+                  widget.gateMode ? 'Start chatting' : 'Open Studio',
+                  style: const TextStyle(fontSize: 14),
+                ),
                 onPressed: () {
                   if (widget.gateMode) {
                     // Replace the whole nav stack with the chat shell.
-                    Navigator.of(context, rootNavigator: true)
-                        .pushAndRemoveUntil(
+                    Navigator.of(
+                      context,
+                      rootNavigator: true,
+                    ).pushAndRemoveUntil(
                       MaterialPageRoute(builder: (_) => const _ShellHost()),
                       (_) => false,
                     );
                   } else {
-                    Navigator.of(context).pushReplacement(MaterialPageRoute(
-                        builder: (_) => const StudioScreen()));
+                    Navigator.of(context).pushReplacement(
+                      MaterialPageRoute(builder: (_) => const StudioScreen()),
+                    );
                   }
                 },
               ),
@@ -430,9 +477,10 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
               const SizedBox(height: 6),
               TextButton(
                 onPressed: () => Navigator.pop(context),
-                child: Text('Back to chat',
-                    style:
-                        TextStyle(fontSize: 12.5, color: Aether.textFaint)),
+                child: Text(
+                  'Back to chat',
+                  style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
+                ),
               ),
             ],
           ],
@@ -459,11 +507,13 @@ class _ShellHost extends StatelessWidget {
               child: SessionsSidebar(),
             ),
       body: wide
-          ? Row(children: [
-              const SessionsSidebar(),
-              const VerticalDivider(width: 1),
-              Expanded(child: chat),
-            ])
+          ? Row(
+              children: [
+                const SessionsSidebar(),
+                const VerticalDivider(width: 1),
+                Expanded(child: chat),
+              ],
+            )
           : chat,
     );
   }

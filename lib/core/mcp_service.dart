@@ -20,9 +20,8 @@ class McpService {
 
   /// Connected servers and the tools they advertise.
   Map<String, List<McpToolDef>> get connectedTools => {
-        for (final e in _running.entries)
-          e.key: e.value.tools,
-      };
+    for (final e in _running.entries) e.key: e.value.tools,
+  };
 
   bool isConnected(String serverName) => _running.containsKey(serverName);
 
@@ -54,8 +53,8 @@ class McpService {
       final kind = (cmd == 'npx' || cmd == 'node')
           ? 'node'
           : (cmd == 'uvx' || cmd == 'uv' || cmd == 'python' || cmd == 'python3')
-              ? 'python'
-              : null;
+          ? 'python'
+          : null;
       if (kind != null) {
         final ok = await sandbox.ensureRuntime(kind);
         if (!ok) {
@@ -69,10 +68,10 @@ class McpService {
       final env = await AppState.I.getMcpEnv(server.name);
       // Native exec — the server command runs through the sandbox env
       // (PATH/LD_LIBRARY_PATH/LD_PRELOAD set by SandboxService.spawn).
-      final proc = await sandbox.spawn(
-        [server.command, ...server.args],
-        env: env.isEmpty ? null : env,
-      );
+      final proc = await sandbox.spawn([
+        server.command,
+        ...server.args,
+      ], env: env.isEmpty ? null : env);
       rs.process = proc;
 
       // Route stdout lines into the broadcast stream; drain stderr so it
@@ -87,15 +86,11 @@ class McpService {
           .listen(rs.stderrLines.add);
 
       // ── MCP handshake ──────────────────────────────────────────────
-      final initResult = await _rpc(
-        rs,
-        'initialize',
-        {
-          'protocolVersion': '2024-11-05',
-          'capabilities': {},
-          'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
-        },
-      );
+      final initResult = await _rpc(rs, 'initialize', {
+        'protocolVersion': '2024-11-05',
+        'capabilities': {},
+        'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
+      });
       if (initResult == null) {
         throw Exception('initialize handshake failed (no response)');
       }
@@ -104,7 +99,8 @@ class McpService {
       // ── Tool discovery ─────────────────────────────────────────────
       final toolsResult = await _rpc(rs, 'tools/list', {});
       if (toolsResult is Map<String, dynamic>) {
-        final tools = (toolsResult['tools'] as List?)
+        final tools =
+            (toolsResult['tools'] as List?)
                 ?.whereType<Map>()
                 .map((t) => McpToolDef.fromJson(t.cast<String, dynamic>()))
                 .toList() ??
@@ -176,11 +172,9 @@ class McpService {
   ) {
     final proc = rs.process;
     if (proc == null) return;
-    proc.stdin.writeln(jsonEncode({
-      'jsonrpc': '2.0',
-      'method': method,
-      'params': params,
-    }));
+    proc.stdin.writeln(
+      jsonEncode({'jsonrpc': '2.0', 'method': method, 'params': params}),
+    );
   }
 
   /// Send a JSON-RPC request and await the matching response (id-correlated).
@@ -211,12 +205,14 @@ class McpService {
       }
     });
 
-    proc.stdin.writeln(jsonEncode({
-      'jsonrpc': '2.0',
-      'id': id,
-      'method': method,
-      'params': params,
-    }));
+    proc.stdin.writeln(
+      jsonEncode({
+        'jsonrpc': '2.0',
+        'id': id,
+        'method': method,
+        'params': params,
+      }),
+    );
 
     try {
       return await completer.future.timeout(const Duration(seconds: 15));
@@ -237,20 +233,20 @@ class McpToolDef {
   McpToolDef({required this.name, this.description, this.inputSchema});
 
   factory McpToolDef.fromJson(Map<String, dynamic> j) => McpToolDef(
-        name: j['name'] as String? ?? '',
-        description: j['description'] as String?,
-        inputSchema: j['inputSchema'] as Map<String, dynamic>?,
-      );
+    name: j['name'] as String? ?? '',
+    description: j['description'] as String?,
+    inputSchema: j['inputSchema'] as Map<String, dynamic>?,
+  );
 
   /// Convert to an OpenAI function-tool schema for the agent loop.
   Map<String, dynamic> toOpenAiTool(String serverKey) => {
-        'type': 'function',
-        'function': {
-          'name': 'mcp__${serverKey}__$name',
-          'description': description ?? 'MCP tool $name',
-          'parameters': inputSchema ?? {'type': 'object', 'properties': {}},
-        },
-      };
+    'type': 'function',
+    'function': {
+      'name': 'mcp__${serverKey}__$name',
+      'description': description ?? 'MCP tool $name',
+      'parameters': inputSchema ?? {'type': 'object', 'properties': {}},
+    },
+  };
 }
 
 class _RunningServer {

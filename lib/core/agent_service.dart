@@ -54,7 +54,7 @@ extension AgentModeX on AgentMode {
       'Full autonomous — kuch bhi, kahin bhi, no confirmation.',
     AgentMode.studio =>
       'Studio mode — files edit, terminal run, repo access free. '
-      'Asks for confirmation before publishing or committing.',
+          'Asks for confirmation before publishing or committing.',
   };
   IconData get icon => switch (this) {
     AgentMode.safe => Icons.visibility_outlined,
@@ -94,6 +94,8 @@ String cleanReasoningText(String raw) {
   t = t.replaceAll(RegExp(r'\n{3,}'), '\n\n');
   return t.trim();
 }
+
+String _fmtK(int n) => n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}K' : '$n';
 
 /// Boundary-aware truncation that never strands a half-cut character or a
 /// dangling ellipsis inside a word. Returns text no longer than [max].
@@ -182,9 +184,11 @@ class _AgentRun {
   final StringBuffer liveReasoning = StringBuffer();
   ChatSession? liveSession;
   Message? liveMsg;
+
   /// Most recent request's prompt token count — the ground truth for
   /// context usage (used by the %-of-context UI + compaction trigger).
   int? lastPromptTokens;
+
   /// DSH "Produced" panel data — files created/modified in this run
   /// (file_write / fs_edit create / commit), cleared per run.
   final List<({String path, int size})> produced = [];
@@ -196,11 +200,8 @@ class SessionEvent {
   final String type;
   final String data;
   final DateTime timestamp;
-  SessionEvent({
-    required this.type,
-    required this.data,
-    DateTime? timestamp,
-  }) : timestamp = timestamp ?? DateTime.now();
+  SessionEvent({required this.type, required this.data, DateTime? timestamp})
+    : timestamp = timestamp ?? DateTime.now();
 }
 
 /// Per-session Studio state — open tabs, editor buffers, active path.
@@ -237,6 +238,7 @@ class AgentService extends ChangeNotifier {
     // Per-session browser tabs: lazy-restore on session switch.
     AppState.I.onSessionSwitched = onSessionSwitched;
   }
+
   /// Named private constructor for subagent children (same body as [_]).
   AgentService._internal() : this._();
   static final AgentService I = AgentService._();
@@ -395,8 +397,7 @@ class AgentService extends ChangeNotifier {
   List<BrowserTab> get browserTabs => _browserBucketFor(_currentRunKey());
 
   /// Active tab index of the ACTIVE session.
-  int get activeTabIndex =>
-      _sessionActiveTab[_currentRunKey()] ?? 0;
+  int get activeTabIndex => _sessionActiveTab[_currentRunKey()] ?? 0;
   set activeTabIndex(int v) => _sessionActiveTab[_currentRunKey()] = v;
 
   List<BrowserTab> _browserBucketFor(String key) =>
@@ -453,8 +454,10 @@ class AgentService extends ChangeNotifier {
           tabs.add(BrowserTab(url: u));
         }
         _sessionActiveTab[sessionId] =
-            (prefs.getInt('$_kBrowserActiveTab$sessionId') ?? 0)
-                .clamp(0, tabs.length - 1);
+            (prefs.getInt('$_kBrowserActiveTab$sessionId') ?? 0).clamp(
+              0,
+              tabs.length - 1,
+            );
       }
     } catch (_) {}
     if (tabs.isEmpty) {
@@ -598,7 +601,8 @@ class AgentService extends ChangeNotifier {
   /// Current session's studio (falls back to a throwaway bucket when no
   /// session is active yet — e.g. before persistence loads).
   _SessionStudio get _studio {
-    final sid = AppState.I.activeSession?.sandboxId ??
+    final sid =
+        AppState.I.activeSession?.sandboxId ??
         AppState.I.activeSession?.id ??
         '__none__';
     return _studioFor(sid);
@@ -669,14 +673,12 @@ class AgentService extends ChangeNotifier {
     return SandboxService.I.workDirFor(sid);
   }
 
-
   // ── fs tools state (read-before-write policy, DSH observation gate) ──
   /// Paths the AI has read via file_read/fs_edit view — str_replace/insert
   /// require a prior read.  Keyed by session id so sessions don't leak.
   final Map<String, Set<String>> _readPaths = {};
   Set<String> _readPathsFor(String sid) =>
       _readPaths.putIfAbsent(sid, () => {});
-
 
   /// Surface of the last model-layer failure (HTTP status, network error,
   /// timeout) so the UI can show the REAL error instead of a dummy string.
@@ -732,8 +734,8 @@ class AgentService extends ChangeNotifier {
   static String _fmtSize(int b) => b >= 1048576
       ? '${(b / 1048576).toStringAsFixed(1)} MB'
       : b >= 1024
-          ? '${(b / 1024).toStringAsFixed(0)} KB'
-          : '$b B';
+      ? '${(b / 1024).toStringAsFixed(0)} KB'
+      : '$b B';
 
   /// True while the ACTIVE session has a run in flight — drives the
   /// typing bubble + stop/send button.  Per-session: another session
@@ -901,7 +903,10 @@ class AgentService extends ChangeNotifier {
         'parameters': {
           'type': 'object',
           'properties': {
-            'direction': {'type': 'string', 'enum': ['up', 'down', 'top', 'bottom']},
+            'direction': {
+              'type': 'string',
+              'enum': ['up', 'down', 'top', 'bottom'],
+            },
             'amount': {'type': 'integer'},
           },
           'required': ['direction'],
@@ -983,7 +988,9 @@ class AgentService extends ChangeNotifier {
             'The user sees the tab in the Browser screen strip.',
         'parameters': {
           'type': 'object',
-          'properties': {'url': {'type': 'string'}},
+          'properties': {
+            'url': {'type': 'string'},
+          },
           'required': ['url'],
         },
       },
@@ -997,7 +1004,9 @@ class AgentService extends ChangeNotifier {
             '(use browser_list_tabs to see them).',
         'parameters': {
           'type': 'object',
-          'properties': {'index': {'type': 'integer'}},
+          'properties': {
+            'index': {'type': 'integer'},
+          },
           'required': ['index'],
         },
       },
@@ -1017,7 +1026,9 @@ class AgentService extends ChangeNotifier {
         'description': 'Close a browser tab by 0-based index.',
         'parameters': {
           'type': 'object',
-          'properties': {'index': {'type': 'integer'}},
+          'properties': {
+            'index': {'type': 'integer'},
+          },
           'required': ['index'],
         },
       },
@@ -1567,7 +1578,8 @@ class AgentService extends ChangeNotifier {
             },
             'mode': {
               'type': 'string',
-              'description': 'Agent mode: "studio" (full sandbox) or '
+              'description':
+                  'Agent mode: "studio" (full sandbox) or '
                   '"quick" (phone terminal). Default: current mode.',
               'enum': ['studio', 'quick'],
             },
@@ -1623,7 +1635,6 @@ class AgentService extends ChangeNotifier {
         'parameters': {
           'type': 'object',
           'properties': {
-
             'message': {'type': 'string'},
           },
           'required': ['message'],
@@ -1686,11 +1697,13 @@ class AgentService extends ChangeNotifier {
             'name': {'type': 'string'},
             'base_url': {
               'type': 'string',
-              'description': 'OpenAI-compatible base URL, e.g. https://api.example.com/v1',
+              'description':
+                  'OpenAI-compatible base URL, e.g. https://api.example.com/v1',
             },
             'api_key': {
               'type': 'string',
-              'description': 'API key from the user (optional for local servers)',
+              'description':
+                  'API key from the user (optional for local servers)',
             },
             'models': {
               'type': 'array',
@@ -1752,7 +1765,8 @@ class AgentService extends ChangeNotifier {
             'args': {
               'type': 'array',
               'items': {'type': 'string'},
-              'description': 'e.g. ["-y", "@modelcontextprotocol/server-github"]',
+              'description':
+                  'e.g. ["-y", "@modelcontextprotocol/server-github"]',
             },
           },
           'required': ['name', 'command'],
@@ -2021,6 +2035,15 @@ class AgentService extends ChangeNotifier {
     return defaultContextWindow;
   }
 
+  /// Context window in effect for the ACTIVE session — the user's Settings
+  /// override wins; otherwise the model-keyword table (1M DSH default for
+  /// unknown/custom models).
+  static int contextWindowForSession(ChatSession s) {
+    final o = AppState.I.contextWindowOverride;
+    if (o > 0) return o;
+    return contextWindowFor(s.model);
+  }
+
   /// DSH default policy: compact when the measured request envelope reaches
   /// 80% of the model's contextWindow; retain the newest 16% verbatim.
   static const _compactThresholdRatio = 0.8;
@@ -2036,9 +2059,11 @@ class AgentService extends ChangeNotifier {
   int measuredContextTokens(ChatSession s, {String systemPrompt = ''}) {
     final billed = lastPromptTokens;
     if (billed != null && billed > 0) return billed;
-    var t = estimateMessageTokens(systemPrompt) + 256; // + tools header ballpark
+    var t =
+        estimateMessageTokens(systemPrompt) + 256; // + tools header ballpark
     for (final m in s.messages) {
-      t += estimateMessageTokens(m.content) +
+      t +=
+          estimateMessageTokens(m.content) +
           estimateMessageTokens(m.toolDetail ?? '');
     }
     return t;
@@ -2046,7 +2071,8 @@ class AgentService extends ChangeNotifier {
 
   /// Fraction (0..1) of the active model's context window currently used.
   double contextUsageFraction(ChatSession s) =>
-      measuredContextTokens(s) / contextWindowFor(s.model);
+      measuredContextTokens(s) / contextWindowForSession(s);
+
   /// Auto-compaction — DSH `agent/pre-step` pressure trigger parity, for
   /// EVERY provider/model (built-in AND custom): measure the request
   /// envelope against 80% of the model's context window (1M default when
@@ -2056,7 +2082,7 @@ class AgentService extends ChangeNotifier {
   /// span-distance guard is token-based, not message-based, so large
   /// 256K/1M models compact rarely and small ones early).
   Future<void> _maybeCompact(ChatSession s, ProviderConfig p) async {
-    final window = contextWindowFor(s.model);
+    final window = contextWindowForSession(s);
     final threshold = (window * _compactThresholdRatio).floor();
     final measured = measuredContextTokens(s, systemPrompt: 'x' * 4000);
     if (measured < threshold) return;
@@ -2075,20 +2101,26 @@ class AgentService extends ChangeNotifier {
           cutoff - s.compactedAtCount >= 4) {
         break;
       }
-      tail += estimateMessageTokens(m.content) +
+      tail +=
+          estimateMessageTokens(m.content) +
           estimateMessageTokens(m.toolDetail ?? '');
       cutoff--;
     }
     if (cutoff - s.compactedAtCount < 4) return; // nothing worth compacting
     final toSummarize = s.messages
         .sublist(s.compactedAtCount, cutoff)
-        .map((m) =>
-            '${m.role == 'user' ? 'User' : 'Assistant'}: ${cleanTruncate(m.content, 400)}')
+        .map(
+          (m) =>
+              '${m.role == 'user' ? 'User' : 'Assistant'}: ${cleanTruncate(m.content, 400)}',
+        )
         .join('\n');
     if (toSummarize.isEmpty) return;
-    _emit('think', 'context pressure '
-        '~${((measured / window) * 100).toStringAsFixed(0)}% of '
-        '${(window / 1000).toStringAsFixed(0)}K window — compacting…');
+    _emit(
+      'think',
+      'context pressure '
+          '~${((measured / window) * 100).toStringAsFixed(0)}% of '
+          '${(window / 1000).toStringAsFixed(0)}K window — compacting…',
+    );
     try {
       final summary = await _callLlm(
         p,
@@ -2097,29 +2129,56 @@ class AgentService extends ChangeNotifier {
             'role': 'system',
             'content':
                 'You are a conversation summarizer. Compress the following '
-                    'conversation into a dense summary (max 500 words). '
-                    'Preserve: all facts, decisions made, file paths '
-                    'mentioned, code snippets, pending tasks, user '
-                    'preferences. Write in the same language as the '
-                    'conversation.'
+                'conversation into a dense summary (max 500 words). '
+                'Preserve: all facts, decisions made, file paths '
+                'mentioned, code snippets, pending tasks, user '
+                'preferences. Write in the same language as the '
+                'conversation.',
           },
           {
             'role': 'user',
             'content':
                 '${s.compactedSummary != null ? '[Previous summary]\n${s.compactedSummary}\n\n' : ''}'
-                    '[New messages to incorporate]\n$toSummarize',
+                '[New messages to incorporate]\n$toSummarize',
           },
         ],
         s,
         includeTools: false,
       );
       if (summary != null && summary['content'] != null) {
+        final summaryText = summary['content'] as String;
         final shadowed = cutoff - s.compactedAtCount;
-        s.compactedSummary = summary['content'] as String;
+        final shadowedTok = s.messages
+            .sublist(s.compactedAtCount, cutoff)
+            .fold<int>(
+              0,
+              (a, m) =>
+                  a +
+                  estimateMessageTokens(m.content) +
+                  estimateMessageTokens(m.toolDetail ?? ''),
+            );
+        s.compactedSummary = summaryText;
         s.compactedAtCount = cutoff;
+        // DSH transcript parity: an inline "Context compacted" event row
+        // (expandable to the summary) — the user SEES what was folded.
+        s.messages.insert(
+          cutoff,
+          Message(
+            role: 'assistant',
+            kind: MsgKind.compact,
+            content:
+                'Context compacted · $shadowed message${shadowed == 1 ? '' : 's'} '
+                '(~${_fmtK(shadowedTok)} tokens)',
+            toolDetail: summaryText,
+            toolState: 'ok',
+          ),
+        );
         AppState.I.persistSessions();
-        _emit('think', 'context compacted ✓ ($shadowed msgs folded; '
-            '~${(tail / 1000).toStringAsFixed(1)}K tokens kept verbatim)');
+        _emit(
+          'think',
+          'context compacted ✓ ($shadowed msgs folded; '
+              '~${(tail / 1000).toStringAsFixed(1)}K tokens kept verbatim)',
+        );
       }
     } catch (e) {
       // Compaction failure is non-fatal — continue with full history.
@@ -2132,7 +2191,7 @@ class AgentService extends ChangeNotifier {
   /// as too long.  Force a compaction with a MINIMAL retained tail (one
   /// quarter of the usual retain budget) and let the caller retry once.
   Future<void> forceCompact(ChatSession s, ProviderConfig p) async {
-    final window = contextWindowFor(s.model);
+    final window = contextWindowForSession(s);
     final retain = (window * _compactRetainRatio / 4).floor();
     var tail = 0;
     var cutoff = s.messages.length;
@@ -2148,11 +2207,16 @@ class AgentService extends ChangeNotifier {
   }
 
   Future<void> _maybeCompactForceSpan(
-      ChatSession s, ProviderConfig p, int cutoff) async {
+    ChatSession s,
+    ProviderConfig p,
+    int cutoff,
+  ) async {
     final toSummarize = s.messages
         .sublist(s.compactedAtCount, cutoff)
-        .map((m) =>
-            '${m.role == 'user' ? 'User' : 'Assistant'}: ${cleanTruncate(m.content, 300)}')
+        .map(
+          (m) =>
+              '${m.role == 'user' ? 'User' : 'Assistant'}: ${cleanTruncate(m.content, 300)}',
+        )
         .join('\n');
     if (toSummarize.isEmpty) return;
     try {
@@ -2163,20 +2227,35 @@ class AgentService extends ChangeNotifier {
             'role': 'system',
             'content':
                 'You are a conversation summarizer. Compress into a dense '
-                    'summary (max 350 words). Preserve facts, file paths, '
-                    'decisions, pending tasks. Same language as conversation.',
+                'summary (max 350 words). Preserve facts, file paths, '
+                'decisions, pending tasks. Same language as conversation.',
           },
           {
             'role': 'user',
-            'content': '${s.compactedSummary != null ? '[Previous summary]\n${s.compactedSummary}\n\n' : ''}$toSummarize',
+            'content':
+                '${s.compactedSummary != null ? '[Previous summary]\n${s.compactedSummary}\n\n' : ''}$toSummarize',
           },
         ],
         s,
         includeTools: false,
       );
       if (summary != null && summary['content'] != null) {
-        s.compactedSummary = summary['content'] as String;
+        final shadowed = cutoff - s.compactedAtCount;
+        final summaryText = summary['content'] as String;
+        s.compactedSummary = summaryText;
         s.compactedAtCount = cutoff;
+        s.messages.insert(
+          cutoff,
+          Message(
+            role: 'assistant',
+            kind: MsgKind.compact,
+            content:
+                'Context force-pruned · $shadowed message${shadowed == 1 ? '' : 's'} '
+                '(overflow recovery)',
+            toolDetail: summaryText,
+            toolState: 'ok',
+          ),
+        );
         AppState.I.persistSessions();
         _emit('think', 'context force-pruned ✓ — retrying the request');
       }
@@ -2245,7 +2324,10 @@ class AgentService extends ChangeNotifier {
   /// Child INHERITS parent's planMode so it cannot bypass plan
   /// restrictions via dispatch_agent (read-only tools only while
   /// the parent is planning).
-  Future<String> _dispatchSubagent(String name, Map<String, dynamic> args) async {
+  Future<String> _dispatchSubagent(
+    String name,
+    Map<String, dynamic> args,
+  ) async {
     final req = pendingApproval;
     final parentPlanMode = planMode;
     pendingApproval = null;
@@ -2351,19 +2433,21 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           'role': 'system',
           'content':
               '[Earlier conversation summary — treat as established context]\n'
-                  '${s.compactedSummary}',
+              '${s.compactedSummary}',
         },
       // Staged attachment note — the file is in the session workspace.
       if (att != null)
         {
           'role': 'system',
-          'content': '[User attached a file this turn: "${att.name}" '
+          'content':
+              '[User attached a file this turn: "${att.name}" '
               '(${_fmtSize(att.size)}). It is saved in THIS session workspace. '
               'Read it with read_attachment("${att.name}") or run_shell, then '
               'respond to the user\'s message.]',
         },
       ...s.messages
           .skip(historyStart)
+          .where((m) => m.kind != MsgKind.compact)
           .map(
             (m) => {
               'role': m.role == 'user' ? 'user' : 'assistant',
@@ -2387,37 +2471,61 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           if (!overflowRecovered) {
             overflowRecovered = true;
             await forceCompact(s, p);
-            msgs.removeWhere((m) =>
-                m['role'] == 'system' &&
-                (m['content'] as String? ?? '').startsWith('[Earlier conversation summary'));
+            msgs.removeWhere(
+              (m) =>
+                  m['role'] == 'system' &&
+                  (m['content'] as String? ?? '').startsWith(
+                    '[Earlier conversation summary',
+                  ),
+            );
             final summary = s.compactedSummary;
             if (summary != null && summary.isNotEmpty) {
               msgs.insert(1, {
                 'role': 'system',
-                'content': '[Earlier conversation summary — treat as established context]\n$summary',
+                'content':
+                    '[Earlier conversation summary — treat as established context]\n$summary',
               });
             }
             msg = await _callLlm(p, msgs, s);
           }
           if (msg == null) {
-            _emit('err',
-                lastError ?? 'context window still over capacity after pruning');
+            _emit(
+              'err',
+              lastError ?? 'context window still over capacity after pruning',
+            );
           }
         }
         // Meter tokens for the Usage screen (real data, DSH StatsLine style).
         if (msg != null) {
           final u = msg['usage'] as Map<String, dynamic>?;
-          final pt = (u?['prompt_tokens'] as num?)?.toInt() ?? 0;
-          if (pt > 0) lastPromptTokens = pt;
+          var pt = (u?['prompt_tokens'] as num?)?.toInt() ?? 0;
+          var ct = (u?['completion_tokens'] as num?)?.toInt() ?? 0;
+          // Fallback metering — provider sent NO usage (e.g. endpoints that
+          // ignore stream_options): estimate with the DSH token-meter
+          // heuristic (chars/4 + 4 overhead) so Usage/context-% never zero.
+          if (pt <= 0) {
+            pt = msgs.fold<int>(0, (a, m) {
+              final c = m['content'];
+              return a + estimateMessageTokens(c is String ? c : '');
+            });
+          }
+          if (ct <= 0) {
+            ct =
+                estimateMessageTokens((msg['content'] as String?) ?? '') +
+                estimateMessageTokens(
+                  (msg['reasoning_content'] as String?) ?? '',
+                );
+          }
+          lastPromptTokens = pt;
           AppState.I.appendUsage(
             UsageEntry(
               time: DateTime.now(),
               providerId: p.id,
               providerName: p.name,
               model: _baseModelOf(p.selectedModel ?? ''),
-              promptTokens: (u?['prompt_tokens'] as num?)?.toInt() ?? 0,
-              completionTokens: (u?['completion_tokens'] as num?)?.toInt() ?? 0,
-              totalTokens: (u?['total_tokens'] as num?)?.toInt() ?? 0,
+              promptTokens: pt,
+              completionTokens: ct,
+              totalTokens: (u?['total_tokens'] as num?)?.toInt() ?? pt + ct,
               duration: Duration.zero,
             ),
           );
@@ -2435,14 +2543,17 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
             'If the model/provider is already configured, increase "AI response timeout" in Settings, or try again.',
             session: s,
           );
-          lastRunElapsedMs = DateTime.now().difference(_runStart ?? DateTime.now()).inMilliseconds;
+          lastRunElapsedMs = DateTime.now()
+              .difference(_runStart ?? DateTime.now())
+              .inMilliseconds;
           break;
         }
 
         // Stamp elapsed on the live message bubble.
         if (_liveMsg != null) {
-          _liveMsg!.elapsedMs =
-              DateTime.now().difference(_runStart ?? DateTime.now()).inMilliseconds;
+          _liveMsg!.elapsedMs = DateTime.now()
+              .difference(_runStart ?? DateTime.now())
+              .inMilliseconds;
           lastRunElapsedMs = _liveMsg!.elapsedMs;
         }
 
@@ -2453,10 +2564,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           // here so the model answers them in the NEXT request of THIS run
           // instead of the user waiting for a whole new run to spin up.
           if (_queue.isNotEmpty) {
-            msgs.add({
-              'role': 'assistant',
-              'content': msg['content'] ?? '',
-            });
+            msgs.add({'role': 'assistant', 'content': msg['content'] ?? ''});
             _finalizeLive();
             _drainQueueIntoMsgs(msgs);
             continue;
@@ -2492,8 +2600,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
                 state: result.startsWith('DENIED')
                     ? 'stopped'
                     : _looksLikeToolError(result)
-                        ? 'error'
-                        : 'ok',
+                    ? 'error'
+                    : 'ok',
                 detail: toolMsg.toolDetail ?? cleanTruncate(result, 8000),
               );
             }
@@ -2591,7 +2699,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         client.close(force: true);
         _activeRequest = null;
         return null;
-      }      final key = p.cleanApiKey;
+      }
+      final key = p.cleanApiKey;
       if (key.isNotEmpty) {
         req.headers.set('Authorization', 'Bearer $key');
       }
@@ -2613,10 +2722,18 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         'model': modelId,
         'messages': msgs,
         'stream': true,
+        // Ask for a final `usage` chunk — without stream_options most
+        // OpenAI-compatible backends (NVIDIA NIM, xAI, many BYOK gateways)
+        // never send token counts, leaving the Usage screen at zero.
+        'stream_options': {'include_usage': true},
       };
       final toolList = includeTools ? _tools : const <Map<String, dynamic>>[];
       if (toolList.isNotEmpty) body['tools'] = toolList;
       if (effort != null) body['reasoning_effort'] = effort;
+      // User-set output cap (Settings → Context & output); 0 = let the
+      // provider default decide — never a synthetic default injected.
+      final maxOut = AppState.I.maxOutputTokens;
+      if (maxOut > 0) body['max_tokens'] = maxOut;
 
       final bodyStr = jsonEncode(body);
       final bodyBytes = utf8.encode(bodyStr);
@@ -2624,13 +2741,16 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
       req.add(bodyBytes);
 
       // Total stream deadline — user-configurable in Settings (default 2 min).
-      final streamDeadline = DateTime.now().add(Duration(seconds: AppState.I.responseTimeoutSec));
+      final streamDeadline = DateTime.now().add(
+        Duration(seconds: AppState.I.responseTimeoutSec),
+      );
       // Time-to-first-response (headers) — also respects the settings value;
       // slow/reasoning models often take >30s before the first SSE byte.
       final res = await req.close().timeout(
         Duration(seconds: AppState.I.responseTimeoutSec),
         onTimeout: () {
-          lastError = 'no response from ${p.name} for '
+          lastError =
+              'no response from ${p.name} for '
               '${AppState.I.responseTimeoutSec}s — Settings me '
               'Increase "AI response timeout" or check the provider';
           throw TimeoutException(lastError ?? 'first-byte timeout');
@@ -2649,7 +2769,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         // providers' BYOK gateways) return 400/404/422 with
         // "tools"/"tool_calls"/"function" in the error body. The DSH-web
         // behaviour is to retry WITHOUT tools so the model still answers.
-        final mightBeToolRejection = (res.statusCode == 400 ||
+        final mightBeToolRejection =
+            (res.statusCode == 400 ||
                 res.statusCode == 404 ||
                 res.statusCode == 422) &&
             includeTools &&
@@ -2659,8 +2780,10 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
                 txt.contains('tool_choice') ||
                 txt.contains('not supported'));
         if (mightBeToolRejection) {
-          _emit('think',
-              'provider rejected tool schema — retrying without tools');
+          _emit(
+            'think',
+            'provider rejected tool schema — retrying without tools',
+          );
           // VISIBLE warning (was invisible before — users had no idea why
           // plugins/MCP/catalog tools "weren't working").
           _appendAssistant(
@@ -2673,15 +2796,21 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           return _callLlm(p, msgs, session, includeTools: false);
         }
         final hint = switch (res.statusCode) {
-          401 || 403 => 'API key invalid or expired — re-enter the key in Settings → ${p.name}.',
-          404 => 'Model "$modelId" not found on this endpoint — pick it again from the model picker.',
+          401 || 403 =>
+            'API key invalid or expired — re-enter the key in Settings → ${p.name}.',
+          404 =>
+            'Model "$modelId" not found on this endpoint — pick it again from the model picker.',
           429 => 'Rate limited — wait a moment and retry.',
           >= 500 => 'Provider server issue (${p.name}) — retry in a moment.',
           _ => '',
         };
-        lastError = 'HTTP ${res.statusCode} ${p.name} · $modelId\n'
+        lastError =
+            'HTTP ${res.statusCode} ${p.name} · $modelId\n'
             '${hint.isNotEmpty ? '$hint\n' : ''}${cleanTruncate(txt, 180)}';
-        _emit('err', 'LLM ${res.statusCode}: ${txt.substring(0, txt.length.clamp(0, 300))}');
+        _emit(
+          'err',
+          'LLM ${res.statusCode}: ${txt.substring(0, txt.length.clamp(0, 300))}',
+        );
         return null;
       }
 
@@ -2699,7 +2828,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
               .timeout(
                 streamDeadline.difference(DateTime.now()),
                 onTimeout: (sink) {
-                  lastError = 'model stream exceeded ${AppState.I.responseTimeoutSec}s — Settings me timeout badhayein';
+                  lastError =
+                      'model stream exceeded ${AppState.I.responseTimeoutSec}s — Settings me timeout badhayein';
                   throw TimeoutException(lastError ?? 'model stream timeout');
                 },
               )) {
@@ -2774,7 +2904,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
       _activeRequest = null;
 
       if (contentBuf.isEmpty && reasoningBuf.isEmpty && tcAcc.isEmpty) {
-        lastError ??= 'empty response from ${modelId.isEmpty ? 'model' : modelId}';
+        lastError ??=
+            'empty response from ${modelId.isEmpty ? 'model' : modelId}';
         _emit('err', lastError!);
         return null;
       }
@@ -2786,7 +2917,9 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         if (tcAcc.isNotEmpty) 'tool_calls': tcAcc.values.toList(),
         'finish_reason': ?finishReason,
         'usage': ?usage,
-        'elapsedMs': DateTime.now().difference(_runStart ?? DateTime.now()).inMilliseconds,
+        'elapsedMs': DateTime.now()
+            .difference(_runStart ?? DateTime.now())
+            .inMilliseconds,
       };
     } catch (e) {
       // A user-initiated cancel aborts the request — surface it as stopped,
@@ -2883,7 +3016,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         // in EVERY access mode (not just Studio).  The sandbox provides
         // bash/python/node/git via apt; the phone terminal (toybox) is only
         // the fallback when the sandbox isn't installed on this device yet.
-        final useSandbox = SandboxService.I.isInstalled ||
+        final useSandbox =
+            SandboxService.I.isInstalled ||
             await SandboxService.I.checkExisting();
         final ok = await _maybeApprove(
           'run_shell',
@@ -2913,8 +3047,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           }
           final hint = out.contains('not found') || out.contains('not: found')
               ? '\n\n[phone terminal: only Android toybox commands here — '
-                  'run the one-time native sandbox setup (Studio screen) for '
-                  'python/node/git/apt]\n'
+                    'run the one-time native sandbox setup (Studio screen) for '
+                    'python/node/git/apt]\n'
               : '';
           return (out.isEmpty ? '(no output)' : out) + hint;
         } catch (e) {
@@ -3138,8 +3272,11 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         try {
           final work = await _sessionWorkDir();
           final out = await SandboxService.I
-              .exec([lang == 'python' ? 'python3' : 'node', '-e', code],
-                    hostWorkDir: work)
+              .exec([
+                lang == 'python' ? 'python3' : 'node',
+                '-e',
+                code,
+              ], hostWorkDir: work)
               .timeout(const Duration(seconds: 60));
           _emit('shellOut', out);
           return out;
@@ -3183,7 +3320,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
             if (m.content.toLowerCase().contains(q2)) {
               final label = share ? '[${sess.title}] ' : '';
               hits.add(
-                  '$label${m.role}: ${cleanTruncate(m.content.replaceAll('\n', ' '), 120)}');
+                '$label${m.role}: ${cleanTruncate(m.content.replaceAll('\n', ' '), 120)}',
+              );
               if (hits.length >= 8) break;
             }
           }
@@ -3284,19 +3422,20 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
       case 'catalog_list_providers':
         _emit('think', 'listing providers');
         final app = AppState.I;
-        return (app.providers.map((p) {
-          final key = p.hasKey ? 'key ✓' : 'no key';
-          return '${p.name} (${p.id}) — $key · ${p.models.length} models '
-              '${p.isConfigured ? '' : '· NOT CONFIGURED'}';
-        }).join('\n'));
+        return (app.providers
+            .map((p) {
+              final key = p.hasKey ? 'key ✓' : 'no key';
+              return '${p.name} (${p.id}) — $key · ${p.models.length} models '
+                  '${p.isConfigured ? '' : '· NOT CONFIGURED'}';
+            })
+            .join('\n'));
 
       case 'catalog_add_provider':
         final name = args['name'] as String;
         final baseUrl = args['base_url'] as String;
         final apiKey = args['api_key'] as String? ?? '';
-        final models = (args['models'] as List?)
-                ?.whereType<String>()
-                .toList() ??
+        final models =
+            (args['models'] as List?)?.whereType<String>().toList() ??
             <String>[];
         _emit('think', 'adding provider: $name');
         final err = await AppState.I.addCustomProvider(
@@ -3331,24 +3470,26 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
       case 'catalog_list_plugins':
         _emit('think', 'listing plugins');
         final app = AppState.I;
-        return (app.plugins.map((p) =>
-                '${p.name} — ${p.installed ? 'installed' : 'available'}'
-                '${p.enabled ? ' · enabled' : ''}'))
-            .join('\n');
+        return (app.plugins.map(
+          (p) =>
+              '${p.name} — ${p.installed ? 'installed' : 'available'}'
+              '${p.enabled ? ' · enabled' : ''}',
+        )).join('\n');
 
       case 'catalog_list_mcp':
         _emit('think', 'listing MCP servers');
         final app = AppState.I;
-        return (app.mcpServers.map((s) =>
-                '${s.name} — ${s.connected ? 'connected' : 'disconnected'}'
-                ' · ${s.command} ${s.args.join(' ')}'))
-            .join('\n');
+        return (app.mcpServers.map(
+          (s) =>
+              '${s.name} — ${s.connected ? 'connected' : 'disconnected'}'
+              ' · ${s.command} ${s.args.join(' ')}',
+        )).join('\n');
 
       case 'catalog_add_mcp':
         final name = args['name'] as String;
         final command = args['command'] as String;
-        final mArgs = (args['args'] as List?)?.whereType<String>().toList() ??
-            <String>[];
+        final mArgs =
+            (args['args'] as List?)?.whereType<String>().toList() ?? <String>[];
         _emit('think', 'adding MCP server: $name');
         AppState.I.addCustomMcpServer(
           name: name,
@@ -3442,10 +3583,13 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         final dir = args['direction'] as String;
         final amount = (args['amount'] as num?)?.toInt() ?? 600;
         final js = switch (dir) {
-          'up' => 'window.scrollBy({top:-$amount,behavior:"smooth"});"scrolled up"',
-          'down' => 'window.scrollBy({top:$amount,behavior:"smooth"});"scrolled down"',
+          'up' =>
+            'window.scrollBy({top:-$amount,behavior:"smooth"});"scrolled up"',
+          'down' =>
+            'window.scrollBy({top:$amount,behavior:"smooth"});"scrolled down"',
           'top' => 'window.scrollTo({top:0,behavior:"smooth"});"top"',
-          'bottom' => 'window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"});"bottom"',
+          'bottom' =>
+            'window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"});"bottom"',
           _ => '"unknown direction"',
         };
         try {
@@ -3462,7 +3606,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         final sel = args['selector'] as String;
         final text = args['text'] as String;
         final submit = args['submit'] as bool? ?? false;
-        final js = '''
+        final js =
+            '''
 (() => {
   const el = document.querySelector(${jsonEncode(sel)});
   if (!el) return 'no element: $sel';
@@ -3492,7 +3637,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         tab.controller ??= controllerForTab(tab);
         final key = args['key'] as String;
         final code = {'Enter': 13, 'Tab': 9, 'Escape': 27}[key] ?? 0;
-        final js = '''
+        final js =
+            '''
 (() => {
   const el = document.activeElement || document.body;
   const opts = {key:${jsonEncode(key)},code:${jsonEncode(key)},keyCode:$code,which:$code,bubbles:true,cancelable:true};
@@ -3604,7 +3750,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         final path = args['path'] as String;
         final c = RepoCache.I.read(path);
         if (c == null) return 'file not found: $path';
-        final sid = AppState.I.activeSession?.sandboxId ??
+        final sid =
+            AppState.I.activeSession?.sandboxId ??
             AppState.I.activeSession?.id ??
             'default';
         _readPathsFor(sid).add(path);
@@ -3811,11 +3958,13 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
   // it as a 24px collapsed row (icon + title · summary) that expands to a
   // Terminal/Diff/Read block.
 
-
   /// Tool rows that should NOT create a chat card (UI-interactive tools
   /// have their own surfaces — approval dock, questions card, todo dock).
   static const _silentTools = {
-    'ask_user_question', 'todo_write', 'exit_plan_mode', 'request_permission',
+    'ask_user_question',
+    'todo_write',
+    'exit_plan_mode',
+    'request_permission',
   };
 
   /// Row presentation per tool — icon + how to title it.
@@ -3830,7 +3979,10 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
       'run_shell' => 'terminal',
       'run_code' => 'code',
       'job_start' || 'job_kill' || 'job_list' || 'job_output' => 'terminal',
-      'web_search' || 'fs_grep' || 'fs_glob' || 'session_search' ||
+      'web_search' ||
+      'fs_grep' ||
+      'fs_glob' ||
+      'session_search' ||
       'memory_search' => 'search',
       'fetch_url' => 'web',
       'generate_image' => 'sparkle',
@@ -3846,52 +3998,53 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
 
   /// Human title for the collapsed row.
   static String toolTitleFor(String toolName) => switch (toolName) {
-        'run_shell' => 'bash',
-        'run_code' => 'Run code',
-        'file_read' => 'Read',
-        'file_write' => 'Write',
-        'fs_edit' => 'Edit',
-        'fs_glob' => 'Glob',
-        'fs_grep' => 'Grep',
-        'web_search' => 'Search',
-        'fetch_url' => 'Fetch',
-        'session_search' => 'Search session',
-        'memory_search' => 'Search memory',
-        'memory_save' => 'Save memory',
-        'dispatch_agent' => 'Subagent',
-        'commit' => 'Commit',
-        'repo_sync' => 'Sync repo',
-        'repo_tree' => 'Repo tree',
-        'job_start' => 'Start job',
-        'job_output' => 'Job output',
-        'job_list' => 'Jobs',
-        'job_kill' => 'Kill job',
-        'create_goal' => 'Create goal',
-        'update_goal' => 'Update goal',
-        'get_goal' => 'Goal',
-        'schedule_create' => 'Create reminder',
-        'schedule_list' => 'Reminders',
-        'schedule_delete' => 'Delete reminder',
-        'browser_navigate' => 'Navigate',
-        'browser_click' => 'Click',
-        'browser_type' => 'Type',
-        'browser_scroll' => 'Scroll',
-        'browser_press_key' => 'Press key',
-        'browser_wait_for' => 'Wait for',
-        'browser_snapshot' => 'Snapshot',
-        'browser_read' => 'Read page',
-        'browser_evaluate' => 'Evaluate JS',
-        'browser_new_tab' => 'New tab',
-        'browser_switch_tab' => 'Switch tab',
-        'browser_list_tabs' => 'List tabs',
-        'browser_close_tab' => 'Close tab',
-        'generate_image' => 'Generate image',
-        'read_attachment' => 'Read attachment',
-        'preview' => 'Preview',
-        _ => toolName.startsWith('mcp_')
-            ? toolName.replaceAll('mcp_', '').replaceAll('_', ' ')
-            : toolName.replaceAll('_', ' '),
-      };
+    'run_shell' => 'bash',
+    'run_code' => 'Run code',
+    'file_read' => 'Read',
+    'file_write' => 'Write',
+    'fs_edit' => 'Edit',
+    'fs_glob' => 'Glob',
+    'fs_grep' => 'Grep',
+    'web_search' => 'Search',
+    'fetch_url' => 'Fetch',
+    'session_search' => 'Search session',
+    'memory_search' => 'Search memory',
+    'memory_save' => 'Save memory',
+    'dispatch_agent' => 'Subagent',
+    'commit' => 'Commit',
+    'repo_sync' => 'Sync repo',
+    'repo_tree' => 'Repo tree',
+    'job_start' => 'Start job',
+    'job_output' => 'Job output',
+    'job_list' => 'Jobs',
+    'job_kill' => 'Kill job',
+    'create_goal' => 'Create goal',
+    'update_goal' => 'Update goal',
+    'get_goal' => 'Goal',
+    'schedule_create' => 'Create reminder',
+    'schedule_list' => 'Reminders',
+    'schedule_delete' => 'Delete reminder',
+    'browser_navigate' => 'Navigate',
+    'browser_click' => 'Click',
+    'browser_type' => 'Type',
+    'browser_scroll' => 'Scroll',
+    'browser_press_key' => 'Press key',
+    'browser_wait_for' => 'Wait for',
+    'browser_snapshot' => 'Snapshot',
+    'browser_read' => 'Read page',
+    'browser_evaluate' => 'Evaluate JS',
+    'browser_new_tab' => 'New tab',
+    'browser_switch_tab' => 'Switch tab',
+    'browser_list_tabs' => 'List tabs',
+    'browser_close_tab' => 'Close tab',
+    'generate_image' => 'Generate image',
+    'read_attachment' => 'Read attachment',
+    'preview' => 'Preview',
+    _ =>
+      toolName.startsWith('mcp_')
+          ? toolName.replaceAll('mcp_', '').replaceAll('_', ' ')
+          : toolName.replaceAll('_', ' '),
+  };
 
   Message _toolStart(String toolName, String summary) {
     final s = AppState.I.activeSession;
@@ -3915,7 +4068,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     if (m == null) return;
     m.toolDetail = '${m.toolDetail ?? ''}$chunk';
     if ((m.toolDetail?.length ?? 0) > 12000) {
-      m.toolDetail = '…(earlier output trimmed)…\n'
+      m.toolDetail =
+          '…(earlier output trimmed)…\n'
           '${m.toolDetail!.substring(m.toolDetail!.length - 10000)}';
     }
     // Keep the collapsed-row summary current with the latest output line.
@@ -3931,7 +4085,9 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     _activeToolMsg = null;
     if (m == null) return;
     if (detail != null && m.toolDetail == null) m.toolDetail = detail;
-    if (summary != null) m.toolSummary = cleanTruncate(summary.replaceAll('\n', ' '), 140);
+    if (summary != null) {
+      m.toolSummary = cleanTruncate(summary.replaceAll('\n', ' '), 140);
+    }
     m.toolState = state;
     AppState.I.refresh();
   }
@@ -3977,7 +4133,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
   Future<String> _handleFsEdit(Map<String, dynamic> args) async {
     final cmd = args['command'] as String;
     final path = args['path'] as String;
-    final sid = AppState.I.activeSession?.sandboxId ??
+    final sid =
+        AppState.I.activeSession?.sandboxId ??
         AppState.I.activeSession?.id ??
         'default';
 
@@ -4082,7 +4239,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         }
         final repoContent = RepoCache.I.read(path);
         final host = await _resolveFsPath(path);
-        final raw = repoContent ??
+        final raw =
+            repoContent ??
             (host != null ? await File(host).readAsString() : null);
         if (raw == null) return 'file not found: $path';
         final lines = raw.split('\n');
@@ -4260,9 +4418,11 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     int lineIdx,
     int ctx,
   ) {
-    for (var c = (lineIdx - ctx).clamp(0, lines.length - 1);
-        c <= (lineIdx + ctx).clamp(0, lines.length - 1);
-        c++) {
+    for (
+      var c = (lineIdx - ctx).clamp(0, lines.length - 1);
+      c <= (lineIdx + ctx).clamp(0, lines.length - 1);
+      c++
+    ) {
       results.add('$file:${c + 1}: ${lines[c]}');
     }
   }
@@ -4285,8 +4445,11 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     AppState.I.persistSessions();
     final done = todos.where((t) => t['status'] == 'completed').length;
     final inProg = todos.where((t) => t['status'] == 'in_progress').length;
-    _emit('think', 'todo: $done done, $inProg in progress, '
-        '${todos.length - done - inProg} pending');
+    _emit(
+      'think',
+      'todo: $done done, $inProg in progress, '
+          '${todos.length - done - inProg} pending',
+    );
     return 'todo list updated: ${todos.length} items '
         '($done completed, $inProg in progress)';
   }
@@ -4312,8 +4475,11 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
             multi: q['multi'] as bool? ?? false,
           ),
     ];
-    _emit('think', 'asking user ${questions.length} question'
-        '${questions.length > 1 ? 's' : ''}…');
+    _emit(
+      'think',
+      'asking user ${questions.length} question'
+          '${questions.length > 1 ? 's' : ''}…',
+    );
     final answers = await _askQuestions(questions);
     if (answers == null) return 'user cancelled the questions';
     final buf = StringBuffer();
@@ -4324,7 +4490,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
   }
 
   Future<Map<String, String>?> _askQuestions(
-      List<UserQuestion> questions) async {
+    List<UserQuestion> questions,
+  ) async {
     final req = ApprovalRequest(
       tool: 'ask_user_question',
       summary: 'The AI asked ${questions.length} question(s)',
@@ -4342,12 +4509,24 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
 
   /// Tools that modify state — blocked during plan mode.
   static const _mutatingTools = {
-    'file_write', 'fs_edit', 'run_shell', 'commit', 'git_clone',
-    'git_push', 'request_permission', 'catalog_add_provider',
-    'catalog_remove_provider', 'catalog_add_mcp', 'catalog_remove_mcp',
+    'file_write',
+    'fs_edit',
+    'run_shell',
+    'commit',
+    'git_clone',
+    'git_push',
+    'request_permission',
+    'catalog_add_provider',
+    'catalog_remove_provider',
+    'catalog_add_mcp',
+    'catalog_remove_mcp',
     'catalog_add_plugin',
-    'agent_install_plugin', 'agent_install_mcp', 'catalog_add_marketplace',
-    'todo_write', 'job_start', 'job_kill',
+    'agent_install_plugin',
+    'agent_install_mcp',
+    'catalog_add_marketplace',
+    'todo_write',
+    'job_start',
+    'job_kill',
   };
 
   bool _isMutatingTool(String name) => _mutatingTools.contains(name);
@@ -4421,16 +4600,15 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     g['round'] = ((g['round'] as num?)?.toInt() ?? 0) + 1;
     g['status'] = status;
     AppState.I.persistSessions();
-    _emit(
-        'think', 'goal → $status (round ${g['round']})');
+    _emit('think', 'goal → $status (round ${g['round']})');
     notifyListeners();
     return status == 'complete'
         ? 'Goal marked complete ✓ (round ${g['round']}).'
         : status == 'blocked'
-            ? 'Goal marked blocked (round ${g['round']}). Tell the user '
-                'what you need to continue.'
-            : 'Goal active, round ${g['round']} recorded. Keep going or '
-                'report to the user.';
+        ? 'Goal marked blocked (round ${g['round']}). Tell the user '
+              'what you need to continue.'
+        : 'Goal active, round ${g['round']} recorded. Keep going or '
+              'report to the user.';
   }
 
   // ── SCHEDULES (DSH schedule equivalent) ──
@@ -4485,9 +4663,12 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
       return 'No reminders in this session.';
     }
     return s.schedules
-        .map((r) => '${r['id']} — '
-            '${r['every'] != null ? 'every ${r['every']}s' : DateTime.parse(r['fireAt'] as String).toLocal()}'
-            ' — ${r['prompt']}')
+        .map(
+          (r) =>
+              '${r['id']} — '
+              '${r['every'] != null ? 'every ${r['every']}s' : DateTime.parse(r['fireAt'] as String).toLocal()}'
+              ' — ${r['prompt']}',
+        )
         .join('\n');
   }
 
@@ -4612,15 +4793,16 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           hostWorkDir: work,
           env: {
             'HOME': '/root',
-            'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+            'PATH':
+                '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
             'TERM': 'xterm-256color',
           },
         );
       } else {
-        job.process = await Process.start(
-          '/system/bin/sh', ['-c', cmd],
-          workingDirectory: work.path,
-        );
+        job.process = await Process.start('/system/bin/sh', [
+          '-c',
+          cmd,
+        ], workingDirectory: work.path);
       }
       job.started = true;
       // Stream output into a buffer (capped at 10K chars).
@@ -4653,7 +4835,9 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     final s = job.output.toString();
     if (s.length > 10000) {
       job.output.clear();
-      job.output.write('…(earlier output trimmed)…\n${s.substring(s.length - 8000)}');
+      job.output.write(
+        '…(earlier output trimmed)…\n${s.substring(s.length - 8000)}',
+      );
     }
   }
 
@@ -4664,8 +4848,8 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
       final status = j.finished
           ? 'finished (exit ${j.exitCode})'
           : j.started
-              ? 'running'
-              : 'starting';
+          ? 'running'
+          : 'starting';
       final lastLines = j.output.toString().trim().split('\n');
       final preview = lastLines.isEmpty || lastLines.last.isEmpty
           ? '(no output yet)'
@@ -4801,10 +4985,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     final url = Uri.parse(
       'https://html.duckduckgo.com/html/?q=${Uri.encodeQueryComponent(query)}',
     );
-    final r = await HttpShim.get(
-      url,
-      headers: {'User-Agent': 'OvidAgent/1.0'},
-    );
+    final r = await HttpShim.get(url, headers: {'User-Agent': 'OvidAgent/1.0'});
     if (r.status != 200) return 'search failed (${r.status})';
     final html = utf8.decode(r.bytes, allowMalformed: true);
     // Parse result titles + snippets from the HTML (DuckDuckGo layout).
@@ -4859,8 +5040,10 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
 
   /// Strip the " · High/Low/Medium" effort suffix from a model label.
   String _baseModelOf(String raw) {
-    final m = RegExp(r'·\s*(low|medium|high)$', caseSensitive: false)
-        .firstMatch(raw);
+    final m = RegExp(
+      r'·\s*(low|medium|high)$',
+      caseSensitive: false,
+    ).firstMatch(raw);
     return m != null ? raw.substring(0, m.start).trim() : raw;
   }
 }

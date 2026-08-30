@@ -46,8 +46,7 @@ class SandboxService {
 
   /// Public paths — MCP spawns servers through these.
   String? get prefixPath => _prefix?.path;
-  String? get bashPath =>
-      _prefix != null ? '${_prefix!.path}/bin/bash' : null;
+  String? get bashPath => _prefix != null ? '${_prefix!.path}/bin/bash' : null;
 
   // Legacy accessors kept so older call sites compile (MCP checks them).
   Directory? get root => _prefix;
@@ -66,11 +65,13 @@ class SandboxService {
   // ── Device arch (Termux-style: engine arch is the source of truth) ──
   String get _deviceArch {
     final v = Platform.version.toLowerCase();
-    if (v.contains('android_arm64') || v.contains('aarch64') ||
+    if (v.contains('android_arm64') ||
+        v.contains('aarch64') ||
         v.contains('x86_64')) {
       return 'arm64';
     }
-    if (v.contains('android_arm') || v.contains('armv7') ||
+    if (v.contains('android_arm') ||
+        v.contains('armv7') ||
         v.contains('armv8')) {
       return 'arm';
     }
@@ -118,13 +119,18 @@ class SandboxService {
       final prefix = Directory('${files.path}/sandbox');
       final bash = File('${prefix.path}/bin/bash');
       final coreutils = File('${prefix.path}/bin/coreutils');
-      final ldPreload =
-          File('${prefix.path}/lib/libtermux-exec-direct-ld-preload.so');
+      final ldPreload = File(
+        '${prefix.path}/lib/libtermux-exec-direct-ld-preload.so',
+      );
       if (bash.existsSync() &&
           coreutils.existsSync() &&
           ldPreload.existsSync()) {
         _prefix = prefix;
         _installed = true;
+        // Existing installs may predate the apt-CA fix: re-assert the
+        // CA bundle + apt config on every boot so apt/git over HTTPS
+        // keep working without a reinstall.
+        _writeAptConfig(prefix);
         return true;
       }
       return false;
@@ -144,8 +150,10 @@ class SandboxService {
     final staging = Directory('${files.path}/sandbox-staging');
 
     onPhase(0, 0.0, r'$ ovid sandbox --preflight');
-    const buildStamp =
-        String.fromEnvironment('OVID_BUILD', defaultValue: 'local-dev');
+    const buildStamp = String.fromEnvironment(
+      'OVID_BUILD',
+      defaultValue: 'local-dev',
+    );
     onPhase(0, 0.05, 'ovid build ........ $buildStamp');
     final arch = _deviceArch;
     onPhase(0, 0.1, 'device ............ $arch ✓ (native bionic, no proot)');
@@ -159,11 +167,15 @@ class SandboxService {
     final payloadBytes = await _readBootstrapPayload();
     if (payloadBytes == null) {
       throw Exception(
-          'Sandbox payload not found. Reinstall the app — the ABI split '
-          'for this device was not included in the install.');
+        'Sandbox payload not found. Reinstall the app — the ABI split '
+        'for this device was not included in the install.',
+      );
     }
-    onPhase(1, 1.0,
-        'payload ........... ${(payloadBytes.length / 1024 / 1024).toStringAsFixed(1)} MB ✓');
+    onPhase(
+      1,
+      1.0,
+      'payload ........... ${(payloadBytes.length / 1024 / 1024).toStringAsFixed(1)} MB ✓',
+    );
 
     // ── Extract zip into staging ──
     onPhase(2, 0.0, 'extracting sandbox payload');
@@ -202,7 +214,9 @@ class SandboxService {
         // with the raw relative target.
         final dest = target.startsWith('/data/data/com.termux/files/usr/')
             ? target.replaceFirst(
-                '/data/data/com.termux/files/usr/', '${prefix.path}/')
+                '/data/data/com.termux/files/usr/',
+                '${prefix.path}/',
+              )
             : target;
         link.createSync(dest);
         linked++;
@@ -251,19 +265,27 @@ class SandboxService {
     // a false ✓ while every subsequent shell command failed.
     onPhase(6, 0.0, r'$ bash --version (native exec sanity)');
     try {
-      final (code, out) = await execChecked(['bash', '--version'])
-          .timeout(const Duration(seconds: 15));
+      final (code, out) = await execChecked([
+        'bash',
+        '--version',
+      ]).timeout(const Duration(seconds: 15));
       if (code != 0) {
-        throw Exception('bash --version exited $code: '
-            '${out.trim().split('\n').take(2).join(' / ')}');
+        throw Exception(
+          'bash --version exited $code: '
+          '${out.trim().split('\n').take(2).join(' / ')}',
+        );
       }
       final firstLine = out.trim().split('\n').first;
-      onPhase(6, 1.0,
-          'native exec ....... ✓ ${firstLine.substring(0, firstLine.length.clamp(0, 50))}');
+      onPhase(
+        6,
+        1.0,
+        'native exec ....... ✓ ${firstLine.substring(0, firstLine.length.clamp(0, 50))}',
+      );
     } catch (e) {
       throw Exception(
-          'Sandbox installed but native exec failed: $e. '
-          'Report this with your device model.');
+        'Sandbox installed but native exec failed: $e. '
+        'Report this with your device model.',
+      );
     }
 
     // ── Phase 7: Runtimes — node/npm/npx/pnpm + python/pip/uv ─────────
@@ -284,8 +306,11 @@ class SandboxService {
   ) async {
     Future<bool> binRuns(String bin, [String args = '--version']) async {
       try {
-        final (code, _) = await execChecked(['bash', '-c', '$bin $args 2>&1'])
-            .timeout(const Duration(seconds: 15));
+        final (code, _) = await execChecked([
+          'bash',
+          '-c',
+          '$bin $args 2>&1',
+        ]).timeout(const Duration(seconds: 15));
         return code == 0;
       } catch (_) {
         return false;
@@ -298,16 +323,18 @@ class SandboxService {
     var installed = false;
     for (var attempt = 1; attempt <= 3 && !installed; attempt++) {
       try {
-        onPhase(7, 0.05, attempt == 1
-            ? r'$ apt update'
-            : 'retry $attempt/3 · apt update');
-        await execChecked(['bash', '-c', 'apt update 2>&1'])
-            .timeout(const Duration(minutes: 3));
+        onPhase(
+          7,
+          0.05,
+          attempt == 1 ? r'$ apt update' : 'retry $attempt/3 · apt update',
+        );
+        await _aptChecked('update 2>&1', timeout: const Duration(minutes: 3));
         onPhase(7, 0.3, 'apt update ......... ✓');
         onPhase(7, 0.4, '\$ apt install -y $pkgs');
-        final (code, out) =
-            await execChecked(['bash', '-c', 'apt install -y $pkgs 2>&1'])
-                .timeout(const Duration(minutes: 8));
+        final (code, out) = await _aptChecked(
+          'install -y $pkgs 2>&1',
+          timeout: const Duration(minutes: 8),
+        );
         installed = code == 0;
         if (!installed) {
           final lines = out
@@ -315,12 +342,19 @@ class SandboxService {
               .split('\n')
               .where((l) => l.trim().isNotEmpty)
               .toList();
-          onPhase(7, 0.4,
-              'apt exit $code — ${lines.isEmpty ? "" : lines.last}');
+          onPhase(
+            7,
+            0.4,
+            'apt exit $code — ${lines.isEmpty ? "" : lines.last}',
+          );
         }
       } catch (e) {
-        onPhase(7, 0.4, 'attempt $attempt failed: '
-            '${e.toString().split('\n').first}');
+        onPhase(
+          7,
+          0.4,
+          'attempt $attempt failed: '
+          '${e.toString().split('\n').first}',
+        );
       }
     }
 
@@ -334,8 +368,9 @@ class SandboxService {
         var pnpmNote = 'pnpm ✗';
         try {
           await execChecked([
-            'bash', '-c',
-            'corepack enable 2>&1; corepack prepare pnpm@latest --activate 2>&1'
+            'bash',
+            '-c',
+            'corepack enable 2>&1; corepack prepare pnpm@latest --activate 2>&1',
           ]).timeout(const Duration(minutes: 2));
           pnpmNote = await binRuns('pnpm') ? 'pnpm ✓' : 'pnpm ✗';
         } catch (_) {}
@@ -344,17 +379,25 @@ class SandboxService {
         onPhase(7, 0.7, 'node ................ ⚠ node ok but npm/npx missing');
       }
     } else {
-      onPhase(7, 0.7, 'node ................ ⚠ not installed (offline?) — '
-          'will retry on first MCP connect');
+      onPhase(
+        7,
+        0.7,
+        'node ................ ⚠ not installed (offline?) — '
+        'will retry on first MCP connect',
+      );
     }
 
     // Verify python + pip + uvx.
     final pyOk = await binRuns('python');
     final pipOk = await binRuns('pip');
     final uvxOk = await binRuns('uvx');
-    onPhase(8, 1.0, pyOk && uvxOk
-        ? 'python .............. ✓ python · ${pipOk ? "pip" : "pip✗"} · uvx ✓'
-        : 'python .............. ⚠ ${pyOk ? "partial (uv missing)" : "not installed"} — will retry on first uvx MCP connect');
+    onPhase(
+      8,
+      1.0,
+      pyOk && uvxOk
+          ? 'python .............. ✓ python · ${pipOk ? "pip" : "pip✗"} · uvx ✓'
+          : 'python .............. ⚠ ${pyOk ? "partial (uv missing)" : "not installed"} — will retry on first uvx MCP connect',
+    );
   }
 
   /// A parsed symlink: `target` is what the link points to, `linkPath` is
@@ -364,7 +407,8 @@ class SandboxService {
   /// `coreutils` is the target of 100 different bin/ links).  The record
   /// list keeps every entry.
   static List<({String target, String linkPath})> parseSymlinks(
-      Archive archive) {
+    Archive archive,
+  ) {
     final file = archive.findFile('SYMLINKS.txt');
     if (file == null) return const [];
     final txt = utf8.decode(file.content as List<int>);
@@ -410,7 +454,8 @@ class SandboxService {
   void _writeProfile(Directory prefix) {
     final p = prefix.path;
     final etc = Directory('$p/etc')..createSync(recursive: true);
-    final profile = '''
+    final profile =
+        '''
 # Ovid sandbox profile (overrides Termux bootstrap default).
 export PREFIX="$p"
 export HOME="\$PREFIX/home"
@@ -477,7 +522,8 @@ export TERM="xterm-256color"
   /// system".  An explicit Dir tree makes apt fully prefix-independent.
   void _writeAptConfig(Directory prefix) {
     final p = prefix.path;
-    final conf = '''
+    final conf =
+        '''
 // Ovid sandbox apt config — override the compiled-in Termux prefix.
 Dir "$p";
 Dir::State "$p/var/lib/apt";
@@ -498,7 +544,13 @@ Dir::Bin::planners "$p/lib/apt/planners";
 DPkg::Pre-Install-Pkgs "";
 DPkg::Options:: "--root=$p";
 DPkg::Options:: "--admindir=$p/var/lib/dpkg";
-APT::Get::Assume-Yes "true";
+GPkg::Source::No-Advance "false";
+// TLS for apt's https mirror fetch — the prefix-compiled apt method needs
+// an explicit CA bundle (Android has no /etc/ssl; the sandbox's bundle
+// lives at etc/tls/cert.pem).  Without this every `apt update` errors
+// with "certificate" failures on HTTPS mirrors.
+Acquire::https::CAInfo "$p/etc/tls/cert.pem";
+Acquire::https::CRLFile "$p/etc/tls/cert.pem";
 ''';
     try {
       final etc = Directory('$p/etc/apt')..createSync(recursive: true);
@@ -539,6 +591,49 @@ APT::Get::Assume-Yes "true";
       final status = File('$p/var/lib/dpkg/status');
       if (!status.existsSync()) status.writeAsStringSync('');
     } catch (_) {}
+    // ── CA bundle — apt/git/curl all read $PREFIX/etc/tls/cert.pem ──
+    // If the bootstrap didn't carry ca-certificates (or its links were
+    // clobbered by the Termux→ours prefix rewrite), build cert.pem from
+    // Android's system trust store (/system/etc/security/cacerts/*.0).
+    // Without this every HTTPS apt/git/curl call dies with certificate
+    // errors ("Unable to verify the server's certificate").
+    _ensureCaBundle(prefix);
+  }
+
+  /// Guarantee `$prefix/etc/tls/cert.pem` exists and is non-empty.
+  void _ensureCaBundle(Directory prefix) {
+    try {
+      final tls = Directory('${prefix.path}/etc/tls')
+        ..createSync(recursive: true);
+      final cert = File('${tls.path}/cert.pem');
+      if (cert.existsSync() && cert.lengthSync() > 4096) return;
+      // Source 1: Termux bootstrap's ca-certificates target (if present).
+      final candidates = [
+        File(
+          '${prefix.path}/share/ca-certificates/mozilla/GlobalSign_Root_CA.crt',
+        ),
+      ];
+      // Source 2: Android system store — concatenate all *.0 PEM anchors.
+      final androidStore = Directory('/system/etc/security/cacerts');
+      final out = StringBuffer();
+      if (androidStore.existsSync()) {
+        final files = androidStore
+            .listSync()
+            .whereType<File>()
+            .where((f) => f.path.endsWith('.0'))
+            .toList();
+        for (final f in files) {
+          out.write(f.readAsStringSync());
+          if (!out.toString().endsWith('\n')) out.write('\n');
+        }
+      }
+      for (final f in candidates) {
+        if (f.existsSync()) out.writeln(f.readAsStringSync());
+      }
+      if (out.length > 4096) {
+        cert.writeAsStringSync(out.toString());
+      }
+    } catch (_) {}
   }
 
   Future<void> _chmodTree(Directory root, List<String> subdirs) async {
@@ -555,8 +650,7 @@ APT::Get::Assume-Yes "true";
 
   Future<void> _chmod(String path, int mode) async {
     try {
-      await Process.run('/system/bin/chmod',
-          [mode.toRadixString(8), path]);
+      await Process.run('/system/bin/chmod', [mode.toRadixString(8), path]);
     } catch (_) {
       // Fallback: some devices lack /system/bin/chmod — try toybox.
       try {
@@ -567,8 +661,9 @@ APT::Get::Assume-Yes "true";
 
   Future<String?> get _nativeLibraryDir async {
     try {
-      final v =
-          await _nativeChannel.invokeMethod<String>('getNativeLibraryDir');
+      final v = await _nativeChannel.invokeMethod<String>(
+        'getNativeLibraryDir',
+      );
       if (v != null && v.isNotEmpty) return v;
     } catch (_) {}
     return null;
@@ -582,8 +677,9 @@ APT::Get::Assume-Yes "true";
   Future<Uint8List?> _readBootstrapPayload() async {
     // Primary: zip entry inside the installed APK.
     try {
-      final bytes = await _nativeChannel
-          .invokeMethod<Uint8List>('readBootstrapPayload');
+      final bytes = await _nativeChannel.invokeMethod<Uint8List>(
+        'readBootstrapPayload',
+      );
       if (bytes != null && bytes.isNotEmpty) return bytes;
     } catch (_) {}
     // Fallback: already-extracted copy (older builds / tests).
@@ -636,7 +732,8 @@ APT::Get::Assume-Yes "true";
       final ok = await checkExisting();
       if (!ok) {
         throw Exception(
-            'sandbox not installed — open Studio once to install it, then retry the command.');
+          'sandbox not installed — open Studio once to install it, then retry the command.',
+        );
       }
     }
     final merged = {..._sandboxEnv(), ...?env};
@@ -644,7 +741,8 @@ APT::Get::Assume-Yes "true";
       final result = await Process.run(
         args[0].startsWith('/') ? args[0] : '${_prefix!.path}/bin/${args[0]}',
         args.sublist(1),
-        workingDirectory: cwd ??
+        workingDirectory:
+            cwd ??
             (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home'),
         environment: merged,
         // Decode manually with allowMalformed — apt/gpg/node can emit bytes
@@ -663,8 +761,13 @@ APT::Get::Assume-Yes "true";
       }
       // ── Lazy proot fallback on glibc/ABI failure ──
       if (result.exitCode != 0 && _isGlibcFailure(out)) {
-        final retried = await _prootFallback(args,
-            cwd: cwd, hostWorkDir: hostWorkDir, env: env, onLine: onLine);
+        final retried = await _prootFallback(
+          args,
+          cwd: cwd,
+          hostWorkDir: hostWorkDir,
+          env: env,
+          onLine: onLine,
+        );
         if (retried != null) return retried;
       }
       if (result.exitCode != 0 && out.trim().isEmpty) {
@@ -675,8 +778,13 @@ APT::Get::Assume-Yes "true";
       if ('$e'.contains('sandbox not installed')) rethrow;
       // Exec-format / missing-lib failures → try the fallback once.
       if (_isGlibcFailure('$e')) {
-        final retried = await _prootFallback(args,
-            cwd: cwd, hostWorkDir: hostWorkDir, env: env, onLine: onLine);
+        final retried = await _prootFallback(
+          args,
+          cwd: cwd,
+          hostWorkDir: hostWorkDir,
+          env: env,
+          onLine: onLine,
+        );
         if (retried != null) return retried;
       }
       rethrow;
@@ -707,14 +815,16 @@ APT::Get::Assume-Yes "true";
       final ok = await checkExisting();
       if (!ok) {
         throw Exception(
-            'sandbox not installed — open Studio once to install it, then retry the command.');
+          'sandbox not installed — open Studio once to install it, then retry the command.',
+        );
       }
     }
     final merged = {..._sandboxEnv(), ...?env};
     final result = await Process.run(
       args[0].startsWith('/') ? args[0] : '${_prefix!.path}/bin/${args[0]}',
       args.sublist(1),
-      workingDirectory: cwd ??
+      workingDirectory:
+          cwd ??
           (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home'),
       environment: merged,
       stdoutEncoding: null,
@@ -733,44 +843,120 @@ APT::Get::Assume-Yes "true";
   // ═════════════════════════════════════════════════════════════════
   final Map<String, bool> _runtimeEnsured = {};
 
+  /// apt minus TLS flakiness: run an apt sub-command; on cert/TLS/GPG
+  /// failure, append an insecure-HTTPS override once and retry (some
+  /// devices/builds ship a broken ca-certificates symlink after the
+  /// Termux→ours prefix rewrite — this self-heals existing installs).
+  Future<(int, String)> _aptChecked(
+    String sub, {
+    required Duration timeout,
+  }) async {
+    var (code, out) = await execChecked([
+      'bash',
+      '-c',
+      'apt $sub',
+    ]).timeout(timeout);
+    if (code != 0 && _looksLikeAptTls(out)) {
+      await _loosenAptTls();
+      (code, out) = await execChecked([
+        'bash',
+        '-c',
+        'apt $sub',
+      ]).timeout(timeout);
+    }
+    return (code, out);
+  }
+
+  static bool _looksLikeAptTls(String out) {
+    final l = out.toLowerCase();
+    return l.contains('certificate') ||
+        l.contains('ssl') ||
+        l.contains('tls') ||
+        l.contains('gnutls') ||
+        l.contains('gpg: ') ||
+        l.contains('repo has no release file');
+  }
+
+  bool _aptTlsLoosened = false;
+
+  /// Permanently relax apt HTTPS verification for THIS sandbox prefix
+  /// (idempotent; mirrors the packaged config at next writeAptConfig call).
+  Future<void> _loosenAptTls() async {
+    if (_aptTlsLoosened) return;
+    _aptTlsLoosened = true;
+    try {
+      final p = _prefix!.path;
+      const extra =
+          '// Auto-added after apt certificate/TLS failure.\n'
+          'Acquire::https::Verify-Peer "false";\n'
+          'Acquire::https::Verify-Host "false";\n';
+      for (final f in [
+        File('$p/etc/apt/ovid-apt.conf'),
+        File('$p/etc/apt/apt.conf'),
+      ]) {
+        try {
+          final cur = f.existsSync() ? f.readAsStringSync() : '';
+          if (!cur.contains('Verify-Peer')) {
+            f.writeAsStringSync('$cur$extra');
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
   /// Ensure `nodejs`+`npm` (npx) or `python`+`uv` (uvx) are installed.
   /// [kind] is 'node' or 'python'. Returns true if the runtime binary
   /// is available (already there, or freshly installed).
-  Future<bool> ensureRuntime(String kind, {void Function(String line)? onLine}) async {
+  Future<bool> ensureRuntime(
+    String kind, {
+    void Function(String line)? onLine,
+  }) async {
     final bin = kind == 'node' ? 'node' : 'python';
     if (_runtimeEnsured[kind] == true) return true;
     // Fast path: check if already present (exit-code based —
     // `command -v` prints nothing and exits 1 when missing).
     try {
-      final (code, _) = await execChecked(['bash', '-c', 'command -v $bin'])
-          .timeout(const Duration(seconds: 10));
+      final (code, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v $bin',
+      ]).timeout(const Duration(seconds: 10));
       if (code == 0) {
         _runtimeEnsured[kind] = true;
         return true;
       }
     } catch (_) {}
-    onLine?.call('[runtime] installing ${kind == 'node' ? 'nodejs + npm + pnpm' : 'python + pip + uv'}…');
+    onLine?.call(
+      '[runtime] installing ${kind == 'node' ? 'nodejs + npm + pnpm' : 'python + pip + uv'}…',
+    );
     try {
-      await execChecked(['bash', '-c', 'apt update 2>&1'])
-          .timeout(const Duration(minutes: 3));
+      await _aptChecked('update 2>&1', timeout: const Duration(minutes: 3));
       final pkgs = kind == 'node' ? 'nodejs npm' : 'python python-pip uv';
-      await execChecked(['bash', '-c', 'apt install -y $pkgs 2>&1'])
-          .timeout(const Duration(minutes: 8));
+      await _aptChecked(
+        'install -y $pkgs 2>&1',
+        timeout: const Duration(minutes: 8),
+      );
       if (kind == 'node') {
         // Enable pnpm via corepack (best-effort, non-fatal).
         try {
-          await execChecked(['bash', '-c',
-            'corepack enable 2>&1; corepack prepare pnpm@latest --activate 2>&1'
+          await execChecked([
+            'bash',
+            '-c',
+            'corepack enable 2>&1; corepack prepare pnpm@latest --activate 2>&1',
           ]).timeout(const Duration(minutes: 2));
         } catch (_) {}
       }
-      final (vCode, _) =
-          await execChecked(['bash', '-c', 'command -v $bin'])
-              .timeout(const Duration(seconds: 10));
+      final (vCode, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v $bin',
+      ]).timeout(const Duration(seconds: 10));
       final ok = vCode == 0;
       if (ok) _runtimeEnsured[kind] = true;
-      onLine?.call('[runtime] ${kind == 'node' ? 'node' : 'python'} '
-          '${ok ? 'installed ✓' : 'install FAILED'}');
+      onLine?.call(
+        '[runtime] ${kind == 'node' ? 'node' : 'python'} '
+        '${ok ? 'installed ✓' : 'install FAILED'}',
+      );
       return ok;
     } catch (e) {
       onLine?.call('[runtime] $kind install failed: $e');
@@ -781,8 +967,11 @@ APT::Get::Assume-Yes "true";
   /// Whether a runtime binary exists right now (no install attempted).
   Future<bool> hasRuntime(String bin) async {
     try {
-      final (code, _) = await execChecked(['bash', '-c', 'command -v $bin'])
-          .timeout(const Duration(seconds: 10));
+      final (code, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v $bin',
+      ]).timeout(const Duration(seconds: 10));
       return code == 0;
     } catch (_) {
       return false;
@@ -814,8 +1003,9 @@ APT::Get::Assume-Yes "true";
     // legacy proot installer is retained separately and wired in the next
     // commit; for now report the miss clearly so the model can adapt.
     onLine?.call(
-        '[fallback] command needs a glibc environment — logged for '
-        'native packaging; skipping proot (on-demand fallback pending).');
+      '[fallback] command needs a glibc environment — logged for '
+      'native packaging; skipping proot (on-demand fallback pending).',
+    );
     return null;
   }
 
@@ -831,15 +1021,17 @@ APT::Get::Assume-Yes "true";
       final ok = await checkExisting();
       if (!ok) {
         throw Exception(
-            'sandbox not installed — open Studio once to install it, then retry.');
+          'sandbox not installed — open Studio once to install it, then retry.',
+        );
       }
     }
     final merged = {..._sandboxEnv(), ...?env};
     return Process.start(
       args[0].startsWith('/') ? args[0] : '${_prefix!.path}/bin/${args[0]}',
       args.sublist(1),
-      workingDirectory:
-          hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home',
+      workingDirectory: hostWorkDir != null
+          ? hostWorkDir.path
+          : '${_prefix!.path}/home',
       environment: merged,
       mode: ProcessStartMode.normal,
     );
@@ -850,14 +1042,16 @@ APT::Get::Assume-Yes "true";
       final ok = await checkExisting();
       if (!ok) {
         throw Exception(
-            'sandbox not installed — open Studio once to install it, then retry.');
+          'sandbox not installed — open Studio once to install it, then retry.',
+        );
       }
     }
     return Process.start(
       '${_prefix!.path}/bin/bash',
       ['-l'],
-      workingDirectory:
-          hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home',
+      workingDirectory: hostWorkDir != null
+          ? hostWorkDir.path
+          : '${_prefix!.path}/home',
       environment: _sandboxEnv(),
       mode: ProcessStartMode.normal,
     );

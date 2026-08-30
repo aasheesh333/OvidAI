@@ -57,22 +57,23 @@ class Aether {
   static const mono = 'JetBrainsMono';
 
   static ThemeData theme() {
-    final base =
-        dark ? ThemeData.dark(useMaterial3: true) : ThemeData.light(useMaterial3: true);
+    final base = dark
+        ? ThemeData.dark(useMaterial3: true)
+        : ThemeData.light(useMaterial3: true);
     return base.copyWith(
-      pageTransitionsTheme: const PageTransitionsTheme(builders: {
-        TargetPlatform.android: _FadeSlideTransitionsBuilder(),
-      }),
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: {TargetPlatform.android: _FadeSlideTransitionsBuilder()},
+      ),
       scaffoldBackgroundColor: bg,
       dividerColor: hairline,
       colorScheme: (dark ? const ColorScheme.dark() : const ColorScheme.light())
           .copyWith(
-        surface: surface,
-        primary: accent,
-        secondary: accent,
-        onSurface: text,
-        error: dangerC,
-      ),
+            surface: surface,
+            primary: accent,
+            secondary: accent,
+            onSurface: text,
+            error: dangerC,
+          ),
       appBarTheme: AppBarTheme(
         backgroundColor: bg,
         surfaceTintColor: Colors.transparent,
@@ -86,17 +87,15 @@ class Aether {
         ),
         iconTheme: IconThemeData(color: textMuted, size: 20),
       ),
-      dividerTheme: DividerThemeData(
-        color: hairline,
-        thickness: 1,
-        space: 1,
-      ),
+      dividerTheme: DividerThemeData(color: hairline, thickness: 1, space: 1),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: surfaceAlt,
         hintStyle: TextStyle(color: textFaint, fontSize: 14),
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 14,
+          vertical: 12,
+        ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
           borderSide: BorderSide(color: hairline),
@@ -129,8 +128,11 @@ class Aether {
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
       ),
-      textTheme: base.textTheme
-          .apply(fontFamily: 'Inter', bodyColor: text, displayColor: text),
+      textTheme: base.textTheme.apply(
+        fontFamily: 'Inter',
+        bodyColor: text,
+        displayColor: text,
+      ),
     );
   }
 }
@@ -140,8 +142,12 @@ class Tag extends StatelessWidget {
   final String label;
   final Color color;
   final bool filled;
-  const Tag(this.label,
-      {super.key, this.color = const Color(0xFF9B9BA4), this.filled = false});
+  const Tag(
+    this.label, {
+    super.key,
+    this.color = const Color(0xFF9B9BA4),
+    this.filled = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -189,9 +195,10 @@ class SectionHeader extends StatelessWidget {
           ),
           if (subtitle != null) ...[
             const SizedBox(height: 4),
-            Text(subtitle!,
-                style:
-                    TextStyle(fontSize: 12.5, color: Aether.textMuted)),
+            Text(
+              subtitle!,
+              style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+            ),
           ],
         ],
       ),
@@ -211,12 +218,16 @@ class _FadeSlideTransitionsBuilder extends PageTransitionsBuilder {
     Widget child,
   ) {
     final curved = CurvedAnimation(
-        parent: animation, curve: Curves.easeOutCubic);
+      parent: animation,
+      curve: Curves.easeOutCubic,
+    );
     return FadeTransition(
       opacity: curved,
       child: SlideTransition(
-        position: Tween(begin: const Offset(0, 0.025), end: Offset.zero)
-            .animate(curved),
+        position: Tween(
+          begin: const Offset(0, 0.025),
+          end: Offset.zero,
+        ).animate(curved),
         child: child,
       ),
     );
