@@ -319,21 +319,32 @@ class SandboxService {
 
     // Up to 3 attempts of (apt update && apt install runtimes).
     // git + curl included so the agent has VCS + HTTP tooling out of the box.
+    // Every attempt CHECKS the update exit code AND prints its last lines
+    // into the log — an empty/failed index used to produce the silent
+    // "Unable to locate package git" install failure.
     const pkgs = 'nodejs npm python python-pip uv git curl';
     var installed = false;
     for (var attempt = 1; attempt <= 3 && !installed; attempt++) {
+      final tag = attempt == 1 ? r'$ apt update' : 'retry $attempt/3 · apt update';
       try {
-        onPhase(
-          7,
-          0.05,
-          attempt == 1 ? r'$ apt update' : 'retry $attempt/3 · apt update',
+        onPhase(7, 0.05, tag);
+        final (uCode, uOut) = await _aptChecked(
+          'update 2>&1',
+          timeout: const Duration(minutes: 3),
+          onLine: (l) => onPhase(7, 0.05, l),
         );
-        await _aptChecked('update 2>&1', timeout: const Duration(minutes: 3));
+        if (uCode != 0) {
+          final tail = uOut.trim().split('\n').where((l) => l.isNotEmpty);
+          onPhase(7, 0.05,
+              'apt update failed ($uCode): ${tail.isEmpty ? "no output" : tail.last}');
+          continue;
+        }
         onPhase(7, 0.3, 'apt update ......... ✓');
         onPhase(7, 0.4, '\$ apt install -y $pkgs');
         final (code, out) = await _aptChecked(
           'install -y $pkgs 2>&1',
           timeout: const Duration(minutes: 8),
+          onLine: (l) => onPhase(7, 0.4, l),
         );
         installed = code == 0;
         if (!installed) {
@@ -591,13 +602,50 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
       final status = File('$p/var/lib/dpkg/status');
       if (!status.existsSync()) status.writeAsStringSync('');
     } catch (_) {}
-    // ── CA bundle — apt/git/curl all read $PREFIX/etc/tls/cert.pem ──
-    // If the bootstrap didn't carry ca-certificates (or its links were
-    // clobbered by the Termux→ours prefix rewrite), build cert.pem from
-    // Android's system trust store (/system/etc/security/cacerts/*.0).
-    // Without this every HTTPS apt/git/curl call dies with certificate
-    // errors ("Unable to verify the server's certificate").
+    _ensureSourcesList(prefix);
     _ensureCaBundle(prefix);
+  }
+
+  /// Known-good Termux main-repo mirrors, tried in order.  A dead or stale
+  /// mirror manifest causes "E: Unable to locate package git" even when
+  /// `apt update` exits 0 — the retry loop rotates to the next mirror.
+  static const _aptMirrors = [
+    'https://packages-cf.termux.dev/apt/termux-main',
+    'https://packages.termux.dev/apt/termux-main',
+    'https://termux.librehat.com/apt/termux-main',
+    'https://termux.cdn.lumito.net/apt/termux-main',
+    'https://termux.astra.in.ua/apt/termux-main',
+  ];
+  int _mirrorIdx = 0;
+
+  /// Writes `$prefix/etc/apt/sources.list` for one mirror (idempotent).
+  void _writeSourcesList(Directory prefix, String mirror) {
+    try {
+      final dir = Directory('${prefix.path}/etc/apt')..createSync(recursive: true);
+      File('${dir.path}/sources.list.d/termux.list').createSync(recursive: true);
+      File('${dir.path}/sources.list').writeAsStringSync(
+          '# Ovid sandbox apt mirror (auto-managed)\n'
+          'deb $mirror stable main\n');
+    } catch (_) {}
+  }
+
+  void _ensureSourcesList(Directory prefix) =>
+      _writeSourcesList(prefix, _aptMirrors[_mirrorIdx]);
+
+  /// Rotate to the next mirror when apt reports fetch/lookup failures
+  /// ("Unable to locate package", "Failed to fetch", 404, ...).
+  bool _rotateMirror(String aptOut) {
+    final l = aptOut.toLowerCase();
+    if (!l.contains('unable to locate package') &&
+        !l.contains('failed to fetch') &&
+        !l.contains('no release file') &&
+        !l.contains('404')) {
+      return false;
+    }
+    _mirrorIdx = (_mirrorIdx + 1) % _aptMirrors.length;
+    final prefix = _prefix;
+    if (prefix != null) _writeSourcesList(prefix, _aptMirrors[_mirrorIdx]);
+    return true;
   }
 
   /// Guarantee `$prefix/etc/tls/cert.pem` exists and is non-empty.
@@ -847,22 +895,38 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
   /// failure, append an insecure-HTTPS override once and retry (some
   /// devices/builds ship a broken ca-certificates symlink after the
   /// Termux→ours prefix rewrite — this self-heals existing installs).
+  /// apt minus TLS flakiness AND dead-mirror days: run an apt sub-command.
+  /// On a cert/TLS/GPG error → loosen HTTPS verification once and retry.
+  /// On a fetch/lookup failure → rotate to the next known-good mirror,
+  /// refresh the index, and retry the operation.  The caller ALWAYS sees
+  /// the final exit code — no silent success on a half-dead mirror.
   Future<(int, String)> _aptChecked(
     String sub, {
     required Duration timeout,
+    void Function(String line)? onLine,
   }) async {
-    var (code, out) = await execChecked([
-      'bash',
-      '-c',
-      'apt $sub',
-    ]).timeout(timeout);
+    Future<(int, String)> run() =>
+        execChecked(['bash', '-c', 'apt $sub']).timeout(timeout);
+    var (code, out) = await run();
     if (code != 0 && _looksLikeAptTls(out)) {
+      onLine?.call('[apt] cert/TLS error — relaxed HTTPS verify once');
       await _loosenAptTls();
-      (code, out) = await execChecked([
+      (code, out) = await run();
+    }
+    if (code != 0 && _rotateMirror(out)) {
+      onLine?.call('[apt] mirror dead/stale — rotated to ${_aptMirrors[_mirrorIdx]}');
+      final (uCode, uOut) = await execChecked([
         'bash',
         '-c',
-        'apt $sub',
-      ]).timeout(timeout);
+        'apt update 2>&1',
+      ]).timeout(const Duration(minutes: 3));
+      if (sub.startsWith('update')) {
+        (code, out) = (uCode, uOut);
+      } else if (uCode != 0) {
+        return (uCode, uOut);
+      } else {
+        (code, out) = await run();
+      }
     }
     return (code, out);
   }
