@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
@@ -222,6 +223,13 @@ class _ChatScreenState extends State<ChatScreen>
   bool _atBottom = true;
   bool _showJumpFab = false;
 
+  // ── Pinch-to-zoom on the message list ──
+  // Two-finger pinch scales ONLY the chat content fonts (header + composer
+  // chatbox stay fixed). We track the scale at gesture start so each pinch
+  // is relative, then persist the result. Width stays responsive — text
+  // reflows, never horizontal-scrolls.
+  double _pinchStartScale = 1.0;
+
   // ── Per-session composer drafts ─────────────────────────────────────
   // Bug fix: the old single controller leaked the draft across sessions —
   // typing in session A, switching to B, then creating a new session kept
@@ -405,29 +413,56 @@ class _ChatScreenState extends State<ChatScreen>
                         )
                       : Stack(
                           children: [
-                            AnimatedBuilder(
-                              animation: AgentService.I,
-                              builder: (_, _) {
-                                final typing = AgentService.I.busy;
-                                _maybeJumpToBottom();
-                                // DSH turn-process folding: consecutive
-                                // tool/reasoning items collapse into a
-                                // single strip before the final answer.
-                                final items = _foldMessages(s.messages);
-                                return ListView.builder(
-                                  controller: _scroll,
-                                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                                  itemCount: items.length + (typing ? 1 : 0),
-                                  itemBuilder: (_, i) =>
-                                      i == items.length
-                                          ? const _TypingBubble()
-                                          : _buildItem(
-                                              items[i], s,
-                                              onAction: () => setState(() {}),
-                                              input: _input,
-                                            ),
-                                );
+                            // Pinch-to-zoom: scales message text only.
+                            GestureDetector(
+                              behavior: HitTestBehavior.translucent,
+                              onScaleStart: (d) {
+                                _pinchStartScale = app.chatFontScale;
                               },
+                              onScaleUpdate: (d) {
+                                // Only react to genuine 2-finger pinch
+                                // (pointerCount >= 2), not 1-finger scroll.
+                                if (d.pointerCount < 2) return;
+                                app.setChatFontScale(
+                                    _pinchStartScale * d.scale);
+                              },
+                              child: MediaQuery(
+                                // Apply the font scale to the message list
+                                // subtree ONLY. The AppBar (header) and the
+                                // _InputBar (composer chatbox) are outside
+                                // this MediaQuery, so they stay fixed.
+                                data: MediaQuery.of(context).copyWith(
+                                  textScaler: TextScaler.linear(
+                                      app.chatFontScale),
+                                ),
+                                child: AnimatedBuilder(
+                                  animation: AgentService.I,
+                                  builder: (_, _) {
+                                    final typing = AgentService.I.busy;
+                                    _maybeJumpToBottom();
+                                    // DSH turn-process folding: consecutive
+                                    // tool/reasoning items collapse into a
+                                    // single strip before the final answer.
+                                    final items = _foldMessages(s.messages);
+                                    return ListView.builder(
+                                      controller: _scroll,
+                                      padding: const EdgeInsets.fromLTRB(
+                                          16, 8, 16, 16),
+                                      itemCount:
+                                          items.length + (typing ? 1 : 0),
+                                      itemBuilder: (_, i) =>
+                                          i == items.length
+                                              ? const _TypingBubble()
+                                              : _buildItem(
+                                                  items[i], s,
+                                                  onAction: () =>
+                                                      setState(() {}),
+                                                  input: _input,
+                                                ),
+                                    );
+                                  },
+                                ),
+                              ),
                             ),
                             // DSH-web "jump to latest" pill — only when the
                             // user scrolled up while content keeps streaming.
@@ -993,16 +1028,14 @@ class _EmptyState extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 8),
-                // Monospace tag — DSH "Preview" chip style.
+                // Monospace tag — DSH "Preview" chip style (soft 24px pill,
+                // solid pastel bg, 12px mono).
                 Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      const EdgeInsets.symmetric(horizontal: 9, vertical: 2),
                   decoration: BoxDecoration(
-                    color: Aether.accent.withValues(alpha: 0.10),
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(
-                      color: Aether.accent.withValues(alpha: 0.25),
-                    ),
+                    color: Aether.accent.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(24),
                   ),
                   child: Text(
                     'agentic preview',
@@ -1789,7 +1822,78 @@ class _MessageView extends StatelessWidget {
       );
 }
 
-class _InputBar extends StatelessWidget {
+/// Staged-attachment preview chip shown above the composer text field.
+/// Shows file icon + name + size with an ✕ to remove.  Hidden when no
+/// attachment is staged.
+class _AttachmentChip extends StatelessWidget {
+  const _AttachmentChip();
+
+  IconData _iconFor(String name) {
+    final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
+    const img = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic'};
+    const vid = {'mp4', 'mov', 'mkv', 'webm', '3gp'};
+    const aud = {'mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac'};
+    if (img.contains(ext)) return Icons.image_outlined;
+    if (vid.contains(ext)) return Icons.videocam_outlined;
+    if (aud.contains(ext)) return Icons.audiotrack_outlined;
+    if (ext == 'pdf') return Icons.picture_as_pdf_outlined;
+    return Icons.insert_drive_file_outlined;
+  }
+
+  String _fmtSize(int b) => b >= 1048576
+      ? '${(b / 1048576).toStringAsFixed(1)} MB'
+      : b >= 1024
+          ? '${(b / 1024).toStringAsFixed(0)} KB'
+          : '$b B';
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AgentService.I,
+      builder: (_, _) {
+        final att = AgentService.I.pendingAttachment;
+        if (att == null) return const SizedBox.shrink();
+        return Container(
+          margin: const EdgeInsets.fromLTRB(6, 6, 6, 2),
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+          decoration: BoxDecoration(
+            color: Aether.surface,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Aether.accent.withValues(alpha: 0.4)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(_iconFor(att.name), size: 16, color: Aether.accent),
+              const SizedBox(width: 7),
+              Flexible(
+                child: Text(
+                  att.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 12.5, fontWeight: FontWeight.w600),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                _fmtSize(att.size),
+                style: TextStyle(fontSize: 11, color: Aether.textFaint),
+              ),
+              const SizedBox(width: 4),
+              GestureDetector(
+                onTap: () => AgentService.I.clearAttachment(),
+                child: Icon(Icons.close, size: 15, color: Aether.textMuted),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _InputBar extends StatefulWidget {
   final TextEditingController controller;
   final bool running;
   final VoidCallback onSend;
@@ -1798,6 +1902,15 @@ class _InputBar extends StatelessWidget {
     required this.running,
     required this.onSend,
   });
+
+  @override
+  State<_InputBar> createState() => _InputBarState();
+}
+
+class _InputBarState extends State<_InputBar> {
+  TextEditingController get controller => widget.controller;
+  bool get running => widget.running;
+  VoidCallback get onSend => widget.onSend;
 
   /// DSH-web rule: running + empty draft = Stop; running + draft = Send
   /// (queue). The queue color (teal) signals "this goes to the queue",
@@ -1817,7 +1930,7 @@ class _InputBar extends StatelessWidget {
               Icons.photo_library_outlined,
               'Photos & videos',
               'Pick from gallery',
-              () => _comingSoon(sheetCtx, 'Photo picking'),
+              () => _pickMedia(sheetCtx),
             ),
             _attachOption(
               sheetCtx,
@@ -1830,8 +1943,8 @@ class _InputBar extends StatelessWidget {
               sheetCtx,
               Icons.insert_drive_file_outlined,
               'Document',
-              'PDF, code, text files',
-              () => _comingSoon(sheetCtx, 'Document attach'),
+              'PDF, code, text, CSV files',
+              () => _pickDocument(sheetCtx),
             ),
             _attachOption(
               sheetCtx,
@@ -1858,6 +1971,60 @@ class _InputBar extends StatelessWidget {
       behavior: SnackBarBehavior.floating,
     ));
   }
+
+  /// Pick a document (PDF/code/text/CSV) and stage it as an attachment.
+  Future<void> _pickDocument(BuildContext sheetCtx) async {
+    Navigator.pop(sheetCtx);
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const [
+        'pdf', 'txt', 'md', 'csv', 'json', 'dart', 'py', 'js', 'ts',
+        'html', 'css', 'xml', 'yaml', 'yml', 'java', 'kt', 'c', 'cpp',
+        'h', 'sh', 'log', 'doc', 'docx',
+      ],
+      withData: false,
+    );
+    await _stagePicked(result);
+  }
+
+  /// Pick a photo/video from the gallery and stage it as an attachment.
+  Future<void> _pickMedia(BuildContext sheetCtx) async {
+    Navigator.pop(sheetCtx);
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.media,
+      withData: false,
+    );
+    await _stagePicked(result);
+  }
+
+  Future<void> _stagePicked(FilePickerResult? result) async {
+    if (result == null || result.files.isEmpty) return;
+    final f = result.files.first;
+    final path = f.path;
+    if (path == null) {
+      _toast('Could not access that file.');
+      return;
+    }
+    final err = await AgentService.I.attachFile(path, f.name);
+    if (err != null) {
+      _toast(err);
+    } else {
+      _toast('Attached ${f.name} — it will be sent with your next message.');
+    }
+  }
+
+  void _toast(String msg) {
+    final ctx = _ctx;
+    if (ctx == null || !ctx.mounted) return;
+    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+      content: Text(msg),
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(seconds: 2),
+    ));
+  }
+
+  // The composer needs a context for toasts that outlives the bottom sheet.
+  BuildContext? _ctx;
 
   void _imagePromptDialog(BuildContext context) {
     final c = TextEditingController();
@@ -1922,6 +2089,7 @@ class _InputBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    _ctx = context; // keep a live context for post-picker toasts
     return SafeArea(
       top: false,
       child: Padding(
@@ -1939,6 +2107,8 @@ class _InputBar extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // ── Staged attachment preview chip (dismissible) ──
+              const _AttachmentChip(),
               // ── Text area — full card width ──
               TextField(
                 controller: controller,
@@ -1969,11 +2139,12 @@ class _InputBar extends StatelessWidget {
                     ),
                     onPressed: () => _attachSheet(context),
                   ),
+                  // DSH-web workspace chip — current workspace/repo name.
+                  const _WorkspaceChip(),
+                  const SizedBox(width: 6),
                   // DSH-web mode selector — icon + text chip, opens the mode sheet.
                   const _ModeChip(),
-                  const SizedBox(width: 6),
-                  // DSH-web model chip — "Model · effort" with caret.
-                  const _ComposerModelChip(),
+                  // Model selector lives in the header AppBar — not duplicated here.
                   const Spacer(),
                   IconButton(
                     tooltip: 'Voice',
@@ -2850,11 +3021,10 @@ class _QuestionsCardState extends State<_QuestionsCard> {
 
 /// Permission mode chip (Read-Only / General / Full Access / Studio) —
 /// DSH-web dropdown under the input. Tapping cycles; long-press opens sheet.
-/// DSH-web composer model chip — shows the active session's model with an
-/// up/down caret; tapping opens the model picker sheet.  Matches DSH's
-/// "Nemotron 3 Super · High" toolbar chip.
-class _ComposerModelChip extends StatelessWidget {
-  const _ComposerModelChip();
+/// DSH-web workspace chip — shows the active workspace (repo name, or
+/// "sandbox" when working in the local sandbox).  Tapping opens Studio.
+class _WorkspaceChip extends StatelessWidget {
+  const _WorkspaceChip();
 
   @override
   Widget build(BuildContext context) {
@@ -2862,60 +3032,47 @@ class _ComposerModelChip extends StatelessWidget {
       animation: AppState.I,
       builder: (_, _) {
         final s = AppState.I.activeSession;
-        final raw = s?.model ?? 'Select model';
-        final label = raw == 'Select a provider' ? 'Select model' : raw;
+        String label = 'sandbox';
+        if (s != null) {
+          final repo = AppState.I.getRepoForSession(s.id);
+          if (repo != null && repo.contains('/')) {
+            label = repo.split('/').last;
+          } else if (repo != null && repo.isNotEmpty) {
+            label = repo;
+          }
+        }
         return GestureDetector(
-          onTap: () => _openModelPicker(context),
+          onTap: () => openStudio(context),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
             decoration: BoxDecoration(
-              color: Aether.surfaceRaised,
               borderRadius: BorderRadius.circular(16),
               border: Border.all(color: Aether.hairline),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.smart_toy_outlined,
-                    size: 12, color: Aether.textMuted),
-                const SizedBox(width: 5),
+                Icon(Icons.folder_outlined, size: 14, color: Aether.textMuted),
+                const SizedBox(width: 6),
                 ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 130),
+                  constraints: const BoxConstraints(maxWidth: 90),
                   child: Text(
                     label,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      height: 20 / 13,
                       color: Aether.textMuted,
                     ),
                   ),
                 ),
-                const SizedBox(width: 2),
-                Icon(Icons.unfold_more, size: 13, color: Aether.textFaint),
               ],
             ),
           ),
         );
       },
-    );
-  }
-
-  void _openModelPicker(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => DraggableScrollableSheet(
-        initialChildSize: 0.5,
-        minChildSize: 0.32,
-        maxChildSize: 0.92,
-        snap: true,
-        snapSizes: const [0.5, 0.92],
-        builder: (ctx, scrollController) =>
-            _ModelPickerSheet(scrollController: scrollController),
-      ),
     );
   }
 }
@@ -2941,13 +3098,14 @@ class _ModeChip extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(m.icon, size: 12, color: m.color),
-                const SizedBox(width: 5),
+                Icon(m.icon, size: 14, color: m.color),
+                const SizedBox(width: 6),
                 Text(
                   m.label,
                   style: TextStyle(
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    height: 20 / 13,
                     color: m.color,
                   ),
                 ),

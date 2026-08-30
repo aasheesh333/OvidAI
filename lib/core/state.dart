@@ -409,6 +409,8 @@ class AppState extends ChangeNotifier {
       if (t != null && t >= 5 && t <= 3600) responseTimeoutSec = t;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
       lightTheme = prefs.getBool(_kTheme) ?? false;
+      chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0)
+          .clamp(chatFontScaleMin, chatFontScaleMax);
       await _loadMemories();
     } catch (_) {}
   }
@@ -587,6 +589,27 @@ class AppState extends ChangeNotifier {
   // ── Light/dark theme (DSH light/dark preference parity) ──
   static const _kTheme = 'ovid_light_theme';
   bool lightTheme = false;
+
+  // ── Chat font scale (pinch-to-zoom on the message list) ──
+  // Scales ONLY the message content text — the header/AppBar and the
+  // composer chatbox stay fixed (per UX requirement). Width stays
+  // responsive (text reflows, never horizontal-scrolls). Persisted.
+  static const _kChatFontScale = 'ovid_chat_font_scale';
+  double chatFontScale = 1.0;
+  static const double chatFontScaleMin = 0.75;
+  static const double chatFontScaleMax = 1.8;
+
+  Future<void> setChatFontScale(double v) async {
+    final clamped = v.clamp(chatFontScaleMin, chatFontScaleMax);
+    if ((clamped - chatFontScale).abs() < 0.001) return;
+    chatFontScale = clamped;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble(_kChatFontScale, chatFontScale);
+    } catch (_) {}
+  }
+
 
   /// Toggle and persist. The app shell listens and rebuilds the whole
   /// tree so every Aether.* getter resolves to the new palette.

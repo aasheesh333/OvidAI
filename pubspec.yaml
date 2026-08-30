@@ -47,6 +47,8 @@ dependencies:
   firebase_crashlytics: ^4.3.4
   archive: ^4.2.0
   permission_handler: ^12.0.3
+  file_picker: ^10.1.2
+
 
 dev_dependencies:
   flutter_test:

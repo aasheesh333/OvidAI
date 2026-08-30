@@ -58,3 +58,4 @@ android/release-keystore.jks
 *.keystore
 keystore.properties
 android/app/src/main/jniLibs/*/libovid_bootstrap.so
+android/build/

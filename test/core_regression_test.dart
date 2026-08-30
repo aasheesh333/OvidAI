@@ -1371,5 +1371,60 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       final parts2 = toolName2.split('__');
       expect(parts2.sublist(2).join('__'), 'list_dir__deep');
     });
+
+    // ── PR11: pinch-zoom font scale + chatbox file upload ──
+
+    // chatFontScale must clamp to [min,max] and persist, so a pinch can't
+    // shrink text to zero or blow it up unboundedly.
+    test('chatFontScale: clamps to bounds and persists', () async {
+      final app = AppState.I;
+      final old = app.chatFontScale;
+      try {
+        await app.setChatFontScale(0.1); // below min
+        expect(app.chatFontScale, AppState.chatFontScaleMin);
+        await app.setChatFontScale(99); // above max
+        expect(app.chatFontScale, AppState.chatFontScaleMax);
+        await app.setChatFontScale(1.4); // in range
+        expect(app.chatFontScale, closeTo(1.4, 1e-9));
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getDouble('ovid_chat_font_scale'), closeTo(1.4, 1e-9));
+      } finally {
+        await app.setChatFontScale(old);
+      }
+    });
+
+    // attachFile copies into the session workspace and stages a
+    // pendingAttachment; clearAttachment resets it. Oversize/missing files
+    // return an error string (never throw).
+    test('attachFile: stages, copies to workspace, clears; errors safe', () async {
+      final agent = AgentService.I;
+      final tmp = Directory.systemTemp.createTempSync('ovid_att');
+      // Unique name per run — the session workspace persists across tests,
+      // and attachFile de-dupes by suffixing when the name already exists.
+      final unique = 'notes_${DateTime.now().microsecondsSinceEpoch}.txt';
+      try {
+        final src = File('${tmp.path}/$unique')
+          ..writeAsStringSync('hello attachment');
+        final err = await agent.attachFile(src.path, unique);
+        expect(err, isNull);
+        final att = agent.pendingAttachment;
+        expect(att, isNotNull);
+        expect(att!.name, unique);
+        expect(att.size, greaterThan(0));
+        // The file was copied INTO the session workspace (different path).
+        expect(att.path, isNot(src.path));
+        expect(File(att.path).existsSync(), isTrue);
+        // Clear resets.
+        agent.clearAttachment();
+        expect(agent.pendingAttachment, isNull);
+        // Missing file → error string, no throw.
+        final missing = await agent.attachFile('${tmp.path}/nope.xyz', 'nope.xyz');
+        expect(missing, isNotNull);
+        expect(agent.pendingAttachment, isNull);
+      } finally {
+        tmp.deleteSync(recursive: true);
+        agent.clearAttachment();
+      }
+    });
   });
 }

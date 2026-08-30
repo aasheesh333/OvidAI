@@ -658,6 +658,59 @@ class AgentService extends ChangeNotifier {
   /// timeout) so the UI can show the REAL error instead of a dummy string.
   String? lastError;
 
+  // ── Pending attachment (chatbox file upload) ──
+  /// Set when the user attaches a file via the composer's + button. The
+  /// file is copied into the session workspace immediately; on the next
+  /// send, a note is prepended to the prompt telling the agent the file is
+  /// in the workspace (it reads it via read_attachment / run_shell).
+  ({String name, String path, int size})? pendingAttachment;
+
+  /// Attach a local file: copy into the session workspace and stage it.
+  /// Returns a human-readable error string, or null on success.
+  Future<String?> attachFile(String sourcePath, String fileName) async {
+    try {
+      final src = File(sourcePath);
+      if (!src.existsSync()) return 'file not found: $fileName';
+      final size = await src.length();
+      if (size > 20 * 1024 * 1024) {
+        return 'file too large (${(size / 1048576).toStringAsFixed(1)} MB, max 20 MB)';
+      }
+      final work = await _sessionWorkDir();
+      work.createSync(recursive: true);
+      // Avoid clobbering: suffix if the name already exists.
+      var destName = fileName;
+      var dest = File('${work.path}/$destName');
+      var n = 1;
+      while (dest.existsSync()) {
+        final dot = fileName.lastIndexOf('.');
+        destName = dot > 0
+            ? '${fileName.substring(0, dot)}_$n${fileName.substring(dot)}'
+            : '${fileName}_$n';
+        dest = File('${work.path}/$destName');
+        n++;
+      }
+      await src.copy(dest.path);
+      pendingAttachment = (name: destName, path: dest.path, size: size);
+      _emit('attach', 'attached $destName (${_fmtSize(size)})');
+      notifyListeners();
+      return null;
+    } catch (e) {
+      return 'attach failed: $e';
+    }
+  }
+
+  /// Clear the staged attachment (user removed it, or after send).
+  void clearAttachment() {
+    pendingAttachment = null;
+    notifyListeners();
+  }
+
+  static String _fmtSize(int b) => b >= 1048576
+      ? '${(b / 1048576).toStringAsFixed(1)} MB'
+      : b >= 1024
+          ? '${(b / 1024).toStringAsFixed(0)} KB'
+          : '$b B';
+
   /// True while the ACTIVE session has a run in flight — drives the
   /// typing bubble + stop/send button.  Per-session: another session
   /// running does NOT make this session look busy.
@@ -1937,7 +1990,7 @@ class AgentService extends ChangeNotifier {
     }
   }
 
-  Future<void> runTask(String prompt) async {
+  Future<void> runTask(String originalPrompt) async {
     final p = _provider;
     final s = AppState.I.activeSession;
     if (s == null) {
@@ -1962,6 +2015,12 @@ class AgentService extends ChangeNotifier {
     lastError = null;
     events.clear();
     _emit('think', 'planning with ${p.selectedModel} · ${mode.label} mode');
+
+    // ── Staged attachment (chatbox upload) ──
+    // The file is already in the session workspace; capture it so we can
+    // inject a system note below telling the agent to read it.
+    final att = pendingAttachment;
+    if (att != null) pendingAttachment = null;
 
     final sys =
         '''
@@ -2024,6 +2083,15 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           'content':
               '[Earlier conversation summary — treat as established context]\n'
                   '${s.compactedSummary}',
+        },
+      // Staged attachment note — the file is in the session workspace.
+      if (att != null)
+        {
+          'role': 'system',
+          'content': '[User attached a file this turn: "${att.name}" '
+              '(${_fmtSize(att.size)}). It is saved in THIS session workspace. '
+              'Read it with read_attachment("${att.name}") or run_shell, then '
+              'respond to the user\'s message.]',
         },
       ...s.messages
           .skip(historyStart)
