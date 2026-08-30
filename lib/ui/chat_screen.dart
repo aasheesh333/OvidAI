@@ -438,6 +438,13 @@ class _ChatScreenState extends State<ChatScreen>
   final Map<String, String> _drafts = {};
   String? _boundSessionId;
 
+  // ── Lazy message paging (ChatGPT/Claude style) ──
+  // Long threads render ONLY the last [_visibleCount] folded items; a
+  // "Load earlier" row at the top pulls in older history on demand, so a
+  // 500-message chat never lags the phone (or re-builds on every token).
+  static const _pageSize = 40;
+  int _visibleCount = _pageSize;
+
   void _bindDraft(String sessionId) {
     if (_boundSessionId == sessionId) return;
     // Save outgoing session's draft.
@@ -459,6 +466,7 @@ class _ChatScreenState extends State<ChatScreen>
     // the bottom, not mid-stream.
     _atBottom = true;
     _showJumpFab = false;
+    _visibleCount = _pageSize; // lazy paging resets per session
   }
 
   @override
@@ -628,12 +636,24 @@ class _ChatScreenState extends State<ChatScreen>
                                 child: AnimatedBuilder(
                                   animation: AgentService.I,
                                   builder: (_, _) {
-                                    final typing = AgentService.I.busy;
+                                    final typing = AgentService.I.busyFor(s.id);
                                     _maybeJumpToBottom();
                                     // DSH turn-process folding: consecutive
                                     // tool/reasoning items collapse into a
                                     // single strip before the final answer.
-                                    final items = _foldMessages(s.messages);
+                                    final allItems = _foldMessages(s.messages);
+                                    // Lazy paging (ChatGPT/Claude style) —
+                                    // render ONLY the newest [_visibleCount]
+                                    // folded items; a "Show earlier" row at
+                                    // the top pulls in older history on tap.
+                                    // A 500-message chat no longer lags the
+                                    // phone while streaming.
+                                    final hidden =
+                                        allItems.length - _visibleCount;
+                                    final items = hidden > 0
+                                        ? allItems.sublist(
+                                            allItems.length - _visibleCount)
+                                        : allItems;
                                     // DSH "Produced" card — files written by
                                     // this run surface as a card under the
                                     // final answer (tap → Studio).
@@ -641,7 +661,7 @@ class _ChatScreenState extends State<ChatScreen>
                                         AgentService.I.producedFiles;
                                     final showProduced =
                                         !typing && produced.isNotEmpty;
-                                    final count =
+                                    final count = (hidden > 0 ? 1 : 0) +
                                         items.length +
                                         (typing ? 1 : 0) +
                                         (showProduced ? 1 : 0);
@@ -655,7 +675,36 @@ class _ChatScreenState extends State<ChatScreen>
                                       ),
                                       itemCount: count,
                                       itemBuilder: (_, i) {
-                                        if (i == items.length) {
+                                        // Row 0: "Show earlier" pager.
+                                        if (hidden > 0 && i == 0) {
+                                          return Center(
+                                            child: TextButton.icon(
+                                              style: TextButton.styleFrom(
+                                                padding: const EdgeInsets
+                                                    .symmetric(horizontal: 10),
+                                                minimumSize: Size.zero,
+                                                visualDensity:
+                                                    VisualDensity.compact,
+                                              ),
+                                              onPressed: () => setState(() =>
+                                                  _visibleCount += _pageSize),
+                                              icon: Icon(
+                                                Icons.expand_less,
+                                                size: 14,
+                                                color: Aether.textFaint,
+                                              ),
+                                              label: Text(
+                                                'Show $hidden earlier',
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  color: Aether.textFaint,
+                                                ),
+                                              ),
+                                            ),
+                                          );
+                                        }
+                                        final li = hidden > 0 ? i - 1 : i;
+                                        if (li == items.length) {
                                           return typing
                                               ? const _TypingBubble()
                                               : _RowIn(
@@ -665,7 +714,7 @@ class _ChatScreenState extends State<ChatScreen>
                                                 );
                                         }
                                         return _buildItem(
-                                          items[i],
+                                          items[li],
                                           s,
                                           onAction: () => setState(() {}),
                                           input: _input,
@@ -720,14 +769,14 @@ class _ChatScreenState extends State<ChatScreen>
                 const _ApprovalDock(),
                 _InputBar(
                   controller: _input,
-                  running: AgentService.I.busy,
+                  running: s == null ? false : AgentService.I.busyFor(s.id),
                   onSend: () {
                     final t = _input.text.trim();
                     if (t.isEmpty) return;
 
                     // ── DSH-web busy behavior: typing while running queues
                     // the message to auto-run after the current turn. ──
-                    if (AgentService.I.busy) {
+                    if (s != null && AgentService.I.busyFor(s.id)) {
                       AgentService.I.enqueueMessage(t);
                       _input.clear();
                       return;
@@ -2472,7 +2521,10 @@ class _InputBarState extends State<_InputBar> {
                   AnimatedBuilder(
                     animation: Listenable.merge([AgentService.I, controller]),
                     builder: (_, _) {
-                      final runningNow = AgentService.I.busy;
+                      // Per-session run state (never leaked from other
+                      // sessions — the multi-session blink fix).
+                      final runningNow = AgentService.I
+                          .busyFor(AppState.I.activeSession?.id ?? '');
                       final hasDraft = controller.text.trim().isNotEmpty;
                       final IconData icon;
                       final Color bg;

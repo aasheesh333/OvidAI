@@ -742,6 +742,13 @@ class AgentService extends ChangeNotifier {
   /// running does NOT make this session look busy.
   bool get busy => _run.activeRunId != null;
 
+  /// True while THE GIVEN session has a run in flight.  The chat list uses
+  /// this (not [busy]) so a background parallel run in session A never
+  /// makes session B blink or show a wrong stop/send button.  This was the
+  /// "both sessions blinking + old session shows send" bug.
+  bool busyFor(String sessionId) =>
+      _runs[sessionId]?.activeRunId != null;
+
   /// True while ANY session has a run — for global indicators.
   bool get anyBusy => _runs.values.any((r) => r.activeRunId != null);
 
