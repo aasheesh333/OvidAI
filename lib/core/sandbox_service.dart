@@ -325,7 +325,9 @@ class SandboxService {
     const pkgs = 'nodejs npm python python-pip uv git curl';
     var installed = false;
     for (var attempt = 1; attempt <= 3 && !installed; attempt++) {
-      final tag = attempt == 1 ? r'$ apt update' : 'retry $attempt/3 · apt update';
+      final tag = attempt == 1
+          ? r'$ apt update'
+          : 'retry $attempt/3 · apt update';
       try {
         onPhase(7, 0.05, tag);
         final (uCode, uOut) = await _aptChecked(
@@ -335,8 +337,11 @@ class SandboxService {
         );
         if (uCode != 0) {
           final tail = uOut.trim().split('\n').where((l) => l.isNotEmpty);
-          onPhase(7, 0.05,
-              'apt update failed ($uCode): ${tail.isEmpty ? "no output" : tail.last}');
+          onPhase(
+            7,
+            0.05,
+            'apt update failed ($uCode): ${tail.isEmpty ? "no output" : tail.last}',
+          );
           continue;
         }
         onPhase(7, 0.3, 'apt update ......... ✓');
@@ -365,6 +370,32 @@ class SandboxService {
           0.4,
           'attempt $attempt failed: '
           '${e.toString().split('\n').first}',
+        );
+      }
+    }
+
+    // ── Direct .deb download fallback (apt-https transport broken) ──
+    // Some devices never complete apt's https method (Cloudflare TLS),
+    // making "no Release file" error every retry chain.  curl honors our
+    // CA bundle and works — so we fetch the package index + full .deb
+    // dependency closure ourselves and install with dpkg directly.
+    if (!installed) {
+      onPhase(7, 0.45, '[deb] apt failed — fetching packages directly…');
+      try {
+        installed = await _debDirectInstall(onPhase, [
+          'nodejs',
+          'npm',
+          'python',
+          'python-pip',
+          'uv',
+          'git',
+          'curl',
+        ]);
+      } catch (e) {
+        onPhase(
+          7,
+          0.45,
+          '[deb] direct fetch failed: ${e.toString().split('\n').first}',
         );
       }
     }
@@ -618,14 +649,184 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
   ];
   int _mirrorIdx = 0;
 
+  /// Direct .deb pool installer — bypasses apt's https transport entirely.
+  /// curl (bundled, works with our CA bundle) fetches the package index +
+  /// each .deb from a Termux mirror pool; dpkg then installs the full
+  /// dependency closure.  Used when apt repeatedly fails with TLS or
+  /// "no Release file" (its methods/https binary is broken on-device).
+  ///
+  /// [wanted] are the high-level packages (nodejs, python, …); the real
+  /// dependency closure (openssl/libcurl/libexpat/…) is resolved from the
+  /// parsed Packages index.
+  Future<bool> _debDirectInstall(
+    void Function(int phase, double progress, String line) onPhase,
+    List<String> wanted,
+  ) async {
+    final prefix = _prefix;
+    if (prefix == null) return false;
+    final p = prefix.path;
+    final arch = _deviceArch == 'arm64' ? 'aarch64' : _deviceArch;
+    // ── 1. Fetch + decompress the binary index (mirrors cycled) ──
+    File? indexFile;
+    String? mirrorUsed;
+    for (var i = 0; i < _aptMirrors.length && indexFile == null; i++) {
+      final m = _aptMirrors[(_mirrorIdx + i) % _aptMirrors.length];
+      onPhase(7, 0.5, '[deb] $m …');
+      final (code, out) = await execChecked([
+        'bash',
+        '-c',
+        'mkdir -p "\$PREFIX/var/cache/apt/archives" && '
+            'cd "\$PREFIX/var/cache/apt" && '
+            'curl -fsSL --retry 2 --connect-timeout 25 '
+            '"$m/dists/stable/main/binary-$arch/Packages.gz" -o Packages.gz '
+            '&& (gzip -dkf Packages.gz || gunzip -c Packages.gz > Packages) '
+            '&& echo INDEX_OK || '
+            '(curl -fsSL --retry 2 '
+            '"$m/dists/stable/main/binary-$arch/Packages" -o Packages && '
+            'echo INDEX_OK)',
+      ]).timeout(const Duration(minutes: 3));
+      if (code == 0 && out.contains('INDEX_OK')) {
+        _mirrorIdx = (_mirrorIdx + i) % _aptMirrors.length;
+        mirrorUsed = m;
+        indexFile = File('$p/var/cache/apt/Packages');
+        onPhase(7, 0.55, '[deb] index ✓ (${m.split('/').last})');
+        break;
+      }
+    }
+    if (indexFile == null || mirrorUsed == null) {
+      onPhase(7, 0.55, '[deb] index fetch failed on all mirrors');
+      return false;
+    }
+
+    // ── 2. Parse the index (name → filename + depends) ──
+    final text = await indexFile.readAsString();
+    final stanzas = text.split(RegExp(r'\n\s*\n'));
+    final table = <String, ({String filename, List<String> depends})>{};
+    for (final stanza in stanzas) {
+      String? name, filename;
+      final depends = <String>[];
+      for (final line in stanza.split('\n')) {
+        if (line.startsWith(' ')) {
+          // Continuation line — Depends lists wrap onto these.
+          if (depends.isNotEmpty) depends.add(line);
+          continue;
+        }
+        final colon = line.indexOf(':');
+        if (colon <= 0) continue;
+        final field = line.substring(0, colon).trim();
+        final value = line.substring(colon + 1).trim();
+        switch (field) {
+          case 'Package':
+            name = value;
+            break;
+          case 'Filename':
+            filename = value;
+            break;
+          case 'Depends':
+            depends.add(value);
+            break;
+        }
+      }
+      if (name != null && filename != null) {
+        table[name] = (filename: filename, depends: depends);
+      }
+    }
+    if (table.isEmpty) {
+      onPhase(7, 0.55, '[deb] index parse produced 0 packages');
+      return false;
+    }
+
+    // ── 3. Resolve the dependency closure ──
+    // Depends entries: "libicu (>= 77), openssl | libopenssl ..."
+    final depNameRe = RegExp('^[a-zA-Z0-9+._-]+');
+    final queue = List<String>.from(wanted);
+    final closure = <String>{};
+    while (queue.isNotEmpty && closure.length < 400) {
+      final name = queue.removeLast();
+      if (closure.contains(name)) continue;
+      final entry = table[name];
+      if (entry == null) continue; // virtual / already-base package
+      closure.add(name);
+      for (final raw in entry.depends) {
+        for (final depList in raw.split(',')) {
+          // Alternation "a | b | c": take the FIRST alternative that exists
+          // in the index (nodejs | nodejs-lts → only nodejs, they conflict).
+          String? picked;
+          for (final alt in depList.split('|')) {
+            final m = depNameRe.firstMatch(alt.trim());
+            if (m != null && table.containsKey(m.group(0)!)) {
+              picked = m.group(0)!;
+              break;
+            }
+          }
+          if (picked != null) queue.add(picked);
+        }
+      }
+    }
+    // Only packages actually in the index get downloaded.
+    final toFetch = closure.where(table.containsKey).toList();
+    onPhase(7, 0.6, '[deb] ${toFetch.length} packages in closure');
+
+    // ── 4. Download every .deb via curl ──
+    final archives = '$p/var/cache/apt/archives';
+    var downloaded = 0;
+    for (final name in toFetch) {
+      final fn = table[name]!.filename;
+      final debFile = File('$archives/${fn.split('/').last}');
+      if (debFile.existsSync() && debFile.lengthSync() > 1000) {
+        downloaded++;
+        continue;
+      }
+      final (code, _) = await execChecked([
+        'bash',
+        '-c',
+        'curl -fsSL --retry 2 --connect-timeout 25 "$mirrorUsed/$fn" '
+            '-o "\$PREFIX/var/cache/apt/archives/${fn.split('/').last}"',
+      ]).timeout(const Duration(minutes: 5));
+      if (code != 0) {
+        onPhase(7, 0.65, '[deb] download failed: ${fn.split('/').last}');
+        return false;
+      }
+      downloaded++;
+      if (downloaded % 10 == 0) {
+        onPhase(7, 0.65, '[deb] $downloaded/${toFetch.length}…');
+      }
+    }
+
+    // ── 5. One-pass dpkg install of the whole closure ──
+    onPhase(7, 0.7, '[deb] dpkg installing $downloaded packages…');
+    final (iCode, iOut) = await execChecked([
+      'bash',
+      '-c',
+      'dpkg --root="\$PREFIX" --admindir="\$PREFIX/var/lib/dpkg" '
+          '-i --force-all "\$PREFIX"/var/cache/apt/archives/*.deb 2>&1'
+          ' | tail -5',
+    ]).timeout(const Duration(minutes: 6));
+    if (iCode != 0 && !iOut.contains('Setting up')) {
+      onPhase(
+        7,
+        0.72,
+        '[deb] dpkg exit $iCode: '
+        '${iOut.trim().split('\n').where((l) => l.isNotEmpty).lastOrNull ?? 'no output'}',
+      );
+    }
+
+    // ── 6. Idempotent verification ──
+    return await runtimesVerified();
+  }
+
   /// Writes `$prefix/etc/apt/sources.list` for one mirror (idempotent).
   void _writeSourcesList(Directory prefix, String mirror) {
     try {
-      final dir = Directory('${prefix.path}/etc/apt')..createSync(recursive: true);
-      File('${dir.path}/sources.list.d/termux.list').createSync(recursive: true);
+      final dir = Directory('${prefix.path}/etc/apt')
+        ..createSync(recursive: true);
+      File(
+        '${dir.path}/sources.list.d/termux.list',
+      ).createSync(recursive: true);
       File('${dir.path}/sources.list').writeAsStringSync(
-          '# Ovid sandbox apt mirror (auto-managed)\n'
-          'deb $mirror stable main\n');
+        '# Ovid sandbox apt mirror (auto-managed)\n'
+        'deb $mirror stable main\n',
+      );
     } catch (_) {}
   }
 
@@ -914,7 +1115,9 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
       (code, out) = await run();
     }
     if (code != 0 && _rotateMirror(out)) {
-      onLine?.call('[apt] mirror dead/stale — rotated to ${_aptMirrors[_mirrorIdx]}');
+      onLine?.call(
+        '[apt] mirror dead/stale — rotated to ${_aptMirrors[_mirrorIdx]}',
+      );
       final (uCode, uOut) = await execChecked([
         'bash',
         '-c',
