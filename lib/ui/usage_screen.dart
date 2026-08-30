@@ -6,8 +6,73 @@ import '../core/state.dart';
 /// PROVIDER-WISE usage tracking — "kisne kitna khaya" view.
 /// ───────────────────────────────────────────────────────────────────
 /// Aggregated from [AppState.usageLog] — real token counts metered per
-/// model call by the agent loop. DSH-web StatsLine + TurnUsage pattern.
+/// model call by the agent loop. DSH-web StatsLine + TurnUsage pattern,
+/// plus APPROXIMATE USD pricing per known model family (public list
+/// prices; marked "approx" everywhere).
 /// ═══════════════════════════════════════════════════════════════════
+
+/// Approximate public list pricing per model family, USD per 1M tokens
+/// (input, output).  Unknown models return null → UI shows "—".
+class _Pricing {
+  final double inputPer1M;
+  final double outputPer1M;
+  const _Pricing(this.inputPer1M, this.outputPer1M);
+
+  static const List<(String, _Pricing)> _table = [
+    ('claude-opus-4', _Pricing(15, 75)),
+    ('claude-opus', _Pricing(15, 75)),
+    ('claude-sonnet-4', _Pricing(3, 15)),
+    ('claude-sonnet', _Pricing(3, 15)),
+    ('claude-3-5-haiku', _Pricing(0.80, 4)),
+    ('claude-haiku', _Pricing(0.80, 4)),
+    ('gpt-4o-mini', _Pricing(0.15, 0.60)),
+    ('gpt-4o', _Pricing(2.50, 10)),
+    ('gpt-4.1', _Pricing(2, 8)),
+    ('o3-mini', _Pricing(1.10, 4.40)),
+    ('o3', _Pricing(2, 8)),
+    ('o4-mini', _Pricing(1.10, 4.40)),
+    ('gemini-2.5-pro', _Pricing(1.25, 10)),
+    ('gemini-2.5-flash', _Pricing(0.30, 2.50)),
+    ('gemini-2.0-flash', _Pricing(0.10, 0.40)),
+    ('gemini', _Pricing(1.25, 10)),
+    ('deepseek-reasoner', _Pricing(0.55, 2.19)),
+    ('deepseek-chat', _Pricing(0.27, 1.10)),
+    ('deepseek-v4', _Pricing(0.25, 1.00)),
+    ('deepseek', _Pricing(0.27, 1.10)),
+    ('grok', _Pricing(3, 15)),
+    ('mistral-large', _Pricing(2, 6)),
+    ('codestral', _Pricing(0.30, 0.90)),
+    ('mistral', _Pricing(2, 6)),
+    ('qwen2.5-coder-32b', _Pricing(0.18, 0.18)),
+    ('qwen', _Pricing(0.35, 1.40)),
+    ('kimi', _Pricing(0.50, 2.00)),
+    ('llama-4', _Pricing(0.18, 0.18)),
+    ('llama-3.3-70b', _Pricing(0.10, 0.10)),
+    ('nemotron', _Pricing(0.20, 0.60)),
+    ('sonar', _Pricing(1, 1)),
+  ];
+
+  /// Pricing for a model id (keyword match, table order = precedence).
+  static _Pricing? forModel(String model) {
+    final m = model.split('·').first.trim().toLowerCase();
+    for (final (key, pricing) in _table) {
+      if (m.contains(key)) return pricing;
+    }
+    return null;
+  }
+
+  /// Approx USD cost for (input, output) tokens of [model]; null if the
+  /// model family is unknown.
+  static double? estimate(String model, int inTok, int outTok) {
+    final p = forModel(model);
+    if (p == null) return null;
+    return inTok / 1e6 * p.inputPer1M + outTok / 1e6 * p.outputPer1M;
+  }
+
+  static String fmt(double usd) => usd >= 1
+      ? '\$${usd.toStringAsFixed(2)}'
+      : '\$${usd.toStringAsFixed(usd >= 0.01 ? 3 : 4)}';
+}
 
 class ProviderUsage {
   final String providerId;
@@ -18,6 +83,8 @@ class ProviderUsage {
   int requests;
   int tokensIn;
   int tokensOut;
+  double costUsd; // approx, only known models contribute
+  bool hasPricedModel;
   List<(String, int, int)> models; // model, reqs, totalTokens
   ProviderUsage({
     required this.providerId,
@@ -29,6 +96,8 @@ class ProviderUsage {
     required this.tokensIn,
     required this.tokensOut,
     required this.models,
+    this.costUsd = 0,
+    this.hasPricedModel = false,
   });
 }
 
@@ -58,7 +127,13 @@ class UsageScreen extends StatelessWidget {
         ..requests += 1
         ..tokensIn += e.promptTokens
         ..tokensOut += e.completionTokens;
-      // Per-model aggregation.
+      final cost = _Pricing.estimate(e.model, e.promptTokens, e.completionTokens);
+      if (cost != null) {
+        p
+          ..costUsd += cost
+          ..hasPricedModel = true;
+      }
+      // Per-model aggregation (in+out split kept for the detail view).
       final m = p.models.where((m) => m.$1 == e.model).firstOrNull;
       if (m != null) {
         p.models[p.models.indexOf(m)] = (m.$1, m.$2 + 1, m.$3 + e.totalTokens);
@@ -95,7 +170,16 @@ class UsageScreen extends StatelessWidget {
     final app = AppState.I;
     final providers = _aggregate(app);
     final reqs = providers.fold<int>(0, (s, p) => s + p.requests);
+    final tokensIn = providers.fold<int>(0, (s, p) => s + p.tokensIn);
     final tokensOut = providers.fold<int>(0, (s, p) => s + p.tokensOut);
+    final costUsd = providers.fold<double>(0, (s, p) => s + p.costUsd);
+    final anyPriced = providers.any((p) => p.hasPricedModel);
+    final todayEntries = app.usageLog.where((e) {
+      final d = e.time;
+      final now = DateTime.now();
+      return d.year == now.year && d.month == now.month && d.day == now.day;
+    }).toList();
+    final todayTokens = todayEntries.fold<int>(0, (s, e) => s + e.totalTokens);
 
     return Scaffold(
       backgroundColor: Aether.bg,
@@ -106,7 +190,7 @@ class UsageScreen extends StatelessWidget {
           return ListView(
             padding: const EdgeInsets.only(bottom: 40),
             children: [
-              // ---- Month summary ----
+              // ---- All-time summary ----
               Container(
                 margin: const EdgeInsets.fromLTRB(16, 14, 16, 6),
                 padding: const EdgeInsets.all(16),
@@ -116,11 +200,25 @@ class UsageScreen extends StatelessWidget {
                   border: Border.all(color: Aether.hairline),
                 ),
                 child: Row(children: [
-                  _stat('All time', '$reqs', big: true),
+                  _stat(
+                    'Est. cost',
+                    anyPriced ? _Pricing.fmt(costUsd) : '—',
+                    big: true,
+                  ),
+                  _stat('Today', _fmtTok(todayTokens)),
                   _stat('Requests', '$reqs'),
                   _stat('Providers', '${providers.length}'),
                 ]),
               ),
+              if (anyPriced)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(18, 4, 18, 0),
+                  child: Text(
+                    'Costs are approximate (public list prices per model; '
+                    'cached-input, promos and free tiers not reflected).',
+                    style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                  ),
+                ),
 
               // ---- tokens banner ----
               Container(
@@ -141,13 +239,13 @@ class UsageScreen extends StatelessWidget {
                     color: Aether.textFaint,
                   ),
                   const SizedBox(width: 8),
-                  Text('Total output', style: TextStyle(
+                  Text('Input · output', style: TextStyle(
                     fontSize: 11,
                     color: Aether.textFaint,
                   )),
                   const Spacer(),
                   Text(
-                    '${tokensOut > 1000 ? '${(tokensOut / 1000).toStringAsFixed(1)}K' : tokensOut} tokens',
+                    '${_fmtTok(tokensIn)} in · ${_fmtTok(tokensOut)} out',
                     style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w700,
@@ -205,6 +303,10 @@ class UsageScreen extends StatelessWidget {
     );
   }
 
+  static String _fmtTok(int n) =>
+      n >= 1000000 ? '${(n / 1000000).toStringAsFixed(2)}M'
+      : n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}K' : '$n';
+
   Widget _stat(String label, String value, {bool big = false}) {
     return Expanded(
       child: Column(
@@ -259,7 +361,8 @@ class _ProviderTile extends StatelessWidget {
         ),
       ]),
       subtitle: Text(
-        '${p.requests} requests · ${_fmtK(p.tokensIn)} in · ${_fmtK(p.tokensOut)} out',
+        '${p.requests} requests · ${_fmtK(p.tokensIn)} in · ${_fmtK(p.tokensOut)} out'
+        '${p.hasPricedModel ? ' · ≈ ${_Pricing.fmt(p.costUsd)}' : ''}',
         style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
       ),
       trailing: Icon(Icons.chevron_right,
@@ -333,6 +436,10 @@ class ProviderUsageScreen extends StatelessWidget {
               _cell('Requests', '${p.requests}'),
               _cell('Tokens in', _fmtK(p.tokensIn)),
               _cell('Tokens out', _fmtK(p.tokensOut)),
+              _cell(
+                'Est. cost',
+                p.hasPricedModel ? '≈ ${_Pricing.fmt(p.costUsd)}' : '—',
+              ),
             ]),
           ),
 
@@ -410,13 +517,17 @@ class ProviderUsageScreen extends StatelessWidget {
               child: Column(children: [
                 const _Row(
                   h: true,
-                  cells: ['MODEL', 'REQ', 'TOKENS'],
-                  flexes: [5, 2, 3],
+                  cells: ['MODEL', 'REQ', 'TOKENS', '≈ COST'],
+                  flexes: [5, 2, 3, 3],
                 ),
                 const Divider(height: 12),
                 for (final m in p.models)
-                  _Row(cells: [m.$1, '${m.$2}', _fmtK(m.$3)],
-                      flexes: const [5, 2, 3]),
+                  _Row(cells: [
+                    m.$1,
+                    '${m.$2}',
+                    _fmtK(m.$3),
+                    _modelCost(p.providerId, m.$1),
+                  ], flexes: const [5, 2, 3, 3]),
               ]),
             ),
         ],
@@ -426,6 +537,19 @@ class ProviderUsageScreen extends StatelessWidget {
 
   String _fmtK(int n) =>
       n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}K' : '$n';
+
+  /// Approx USD cost for ONE model on this provider, computed from the raw
+  /// log (per-model in/out split lives there, not in the aggregate tuple).
+  String _modelCost(String providerId, String model) {
+    var i = 0, o = 0;
+    for (final e in AppState.I.usageLog) {
+      if (e.providerId != providerId || e.model != model) continue;
+      i += e.promptTokens;
+      o += e.completionTokens;
+    }
+    final cost = _Pricing.estimate(model, i, o);
+    return cost == null ? '—' : _Pricing.fmt(cost);
+  }
 
   Widget _cell(String label, String value) {
     return Expanded(

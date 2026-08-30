@@ -966,6 +966,31 @@ void main() {
       expect(AgentService.toolTitleFor('run_shell'), 'bash');
       expect(AgentService.toolTitleFor('dispatch_agent'), 'Subagent');
     });
+
+    test('per-model context windows (DSH compaction parity, all providers)',
+        () {
+      // Known families → their declared windows.
+      expect(AgentService.contextWindowFor('deepseek-chat'), 128000);
+      expect(AgentService.contextWindowFor('deepseek-reasoner'), 128000);
+      expect(AgentService.contextWindowFor('gpt-4o'), 128000);
+      expect(AgentService.contextWindowFor('gpt-4.1'), 1048576);
+      expect(AgentService.contextWindowFor('claude-opus-4-20250514'), 200000);
+      expect(AgentService.contextWindowFor('gemini-2.5-flash'), 1048576);
+      expect(AgentService.contextWindowFor('grok-3'), 256000);
+      expect(AgentService.contextWindowFor('nvidia/nemotron-3-super'), 1048576);
+      // Variant suffixes (· Medium) fall back to the base model window.
+      expect(AgentService.contextWindowFor('deepseek-chat · High'), 128000);
+      // Custom-provider / unknown models get the DSH 1M default.
+      expect(AgentService.contextWindowFor('my-custom-model-x1'), 1000000);
+      expect(AgentService.contextWindowFor(''), 1000000);
+    });
+
+    test('token estimate heuristic (DSH token-meter: 4 chars/token + overhead)',
+        () {
+      expect(AgentService.estimateMessageTokens(''), 4);
+      expect(AgentService.estimateMessageTokens('a' * 100), 29);
+      expect(AgentService.estimateMessageTokens('x' * 400000), 100004);
+    });
     test('ChatSession.goal round-trips through JSON', () {
       final s = ChatSession(id: 'g1', title: 't', model: 'm');
       s.goal = {

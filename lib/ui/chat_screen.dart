@@ -71,19 +71,149 @@ List<_ChatItem> _foldMessages(List<Message> messages) {
   return out;
 }
 
+/// DSH `row-in` / `wide-in` entrance — fade + 8px slide-up, plays ONCE
+/// when the widget is inserted (streaming rebuilds don't re-trigger it
+/// because the State persists in the ListView element).
+class _RowIn extends StatefulWidget {
+  final Widget child;
+  const _RowIn({required this.child});
+  @override
+  State<_RowIn> createState() => _RowInState();
+}
+
+class _RowInState extends State<_RowIn> with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 300),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _c.forward();
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final curved = CurvedAnimation(parent: _c, curve: Curves.easeOutCubic);
+    return FadeTransition(
+      opacity: curved,
+      child: SlideTransition(
+        position: Tween<Offset>(begin: const Offset(0, 0.04), end: Offset.zero)
+            .animate(curved),
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+/// DSH `dsh-state-dot-chase` — pulsing accent dot used on running tool
+/// and reasoning rows instead of a spinner.
+class _ChaseDot extends StatefulWidget {
+  final Color color;
+  const _ChaseDot(this.color);
+  @override
+  State<_ChaseDot> createState() => _ChaseDotState();
+}
+
+class _ChaseDotState extends State<_ChaseDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (_, _) {
+        final phase = 0.5 - (_c.value - 0.5).abs();
+        final op = 0.35 + 0.65 * phase * 2;
+        final scale = 0.8 + 0.35 * phase * 2;
+        return Transform.scale(
+          scale: scale,
+          child: Container(
+            width: 11,
+            height: 11,
+            decoration: BoxDecoration(
+              color: widget.color.withValues(alpha: op.clamp(0.0, 1.0)),
+              shape: BoxShape.circle,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// DSH `dsh-turn-status-shimmer` — shimmering status text (e.g. the
+/// "Thinking…" label on a live reasoning row).
+class _ShimmerText extends StatefulWidget {
+  final String text;
+  final TextStyle style;
+  const _ShimmerText(this.text, {required this.style});
+  @override
+  State<_ShimmerText> createState() => _ShimmerTextState();
+}
+
+class _ShimmerTextState extends State<_ShimmerText>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1400),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (_, _) {
+        final t = (_c.value * 2) % 1.0;
+        final mix = Color.lerp(
+          Aether.textMuted,
+          Aether.text,
+          (0.5 - (t - 0.5).abs()) * 2,
+        );
+        return Text(widget.text, style: widget.style.copyWith(color: mix));
+      },
+    );
+  }
+}
+
 Widget _buildItem(_ChatItem item, dynamic s,
     {required VoidCallback onAction, required TextEditingController input}) {
   if (item is _SingleItem) {
-    return _MessageView(
-      m: item.m,
-      session: s,
-      msgIndex: item.index,
-      onAction: onAction,
-      input: input,
+    return _RowIn(
+      child: _MessageView(
+        m: item.m,
+        session: s,
+        msgIndex: item.index,
+        onAction: onAction,
+        input: input,
+      ),
     );
   }
   final g = item as _FoldedGroup;
-  return _TurnProcessStrip(group: g.msgs);
+  return _RowIn(child: _TurnProcessStrip(group: g.msgs));
 }
 
 /// DSH StatsLine parity — pipe-separated line docked above the composer:
@@ -100,10 +230,11 @@ class _StatsLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: AppState.I,
+      animation: Listenable.merge([AppState.I, AgentService.I]),
       builder: (_, _) {
         final usage = AppState.I.usageLog;
-        if (usage.isEmpty) return const SizedBox.shrink();
+        final s = AppState.I.activeSession;
+        if (s == null) return const SizedBox.shrink();
         final today = usage.where((e) {
           final d = e.time;
           final now = DateTime.now();
@@ -111,22 +242,73 @@ class _StatsLine extends StatelessWidget {
         }).toList();
         final input = usage.fold<int>(0, (a, e) => a + e.promptTokens);
         final output = usage.fold<int>(0, (a, e) => a + e.completionTokens);
-        final parts = <String>[
-          '${today.length} turn${today.length == 1 ? '' : 's'} today',
-          if (AgentService.I.lastRunElapsedMs != null)
-            'last ${(AgentService.I.lastRunElapsedMs! / 1000).toStringAsFixed(1)}s',
-          'Input ${_fmtTok(input)} tok · Output ${_fmtTok(output)} tok',
-        ];
+        // DSH footer ring — % of THIS model's context window in use,
+        // measured from the last billed promptTokens (exact) or the
+        // chars/4 heuristic fallback.
+        final window = AgentService.contextWindowFor(s.model);
+        final used = AgentService.I.measuredContextTokens(s);
+        final frac = (used / window).clamp(0.0, 1.0);
+        final pct = frac * 100;
+        if (usage.isEmpty && used == 0) return const SizedBox.shrink();
+        final ringColor = frac >= 0.8
+            ? Aether.dangerC
+            : frac >= 0.55
+                ? Aether.warn
+                : Aether.success;
         return Container(
           width: double.infinity,
           padding: const EdgeInsets.fromLTRB(16, 3, 16, 3),
-          alignment: Alignment.center,
-          child: Text(
-            parts.join('  |  '),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Flexible(
+                child: Text(
+                  [
+                    '${today.length} turn${today.length == 1 ? '' : 's'} today',
+                    if (AgentService.I.lastRunElapsedMs != null)
+                      'last ${(AgentService.I.lastRunElapsedMs! / 1000).toStringAsFixed(1)}s',
+                    'Input ${_fmtTok(input)} tok · Output ${_fmtTok(output)} tok',
+                    if (s.compactedSummary != null) 'compacted',
+                  ].join('  |  '),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                ),
+              ),
+              const SizedBox(width: 8),
+              // Context ring — 12px arc + % label (DSH "% of context used").
+              Tooltip(
+                message:
+                    '${pct.toStringAsFixed(0)}% of ${_fmtTok(window)} context used',
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        value: frac,
+                        strokeWidth: 2,
+                        backgroundColor:
+                            Aether.hairline,
+                        valueColor: AlwaysStoppedAnimation(ringColor),
+                        strokeCap: StrokeCap.round,
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      '${pct.toStringAsFixed(0)}%',
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        fontFamily: Aether.mono,
+                        color: ringColor,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
         );
       },
@@ -406,11 +588,7 @@ class _ChatScreenState extends State<ChatScreen>
               children: [
                 Expanded(
                   child: s == null || s.messages.isEmpty
-                      ? _EmptyState(
-                          onSuggest: (t) {
-                            _input.text = t;
-                          },
-                        )
+                      ? const _EmptyState()
                       : Stack(
                           children: [
                             // Pinch-to-zoom: scales message text only.
@@ -444,21 +622,36 @@ class _ChatScreenState extends State<ChatScreen>
                                     // tool/reasoning items collapse into a
                                     // single strip before the final answer.
                                     final items = _foldMessages(s.messages);
+                                    // DSH "Produced" card — files written by
+                                    // this run surface as a card under the
+                                    // final answer (tap → Studio).
+                                    final produced = AgentService.I.producedFiles;
+                                    final showProduced =
+                                        !typing && produced.isNotEmpty;
+                                    final count = items.length +
+                                        (typing ? 1 : 0) +
+                                        (showProduced ? 1 : 0);
                                     return ListView.builder(
                                       controller: _scroll,
                                       padding: const EdgeInsets.fromLTRB(
                                           16, 8, 16, 16),
-                                      itemCount:
-                                          items.length + (typing ? 1 : 0),
-                                      itemBuilder: (_, i) =>
-                                          i == items.length
+                                      itemCount: count,
+                                      itemBuilder: (_, i) {
+                                        if (i == items.length) {
+                                          return typing
                                               ? const _TypingBubble()
-                                              : _buildItem(
-                                                  items[i], s,
-                                                  onAction: () =>
-                                                      setState(() {}),
-                                                  input: _input,
-                                                ),
+                                              : _RowIn(
+                                                  child: _ProducedFilesCard(
+                                                      files: produced),
+                                                );
+                                        }
+                                        return _buildItem(
+                                          items[i], s,
+                                          onAction: () =>
+                                              setState(() {}),
+                                          input: _input,
+                                        );
+                                      },
                                     );
                                   },
                                 ),
@@ -922,204 +1115,98 @@ class _ModelTile extends StatelessWidget {
   }
 }
 
-/// 50+ prompt suggestions — 4 random ones show per empty-state render.
-const _suggestionPool = [
-  ('⚡', 'Build a Flutter login screen'),
-  ('🧠', 'Explain transformers simply'),
-  ('🖼', 'Generate a minimal wallpaper'),
-  ('💻', 'Write a Python web scraper'),
-  ('🔍', 'Search the web for today\'s AI news'),
-  ('📄', 'Summarize this PDF for me'),
-  ('🐛', 'Debug this crash log'),
-  ('📊', 'Analyze this CSV and chart the trends'),
-  ('🎨', 'Design a color palette for a fintech app'),
-  ('🌐', 'Translate this text to French'),
-  ('📝', 'Draft a professional email to my manager'),
-  ('🧮', 'Solve this calculus problem step by step'),
-  ('🚀', 'Explain how rockets work like I\'m 10'),
-  ('🔧', 'Refactor this function for readability'),
-  ('📱', 'Create an app idea for productivity'),
-  ('🗂', 'Organize my project folder structure'),
-  ('🔐', 'Explain OAuth 2.0 in simple terms'),
-  ('🧪', 'Write unit tests for this class'),
-  ('🎯', 'Help me set SMART goals for this month'),
-  ('🤖', 'How do neural networks learn?'),
-  ('📈', 'Explain the difference between stocks and bonds'),
-  ('🎮', 'Design a simple 2D game concept'),
-  ('🏠', 'Plan a smart home automation setup'),
-  ('✈️', 'Create a 5-day itinerary for Tokyo'),
-  ('🍳', 'Give me a recipe using only 5 ingredients'),
-  ('📚', 'Recommend 5 books on machine learning'),
-  ('🎵', 'Write a haiku about programming'),
-  ('🗺', 'Compare Dijkstra vs A* pathfinding'),
-  ('💼', 'Review my resume summary'),
-  ('🧘', 'Create a 10-minute morning routine'),
-  ('🔬', 'Explain CRISPR gene editing'),
-  ('📦', 'Write a Dockerfile for a Node app'),
-  ('🌊', 'Explain ocean tides simply'),
-  ('⚙️', 'Optimize this SQL query'),
-  ('🗣', 'Practice Spanish conversation with me'),
-  ('🎭', 'Write a short dialogue between two friends'),
-  ('📐', 'Calculate the area of this irregular shape'),
-  ('🔮', 'Predict 3 AI trends for next year'),
-  ('🏃', 'Design a beginner running plan'),
-  ('💡', 'Brainstorm 10 startup ideas in health tech'),
-  ('📷', 'Explain camera aperture like I\'m new to photography'),
-  ('🌍', 'Compare renewable energy sources'),
-  ('🛠', 'Fix this TypeScript error'),
-  ('🧑‍🏫', 'Teach me binary search with an example'),
-  ('📰', 'Summarize the key points of this article'),
-  ('🎲', 'Explain probability with dice examples'),
-  ('🏗', 'Design a database schema for a blog'),
-  ('🌱', 'How do I start composting at home?'),
-  ('📅', 'Plan my week around these 5 tasks'),
-  ('🔑', 'Generate a secure password policy'),
-  ('🧊', 'Explain the water cycle'),
-];
-
+/// DSH-web home parity (Ovid branding): centered logo, big greeting with
+/// a mono pill beside it, then open space down to the composer.  DSH has
+/// NO suggestion rows on the home screen — the surface is intentionally
+/// empty so the composer is the whole focus.  Entrance: `wide-in` fade+rise.
 class _EmptyState extends StatelessWidget {
-  final void Function(String)? onSuggest;
-  const _EmptyState({this.onSuggest});
+  const _EmptyState();
   @override
   Widget build(BuildContext context) {
-    final shuffled = [..._suggestionPool]..shuffle();
-    final suggestions = shuffled.take(5).toList();
-    // DSH-web home: left-aligned content block, big light-weight greeting,
-    // a small MONOSPACED tag under it, then minimal full-width suggestion
-    // rows separated by hairlines (not heavy cards).
     return LayoutBuilder(
       builder: (context, c) {
         return SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(22, 40, 22, 24),
           child: ConstrainedBox(
             constraints: BoxConstraints(minHeight: c.maxHeight - 64),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                // Brand mark (kept — Ovid identity, same as header rule).
-                Container(
-                  width: 52,
-                  height: 52,
-                  decoration: BoxDecoration(
-                    color: Aether.accent,
-                    borderRadius: BorderRadius.circular(15),
-                  ),
-                  child: const Center(
-                    child: Text(
-                      'O',
-                      style: TextStyle(
-                        fontSize: 25,
-                        fontWeight: FontWeight.w800,
-                        color: Colors.white,
+            child: _RowIn(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  // Brand mark (Ovid identity).
+                  Container(
+                    width: 52,
+                    height: 52,
+                    decoration: BoxDecoration(
+                      color: Aether.accent,
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                    child: const Center(
+                      child: Text(
+                        'O',
+                        style: TextStyle(
+                          fontSize: 25,
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                        ),
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 22),
-                // Greeting — DSH scale: 26px, medium weight (not bold).
-                const Text(
-                  'How can I help?',
-                  style: TextStyle(
-                    fontSize: 26,
-                    fontWeight: FontWeight.w500,
-                    height: 32 / 26,
-                    letterSpacing: -0.2,
+                  const SizedBox(height: 22),
+                  // Greeting + mono pill (DSH "What do you want to build? ·
+                  // Preview" pattern) in one row so the pill sits beside the
+                  // title like DSH, not under it.
+                  Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 10,
+                    runSpacing: 6,
+                    children: [
+                      Text(
+                        'How can I help?',
+                        style: TextStyle(
+                          fontSize: 26,
+                          fontWeight: FontWeight.w500,
+                          height: 32 / 26,
+                          letterSpacing: -0.2,
+                          color: Aether.text,
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 9, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Aether.accent.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(24),
+                        ),
+                        child: Text(
+                          'preview',
+                          style: TextStyle(
+                            fontFamily: Aether.mono,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            height: 18 / 12,
+                            color: Aether.accent,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-                const SizedBox(height: 8),
-                // Monospace tag — DSH "Preview" chip style (soft 24px pill,
-                // solid pastel bg, 12px mono).
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 9, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: Aether.accent.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(24),
-                  ),
-                  child: Text(
-                    'agentic preview',
+                  const SizedBox(height: 8),
+                  Text(
+                    'Ask, deep-dive, build — the agent runs tools right here.',
                     style: TextStyle(
-                      fontFamily: Aether.mono,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      height: 18 / 12,
-                      color: Aether.accent,
+                      fontSize: 13,
+                      height: 1.5,
+                      color: Aether.textFaint,
                     ),
                   ),
-                ),
-                const SizedBox(height: 30),
-                // Section label.
-                Text(
-                  'TRY',
-                  style: TextStyle(
-                    fontFamily: Aether.mono,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 1.4,
-                    color: Aether.textFaint,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                // Minimal full-width rows, hairline separators (DSH list).
-                for (var i = 0; i < suggestions.length; i++)
-                  _SuggestionRow(
-                    emoji: suggestions[i].$1,
-                    text: suggestions[i].$2,
-                    showDivider: i != 0,
-                    onTap: () => onSuggest?.call(suggestions[i].$2),
-                  ),
-              ],
+                ],
+              ),
             ),
           ),
         );
       },
-    );
-  }
-}
-
-/// DSH-web minimal suggestion row — emoji + text, hairline divider above,
-/// subtle press highlight, chevron on the right.  No heavy card chrome.
-class _SuggestionRow extends StatelessWidget {
-  final String emoji;
-  final String text;
-  final bool showDivider;
-  final VoidCallback? onTap;
-  const _SuggestionRow({
-    required this.emoji,
-    required this.text,
-    this.showDivider = true,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (showDivider) Divider(height: 1, color: Aether.hairline),
-        InkWell(
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 13),
-            child: Row(
-              children: [
-                Text(emoji, style: const TextStyle(fontSize: 16)),
-                const SizedBox(width: 13),
-                Expanded(
-                  child: Text(
-                    text,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 14.5, color: Aether.textMuted),
-                  ),
-                ),
-                Icon(Icons.north_east, size: 14, color: Aether.textFaint),
-              ],
-            ),
-          ),
-        ),
-      ],
     );
   }
 }
@@ -1170,14 +1257,7 @@ class _ReasoningCardState extends State<_ReasoningCard> {
               child: Row(
                 children: [
                   if (isStreaming)
-                    const SizedBox(
-                      width: 12,
-                      height: 12,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 1.5,
-                        color: Aether.accent,
-                      ),
-                    )
+                    const _ChaseDot(Aether.accent)
                   else
                     Icon(
                       expanded
@@ -1187,14 +1267,24 @@ class _ReasoningCardState extends State<_ReasoningCard> {
                       color: Aether.textFaint,
                     ),
                   const SizedBox(width: 8),
-                  Text(
-                    isStreaming ? 'Thinking…' : 'Thoughts',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Aether.textMuted,
-                      fontWeight: FontWeight.w500,
+                  if (isStreaming)
+                    _ShimmerText(
+                      'Thinking…',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Aether.textMuted,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    )
+                  else
+                    Text(
+                      'Thoughts',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Aether.textMuted,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
-                  ),
                   const Spacer(),
                   if (isStreaming)
                     Text(
@@ -1314,14 +1404,7 @@ class _ToolCardState extends State<_ToolCard>
                   else if (stopped)
                     _StateDot(Aether.warn)
                   else if (running)
-                    SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 1.5,
-                        color: Aether.accent,
-                      ),
-                    )
+                    const _ChaseDot(Aether.accent)
                   else
                     Icon(_iconFor(iconKind),
                         size: 14, color: Aether.textMuted),
@@ -1373,23 +1456,34 @@ class _ToolCardState extends State<_ToolCard>
               ),
             ),
           ),
-          // Glare sweep while running (DSH 300px band).
+          // Glare sweep while running — DSH `dsh-tool-row-sweep` parity:
+          // a soft highlight band sweeping the FULL row left→right
+          // (lifted over the row above via a paint-only translation).
           if (running)
-            AnimatedBuilder(
-              animation: _sweep,
-              builder: (_, _) => Container(
-                height: 1.5,
-                margin: const EdgeInsets.symmetric(horizontal: 10),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment(-1 + 2 * _sweep.value, 0),
-                    end: Alignment(-0.6 + 2 * _sweep.value, 0),
-                    colors: [
-                      Colors.transparent,
-                      Aether.accent.withValues(alpha: 0.5),
-                      Colors.transparent,
-                    ],
-                  ),
+            IgnorePointer(
+              child: Transform.translate(
+                offset: const Offset(0, -34),
+                child: AnimatedBuilder(
+                  animation: _sweep,
+                  builder: (_, _) {
+                    final t = _sweep.value;
+                    return Container(
+                      height: 30,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment(-1.2 + 2.4 * t, 0),
+                          end: Alignment(-0.7 + 2.4 * t, 0),
+                          colors: [
+                            Colors.transparent,
+                            Aether.accent.withValues(alpha: 0.06),
+                            Aether.accent.withValues(alpha: 0.14),
+                            Colors.transparent,
+                          ],
+                          stops: const [0.0, 0.45, 0.55, 1.0],
+                        ),
+                      ),
+                    );
+                  },
                 ),
               ),
             ),
@@ -1541,6 +1635,89 @@ class _DiffLine extends StatelessWidget {
           height: 1.45,
           color: color,
         ),
+      ),
+    );
+  }
+}
+
+/// DSH "Produced" parity — card under the final answer listing files the
+/// agent created/edited this run.  Tap a file to open it in Studio.
+class _ProducedFilesCard extends StatelessWidget {
+  final List<({String path, int size})> files;
+  const _ProducedFilesCard({required this.files});
+
+  String _fmtSize(int b) => b >= 1048576
+      ? '${(b / 1048576).toStringAsFixed(1)} MB'
+      : b >= 1024
+          ? '${(b / 1024).toStringAsFixed(1)} KB'
+          : '$b B';
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8, right: 40),
+      decoration: BoxDecoration(
+        color: Aether.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 9, 12, 5),
+            child: Row(
+              children: [
+                const Icon(Icons.upload_file_outlined,
+                    size: 13, color: Aether.success),
+                const SizedBox(width: 6),
+                Text(
+                  'Produced · ${files.length} file${files.length == 1 ? '' : 's'}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.4,
+                    color: Aether.textMuted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          for (final f in files)
+            InkWell(
+              onTap: () => openStudio(context),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                child: Row(
+                  children: [
+                    Icon(Icons.insert_drive_file_outlined,
+                        size: 14, color: Aether.accent),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        f.path,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontFamily: Aether.mono,
+                          color: Aether.text,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _fmtSize(f.size),
+                      style: TextStyle(
+                          fontSize: 10.5, color: Aether.textFaint),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          const SizedBox(height: 4),
+        ],
       ),
     );
   }
@@ -2213,72 +2390,28 @@ class _InputBarState extends State<_InputBar> {
   }
 }
 
-class _TypingBubble extends StatefulWidget {
+class _TypingBubble extends StatelessWidget {
   const _TypingBubble();
-  @override
-  State<_TypingBubble> createState() => _TypingBubbleState();
-}
-
-class _TypingBubbleState extends State<_TypingBubble>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController c = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1100),
-  )..repeat();
-
-  @override
-  void dispose() {
-    c.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
-    // DSH-web inline "thinking" shimmer — a borderless row (pulsing dot +
-    // shimmering "Deep diving…" text), NOT a boxed card. Matches the live
-    // DSH status line that appears while the model streams.
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: 12, left: 4),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            AnimatedBuilder(
-              animation: c,
-              builder: (_, _) {
-                final op = 0.3 + 0.7 * (0.5 - (c.value - 0.5).abs()) * 2;
-                return Container(
-                  width: 7,
-                  height: 7,
-                  decoration: BoxDecoration(
-                    color: Aether.accent.withValues(alpha: op),
-                    shape: BoxShape.circle,
-                  ),
-                );
-              },
+    // DSH parsing status — an inline shimmer (no bubble/box): a pulsing
+    // accent dot + shimmering status text ("Deep diving…").
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 10),
+      child: Row(
+        children: [
+          const _ChaseDot(Aether.accent),
+          const SizedBox(width: 10),
+          _ShimmerText(
+            'Deep diving…',
+            style: TextStyle(
+              fontSize: 12.5,
+              color: Aether.textMuted,
+              fontWeight: FontWeight.w500,
             ),
-            const SizedBox(width: 9),
-            AnimatedBuilder(
-              animation: c,
-              builder: (_, _) {
-                // Shimmer: slide a highlight across the text color.
-                final t = (c.value * 2) % 1.0;
-                final base = Aether.textMuted;
-                final hi = Aether.text;
-                final mix = Color.lerp(base, hi, (0.5 - (t - 0.5).abs()) * 2);
-                return Text(
-                  'Deep diving…',
-                  style: TextStyle(
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w500,
-                    color: mix,
-                  ),
-                );
-              },
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

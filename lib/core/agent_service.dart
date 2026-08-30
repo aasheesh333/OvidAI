@@ -182,6 +182,12 @@ class _AgentRun {
   final StringBuffer liveReasoning = StringBuffer();
   ChatSession? liveSession;
   Message? liveMsg;
+  /// Most recent request's prompt token count — the ground truth for
+  /// context usage (used by the %-of-context UI + compaction trigger).
+  int? lastPromptTokens;
+  /// DSH "Produced" panel data — files created/modified in this run
+  /// (file_write / fs_edit create / commit), cleared per run.
+  final List<({String path, int size})> produced = [];
 }
 
 /// Session event (DSH SessionEvent equivalent) — durable facts about what
@@ -273,6 +279,24 @@ class AgentService extends ChangeNotifier {
   set _runStart(DateTime? v) => _run.runStart = v;
   int? get lastRunElapsedMs => _run.lastRunElapsedMs;
   set lastRunElapsedMs(int? v) => _run.lastRunElapsedMs = v;
+  int? get lastPromptTokens => _run.lastPromptTokens;
+  set lastPromptTokens(int? v) => _run.lastPromptTokens = v;
+
+  /// Files produced in the active session's current/latest run (DSH
+  /// "Produced" cards). Read-only view for the UI.
+  List<({String path, int size})> get producedFiles =>
+      List.unmodifiable(_run.produced);
+
+  void _recordProduced(String path, int size) {
+    final r = _run;
+    final i = r.produced.indexWhere((e) => e.path == path);
+    if (i >= 0) {
+      r.produced[i] = (path: path, size: size);
+    } else {
+      r.produced.add((path: path, size: size));
+    }
+    notifyListeners();
+  }
 
   /// Stop the current session's run: aborts the in-flight HTTP request
   /// and flags every loop turn to exit at the next checkpoint.
@@ -1004,17 +1028,16 @@ class AgentService extends ChangeNotifier {
       'function': {
         'name': 'run_shell',
         'description':
-            'Run a shell command. TWO execution tiers depending on the '
-            'user\'s access mode:\n'
-            '• Studio mode → native Linux sandbox (bash, python, node, git '
-            'via apt — commands run in the session workspace).\n'
-            '• Other modes → phone terminal (Android device shell: ls, cat, '
-            'grep, cp, mv, ps, uname, toybox utilities — instant, no '
-            'install).\n'
+            'Run a shell command. Execution tier is automatic:\n'
+            '• Native Linux sandbox installed (one-time setup) → bash, '
+            'python3, node/npm, git, curl via apt — all access modes, in '
+            'the current session workspace.\n'
+            '• Sandbox not installed → phone terminal (Android device shell: '
+            'ls, cat, grep, cp, mv, ps, uname, toybox utilities — instant).\n'
             'If a phone-terminal command reports "not found", tell the user '
-            'to switch to Studio mode and install the native sandbox for '
-            'full tooling. Commands always run in the CURRENT SESSION '
-            'workspace — you cannot see other sessions\' files.',
+            'the native sandbox setup (Studio screen) unlocks full tooling. '
+            'Commands always run in the CURRENT SESSION workspace — you '
+            'cannot see other sessions\' files.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -1945,25 +1968,127 @@ class AgentService extends ChangeNotifier {
     _emit('think', 'queued message joined this run');
   }
 
-  /// Context compaction — summarize older messages into a dense summary
-  /// when history exceeds the threshold.  Uses a non-tool LLM call.
-  /// Re-compacts only after 20+ new messages since last compaction.
-  Future<void> _maybeCompact(ChatSession s, ProviderConfig p) async {
-    // Skip if recently compacted (fewer than 20 new messages).
-    if (s.compactedSummary != null &&
-        s.messages.length - s.compactedAtCount < 20) {
-      return;
+  /// ── DSH-compaction parity (dsh-compaction-basic) ──────────────────────
+  /// Model-aware context windows.  DSH asks each provider adapter for the
+  /// model's contextWindow and falls back to 1M when unannounced.  Ovid is
+  /// BYOK across many providers, so we keep a keyword map (longest match
+  /// wins) with the same 1M default for unknown models.
+  static const _contextWindows = <(String, int)>[
+    ('nemotron', 1048576),
+    ('gemini-2.5-pro', 1048576),
+    ('gemini-2.5-flash', 1048576),
+    ('gemini-2.0-flash', 1048576),
+    ('gemini', 1048576),
+    ('gpt-4.1', 1048576),
+    ('grok-4', 256000),
+    ('grok', 256000),
+    ('claude-opus-4', 200000),
+    ('claude-sonnet-4', 200000),
+    ('claude-3-7', 200000),
+    ('claude-3-5', 200000),
+    ('claude', 200000),
+    ('o3', 200000),
+    ('o4', 200000),
+    ('deepseek-v4', 1048576),
+    ('deepseek', 128000),
+    ('qwen3', 1048576),
+    ('qwen2.5', 131072),
+    ('qwen', 131072),
+    ('gpt-oss-120b', 131072),
+    ('gpt-4o', 128000),
+    ('gpt', 128000),
+    ('llama-4', 1048576),
+    ('llama-3.3-70b', 128000),
+    ('llama-3', 128000),
+    ('llama', 128000),
+    ('mistral-large', 128000),
+    ('mistral', 128000),
+    ('kimi', 262144),
+    ('glm', 131072),
+    ('codestral', 262144),
+    ('sonar', 127072),
+  ];
+
+  /// DSH default when the model doesn't declare a window: 1,000,000 tokens.
+  static const defaultContextWindow = 1000000;
+
+  /// Context window (tokens) for [model] — keyword match, longest first.
+  static int contextWindowFor(String model) {
+    final m = model.split('·').first.trim().toLowerCase();
+    for (final (key, window) in _contextWindows) {
+      if (m.contains(key)) return window;
     }
-    _emit('think', 'compacting conversation context…');
-    // Take messages from last compaction point to current - 15 (keep
-    // recent 15 verbatim for continuity).
-    final cutoff = s.messages.length > 15 ? s.messages.length - 15 : 0;
+    return defaultContextWindow;
+  }
+
+  /// DSH default policy: compact when the measured request envelope reaches
+  /// 80% of the model's contextWindow; retain the newest 16% verbatim.
+  static const _compactThresholdRatio = 0.8;
+  static const _compactRetainRatio = 0.16;
+
+  /// DSH token-meter heuristic: 4 chars ≈ 1 token, +4 tokens of
+  /// role/framing overhead per message.
+  static int estimateMessageTokens(String text) => text.length ~/ 4 + 4;
+
+  /// Measured context usage for [s]: the LAST billed promptTokens when we
+  /// have one (exact ground truth — the provider counts what we actually
+  /// sent), otherwise the DSH chars/4 heuristic over system+history.
+  int measuredContextTokens(ChatSession s, {String systemPrompt = ''}) {
+    final billed = lastPromptTokens;
+    if (billed != null && billed > 0) return billed;
+    var t = estimateMessageTokens(systemPrompt) + 256; // + tools header ballpark
+    for (final m in s.messages) {
+      t += estimateMessageTokens(m.content) +
+          estimateMessageTokens(m.toolDetail ?? '');
+    }
+    return t;
+  }
+
+  /// Fraction (0..1) of the active model's context window currently used.
+  double contextUsageFraction(ChatSession s) =>
+      measuredContextTokens(s) / contextWindowFor(s.model);
+  /// Auto-compaction — DSH `agent/pre-step` pressure trigger parity, for
+  /// EVERY provider/model (built-in AND custom): measure the request
+  /// envelope against 80% of the model's context window (1M default when
+  /// unknown); when over, summarize the oldest span head-anchored to
+  /// [compactedAtCount] while keeping the newest ~16% of the window
+  /// verbatim.  Re-compacts when the pressure crosses again (the
+  /// span-distance guard is token-based, not message-based, so large
+  /// 256K/1M models compact rarely and small ones early).
+  Future<void> _maybeCompact(ChatSession s, ProviderConfig p) async {
+    final window = contextWindowFor(s.model);
+    final threshold = (window * _compactThresholdRatio).floor();
+    final measured = measuredContextTokens(s, systemPrompt: 'x' * 4000);
+    if (measured < threshold) return;
+
+    // Select the compactable span [compactedAtCount, cutoff): retain the
+    // newest ~16% of the window verbatim (DSH retainRatio), keeping at
+    // least 6 recent messages.  Never split the last user message from
+    // its tool/reasoning/answer run.
+    final retain = (window * _compactRetainRatio).floor();
+    var tail = 0;
+    var cutoff = s.messages.length;
+    while (cutoff > s.compactedAtCount) {
+      final m = s.messages[cutoff - 1];
+      if (tail >= retain &&
+          s.messages.length - cutoff >= 6 &&
+          cutoff - s.compactedAtCount >= 4) {
+        break;
+      }
+      tail += estimateMessageTokens(m.content) +
+          estimateMessageTokens(m.toolDetail ?? '');
+      cutoff--;
+    }
+    if (cutoff - s.compactedAtCount < 4) return; // nothing worth compacting
     final toSummarize = s.messages
         .sublist(s.compactedAtCount, cutoff)
         .map((m) =>
             '${m.role == 'user' ? 'User' : 'Assistant'}: ${cleanTruncate(m.content, 400)}')
         .join('\n');
     if (toSummarize.isEmpty) return;
+    _emit('think', 'context pressure '
+        '~${((measured / window) * 100).toStringAsFixed(0)}% of '
+        '${(window / 1000).toStringAsFixed(0)}K window — compacting…');
     try {
       final summary = await _callLlm(
         p,
@@ -1989,15 +2114,74 @@ class AgentService extends ChangeNotifier {
         includeTools: false,
       );
       if (summary != null && summary['content'] != null) {
+        final shadowed = cutoff - s.compactedAtCount;
         s.compactedSummary = summary['content'] as String;
         s.compactedAtCount = cutoff;
         AppState.I.persistSessions();
-        _emit('think', 'context compacted ✓ '
-            '(${s.messages.length} msgs → summary)');
+        _emit('think', 'context compacted ✓ ($shadowed msgs folded; '
+            '~${(tail / 1000).toStringAsFixed(1)}K tokens kept verbatim)');
       }
     } catch (e) {
       // Compaction failure is non-fatal — continue with full history.
       _emit('think', 'compaction skipped: $e');
+    }
+  }
+
+  /// Hard context-overflow recovery — DSH `agent/request-error`
+  /// `CONTEXT_WINDOW_EXCEEDED` recovery: the provider rejected the request
+  /// as too long.  Force a compaction with a MINIMAL retained tail (one
+  /// quarter of the usual retain budget) and let the caller retry once.
+  Future<void> forceCompact(ChatSession s, ProviderConfig p) async {
+    final window = contextWindowFor(s.model);
+    final retain = (window * _compactRetainRatio / 4).floor();
+    var tail = 0;
+    var cutoff = s.messages.length;
+    while (cutoff > s.compactedAtCount) {
+      final m = s.messages[cutoff - 1];
+      if (tail >= retain && s.messages.length - cutoff >= 4) break;
+      tail += estimateMessageTokens(m.content);
+      cutoff--;
+    }
+    if (cutoff - s.compactedAtCount < 2) return;
+    _emit('think', 'provider rejected (context too long) — force pruning…');
+    await _maybeCompactForceSpan(s, p, cutoff);
+  }
+
+  Future<void> _maybeCompactForceSpan(
+      ChatSession s, ProviderConfig p, int cutoff) async {
+    final toSummarize = s.messages
+        .sublist(s.compactedAtCount, cutoff)
+        .map((m) =>
+            '${m.role == 'user' ? 'User' : 'Assistant'}: ${cleanTruncate(m.content, 300)}')
+        .join('\n');
+    if (toSummarize.isEmpty) return;
+    try {
+      final summary = await _callLlm(
+        p,
+        [
+          {
+            'role': 'system',
+            'content':
+                'You are a conversation summarizer. Compress into a dense '
+                    'summary (max 350 words). Preserve facts, file paths, '
+                    'decisions, pending tasks. Same language as conversation.',
+          },
+          {
+            'role': 'user',
+            'content': '${s.compactedSummary != null ? '[Previous summary]\n${s.compactedSummary}\n\n' : ''}$toSummarize',
+          },
+        ],
+        s,
+        includeTools: false,
+      );
+      if (summary != null && summary['content'] != null) {
+        s.compactedSummary = summary['content'] as String;
+        s.compactedAtCount = cutoff;
+        AppState.I.persistSessions();
+        _emit('think', 'context force-pruned ✓ — retrying the request');
+      }
+    } catch (e) {
+      _emit('think', 'force compaction failed: $e');
     }
   }
 
@@ -2096,6 +2280,7 @@ class AgentService extends ChangeNotifier {
     activeRunId = runId;
     _runStart = DateTime.now();
     lastError = null;
+    _run.produced.clear(); // DSH "Produced" panel resets per run
     events.clear();
     _emit('think', 'planning with ${p.selectedModel} · ${mode.label} mode');
 
@@ -2137,24 +2322,25 @@ location, phone/calls, SMS, bluetooth, activity, sensors) — call
 request_permission FIRST with a clear reason. The user approves in-chat,
 then the system dialog appears. Never claim a permission was granted
 without calling the tool. If denied, tell the user and offer alternatives.
-Execution tiers: run_shell adapts to the user's access mode.
-• Studio mode → native Linux sandbox (bash/python/node/git via apt) in the
-  session workspace.
-• Any other mode → instant phone terminal (Android device shell + toybox:
-  ls/cat/grep/cp/mv/ps/uname...). No python/gcc/apt here — if a command
-  is "not found", suggest switching to Studio mode + one-time native
-  sandbox setup (fast, bundled). Provider/plugin/MCP management works the
-  same in every tier via the catalog_* tools.
+Execution tiers: run_shell picks the best tier automatically.
+• Whenever the native sandbox is installed (one-time setup) → bash, python3,
+  node/npm, git, apt/curl/wget all available, in any access mode, in the
+  session workspace. Never report these as "not found" without running
+  them first — they work.
+• Only when the sandbox is NOT installed: instant phone terminal
+  (Android device shell + toybox: ls/cat/grep/cp/mv/ps/uname...). If a
+  command is "not found", tell the user to run the one-time native
+  sandbox setup from the Studio screen. Provider/plugin/MCP management
+  works the same in every tier via the catalog_* tools.
 ${s.goal != null && s.goal!['status'] == 'active' ? '\nACTIVE GOAL (round ${s.goal!['round']}): "${s.goal!['objective']}". This user message is a goal round — work toward the objective, then update_goal with progress. Do not restate the goal; just advance it.' : ''}
 ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a [reminder] message arrives, treat its prompt as a user request and act on it.' : ''}
 ''';
 
-    // ── Context compaction (DSH compaction package equivalent) ──
-    // If history is long, summarize older messages into a dense context
-    // block so the model sees less tokens but keeps all facts.
-    if (s.messages.length > 30) {
-      await _maybeCompact(s, p);
-    }
+    // ── Context compaction (DSH dsh-compaction-basic parity) ──
+    // Pre-step pressure check: measure the envelope against 80% of THIS
+    // model's context window (1M default) — works for every provider and
+    // every model incl. custom BYOK routes, 256K and 1M windows alike.
+    await _maybeCompact(s, p);
 
     final historyStart = s.messages.length > 12 ? s.messages.length - 12 : 0;
     final msgs = <Map<String, dynamic>>[
@@ -2187,16 +2373,42 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     ];
 
     try {
+      var overflowRecovered = false;
       for (var turn = 0; turn < 12; turn++) {
         if (_cancelRequested) {
           _emit('done', 'stopped by user');
           break;
         }
         _resetLiveBuffers();
-        final msg = await _callLlm(p, msgs, s);
+        var msg = await _callLlm(p, msgs, s);
+        if (msg == null && _looksLikeContextOverflow(lastError)) {
+          // DSH context-overflow recovery: provider rejected the request as
+          // too long → force-prune the oldest span and retry ONCE.
+          if (!overflowRecovered) {
+            overflowRecovered = true;
+            await forceCompact(s, p);
+            msgs.removeWhere((m) =>
+                m['role'] == 'system' &&
+                (m['content'] as String? ?? '').startsWith('[Earlier conversation summary'));
+            final summary = s.compactedSummary;
+            if (summary != null && summary.isNotEmpty) {
+              msgs.insert(1, {
+                'role': 'system',
+                'content': '[Earlier conversation summary — treat as established context]\n$summary',
+              });
+            }
+            msg = await _callLlm(p, msgs, s);
+          }
+          if (msg == null) {
+            _emit('err',
+                lastError ?? 'context window still over capacity after pruning');
+          }
+        }
         // Meter tokens for the Usage screen (real data, DSH StatsLine style).
         if (msg != null) {
           final u = msg['usage'] as Map<String, dynamic>?;
+          final pt = (u?['prompt_tokens'] as num?)?.toInt() ?? 0;
+          if (pt > 0) lastPromptTokens = pt;
           AppState.I.appendUsage(
             UsageEntry(
               time: DateTime.now(),
@@ -2667,17 +2879,23 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     switch (name) {
       case 'run_shell':
         final cmd = args['command'] as String;
+        // Route through the native Linux sandbox whenever it is installed —
+        // in EVERY access mode (not just Studio).  The sandbox provides
+        // bash/python/node/git via apt; the phone terminal (toybox) is only
+        // the fallback when the sandbox isn't installed on this device yet.
+        final useSandbox = SandboxService.I.isInstalled ||
+            await SandboxService.I.checkExisting();
         final ok = await _maybeApprove(
           'run_shell',
           cmd,
-          'Command will run in ${mode == AgentMode.studio ? "the native sandbox" : "the phone terminal (device shell)"}:\n\$ $cmd',
+          'Command will run in ${useSandbox ? "the native sandbox" : "the phone terminal (device shell)"}:\n\$ $cmd',
         );
         if (!ok) return 'DENIED by user';
         _emit('shell', cmd);
         try {
           final work = await _sessionWorkDir();
-          if (mode == AgentMode.studio) {
-            // Studio tier — native bionic sandbox (bash/python/node/apt).
+          if (useSandbox) {
+            // Native bionic sandbox (bash/python/node/apt) — full tooling.
             final out = await SandboxService.I
                 .exec(['bash', '-c', cmd], hostWorkDir: work)
                 .timeout(const Duration(seconds: 60));
@@ -2695,17 +2913,16 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           }
           final hint = out.contains('not found') || out.contains('not: found')
               ? '\n\n[phone terminal: only Android toybox commands here — '
-                  'use Studio mode + the native sandbox for python/node/apt]'
+                  'run the one-time native sandbox setup (Studio screen) for '
+                  'python/node/git/apt]\n'
               : '';
           return (out.isEmpty ? '(no output)' : out) + hint;
         } catch (e) {
           // Friendly actionable message — the model relays this to the user.
           if ('$e'.contains('not installed')) {
-            return mode == AgentMode.studio
-                ? 'sandbox not installed yet. Tell the user: "Open Studio and install the sandbox (one-time, ~320 MB), then the command will work."'
-                : 'phone terminal error: $e';
+            return 'sandbox not installed yet. Tell the user: "Open Studio and install the sandbox (one-time, ~320 MB), then the command will work."';
           }
-          return 'sandbox error: $e';
+          return '${useSandbox ? "sandbox" : "phone terminal"} error: $e';
         }
 
       case 'request_permission':
@@ -3457,6 +3674,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         if (!ok) return 'DENIED by user';
         RepoCache.I.write(path, content);
         openStudioFile(path, content);
+        _recordProduced(path, content.length);
         _emit('file', 'edited $path');
         return 'written locally ✓ · $path · ${content.length} chars\n'
             'call commit() to push, or preview() to see web build.';
@@ -3556,6 +3774,23 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
       _ => args['path'] ?? args['pattern'] ?? args['file'],
     };
     return (pick as String?) ?? '';
+  }
+
+  /// Heuristic: provider error text meaning "this request exceeded the
+  /// context window" — triggers one force-compaction + retry (DSH
+  /// CONTEXT_WINDOW_EXCEEDED recovery parity).  Worded broadly to cover
+  /// OpenAI/Anthropic/Gemini/DeepSeek/xAI/Mistral/custom proxies.
+  bool _looksLikeContextOverflow(String? err) {
+    if (err == null) return false;
+    final l = err.toLowerCase();
+    return l.contains('context length') ||
+        l.contains('context window') ||
+        l.contains('maximum context') ||
+        l.contains('too many tokens') ||
+        (l.contains('exceed') && l.contains('token')) ||
+        l.contains('prompt is too long') ||
+        l.contains('prompt too large') ||
+        l.contains('reduce the length');
   }
 
   /// Heuristic: tool result text that reads as a failure → error state dot.
@@ -3782,6 +4017,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         f.parent.createSync(recursive: true);
         f.writeAsStringSync(content);
         _readPathsFor(sid).add(path);
+        _recordProduced(path, content.length);
         _emit('file', 'created $path');
         return 'created $path ✓ · ${content.length} chars';
 
@@ -3812,6 +4048,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           if (!ok) return 'DENIED by user';
           RepoCache.I.write(path, updated);
           openStudioFile(path, updated);
+          _recordProduced(path, updated.length);
           _emit('file', 'edited $path');
           return 'edited $path ✓ (str_replace)';
         }
