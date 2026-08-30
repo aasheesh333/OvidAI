@@ -848,13 +848,22 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
     }
     onPhase(7, 0.75, '[deb] $extracted/$downloaded packages extracted ✓');
 
-    // ── 5b. PATH/arming sanity: extracted bins must be executable. ──
+    // ── 5b. Shebang rewrite: extracted SCRIPT bins (npm, npx, uvx…) have
+    // "#!/data/data/com.termux/files/usr/bin/env" baked in — the compiled-in
+    // Termux prefix — which is another app's private dir → "bad interpreter:
+    // Permission denied". Rewrite every shebang that mentions the Termux
+    // prefix to OUR prefix (termux-fix-shebang equivalent), then chmod.
     await execChecked([
       'bash',
       '-c',
-      'chmod +x "\$PREFIX"/bin/* 2>/dev/null; '
+      'for f in "\$PREFIX"/bin/*; do '
+          '[ -f "\$f" ] || continue; '
+          'head -c2 "\$f" 2>/dev/null | grep -q "#!" || continue; '
+          'sed -i "s|/data/data/com.termux/files|$p|g" "\$f" 2>/dev/null; '
+          'done; '
+          'chmod +x "\$PREFIX"/bin/* 2>/dev/null; '
           'command -v node npm python git curl 2>&1 | head -8',
-    ]).timeout(const Duration(seconds: 20));
+    ]).timeout(const Duration(seconds: 30));
 
     // ── 6. Idempotent verification ──
     return await runtimesVerified();
