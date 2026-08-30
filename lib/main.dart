@@ -29,6 +29,17 @@ Future<void> main() async {
     // Pre-warm the browser only after the sandbox gate is satisfied (the
     // setup screen replaces the shell until install completes).
     if (sandboxReady) unawaited(AgentService.I.prewarmBrowser());
+    // Self-heal runtime tools: if the sandbox is present but node/python/
+    // git/curl are missing (e.g. an earlier launch failed halfway through
+    // the runtime install), re-run the runtime installer in the
+    // background. Logged in Settings → Device health.
+    if (sandboxReady) {
+      unawaited(() async {
+        if (!await SandboxService.I.runtimesVerified()) {
+          await SandboxService.I.installCoreRuntimes((_, _, _) {});
+        }
+      }());
+    }
   });
 }
 

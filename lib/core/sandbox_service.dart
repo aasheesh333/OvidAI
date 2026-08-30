@@ -979,6 +979,62 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
   }
 
   // ═════════════════════════════════════════════════════════════════
+  // HEALTH / RUNTIME REPAIR (Health screen + first-launch gate)
+  // ═════════════════════════════════════════════════════════════════
+
+  /// Fast check: every runtime the app treats as REQUIRED is present.
+  /// (bash + node + npm + python + git + curl — the full Linux toolchain
+  /// the agent and MCP servers need.  Stored flag avoided: real probe.)
+  Future<bool> runtimesVerified() async {
+    try {
+      final (code, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v node >/dev/null && command -v npm >/dev/null && '
+            'command -v python >/dev/null && command -v curl >/dev/null && '
+            'command -v git >/dev/null',
+      ]).timeout(const Duration(seconds: 15));
+      return code == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Which runtime binaries are missing right now (for the Health screen
+  /// list).  Returns accurate per-binary statuses via one bash probe.
+  Future<Map<String, bool>> probeRuntimes() async {
+    const bins = ['bash', 'node', 'npm', 'python', 'git', 'curl'];
+    final result = <String, bool>{for (final b in bins) b: false};
+    if (!_installed) return result;
+    try {
+      final (code, out) = await execChecked([
+        'bash',
+        '-c',
+        'for b in ${bins.join(' ')}; do command -v \$b >/dev/null && echo "OK \$b" || echo "MISS \$b"; done',
+      ]).timeout(const Duration(seconds: 15));
+      if (code == 0 || out.isNotEmpty) {
+        for (final l in out.split('\n')) {
+          final t = l.trim();
+          if (t.startsWith('OK ')) result[t.substring(3)] = true;
+          if (t.startsWith('MISS ')) result[t.substring(5)] = false;
+        }
+      }
+    } catch (_) {}
+    return result;
+  }
+
+  /// Install/repair the runtime toolchain (node+npm+pnpm, python+pip+uv,
+  /// git, curl) with retries + apt TLS self-heal.  Called by the
+  /// first-launch gate (repair mode) and the Health screen's Repair button.
+  Future<bool> installCoreRuntimes(
+    void Function(int phase, double progress, String line) onPhase,
+  ) async {
+    if (!_installed) return false;
+    await _installRuntimesWithRetry(onPhase);
+    return await runtimesVerified();
+  }
+
+  // ═════════════════════════════════════════════════════════════════
   // LAZY PROOT-UBUNTU FALLBACK — provisioned ON DEMAND, never bundled.
   // Only triggered by a real glibc/ABI failure; fully isolated from the
   // native path.  Every trigger is logged for later bionic-native-ifying.

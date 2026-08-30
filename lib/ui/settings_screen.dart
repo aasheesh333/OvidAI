@@ -4,6 +4,7 @@ import '../core/firebase_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'auth_screen.dart';
+import 'health_screen.dart';
 import 'providers_screen.dart';
 import 'plugins_screen.dart';
 import 'usage_screen.dart';
@@ -149,6 +150,13 @@ class SettingsScreen extends StatelessWidget {
           _settingTile(Icons.mic_none, 'Voice input', 'On'),
 
           const SectionHeader('Agents & Sandbox'),
+          _navTile(
+            context,
+            Icons.monitor_heart_outlined,
+            'Device health',
+            'Score out of 100 — which packages/capabilities are available, why the score is what it is, and one-tap repair.',
+            const HealthScreen(),
+          ),
           _navTile(
             context,
             Icons.timer_outlined,
