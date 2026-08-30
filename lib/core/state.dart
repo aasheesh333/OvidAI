@@ -275,6 +275,11 @@ class ChatSession {
   /// enables "Share session memory" in Settings.
   String? sandboxId;
 
+  /// Per-session Studio repo (owner/name).  Each session can work on a
+  /// different repo; new sessions start with the global default (the last
+  /// connected repo).  Persisted with the session.
+  String? repo;
+
   /// Session todo/task list — written by todo_write tool, rendered as a
   /// live checklist above the chat input.  Persisted with the session.
   final List<Map<String, String>> todos;
@@ -305,6 +310,7 @@ class ChatSession {
     required this.model,
     this.providerId,
     this.sandboxId,
+    this.repo,
     this.compactedSummary,
     this.goal,
     this.compactedAtCount = 0,
@@ -325,6 +331,7 @@ class ChatSession {
     model: j['model'] as String? ?? 'Select a provider',
     providerId: j['providerId'] as String?,
     sandboxId: j['sandboxId'] as String?,
+    repo: j['repo'] as String?,
     compactedSummary: j['compactedSummary'] as String?,
     compactedAtCount: (j['compactedAtCount'] as num?)?.toInt() ?? 0,
     goal: j['goal'] == null
@@ -354,6 +361,7 @@ class ChatSession {
     'model': model,
     if (providerId != null) 'providerId': providerId,
     'sandboxId': sandboxId ?? id,
+    if (repo != null) 'repo': repo,
     if (compactedSummary != null) 'compactedSummary': compactedSummary,
     if (compactedAtCount > 0) 'compactedAtCount': compactedAtCount,
     if (goal != null) 'goal': goal,
@@ -386,6 +394,10 @@ class AppState extends ChangeNotifier {
     await loadSessions();
     await _loadLastSelection();
     await _loadUsage();
+    // Custom MCP servers + plugin install state survive restarts.
+    await _loadCustomMcpServers();
+    await _loadCustomPlugins();
+    await _loadPluginState();
     // Check if the sandbox was installed on a previous launch so the
     // user is never asked to re-install the ~200 MB rootfs.
      if (await SandboxService.I.checkExisting()) {
@@ -567,6 +579,9 @@ class AppState extends ChangeNotifier {
   /// ON  → the AI (via memory_search) can search across ALL sessions' chat
   /// history ("poori app history", user-opted).
   static const _kShareMemory = 'ovid_share_session_memory';
+  static const _kCustomMcpServers = 'ovid_custom_mcp_servers_v1';
+  static const _kPluginState = 'ovid_plugin_state_v1';
+  static const _kMcpEnvPrefix = 'ovid_mcp_env_';
   bool shareSessionMemory = false;
 
   // ── Light/dark theme (DSH light/dark preference parity) ──
@@ -701,10 +716,17 @@ class AppState extends ChangeNotifier {
   void selectSession(String id) {
     activeSessionId = id;
     // NOTE: runs are per-session (parallel) — switching NEVER stops a
-    // running session (DSH multi-session behavior).
+    // running session (DSH multi-session behavior).  Lazy-restore the
+    // newly-active session's browser tabs (per-session browsers).
+    onSessionSwitched?.call(id);
     notifyListeners();
     persistSessions();
   }
+
+  /// Hook for AgentService to lazy-restore per-session browser tabs on
+  /// session switch.  Set in AgentService's constructor (avoids a
+  /// circular import).
+  void Function(String sessionId)? onSessionSwitched;
 
   void newSession() {
     final s = ChatSession(
@@ -716,8 +738,12 @@ class AppState extends ChangeNotifier {
       s.providerId =
           lastSelectedProviderId ?? _inferProviderId(lastSelectedModel);
     }
+    // New session starts with its own default browser tab + the global
+    // repo as its Studio repo (fresh per-session state, cookies shared).
+    s.repo = null;
     sessions.insert(0, s);
     activeSessionId = s.id;
+    onSessionSwitched?.call(s.id);
     // Restore the selected-model pointer on the provider.
     if (s.providerId != null) {
       final p = providerById(s.providerId);
@@ -1173,11 +1199,13 @@ class AppState extends ChangeNotifier {
         custom: true,
       ),
     );
+    _persistCustomMcpServers();
     refresh();
   }
 
   void removeMcpServer(McpServer s) {
     mcpServers.remove(s);
+    _persistCustomMcpServers();
     refresh();
   }
 
@@ -1188,7 +1216,198 @@ class AppState extends ChangeNotifier {
   }) {
     s.command = command;
     s.args = args;
+    _persistCustomMcpServers();
     refresh();
+  }
+
+  // ── Custom MCP server + plugin persistence ─────────────────────────
+  Future<void> _persistCustomMcpServers() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final customs = mcpServers
+          .where((s) => s.custom)
+          .map((s) => jsonEncode({
+                'name': s.name,
+                'command': s.command,
+                'args': s.args,
+                'envHint': s.envHint,
+              }))
+          .toList();
+      await prefs.setStringList(_kCustomMcpServers, customs);
+    } catch (_) {}
+  }
+
+  Future<void> _loadCustomMcpServers() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final list = prefs.getStringList(_kCustomMcpServers);
+      if (list == null || list.isEmpty) return;
+      for (final j in list) {
+        final m = jsonDecode(j) as Map<String, dynamic>;
+        final name = m['name'] as String;
+        if (mcpServers.any((s) => s.name == name)) continue;
+        mcpServers.add(McpServer(
+          name: name,
+          author: 'you',
+          description: 'Custom MCP server — connects on demand.',
+          category: 'Custom',
+          command: m['command'] as String? ?? 'npx',
+          args: (m['args'] as List?)?.cast<String>() ?? const [],
+          envHint: m['envHint'] as String?,
+          source: 'custom',
+          custom: true,
+        ));
+      }
+      refresh();
+    } catch (_) {}
+  }
+
+  /// Public persist hook — the Plugins UI and agent tools call this after
+  /// mutating PluginItem.installed / .enabled so state survives restarts.
+  Future<void> persistPluginState() => _persistPluginState();
+
+  /// Add a custom plugin (agent-created or user-defined).  Custom plugins
+  /// persist across restarts (full definition, not just enabled state)
+  /// and can add tools to the agent.
+  void addCustomPlugin({
+    required String name,
+    required String description,
+    String category = 'Custom',
+  }) {
+    if (plugins.any((p) => p.name.toLowerCase() == name.toLowerCase())) {
+      return; // already exists — no dupes
+    }
+    plugins.insert(
+      0,
+      PluginItem(
+        name: name,
+        author: 'you',
+        description: description,
+        version: '1.0.0',
+        category: category,
+        installed: true,
+        enabled: true,
+        installs: 1,
+      ),
+    );
+    _persistCustomPlugins();
+    refresh();
+  }
+
+  static const _kCustomPlugins = 'ovid_custom_plugins_v1';
+
+  Future<void> _persistCustomPlugins() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final customs = plugins
+          .where((p) => p.author == 'you')
+          .map((p) => jsonEncode({
+                'name': p.name,
+                'description': p.description,
+                'category': p.category,
+                'installed': p.installed,
+                'enabled': p.enabled,
+              }))
+          .toList();
+      await prefs.setStringList(_kCustomPlugins, customs);
+    } catch (_) {}
+  }
+
+  Future<void> _loadCustomPlugins() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final list = prefs.getStringList(_kCustomPlugins);
+      if (list == null || list.isEmpty) return;
+      for (final j in list) {
+        final m = jsonDecode(j) as Map<String, dynamic>;
+        final name = m['name'] as String;
+        if (plugins.any((p) => p.name == name)) continue;
+        plugins.insert(
+          0,
+          PluginItem(
+            name: name,
+            author: 'you',
+            description: m['description'] as String? ?? 'Custom plugin.',
+            version: '1.0.0',
+            category: m['category'] as String? ?? 'Custom',
+            installed: m['installed'] as bool? ?? true,
+            enabled: m['enabled'] as bool? ?? true,
+            installs: 1,
+          ),
+        );
+      }
+      refresh();
+    } catch (_) {}
+  }
+
+  Future<void> _persistPluginState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final state = <String, String>{};
+      for (final p in plugins) {
+        state[p.name] = jsonEncode({
+          'installed': p.installed,
+          'enabled': p.enabled,
+        });
+      }
+      await prefs.setString(_kPluginState, jsonEncode(state));
+    } catch (_) {}
+  }
+
+  Future<void> _loadPluginState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kPluginState);
+      if (raw == null) return;
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      for (final p in plugins) {
+        final v = m[p.name];
+        if (v == null) continue;
+        final ps = jsonDecode(v as String) as Map<String, dynamic>;
+        p.installed = ps['installed'] as bool? ?? p.installed;
+        p.enabled = ps['enabled'] as bool? ?? p.enabled;
+      }
+      refresh();
+    } catch (_) {}
+  }
+
+  // ── MCP server env vars (secure storage) ────────────────────────────
+  Future<void> setMcpEnv(String serverName, Map<String, String> env) async {
+    try {
+      await _secureStorage.write(
+        key: '$_kMcpEnvPrefix$serverName',
+        value: jsonEncode(env),
+      );
+    } catch (_) {}
+  }
+
+  Future<Map<String, String>> getMcpEnv(String serverName) async {
+    try {
+      final raw = await _secureStorage.read(key: '$_kMcpEnvPrefix$serverName');
+      if (raw == null || raw.isEmpty) return {};
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      return m.map((k, v) => MapEntry(k, v.toString()));
+    } catch (_) {
+      return {};
+    }
+  }
+
+  // ── Per-session repo selection (Studio) ─────────────────────────────
+  /// Repo bound to a session.  Falls back to [fallback] (the global
+  /// AgentService.repoFull — passed by the caller to avoid a circular
+  /// import) when the session has no repo of its own.
+  String? getRepoForSession(String sessionId, {String? fallback}) {
+    final session = sessions.where((s) => s.id == sessionId).firstOrNull;
+    return session?.repo ?? fallback;
+  }
+
+  void setRepoForSession(String sessionId, String repoFull) {
+    final session = sessions.where((s) => s.id == sessionId).firstOrNull;
+    if (session != null) {
+      session.repo = repoFull;
+      persistSessions();
+      refresh();
+    }
   }
 
   /// ---------- Built-in catalog ----------

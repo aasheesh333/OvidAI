@@ -43,7 +43,7 @@ LIBS_GLOBS=(
   "lib/lib*.so*"
 )
 APT_METHODS=(copy gpgv http https file store rsh cdrom)
-ASSETS_DIRS=(etc share/terminfo)
+ASSETS_DIRS=(etc share/terminfo share/termux-keyring)
 
 mkdir -p "$WORK"
 declare -A ABI_MAP=(
@@ -95,6 +95,14 @@ for termux_abi in "${abis[@]}"; do
       cp -r "$d/$ad" "$out/$ad"
     fi
   done
+
+  # dpkg database — without it, apt considers every package "not installed"
+  # and re-downloads ~10+ MB of libs already present in the payload.
+  # status (71 packages marked installed) lets apt resolve correctly.
+  if [ -d "$d/var/lib/dpkg" ]; then
+    mkdir -p "$out/var/lib"
+    cp -r "$d/var/lib/dpkg" "$out/var/lib/dpkg"
+  fi
 
   # Repack as the jniLibs payload zip.  The .so extension is ONLY a
   # container trick — the file is a zip; Android never parses it.

@@ -4,8 +4,12 @@ import '../core/theme.dart';
 import '../core/state.dart';
 import '../core/sandbox_service.dart';
 import 'studio_screen.dart';
+import 'chat_screen.dart';
+import 'sidebar.dart';
 
-/// Opens Studio — first-time users go through the sandbox install flow.
+/// Opens Studio.  The sandbox is now installed on FIRST LAUNCH (blocking
+/// gate in main.dart) — Studio just opens.  (Defense-in-depth: if the
+/// sandbox somehow got wiped, open the setup screen instead.)
 void openStudio(BuildContext context) {
   // The gate is decided by a REAL disk check, not a stale in-memory flag.
   SandboxService.I.checkExisting().then((installed) {
@@ -16,144 +20,10 @@ void openStudio(BuildContext context) {
         context,
       ).push(MaterialPageRoute(builder: (_) => const StudioScreen()));
     } else {
-      _showGate(context);
+      Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => const SandboxSetupScreen()));
     }
   });
-}
-
-/// "Code on your phone?" — one-time install permission sheet.
-void _showGate(BuildContext context) {
-  showModalBottomSheet(
-    context: context,
-    backgroundColor: Aether.surface,
-    isScrollControlled: true,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-    ),
-    builder: (ctx) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Container(
-                width: 46,
-                height: 46,
-                decoration: BoxDecoration(
-                  color: Aether.accentSoft,
-                  borderRadius: BorderRadius.circular(14),
-                  border:
-                      Border.all(color: Aether.accent.withValues(alpha: .35)),
-                ),
-                child: const Icon(Icons.terminal,
-                    size: 22, color: Aether.accent),
-              ),
-              const SizedBox(width: 14),
-              const Expanded(
-                child: Text('Code on your phone?',
-                    style:
-                        TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700)),
-              ),
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                icon: Icon(Icons.close,
-                    size: 18, color: Aether.textFaint),
-                onPressed: () => Navigator.pop(ctx),
-              ),
-            ]),
-            const SizedBox(height: 12),
-            Text(
-              'Ovid Studio needs a one-time sandbox — a native Linux environment '
-              'bundled with the app (no big download). After this, the AI can edit '
-              'files, run code and push commits straight from chat.',
-              style: TextStyle(
-                  fontSize: 13, height: 1.55, color: Aether.textMuted),
-            ),
-            const SizedBox(height: 16),
-            const _SpecRow(Icons.dns_outlined, 'Native Linux tools',
-                'bash · coreutils · apt — bionic-native, no root needed'),
-            const SizedBox(height: 10),
-            const _SpecRow(Icons.construction_outlined, 'Toolchain',
-                'apt installs python3 · node · git on demand — like Termux'),
-            const SizedBox(height: 10),
-            const _SpecRow(Icons.offline_bolt_outlined, 'Bundled payload',
-                '≈ 16 MB shipped in the app · installs in seconds · no internet needed'),
-            const SizedBox(height: 10),
-            const _SpecRow(Icons.lock_outline, 'Private',
-                'Everything runs and stays on this device'),
-            const SizedBox(height: 18),
-            Row(children: [
-              Expanded(
-                child: OutlinedButton(
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 13),
-                    side: BorderSide(color: Aether.hairlineStrong),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12)),
-                  ),
-                  onPressed: () => Navigator.pop(ctx),
-                  child:
-                      const Text('Not now', style: TextStyle(fontSize: 13.5)),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                flex: 2,
-                child: FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Aether.accent,
-                    padding: const EdgeInsets.symmetric(vertical: 13),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12)),
-                  ),
-                  icon:
-                      const Icon(Icons.download_outlined, size: 17),
-                  label: const Text('Install sandbox',
-                      style: TextStyle(fontSize: 13.5)),
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    Navigator.of(context).push(MaterialPageRoute(
-                        builder: (_) => const SandboxSetupScreen()));
-                  },
-                ),
-              ),
-            ]),
-          ],
-        ),
-      ),
-    ),
-  );
-}
-
-class _SpecRow extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String sub;
-  const _SpecRow(this.icon, this.title, this.sub);
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(children: [
-      Icon(icon, size: 16, color: Aether.textMuted),
-      const SizedBox(width: 12),
-      Expanded(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title,
-                style: const TextStyle(
-                    fontSize: 12.5, fontWeight: FontWeight.w600)),
-            const SizedBox(height: 1),
-            Text(sub,
-                style: TextStyle(
-                    fontSize: 11.5, color: Aether.textFaint)),
-          ],
-        ),
-      ),
-    ]);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +33,12 @@ class _SpecRow extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 class SandboxSetupScreen extends StatefulWidget {
-  const SandboxSetupScreen({super.key});
+  /// When true, the screen acts as a first-launch gate: it's non-dismissible
+  /// and on success navigates to the chat shell (not Studio).  When false
+  /// (default, opened from Studio), it allows back navigation and goes to
+  /// Studio on success.
+  final bool gateMode;
+  const SandboxSetupScreen({super.key, this.gateMode = false});
   @override
   State<SandboxSetupScreen> createState() => _SandboxSetupScreenState();
 }
@@ -177,6 +52,8 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
     'Linking tool aliases',
     'Configuring prefix',
     'Verifying native exec',
+    'Installing Node.js runtime',
+    'Installing Python runtime',
   ];
 
   final _log = <String>[];
@@ -261,18 +138,24 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Gate mode: never dismissible (sandbox is required, not optional).
+    final canPop = !widget.gateMode && (_done || _error != null);
     return PopScope(
-      canPop: _done || _error != null,
+      canPop: canPop,
       child: Scaffold(
         backgroundColor: Aether.bg,
         appBar: AppBar(
-          leading: IconButton(
-            icon: const Icon(Icons.close, size: 20),
-            onPressed: () {
-              if (_done || _error == null) Navigator.pop(context);
-            },
-          ),
-          title: const Text('Setting up sandbox'),
+          leading: widget.gateMode
+              ? null // no close button in gate mode
+              : IconButton(
+                  icon: const Icon(Icons.close, size: 20),
+                  onPressed: () {
+                    if (_done || _error == null) Navigator.pop(context);
+                  },
+                ),
+          title: Text(widget.gateMode
+              ? 'Setting up Ovid — one time'
+              : 'Setting up sandbox'),
         ),
         body: SafeArea(
           child: _error != null
@@ -509,8 +392,8 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
               runSpacing: 8,
               alignment: WrapAlignment.center,
               children: [
-                Tag('UBUNTU 24.04', color: Aether.success, filled: true),
-                Tag('1.1 GB', color: Aether.textMuted),
+                Tag('NATIVE BIONIC', color: Aether.success, filled: true),
+                Tag('NODE + PYTHON', color: Aether.textMuted),
                 Tag('NO ROOT', color: Aether.textMuted),
               ],
             ),
@@ -525,22 +408,63 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                       borderRadius: BorderRadius.circular(13)),
                 ),
                 icon: const Icon(Icons.code, size: 18),
-                label: const Text('Open Studio',
-                    style: TextStyle(fontSize: 14)),
-                onPressed: () => Navigator.of(context).pushReplacement(
-                    MaterialPageRoute(
-                        builder: (_) => const StudioScreen())),
+                label: Text(
+                    widget.gateMode ? 'Start chatting' : 'Open Studio',
+                    style: const TextStyle(fontSize: 14)),
+                onPressed: () {
+                  if (widget.gateMode) {
+                    // Replace the whole nav stack with the chat shell.
+                    Navigator.of(context, rootNavigator: true)
+                        .pushAndRemoveUntil(
+                      MaterialPageRoute(builder: (_) => const _ShellHost()),
+                      (_) => false,
+                    );
+                  } else {
+                    Navigator.of(context).pushReplacement(MaterialPageRoute(
+                        builder: (_) => const StudioScreen()));
+                  }
+                },
               ),
             ),
-            const SizedBox(height: 6),
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: Text('Back to chat',
-                  style: TextStyle(fontSize: 12.5, color: Aether.textFaint)),
-            ),
+            if (!widget.gateMode) ...[
+              const SizedBox(height: 6),
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text('Back to chat',
+                    style:
+                        TextStyle(fontSize: 12.5, color: Aether.textFaint)),
+              ),
+            ],
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Post-setup chat shell host — used by gate mode to push the chat shell
+/// after a successful first-launch install.  Mirrors main.dart's _Shell.
+class _ShellHost extends StatelessWidget {
+  const _ShellHost();
+  @override
+  Widget build(BuildContext context) {
+    final wide = MediaQuery.of(context).size.width >= 840;
+    final chat = const ChatScreen();
+    return Scaffold(
+      drawer: wide
+          ? null
+          : Drawer(
+              width: 288,
+              backgroundColor: Aether.surface,
+              child: SessionsSidebar(),
+            ),
+      body: wide
+          ? Row(children: [
+              const SessionsSidebar(),
+              const VerticalDivider(width: 1),
+              Expanded(child: chat),
+            ])
+          : chat,
     );
   }
 }

@@ -4,10 +4,12 @@ import 'package:flutter/material.dart';
 import 'core/agent_service.dart';
 import 'core/firebase_service.dart';
 import 'core/github_service.dart';
+import 'core/sandbox_service.dart';
 import 'core/state.dart';
 import 'core/theme.dart';
 import 'ui/sidebar.dart';
 import 'ui/chat_screen.dart';
+import 'ui/sandbox_setup.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,17 +19,22 @@ Future<void> main() async {
   // Firebase is optional: if google-services.json isn't injected (local debug),
   // FirebaseService degrades to offline no-ops and the app still runs.
   await FirebaseService.I.initialize();
-  // Pre-warm the persistent browser so it is ready the moment the user (or
-  // the agent) opens it — restores last-session tabs, never reloads on open.
-  unawaited(AgentService.I.prewarmBrowser());
-  runApp(const OvidApp());
+  // Sandbox installs on FIRST LAUNCH (blocking) — the user never has to
+  // tap Studio to trigger it. Later launches check the disk and skip.
+  final sandboxReady = await SandboxService.I.checkExisting();
+  AppState.I.sandboxInstalled = sandboxReady;
+  runApp(OvidApp(sandboxReady: sandboxReady));
   WidgetsBinding.instance.addPostFrameCallback((_) {
     unawaited(GitHubService.I.initialize());
+    // Pre-warm the browser only after the sandbox gate is satisfied (the
+    // setup screen replaces the shell until install completes).
+    if (sandboxReady) unawaited(AgentService.I.prewarmBrowser());
   });
 }
 
 class OvidApp extends StatefulWidget {
-  const OvidApp({super.key});
+  const OvidApp({super.key, this.sandboxReady = true});
+  final bool sandboxReady;
   @override
   State<OvidApp> createState() => _OvidAppState();
 }
@@ -56,8 +63,23 @@ class _OvidAppState extends State<OvidApp> {
       title: 'Ovid',
       debugShowCheckedModeBanner: false,
       theme: Aether.theme(),
-      home: const _Shell(),
+      home: widget.sandboxReady
+          ? const _Shell()
+          : const _FirstLaunchSetupGate(),
     );
+  }
+}
+
+/// Full-screen gate shown ONLY on first launch when the sandbox is not
+/// yet installed.  Runs the real SandboxService.install (payload extract
+/// → chmod → symlinks → config → bash sanity → Node.js → Python) and
+/// then replaces itself with the chat _Shell.  Non-dismissible — the
+/// sandbox is required for all agent features (MCP, code execution, etc.).
+class _FirstLaunchSetupGate extends StatelessWidget {
+  const _FirstLaunchSetupGate();
+  @override
+  Widget build(BuildContext context) {
+    return const SandboxSetupScreen(gateMode: true);
   }
 }
 

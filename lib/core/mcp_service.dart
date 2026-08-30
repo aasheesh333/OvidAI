@@ -47,10 +47,31 @@ class McpService {
           'initialized, this is a bug — report it.',
         );
       }
+      // Lazy runtime ensure: if the eager Node.js/Python install during
+      // sandbox setup was skipped (offline) or failed, install on demand
+      // now — the server command needs npx / uvx to exist.
+      final cmd = server.command;
+      final kind = (cmd == 'npx' || cmd == 'node')
+          ? 'node'
+          : (cmd == 'uvx' || cmd == 'uv' || cmd == 'python' || cmd == 'python3')
+              ? 'python'
+              : null;
+      if (kind != null) {
+        final ok = await sandbox.ensureRuntime(kind);
+        if (!ok) {
+          throw Exception(
+            'runtime "$cmd" unavailable — install ${kind == 'node' ? 'nodejs+npm' : 'python+uv'} '
+            'failed (offline?). Reconnect once you have internet.',
+          );
+        }
+      }
+      // Per-server env vars (API keys etc.) from secure storage.
+      final env = await AppState.I.getMcpEnv(server.name);
       // Native exec — the server command runs through the sandbox env
       // (PATH/LD_LIBRARY_PATH/LD_PRELOAD set by SandboxService.spawn).
       final proc = await sandbox.spawn(
         [server.command, ...server.args],
+        env: env.isEmpty ? null : env,
       );
       rs.process = proc;
 

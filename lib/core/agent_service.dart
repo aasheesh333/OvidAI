@@ -228,6 +228,8 @@ class AgentService extends ChangeNotifier {
     _startScheduleTimer();
     // Deleted sessions lose their run; all others keep running in parallel.
     AppState.I.onSessionDeleted = dropSessionRun;
+    // Per-session browser tabs: lazy-restore on session switch.
+    AppState.I.onSessionSwitched = onSessionSwitched;
   }
   /// Named private constructor for subagent children (same body as [_]).
   AgentService._internal() : this._();
@@ -348,35 +350,60 @@ class AgentService extends ChangeNotifier {
   String? browserPageText;
   String? previewFile; // local path to index.html for WebView
 
-  // ── PERSISTENT BROWSER (singleton tabs owned by the agent service) ────
+  // ── PER-SESSION BROWSER (each session owns its tabs + active index) ──
   // The WebView controllers live here — OUTLIVES any BrowserScreen route.
-  // The browser is pre-warmed once on first launch and never reloads when
-  // the user re-opens the panel (state survives), DSH-web style.
-  final List<BrowserTab> browserTabs = [];
-  int activeTabIndex = 0;
-  bool browserBusy = false; // true while an agent browser tool is running
+  // Cookies/logins are SHARED across all sessions (WebView CookieManager
+  // is app-global): a login done in session A works in sessions B…Z too.
+  // Tabs themselves are per-session: switching sessions switches tab sets;
+  // old sessions keep their tabs and pages alive as-is.
   static const _kBrowserTabs = 'ovid_browser_tabs';
   static const _kBrowserActiveTab = 'ovid_browser_active_tab';
+  static const _kBrowserSessionPrefix = 'ovid_browser_session_';
   static const _defaultBrowserUrl = 'https://www.google.com';
+
+  /// Per-session browser bucket: tab list + active index.
+  final Map<String, List<BrowserTab>> _sessionBrowsers = {};
+  final Map<String, int> _sessionActiveTab = {};
+
+  bool browserBusy = false; // true while an agent browser tool is running
+
+  /// Tabs of the ACTIVE session (created empty on first access).
+  List<BrowserTab> get browserTabs => _browserBucketFor(_currentRunKey());
+
+  /// Active tab index of the ACTIVE session.
+  int get activeTabIndex =>
+      _sessionActiveTab[_currentRunKey()] ?? 0;
+  set activeTabIndex(int v) => _sessionActiveTab[_currentRunKey()] = v;
+
+  List<BrowserTab> _browserBucketFor(String key) =>
+      _sessionBrowsers.putIfAbsent(key, () => <BrowserTab>[]);
+
+  /// Tabs belonging to an explicit session id (not the current one).
+  List<BrowserTab> browserTabsFor(String sessionId) =>
+      _browserBucketFor(sessionId);
 
   /// True once the browser has ever been opened/pre-warmed in this launch.
   bool get browserReady => browserTabs.isNotEmpty;
 
   BrowserTab get _activeTab {
-    if (browserTabs.isEmpty) _newTabInternal(_defaultBrowserUrl);
-    if (activeTabIndex >= browserTabs.length) activeTabIndex = 0;
+    final tabs = browserTabs;
+    if (tabs.isEmpty) _newTabInternal(_defaultBrowserUrl);
+    if (activeTabIndex >= tabs.length) activeTabIndex = 0;
     return browserTabs[activeTabIndex];
   }
 
   BrowserTab _newTabInternal(String url) {
+    final tabs = browserTabs;
     final tab = BrowserTab(url: url);
-    browserTabs.add(tab);
-    activeTabIndex = browserTabs.length - 1;
+    tabs.add(tab);
+    activeTabIndex = tabs.length - 1;
     return tab;
   }
 
   /// Pre-warm the browser once at app launch so it's instantly ready.
   /// Called from main() — safe to call repeatedly (no-op after first).
+  /// Restores the ACTIVE session's tabs; other sessions restore lazily
+  /// on first access (switching to them).
   Future<void> prewarmBrowser() async {
     if (browserTabs.isNotEmpty) return;
     try {
@@ -387,6 +414,35 @@ class AgentService extends ChangeNotifier {
     } catch (_) {
       if (browserTabs.isEmpty) _newTabInternal(_defaultBrowserUrl);
     }
+  }
+
+  /// Restore tabs for a session id — called lazily when the user switches
+  /// to a session whose tabs were never materialized this launch.
+  Future<void> _restoreSessionTabsIfNeeded(String sessionId) async {
+    final tabs = _browserBucketFor(sessionId);
+    if (tabs.isNotEmpty) return; // already alive this launch
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final urls = prefs.getStringList('$_kBrowserSessionPrefix$sessionId');
+      if (urls != null && urls.isNotEmpty) {
+        for (final u in urls) {
+          tabs.add(BrowserTab(url: u));
+        }
+        _sessionActiveTab[sessionId] =
+            (prefs.getInt('$_kBrowserActiveTab$sessionId') ?? 0)
+                .clamp(0, tabs.length - 1);
+      }
+    } catch (_) {}
+    if (tabs.isEmpty) {
+      tabs.add(BrowserTab(url: _defaultBrowserUrl));
+    }
+  }
+
+  /// Called by AppState.selectSession — brings the newly-active session's
+  /// tabs to life (lazy restore) so switching is instant and isolated.
+  Future<void> onSessionSwitched(String sessionId) async {
+    await _restoreSessionTabsIfNeeded(sessionId);
+    notifyListeners();
   }
 
   Future<bool> _restoreBrowserTabs() async {
@@ -408,11 +464,22 @@ class AgentService extends ChangeNotifier {
   Future<void> _persistBrowserTabs() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      // Global (last-active) copy for next-launch restore of the
+      // then-active session…
       await prefs.setStringList(
         _kBrowserTabs,
         browserTabs.map((t) => t.url).toList(),
       );
       await prefs.setInt(_kBrowserActiveTab, activeTabIndex);
+      // …and the per-session copy keyed by this session's id.
+      final key = _currentRunKey();
+      if (key.isNotEmpty) {
+        await prefs.setStringList(
+          '$_kBrowserSessionPrefix$key',
+          browserTabs.map((t) => t.url).toList(),
+        );
+        await prefs.setInt('$_kBrowserActiveTab$key', activeTabIndex);
+      }
     } catch (_) {}
   }
 
@@ -425,12 +492,13 @@ class AgentService extends ChangeNotifier {
 
   /// User-facing: close tab at index. Keeps at least one tab alive.
   void closeBrowserTab(int index) {
-    if (index < 0 || index >= browserTabs.length) return;
-    browserTabs.removeAt(index);
-    if (browserTabs.isEmpty) {
+    final tabs = browserTabs;
+    if (index < 0 || index >= tabs.length) return;
+    tabs.removeAt(index);
+    if (tabs.isEmpty) {
       _newTabInternal(_defaultBrowserUrl);
-    } else if (activeTabIndex >= browserTabs.length) {
-      activeTabIndex = browserTabs.length - 1;
+    } else if (activeTabIndex >= tabs.length) {
+      activeTabIndex = tabs.length - 1;
     }
     _persistBrowserTabs();
     notifyListeners();
@@ -438,7 +506,8 @@ class AgentService extends ChangeNotifier {
 
   /// User/agent-facing: switch the active tab (agent tools target this).
   void selectBrowserTab(int index) {
-    if (index < 0 || index >= browserTabs.length) return;
+    final tabs = browserTabs;
+    if (index < 0 || index >= tabs.length) return;
     activeTabIndex = index;
     _persistBrowserTabs();
     notifyListeners();
@@ -515,7 +584,25 @@ class AgentService extends ChangeNotifier {
   Map<String, String> get fileBuffer => _studio.fileBuffer;
   String? get activeFilePath => _studio.activeFilePath;
   set activeFilePath(String? v) => _studio.activeFilePath = v;
+
+  /// Global repo (owner/name) — the last one the user connected in Studio.
   String? repoFull; // e.g. "aasheesh333/Ovid"
+
+  /// Repo for the ACTIVE session — per-session Studio repos.  Falls back
+  /// to the global [repoFull] when the session never picked one, so old
+  /// sessions keep working exactly as before (as-is).
+  String? get sessionRepoFull =>
+      AppState.I.getRepoForSession(_currentRunKey(), fallback: repoFull);
+
+  /// Set the repo for the ACTIVE session (Studio pick) — also updates the
+  /// global default so future sessions inherit the latest choice.
+  set sessionRepoFull(String? v) {
+    final key = _currentRunKey();
+    if (key.isNotEmpty && v != null) {
+      AppState.I.setRepoForSession(key, v);
+    }
+    repoFull = v; // global default for new sessions
+  }
 
   /// Open-file tab list — scoped to the ACTIVE session.
   List<String> get studioOpenFiles => _studio.openFiles;
@@ -648,6 +735,19 @@ class AgentService extends ChangeNotifier {
       if (p.name == 'RAG Memory') tools.add(_memoryTool);
       if (p.category == 'MCP' && p.installed && p.enabled) {
         tools.add(_mcpProxyTool(p));
+      }
+    }
+    // ── Real MCP server tools (discovered via tools/list) ──
+    // Each connected MCP server advertises tools with full input schemas.
+    // We inject them as `mcp__<server>__<tool>` so the model can call them
+    // directly with typed arguments instead of the generic mcp_* proxy.
+    for (final entry in McpService.I.connectedTools.entries) {
+      final serverKey = entry.key
+          .toLowerCase()
+          .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+          .replaceAll(RegExp(r'^_|_$'), '');
+      for (final t in entry.value) {
+        tools.add(t.toOpenAiTool(serverKey));
       }
     }
     return tools;
@@ -1497,6 +1597,29 @@ class AgentService extends ChangeNotifier {
             },
           },
           'required': ['name', 'command'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_add_plugin',
+        'description':
+            'Create a custom plugin definition (name + description + '
+            'category). Use when the user wants to add a plugin that is '
+            'not in the catalog. The plugin appears in Plugins and '
+            'persists across restarts.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'name': {'type': 'string'},
+            'description': {'type': 'string'},
+            'category': {
+              'type': 'string',
+              'description': 'Agent / Tool / MCP / Runtime / Custom',
+            },
+          },
+          'required': ['name', 'description'],
         },
       },
     },
@@ -2704,6 +2827,34 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
               : 'No matches for "$q2" in memories + this session. (Enable "Share session memory" in Settings to search across chats.)';
         }
         return hits.join('\n');
+      case String() when name.startsWith('mcp__'):
+        // Real discovered MCP tool call: mcp__<server>__<tool>.
+        // The tool schema came from tools/list (McpService.connectedTools).
+        final parts = name.split('__');
+        if (parts.length < 3) {
+          return 'Malformed MCP tool name "$name" (expected mcp__<server>__<tool>).';
+        }
+        final serverKey = parts[1];
+        final toolName = parts.sublist(2).join('__');
+        // Resolve the server by fuzzy-matching the sanitized key against
+        // configured server names (same normalization as _tools).
+        String? norm(String s) => s
+            .toLowerCase()
+            .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+            .replaceAll(RegExp(r'^_|_$'), '');
+        final match = AppState.I.mcpServers
+            .where((s) => norm(s.name) == serverKey)
+            .firstOrNull;
+        if (match == null) {
+          return 'No MCP server matches key "$serverKey". '
+              'Connected tools come from a configured server — check Plugins → MCP.';
+        }
+        if (!McpService.I.isConnected(match.name)) {
+          final res = await McpService.I.connect(match);
+          if (!res.contains('connected')) return res;
+        }
+        _emit('shell', 'MCP: ${match.name} → $toolName');
+        return await McpService.I.callTool(match.name, toolName, args);
       case String() when name.startsWith('mcp_'):
         // Real MCP proxy — call through McpService (spawns/connects as needed).
         final mcpName = name.substring(4).replaceAll('_', ' ');
@@ -2733,6 +2884,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           if (match == null) return 'Plugin not found: $pluginName';
           match.installed = true;
           match.enabled = true;
+          app.persistPluginState();
           app.refresh();
           _emit('done', 'installed $pluginName');
           return 'Plugin "$pluginName" installed and enabled ✓';
@@ -2748,10 +2900,14 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
               .where((s) => s.name.toLowerCase() == mcpName2.toLowerCase())
               .firstOrNull;
           if (match == null) return 'MCP server not found: $mcpName2';
-          match.connected = true;
+          // REAL connect — spawns the process, runs the MCP handshake,
+          // discovers tools.  (Previously this only flipped a bool, so
+          // the UI said "connected" but nothing actually ran.)
+          final res = await McpService.I.connect(match);
+          match.connected = McpService.I.isConnected(match.name);
           app.refresh();
-          _emit('done', 'connected $mcpName2');
-          return 'MCP server "$mcpName2" connected ✓';
+          _emit('done', res);
+          return res;
         } catch (e) {
           return 'MCP connect failed: $e';
         }
@@ -2835,6 +2991,20 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         return 'MCP server "$name" added. Connect it from the Plugins → MCP '
             'section (or ask me to connect it).';
 
+      case 'catalog_add_plugin':
+        final name = args['name'] as String;
+        final desc = args['description'] as String;
+        final category = args['category'] as String? ?? 'Custom';
+        _emit('think', 'creating plugin: $name');
+        AppState.I.addCustomPlugin(
+          name: name,
+          description: desc,
+          category: category,
+        );
+        _emit('done', 'plugin created: $name');
+        return 'Plugin "$name" created and enabled ✓ — visible in Plugins, '
+            'persists across restarts.';
+
       case 'catalog_remove_mcp':
         final name = args['name'] as String;
         _emit('think', 'removing MCP server: $name');
@@ -2900,11 +3070,11 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
       // ─── DSH-grade repo tools ─────────────────────────────────────────
 
       case 'repo_sync':
-        if (repoFull == null) return 'no repo connected';
-        _emit('think', 'syncing repo $repoFull …');
+        if (sessionRepoFull == null) return 'no repo connected';
+        _emit('think', 'syncing repo $sessionRepoFull …');
         try {
           // bind cache
-          RepoCache.I.bind(repoFull!, GitHubService.I.token!);
+          RepoCache.I.bind(sessionRepoFull!, GitHubService.I.token!);
           await RepoCache.I.sync(onLine: (l) => _emit('shellOut', l));
           notifyListeners();
           return 'repo synced · ${RepoCache.I.files.length} files ready in '
@@ -3631,6 +3801,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     'file_write', 'fs_edit', 'run_shell', 'commit', 'git_clone',
     'git_push', 'request_permission', 'catalog_add_provider',
     'catalog_remove_provider', 'catalog_add_mcp', 'catalog_remove_mcp',
+    'catalog_add_plugin',
     'agent_install_plugin', 'agent_install_mcp', 'catalog_add_marketplace',
     'todo_write', 'job_start', 'job_kill',
   };

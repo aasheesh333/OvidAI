@@ -189,15 +189,21 @@ class SandboxService {
       try {
         link.parent.createSync(recursive: true);
         if (link.existsSync()) link.deleteSync();
-        // Absolute-termux targets → point at our own bin/.
-        var dest = target;
-        if (dest.startsWith('/data/data/com.termux/files/usr/')) {
-          dest = dest.replaceFirst(
-              '/data/data/com.termux/files/usr/', '${staging.path}/');
-        } else if (!dest.startsWith('/')) {
-          // Relative target (e.g. ./bin/dash) — resolve against link dir.
-          dest = '${link.parent.path}/$dest';
-        }
+        // Only ABSOLUTE termux targets are rewritten — and they are
+        // rewritten to the FINAL prefix path (not staging!), because
+        // symlinks don't need their target to exist at creation time
+        // and the staging dir is renamed away a few lines later.
+        // RELATIVE targets (e.g. `libreadline.so.8` for link
+        // `./lib/libreadline.so`) are kept EXACTLY as written — resolving
+        // them against the link dir would bake in the STAGING path, and
+        // the staging→prefix rename would leave every link dangling
+        // (that's the "libreadline.so.8 not found" class of failure).
+        // TermuxInstaller.java does the same: Os.symlink(oldPath, newPath)
+        // with the raw relative target.
+        final dest = target.startsWith('/data/data/com.termux/files/usr/')
+            ? target.replaceFirst(
+                '/data/data/com.termux/files/usr/', '${prefix.path}/')
+            : target;
         link.createSync(dest);
         linked++;
       } catch (_) {}
@@ -222,16 +228,79 @@ class SandboxService {
     Directory('${prefix.path}/tmp').createSync(recursive: true);
 
     // ── Sanity: run bash --version natively ──
+    // execChecked surfaces BOTH the exit code and stderr.  The dynamic
+    // linker's "CANNOT LINK EXECUTABLE ... library not found" errors go
+    // to stderr with exit 1 — the old exec() swallowed that and reported
+    // a false ✓ while every subsequent shell command failed.
     onPhase(6, 0.0, r'$ bash --version (native exec sanity)');
     try {
-      final out = await exec(['bash', '--version'])
+      final (code, out) = await execChecked(['bash', '--version'])
           .timeout(const Duration(seconds: 15));
+      if (code != 0) {
+        throw Exception('bash --version exited $code: '
+            '${out.trim().split('\n').take(2).join(' / ')}');
+      }
       final firstLine = out.trim().split('\n').first;
-      onPhase(6, 1.0, 'native exec ....... ✓ ${firstLine.substring(0, firstLine.length.clamp(0, 50))}');
+      onPhase(6, 1.0,
+          'native exec ....... ✓ ${firstLine.substring(0, firstLine.length.clamp(0, 50))}');
     } catch (e) {
       throw Exception(
           'Sandbox installed but native exec failed: $e. '
           'Report this with your device model.');
+    }
+
+    // ── Phase 7: Install Node.js + npm (needed by all npx-based MCP servers) ──
+    onPhase(7, 0.0, r'$ apt update && apt install -y nodejs npm');
+    try {
+      final (_, _) = await execChecked(['bash', '-lc', 'apt update 2>&1'])
+          .timeout(const Duration(minutes: 3));
+      onPhase(7, 0.3, 'apt update ......... ✓');
+      // Install nodejs + npm. npx comes from the npm package.
+      await execChecked(['bash', '-lc', 'apt install -y nodejs npm 2>&1'])
+          .timeout(const Duration(minutes: 5));
+      final (nodeCode, nodeVer) =
+          await execChecked(['bash', '-lc', 'node --version 2>&1'])
+              .timeout(const Duration(seconds: 10));
+      final (npxCode, npxVer) =
+          await execChecked(['bash', '-lc', 'npx --version 2>&1'])
+              .timeout(const Duration(seconds: 10));
+      final ok = nodeCode == 0 && npxCode == 0;
+      if (ok) {
+        onPhase(7, 1.0,
+            'node ................ ✓ ${nodeVer.trim().split('\n').first} · npx ${npxVer.trim().split('\n').first}');
+      } else {
+        onPhase(7, 1.0,
+            'node ................ ⚠ deferred (will retry on first MCP connect)');
+      }
+    } catch (e) {
+      // Network failure or timeout — don't block the whole install.
+      // McpService._ensureRuntime will retry lazily on first connect.
+      onPhase(7, 1.0,
+          'node ................ ⚠ deferred ($e) — will install on first MCP connect');
+    }
+
+    // ── Phase 8: Install Python + pip + uv (needed by uvx-based MCP servers) ──
+    onPhase(8, 0.0, r'$ apt install -y python python-pip uv');
+    try {
+      await execChecked(['bash', '-lc', 'apt install -y python python-pip uv 2>&1'])
+          .timeout(const Duration(minutes: 5));
+      final (pyCode, pyVer) =
+          await execChecked(['bash', '-lc', 'python --version 2>&1'])
+              .timeout(const Duration(seconds: 10));
+      final (uvxCode, uvxVer) =
+          await execChecked(['bash', '-lc', 'uvx --version 2>&1'])
+              .timeout(const Duration(seconds: 10));
+      final ok = pyCode == 0 && uvxCode == 0;
+      if (ok) {
+        onPhase(8, 1.0,
+            'python .............. ✓ ${pyVer.trim().split('\n').first} · uvx ${uvxVer.trim().split('\n').first}');
+      } else {
+        onPhase(8, 1.0,
+            'python .............. ⚠ deferred (will retry on first uvx MCP connect)');
+      }
+    } catch (e) {
+      onPhase(8, 1.0,
+          'python .............. ⚠ deferred ($e) — will install on first uvx MCP connect');
     }
   }
 
@@ -435,6 +504,92 @@ class SandboxService {
         l.contains('gnu_get_libc') ||
         l.contains('cannot locate symbol') ||
         l.contains('exec format error');
+  }
+
+  /// Exit-code-checked exec — returns (exitCode, combinedOutput).
+  /// Unlike [exec], this NEVER swallows failures: the caller can see
+  /// exitCode != 0 even when the command printed something on stderr
+  /// (e.g. the dynamic linker's "CANNOT LINK EXECUTABLE" errors, which
+  /// used to make sanity checks false-positive).
+  Future<(int, String)> execChecked(
+    List<String> args, {
+    String? cwd,
+    Directory? hostWorkDir,
+    Map<String, String>? env,
+  }) async {
+    if (_prefix == null) {
+      final ok = await checkExisting();
+      if (!ok) {
+        throw Exception(
+            'sandbox not installed — open Studio once to install it, then retry the command.');
+      }
+    }
+    final merged = {..._sandboxEnv(), ...?env};
+    final result = await Process.run(
+      args[0].startsWith('/') ? args[0] : '${_prefix!.path}/bin/${args[0]}',
+      args.sublist(1),
+      workingDirectory: cwd ??
+          (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home'),
+      environment: merged,
+      stdoutEncoding: utf8,
+      stderrEncoding: utf8,
+    );
+    return (result.exitCode, '${result.stdout}${result.stderr}');
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  // RUNTIME ENSURE — lazily install nodejs/npm or python/uv if the eager
+  // install during setup was skipped (offline) or failed.  McpService
+  // calls this before spawning a server that needs npx / uvx.
+  // ═════════════════════════════════════════════════════════════════
+  final Map<String, bool> _runtimeEnsured = {};
+
+  /// Ensure `nodejs`+`npm` (npx) or `python`+`uv` (uvx) are installed.
+  /// [kind] is 'node' or 'python'. Returns true if the runtime binary
+  /// is available (already there, or freshly installed).
+  Future<bool> ensureRuntime(String kind, {void Function(String line)? onLine}) async {
+    final bin = kind == 'node' ? 'node' : 'python';
+    if (_runtimeEnsured[kind] == true) return true;
+    // Fast path: check if already present (exit-code based —
+    // `command -v` prints nothing and exits 1 when missing).
+    try {
+      final (code, _) = await execChecked(['bash', '-lc', 'command -v $bin'])
+          .timeout(const Duration(seconds: 10));
+      if (code == 0) {
+        _runtimeEnsured[kind] = true;
+        return true;
+      }
+    } catch (_) {}
+    onLine?.call('[runtime] installing ${kind == 'node' ? 'nodejs + npm' : 'python + pip + uv'}…');
+    try {
+      await execChecked(['bash', '-lc', 'apt update 2>&1'])
+          .timeout(const Duration(minutes: 3));
+      final pkgs = kind == 'node' ? 'nodejs npm' : 'python python-pip uv';
+      await execChecked(['bash', '-lc', 'apt install -y $pkgs 2>&1'])
+          .timeout(const Duration(minutes: 5));
+      final (vCode, _) =
+          await execChecked(['bash', '-lc', 'command -v $bin'])
+              .timeout(const Duration(seconds: 10));
+      final ok = vCode == 0;
+      if (ok) _runtimeEnsured[kind] = true;
+      onLine?.call('[runtime] ${kind == 'node' ? 'node' : 'python'} '
+          '${ok ? 'installed ✓' : 'install FAILED'}');
+      return ok;
+    } catch (e) {
+      onLine?.call('[runtime] $kind install failed: $e');
+      return false;
+    }
+  }
+
+  /// Whether a runtime binary exists right now (no install attempted).
+  Future<bool> hasRuntime(String bin) async {
+    try {
+      final (code, _) = await execChecked(['bash', '-lc', 'command -v $bin'])
+          .timeout(const Duration(seconds: 10));
+      return code == 0;
+    } catch (_) {
+      return false;
+    }
   }
 
   // ═════════════════════════════════════════════════════════════════

@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/github_service.dart';
+import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
@@ -1176,6 +1177,199 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       for (final s in list) {
         expect(s.target, anyOf('coreutils', 'libncursesw.so.6.5'));
       }
+    });
+
+    // ── PR10: working MCP/plugins + first-launch setup + per-session state ──
+
+    // Regression: agent_install_mcp used to ONLY flip match.connected = true
+    // without ever spawning the process — the UI said "connected" while
+    // nothing ran.  The fix routes through McpService.connect() which
+    // fails loudly when the sandbox isn't there.  Here: the catalog tool
+    // result must reflect the REAL connection state (unavailable sandbox
+    // → explicit failure, never a fake ✓).
+    test('agent_install_mcp reports real connect result (no bool-flip)', () async {
+      final app = AppState.I;
+      final s = app.mcpServers.firstWhere(
+          (m) => m.name == 'Filesystem',
+          orElse: () => app.mcpServers.first);
+      final wasConnected = s.connected;
+      try {
+        // McpService.connect with no sandbox → returns 'connect failed: …'
+        final res = await McpService.I.connect(s);
+        expect(res.toLowerCase(), contains('failed'));
+        // And the server is NOT marked connected.
+        expect(McpService.I.isConnected(s.name), isFalse);
+      } finally {
+        s.connected = wasConnected;
+      }
+    });
+
+    // Regression: custom MCP servers used to vanish on restart (no
+    // persistence).  The fix persists them; here we verify the save/load
+    // round-trip through the AppState API.
+    test('custom MCP servers persist via addCustomMcpServer', () async {
+      final app = AppState.I;
+      final name = 'test-echo-server-\${DateTime.now().millisecondsSinceEpoch}';
+      app.addCustomMcpServer(
+        name: name,
+        command: 'npx',
+        args: ['-y', '@example/echo'],
+      );
+      expect(app.mcpServers.any((s) => s.name == name), isTrue);
+      // Verify it was written to SharedPreferences.
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getStringList('ovid_custom_mcp_servers_v1');
+      expect(saved, isNotNull);
+      expect(saved!.any((j) => (jsonDecode(j)
+              as Map<String, dynamic>)['name'] == name),
+          isTrue);
+      // Clean up (also exercises remove persistence).
+      final added = app.mcpServers.firstWhere((s) => s.name == name);
+      app.removeMcpServer(added);
+      expect(app.mcpServers.any((s) => s.name == name), isFalse);
+    });
+
+    // Regression: plugin install/enable state used to reset to seed
+    // defaults on every restart.  The fix persists {name: {installed,
+    // enabled}} and overlays it after seeding.
+    test('plugin state persists via persistPluginState', () async {
+      final app = AppState.I;
+      final p = app.plugins.first;
+      final wasInstalled = p.installed;
+      final wasEnabled = p.enabled;
+      try {
+        p.installed = !p.installed;
+        p.enabled = !p.enabled;
+        await app.persistPluginState();
+        final prefs = await SharedPreferences.getInstance();
+        final raw = prefs.getString('ovid_plugin_state_v1');
+        expect(raw, isNotNull);
+        final m = jsonDecode(raw!) as Map<String, dynamic>;
+        expect(m.containsKey(p.name), isTrue);
+        final st = jsonDecode(m[p.name] as String) as Map<String, dynamic>;
+        expect(st['installed'], !wasInstalled);
+        expect(st['enabled'], !wasEnabled);
+      } finally {
+        p.installed = wasInstalled;
+        p.enabled = wasEnabled;
+        await app.persistPluginState();
+      }
+    });
+
+    // New: agent can create custom plugins (catalog_add_plugin) — full
+    // definition persists (not just enabled flags).
+    test('addCustomPlugin creates + persists a custom plugin', () async {
+      final app = AppState.I;
+      const name = 'test-custom-plugin-x1';
+      app.addCustomPlugin(
+          name: name, description: 'A test plugin', category: 'Tool');
+      expect(app.plugins.any((p) => p.name == name), isTrue);
+      final created = app.plugins.firstWhere((p) => p.name == name);
+      expect(created.installed, isTrue);
+      expect(created.enabled, isTrue);
+      // Persisted as a full definition.
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getStringList('ovid_custom_plugins_v1');
+      expect(saved, isNotNull);
+      expect(
+          saved!.any((j) =>
+              (jsonDecode(j) as Map<String, dynamic>)['name'] == name),
+          isTrue);
+      // Clean up.
+      app.plugins.removeWhere((p) => p.name == name);
+      await app.persistPluginState();
+    });
+
+    // New: per-session Studio repos — each session binds its own repo,
+    // falls back to the global when unset, and persists with the session.
+    test('per-session repo: set/get/persist round-trip', () async {
+      final app = AppState.I;
+      // Ensure two distinct sessions.
+      while (app.sessions.length < 2) {
+        app.newSession();
+      }
+      final s = app.sessions[0];
+      final old = s.repo;
+      try {
+        app.setRepoForSession(s.id, 'user/repo-a');
+        expect(app.getRepoForSession(s.id), 'user/repo-a');
+        expect(app.getRepoForSession(s.id, fallback: 'global/repo'),
+            'user/repo-a'); // session wins
+        // Persisted through ChatSession.toJson.
+        expect(s.toJson()['repo'], 'user/repo-a');
+        // Another session (no repo of its own) falls back to the global.
+        final s2 = app.sessions[1];
+        final old2 = s2.repo;
+        s2.repo = null; // ensure fallback path
+        expect(app.getRepoForSession(s2.id, fallback: 'global/repo'),
+            'global/repo');
+        s2.repo = old2;
+      } finally {
+        s.repo = old;
+      }
+    });
+
+    // New: ChatSession.repo JSON round-trip (old sessions without repo
+    // still deserialize — migration path).
+    test('ChatSession.repo: JSON round-trip + legacy migration', () {
+      final s = ChatSession(
+          id: 'r1', title: 't', model: 'm', repo: 'user/repo-b');
+      final j = s.toJson();
+      expect(j['repo'], 'user/repo-b');
+      final back = ChatSession.fromJson(j);
+      expect(back.repo, 'user/repo-b');
+      // Legacy JSON without repo → null (falls back to global at use site).
+      final legacy = ChatSession.fromJson(
+          {'id': 'r2', 'title': 't', 'model': 'm'});
+      expect(legacy.repo, isNull);
+    });
+
+    // New: per-session browser tabs — switching sessions switches tab
+    // sets; tabs are isolated per session id.
+    test('browser tabs are per-session (switch isolation)', () {
+      final agent = AgentService.I;
+      final app = AppState.I;
+      // Ensure two distinct sessions.
+      while (app.sessions.length < 2) {
+        app.newSession();
+      }
+      final s1 = app.sessions[0];
+      final s2 = app.sessions[1];
+      AppState.I.selectSession(s1.id);
+      agent.browserTabs; // materialize bucket
+      agent.newBrowserTab('https://a.example.com');
+      final count1 = agent.browserTabs.length;
+      expect(agent.browserTabs.isNotEmpty, isTrue);
+
+      AppState.I.selectSession(s2.id);
+      // Fresh session bucket starts EMPTY (then lazily gets a default
+      // tab only on access via _activeTab).
+      expect(agent.browserTabsFor(s2.id).isEmpty, isTrue);
+      // Tabs of session 1 are untouched by session 2's bucket.
+      expect(agent.browserTabsFor(s1.id).length, count1);
+      // Back to s1 — tabs intact.
+      AppState.I.selectSession(s1.id);
+      expect(agent.browserTabs.length, count1);
+    });
+
+    // New: MCP tool name format — mcp__<server>__<tool> parsing contract
+    // (the dispatch + injection share this normalization).
+    test('mcp tool names: mcp__server__tool normalization round-trip', () {
+      String norm(String s) => s
+          .toLowerCase()
+          .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+          .replaceAll(RegExp(r'^_|_$'), '');
+      expect(norm('Chrome DevTools'), 'chrome_devtools');
+      expect(norm('Filesystem'), 'filesystem');
+      final toolName = 'mcp__${norm('Filesystem')}__read_file';
+      final parts = toolName.split('__');
+      expect(parts.length, 3);
+      expect(parts[1], norm('Filesystem'));
+      expect(parts[2], 'read_file');
+      // Multi-underscore tool names survive (sublist join).
+      final toolName2 = 'mcp__fs__list_dir__deep';
+      final parts2 = toolName2.split('__');
+      expect(parts2.sublist(2).join('__'), 'list_dir__deep');
     });
   });
 }

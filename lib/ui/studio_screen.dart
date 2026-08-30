@@ -22,7 +22,7 @@ class _StudioScreenState extends State<StudioScreen> {
   bool _syncing = false;
   bool _handledInitialAuth = false;
 
-  String? get _repo => AgentService.I.repoFull;
+  String? get _repo => AgentService.I.sessionRepoFull;
 
   @override
   void initState() {
@@ -110,7 +110,7 @@ class _StudioScreenState extends State<StudioScreen> {
         ),
       );
       if (picked != null) {
-        AgentService.I.repoFull = picked;
+        AgentService.I.sessionRepoFull = picked;
         await _autoSync();
       }
     } catch (e) {
@@ -701,10 +701,10 @@ class _EditorState extends State<_Editor> {
                         ),
                       ),
                     ),
-                  if (a.repoFull != null) ...[
+                  if (a.sessionRepoFull != null) ...[
                     const SizedBox(width: 10),
                     Text(
-                      a.repoFull!,
+                      a.sessionRepoFull!,
                       style: TextStyle(
                         fontFamily: Aether.mono,
                         fontSize: 10,

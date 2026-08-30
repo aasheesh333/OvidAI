@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -410,6 +411,7 @@ class PluginDetailScreen extends StatelessWidget {
                         style: const TextStyle(fontSize: 13.5)),
                     onPressed: () {
                       plugin.enabled = !plugin.enabled;
+                      app.persistPluginState();
                       app.refresh();
                     },
                   )
@@ -428,6 +430,7 @@ class PluginDetailScreen extends StatelessWidget {
                     onPressed: () {
                       plugin.installed = true;
                       plugin.enabled = true;
+                      app.persistPluginState();
                       app.refresh();
                     },
                   ),
@@ -452,6 +455,7 @@ class PluginDetailScreen extends StatelessWidget {
                         style: TextStyle(fontSize: 12.5)),
                     onPressed: () {
                       plugin.enabled = true;
+                      app.persistPluginState();
                       app.refresh();
                       ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
@@ -477,6 +481,7 @@ class PluginDetailScreen extends StatelessWidget {
                     onPressed: () {
                       plugin.installed = false;
                       plugin.enabled = false;
+                      app.persistPluginState();
                       app.refresh();
                     },
                   ),
@@ -660,7 +665,7 @@ class _McpSection extends StatelessWidget {
               style: const TextStyle(
                   fontSize: 13.5, fontFamily: Aether.mono),
               decoration: const InputDecoration(
-                  hintText: 'Env var needed? (optional, e.g. GITHUB_TOKEN)'),
+                  hintText: 'Env vars, JSON ({"GITHUB_TOKEN":"ghp_…"}) — optional'),
             ),
             const SizedBox(height: 14),
             SizedBox(
@@ -676,14 +681,36 @@ class _McpSection extends StatelessWidget {
                 label: const Text('Save server', style: TextStyle(fontSize: 13.5)),
                 onPressed: () {
                   if (nameC.text.trim().isEmpty) return;
+                  // Env can be raw var names (envHint) or a JSON object
+                  // with values — the latter is stored in secure storage
+                  // and passed to the spawned server process.
+                  Map<String, String>? envMap;
+                  String? envHint;
+                  final envTxt = envC.text.trim();
+                  if (envTxt.startsWith('{')) {
+                    try {
+                      final m = jsonDecode(envTxt) as Map<String, dynamic>;
+                      envMap = m.map((k, v) => MapEntry(k, v.toString()));
+                    } catch (_) {
+                      ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
+                          content: Text('Env JSON invalid — check syntax')));
+                      return;
+                    }
+                  } else if (envTxt.isNotEmpty) {
+                    envHint = envTxt;
+                  }
                   app.addCustomMcpServer(
                     name: nameC.text,
                     command: cmdC.text.isEmpty ? 'npx' : cmdC.text,
                     args: argsC.text.trim().isEmpty
                         ? []
                         : argsC.text.trim().split(RegExp(r'\s+')),
-                    envHint: envC.text.trim().isEmpty ? null : envC.text.trim(),
+                    envHint: envHint,
                   );
+                  if (envMap != null) {
+                    unawaited(
+                        app.setMcpEnv(nameC.text.trim(), envMap));
+                  }
                   Navigator.pop(ctx);
                 },
               ),
@@ -1049,12 +1076,15 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
           height: MediaQuery.of(ctx).size.height * 0.62,
           child: _McpJsonEditorSheet(
             controller: ctrl,
-            onSave: (command, args) {
+            onSave: (command, args, env) {
               app.updateCustomMcpServer(
                 s,
                 command: command,
                 args: args,
               );
+              // Env values (API keys) → secure storage, passed to the
+              // server process at connect time.
+              unawaited(app.setMcpEnv(s.name, env));
               Navigator.pop(ctx);
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('mcp.json saved ✓')),
@@ -1070,12 +1100,15 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
     final argsJson = s.args.isEmpty
         ? '[]'
         : '[${s.args.map((a) => '"$a"').join(', ')}]';
+    final envJson = s.envHint != null
+        ? ',\n      "env": { "${s.envHint!}": "••••••••" }'
+        : '';
     return '{\n'
         '  "mcpServers": {\n'
         '    "${s.name.toLowerCase()}": {\n'
         '      "command": "${s.command}",\n'
         '      "args": $argsJson'
-        '${s.envHint != null ? ',\n      "env": { "${s.envHint!}": "••••••••" }' : ''}\n'
+        '$envJson\n'
         '    }\n'
         '  }\n'
         '}';
@@ -1083,10 +1116,12 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
 }
 
 /// Bottom-sheet mcp.json editor: multiline TextField + live validation.
-/// Save parses the mcpServers.{name} entry and returns command + args.
+/// Save parses the mcpServers.{name} entry and returns command + args +
+/// env (values stored in secure storage, passed to the server process).
 class _McpJsonEditorSheet extends StatefulWidget {
   final TextEditingController controller;
-  final void Function(String command, List<String> args) onSave;
+  final void Function(String command, List<String> args,
+      Map<String, String> env) onSave;
   const _McpJsonEditorSheet({
     required this.controller,
     required this.onSave,
@@ -1107,7 +1142,8 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
     });
   }
 
-  ({String command, List<String> args})? _parse(String raw) {
+  ({String command, List<String> args, Map<String, String> env})? _parse(
+      String raw) {
     try {
       final j = jsonDecode(raw) as Map<String, dynamic>;
       final servers = j['mcpServers'] as Map<String, dynamic>?;
@@ -1119,7 +1155,10 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
               ?.whereType<String>()
               .toList() ??
           <String>[];
-      return (command: command.trim(), args: args);
+      final env = (entry['env'] as Map<String, dynamic>?)
+              ?.map((k, v) => MapEntry(k, v.toString())) ??
+          <String, String>{};
+      return (command: command.trim(), args: args, env: env);
     } catch (_) {
       return null;
     }
@@ -1194,7 +1233,7 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
                   'Invalid mcp.json — check the JSON syntax and try again.');
               return;
             }
-            widget.onSave(parsed.command, parsed.args);
+            widget.onSave(parsed.command, parsed.args, parsed.env);
           },
         ),
       ],
