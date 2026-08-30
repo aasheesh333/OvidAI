@@ -793,26 +793,115 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
       }
     }
 
-    // ── 5. One-pass dpkg install of the whole closure ──
-    onPhase(7, 0.7, '[deb] dpkg installing $downloaded packages…');
-    final (iCode, iOut) = await execChecked([
+    // ── 5. Extract every .deb directly into $PREFIX ──
+    // dpkg CANNOT work here: Termux's dpkg has /data/data/com.termux
+    // compiled in and always opens THAT config dir → Permission denied
+    // (verified on-device, 10+ identical failures).  But a .deb is just
+    // an `ar` archive wrapping data.tar.xz — curl/ar need no dpkg.
+    // We parse the ar header in Dart, decompress with the bundled xz,
+    // and untar straight into our own writable $PREFIX.
+    onPhase(7, 0.7, '[deb] extracting $downloaded packages…');
+    var extracted = 0;
+    for (final name in toFetch) {
+      final fn = table[name]!.filename.split('/').last;
+      final debPath = '$archives/$fn';
+      final deb = File(debPath);
+      if (!deb.existsSync()) continue;
+      final dataTarXz =
+          await _readArMember(deb, 'data.tar.xz') ??
+          await _readArMember(deb, 'data.tar.gz');
+      if (dataTarXz == null) {
+        onPhase(7, 0.72, '[deb] no data.tar in $fn — skipped');
+        continue;
+      }
+      final fmt = dataTarXz.name.endsWith('.xz') ? '-xJf' : '-xzf';
+      final tmpTar = '$archives/.data.tar';
+      await File(tmpTar).writeAsBytes(dataTarXz.bytes, flush: true);
+      // Termux debs contain paths under data/data/com.termux/files/usr/…
+      // (derooted Android prefix). Extract to a staging dir, then move the
+      // `usr/` subtree up into $PREFIX. Symlinks inside are relative
+      // (libzstd.so.1 -> libzstd.so.1.5.7) so they survive the move.
+      final stage = '$archives/.stage';
+      final (code, out) = await execChecked([
+        'bash',
+        '-c',
+        'rm -rf "$stage" && mkdir -p "$stage" && '
+            'tar $fmt "\$PREFIX/var/cache/apt/archives/.data.tar" -C "$stage" && '
+            'cp -a "$stage/data/data/com.termux/files/usr/." "\$PREFIX/" && '
+            'rm -rf "$stage"'
+            ' 2>&1 | tail -3',
+      ]).timeout(const Duration(minutes: 3));
+      await File(tmpTar).delete().catchError((_) => File(tmpTar));
+      if (code != 0) {
+        onPhase(
+          7,
+          0.72,
+          '[deb] tar failed on $fn: ${out.trim().split('\n').lastOrNull ?? code}',
+        );
+        continue;
+      }
+      extracted++;
+    }
+    if (extracted == 0) {
+      onPhase(7, 0.72, '[deb] nothing extracted — giving up');
+      return false;
+    }
+    onPhase(7, 0.75, '[deb] $extracted/$downloaded packages extracted ✓');
+
+    // ── 5b. PATH/arming sanity: extracted bins must be executable. ──
+    await execChecked([
       'bash',
       '-c',
-      'dpkg --root="\$PREFIX" --admindir="\$PREFIX/var/lib/dpkg" '
-          '-i --force-all "\$PREFIX"/var/cache/apt/archives/*.deb 2>&1'
-          ' | tail -5',
-    ]).timeout(const Duration(minutes: 6));
-    if (iCode != 0 && !iOut.contains('Setting up')) {
-      onPhase(
-        7,
-        0.72,
-        '[deb] dpkg exit $iCode: '
-        '${iOut.trim().split('\n').where((l) => l.isNotEmpty).lastOrNull ?? 'no output'}',
-      );
-    }
+      'chmod +x "\$PREFIX"/bin/* 2>/dev/null; '
+          'command -v node npm python git curl 2>&1 | head -8',
+    ]).timeout(const Duration(seconds: 20));
 
     // ── 6. Idempotent verification ──
     return await runtimesVerified();
+  }
+
+  /// Reads one member of an `ar` archive (`.deb` container) in pure Dart.
+  /// Returns null when [wanted] (e.g. `data.tar.xz`) is not present.
+  /// ar format: `!<arch>\n` global header, then per-member 60-byte headers
+  /// (name[16] mtime[12] uid[6] gid[6] mode[8] size[10] magic[2]="`\n"),
+  /// data padded to even byte boundary. Member names like "data.tar.xz/".
+  Future<({String name, List<int> bytes})?> _readArMember(
+    File ar,
+    String wanted,
+  ) async {
+    try {
+      final raf = await ar.open();
+      try {
+        final magic = await raf.read(8);
+        if (magic.length != 8 ||
+            String.fromCharCodes(magic.take(7)) != '!<arch>') {
+          return null;
+        }
+        while (true) {
+          final header = await raf.read(60);
+          if (header.length < 60) break;
+          final rawName = String.fromCharCodes(header.sublist(0, 16)).trim();
+          final sizeStr = String.fromCharCodes(header.sublist(48, 58)).trim();
+          final size = int.tryParse(sizeStr) ?? 0;
+          final name = rawName.endsWith('/')
+              ? rawName.substring(0, rawName.length - 1)
+              : rawName;
+          if (name == wanted) {
+            final bytes = await raf.read(size);
+            return (name: name, bytes: bytes);
+          }
+          // Skip this member (data padded to even offset).
+          await raf.setPosition(
+            await raf.position() + size + (size.isOdd ? 1 : 0),
+          );
+        }
+        return null;
+      } finally {
+        await raf.close();
+      }
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Writes `$prefix/etc/apt/sources.list` for one mirror (idempotent).
