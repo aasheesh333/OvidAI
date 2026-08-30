@@ -948,77 +948,145 @@ class _EmptyState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final shuffled = [..._suggestionPool]..shuffle();
-    final suggestions = shuffled.take(4).toList();
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 56,
-              height: 56,
-              decoration: BoxDecoration(
-                color: Aether.accent,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: const Center(
-                child: Text(
-                  'O',
+    final suggestions = shuffled.take(5).toList();
+    // DSH-web home: left-aligned content block, big light-weight greeting,
+    // a small MONOSPACED tag under it, then minimal full-width suggestion
+    // rows separated by hairlines (not heavy cards).
+    return LayoutBuilder(
+      builder: (context, c) {
+        return SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(22, 40, 22, 24),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: c.maxHeight - 64),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                // Brand mark (kept — Ovid identity, same as header rule).
+                Container(
+                  width: 52,
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: Aether.accent,
+                    borderRadius: BorderRadius.circular(15),
+                  ),
+                  child: const Center(
+                    child: Text(
+                      'O',
+                      style: TextStyle(
+                        fontSize: 25,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 22),
+                // Greeting — DSH scale: 26px, medium weight (not bold).
+                const Text(
+                  'How can I help?',
                   style: TextStyle(
                     fontSize: 26,
-                    fontWeight: FontWeight.w800,
-                    color: Colors.white,
+                    fontWeight: FontWeight.w500,
+                    height: 32 / 26,
+                    letterSpacing: -0.2,
                   ),
                 ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'How can I help?',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'Add an API key in Settings → Providers to get started.',
-              style: TextStyle(fontSize: 13, color: Aether.textMuted),
-            ),
-            const SizedBox(height: 28),
-            for (final s in suggestions)
-              GestureDetector(
-                onTap: () => onSuggest?.call(s.$2),
-                child: Container(
-                  width: 320,
-                  margin: const EdgeInsets.only(bottom: 8),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 11,
-                  ),
+                const SizedBox(height: 8),
+                // Monospace tag — DSH "Preview" chip style.
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(
-                    color: Aether.surface,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Aether.hairline),
+                    color: Aether.accent.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                      color: Aether.accent.withValues(alpha: 0.25),
+                    ),
                   ),
-                  child: Row(
-                    children: [
-                      Text(s.$1, style: const TextStyle(fontSize: 15)),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          s.$2,
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: Aether.textMuted,
-                          ),
-                        ),
-                      ),
-                    ],
+                  child: Text(
+                    'agentic preview',
+                    style: TextStyle(
+                      fontFamily: Aether.mono,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      height: 18 / 12,
+                      color: Aether.accent,
+                    ),
                   ),
                 ),
-              ),
-          ],
+                const SizedBox(height: 30),
+                // Section label.
+                Text(
+                  'TRY',
+                  style: TextStyle(
+                    fontFamily: Aether.mono,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 1.4,
+                    color: Aether.textFaint,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                // Minimal full-width rows, hairline separators (DSH list).
+                for (var i = 0; i < suggestions.length; i++)
+                  _SuggestionRow(
+                    emoji: suggestions[i].$1,
+                    text: suggestions[i].$2,
+                    showDivider: i != 0,
+                    onTap: () => onSuggest?.call(suggestions[i].$2),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// DSH-web minimal suggestion row — emoji + text, hairline divider above,
+/// subtle press highlight, chevron on the right.  No heavy card chrome.
+class _SuggestionRow extends StatelessWidget {
+  final String emoji;
+  final String text;
+  final bool showDivider;
+  final VoidCallback? onTap;
+  const _SuggestionRow({
+    required this.emoji,
+    required this.text,
+    this.showDivider = true,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (showDivider) Divider(height: 1, color: Aether.hairline),
+        InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 13),
+            child: Row(
+              children: [
+                Text(emoji, style: const TextStyle(fontSize: 16)),
+                const SizedBox(width: 13),
+                Expanded(
+                  child: Text(
+                    text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 14.5, color: Aether.textMuted),
+                  ),
+                ),
+                Icon(Icons.north_east, size: 14, color: Aether.textFaint),
+              ],
+            ),
+          ),
         ),
-      ),
+      ],
     );
   }
 }
@@ -1876,9 +1944,11 @@ class _InputBar extends StatelessWidget {
                 controller: controller,
                 minLines: 1,
                 maxLines: 5,
-                style: const TextStyle(fontSize: 14),
+                // DSH composer: 16px input, 24px line-height.
+                style: const TextStyle(fontSize: 16, height: 24 / 16),
                 decoration: const InputDecoration(
-                  hintText: 'Ask anything…',
+                  hintText: 'Describe what you want to build…',
+                  hintStyle: TextStyle(fontSize: 16, height: 24 / 16),
                   filled: false,
                   border: InputBorder.none,
                   enabledBorder: InputBorder.none,
@@ -1901,6 +1971,9 @@ class _InputBar extends StatelessWidget {
                   ),
                   // DSH-web mode selector — icon + text chip, opens the mode sheet.
                   const _ModeChip(),
+                  const SizedBox(width: 6),
+                  // DSH-web model chip — "Model · effort" with caret.
+                  const _ComposerModelChip(),
                   const Spacer(),
                   IconButton(
                     tooltip: 'Voice',
@@ -2777,6 +2850,76 @@ class _QuestionsCardState extends State<_QuestionsCard> {
 
 /// Permission mode chip (Read-Only / General / Full Access / Studio) —
 /// DSH-web dropdown under the input. Tapping cycles; long-press opens sheet.
+/// DSH-web composer model chip — shows the active session's model with an
+/// up/down caret; tapping opens the model picker sheet.  Matches DSH's
+/// "Nemotron 3 Super · High" toolbar chip.
+class _ComposerModelChip extends StatelessWidget {
+  const _ComposerModelChip();
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AppState.I,
+      builder: (_, _) {
+        final s = AppState.I.activeSession;
+        final raw = s?.model ?? 'Select model';
+        final label = raw == 'Select a provider' ? 'Select model' : raw;
+        return GestureDetector(
+          onTap: () => _openModelPicker(context),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            decoration: BoxDecoration(
+              color: Aether.surfaceRaised,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Aether.hairline),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.smart_toy_outlined,
+                    size: 12, color: Aether.textMuted),
+                const SizedBox(width: 5),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 130),
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Aether.textMuted,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 2),
+                Icon(Icons.unfold_more, size: 13, color: Aether.textFaint),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _openModelPicker(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: 0.5,
+        minChildSize: 0.32,
+        maxChildSize: 0.92,
+        snap: true,
+        snapSizes: const [0.5, 0.92],
+        builder: (ctx, scrollController) =>
+            _ModelPickerSheet(scrollController: scrollController),
+      ),
+    );
+  }
+}
+
 class _ModeChip extends StatelessWidget {
   const _ModeChip();
 

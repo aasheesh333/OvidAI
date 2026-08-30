@@ -799,7 +799,7 @@ class _TerminalState extends State<_Terminal> {
       final sessionId = AppState.I.activeSession?.sandboxId ?? 'default';
       final workDir = await SandboxService.I.workDirFor(sessionId);
       final out = await SandboxService.I.exec(
-        ['bash', '-lc', c],
+        ['bash', '-c', c],
         hostWorkDir: workDir,
         onLine: (l) {
           if (!mounted) return;

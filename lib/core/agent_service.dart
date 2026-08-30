@@ -2528,7 +2528,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           if (mode == AgentMode.studio) {
             // Studio tier — native bionic sandbox (bash/python/node/apt).
             final out = await SandboxService.I
-                .exec(['bash', '-lc', cmd], hostWorkDir: work)
+                .exec(['bash', '-c', cmd], hostWorkDir: work)
                 .timeout(const Duration(seconds: 60));
             for (final l in const LineSplitter().convert(out.trim())) {
               _emit('shellOut', l);
@@ -4064,7 +4064,7 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         // Same env/loader setup as exec() — PROOT_LOADER is required or
         // every guest execve hits EACCES (noexec temp fallback).
         job.process = await SandboxService.I.spawn(
-          ['bash', '-lc', cmd],
+          ['bash', '-c', cmd],
           hostWorkDir: work,
           env: {
             'HOME': '/root',

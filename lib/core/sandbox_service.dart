@@ -227,6 +227,20 @@ class SandboxService {
     Directory('${prefix.path}/home').createSync(recursive: true);
     Directory('${prefix.path}/tmp').createSync(recursive: true);
 
+    // ── Write OUR profile (defense-in-depth) ──
+    // Termux's bash has its prefix COMPILED IN, so `bash -l` sources
+    // `<termux>/etc/profile` (an unreadable cross-uid path →
+    // "Permission denied"). We run non-interactive exec with `-c` (no
+    // profile), but the interactive terminal may still want a profile —
+    // make sure OUR prefix's etc/profile points at OUR prefix, and drop a
+    // bashrc that exports the right PATH/LD_LIBRARY_PATH.
+    _writeProfile(prefix);
+
+    // ── Remove stale node tarballs from older installs ──
+    // Older builds downloaded node-vXX into HOME instead of using apt —
+    // those leftover dirs confuse PATH and waste space.
+    _cleanStaleHome(prefix);
+
     // ── Sanity: run bash --version natively ──
     // execChecked surfaces BOTH the exit code and stderr.  The dynamic
     // linker's "CANNOT LINK EXECUTABLE ... library not found" errors go
@@ -252,17 +266,17 @@ class SandboxService {
     // ── Phase 7: Install Node.js + npm (needed by all npx-based MCP servers) ──
     onPhase(7, 0.0, r'$ apt update && apt install -y nodejs npm');
     try {
-      final (_, _) = await execChecked(['bash', '-lc', 'apt update 2>&1'])
+      final (_, _) = await execChecked(['bash', '-c', 'apt update 2>&1'])
           .timeout(const Duration(minutes: 3));
       onPhase(7, 0.3, 'apt update ......... ✓');
       // Install nodejs + npm. npx comes from the npm package.
-      await execChecked(['bash', '-lc', 'apt install -y nodejs npm 2>&1'])
+      await execChecked(['bash', '-c', 'apt install -y nodejs npm 2>&1'])
           .timeout(const Duration(minutes: 5));
       final (nodeCode, nodeVer) =
-          await execChecked(['bash', '-lc', 'node --version 2>&1'])
+          await execChecked(['bash', '-c', 'node --version 2>&1'])
               .timeout(const Duration(seconds: 10));
       final (npxCode, npxVer) =
-          await execChecked(['bash', '-lc', 'npx --version 2>&1'])
+          await execChecked(['bash', '-c', 'npx --version 2>&1'])
               .timeout(const Duration(seconds: 10));
       final ok = nodeCode == 0 && npxCode == 0;
       if (ok) {
@@ -282,13 +296,13 @@ class SandboxService {
     // ── Phase 8: Install Python + pip + uv (needed by uvx-based MCP servers) ──
     onPhase(8, 0.0, r'$ apt install -y python python-pip uv');
     try {
-      await execChecked(['bash', '-lc', 'apt install -y python python-pip uv 2>&1'])
+      await execChecked(['bash', '-c', 'apt install -y python python-pip uv 2>&1'])
           .timeout(const Duration(minutes: 5));
       final (pyCode, pyVer) =
-          await execChecked(['bash', '-lc', 'python --version 2>&1'])
+          await execChecked(['bash', '-c', 'python --version 2>&1'])
               .timeout(const Duration(seconds: 10));
       final (uvxCode, uvxVer) =
-          await execChecked(['bash', '-lc', 'uvx --version 2>&1'])
+          await execChecked(['bash', '-c', 'uvx --version 2>&1'])
               .timeout(const Duration(seconds: 10));
       final ok = pyCode == 0 && uvxCode == 0;
       if (ok) {
@@ -347,6 +361,54 @@ class SandboxService {
       }
     }
     return count;
+  }
+
+  /// Write a sane `$PREFIX/etc/profile` + `$PREFIX/etc/bash.bashrc` that
+  /// export OUR prefix (not Termux's).  The Termux bootstrap ships these
+  /// files pointing at /data/data/com.termux/files/usr; our text rewrite
+  /// fixes real files, but this guarantees a correct profile regardless of
+  /// symlinks/permissions.
+  void _writeProfile(Directory prefix) {
+    final p = prefix.path;
+    final etc = Directory('$p/etc')..createSync(recursive: true);
+    final profile = '''
+# Ovid sandbox profile (overrides Termux bootstrap default).
+export PREFIX="$p"
+export HOME="\$PREFIX/home"
+export TMPDIR="\$PREFIX/tmp"
+export PATH="\$PREFIX/bin:\$PREFIX/bin/applets:/system/bin:/system/xbin"
+export LD_LIBRARY_PATH="\$PREFIX/lib"
+export LANG="en_US.UTF-8"
+export TERM="xterm-256color"
+''';
+    try {
+      File('${etc.path}/profile').writeAsStringSync(profile);
+    } catch (_) {}
+    try {
+      File('${etc.path}/bash.bashrc').writeAsStringSync(profile);
+    } catch (_) {}
+    // Also drop a ~/.bashrc so interactive `bash -i` picks it up.
+    try {
+      File('$p/home/.bashrc').writeAsStringSync(profile);
+    } catch (_) {}
+  }
+
+  /// Delete leftover node-vXX dirs that older builds dropped into HOME.
+  void _cleanStaleHome(Directory prefix) {
+    final home = Directory('${prefix.path}/home');
+    if (!home.existsSync()) return;
+    try {
+      for (final e in home.listSync()) {
+        final name = e.path.split('/').last;
+        if (name.startsWith('node-v') ||
+            name.startsWith('node_') ||
+            name == 'node') {
+          try {
+            e.deleteSync(recursive: true);
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
   }
 
   void _rewritePrefixInConfigs(Directory prefix) {
@@ -553,7 +615,7 @@ class SandboxService {
     // Fast path: check if already present (exit-code based —
     // `command -v` prints nothing and exits 1 when missing).
     try {
-      final (code, _) = await execChecked(['bash', '-lc', 'command -v $bin'])
+      final (code, _) = await execChecked(['bash', '-c', 'command -v $bin'])
           .timeout(const Duration(seconds: 10));
       if (code == 0) {
         _runtimeEnsured[kind] = true;
@@ -562,13 +624,13 @@ class SandboxService {
     } catch (_) {}
     onLine?.call('[runtime] installing ${kind == 'node' ? 'nodejs + npm' : 'python + pip + uv'}…');
     try {
-      await execChecked(['bash', '-lc', 'apt update 2>&1'])
+      await execChecked(['bash', '-c', 'apt update 2>&1'])
           .timeout(const Duration(minutes: 3));
       final pkgs = kind == 'node' ? 'nodejs npm' : 'python python-pip uv';
-      await execChecked(['bash', '-lc', 'apt install -y $pkgs 2>&1'])
+      await execChecked(['bash', '-c', 'apt install -y $pkgs 2>&1'])
           .timeout(const Duration(minutes: 5));
       final (vCode, _) =
-          await execChecked(['bash', '-lc', 'command -v $bin'])
+          await execChecked(['bash', '-c', 'command -v $bin'])
               .timeout(const Duration(seconds: 10));
       final ok = vCode == 0;
       if (ok) _runtimeEnsured[kind] = true;
@@ -584,7 +646,7 @@ class SandboxService {
   /// Whether a runtime binary exists right now (no install attempted).
   Future<bool> hasRuntime(String bin) async {
     try {
-      final (code, _) = await execChecked(['bash', '-lc', 'command -v $bin'])
+      final (code, _) = await execChecked(['bash', '-c', 'command -v $bin'])
           .timeout(const Duration(seconds: 10));
       return code == 0;
     } catch (_) {
