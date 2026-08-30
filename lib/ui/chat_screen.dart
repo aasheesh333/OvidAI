@@ -1688,18 +1688,22 @@ class _MessageView extends StatelessWidget {
   Widget _text(bool isUser) => Container(
         padding: EdgeInsets.symmetric(
           horizontal: isUser ? 14 : 4,
-          vertical: isUser ? 11 : 4,
+          vertical: isUser ? 10 : 4,
         ),
         decoration: BoxDecoration(
-          color: isUser ? Aether.surfaceRaised : Colors.transparent,
-          borderRadius: BorderRadius.circular(14),
-          border: isUser ? Border.all(color: Aether.hairline) : null,
+          // DSH-web user bubble: a SOFT accent-tinted fill, fully rounded,
+          // NO hard border (the bordered "wireframe box" was the visual
+          // mismatch the user flagged). Assistant stays borderless prose.
+          color: isUser
+              ? Aether.accent.withValues(alpha: 0.16)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(18),
         ),
         child: isUser
             ? Text(
                 m.content,
                 style: TextStyle(
-                  fontSize: 14,
+                  fontSize: 14.5,
                   height: 1.5,
                   color: Aether.text,
                 ),
@@ -2230,36 +2234,49 @@ class _TypingBubbleState extends State<_TypingBubble>
 
   @override
   Widget build(BuildContext context) {
+    // DSH-web inline "thinking" shimmer — a borderless row (pulsing dot +
+    // shimmering "Deep diving…" text), NOT a boxed card. Matches the live
+    // DSH status line that appears while the model streams.
     return Align(
       alignment: Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 12),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        decoration: BoxDecoration(
-          color: Aether.surface,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Aether.hairline),
-        ),
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 12, left: 4),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            for (var i = 0; i < 3; i++)
-              AnimatedBuilder(
-                animation: c,
-                builder: (_, _) {
-                  final t = (c.value * 3 - i).clamp(0.0, 1.0);
-                  final op = 0.25 + 0.75 * (t < 0.5 ? t * 2 : (1 - t) * 2);
-                  return Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 2),
-                    width: 6,
-                    height: 6,
-                    decoration: BoxDecoration(
-                      color: Aether.accent.withValues(alpha: op),
-                      shape: BoxShape.circle,
-                    ),
-                  );
-                },
-              ),
+            AnimatedBuilder(
+              animation: c,
+              builder: (_, _) {
+                final op = 0.3 + 0.7 * (0.5 - (c.value - 0.5).abs()) * 2;
+                return Container(
+                  width: 7,
+                  height: 7,
+                  decoration: BoxDecoration(
+                    color: Aether.accent.withValues(alpha: op),
+                    shape: BoxShape.circle,
+                  ),
+                );
+              },
+            ),
+            const SizedBox(width: 9),
+            AnimatedBuilder(
+              animation: c,
+              builder: (_, _) {
+                // Shimmer: slide a highlight across the text color.
+                final t = (c.value * 2) % 1.0;
+                final base = Aether.textMuted;
+                final hi = Aether.text;
+                final mix = Color.lerp(base, hi, (0.5 - (t - 0.5).abs()) * 2);
+                return Text(
+                  'Deep diving…',
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w500,
+                    color: mix,
+                  ),
+                );
+              },
+            ),
           ],
         ),
       ),

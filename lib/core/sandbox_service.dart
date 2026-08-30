@@ -235,6 +235,9 @@ class SandboxService {
     // make sure OUR prefix's etc/profile points at OUR prefix, and drop a
     // bashrc that exports the right PATH/LD_LIBRARY_PATH.
     _writeProfile(prefix);
+    // apt/dpkg have Termux's prefix compiled in and LD_PRELOAD redirect is
+    // unreliable — give apt an explicit Dir config rooted at OUR prefix.
+    _writeAptConfig(prefix);
 
     // ── Remove stale node tarballs from older installs ──
     // Older builds downloaded node-vXX into HOME instead of using apt —
@@ -263,59 +266,95 @@ class SandboxService {
           'Report this with your device model.');
     }
 
-    // ── Phase 7: Install Node.js + npm (needed by all npx-based MCP servers) ──
-    onPhase(7, 0.0, r'$ apt update && apt install -y nodejs npm');
-    try {
-      final (_, _) = await execChecked(['bash', '-c', 'apt update 2>&1'])
-          .timeout(const Duration(minutes: 3));
-      onPhase(7, 0.3, 'apt update ......... ✓');
-      // Install nodejs + npm. npx comes from the npm package.
-      await execChecked(['bash', '-c', 'apt install -y nodejs npm 2>&1'])
-          .timeout(const Duration(minutes: 5));
-      final (nodeCode, nodeVer) =
-          await execChecked(['bash', '-c', 'node --version 2>&1'])
-              .timeout(const Duration(seconds: 10));
-      final (npxCode, npxVer) =
-          await execChecked(['bash', '-c', 'npx --version 2>&1'])
-              .timeout(const Duration(seconds: 10));
-      final ok = nodeCode == 0 && npxCode == 0;
-      if (ok) {
-        onPhase(7, 1.0,
-            'node ................ ✓ ${nodeVer.trim().split('\n').first} · npx ${npxVer.trim().split('\n').first}');
-      } else {
-        onPhase(7, 1.0,
-            'node ................ ⚠ deferred (will retry on first MCP connect)');
+    // ── Phase 7: Runtimes — node/npm/npx/pnpm + python/pip/uv ─────────
+    // These are REQUIRED for MCP servers (npx/uvx) and for the agent's
+    // node/python tooling, so we install them eagerly at first launch and
+    // VERIFY each binary actually runs. apt update+install is retried —
+    // a single flaky mirror/timeout must not leave the sandbox runtimeless.
+    onPhase(7, 0.0, r'$ apt update && apt install runtimes');
+    await _installRuntimesWithRetry(onPhase);
+  }
+
+  /// Install + verify node/npm/npx/pnpm and python/pip/uv, retrying the
+  /// apt steps. Reports progress via [onPhase]. Never throws — on total
+  /// failure it logs a clear ⚠ line and leaves the lazy ensureRuntime()
+  /// fallback to retry on first use (so the app still opens offline).
+  Future<void> _installRuntimesWithRetry(
+    void Function(int phase, double progress, String line) onPhase,
+  ) async {
+    Future<bool> binRuns(String bin, [String args = '--version']) async {
+      try {
+        final (code, _) = await execChecked(['bash', '-c', '$bin $args 2>&1'])
+            .timeout(const Duration(seconds: 15));
+        return code == 0;
+      } catch (_) {
+        return false;
       }
-    } catch (e) {
-      // Network failure or timeout — don't block the whole install.
-      // McpService._ensureRuntime will retry lazily on first connect.
-      onPhase(7, 1.0,
-          'node ................ ⚠ deferred ($e) — will install on first MCP connect');
     }
 
-    // ── Phase 8: Install Python + pip + uv (needed by uvx-based MCP servers) ──
-    onPhase(8, 0.0, r'$ apt install -y python python-pip uv');
-    try {
-      await execChecked(['bash', '-c', 'apt install -y python python-pip uv 2>&1'])
-          .timeout(const Duration(minutes: 5));
-      final (pyCode, pyVer) =
-          await execChecked(['bash', '-c', 'python --version 2>&1'])
-              .timeout(const Duration(seconds: 10));
-      final (uvxCode, uvxVer) =
-          await execChecked(['bash', '-c', 'uvx --version 2>&1'])
-              .timeout(const Duration(seconds: 10));
-      final ok = pyCode == 0 && uvxCode == 0;
-      if (ok) {
-        onPhase(8, 1.0,
-            'python .............. ✓ ${pyVer.trim().split('\n').first} · uvx ${uvxVer.trim().split('\n').first}');
-      } else {
-        onPhase(8, 1.0,
-            'python .............. ⚠ deferred (will retry on first uvx MCP connect)');
+    // Up to 3 attempts of (apt update && apt install runtimes).
+    // git + curl included so the agent has VCS + HTTP tooling out of the box.
+    const pkgs = 'nodejs npm python python-pip uv git curl';
+    var installed = false;
+    for (var attempt = 1; attempt <= 3 && !installed; attempt++) {
+      try {
+        onPhase(7, 0.05, attempt == 1
+            ? r'$ apt update'
+            : 'retry $attempt/3 · apt update');
+        await execChecked(['bash', '-c', 'apt update 2>&1'])
+            .timeout(const Duration(minutes: 3));
+        onPhase(7, 0.3, 'apt update ......... ✓');
+        onPhase(7, 0.4, '\$ apt install -y $pkgs');
+        final (code, out) =
+            await execChecked(['bash', '-c', 'apt install -y $pkgs 2>&1'])
+                .timeout(const Duration(minutes: 8));
+        installed = code == 0;
+        if (!installed) {
+          final lines = out
+              .trim()
+              .split('\n')
+              .where((l) => l.trim().isNotEmpty)
+              .toList();
+          onPhase(7, 0.4,
+              'apt exit $code — ${lines.isEmpty ? "" : lines.last}');
+        }
+      } catch (e) {
+        onPhase(7, 0.4, 'attempt $attempt failed: '
+            '${e.toString().split('\n').first}');
       }
-    } catch (e) {
-      onPhase(8, 1.0,
-          'python .............. ⚠ deferred ($e) — will install on first uvx MCP connect');
     }
+
+    // Verify node + npm/npx.
+    if (await binRuns('node')) {
+      final nodeOk = await binRuns('node');
+      final npmOk = await binRuns('npm');
+      final npxOk = await binRuns('npx');
+      if (nodeOk && npmOk && npxOk) {
+        // pnpm via corepack (bundled with node) — enable + prepare, non-fatal.
+        var pnpmNote = 'pnpm ✗';
+        try {
+          await execChecked([
+            'bash', '-c',
+            'corepack enable 2>&1; corepack prepare pnpm@latest --activate 2>&1'
+          ]).timeout(const Duration(minutes: 2));
+          pnpmNote = await binRuns('pnpm') ? 'pnpm ✓' : 'pnpm ✗';
+        } catch (_) {}
+        onPhase(7, 0.7, 'node ................ ✓ node · npm · npx · $pnpmNote');
+      } else {
+        onPhase(7, 0.7, 'node ................ ⚠ node ok but npm/npx missing');
+      }
+    } else {
+      onPhase(7, 0.7, 'node ................ ⚠ not installed (offline?) — '
+          'will retry on first MCP connect');
+    }
+
+    // Verify python + pip + uvx.
+    final pyOk = await binRuns('python');
+    final pipOk = await binRuns('pip');
+    final uvxOk = await binRuns('uvx');
+    onPhase(8, 1.0, pyOk && uvxOk
+        ? 'python .............. ✓ python · ${pipOk ? "pip" : "pip✗"} · uvx ✓'
+        : 'python .............. ⚠ ${pyOk ? "partial (uv missing)" : "not installed"} — will retry on first uvx MCP connect');
   }
 
   /// A parsed symlink: `target` is what the link points to, `linkPath` is
@@ -430,6 +469,78 @@ export TERM="xterm-256color"
     }
   }
 
+  /// Write an apt config that points EVERY Dir at OUR prefix and export it
+  /// via APT_CONFIG.  The apt/dpkg binaries have Termux's prefix COMPILED
+  /// IN, and the LD_PRELOAD path-redirect (termux-exec) is blocked by
+  /// SELinux on many devices — so apt would otherwise read
+  /// /data/data/com.termux/... → "Permission denied" / "no packaging
+  /// system".  An explicit Dir tree makes apt fully prefix-independent.
+  void _writeAptConfig(Directory prefix) {
+    final p = prefix.path;
+    final conf = '''
+// Ovid sandbox apt config — override the compiled-in Termux prefix.
+Dir "$p";
+Dir::State "$p/var/lib/apt";
+Dir::State::status "$p/var/lib/dpkg/status";
+Dir::Cache "$p/var/cache/apt";
+Dir::Etc "$p/etc/apt";
+Dir::Etc::sourcelist "$p/etc/apt/sources.list";
+Dir::Etc::sourceparts "$p/etc/apt/sources.list.d";
+Dir::Etc::main "$p/etc/apt/apt.conf";
+Dir::Etc::parts "$p/etc/apt/apt.conf.d";
+Dir::Etc::trusted "$p/etc/apt/trusted.gpg";
+Dir::Etc::trustedparts "$p/etc/apt/trusted.gpg.d";
+Dir::Bin::dpkg "$p/bin/dpkg";
+Dir::Bin::apt-get "$p/bin/apt-get";
+Dir::Bin::methods "$p/lib/apt/methods";
+Dir::Bin::solvers "$p/lib/apt/solvers";
+Dir::Bin::planners "$p/lib/apt/planners";
+DPkg::Pre-Install-Pkgs "";
+DPkg::Options:: "--root=$p";
+DPkg::Options:: "--admindir=$p/var/lib/dpkg";
+APT::Get::Assume-Yes "true";
+''';
+    try {
+      final etc = Directory('$p/etc/apt')..createSync(recursive: true);
+      File('${etc.path}/ovid-apt.conf').writeAsStringSync(conf);
+    } catch (_) {}
+    // Point the default apt.conf at ours too (some apt builds read Dir::Etc::main).
+    try {
+      File('$p/etc/apt/apt.conf').writeAsStringSync(conf);
+    } catch (_) {}
+    // apt needs the Termux signing keys to verify packages. They ship under
+    // share/termux-keyring/*.gpg — link them into trusted.gpg.d so apt's
+    // GPGV verification succeeds (otherwise every install is rejected).
+    try {
+      final keyring = Directory('$p/share/termux-keyring');
+      final trusted = Directory('$p/etc/apt/trusted.gpg.d')
+        ..createSync(recursive: true);
+      if (keyring.existsSync()) {
+        for (final k in keyring.listSync()) {
+          if (k.path.endsWith('.gpg')) {
+            final name = k.path.split('/').last;
+            final dest = '${trusted.path}/$name';
+            if (!File(dest).existsSync()) {
+              try {
+                Link(dest).createSync(k.path);
+              } catch (_) {
+                try {
+                  File(k.path).copySync(dest);
+                } catch (_) {}
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    // dpkg needs an admindir + a status file to consider packages installed.
+    try {
+      Directory('$p/var/lib/dpkg').createSync(recursive: true);
+      final status = File('$p/var/lib/dpkg/status');
+      if (!status.existsSync()) status.writeAsStringSync('');
+    } catch (_) {}
+  }
+
   Future<void> _chmodTree(Directory root, List<String> subdirs) async {
     for (final sub in subdirs) {
       final dir = Directory('${root.path}/$sub');
@@ -503,6 +614,14 @@ export TERM="xterm-256color"
       'TERM': 'xterm-256color',
       'ANDROID_DATA': '/data',
       'ANDROID_ROOT': '/system',
+      // Point apt at our explicit Dir config (bypasses the compiled-in
+      // Termux prefix that SELinux-blocked LD_PRELOAD fails to redirect).
+      'APT_CONFIG': '$p/etc/apt/ovid-apt.conf',
+      // TLS roots for curl/git/wget — they look for the CA bundle at the
+      // compiled-in Termux path otherwise and HTTPS fails ("google: 000").
+      'CURL_CA_BUNDLE': '$p/etc/tls/cert.pem',
+      'SSL_CERT_FILE': '$p/etc/tls/cert.pem',
+      'GIT_SSL_CAINFO': '$p/etc/tls/cert.pem',
     };
   }
 
@@ -528,10 +647,15 @@ export TERM="xterm-256color"
         workingDirectory: cwd ??
             (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home'),
         environment: merged,
-        stdoutEncoding: utf8,
-        stderrEncoding: utf8,
+        // Decode manually with allowMalformed — apt/gpg/node can emit bytes
+        // that aren't valid UTF-8; utf8 directly throws FormatException and
+        // kills the whole command ("Unexpected extension byte").
+        stdoutEncoding: null,
+        stderrEncoding: null,
       );
-      final out = '${result.stdout}${result.stderr}';
+      final out =
+          '${utf8.decode(result.stdout as List<int>, allowMalformed: true)}'
+          '${utf8.decode(result.stderr as List<int>, allowMalformed: true)}';
       if (onLine != null) {
         for (final l in const LineSplitter().convert(out)) {
           onLine(l);
@@ -593,10 +717,13 @@ export TERM="xterm-256color"
       workingDirectory: cwd ??
           (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home'),
       environment: merged,
-      stdoutEncoding: utf8,
-      stderrEncoding: utf8,
+      stdoutEncoding: null,
+      stderrEncoding: null,
     );
-    return (result.exitCode, '${result.stdout}${result.stderr}');
+    final out =
+        '${utf8.decode(result.stdout as List<int>, allowMalformed: true)}'
+        '${utf8.decode(result.stderr as List<int>, allowMalformed: true)}';
+    return (result.exitCode, out);
   }
 
   // ═════════════════════════════════════════════════════════════════
@@ -622,13 +749,21 @@ export TERM="xterm-256color"
         return true;
       }
     } catch (_) {}
-    onLine?.call('[runtime] installing ${kind == 'node' ? 'nodejs + npm' : 'python + pip + uv'}…');
+    onLine?.call('[runtime] installing ${kind == 'node' ? 'nodejs + npm + pnpm' : 'python + pip + uv'}…');
     try {
       await execChecked(['bash', '-c', 'apt update 2>&1'])
           .timeout(const Duration(minutes: 3));
       final pkgs = kind == 'node' ? 'nodejs npm' : 'python python-pip uv';
       await execChecked(['bash', '-c', 'apt install -y $pkgs 2>&1'])
-          .timeout(const Duration(minutes: 5));
+          .timeout(const Duration(minutes: 8));
+      if (kind == 'node') {
+        // Enable pnpm via corepack (best-effort, non-fatal).
+        try {
+          await execChecked(['bash', '-c',
+            'corepack enable 2>&1; corepack prepare pnpm@latest --activate 2>&1'
+          ]).timeout(const Duration(minutes: 2));
+        } catch (_) {}
+      }
       final (vCode, _) =
           await execChecked(['bash', '-c', 'command -v $bin'])
               .timeout(const Duration(seconds: 10));
@@ -736,10 +871,11 @@ export TERM="xterm-256color"
       '/system/bin/sh',
       ['-c', cmd],
       workingDirectory: hostWorkDir?.path,
-      stdoutEncoding: utf8,
-      stderrEncoding: utf8,
+      stdoutEncoding: null,
+      stderrEncoding: null,
     );
-    return '${result.stdout}${result.stderr}';
+    return '${utf8.decode(result.stdout as List<int>, allowMalformed: true)}'
+        '${utf8.decode(result.stderr as List<int>, allowMalformed: true)}';
   }
 
   // ═════════════════════════════════════════════════════════════════

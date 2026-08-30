@@ -866,6 +866,89 @@ class AgentService extends ChangeNotifier {
         'parameters': {'type': 'object', 'properties': {}},
       },
     },
+    // ── Real-user interaction (chrome-devtools-mcp parity) ──
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_scroll',
+        'description':
+            'Scroll the page like a real user. direction: up|down|top|bottom; '
+            'amount in px (default 600). Use to reveal off-screen content.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'direction': {'type': 'string', 'enum': ['up', 'down', 'top', 'bottom']},
+            'amount': {'type': 'integer'},
+          },
+          'required': ['direction'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_type',
+        'description':
+            'Type text into an input/textarea identified by a CSS selector, '
+            'like a real user (focuses, sets value, fires input/change events). '
+            'Set submit=true to also submit the enclosing form / press Enter.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'selector': {'type': 'string'},
+            'text': {'type': 'string'},
+            'submit': {'type': 'boolean'},
+          },
+          'required': ['selector', 'text'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_press_key',
+        'description':
+            'Press a key on the page (Enter, Tab, Escape, ArrowDown, etc.), '
+            'dispatching real keydown/keyup events to the focused element.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'key': {'type': 'string'},
+          },
+          'required': ['key'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_wait_for',
+        'description':
+            'Wait until text appears on the page (or a timeout ms elapses). '
+            'Use after an action that loads content asynchronously. '
+            'Returns the matched text or "timeout".',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'text': {'type': 'string'},
+            'timeoutMs': {'type': 'integer'},
+          },
+          'required': ['text'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_snapshot',
+        'description':
+            'Return an accessibility-style outline of the page: interactive '
+            'elements (links, buttons, inputs) with their text and a CSS '
+            'selector you can pass to browser_click/browser_type. '
+            'Use this to decide WHAT to click instead of guessing selectors.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
     // ── Tab management (user sees the strip in the Browser screen) ──
     {
       'type': 'function',
@@ -3135,6 +3218,146 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
           return 'read failed: $e';
         }
 
+      // ── Real-user interaction (chrome-devtools-mcp parity) ──
+      case 'browser_scroll':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        final dir = args['direction'] as String;
+        final amount = (args['amount'] as num?)?.toInt() ?? 600;
+        final js = switch (dir) {
+          'up' => 'window.scrollBy({top:-$amount,behavior:"smooth"});"scrolled up"',
+          'down' => 'window.scrollBy({top:$amount,behavior:"smooth"});"scrolled down"',
+          'top' => 'window.scrollTo({top:0,behavior:"smooth"});"top"',
+          'bottom' => 'window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"});"bottom"',
+          _ => '"unknown direction"',
+        };
+        try {
+          final r = await tab.controller!.runJavaScriptReturningResult(js);
+          _emit('shell', 'scroll $dir');
+          return r.toString();
+        } catch (e) {
+          return 'scroll failed: $e';
+        }
+
+      case 'browser_type':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        final sel = args['selector'] as String;
+        final text = args['text'] as String;
+        final submit = args['submit'] as bool? ?? false;
+        final js = '''
+(() => {
+  const el = document.querySelector(${jsonEncode(sel)});
+  if (!el) return 'no element: $sel';
+  el.focus();
+  el.value = ${jsonEncode(text)};
+  el.dispatchEvent(new Event('input', {bubbles:true}));
+  el.dispatchEvent(new Event('change', {bubbles:true}));
+  ${submit ? '''
+  const form = el.closest('form');
+  if (form) { form.requestSubmit ? form.requestSubmit() : form.submit(); }
+  else {
+    el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
+    el.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
+  }''' : ''}
+  return 'typed ${text.length} chars into $sel';
+})()''';
+        try {
+          final r = await tab.controller!.runJavaScriptReturningResult(js);
+          _emit('shell', 'type into $sel');
+          return r.toString();
+        } catch (e) {
+          return 'type failed: $e';
+        }
+
+      case 'browser_press_key':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        final key = args['key'] as String;
+        final code = {'Enter': 13, 'Tab': 9, 'Escape': 27}[key] ?? 0;
+        final js = '''
+(() => {
+  const el = document.activeElement || document.body;
+  const opts = {key:${jsonEncode(key)},code:${jsonEncode(key)},keyCode:$code,which:$code,bubbles:true,cancelable:true};
+  el.dispatchEvent(new KeyboardEvent('keydown',opts));
+  el.dispatchEvent(new KeyboardEvent('keyup',opts));
+  return 'pressed $key';
+})()''';
+        try {
+          final r = await tab.controller!.runJavaScriptReturningResult(js);
+          _emit('shell', 'press $key');
+          return r.toString();
+        } catch (e) {
+          return 'press failed: $e';
+        }
+
+      case 'browser_wait_for':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        final text = args['text'] as String;
+        final timeoutMs = (args['timeoutMs'] as num?)?.toInt() ?? 10000;
+        // Poll from Dart — runJavaScriptReturningResult doesn't await JS
+        // promises reliably on all webview versions.
+        final sw = Stopwatch()..start();
+        var found = false;
+        while (sw.elapsedMilliseconds < timeoutMs) {
+          try {
+            final r = await tab.controller!.runJavaScriptReturningResult(
+              'document.body ? document.body.innerText.includes(${jsonEncode(text)}) : false',
+            );
+            if (r.toString() == 'true') {
+              found = true;
+              break;
+            }
+          } catch (_) {}
+          await Future.delayed(const Duration(milliseconds: 300));
+        }
+        _emit('shell', found ? 'wait ✓ $text' : 'wait ⏱ timeout $text');
+        return found
+            ? 'found: $text (after ${sw.elapsedMilliseconds}ms)'
+            : 'timeout: "$text" did not appear within ${timeoutMs}ms';
+
+      case 'browser_snapshot':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        const js = r'''
+(() => {
+  const out = [];
+  const sel = 'a,button,input,textarea,select,[role="button"],[onclick]';
+  const els = document.querySelectorAll(sel);
+  let i = 0;
+  for (const el of els) {
+    if (i >= 60) break;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) continue;
+    const tag = el.tagName.toLowerCase();
+    const text = (el.innerText || el.value || el.getAttribute('aria-label') || el.placeholder || '').trim().slice(0, 50);
+    if (!text && tag === 'a') continue;
+    // build a usable selector
+    let cs = tag;
+    if (el.id) cs = '#' + el.id;
+    else if (el.name) cs = tag + '[name="' + el.name + '"]';
+    else if (el.className && typeof el.className === 'string') {
+      const c = el.className.trim().split(/\s+/)[0];
+      if (c) cs = tag + '.' + c;
+    }
+    out.push(tag + ' | ' + text + ' | ' + cs);
+    i++;
+  }
+  return out.join('\n') || '(no interactive elements)';
+})()''';
+        try {
+          final r = await tab.controller!.runJavaScriptReturningResult(js);
+          final raw = r.toString();
+          final text = raw.startsWith('"') && raw.endsWith('"')
+              ? jsonDecode(raw) as String
+              : raw;
+          _emit('page', 'snapshot · interactive elements');
+          return cleanTruncate(text, 4000);
+        } catch (e) {
+          return 'snapshot failed: $e';
+        }
+
       // ─── DSH-grade repo tools ─────────────────────────────────────────
 
       case 'repo_sync':
@@ -3323,7 +3546,10 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
       'commit' => args['message'],
       'generate_image' => args['prompt'],
       'browser_evaluate' => args['script'] ?? args['expression'],
-      'browser_click' => args['selector'],
+      'browser_click' || 'browser_type' => args['selector'],
+      'browser_scroll' => args['direction'],
+      'browser_press_key' => args['key'],
+      'browser_wait_for' => args['text'],
       'create_goal' => args['objective'],
       'schedule_create' => args['prompt'],
       'memory_save' => args['content'],
@@ -3411,6 +3637,19 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
         'schedule_create' => 'Create reminder',
         'schedule_list' => 'Reminders',
         'schedule_delete' => 'Delete reminder',
+        'browser_navigate' => 'Navigate',
+        'browser_click' => 'Click',
+        'browser_type' => 'Type',
+        'browser_scroll' => 'Scroll',
+        'browser_press_key' => 'Press key',
+        'browser_wait_for' => 'Wait for',
+        'browser_snapshot' => 'Snapshot',
+        'browser_read' => 'Read page',
+        'browser_evaluate' => 'Evaluate JS',
+        'browser_new_tab' => 'New tab',
+        'browser_switch_tab' => 'Switch tab',
+        'browser_list_tabs' => 'List tabs',
+        'browser_close_tab' => 'Close tab',
         'generate_image' => 'Generate image',
         'read_attachment' => 'Read attachment',
         'preview' => 'Preview',
