@@ -80,6 +80,27 @@ jobs:
             adb install build/app/outputs/flutter-apk/app-debug.apk
             adb shell monkey -p com.dhanuk.ovidai -c android.intent.category.LAUNCHER 1
             sleep 150
+            # B. Tap through to the chat (sandbox ready → Start chatting)
+            adb shell input keyevent KEYCODE_DPAD_CENTER 2>/dev/null || true
+            adb shell input tap 540 2330 2>/dev/null || true
+            sleep 10
+            # C. Vibe-coder simulation inside the sandbox: exercise every
+            # core tool the agent would use (node, npm, python, git, curl)
+            cat > test-output/vibe.sh << 'EOF'
+#!/data/local/tmp/../../data/data/com.dhanuk.ovidai/files/sandbox/bin/bash
+cd $TMPDIR 2>/dev/null
+export PATH=/data/data/com.dhanuk.ovidai/files/sandbox/bin:$PATH
+echo "== versions =="; node --version; npm --version; python --version; git --version; curl --version | head -1
+echo "== npm run =="; npm init -y >/dev/null 2>&1 && npm install --no-audit --no-fund is-odd@3.0.1 2>&1 | tail -1
+echo "== python pip =="; pip install --quiet requests 2>&1 | tail -1; python -c "import requests; print('requests ok', requests.__version__)"
+echo "== node run =="; node -e "console.log('node runs:', 2+2)"
+echo "== git =="; git init -q vibe && cd vibe && git config user.email t@t && git config user.name t && echo hi > a.txt && git add . && git commit -q -m vibe && git log --oneline
+echo "== curl https =="; curl -fsSL https://packages-cf.termux.dev/apt/termux-main/dists/stable/Release -o /dev/null -w 'mirror http %{http_code}\n'
+echo ALL_DONE
+EOF
+            adb push test-output/vibe.sh /data/local/tmp/vibe.sh 2>&1
+            adb shell chmod 755 /data/local/tmp/vibe.sh
+            adb shell run-as com.dhanuk.ovidai /data/local/tmp/../../data/user/0/com.dhanuk.ovidai/files/sandbox/bin/bash /data/local/tmp/vibe.sh > test-output/vibe-out.txt 2>&1 || true
             mkdir -p test-output
             adb logcat -d > test-output/full.logcat.txt 2>&1 || true
             adb shell run-as com.dhanuk.ovidai ls files/sandbox/bin > test-output/sandbox-bin.txt 2>&1 || true
