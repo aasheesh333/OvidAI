@@ -99,6 +99,82 @@ class SandboxService {
     return d;
   }
 
+  /// Delete a session's workspace (session deleted → files go too).
+  Future<void> deleteWorkspace(String sessionSandboxId) async {
+    try {
+      final root = await _ensureFilesRoot();
+      final d = Directory('${root.path}/workspaces/ws_$sessionSandboxId');
+      if (d.existsSync()) await d.delete(recursive: true);
+    } catch (_) {}
+  }
+
+  /// Storage-quota housekeeping (DSH Part 5 parity):
+  /// 1. Orphan sweep — delete ws_* dirs with no matching session id.
+  /// 2. LRU eviction — oldest-accessed workspace dirs go when the
+  ///    workspaces root exceeds [maxBytes]; active sessions are spared.
+  ///    DSH runs this per-session at 500MB; we run the same policy over
+  ///    the whole workspaces root on launch.
+  Future<void> enforceWorkspaceQuota({
+    required Set<String> activeSandboxIds,
+    int maxBytes = 500 * 1024 * 1024,
+    int graceDays = 30,
+  }) async {
+    try {
+      final root = await _ensureFilesRoot();
+      final wsRoot = Directory('${root.path}/workspaces');
+      if (!wsRoot.existsSync()) return;
+
+      // 1. Orphan sweep.
+      final dirs = wsRoot
+          .listSync()
+          .whereType<Directory>()
+          .where((d) => d.path.split('/').last.startsWith('ws_'))
+          .toList();
+      for (final d in dirs) {
+        final id = d.path.split('/').last.substring(3);
+        if (!activeSandboxIds.contains(id)) {
+          try {
+            await d.delete(recursive: true);
+          } catch (_) {}
+        }
+      }
+
+      // 2. Size + LRU.
+      final byAccess = <(Directory, DateTime, int)>[];
+      var total = 0;
+      for (final d in dirs.where(
+        (d) => activeSandboxIds.contains(d.path.split('/').last.substring(3)),
+      )) {
+        final stat = d.statSync();
+        var size = 0;
+        try {
+          for (final e in d.listSync(recursive: true, followLinks: false)) {
+            if (e is File) {
+              try {
+                size += e.lengthSync();
+              } catch (_) {}
+            }
+          }
+        } catch (_) {}
+        total += size;
+        byAccess.add((d, stat.accessed, size));
+      }
+      if (total <= maxBytes) return;
+
+      byAccess.sort((a, b) => a.$2.compareTo(b.$2)); // oldest first
+      final cutoff = DateTime.now().subtract(Duration(days: graceDays));
+      for (final (d, accessed, size) in byAccess) {
+        if (total <= maxBytes) break;
+        // Spare anything accessed inside the grace window.
+        if (accessed.isAfter(cutoff)) break;
+        try {
+          await d.delete(recursive: true);
+          total -= size;
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
   // ── Files root ─────────────────────────────────────────────────────
   Future<Directory> _ensureFilesRoot() async {
     Directory base;

@@ -895,12 +895,19 @@ class AppState extends ChangeNotifier {
   }
 
   void deleteSession(String id) {
-    sessions.removeWhere((s) => s.id == id);
+    final s = sessions.where((x) => x.id == id).firstOrNull;
+    sessions.removeWhere((x) => x.id == id);
     if (activeSessionId == id) {
       activeSessionId = sessions.isEmpty ? null : sessions.first.id;
     }
     // The deleted session's run dies with it (its jobs, queue, stream).
     onSessionDeleted?.call(id);
+    // Its workspace dies with it too — files dir was never cleaned
+    // before, so deleted sessions leaked their ws_<id> dirs forever.
+    if (s != null) {
+      final sid = s.sandboxId;
+      if (sid != null) unawaited(SandboxService.I.deleteWorkspace(sid));
+    }
     notifyListeners();
     persistSessions();
   }

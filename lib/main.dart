@@ -41,6 +41,17 @@ Future<void> main() async {
         }
       }());
     }
+    // Storage-quota housekeeping (DSH Part 5): orphaned ws_* dirs from
+    // deleted sessions are swept; over-quota workspaces LRU-evict with a
+    // 30-day grace window. Never blocks first paint.
+    unawaited(
+      SandboxService.I.enforceWorkspaceQuota(
+        activeSandboxIds: AppState.I.sessions
+            .map((s) => s.sandboxId)
+            .whereType<String>()
+            .toSet(),
+      ),
+    );
   });
 }
 
