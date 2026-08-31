@@ -805,6 +805,8 @@ class AgentService extends ChangeNotifier {
 
   // ── TOOLS (OpenAI function-calling schema) ────────────────────────────
   // Dynamic: installed plugins add their own tools.
+  static const _repoToolNames = {'repo_sync', 'repo_tree'};
+
   List<Map<String, dynamic>> get _tools {
     final tools = <Map<String, dynamic>>[];
     // Core agent tools — always available
@@ -817,9 +819,25 @@ class AgentService extends ChangeNotifier {
       if (p.name == 'File Reader') tools.add(_fileReadTool);
       if (p.name == 'Web Fetch & Reader') tools.add(_webFetchTool);
       if (p.name == 'Code Runner') tools.add(_codeRunnerTool);
-      if (p.name == 'RAG Memory') tools.add(_memoryTool);
       if (p.category == 'MCP' && p.installed && p.enabled) {
         tools.add(_mcpProxyTool(p));
+      }
+    }
+    // ── User settings gates (persisted toggles from Settings screen) ──
+    // Memory toggle OFF → no memory_search tool; GitHub sync OFF → no
+    // repo_sync/repo_tree tools (agent works purely in local workspace).
+    if (app.memoryEnabled &&
+        app.plugins.any(
+          (p) => p.name == 'RAG Memory' && p.installed && p.enabled,
+        )) {
+      tools.add(_memoryTool);
+    }
+    if (app.githubSync) {
+      for (final t in _coreTools) {
+        final fn = t['function'];
+        if (fn is Map && _repoToolNames.contains(fn['name'])) {
+          tools.add(t);
+        }
       }
     }
     // ── Real MCP server tools (discovered via tools/list) ──
@@ -2425,6 +2443,7 @@ Execution tiers: run_shell picks the best tier automatically.
   works the same in every tier via the catalog_* tools.
 ${s.goal != null && s.goal!['status'] == 'active' ? '\nACTIVE GOAL (round ${s.goal!['round']}): "${s.goal!['objective']}". This user message is a goal round — work toward the objective, then update_goal with progress. Do not restate the goal; just advance it.' : ''}
 ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a [reminder] message arrives, treat its prompt as a user request and act on it.' : ''}
+${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTIONS (follow with priority):\n${AppState.I.customInstructions.trim()}'}
 ''';
 
     // ── Context compaction (DSH dsh-compaction-basic parity) ──
@@ -2981,6 +3000,12 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
   }
 
   void _streamReasoning(ChatSession s, String tok) {
+    // Reasoning display toggle (Settings) — OFF hides thinking chips live;
+    // tokens still accumulate in reasoningBuf for the final message.
+    if (!AppState.I.showReasoning) {
+      _liveReasoning.write(tok);
+      return;
+    }
     _ensureLiveMsg(s);
     _liveReasoning.write(tok);
     _liveMsg!.content = _liveReasoning.toString();
@@ -3879,7 +3904,81 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
   }
 
   // ── APPROVALS (safe / auto mode) ──────────────────────────────────────
+  /// Destructive-command detector (DSH dangerous-command gate parity).
+  /// These ALWAYS ask the user — even in full/drive mode — because one
+  /// bad command can wipe the workspace or brick the sandbox:
+  /// • rm -rf on / ~ $HOME or the sandbox prefix itself
+  /// • dd/mkfs writing to block devices
+  /// • fork bombs
+  /// • recursive chmod/chown to 777 on root paths
+  /// • wiping the sandbox (rm -rf $PREFIX) or factory resets
+  static const _destructivePatterns = [
+    r'\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+(/[^\s]*|\$HOME|~)([^\w]|$)',
+    r'\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(/|\$HOME|~)',
+    r'\bdd\s+[^|]*if=/dev/(block|zero|random)',
+    r'\bmkfs(\.\w+)?\s',
+    r'\b:\(\)\s*\{.*\};\s*:',
+    r'\bchmod\s+-R\s+777\s+/',
+    r'\bchown\s+-R\s+\S+\s+/\s*$',
+    r'\b(reboot|shutdown|halt)\b',
+    r'>\s*/dev/sd[a-z]',
+    r'\brm\s+-rf\s+\$PREFIX',
+    r'\bfind\s+/.*-delete\b',
+  ];
+
+  bool _isDestructiveCommand(String cmd) {
+    final l = cmd;
+    for (final pat in _destructivePatterns) {
+      try {
+        if (RegExp(pat, dotAll: true).hasMatch(l)) return true;
+      } catch (_) {}
+    }
+    return false;
+  }
+
+  /// Read-only command detector for the "Auto-run safe commands" setting:
+  /// ON (default) → read-only shell commands skip the safe-mode confirm.
+  static const _readOnlyCommands = [
+    'ls', 'cat', 'head', 'tail', 'grep', 'find', 'wc', 'file', 'stat', 'du',
+    'df', 'pwd', 'whoami', 'id', 'uname', 'uptime', 'env', 'printenv',
+    'which', 'command', 'type', 'echo', 'date', 'cal', 'hostname',
+    'git status', 'git log', 'git diff', 'git branch', 'git show',
+    'git remote', 'git config --get', 'git rev-parse', 'git ls-files',
+    'node --version', 'npm --version', 'npm ls', 'npm list', 'npm view',
+    'npm ping', 'python --version', 'python3 --version', 'pip list',
+    'pip show', 'pip --version', 'curl --version', 'curl -I', 'curl -s',
+    'wget --version', 'ps', 'top', 'lsblk', 'mount', 'ip addr', 'ifconfig',
+    'netstat', 'ping', 'dig', 'nslookup', 'traceroute', 'tree',
+  ];
+
+  bool _isReadOnlyCommand(String cmd) {
+    final c = cmd.trim();
+    if (c.isEmpty) return false;
+    // Compound commands (&&, ;, |) are safe only if EVERY segment is.
+    for (final seg in c.split(RegExp(r'&&|\|\||;|\|'))) {
+      final s = seg.trim();
+      if (s.isEmpty) continue;
+      var matched = false;
+      for (final ro in _readOnlyCommands) {
+        if (s == ro || s.startsWith('$ro ') || s.startsWith('$ro\t')) {
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) return false;
+    }
+    return true;
+  }
+
   Future<bool> _maybeApprove(String tool, String summary, String detail) async {
+    // Destructive commands always confirm — no mode skips this gate.
+    // `summary` carries the raw command for run_shell/job_start/run_code.
+    if ((tool == 'run_shell' || tool == 'job_start' || tool == 'run_code') &&
+        (_isDestructiveCommand(summary) || _isDestructiveCommand(detail))) {
+      return await _askUser('⚠ $tool', 'Destructive command needs approval',
+          '$detail\n\n⚠ This command is destructive — irreversible '
+          'filesystem/device changes. Confirm only if you intended it.');
+    }
     switch (mode) {
       case AgentMode.drive:
         return true;
@@ -3887,6 +3986,12 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
       case AgentMode.studio:
         return tool != 'commit' ? true : await _askUser(tool, summary, detail);
       case AgentMode.safe:
+        // "Auto-run safe commands" ON → read-only commands skip confirm.
+        if (AppState.I.autoRunSafeCommands &&
+            (tool == 'run_shell' || tool == 'job_start') &&
+            _isReadOnlyCommand(summary)) {
+          return true;
+        }
         return await _askUser(tool, summary, detail);
     }
   }

@@ -33,10 +33,17 @@ class _FoldedGroup extends _ChatItem {
 }
 
 List<_ChatItem> _foldMessages(List<Message> messages) {
+  final showReasoning = AppState.I.showReasoning;
   final out = <_ChatItem>[];
   var i = 0;
   while (i < messages.length) {
     final m = messages[i];
+    // Reasoning display toggle (Settings): OFF → skip thinking chips.
+    // Data stays in the session; only display is suppressed.
+    if (m.kind == MsgKind.reasoning && !showReasoning) {
+      i++;
+      continue;
+    }
     final foldable =
         m.role == 'assistant' &&
         (m.kind == MsgKind.tool || m.kind == MsgKind.reasoning) &&

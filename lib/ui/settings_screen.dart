@@ -1,4 +1,6 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import '../core/agent_service.dart';
 import '../core/firebase_service.dart';
 import '../core/state.dart';
@@ -120,23 +122,29 @@ class SettingsScreen extends StatelessWidget {
           ),
 
           const SectionHeader('Personalization'),
-          _switchTile(
-            Icons.tune,
-            'Custom instructions',
-            'How the AI should respond',
-            true,
+          _SettingsSwitchTile(
+            icon: Icons.tune,
+            title: 'Custom instructions',
+            subtitleOn: 'Active — appended to every AI request',
+            subtitleOff: 'Set how the AI should respond',
+            getter: _getCustomInstructionsOn,
+            onTap: () => _openCustomInstructions(context),
           ),
-          _switchTile(
-            Icons.psychology_outlined,
-            'Memory',
-            'Remember preferences across chats',
-            true,
+          const _SettingsSwitchTile(
+            icon: Icons.psychology_outlined,
+            title: 'Memory',
+            subtitleOn: 'ON — AI remembers across chats (memory_search)',
+            subtitleOff: 'OFF — AI starts fresh every chat',
+            getter: _getMemoryEnabled,
+            setter: _setMemoryEnabled,
           ),
-          _switchTile(
-            Icons.auto_awesome,
-            'Reasoning mode',
-            'Show thinking before answers',
-            false,
+          const _SettingsSwitchTile(
+            icon: Icons.auto_awesome,
+            title: 'Reasoning mode',
+            subtitleOn: 'ON — show thinking before answers',
+            subtitleOff: 'OFF — hide thinking, answers only',
+            getter: _getShowReasoning,
+            setter: _setShowReasoning,
           ),
 
           const SectionHeader('Chat'),
@@ -149,8 +157,7 @@ class SettingsScreen extends StatelessWidget {
           ),
           _settingTile(Icons.mic_none, 'Voice input', 'On'),
 
-          const SectionHeader('Agents & Sandbox'),
-          _navTile(
+          const SectionHeader('Agents & Sandbox'),          _navTile(
             context,
             Icons.monitor_heart_outlined,
             'Device health',
@@ -182,17 +189,21 @@ class SettingsScreen extends StatelessWidget {
             'In-app browser',
             'Agent can browse & log in (ask me)',
           ),
-          _switchTile(
-            Icons.folder_shared_outlined,
-            'GitHub sync',
-            'AI edits push to your connected repo',
-            true,
+          const _SettingsSwitchTile(
+            icon: Icons.folder_shared_outlined,
+            title: 'GitHub sync',
+            subtitleOn: 'ON — AI edits push to your connected repo',
+            subtitleOff: 'OFF — AI edits stay in local workspace only',
+            getter: _getGithubSync,
+            setter: _setGithubSync,
           ),
-          _switchTile(
-            Icons.flash_on,
-            'Auto-run safe commands',
-            'No confirm for read-only terminal commands',
-            true,
+          const _SettingsSwitchTile(
+            icon: Icons.flash_on,
+            title: 'Auto-run safe commands',
+            subtitleOn: 'ON — read-only terminal commands run without confirm',
+            subtitleOff: 'OFF — every terminal command asks first',
+            getter: _getAutoRunSafe,
+            setter: _setAutoRunSafe,
           ),
           _settingTile(
             Icons.security_outlined,
@@ -211,11 +222,7 @@ class SettingsScreen extends StatelessWidget {
             'Delete all data',
             'Chats, keys and settings · irreversible',
           ),
-          _settingTile(
-            Icons.storage_outlined,
-            'Storage',
-            '214 MB · on-device only',
-          ),
+          const _StorageTile(),
 
           const SectionHeader('Privacy'),
           _TelemetryTile(),
@@ -247,20 +254,6 @@ class SettingsScreen extends StatelessWidget {
       trailing: Icon(Icons.chevron_right, size: 18, color: Aether.textFaint),
       onTap: () =>
           Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen)),
-    );
-  }
-
-  Widget _switchTile(
-    IconData icon,
-    String title,
-    String subtitle,
-    bool initial,
-  ) {
-    return _SwitchTile(
-      icon: icon,
-      title: title,
-      subtitle: subtitle,
-      initial: initial,
     );
   }
 
@@ -345,43 +338,177 @@ class _TelemetryTile extends StatelessWidget {
     );
   }
 }
-
-class _SwitchTile extends StatefulWidget {
+/// Real persisted setting toggle — reads/writes AppState (survives app
+/// restarts, gates actual features). Replaces the old fake local-state
+/// `_SwitchTile` that reset to a hardcoded literal on every reopen.
+class _SettingsSwitchTile extends StatelessWidget {
   final IconData icon;
   final String title;
-  final String subtitle;
-  final bool initial;
-  const _SwitchTile({
+  final String subtitleOn;
+  final String subtitleOff;
+  final bool Function() getter;
+  final Future<void> Function(bool)? setter;
+  final VoidCallback? onTap;
+  const _SettingsSwitchTile({
     required this.icon,
     required this.title,
-    required this.subtitle,
-    required this.initial,
+    required this.subtitleOn,
+    required this.subtitleOff,
+    required this.getter,
+    this.setter,
+    this.onTap,
   });
+
   @override
-  State<_SwitchTile> createState() => _SwitchTileState();
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    return AnimatedBuilder(
+      animation: app,
+      builder: (_, _) {
+        final v = getter();
+        return ListTile(
+          dense: true,
+          leading: Icon(icon, size: 19, color: Aether.textMuted),
+          title: Text(title, style: const TextStyle(fontSize: 14)),
+          subtitle: Text(
+            v ? subtitleOn : subtitleOff,
+            style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+          ),
+          trailing: SizedBox(
+            height: 26,
+            child: Switch(
+              value: v,
+              activeTrackColor: Aether.accent,
+              onChanged: setter == null
+                  ? null
+                  : (x) => setter!(x),
+            ),
+          ),
+          onTap: onTap ?? (setter == null ? null : () => setter!(!getter())),
+        );
+      },
+    );
+  }
 }
 
-class _SwitchTileState extends State<_SwitchTile> {
-  late bool v = widget.initial;
+// ── Static accessors keep the tile declarations const-friendly ──
+bool _getMemoryEnabled() => AppState.I.memoryEnabled;
+Future<void> _setMemoryEnabled(bool v) => AppState.I.setMemoryEnabled(v);
+bool _getShowReasoning() => AppState.I.showReasoning;
+Future<void> _setShowReasoning(bool v) => AppState.I.setShowReasoning(v);
+bool _getGithubSync() => AppState.I.githubSync;
+Future<void> _setGithubSync(bool v) => AppState.I.setGithubSync(v);
+bool _getAutoRunSafe() => AppState.I.autoRunSafeCommands;
+Future<void> _setAutoRunSafe(bool v) => AppState.I.setAutoRunSafeCommands(v);
+bool _getCustomInstructionsOn() =>
+    AppState.I.customInstructions.trim().isNotEmpty;
+
+/// Custom instructions — tap opens the editor dialog; the switch mirrors
+/// whether instructions exist (empty = off).
+void _openCustomInstructions(BuildContext context) {
+  final controller = TextEditingController(
+    text: AppState.I.customInstructions,
+  );
+  showDialog<void>(
+    context: context,
+    builder: (d) => AlertDialog(
+      title: const Text('Custom instructions', style: TextStyle(fontSize: 15)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'Appended to every AI request, with priority. '
+            'Example: "Always answer in Hindi. Be brief."',
+            style: TextStyle(fontSize: 12, color: Aether.textFaint),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: controller,
+            maxLines: 6,
+            minLines: 4,
+            autofocus: true,
+            decoration: const InputDecoration(
+              hintText: 'How should the AI respond?',
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(d),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () {
+            AppState.I.setCustomInstructions(controller.text.trim());
+            Navigator.pop(d);
+          },
+          child: const Text('Save'),
+        ),
+      ],
+    ),
+  );
+}
+
+/// Live on-device storage usage (replaces the hardcoded "214 MB" string).
+class _StorageTile extends StatefulWidget {
+  const _StorageTile();
+  @override
+  State<_StorageTile> createState() => _StorageTileState();
+}
+
+class _StorageTileState extends State<_StorageTile> {
+  String _label = 'Calculating…';
+
+  @override
+  void initState() {
+    super.initState();
+    _measure();
+  }
+
+  Future<void> _measure() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      var bytes = 0;
+      // Walk the app documents tree (sessions, workspaces, previews,
+      // exported repos — everything that counts against user storage).
+      final stack = <Directory>[docs];
+      while (stack.isNotEmpty) {
+        final dir = stack.removeLast();
+        try {
+          await for (final e in dir.list(followLinks: false)) {
+            if (e is File) {
+              try {
+                bytes += await e.length();
+              } catch (_) {}
+            } else if (e is Directory) {
+              stack.add(e);
+            }
+          }
+        } catch (_) {}
+      }
+      final mb = bytes / (1024 * 1024);
+      setState(() {
+        _label = mb >= 1024
+            ? '${(mb / 1024).toStringAsFixed(1)} GB · on-device only'
+            : '${mb.toStringAsFixed(0)} MB · on-device only';
+      });
+    } catch (_) {
+      setState(() => _label = 'On-device only');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListTile(
       dense: true,
-      leading: Icon(widget.icon, size: 19, color: Aether.textMuted),
-      title: Text(widget.title, style: const TextStyle(fontSize: 14)),
+      leading: Icon(Icons.storage_outlined, size: 19, color: Aether.textMuted),
+      title: const Text('Storage', style: TextStyle(fontSize: 14)),
       subtitle: Text(
-        widget.subtitle,
-        style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        _label,
+        style: TextStyle(fontSize: 12, color: Aether.textFaint),
       ),
-      trailing: SizedBox(
-        height: 26,
-        child: Switch(
-          value: v,
-          activeTrackColor: Aether.accent,
-          onChanged: (x) => setState(() => v = x),
-        ),
-      ),
-      onTap: () => setState(() => v = !v),
+      onTap: _measure,
     );
   }
 }

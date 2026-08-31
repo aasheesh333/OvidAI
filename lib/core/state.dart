@@ -416,6 +416,11 @@ class AppState extends ChangeNotifier {
       maxOutputTokens = prefs.getInt(_kMaxOutputTokens) ?? 0;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
       lightTheme = prefs.getBool(_kTheme) ?? false;
+      customInstructions = prefs.getString(_kCustomInstructions) ?? '';
+      memoryEnabled = prefs.getBool(_kMemoryEnabled) ?? true;
+      showReasoning = prefs.getBool(_kShowReasoning) ?? true;
+      githubSync = prefs.getBool(_kGithubSync) ?? true;
+      autoRunSafeCommands = prefs.getBool(_kAutoRunSafe) ?? true;
       chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0).clamp(
         chatFontScaleMin,
         chatFontScaleMax,
@@ -599,6 +604,27 @@ class AppState extends ChangeNotifier {
   static const _kTheme = 'ovid_light_theme';
   bool lightTheme = false;
 
+  // ── User settings that gate REAL features (persisted, Settings screen) ──
+  /// Custom instructions appended to the system prompt every turn.
+  static const _kCustomInstructions = 'ovid_custom_instructions';
+  String customInstructions = '';
+
+  /// Memory plugin (RAG "Memory" toggle): writes + searches across sessions.
+  static const _kMemoryEnabled = 'ovid_memory_enabled';
+  bool memoryEnabled = true;
+
+  /// Show reasoning/thinking cards in chat (off = hide the chips entirely).
+  static const _kShowReasoning = 'ovid_show_reasoning';
+  bool showReasoning = true;
+
+  /// GitHub sync: agent file edits/commits push to the connected repo.
+  static const _kGithubSync = 'ovid_github_sync';
+  bool githubSync = true;
+
+  /// Auto-run safe commands: read-only shell commands skip confirmation.
+  static const _kAutoRunSafe = 'ovid_auto_run_safe';
+  bool autoRunSafeCommands = true;
+
   // ── Chat font scale (pinch-to-zoom on the message list) ──
   // Scales ONLY the message content text — the header/AppBar and the
   // composer chatbox stay fixed (per UX requirement). Width stays
@@ -637,6 +663,51 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kShareMemory, v);
+    } catch (_) {}
+  }
+
+  Future<void> setCustomInstructions(String v) async {
+    customInstructions = v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kCustomInstructions, v);
+    } catch (_) {}
+  }
+
+  Future<void> setMemoryEnabled(bool v) async {
+    memoryEnabled = v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kMemoryEnabled, v);
+    } catch (_) {}
+  }
+
+  Future<void> setShowReasoning(bool v) async {
+    showReasoning = v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kShowReasoning, v);
+    } catch (_) {}
+  }
+
+  Future<void> setGithubSync(bool v) async {
+    githubSync = v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kGithubSync, v);
+    } catch (_) {}
+  }
+
+  Future<void> setAutoRunSafeCommands(bool v) async {
+    autoRunSafeCommands = v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kAutoRunSafe, v);
     } catch (_) {}
   }
 
