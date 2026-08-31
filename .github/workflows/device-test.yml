@@ -50,6 +50,15 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Lower targetSdk for the test build (exec data-dir workaround)
+        # Android 10+ with targetSdk >= 29 blocks exec() of files in the
+        # app's private dir (avc: denied {execute_no_trans}), so the
+        # sandbox bash can't start on an AOSP emulator. Real OEM devices
+        # (ColorOS et al.) allow it, so only the TEST build uses 28.
+        run: |
+          sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 28/' \
+            android/app/build.gradle.kts
+
       - name: Build debug APK (with x86_64 so the emulator can run it)
         run: flutter build apk --debug --target-platform android-x64
 
