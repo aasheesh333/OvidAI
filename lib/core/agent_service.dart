@@ -206,8 +206,13 @@ class SessionEvent {
   final String type;
   final String data;
   final DateTime timestamp;
-  SessionEvent({required this.type, required this.data, DateTime? timestamp})
-    : timestamp = timestamp ?? DateTime.now();
+  final String? sessionId; // session the event belongs to (isolation)
+  SessionEvent({
+    required this.type,
+    required this.data,
+    DateTime? timestamp,
+    this.sessionId,
+  }) : timestamp = timestamp ?? DateTime.now();
 }
 
 /// Per-session Studio state — open tabs, editor buffers, active path.
@@ -275,6 +280,19 @@ class AgentService extends ChangeNotifier {
   /// ignores stop", or worse: old run's abort targeted nothing).
   _AgentRun? _pinnedRun;
   _AgentRun get _runResolved => _pinnedRun ?? _run;
+
+  /// Session id the pinned run is executing in (null when idle). Used to
+  /// keep assistant output + queued continuations bound to the RUNNING
+  /// session across mid-run session switches (session-bleed fix).
+  String? _pinnedRunId;
+
+  /// The session a RUNNING agent action belongs to: the pinned run's
+  /// session if a run is live, else the active one. Mid-run tool calls
+  /// (file_read, fs_edit, memory/schedule handlers…) MUST route through
+  /// this so a session switch mid-run can't make the run touch the
+  /// wrong session's workspace/studio/notes.
+  ChatSession? get _runSession =>
+      AppState.I.sessionById(_pinnedRunId) ?? AppState.I.activeSession;
 
   String _currentRunKey() => AppState.I.activeSession?.id ?? '';
 
@@ -893,7 +911,7 @@ class AgentService extends ChangeNotifier {
   /// Per-session sandbox workspace (host dir). AI shell/code commands run
   /// with this as `cwd` bound to /work inside the jail.
   Future<Directory> _sessionWorkDir() async {
-    final s = AppState.I.activeSession;
+    final s = _runSession;
     final sid = s?.sandboxId ?? s?.id ?? 'default';
     return SandboxService.I.workDirFor(sid);
   }
@@ -986,9 +1004,17 @@ class AgentService extends ChangeNotifier {
     events.add(AgentEvent(kind, text));
     if (events.length > 120) events.removeRange(0, events.length - 120);
     // Mirror into the session event log (session_search queries this).
-    _sessionEvents.add(SessionEvent(type: kind, data: text));
-    if (_sessionEvents.length > 500) {
-      _sessionEvents.removeRange(0, _sessionEvents.length - 500);
+    // Tag with the RUNNING session so parallel sessions' events stay
+    // isolated (session_search only sees its own session's events).
+    _sessionEvents.add(
+      SessionEvent(
+        type: kind,
+        data: text,
+        sessionId: _pinnedRunId ?? AppState.I.activeSessionId,
+      ),
+    );
+    if (_sessionEvents.length > 2000) {
+      _sessionEvents.removeRange(0, _sessionEvents.length - 2000);
     }
     // DSH ToolRow parity: shell output streams into the live tool card.
     if (kind == 'shellOut' && _activeToolMsg != null) {
@@ -2232,7 +2258,19 @@ class AgentService extends ChangeNotifier {
     if (_queue.isEmpty) return;
     while (_queue.isNotEmpty) {
       final queued = _queue.removeAt(0);
-      AppState.I.sendMessage(queued);
+      // Record in the RUNNING session — never the active one (the user
+      // may have switched chats since the message was queued).
+      final target = _runSession;
+      if (target != null) {
+        target.messages.add(Message(role: 'user', content: queued));
+        if (target.title == 'New chat' || target.title.isEmpty) {
+          target.title = AppState.autoTitle(queued);
+        }
+        AppState.I.refresh();
+        AppState.I.persistSessions();
+      } else {
+        AppState.I.sendMessage(queued);
+      }
       msgs.add({'role': 'user', 'content': queued});
     }
     _emit('think', 'queued message joined this run');
@@ -2537,7 +2575,7 @@ class AgentService extends ChangeNotifier {
   }
 
   Future<String> _runSubagentLoop(ProviderConfig p, String prompt) async {
-    final session = AppState.I.activeSession;
+    final session = _runSession;
     if (session == null) return 'No active session for subagent.';
     final sys =
         'You are a focused subagent. Do the task and give a final answer. '
@@ -2622,6 +2660,7 @@ class AgentService extends ChangeNotifier {
     // sessions mid-task, this run's cancel/queue/abort state stays bound
     // to THIS session (fixes the session-switch race).
     _pinnedRun = _run;
+    _pinnedRunId = s.id;
     activeRunId = runId;
     _runStart = DateTime.now();
     lastError = null;
@@ -2641,7 +2680,7 @@ You are Ovid's on-device coding & browsing agent running INSIDE a Flutter app.
 Environment: Android device with a native Linux sandbox (python3/node/git via apt),
 a live Browser panel, and the user's connected GitHub repo (${GitHubService.I.login ?? 'github'}).
 Access mode: ${mode.label.toUpperCase()} — ${mode.hint}
-Session isolation: this chat has its OWN sandbox workspace (id: ${AppState.I.activeSession?.sandboxId ?? 'default'}).
+Session isolation: this chat has its OWN sandbox workspace (id: ${s.sandboxId ?? s.id}).
 Other chats' files are NOT visible to you — don't ask about them, they're
 inaccessible here. ${AppState.I.shareSessionMemory ? 'The user enabled "Share session memory" — you may search across all chats via memory_search.' : ''}
 
@@ -2949,7 +2988,9 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
       _cancelRequested = false;
       // Un-pin: next run binds to whatever session is active then.
       final pinned = _pinnedRun;
+      final pinnedSessionId = _pinnedRunId;
       _pinnedRun = null;
+      _pinnedRunId = null;
       // Foreground notification retires with the run (covers error paths
       // where no 'done'/'err' event ever fires).
       AgentNotificationService.I.agentIdle();
@@ -2959,10 +3000,27 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
       if (pinned != null && pinned.queue.isNotEmpty) {
         final next = pinned.queue.removeAt(0);
         Future.delayed(const Duration(milliseconds: 250), () {
-          // Record the queued message as a user message in the session
-          // (the normal send path does this via AppState.sendMessage).
-          AppState.I.sendMessage(next);
-          runTask(next);
+          // Route the queued message to the RUNNING session — never the
+          // currently-active one (session-bleed fix). Fall back to the
+          // active session only if the original was deleted.
+          final target = AppState.I.sessionById(pinnedSessionId);
+          if (target != null) {
+            target.messages.add(
+              Message(role: 'user', content: next),
+            );
+            if (target.title == 'New chat' || target.title.isEmpty) {
+              target.title = AppState.autoTitle(next);
+            }
+            AppState.I.refresh();
+            AppState.I.persistSessions();
+            // Auto-switch the UI to the session that keeps running, so
+            // the user sees the continuation where it belongs.
+            AppState.I.activeSessionId = target.id;
+            runTask(next);
+          } else {
+            AppState.I.sendMessage(next);
+            runTask(next);
+          }
         });
       }
     }
@@ -3300,13 +3358,15 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
 
   // ── LIVE BUBBLE streaming (DSH-web style) ─────────────────────────────
   // Buffers live on the per-session _AgentRun so parallel sessions keep
-  // independent streaming bubbles.
-  StringBuffer get _liveContent => _run.liveContent;
-  StringBuffer get _liveReasoning => _run.liveReasoning;
-  ChatSession? get _liveSession => _run.liveSession;
-  set _liveSession(ChatSession? v) => _run.liveSession = v;
-  Message? get _liveMsg => _run.liveMsg;
-  set _liveMsg(Message? v) => _run.liveMsg = v;
+  // independent streaming bubbles. During a run they resolve to the
+  // PINNED run's buffers — a mid-run session switch must never make
+  // _ensureLiveMsg spawn a NEW bubble in the wrong session's chat.
+  StringBuffer get _liveContent => _runResolved.liveContent;
+  StringBuffer get _liveReasoning => _runResolved.liveReasoning;
+  ChatSession? get _liveSession => _runResolved.liveSession;
+  set _liveSession(ChatSession? v) => _runResolved.liveSession = v;
+  Message? get _liveMsg => _runResolved.liveMsg;
+  set _liveMsg(Message? v) => _runResolved.liveMsg = v;
 
   void _ensureLiveMsg(ChatSession s) {
     if (_liveSession == s &&
@@ -4152,10 +4212,8 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
         final path = args['path'] as String;
         final c = RepoCache.I.read(path);
         if (c == null) return 'file not found: $path';
-        final sid =
-            AppState.I.activeSession?.sandboxId ??
-            AppState.I.activeSession?.id ??
-            'default';
+        final rs = _runSession;
+        final sid = rs?.sandboxId ?? rs?.id ?? 'default';
         _readPathsFor(sid).add(path);
         openStudioFile(path, c);
         _emit('file', 'read $path');
@@ -4402,7 +4460,11 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     MsgKind kind = MsgKind.text,
     ChatSession? session,
   }) {
-    final s = session ?? AppState.I.activeSession;
+    // While a run is pinned, default to THE RUNNING session — a mid-run
+    // session switch must never redirect assistant output into the
+    // newly-active chat (session bleed).
+    final s = session ??
+        (AppState.I.sessionById(_pinnedRunId) ?? AppState.I.activeSession);
     if (s == null || text.trim().isEmpty) return;
     s.messages.add(Message(role: 'assistant', kind: kind, content: text));
     AppState.I.refresh();
@@ -4592,7 +4654,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
   };
 
   Message _toolStart(String toolName, String summary) {
-    final s = AppState.I.activeSession;
+    final s = _runSession;
     if (s == null) return Message(role: 'assistant', kind: MsgKind.tool);
     final m = Message(
       role: 'assistant',
@@ -4678,10 +4740,8 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
   Future<String> _handleFsEdit(Map<String, dynamic> args) async {
     final cmd = args['command'] as String;
     final path = args['path'] as String;
-    final sid =
-        AppState.I.activeSession?.sandboxId ??
-        AppState.I.activeSession?.id ??
-        'default';
+    final rs = _runSession;
+    final sid = rs?.sandboxId ?? rs?.id ?? 'default';
 
     switch (cmd) {
       case 'view':
@@ -4982,7 +5042,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
             'status': t['status'] as String? ?? 'pending',
           },
     ];
-    final s = AppState.I.activeSession;
+    final s = _runSession;
     if (s == null) return 'no active session';
     s.todos.clear();
     s.todos.addAll(todos);
@@ -5096,7 +5156,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
   // ── GOALS (DSH goal-round equivalent) ──
   String _handleCreateGoal(Map<String, dynamic> args) {
     final objective = (args['objective'] as String).trim();
-    final s = AppState.I.activeSession;
+    final s = _runSession;
     if (s == null) return 'No active session.';
     if (s.goal != null && s.goal!['status'] == 'active') {
       return 'A goal is already ACTIVE in this session: '
@@ -5119,7 +5179,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
   }
 
   String _handleGetGoal() {
-    final s = AppState.I.activeSession;
+    final s = _runSession;
     final g = s?.goal;
     if (g == null) return 'No goal in this session.';
     final log = (g['progressLog'] as List?)?.join('\n  ') ?? '';
@@ -5130,7 +5190,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
   String _handleUpdateGoal(Map<String, dynamic> args) {
     final status = args['status'] as String;
     final progress = args['progress'] as String?;
-    final s = AppState.I.activeSession;
+    final s = _runSession;
     final g = s?.goal;
     if (g == null) return 'No goal in this session.';
     if (!['active', 'complete', 'blocked'].contains(status)) {
@@ -5159,7 +5219,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
   // ── SCHEDULES (DSH schedule equivalent) ──
   String _handleScheduleCreate(Map<String, dynamic> args) {
     final prompt = (args['prompt'] as String).trim();
-    final s = AppState.I.activeSession;
+    final s = _runSession;
     if (s == null) return 'No active session.';
     final after = (args['after_seconds'] as num?)?.toInt();
     final at = args['at'] as String?;
@@ -5203,7 +5263,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
   }
 
   String _handleScheduleList() {
-    final s = AppState.I.activeSession;
+    final s = _runSession;
     if (s == null || s.schedules.isEmpty) {
       return 'No reminders in this session.';
     }
@@ -5219,7 +5279,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
 
   String _handleScheduleDelete(Map<String, dynamic> args) {
     final id = args['id'] as String;
-    final s = AppState.I.activeSession;
+    final s = _runSession;
     if (s == null) return 'No active session.';
     final before = s.schedules.length;
     s.schedules.removeWhere((r) => r['id'] == id);
@@ -5243,31 +5303,42 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
   }
 
   void _fireDueSchedules() {
-    final s = AppState.I.activeSession;
-    if (s == null || s.schedules.isEmpty) return;
+    // Reminders are session-scoped: check EVERY session's schedule list,
+    // not just the active/running one (idle sessions still fire).
     final now = DateTime.now();
-    for (final r in List.of(s.schedules)) {
-      final fireAt = DateTime.tryParse(r['fireAt'] as String? ?? '');
-      if (fireAt == null || fireAt.isAfter(now)) continue;
-      final prompt = r['prompt'] as String;
-      final id = r['id'] as String;
-      final every = r['every'] as num?;
-      if (every != null) {
-        // Fixed-rate: creation-aligned, skip missed occurrences.
-        r['fireAt'] = DateTime.now()
-            .add(Duration(seconds: every.toInt()))
-            .toIso8601String();
-      } else {
-        s.schedules.removeWhere((x) => x['id'] == id);
-      }
-      AppState.I.persistSessions();
-      _emit('think', 'reminder $id fired');
-      // Session-local delivery: only inject if this session is active.
-      if (activeRunId == null) {
-        AppState.I.sendMessage('⏰ [reminder $id] $prompt');
-      } else {
-        // Busy — queue joins the current run (DSH queue behavior).
-        enqueueMessage('⏰ [reminder $id] $prompt');
+    for (final s in List.of(AppState.I.sessions)) {
+      if (s.schedules.isEmpty) continue;
+      for (final r in List.of(s.schedules)) {
+        final fireAt = DateTime.tryParse(r['fireAt'] as String? ?? '');
+        if (fireAt == null || fireAt.isAfter(now)) continue;
+        final prompt = r['prompt'] as String;
+        final id = r['id'] as String;
+        final every = r['every'] as num?;
+        if (every != null) {
+          // Fixed-rate: creation-aligned, skip missed occurrences.
+          r['fireAt'] = DateTime.now()
+              .add(Duration(seconds: every.toInt()))
+              .toIso8601String();
+        } else {
+          s.schedules.removeWhere((x) => x['id'] == id);
+        }
+        AppState.I.persistSessions();
+        _emit('think', 'reminder $id fired (${s.title})');
+        // Delivery: if THIS session is running, queue joins ITS run; if
+        // this session is active and idle, inject now; if the user is
+        // elsewhere, switch to the session so the reminder is seen.
+        if (busyFor(s.id)) {
+          // Busy — queue joins THIS session's run (DSH queue behavior).
+          _runs[s.id]?.queue.add('⏰ [reminder $id] $prompt');
+          _emit('think', 'queued reminder for running session ${s.title}');
+        } else if (AppState.I.activeSessionId == s.id) {
+          AppState.I.sendMessage('⏰ [reminder $id] $prompt');
+        } else {
+          // Session not visible — bring it to the user (the reminder is
+          // theirs; silent delivery into a background chat is a miss).
+          AppState.I.activeSessionId = s.id;
+          AppState.I.sendMessage('⏰ [reminder $id] $prompt');
+        }
       }
     }
   }
@@ -5466,7 +5537,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     final query = (args['query'] as String).toLowerCase();
     final limit = (args['limit'] as num?)?.toInt() ?? 20;
     // Search session messages + event log.
-    final s = AppState.I.activeSession;
+    final s = _runSession;
     final results = <String>[];
     // Messages.
     if (s != null) {
@@ -5477,8 +5548,10 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
         }
       }
     }
-    // Events.
+    // Events (this session only — parallel sessions stay isolated).
+    final evSessionId = _pinnedRunId ?? AppState.I.activeSessionId;
     for (final e in _sessionEvents) {
+      if (e.sessionId != null && e.sessionId != evSessionId) continue;
       if (e.data.toLowerCase().contains(query) ||
           e.type.toLowerCase().contains(query)) {
         results.add('[${e.type}] ${e.data}');

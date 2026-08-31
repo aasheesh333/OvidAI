@@ -1093,6 +1093,170 @@ void main() {
   });
 
   group('PR9: parallel sessions', () {
+    test('session bleed: mid-run switch keeps stream + output in A, B clean', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final provider = app.providerById('ollama-local')!;
+      final originals = ({
+        'baseUrl': provider.baseUrl,
+        'models': List<String>.of(provider.models),
+        'selectedModel': provider.selectedModel,
+      });
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+
+      final sessionA = ChatSession(
+        id: 'bleed-a',
+        title: 'A',
+        providerId: provider.id,
+        model: 'test-model',
+        messages: [Message(role: 'user', content: 'hello')],
+      );
+      final sessionB = ChatSession(id: 'bleed-b', title: 'B', model: 'test-model');
+      app.sessions.addAll([sessionA, sessionB]);
+      app.activeSessionId = sessionA.id;
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['test-model']
+        ..selectedModel = 'test-model';
+
+      // Server streams 3 SSE deltas slowly, then finishes.
+      final serverTask = server.first.then((request) async {
+        request.response.headers.chunkedTransferEncoding = true;
+        for (var i = 0; i < 3; i++) {
+          request.response.add(
+            utf8.encode(
+              'data: ${jsonEncode({
+                'choices': [
+                  {
+                    'delta': {'content': 'chunk$i '},
+                    'finish_reason': i == 2 ? 'stop' : null,
+                  },
+                ],
+              })}\n\n',
+            ),
+          );
+          await request.response.flush();
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+        }
+        try {
+          await request.response.close();
+        } catch (_) {}
+      });
+
+      try {
+        final run = agent.runTask('task in A');
+        // Wait for the first chunk to start streaming into A, then
+        // switch to session B mid-run (the classic bleed repro).
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        app.selectSession(sessionB.id);
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        // While switched away, B's chat must stay pristine…
+        expect(sessionB.messages, isEmpty,
+            reason: 'B must not receive any of A\'s streaming or events');
+        await run.timeout(const Duration(seconds: 10));
+        await serverTask.timeout(const Duration(seconds: 10));
+
+        // …and A must own the complete streamed answer.
+        expect(sessionB.messages, isEmpty);
+        final aText = sessionA.messages
+            .where((m) => m.role == 'assistant')
+            .map((m) => m.content)
+            .join('');
+        expect(aText, contains('chunk0'));
+        expect(aText, contains('chunk2'));
+      } finally {
+        provider
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+        await server.close(force: true);
+        app.deleteSession(sessionA.id);
+        app.deleteSession(sessionB.id);
+      }
+    });
+
+    test('session bleed: queued continuation lands in the RUNNING session', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final provider = app.providerById('ollama-local')!;
+      final originals = ({
+        'baseUrl': provider.baseUrl,
+        'models': List<String>.of(provider.models),
+        'selectedModel': provider.selectedModel,
+      });
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      var requests = 0;
+
+      final sessionA = ChatSession(
+        id: 'qc-a',
+        title: 'A',
+        providerId: provider.id,
+        model: 'test-model',
+        messages: [Message(role: 'user', content: 'hello')],
+      );
+      final sessionB = ChatSession(id: 'qc-b', title: 'B', model: 'test-model');
+      app.sessions.addAll([sessionA, sessionB]);
+      app.activeSessionId = sessionA.id;
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['test-model']
+        ..selectedModel = 'test-model';
+
+      final serverTask = () async {
+        await for (final request in server) {
+          requests++;
+          request.response.headers.chunkedTransferEncoding = true;
+          request.response.add(
+            utf8.encode(
+              'data: ${jsonEncode({
+                'choices': [
+                  {
+                    'delta': {'content': 'done '},
+                    'finish_reason': 'stop',
+                  },
+                ],
+              })}\n\n',
+            ),
+          );
+          await request.response.flush();
+          try {
+            await request.response.close();
+          } catch (_) {}
+        }
+      }();
+
+      try {
+        // Start a run in A, queue a follow-up for A, then switch to B.
+        final run = agent.runTask('first in A');
+        agent.enqueueMessage('queued follow-up');
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        app.selectSession(sessionB.id);
+        await run.timeout(const Duration(seconds: 10));
+        // The queued follow-up must start a continuation run in A (not B).
+        // Wait for the second request (the continuation).
+        for (var i = 0; i < 50 && requests < 2; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+        expect(requests, greaterThanOrEqualTo(2),
+            reason: 'queued message should trigger a continuation run');
+        // B never received A's queued message as a user bubble.
+        expect(sessionB.messages.where((m) => m.role == 'user'), isEmpty);
+        // A received it.
+        expect(
+          sessionA.messages.map((m) => m.content),
+          contains('queued follow-up'),
+        );
+      } finally {
+        provider
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+        await server.close(force: true);
+        app.deleteSession(sessionA.id);
+        app.deleteSession(sessionB.id);
+      }
+    });
+
     test('queue is per-session — switching sessions isolates queues', () {
       final app = AppState.I;
       final agent = AgentService.I;

@@ -800,6 +800,11 @@ class AppState extends ChangeNotifier {
   ChatSession? get activeSession =>
       sessions.where((s) => s.id == activeSessionId).firstOrNull;
 
+  /// Session lookup by id (used by the agent to keep a RUNNING run's
+  /// writes bound to its own session even if the user switches chats).
+  ChatSession? sessionById(String? id) =>
+      id == null ? null : sessions.where((s) => s.id == id).firstOrNull;
+
   ProviderConfig get defaultProvider => providers.first;
 
   ProviderConfig? providerById(String? id) {
@@ -973,6 +978,9 @@ class AppState extends ChangeNotifier {
     final title = take.length > 40 ? '${take.substring(0, 40)}…' : take;
     return words.length > 6 && !title.endsWith('…') ? '$title…' : title;
   }
+
+  /// Public wrapper (agent uses it for queued-continuation messages).
+  static String autoTitle(String text) => _autoTitle(text);
 
   void removeModel(String providerId, String model) {
     final p = providerById(providerId);
