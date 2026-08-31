@@ -746,8 +746,7 @@ class AgentService extends ChangeNotifier {
   /// this (not [busy]) so a background parallel run in session A never
   /// makes session B blink or show a wrong stop/send button.  This was the
   /// "both sessions blinking + old session shows send" bug.
-  bool busyFor(String sessionId) =>
-      _runs[sessionId]?.activeRunId != null;
+  bool busyFor(String sessionId) => _runs[sessionId]?.activeRunId != null;
 
   /// True while ANY session has a run — for global indicators.
   bool get anyBusy => _runs.values.any((r) => r.activeRunId != null);
@@ -1995,7 +1994,10 @@ class AgentService extends ChangeNotifier {
   /// BYOK across many providers, so we keep a keyword map (longest match
   /// wins) with the same 1M default for unknown models.
   static const _contextWindows = <(String, int)>[
-    ('nemotron', 1048576),
+    ('nemotron-3.5-lightning-30b', 32768), // NVIDIA NIM — real limit, was 1M
+    ('nemotron-3-nano', 262144),
+    ('nemotron-3-super', 262144),
+    ('nemotron', 131072), // safe default for unknown nemotron variants
     ('gemini-2.5-pro', 1048576),
     ('gemini-2.5-flash', 1048576),
     ('gemini-2.0-flash', 1048576),
@@ -2431,7 +2433,6 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
     // every model incl. custom BYOK routes, 256K and 1M windows alike.
     await _maybeCompact(s, p);
 
-    final historyStart = s.messages.length > 12 ? s.messages.length - 12 : 0;
     final msgs = <Map<String, dynamic>>[
       {'role': 'system', 'content': sys},
       // Compacted summary as system-level context (DSH injection style).
@@ -2452,8 +2453,10 @@ ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a 
               'Read it with read_attachment("${att.name}") or run_shell, then '
               'respond to the user\'s message.]',
         },
+      // Full message history — compaction (_maybeCompact) already ran above
+      // and merges anything that would overflow this model's window into
+      // `compactedSummary`, so we never hard-truncate mid-conversation.
       ...s.messages
-          .skip(historyStart)
           .where((m) => m.kind != MsgKind.compact)
           .map(
             (m) => {

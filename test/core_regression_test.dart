@@ -108,9 +108,11 @@ void main() {
         await run.timeout(const Duration(seconds: 5));
         await serverTask.timeout(const Duration(seconds: 5));
 
-        expect(sentMessages, hasLength(13));
+        // Compaction now carries the long-tail; the transport sends the
+        // FULL history (no 12-message slice) — that's what this asserts.
+        expect(sentMessages, hasLength(16));
         expect(sentMessages.first['role'], 'system');
-        expect(sentMessages[1]['content'], 'message-3');
+        expect(sentMessages[1]['content'], 'message-0');
         expect(sentMessages.last['content'], 'message-14');
         expect(original.messages.last.content, 'response for original');
         expect(other.messages, isEmpty);
@@ -1008,9 +1010,10 @@ void main() {
         expect(AgentService.contextWindowFor('claude-opus-4-20250514'), 200000);
         expect(AgentService.contextWindowFor('gemini-2.5-flash'), 1048576);
         expect(AgentService.contextWindowFor('grok-3'), 256000);
+        expect(AgentService.contextWindowFor('nvidia/nemotron-3-super'), 262144);
         expect(
-          AgentService.contextWindowFor('nvidia/nemotron-3-super'),
-          1048576,
+          AgentService.contextWindowFor('nvidia/nemotron-3.5-lightning-30b'),
+          32768,
         );
         // Variant suffixes (· Medium) fall back to the base model window.
         expect(AgentService.contextWindowFor('deepseek-chat · High'), 128000);
