@@ -444,6 +444,8 @@ class _ChatScreenState extends State<ChatScreen>
   // 500-message chat never lags the phone (or re-builds on every token).
   static const _pageSize = 40;
   int _visibleCount = _pageSize;
+  bool _paging = false; // blocks re-entrant top-of-list pagination
+  int _totalItems = 0; // last known full history length (for paging)
 
   void _bindDraft(String sessionId) {
     if (_boundSessionId == sessionId) return;
@@ -491,6 +493,24 @@ class _ChatScreenState extends State<ChatScreen>
       setState(() {
         _atBottom = atBottom;
         _showJumpFab = !atBottom;
+      });
+    }
+    // ChatGPT/Gemini-style lazy paging: scroll to the top and more history
+    // slides in automatically — no "Show earlier" tapping.
+    if (!_paging && pos.pixels < 120 && _visibleCount < _totalItems) {
+      _paging = true;
+      final oldExtent = pos.maxScrollExtent;
+      final oldPixels = pos.pixels;
+      setState(() => _visibleCount += _pageSize);
+      // Keep the viewport pinned to the message the user was reading:
+      // prepended items grow maxScrollExtent; compensating by the delta
+      // makes the content appear to stay put while history loads above.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scroll.hasClients) {
+          final newExtent = _scroll.position.maxScrollExtent;
+          _scroll.jumpTo(newExtent - oldExtent + oldPixels);
+        }
+        _paging = false;
       });
     }
   }
@@ -642,17 +662,19 @@ class _ChatScreenState extends State<ChatScreen>
                                     // tool/reasoning items collapse into a
                                     // single strip before the final answer.
                                     final allItems = _foldMessages(s.messages);
-                                    // Lazy paging (ChatGPT/Claude style) —
+                                    // Lazy paging (ChatGPT/Gemini style) —
                                     // render ONLY the newest [_visibleCount]
-                                    // folded items; a "Show earlier" row at
-                                    // the top pulls in older history on tap.
-                                    // A 500-message chat no longer lags the
-                                    // phone while streaming.
+                                    // folded items; scrolling to the top
+                                    // auto-loads the previous page (no tap
+                                    // needed, see _onScroll). A 500-message
+                                    // chat never lags the phone.
+                                    _totalItems = allItems.length;
                                     final hidden =
                                         allItems.length - _visibleCount;
                                     final items = hidden > 0
                                         ? allItems.sublist(
-                                            allItems.length - _visibleCount)
+                                            allItems.length - _visibleCount,
+                                          )
                                         : allItems;
                                     // DSH "Produced" card — files written by
                                     // this run surface as a card under the
@@ -661,7 +683,8 @@ class _ChatScreenState extends State<ChatScreen>
                                         AgentService.I.producedFiles;
                                     final showProduced =
                                         !typing && produced.isNotEmpty;
-                                    final count = (hidden > 0 ? 1 : 0) +
+                                    final count =
+                                        (hidden > 0 ? 1 : 0) +
                                         items.length +
                                         (typing ? 1 : 0) +
                                         (showProduced ? 1 : 0);
@@ -675,30 +698,35 @@ class _ChatScreenState extends State<ChatScreen>
                                       ),
                                       itemCount: count,
                                       itemBuilder: (_, i) {
-                                        // Row 0: "Show earlier" pager.
+                                        // Row 0: subtle paging indicator —
+                                        // auto-scroll handles the actual
+                                        // loading; this is just feedback.
                                         if (hidden > 0 && i == 0) {
                                           return Center(
-                                            child: TextButton.icon(
-                                              style: TextButton.styleFrom(
-                                                padding: const EdgeInsets
-                                                    .symmetric(horizontal: 10),
-                                                minimumSize: Size.zero,
-                                                visualDensity:
-                                                    VisualDensity.compact,
-                                              ),
-                                              onPressed: () => setState(() =>
-                                                  _visibleCount += _pageSize),
-                                              icon: Icon(
-                                                Icons.expand_less,
-                                                size: 14,
-                                                color: Aether.textFaint,
-                                              ),
-                                              label: Text(
-                                                'Show $hidden earlier',
-                                                style: TextStyle(
-                                                  fontSize: 11,
-                                                  color: Aether.textFaint,
-                                                ),
+                                            child: Padding(
+                                              padding: const EdgeInsets.all(8),
+                                              child: Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  SizedBox(
+                                                    width: 12,
+                                                    height: 12,
+                                                    child:
+                                                        CircularProgressIndicator(
+                                                          strokeWidth: 1.5,
+                                                          color:
+                                                              Aether.textFaint,
+                                                        ),
+                                                  ),
+                                                  const SizedBox(width: 6),
+                                                  Text(
+                                                    'Loading earlier…',
+                                                    style: TextStyle(
+                                                      fontSize: 11,
+                                                      color: Aether.textFaint,
+                                                    ),
+                                                  ),
+                                                ],
                                               ),
                                             ),
                                           );
@@ -2523,8 +2551,9 @@ class _InputBarState extends State<_InputBar> {
                     builder: (_, _) {
                       // Per-session run state (never leaked from other
                       // sessions — the multi-session blink fix).
-                      final runningNow = AgentService.I
-                          .busyFor(AppState.I.activeSession?.id ?? '');
+                      final runningNow = AgentService.I.busyFor(
+                        AppState.I.activeSession?.id ?? '',
+                      );
                       final hasDraft = controller.text.trim().isNotEmpty;
                       final IconData icon;
                       final Color bg;

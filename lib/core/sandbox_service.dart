@@ -355,6 +355,12 @@ class SandboxService {
           onLine: (l) => onPhase(7, 0.4, l),
         );
         installed = code == 0;
+        if (installed) {
+          // apt path also needs the shebang fix: the debs it installed
+          // still contain #!/data/data/com.termux/files/... scripts.
+          final prefix = _prefix;
+          if (prefix != null) await _patchExtractedShebangs(prefix);
+        }
         if (!installed) {
           final lines = out
               .trim()
@@ -381,7 +387,8 @@ class SandboxService {
     // Some devices never complete apt's https method (Cloudflare TLS),
     // making "no Release file" error every retry chain.  curl honors our
     // CA bundle and works — so we fetch the package index + full .deb
-    // dependency closure ourselves and install with dpkg directly.
+    // dependency closure ourselves and extract with a pure-Dart ar parser
+    // (dpkg itself can't run — its prefix is the other app's private dir).
     if (!installed) {
       onPhase(7, 0.45, '[deb] apt failed — fetching packages directly…');
       try {
@@ -704,9 +711,10 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
     // ── 2. Parse the index (name → filename + depends) ──
     final text = await indexFile.readAsString();
     final stanzas = text.split(RegExp(r'\n\s*\n'));
-    final table = <String, ({String filename, List<String> depends})>{};
+    final table =
+        <String, ({String filename, List<String> depends, String? sha256})>{};
     for (final stanza in stanzas) {
-      String? name, filename;
+      String? name, filename, sha256;
       final depends = <String>[];
       for (final line in stanza.split('\n')) {
         if (line.startsWith(' ')) {
@@ -725,13 +733,16 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
           case 'Filename':
             filename = value;
             break;
+          case 'SHA256':
+            sha256 = value;
+            break;
           case 'Depends':
             depends.add(value);
             break;
         }
       }
       if (name != null && filename != null) {
-        table[name] = (filename: filename, depends: depends);
+        table[name] = (filename: filename, depends: depends, sha256: sha256);
       }
     }
     if (table.isEmpty) {
@@ -789,6 +800,25 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
       if (code != 0) {
         onPhase(7, 0.65, '[deb] download failed: ${fn.split('/').last}');
         return false;
+      }
+      // Integrity: the Termux index lists SHA256 per package — a MITM or
+      // truncated download that passes curl would otherwise install
+      // corrupt binaries into the sandbox.
+      final expected = table[name]!.sha256;
+      if (expected != null) {
+        final (hCode, hOut) = await execChecked([
+          'bash',
+          '-c',
+          'cd "\$PREFIX/var/cache/apt/archives" && '
+              'actual=\$(sha256sum "${fn.split('/').last}" | cut -d" " -f1) && '
+              '[ "\$actual" = "$expected" ] && echo SHA_OK || '
+              'echo "SHA_BAD \$actual"',
+        ]).timeout(const Duration(seconds: 30));
+        if (hCode != 0 || hOut.contains('SHA_BAD')) {
+          onPhase(7, 0.65, '[deb] SHA256 mismatch: ${fn.split('/').last}');
+          debFile.deleteSync();
+          return false;
+        }
       }
       downloaded++;
       if (downloaded % 10 == 0) {
@@ -854,22 +884,34 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
     // ── 5b. Shebang rewrite: extracted SCRIPT bins (npm, npx, uvx…) have
     // "#!/data/data/com.termux/files/usr/bin/env" baked in — the compiled-in
     // Termux prefix — which is another app's private dir → "bad interpreter:
-    // Permission denied". Rewrite every shebang that mentions the Termux
-    // prefix to OUR prefix (termux-fix-shebang equivalent), then chmod.
-    await execChecked([
-      'bash',
-      '-c',
-      'for f in "\$PREFIX"/bin/*; do '
-          '[ -f "\$f" ] || continue; '
-          'head -c2 "\$f" 2>/dev/null | grep -q "#!" || continue; '
-          'sed -i "s|/data/data/com.termux/files|$p|g" "\$f" 2>/dev/null; '
-          'done; '
-          'chmod +x "\$PREFIX"/bin/* 2>/dev/null; '
-          'command -v node npm python git curl 2>&1 | head -8',
-    ]).timeout(const Duration(seconds: 30));
+    // Permission denied". Rewrite every shebang mentioning the Termux prefix
+    // to OUR prefix (termux-fix-shebang equivalent), then chmod.
+    await _patchExtractedShebangs(prefix);
 
     // ── 6. Idempotent verification ──
     return await runtimesVerified();
+  }
+
+  /// Rewrites `#!/data/data/com.termux/files/...` shebangs in extracted
+  /// Termux packages to point at OUR sandbox prefix. Runs after BOTH install
+  /// paths (apt AND direct-deb) so npm/npx/uvx never hit the cross-app
+  /// prefix wall regardless of how they were installed.
+  Future<void> _patchExtractedShebangs(Directory prefix) async {
+    final p = prefix.path;
+    await execChecked([
+      'bash',
+      '-c',
+      // bin/ first (fast path), then npm's nested lib/node_modules scripts.
+      'for dir in "\$PREFIX/bin" "\$PREFIX/lib/node_modules" '
+          '"\$PREFIX/lib" "\$PREFIX/etc"; do '
+          '[ -d "\$dir" ] || continue; '
+          'find "\$dir" -maxdepth 6 -type f ! -name "*.so*" '
+          '! -name "*.png" ! -name "*.jpg" ! -name "*.a" '
+          '-exec sh -c \'head -c2 "\$1" 2>/dev/null | grep -q "#!" && '
+          'sed -i "s|/data/data/com.termux/files|$p|g" "\$1"\' _ {} \\; '
+          '2>/dev/null; done; '
+          'chmod +x "\$PREFIX"/bin/* 2>/dev/null',
+    ]).timeout(const Duration(minutes: 2));
   }
 
   /// Reads one member of an `ar` archive (`.deb` container) in pure Dart.
