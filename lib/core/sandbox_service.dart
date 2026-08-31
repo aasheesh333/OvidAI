@@ -65,20 +65,23 @@ class SandboxService {
   // ── Device arch (Termux-style: engine arch is the source of truth) ──
   String get _deviceArch {
     final v = Platform.version.toLowerCase();
-    if (v.contains('android_arm64') ||
-        v.contains('aarch64') ||
-        v.contains('x86_64')) {
+    // x86_64 first — an emulator/Chromebook must NOT be mapped to arm64
+    // (that was the "Permission denied" on bash exec: wrong-ISA payload).
+    if (v.contains('android_x64') || v.contains('x86_64')) return 'x86_64';
+    if (v.contains('android_arm64') || v.contains('aarch64')) {
       return 'arm64';
     }
     if (v.contains('android_arm') ||
         v.contains('armv7') ||
-        v.contains('armv8')) {
+        v.contains('armv8') ||
+        v.contains('armeabi')) {
       return 'arm';
     }
     try {
       final r = Process.runSync('/system/bin/getprop', ['ro.product.cpu.abi']);
       final abi = r.stdout.toString().trim().toLowerCase();
-      if (abi.contains('arm64') || abi.contains('x86_64')) return 'arm64';
+      if (abi.contains('arm64')) return 'arm64';
+      if (abi.contains('x86_64')) return 'x86_64';
       if (abi.contains('arm')) return 'arm';
     } catch (_) {}
     return 'arm64';

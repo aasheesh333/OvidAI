@@ -4,6 +4,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import android.content.Context
+import android.os.Build
 import java.io.File
 import java.util.zip.ZipFile
 
@@ -38,9 +39,14 @@ class MainActivity : FlutterActivity() {
                         try {
                             val apkPath = applicationInfo.sourceDir
                             val zip = ZipFile(apkPath)
-                            var entry = zip.getEntry("lib/arm64-v8a/libovid_bootstrap.so")
-                            if (entry == null) entry = zip.getEntry("lib/armeabi-v7a/libovid_bootstrap.so")
-                            if (entry == null) entry = zip.getEntry("lib/x86_64/libovid_bootstrap.so")
+                            // Pick the payload matching the device's REAL ABI
+                            // (first entry in SUPPORTED_ABIS). Falling back to
+                            // arm64 on an x86_64 device must never happen —
+                            // that was the 'Permission denied' exec fault.
+                            var entry = Build.SUPPORTED_ABIS
+                                .map { zip.getEntry("lib/$it/libovid_bootstrap.so") }
+                                .firstOrNull { it != null }
+                            if (entry == null) entry = zip.getEntry("lib/arm64-v8a/libovid_bootstrap.so")
                             if (entry == null) {
                                 zip.close()
                                 result.error("MISSING", "no libovid_bootstrap.so in APK", null)
