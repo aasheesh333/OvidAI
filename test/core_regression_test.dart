@@ -1202,6 +1202,7 @@ void main() {
         ..models = ['test-model']
         ..selectedModel = 'test-model';
 
+      // Serve every request (run + continuation) with a quick final answer.
       final serverTask = () async {
         await for (final request in server) {
           requests++;
@@ -1224,6 +1225,7 @@ void main() {
           } catch (_) {}
         }
       }();
+      unawaited(serverTask);
 
       try {
         // Start a run in A, queue a follow-up for A, then switch to B.
