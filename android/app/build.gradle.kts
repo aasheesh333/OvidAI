@@ -73,6 +73,13 @@ android {
     }
 }
 
+// Belt-and-suspenders: if the extension flags above are ignored, kill the
+// tasks outright. The 43MB zip-in-.so payloads have no debug symbols to
+// upload and mapping is meaningless for Dart AOT builds.
+tasks.matching { it.name.startsWith("uploadCrashlytics") }.configureEach {
+    enabled = false
+}
+
 kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
