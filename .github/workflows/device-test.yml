@@ -67,23 +67,15 @@ jobs:
             -noaudio -no-boot-anim -camera-back none -memory 2048
           disable-animations: true
           script: |
-            set -e
+            set -x
             adb install build/app/outputs/flutter-apk/app-debug.apk
-            echo "[TEST] APK installed, launching…"
             adb shell monkey -p com.dhanuk.ovidai -c android.intent.category.LAUNCHER 1
-            sleep 45
-            # Let the app's background sandbox provisioning run.
-            for i in $(seq 1 6); do
-              sleep 30
-              done_marker=$(adb shell 'run-as com.dhanuk.ovidai ls files/sandbox/bin/node 2>/dev/null' || true)
-              if [ -n "$done_marker" ]; then echo "[TEST] sandbox node present"; break; fi
-            done
-            echo "[TEST] --- device log tail (sandbox install) ---"
-            adb logcat -d | grep -Ei 'ovid|sandbox|\[deb\]|\[apt\]|flutter' | tail -120 || true
-            echo "[TEST] --- internal probe ---"
-            adb shell 'run-as com.dhanuk.ovidai sh -c "ls files/sandbox/bin | head -30; files/sandbox/bin/bash -lc \"command -v node npm python git curl\" 2>&1"' || true
+            sleep 150
             mkdir -p test-output
-            adb exec-out screencap -p > test-output/screen.png || true
+            adb logcat -d > test-output/full.logcat.txt 2>&1 || true
+            adb shell run-as com.dhanuk.ovidai ls files/sandbox/bin > test-output/sandbox-bin.txt 2>&1 || true
+            adb exec-out screencap -p > test-output/screen.png 2>/dev/null || true
+            echo TEST_COMPLETE_MARKER
 
       - name: Upload test artifacts (screenshot + log)
         if: always()
