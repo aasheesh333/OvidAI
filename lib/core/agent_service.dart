@@ -24,6 +24,10 @@ class BrowserTab {
   WebViewController? controller;
   bool loadedOnce = false;
 
+  /// Local preview tab: when set, [url] is display-only and the WebView
+  /// loads this file:// path (agent `preview` tool output) instead.
+  String? localPreviewPath;
+
   BrowserTab({required this.url});
 }
 
@@ -492,19 +496,18 @@ class AgentService extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       // Global (last-active) copy for next-launch restore of the
-      // then-active session…
-      await prefs.setStringList(
-        _kBrowserTabs,
-        browserTabs.map((t) => t.url).toList(),
-      );
+      // then-active session… Preview tabs are runtime-only (their local
+      // file may not exist next launch) so they're skipped.
+      final persistable = browserTabs
+          .where((t) => t.localPreviewPath == null && t.url != 'ovid://preview')
+          .map((t) => t.url)
+          .toList();
+      await prefs.setStringList(_kBrowserTabs, persistable);
       await prefs.setInt(_kBrowserActiveTab, activeTabIndex);
       // …and the per-session copy keyed by this session's id.
       final key = _currentRunKey();
       if (key.isNotEmpty) {
-        await prefs.setStringList(
-          '$_kBrowserSessionPrefix$key',
-          browserTabs.map((t) => t.url).toList(),
-        );
+        await prefs.setStringList('$_kBrowserSessionPrefix$key', persistable);
         await prefs.setInt('$_kBrowserActiveTab$key', activeTabIndex);
       }
     } catch (_) {}
@@ -515,6 +518,65 @@ class AgentService extends ChangeNotifier {
     _newTabInternal(url);
     _persistBrowserTabs();
     notifyListeners();
+  }
+
+  /// Agent-facing: open (or reuse) the session's LIVE PREVIEW tab — a
+  /// local index.html rendered by the agent's `preview` tool. The tab is
+  /// found by `isPreview` flag rather than URL so re-renders reload the
+  /// same tab instead of piling up.
+  void openPreviewTab(String filePath) {
+    BrowserTab? tab = browserTabs
+        .cast<BrowserTab?>()
+        .firstWhere((t) => t!.localPreviewPath != null, orElse: () => null);
+    if (tab == null) {
+      tab = _newTabInternal('ovid://preview');
+      tab.localPreviewPath = filePath;
+      tab.title = 'Preview';
+    } else {
+      tab.localPreviewPath = filePath;
+    }
+    activeTabIndex = browserTabs.indexOf(tab);
+    previewFile = filePath;
+    // Controller may not exist yet (created lazily by controllerForTab);
+    // when the browser screen builds it will pick up localPreviewPath.
+    final c = tab.controller;
+    if (c != null) {
+      _loadLocalPreview(tab, c);
+    }
+    _persistBrowserTabs();
+    notifyListeners();
+  }
+
+  /// Agent-facing: open (or reuse) the session's DEV SERVER tab — a
+  /// localhost:PORT URL discovered in background-job output (vite/next/
+  /// python http.server etc). Cleartext-to-localhost is allowed via the
+  /// network security config (nothing else is).
+  void openDevServerTab(String url) {
+    BrowserTab? tab = browserTabs
+        .cast<BrowserTab?>()
+        .firstWhere(
+          (t) =>
+              t!.url.startsWith('http://localhost:') ||
+              t.url.startsWith('http://127.0.0.1:'),
+          orElse: () => null,
+        );
+    if (tab == null) {
+      tab = _newTabInternal(url);
+      tab.title = 'Dev server';
+      tab.controller?.loadRequest(Uri.parse(url));
+    } else if (tab.url != url) {
+      tab.url = url;
+      tab.controller?.loadRequest(Uri.parse(url));
+    }
+    activeTabIndex = browserTabs.indexOf(tab);
+    _persistBrowserTabs();
+    notifyListeners();
+  }
+
+  void _loadLocalPreview(BrowserTab tab, WebViewController c) {
+    final p = tab.localPreviewPath;
+    if (p == null) return;
+    c.loadFile(p);
   }
 
   /// User-facing: close tab at index. Keeps at least one tab alive.
@@ -571,7 +633,13 @@ class AgentService extends ChangeNotifier {
       );
     if (!tab.loadedOnce) {
       tab.loadedOnce = true;
-      tab.controller!.loadRequest(Uri.parse(tab.url));
+      final previewPath = tab.localPreviewPath;
+      if (previewPath != null) {
+        tab.controller!.loadFile(previewPath);
+      } else if (tab.url.startsWith('http')) {
+        tab.controller!.loadRequest(Uri.parse(tab.url));
+      }
+      // Non-http non-preview (ovid:// markers) — nothing to load.
     }
     return tab.controller!;
   }
@@ -3886,10 +3954,10 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
         try {
           final path = await RepoCache.I.exportPreview('');
           if (path == null) return 'no index.html found in workspace';
-          previewFile = path;
-          notifyListeners();
+          openPreviewTab(path);
           _emit('page', 'preview ready');
-          return 'preview rendered in Browser panel ✓';
+          return 'preview rendered in Browser panel ✓ — open the Browser '
+              'tab to see it live';
         } catch (e) {
           return 'preview failed: $e';
         }
@@ -4916,14 +4984,18 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
         ], workingDirectory: work.path);
       }
       job.started = true;
-      // Stream output into a buffer (capped at 10K chars).
+      // Stream output into a buffer (capped at 10K chars). Dev-server
+      // detection runs on every chunk: vite/next/serve/python http.server
+      // print "Local: http://localhost:5173/" etc → open a live tab.
       job.process!.stdout.transform(utf8.decoder).listen((data) {
         job.output.write(data);
         _trimJobOutput(job);
+        _detectDevServer(job, data);
       });
       job.process!.stderr.transform(utf8.decoder).listen((data) {
         job.output.write(data);
         _trimJobOutput(job);
+        _detectDevServer(job, data);
       });
       job.process!.exitCode.then((code) {
         job.exitCode = code;
@@ -4950,6 +5022,26 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
         '…(earlier output trimmed)…\n${s.substring(s.length - 8000)}',
       );
     }
+  }
+
+  /// Live-preview hook (DSH Part 6): scan job output for a dev-server
+  /// URL and surface it as a Browser tab the moment it appears.
+  static final _devServerRe = RegExp(
+    r'https?://(?:localhost|127\.0\.0\.1|\[::1\]):(\d{2,5})[^\s"<>]*',
+  );
+
+  void _detectDevServer(_BgJob job, String chunk) {
+    final m = _devServerRe.firstMatch(chunk);
+    if (m == null) return;
+    final url = m.group(0)!;
+    // Skip already-open tab; throttle re-announces (vite re-prints on
+    // file change) by checking the exact URL.
+    final exists = browserTabs.any(
+      (t) => t.url == url || t.localPreviewPath != null && t.url == url,
+    );
+    if (exists) return;
+    _emit('page', 'dev server detected: $url');
+    openDevServerTab(url);
   }
 
   String _handleJobList() {

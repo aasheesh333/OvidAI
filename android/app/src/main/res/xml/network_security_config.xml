@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Ovid network security config.
+  Base: NO cleartext anywhere (modern default).
+  Exception: localhost + 127.0.0.1 + [::1] cleartext ALLOWED — the agent's
+  background dev servers (vite/next/python http.server) announce
+  http://localhost:PORT URLs that render in the live preview tab.
+  Everything else (public web) stays HTTPS-only.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">::1</domain>
+    </domain-config>
+</network-security-config>

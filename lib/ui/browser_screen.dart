@@ -48,6 +48,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
       }
     }
     agent.addListener(_onAgentChanged);
+    // Omnibar initial value.
+    final t = agent.browserTabs.isNotEmpty
+        ? agent.browserTabs[agent.activeTabIndex]
+        : null;
+    if (t != null) _url.text = _omnibarText(t);
   }
 
   static bool _sameHost(String a, String b) {
@@ -60,11 +65,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (!mounted) return;
     // Keep the omnibar synced with the active tab (agent navigations too).
     final tab = _activeTab;
-    if (tab != null && !_editingUrl && _url.text != tab.url) {
-      _url.text = tab.url;
+    if (tab != null && !_editingUrl && _url.text != _omnibarText(tab)) {
+      _url.text = _omnibarText(tab);
     }
     setState(() {});
   }
+
+  String _omnibarText(BrowserTab tab) =>
+      tab.localPreviewPath != null ? 'Live preview' : tab.url;
 
   BrowserTab? get _activeTab =>
       _agent.activeTabIndex < _agent.browserTabs.length
@@ -234,7 +242,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       size: 17,
                       color: Aether.textMuted,
                     ),
-                    onPressed: () => controller?.reload(),
+                    onPressed: () {
+                      final t = _activeTab;
+                      final lp = t?.localPreviewPath;
+                      if (t != null && lp != null) {
+                        t.controller?.loadFile(lp);
+                      } else {
+                        controller?.reload();
+                      }
+                    },
                   ),
                   Expanded(
                     child: Container(
@@ -263,11 +279,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
                             color: Aether.textFaint,
                           ),
                           prefixIcon: Icon(
-                            (tab?.url ?? '').startsWith('https')
+                            tab?.localPreviewPath != null
+                                ? Icons.preview_outlined
+                                : (tab?.url ?? '').startsWith('https')
                                 ? Icons.lock_outline
                                 : Icons.public,
                             size: 12,
-                            color: (tab?.url ?? '').startsWith('https')
+                            color: tab?.localPreviewPath != null
+                                ? Aether.accent
+                                : (tab?.url ?? '').startsWith('https')
                                 ? Aether.success
                                 : Aether.textFaint,
                           ),
@@ -318,10 +338,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   String _tabLabel(BrowserTab t) {
+    if (t.localPreviewPath != null) return 'Preview';
+    if (t.url == 'ovid://preview') return 'Preview';
+    if (t.title?.isNotEmpty == true) return t.title!;
     final host = Uri.tryParse(t.url)?.host ?? '';
-    return t.title?.isNotEmpty == true
-        ? t.title!
-        : (host.isNotEmpty ? host : t.url);
+    return host.isNotEmpty ? host : t.url;
   }
 }
 
