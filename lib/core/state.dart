@@ -1320,6 +1320,44 @@ class AppState extends ChangeNotifier {
     } else {
       unawaited(McpService.I.disconnect(s.name));
     }
+    _persistMcpConnectedIntent();
+    refresh();
+  }
+
+  // ── MCP auto-reconnect (DSH tier-2 lifecycle parity) ──
+  /// Names of servers the user wants connected. Survives restarts so the
+  /// app can respawn them on launch/resume (spawn-on-demand otherwise).
+  static const _kMcpConnectedIntent = 'ovid_mcp_connected_v1';
+
+  Future<void> _persistMcpConnectedIntent() async {
+    final names = mcpServers
+        .where((s) => s.connected)
+        .map((s) => s.name)
+        .toList();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(_kMcpConnectedIntent, names);
+    } catch (_) {}
+  }
+
+  /// Reconnect every server the user had connected (app resume/launch).
+  /// Failures are silent — servers stay "disconnected" until the user
+  /// retries; lazy connect covers them on tool call.
+  Future<void> reconnectMcpServers() async {
+    List<String> names;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      names = prefs.getStringList(_kMcpConnectedIntent) ?? [];
+    } catch (_) {
+      return;
+    }
+    if (names.isEmpty) return;
+    for (final name in names) {
+      final s = mcpServers.where((s) => s.name == name).firstOrNull;
+      if (s == null || McpService.I.isConnected(name)) continue;
+      await McpService.I.connect(s);
+      s.connected = McpService.I.isConnected(name);
+    }
     refresh();
   }
 

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'core/agent_service.dart';
 import 'core/firebase_service.dart';
 import 'core/github_service.dart';
+import 'core/mcp_service.dart';
 import 'core/sandbox_service.dart';
 import 'core/state.dart';
 import 'core/theme.dart';
@@ -103,12 +104,41 @@ class _Shell extends StatefulWidget {
   State<_Shell> createState() => _ShellState();
 }
 
-class _ShellState extends State<_Shell> {
+class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // Ask for telemetry consent once (Play policy) after first frame.
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAskConsent());
+    // MCP auto-reconnect: respawn servers the user had connected.
+    unawaited(AppState.I.reconnectMcpServers());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // ── App lifecycle → MCP lifecycle (DSH tier-2 parity) ──
+    // resume  → respawn every server the user wants connected
+    // paused  → tear processes down (Android will kill them anyway when
+    //           memory-pressured; killing now avoids zombie stdio pipes)
+    switch (state) {
+      case AppLifecycleState.resumed:
+        unawaited(AppState.I.reconnectMcpServers());
+        break;
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        unawaited(McpService.I.disconnectAll());
+        break;
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.hidden:
+        break;
+    }
   }
 
   void _maybeAskConsent() {
