@@ -80,27 +80,12 @@ jobs:
             adb install build/app/outputs/flutter-apk/app-debug.apk
             adb shell monkey -p com.dhanuk.ovidai -c android.intent.category.LAUNCHER 1
             sleep 150
-            # B. Tap through to the chat (sandbox ready → Start chatting)
-            adb shell input keyevent KEYCODE_DPAD_CENTER 2>/dev/null || true
-            adb shell input tap 540 2330 2>/dev/null || true
-            sleep 10
-            # C. Vibe-coder simulation inside the sandbox: exercise every
-            # core tool the agent would use (node, npm, python, git, curl)
-            cat > test-output/vibe.sh << 'EOF'
-#!/data/local/tmp/../../data/data/com.dhanuk.ovidai/files/sandbox/bin/bash
-cd $TMPDIR 2>/dev/null
-export PATH=/data/data/com.dhanuk.ovidai/files/sandbox/bin:$PATH
-echo "== versions =="; node --version; npm --version; python --version; git --version; curl --version | head -1
-echo "== npm run =="; npm init -y >/dev/null 2>&1 && npm install --no-audit --no-fund is-odd@3.0.1 2>&1 | tail -1
-echo "== python pip =="; pip install --quiet requests 2>&1 | tail -1; python -c "import requests; print('requests ok', requests.__version__)"
-echo "== node run =="; node -e "console.log('node runs:', 2+2)"
-echo "== git =="; git init -q vibe && cd vibe && git config user.email t@t && git config user.name t && echo hi > a.txt && git add . && git commit -q -m vibe && git log --oneline
-echo "== curl https =="; curl -fsSL https://packages-cf.termux.dev/apt/termux-main/dists/stable/Release -o /dev/null -w 'mirror http %{http_code}\n'
-echo ALL_DONE
-EOF
-            adb push test-output/vibe.sh /data/local/tmp/vibe.sh 2>&1
-            adb shell chmod 755 /data/local/tmp/vibe.sh
-            adb shell run-as com.dhanuk.ovidai /data/local/tmp/../../data/user/0/com.dhanuk.ovidai/files/sandbox/bin/bash /data/local/tmp/vibe.sh > test-output/vibe-out.txt 2>&1 || true
+            # B. Vibe-coder simulation inside the sandbox: exercise every
+            # core tool the agent uses (node, npm, python, git, curl).
+            # base64-encoded to keep YAML/shell quoting sane.
+            VIBE_B64="IyEvZGF0YS9kYXRhL2NvbS5kaGFudWsub3ZpZGFpL2ZpbGVzL3NhbmRib3gvYmluL2Jhc2gKZXhwb3J0IFBBVEg9L2RhdGEvZGF0YS9jb20uZGhhbnVrLm92aWRhaS9maWxlcy9zYW5kYm94L2JpbjokUEFUSApjZCAvZGF0YS9kYXRhL2NvbS5kaGFudWsub3ZpZGFpL2ZpbGVzL3NhbmRib3gvaG9tZSAyPi9kZXYvbnVsbCB8fCBjZCAvdG1wCmVjaG8gIj09IHZlcnNpb25zID09Ijsgbm9kZSAtLXZlcnNpb247IG5wbSAtLXZlcnNpb247IHB5dGhvbiAtLXZlcnNpb247IGdpdCAtLXZlcnNpb247IGN1cmwgLS12ZXJzaW9uIHwgaGVhZCAtMQplY2hvICI9PSBucG0gPT0iOyBybSAtZiBwYWNrYWdlLmpzb247IG5wbSBpbml0IC15ID4vZGV2L251bGwgMj4mMSAmJiBucG0gaW5zdGFsbCAtLW5vLWF1ZGl0IC0tbm8tZnVuZCBpcy1vZGRAMy4wLjEgMj4mMSB8IHRhaWwgLTEKZWNobyAiPT0gcHl0aG9uIHBpcCA9PSI7IHBpcCBpbnN0YWxsIC0tcXVpZXQgcmVxdWVzdHMgMj4mMSB8IHRhaWwgLTE7IHB5dGhvbiAtYyAiaW1wb3J0IHJlcXVlc3RzOyBwcmludCgncmVxdWVzdHMgb2snLCByZXF1ZXN0cy5fX3ZlcnNpb25fXykiCmVjaG8gIj09IG5vZGUgcnVuID09Ijsgbm9kZSAtZSAiY29uc29sZS5sb2coJ25vZGUgcnVuczonLCAyKzIpIgplY2hvICI9PSBnaXQgPT0iOyBybSAtcmYgdmliZTsgZ2l0IGluaXQgLXEgdmliZSAmJiBjZCB2aWJlICYmIGdpdCBjb25maWcgdXNlci5lbWFpbCB0QHQgJiYgZ2l0IGNvbmZpZyB1c2VyLm5hbWUgdCAmJiBlY2hvIGhpID4gYS50eHQgJiYgZ2l0IGFkZCAuICYmIGdpdCBjb21taXQgLXEgLW0gdmliZSAmJiBnaXQgbG9nIC0tb25lbGluZQplY2hvICI9PSBjdXJsIGh0dHBzID09IjsgY3VybCAtZnNTTCBodHRwczovL3BhY2thZ2VzLWNmLnRlcm11eC5kZXYvYXB0L3Rlcm11eC1tYWluL2Rpc3RzL3N0YWJsZS9SZWxlYXNlIC1vIC9kZXYvbnVsbCAtdyAnbWlycm9yIGh0dHAgJXtodHRwX2NvZGV9XG4nICYmIGVjaG8gY3VybC1vawplY2hvIEFMTF9ET05FCg=="
+            adb shell "run-as com.dhanuk.ovidai sh -c 'echo $VIBE_B64 | /data/data/com.dhanuk.ovidai/files/sandbox/bin/base64 -d > files/vibe.sh; files/sandbox/bin/bash files/vibe.sh'" > test-output/vibe-out.txt 2>&1 || true
+            cat test-output/vibe-out.txt
             mkdir -p test-output
             adb logcat -d > test-output/full.logcat.txt 2>&1 || true
             adb shell run-as com.dhanuk.ovidai ls files/sandbox/bin > test-output/sandbox-bin.txt 2>&1 || true
