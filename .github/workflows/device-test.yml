@@ -17,6 +17,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Detect optional secrets
+        env:
+          GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES" ]; then echo "firebase=true" >> "$GITHUB_ENV"; fi
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -30,6 +36,14 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules || true
           sudo udevadm trigger --name-match=kvm || true
+
+      - name: Write google-services.json
+        if: env.firebase == 'true'
+        env:
+          GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          mkdir -p android/app
+          printf '%s' "$GOOGLE_SERVICES" > android/app/google-services.json
 
       - uses: subosito/flutter-action@v2
         with:
