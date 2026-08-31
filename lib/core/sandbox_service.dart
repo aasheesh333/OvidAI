@@ -134,6 +134,8 @@ class SandboxService {
         // CA bundle + apt config on every boot so apt/git over HTTPS
         // keep working without a reinstall.
         _writeAptConfig(prefix);
+        _ensureTlsConfig(prefix);
+        _probePythonPath();
         return true;
       }
       return false;
@@ -410,6 +412,14 @@ class SandboxService {
       }
     }
 
+    // ── Post-install config (env-injection targets) ──
+    final prefix = _prefix;
+    if (prefix != null) {
+      _ensureTlsConfig(prefix);
+      _ensurePipConfig(prefix);
+      _probePythonPath();
+    }
+
     // Verify node + npm/npx.
     if (await binRuns('node')) {
       final nodeOk = await binRuns('node');
@@ -450,6 +460,93 @@ class SandboxService {
           ? 'python .............. ✓ python · ${pipOk ? "pip" : "pip✗"} · uvx ✓'
           : 'python .............. ⚠ ${pyOk ? "partial (uv missing)" : "not installed"} — will retry on first uvx MCP connect',
     );
+
+    // ── Bootstrap self-test (DSH Part 3) — EXECUTE, never just probe ──
+    // git/curl were previously only `command -v`-probed; a broken exec-path
+    // or missing libexec went unnoticed until a real clone failed mid-task.
+    await selfTest(onPhase);
+  }
+
+  /// DSH Part 3 self-test: run each critical runtime and CHECK its
+  /// behavior, not just its existence. Results stream to the install log;
+  /// failures are warnings (health screen + next-connect retry cover them)
+  /// except GIT_EXEC_PATH mismatch — the #1 real-device git failure.
+  Future<void> selfTest(
+    void Function(int phase, double progress, String line) onPhase,
+  ) async {
+    if (_prefix == null) return;
+
+    // git — version + exec-path MUST point inside our prefix.
+    try {
+      final (_, ver) = await execChecked(['bash', '-c', 'git --version 2>&1'])
+          .timeout(const Duration(seconds: 30));
+      if (!ver.contains('git version')) {
+        onPhase(8, 1.0, 'git ...............  ⚠ unexpected version output: '
+            '${ver.trim().split('\n').last}');
+      }
+    } catch (e) {
+      onPhase(8, 1.0, 'git ...............  ⚠ exec failed: '
+          '${e.toString().split('\n').first}');
+    }
+    String? execPath;
+    try {
+      final (_, ep) = await execChecked(['bash', '-c', 'git --exec-path 2>&1'])
+          .timeout(const Duration(seconds: 30));
+      execPath = ep.trim();
+    } catch (_) {}
+    final prefixPath = _prefix!.path;
+    if (execPath == null || execPath.isEmpty) {
+      onPhase(8, 1.0, 'git exec-path .....  ⚠ not reported');
+    } else if (!execPath.startsWith(prefixPath)) {
+      // Compiled-in Termux prefix leak — clone/push WILL fail with
+      // "'remote-https' is not a git command". GIT_EXEC_PATH env fix
+      // (set in _sandboxEnv) covers spawned processes; log loudly anyway.
+      onPhase(
+        8,
+        1.0,
+        'git exec-path .....  ⚠ points at $execPath — env override active '
+            '(GIT_EXEC_PATH=$prefixPath/libexec/git-core)',
+      );
+    } else {
+      onPhase(8, 1.0, 'git exec-path .....  ✓ $execPath');
+    }
+
+    // curl — must execute and report a version.
+    try {
+      final (_, v) = await execChecked(['bash', '-c', 'curl --version 2>&1'])
+          .timeout(const Duration(seconds: 30));
+      onPhase(
+        8,
+        1.0,
+        v.trimLeft().startsWith('curl')
+            ? 'curl ..............  ✓'
+            : 'curl ..............  ⚠ ${v.trim().split('\n').last}',
+      );
+    } catch (e) {
+      onPhase(8, 1.0, 'curl ..............  ⚠ exec failed');
+    }
+
+    // npm ping — registry reachability over our TLS config.
+    try {
+      final (_, out) = await execChecked(['bash', '-c', 'npm ping 2>&1'])
+          .timeout(const Duration(seconds: 45));
+      final l = out.toLowerCase();
+      final ok = l.contains('pong') || l.contains('success');
+      final lastLine = out
+          .trim()
+          .split('\n')
+          .where((l) => l.isNotEmpty)
+          .lastOrNull;
+      onPhase(
+        8,
+        1.0,
+        ok
+            ? 'npm registry ......  ✓ ping ok'
+            : 'npm registry ......  ⚠ ${lastLine ?? 'no output'}',
+      );
+    } catch (_) {
+      onPhase(8, 1.0, 'npm registry ......  ⚠ ping failed/timeout');
+    }
   }
 
   /// A parsed symlink: `target` is what the link points to, `linkPath` is
@@ -516,6 +613,16 @@ export PATH="\$PREFIX/bin:\$PREFIX/bin/applets:/system/bin:/system/xbin"
 export LD_LIBRARY_PATH="\$PREFIX/lib"
 export LANG="en_US.UTF-8"
 export TERM="xterm-256color"
+export SHELL="\$PREFIX/bin/bash"
+# DSH env-injection parity — interactive shells get the same set the
+# spawn-level injection provides (GIT_EXEC_PATH, NODE_PATH, npm/python).
+export GIT_EXEC_PATH="\$PREFIX/libexec/git-core"
+export GIT_CONFIG_NOSYSTEM=1
+export NODE_PATH="\$PREFIX/lib/node_modules"
+export npm_config_registry="https://registry.npmjs.org/"
+export npm_config_cache="\$HOME/.npm"
+export npm_config_userconfig="\$HOME/.npmrc"
+export PIP_CACHE_DIR="\$HOME/.cache/pip"
 ''';
     try {
       File('${etc.path}/profile').writeAsStringSync(profile);
@@ -645,6 +752,58 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
     } catch (_) {}
     _ensureSourcesList(prefix);
     _ensureCaBundle(prefix);
+    _ensureTlsConfig(prefix);
+  }
+
+  /// Generate `$prefix/etc/tls/openssl.cnf` (DSH Part 3 parity) — TLSv1.2
+  /// + SECLEVEL=1 so node/npm/pip TLS handshakes work on old Android
+  /// OpenSSL builds that default to stricter/weaker-mixed configs.
+  void _ensureTlsConfig(Directory prefix) {
+    try {
+      final tls = Directory('${prefix.path}/etc/tls')
+        ..createSync(recursive: true);
+      final cnf = File('${tls.path}/openssl.cnf');
+      if (cnf.existsSync() && cnf.lengthSync() > 0) return;
+      cnf.writeAsStringSync('''
+# Ovid sandbox TLS config (auto-generated).
+# TLSv1.2 floor + SECLEVEL=1: maximum device compatibility for
+# node/npm/pip/git/curl HTTPS against modern registries.
+openssl_conf = ovid_init
+
+[ovid_init]
+ssl_conf = ssl_sect
+
+[ssl_sect]
+system_default = system_default_sect
+
+[system_default_sect]
+CipherString = DEFAULT@SECLEVEL=1
+MinProtocol = TLSv1.2
+''');
+    } catch (_) {}
+  }
+
+  /// pip.conf — keep pip's index/cache/config inside the sandbox HOME.
+  void _ensurePipConfig(Directory prefix) {
+    try {
+      final conf = File('${prefix.path}/etc/pip.conf')
+        ..createSync(recursive: true);
+      if (conf.existsSync() && conf.lengthSync() > 0) return;
+      conf.writeAsStringSync('''
+[global]
+cache-dir = ${prefix.path}/home/.cache/pip
+no-color = true
+''');
+      final npmrc = File('${prefix.path}/home/.npmrc')
+        ..createSync(recursive: true);
+      if (npmrc.existsSync() && npmrc.lengthSync() > 0) return;
+      npmrc.writeAsStringSync('''
+cache=${prefix.path}/home/.npm
+update-notifier=false
+fund=false
+audit=false
+''');
+    } catch (_) {}
   }
 
   /// Known-good Termux main-repo mirrors, tried in order.  A dead or stale
@@ -1090,7 +1249,7 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
   // ═════════════════════════════════════════════════════════════════
   Map<String, String> _sandboxEnv() {
     final p = _prefix!.path;
-    return {
+    final env = <String, String>{
       'PREFIX': p,
       'TERMUX__PREFIX': p,
       'HOME': '$p/home',
@@ -1100,6 +1259,7 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
       'LD_PRELOAD': '$p/lib/libtermux-exec-direct-ld-preload.so',
       'LANG': 'en_US.UTF-8',
       'TERM': 'xterm-256color',
+      'SHELL': '$p/bin/bash',
       'ANDROID_DATA': '/data',
       'ANDROID_ROOT': '/system',
       // Point apt at our explicit Dir config (bypasses the compiled-in
@@ -1110,7 +1270,56 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
       'CURL_CA_BUNDLE': '$p/etc/tls/cert.pem',
       'SSL_CERT_FILE': '$p/etc/tls/cert.pem',
       'GIT_SSL_CAINFO': '$p/etc/tls/cert.pem',
+      // ── DSH-web env-injection parity (spawn-level, never profiles) ──
+      // The golden rule: agents run `bash -c` non-interactive, which never
+      // reads .bashrc — every runtime var must be in the process env.
+      // git: exec-path points at OUR libexec (compiled-in prefix would
+      // look at com.termux's path → "git: 'remote-https' is not a git
+      // command"). NOSYSTEM skips the read-only /system gitconfig.
+      if (Directory('$p/libexec/git-core').existsSync())
+        'GIT_EXEC_PATH': '$p/libexec/git-core',
+      'GIT_CONFIG_NOSYSTEM': '1',
+      // node/npm: global modules + registry + cache all inside sandbox.
+      'NODE_PATH': '$p/lib/node_modules',
+      'npm_config_registry': 'https://registry.npmjs.org/',
+      'npm_config_cache': '$p/home/.npm',
+      'npm_config_userconfig': '$p/home/.npmrc',
+      // pip cache + config inside sandbox HOME.
+      'PIP_CACHE_DIR': '$p/home/.cache/pip',
+      'PIP_CONFIG_FILE': '$p/etc/pip.conf',
+      // TLS config: some Android openssl builds fail without an explicit
+      // config; ours sets TLSv1.2 + SECLEVEL=1 for old device compat.
+      if (File('$p/etc/tls/openssl.cnf').existsSync())
+        'OPENSSL_CONF': '$p/etc/tls/openssl.cnf',
     };
+    // python: site-packages on PYTHONPATH — only when discovered (empty
+    // PYTHONPATH would pollute sys.path with cwd).
+    final pysp = _pythonSitePackages;
+    if (pysp != null && pysp.isNotEmpty) env['PYTHONPATH'] = pysp;
+    return env;
+  }
+
+  /// Probed `lib/python3.x/site-packages` (python is apt-installed AFTER
+  /// bootstrap, so the version dir must be discovered, not hardcoded).
+  String? _pythonSitePackages;
+
+  /// Discover the python site-packages dir once; safe no-op if absent.
+  void _probePythonPath() {
+    if (_pythonSitePackages != null || _prefix == null) return;
+    try {
+      final lib = Directory('${_prefix!.path}/lib');
+      if (!lib.existsSync()) return;
+      for (final e in lib.listSync(followLinks: false)) {
+        if (e is! Directory) continue;
+        final name = e.path.split('/').last;
+        if (!name.startsWith('python3')) continue;
+        final sp = Directory('${e.path}/site-packages');
+        if (sp.existsSync()) {
+          _pythonSitePackages = sp.path;
+          return;
+        }
+      }
+    } catch (_) {}
   }
 
   Future<String> exec(

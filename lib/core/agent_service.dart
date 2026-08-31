@@ -4901,17 +4901,13 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     _emit('shell', 'job #$id started: $name');
     try {
       if (mode == AgentMode.studio && SandboxService.I.isInstalled) {
-        // Same env/loader setup as exec() — PROOT_LOADER is required or
-        // every guest execve hits EACCES (noexec temp fallback).
+        // Sandbox spawn — _sandboxEnv() provides the full DSH env set
+        // (PATH, GIT_EXEC_PATH, NODE_PATH, npm_config_*, PYTHONPATH, TLS).
+        // The old code overrode PATH with glibc-style /usr/* dirs — that
+        // clobbered $PREFIX/bin and broke every sandbox job command.
         job.process = await SandboxService.I.spawn(
           ['bash', '-c', cmd],
           hostWorkDir: work,
-          env: {
-            'HOME': '/root',
-            'PATH':
-                '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-            'TERM': 'xterm-256color',
-          },
         );
       } else {
         job.process = await Process.start('/system/bin/sh', [
