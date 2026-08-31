@@ -62,14 +62,15 @@ android {
                 else signingConfigs.getByName("debug")
         }
     }
-}
 
-firebaseCrashlytics {
-    // The bundled libovid_bootstrap.so payloads are zip archives (not real
-    // ELF libs) — crashlytics symbol/mapping uploads 400 on them and break
-    // the CI build. Symbols aren't useful here anyway (Dart AOT obfuscates).
-    nativeSymbolUploadEnabled = false
-    mappingFileUploadEnabled = false
+    firebaseCrashlytics {
+        // The bundled libovid_bootstrap.so payloads are zip archives (not
+        // real ELF libs) — crashlytics symbol/mapping uploads 400 on them
+        // and break the CI build. Symbols aren't useful here anyway
+        // (Dart AOT obfuscates).
+        nativeSymbolUploadEnabled = false
+        mappingFileUploadEnabled = false
+    }
 }
 
 kotlin {
