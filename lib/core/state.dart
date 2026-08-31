@@ -1541,6 +1541,7 @@ class AppState extends ChangeNotifier {
         baseUrl: 'https://integrate.api.nvidia.com/v1',
         isFree: true,
         models: [
+          'nvidia/nemotron-3.5-lightning-30b-a3b',
           'meta/llama-3.3-70b-instruct',
           'deepseek-ai/deepseek-r1',
           'qwen/qwen2.5-coder-32b-instruct',
