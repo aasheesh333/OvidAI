@@ -1972,15 +1972,25 @@ class _MessageView extends StatelessWidget {
             constraints: BoxConstraints(
               maxWidth: MediaQuery.of(context).size.width * 0.82,
             ),
-            child: switch (m.kind) {
-              MsgKind.code => _code(),
-              MsgKind.imageGen => _imageGen(),
-              MsgKind.reasoning => _reasoning(),
-              MsgKind.tool => _toolCard(),
-              MsgKind.turnTail => _turnTail(),
-              MsgKind.compact => _CompactionRow(m),
-              _ => _text(isUser),
-            },
+            child: Column(
+              crossAxisAlignment: isUser
+                  ? CrossAxisAlignment.end
+                  : CrossAxisAlignment.start,
+              children: [
+                switch (m.kind) {
+                  MsgKind.code => _code(),
+                  MsgKind.imageGen => _imageGen(),
+                  MsgKind.reasoning => _reasoning(),
+                  MsgKind.tool => _toolCard(),
+                  MsgKind.turnTail => _turnTail(),
+                  MsgKind.compact => _CompactionRow(m),
+                  _ => _text(isUser),
+                },
+                // Attachment chips under the user bubble (in-chat display).
+                if (isUser && m.attachments.isNotEmpty)
+                  _attachmentChips(),
+              ],
+            ),
           ),
           // DSH-web message meta + action row: copy / edit / revert / time.
           // (Suppressed on compaction event rows — they are apparatus, not
@@ -2082,6 +2092,71 @@ class _MessageView extends StatelessWidget {
   );
 
   Widget _reasoning() => _ReasoningCard(m);
+
+  /// Attachment chips under a user message (paperclip + name + size).
+  Widget _attachmentChips() => Padding(
+    padding: const EdgeInsets.only(top: 4),
+    child: Wrap(
+      spacing: 6,
+      runSpacing: 4,
+      alignment: WrapAlignment.end,
+      children: [
+        for (final a in m.attachments)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+            decoration: BoxDecoration(
+              color: Aether.surfaceRaised,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Aether.hairline),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  _attachIcon(a.name),
+                  size: 13,
+                  color: Aether.accent,
+                ),
+                const SizedBox(width: 5),
+                Text(
+                  a.name,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: Aether.text,
+                  ),
+                ),
+                const SizedBox(width: 5),
+                Text(
+                  _fmtSize(a.size),
+                  style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                ),
+              ],
+            ),
+          ),
+      ],
+    ),
+  );
+
+  IconData _attachIcon(String name) {
+    final ext = name.split('.').last.toLowerCase();
+    return switch (ext) {
+      'png' || 'jpg' || 'jpeg' || 'gif' || 'webp' || 'bmp' => Icons.image,
+      'mp4' || 'mov' || 'avi' || 'mkv' || 'webm' => Icons.videocam,
+      'mp3' || 'wav' || 'ogg' || 'm4a' || 'flac' => Icons.audio_file,
+      'pdf' => Icons.picture_as_pdf,
+      'zip' || 'tar' || 'gz' || 'rar' || '7z' => Icons.folder_zip,
+      'dart' || 'py' || 'js' || 'ts' || 'json' || 'yaml' || 'yml' ||
+      'md' || 'txt' || 'csv' || 'html' || 'css' || 'sh' => Icons.code,
+      _ => Icons.insert_drive_file,
+    };
+  }
+
+  String _fmtSize(int b) => b >= 1048576
+      ? '${(b / 1048576).toStringAsFixed(1)} MB'
+      : b >= 1024
+      ? '${(b / 1024).toStringAsFixed(0)} KB'
+      : '$b B';
 
   /// DSH ToolRow parity — collapsed 24px row (icon + title · summary)
   /// expanding to a Terminal/Diff/plain detail block.
@@ -3220,9 +3295,31 @@ class _QuestionsCardState extends State<_QuestionsCard> {
   /// question id → selected option labels (multi → Set, single → 1 elem)
   final Map<String, Set<String>> _selected = {};
 
+  /// question id → free-text "own answer" (overrides chips when non-empty)
+  final Map<String, TextEditingController> _custom = {};
+
+  @override
+  void dispose() {
+    for (final c in _custom.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  TextEditingController _controllerFor(String id) =>
+      _custom.putIfAbsent(id, TextEditingController.new);
+
+  String? _answerFor(UserQuestion q) {
+    final custom = _custom[q.id]?.text.trim();
+    if (custom != null && custom.isNotEmpty) return custom;
+    final sel = _selected[q.id];
+    if (sel == null || sel.isEmpty) return null;
+    return sel.join(', ');
+  }
+
   bool get _allAnswered {
     for (final q in widget.req.questions!) {
-      if (!(_selected[q.id]?.isNotEmpty ?? false)) return false;
+      if (_answerFor(q) == null) return false;
     }
     return true;
   }
@@ -3282,6 +3379,9 @@ class _QuestionsCardState extends State<_QuestionsCard> {
                 children: [for (final opt in q.options) _optionChip(q, opt)],
               ),
             ],
+            // Free-form "own answer" — for answers the chips don't cover.
+            const SizedBox(height: 6),
+            _ownAnswerField(q),
             const SizedBox(height: 8),
           ],
           Row(
@@ -3309,8 +3409,9 @@ class _QuestionsCardState extends State<_QuestionsCard> {
                 ),
                 onPressed: _allAnswered
                     ? () {
-                        for (final e in _selected.entries) {
-                          widget.req.answers[e.key] = e.value.join(', ');
+                        for (final q in widget.req.questions!) {
+                          final a = _answerFor(q);
+                          if (a != null) widget.req.answers[q.id] = a;
                         }
                         AgentService.I.approve(true);
                       }
@@ -3320,6 +3421,38 @@ class _QuestionsCardState extends State<_QuestionsCard> {
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  /// Free-text field for a question ("your own answer"). Typing here
+  /// overrides any selected chip — the user isn't limited to the AI's
+  /// preset options.
+  Widget _ownAnswerField(UserQuestion q) {
+    return TextField(
+      controller: _controllerFor(q.id),
+      style: TextStyle(fontSize: 12.5, color: Aether.text),
+      onChanged: (t) {
+        // Typing an own answer overrides chip selection for this question.
+        if (t.trim().isNotEmpty) _selected[q.id]?.clear();
+        setState(() {});
+      },
+      decoration: InputDecoration(
+        isDense: true,
+        hintText: 'Or type your own answer…',
+        hintStyle: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 10,
+          vertical: 7,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: Aether.hairline),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: Aether.accent),
+        ),
       ),
     );
   }

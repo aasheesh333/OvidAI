@@ -916,6 +916,10 @@ class AgentService extends ChangeNotifier {
     return SandboxService.I.workDirFor(sid);
   }
 
+  /// Test seam: resolve the ACTIVE session's workspace directory without
+  /// running an agent (tests stage files here before runTask).
+  Future<Directory> sessionWorkDirForTest() async => _sessionWorkDir();
+
   // ── fs tools state (read-before-write policy, DSH observation gate) ──
   /// Paths the AI has read via file_read/fs_edit view — str_replace/insert
   /// require a prior read.  Keyed by session id so sessions don't leak.
@@ -2670,9 +2674,23 @@ class AgentService extends ChangeNotifier {
 
     // ── Staged attachment (chatbox upload) ──
     // The file is already in the session workspace; capture it so we can
-    // inject a system note below telling the agent to read it.
+    // inject a system note below telling the agent to read it, and stamp
+    // it onto the user message that carried it (in-chat chip display).
     final att = pendingAttachment;
-    if (att != null) pendingAttachment = null;
+    if (att != null) {
+      pendingAttachment = null;
+      final lastUser = s.messages.lastWhere(
+        (m) => m.role == 'user',
+        orElse: () => Message(role: 'user', content: originalPrompt),
+      );
+      if (lastUser.content == originalPrompt &&
+          lastUser.attachments.every((a) => a.name != att.name)) {
+        lastUser.attachments = [
+          ...lastUser.attachments,
+          MessageAttachment(name: att.name, size: att.size),
+        ];
+      }
+    }
 
     final sys =
         '''
@@ -5087,6 +5105,32 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     );
     final answers = await _askQuestions(questions);
     if (answers == null) return 'user cancelled the questions';
+    // Record the Q&A in the chat thread (durable, visible on reload):
+    // the questions asked + the user's answers, as a compact tool card.
+    final qa = StringBuffer();
+    for (final q in questions) {
+      final a = answers[q.id];
+      qa.writeln('Q: ${q.question}');
+      qa.writeln('A: ${a == null || a.isEmpty ? '—' : a}');
+    }
+    final s = _runSession;
+    if (s != null) {
+      s.messages.add(
+        Message(
+          role: 'assistant',
+          kind: MsgKind.tool,
+          toolName: 'ask_user_question',
+          toolTitle: 'User answered',
+          toolSummary:
+              '${questions.length} question'
+              '${questions.length > 1 ? 's' : ''} answered',
+          toolDetail: qa.toString().trim(),
+          toolState: 'ok',
+        ),
+      );
+      AppState.I.refresh();
+      AppState.I.persistSessions();
+    }
     final buf = StringBuffer();
     for (final e in answers.entries) {
       buf.writeln('${e.key}: ${e.value}');
@@ -5109,6 +5153,10 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     if (!ok) return null;
     return req.answers;
   }
+
+  /// Test seam: drive ask_user_question's handler directly (no LLM).
+  Future<String> handleAskUserQuestionForTest(Map<String, dynamic> args) =>
+      _handleAskUserQuestion(args);
 
   // ── WAVE 2 HANDLERS — plan mode, background jobs, session events ────
 

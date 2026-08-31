@@ -1588,8 +1588,159 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       }
     });
 
-    // New: ChatSession.repo JSON round-trip (old sessions without repo
-    // still deserialize — migration path).
+    // New: Message attachments JSON round-trip + legacy messages without
+    // attachments still deserialize.
+    test('Message.attachments: JSON round-trip + legacy migration', () {
+      final m = Message(
+        role: 'user',
+        content: 'check this file',
+        attachments: [
+          MessageAttachment(name: 'data.csv', size: 2048),
+          MessageAttachment(name: 'img.png', size: 999424),
+        ],
+      );
+      final j = m.toJson();
+      expect(j['attachments'], hasLength(2));
+      final back = Message.fromJson(j);
+      expect(back.attachments, hasLength(2));
+      expect(back.attachments.first.name, 'data.csv');
+      expect(back.attachments.first.size, 2048);
+      expect(back.attachments.last.name, 'img.png');
+      // Legacy message without attachments → empty list, no crash.
+      final legacy = Message.fromJson({'role': 'user', 'content': 'hi'});
+      expect(legacy.attachments, isEmpty);
+    });
+
+    test('runTask stamps the staged attachment onto the user message', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final provider = app.providerById('ollama-local')!;
+      final originals = ({
+        'baseUrl': provider.baseUrl,
+        'models': List<String>.of(provider.models),
+        'selectedModel': provider.selectedModel,
+      });
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+
+      final session = ChatSession(
+        id: 'attach-run',
+        title: 'Attach',
+        providerId: provider.id,
+        model: 'test-model',
+      );
+      app.sessions.add(session);
+      app.activeSessionId = session.id;
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['test-model']
+        ..selectedModel = 'test-model';
+
+      final serverTask = server.first.then((request) async {
+        request.response.headers.chunkedTransferEncoding = true;
+        request.response.add(
+          utf8.encode(
+            'data: ${jsonEncode({
+              'choices': [
+                {
+                  'delta': {'content': 'ok'},
+                  'finish_reason': 'stop',
+                },
+              ],
+            })}\n\n',
+          ),
+        );
+        await request.response.flush();
+        try {
+          await request.response.close();
+        } catch (_) {}
+      });
+
+      final tmpDir = Directory.systemTemp.createTempSync('attach_src');
+      try {
+        // Stage an attachment: source OUTSIDE the workspace (like a
+        // picked file from the file picker).
+        final f = File(
+          '${tmpDir.path}/attach_test_${DateTime.now().millisecondsSinceEpoch}.txt',
+        );
+        final attachName = f.uri.pathSegments.last;
+        f.writeAsStringSync('hello attach');
+        await agent.attachFile(f.path, attachName);
+        expect(agent.pendingAttachment, isNotNull);
+
+        app.sendMessage('analyze this');
+        final run = agent.runTask('analyze this');
+        await run.timeout(const Duration(seconds: 10));
+        await serverTask.timeout(const Duration(seconds: 10));
+
+        // The user message now carries the attachment chip.
+        final userMsg = session.messages.firstWhere(
+          (m) => m.role == 'user' && m.content == 'analyze this',
+        );
+        expect(userMsg.attachments, hasLength(1));
+        expect(userMsg.attachments.first.name, attachName);
+        // And it survives a JSON round-trip (persistence).
+        final back = Message.fromJson(userMsg.toJson());
+        expect(back.attachments.first.name, attachName);
+      } finally {
+        provider
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+        await server.close(force: true);
+        app.deleteSession(session.id);
+        try {
+          tmpDir.deleteSync(recursive: true);
+        } catch (_) {}
+      }
+    });
+
+    test('ask_user_question records the Q&A into the chat thread', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final session = ChatSession(id: 'qa-rec', title: 'QA', model: 'm');
+      app.sessions.add(session);
+      app.activeSessionId = session.id;
+
+      // Drive the handler directly (no LLM round-trip needed): answer the
+      // pending questions from the outside while the handler awaits.
+      final handler = agent.handleAskUserQuestionForTest({
+        'questions': [
+          {
+            'id': 'q1',
+            'question': 'Which database?',
+            'options': [
+              {'label': 'Postgres'},
+              {'label': 'SQLite'},
+            ],
+          },
+        ],
+      });
+
+      // The questions card must appear as a pending approval.
+      for (var i = 0;
+          i < 50 && AgentService.I.pendingApproval?.questions == null;
+          i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      final req = AgentService.I.pendingApproval;
+      expect(req, isNotNull);
+      expect(req!.questions, hasLength(1));
+      // Answer like the UI does: record the answer, approve.
+      req.answers['q1'] = 'Postgres';
+      AgentService.I.approve(true);
+
+      final result = await handler.timeout(const Duration(seconds: 5));
+      expect(result, contains('q1: Postgres'));
+      // The Q&A is recorded in the thread as a tool card.
+      final qaMsg = session.messages.lastWhere(
+        (m) => m.kind == MsgKind.tool && m.toolName == 'ask_user_question',
+      );
+      expect(qaMsg.toolDetail, contains('Which database?'));
+      expect(qaMsg.toolDetail, contains('Postgres'));
+
+      app.deleteSession(session.id);
+    });
+
     test('ChatSession.repo: JSON round-trip + legacy migration', () {
       final s = ChatSession(
         id: 'r1',

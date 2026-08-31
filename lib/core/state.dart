@@ -167,6 +167,21 @@ class McpServer {
 
 enum MsgKind { text, code, imageGen, reasoning, tool, turnTail, compact }
 
+/// Attachment metadata rendered as a chip under a user message.
+class MessageAttachment {
+  final String name;
+  final int size;
+  MessageAttachment({required this.name, required this.size});
+
+  factory MessageAttachment.fromJson(Map<String, dynamic> j) =>
+      MessageAttachment(
+        name: j['name'] as String? ?? 'file',
+        size: (j['size'] as num?)?.toInt() ?? 0,
+      );
+
+  Map<String, dynamic> toJson() => {'name': name, 'size': size};
+}
+
 class Message {
   final String role; // 'user' | 'assistant'
   MsgKind kind; // mutable — reasoning → text promote
@@ -175,6 +190,10 @@ class Message {
   final DateTime time;
   bool thinking; // mutable — live state
   int? elapsedMs; // assistant: how long this response took
+
+  /// Files attached to this user message (chatbox + button). Rendered as
+  /// chips under the bubble; the agent reads them from the workspace.
+  List<MessageAttachment> attachments;
 
   // ── Tool-card fields (MsgKind.tool) — DSH ToolRow parity ──
   /// Tool name ('run_shell', 'fs_edit', 'dispatch_agent', …).
@@ -205,6 +224,7 @@ class Message {
     this.toolSummary,
     this.toolDetail,
     this.toolState = 'running',
+    this.attachments = const [],
     DateTime? time,
   }) : time = time ?? DateTime.now();
 
@@ -223,6 +243,11 @@ class Message {
     toolSummary: j['toolSummary'] as String?,
     toolDetail: j['toolDetail'] as String?,
     toolState: j['toolState'] as String? ?? 'ok',
+    attachments: [
+      for (final a in (j['attachments'] as List? ?? []))
+        if (a is Map<String, dynamic>)
+          MessageAttachment.fromJson(a),
+    ],
     time: j['time'] != null ? DateTime.tryParse(j['time'] as String) : null,
   );
 
@@ -238,6 +263,8 @@ class Message {
     if (toolSummary != null) 'toolSummary': toolSummary,
     if (toolDetail != null) 'toolDetail': toolDetail,
     if (toolState != 'ok') 'toolState': toolState,
+    if (attachments.isNotEmpty)
+      'attachments': [for (final a in attachments) a.toJson()],
     'time': time.toIso8601String(),
   };
 }
