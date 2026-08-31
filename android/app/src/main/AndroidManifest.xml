@@ -1,5 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Foreground service (agent keep-alive): required on API 28+ for
+         startForeground(); the dataSync subtype permission is required on
+         API 34+. Missing these crashed the app on every agent message
+         (SecurityException: startForeground requires
+         android.permission.FOREGROUND_SERVICE). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Device permissions the AI agent can request at runtime, each behind
          an in-chat user-consent gate first (Play policy: no surprise prompts). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

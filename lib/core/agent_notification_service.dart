@@ -24,6 +24,7 @@ class AgentNotificationService {
   bool _supported = true; // desktop/test → channel MissingPluginException
   bool _active = false;
   bool _permAsked = false;
+  int _failCount = 0; // 3 native failures → feature off for the session
   int _lastEventHash = 0;
   Timer? _debounce;
 
@@ -63,9 +64,12 @@ class AgentNotificationService {
 
   /// Start/update the foreground notification. Debounced + content-hashed
   /// so streaming `think` events don't spam notification updates.
+  /// NEVER blocks or throws into the agent event stream — all failures
+  /// are swallowed and after 3 consecutive native failures the feature
+  /// disables itself for the session.
   Future<void> agentWorking(String text) async {
     if (!_supported) return;
-    await _ensurePermission();
+    unawaited(_ensurePermission());
     final clean = _clean(text);
     final h = clean.hashCode;
     if (_active && h == _lastEventHash) return;
@@ -95,13 +99,26 @@ class AgentNotificationService {
   Future<bool> _invoke(String method, Map<String, String> args) async {
     try {
       final r = await _channel.invokeMethod(method, args);
-      return r == true;
+      if (r == true) {
+        _failCount = 0;
+        return true;
+      }
+      return false;
     } on MissingPluginException {
       _supported = false;
       return false;
-    } on PlatformException {
+    } on PlatformException catch (e) {
+      // Native side refused (permission/service policy). The native
+      // service ALSO catches startForeground failures and stops itself —
+      // so a failure here must never repeat forever or touch the run.
+      _failCount++;
+      if (_failCount >= 3 || e.code.contains('SECURITY')) {
+        _supported = false; // feature off for this app session
+      }
       return false;
     } catch (_) {
+      _failCount++;
+      if (_failCount >= 3) _supported = false;
       return false;
     }
   }
@@ -110,6 +127,7 @@ class AgentNotificationService {
   String _clean(String s) {
     final one = s.replaceAll(RegExp(r'\s+'), ' ').trim();
     if (one.length <= 90) return one.isEmpty ? 'working…' : one;
-    return '${one.substring(0, 90)}…';
+    final cut = one.substring(0, 90);
+    return '$cut…';
   }
 }

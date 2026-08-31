@@ -7,6 +7,7 @@ import 'package:flutter/material.dart' show IconData, Icons, Color;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:path_provider/path_provider.dart';
 import '../core/theme.dart';
 import 'agent_notification_service.dart';
 import 'state.dart';
@@ -267,32 +268,45 @@ class AgentService extends ChangeNotifier {
   /// use a detached run keyed to ''.
   _AgentRun get _run => _runs.putIfAbsent(_currentRunKey(), () => _AgentRun());
 
+  /// While a run is active, `_run` resolves to THE RUNNING run's bucket —
+  /// NOT whatever session is currently active in the UI. This kills the
+  /// session-switch race where mid-run cancel flags/queues were read
+  /// from the WRONG session (new session = fresh flags = "AI randomly
+  /// ignores stop", or worse: old run's abort targeted nothing).
+  _AgentRun? _pinnedRun;
+  _AgentRun get _runResolved => _pinnedRun ?? _run;
+
   String _currentRunKey() => AppState.I.activeSession?.id ?? '';
 
-  // ── Compatibility accessors (UI reads the ACTIVE session's run) ───────
-  String? get activeRunId => _run.activeRunId;
-  set activeRunId(String? v) => _run.activeRunId = v;
-  ApprovalRequest? get pendingApproval => _run.pendingApproval;
-  set pendingApproval(ApprovalRequest? v) => _run.pendingApproval = v;
-  bool get planMode => _run.planMode;
-  set planMode(bool v) => _run.planMode = v;
-  bool get cancelRequested => _run.cancelRequested;
-  bool get _cancelRequested => _run.cancelRequested;
-  set _cancelRequested(bool v) => _run.cancelRequested = v;
-  set _activeRequest(HttpClientRequest? v) => _run.activeRequest = v;
-  List<String> get _queue => _run.queue;
+  // ── Compatibility accessors ───────────────────────────────────────────
+  // Run-INTERNAL accessors (cancel flag, active request, queue drain)
+  // resolve to the RUNNING run (pinned) so a mid-run session switch can
+  // never corrupt the live execution. UI-read accessors (queuedMessages,
+  // pendingApproval display, busy) still read the ACTIVE session's run.
+  String? get activeRunId => _runResolved.activeRunId;
+  set activeRunId(String? v) => _runResolved.activeRunId = v;
+  ApprovalRequest? get pendingApproval => _runResolved.pendingApproval;
+  set pendingApproval(ApprovalRequest? v) => _runResolved.pendingApproval = v;
+  bool get planMode => _runResolved.planMode;
+  set planMode(bool v) => _runResolved.planMode = v;
+  bool get cancelRequested => _runResolved.cancelRequested;
+  bool get _cancelRequested => _runResolved.cancelRequested;
+  set _cancelRequested(bool v) => _runResolved.cancelRequested = v;
+  set _activeRequest(HttpClientRequest? v) => _runResolved.activeRequest = v;
+  List<String> get _queue => _runResolved.queue;
+  /// UI view: the ACTIVE session's queue (per-session isolation test).
   List<String> get queuedMessages => List.unmodifiable(_run.queue);
-  Map<int, _BgJob> get _jobs => _run.jobs;
-  int get _jobCounter => _run.jobCounter;
-  set _jobCounter(int v) => _run.jobCounter = v;
-  Message? get _activeToolMsg => _run.activeToolMsg;
-  set _activeToolMsg(Message? v) => _run.activeToolMsg = v;
-  DateTime? get _runStart => _run.runStart;
-  set _runStart(DateTime? v) => _run.runStart = v;
-  int? get lastRunElapsedMs => _run.lastRunElapsedMs;
-  set lastRunElapsedMs(int? v) => _run.lastRunElapsedMs = v;
-  int? get lastPromptTokens => _run.lastPromptTokens;
-  set lastPromptTokens(int? v) => _run.lastPromptTokens = v;
+  Map<int, _BgJob> get _jobs => _runResolved.jobs;
+  int get _jobCounter => _runResolved.jobCounter;
+  set _jobCounter(int v) => _runResolved.jobCounter = v;
+  Message? get _activeToolMsg => _runResolved.activeToolMsg;
+  set _activeToolMsg(Message? v) => _runResolved.activeToolMsg = v;
+  DateTime? get _runStart => _runResolved.runStart;
+  set _runStart(DateTime? v) => _runResolved.runStart = v;
+  int? get lastRunElapsedMs => _runResolved.lastRunElapsedMs;
+  set lastRunElapsedMs(int? v) => _runResolved.lastRunElapsedMs = v;
+  int? get lastPromptTokens => _runResolved.lastPromptTokens;
+  set lastPromptTokens(int? v) => _runResolved.lastPromptTokens = v;
 
   /// Files produced in the active session's current/latest run (DSH
   /// "Produced" cards). Read-only view for the UI.
@@ -585,6 +599,96 @@ class AgentService extends ChangeNotifier {
     c.loadFile(p);
   }
 
+  /// Detect that a browser URL is actually a LOCAL file reference the
+  /// agent wants to preview: `file://` URLs, absolute sandbox-style
+  /// paths (/data/data/..., $PREFIX/...), or bare `index.html`-style
+  /// paths. Returns the host file path when found in the session
+  /// workspace, else null (caller falls back to normal web loading).
+  Future<String?> _resolveLocalWebTarget(String url) {
+    return _resolveLocalWebTargetImpl(url);
+  }
+
+  Future<String?> _resolveLocalWebTargetImpl(String url) async {
+    var path = url.trim();
+    if (path.startsWith('file://')) path = path.substring(7);
+    // Only treat as local when it's clearly not a web URL.
+    final isLocal = path.startsWith('file:') ||
+        path.startsWith('/data/') ||
+        path.startsWith('/storage/') ||
+        path.startsWith('/work/') ||
+        path.startsWith('\$PREFIX') ||
+        path.startsWith('./') ||
+        path.startsWith('~/') ||
+        (!path.contains('://') &&
+            (path.endsWith('.html') || path.endsWith('.htm')));
+    if (!isLocal) return null;
+    // Strip known sandbox prefixes → relative-ish name.
+    path = path
+        .replaceAll(RegExp(r'^/data/data/[^/]+/files/(usr/home|home)/'), '')
+        .replaceAll(RegExp(r'^\$PREFIX/home/'), '')
+        .replaceAll(RegExp(r'^/work/'), '')
+        .replaceAll(RegExp(r'^\./'), '')
+        .replaceAll(RegExp(r'^~/'), '')
+        .replaceAll(RegExp(r'^/'), '');
+    if (path.isEmpty) return null;
+    // Search the session workspace (recursive).
+    try {
+      final work = await _sessionWorkDir();
+      final candidate = File('${work.path}/$path');
+      if (candidate.existsSync()) return candidate.path;
+      // Maybe it's a directory reference (…/aurora) → look for index.html.
+      final dir = Directory('${work.path}/$path');
+      if (dir.existsSync()) {
+        final idx = File('${dir.path}/index.html');
+        if (idx.existsSync()) return idx.path;
+      }
+      // Last resort: search by filename anywhere in the workspace.
+      final name = path.split('/').last;
+      for (final e in work.listSync(recursive: true, followLinks: false)) {
+        if (e is File && e.path.endsWith('/$name')) return e.path;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Copy a host web project (index.html + sibling assets) into the
+  /// app-docs preview dir so the WebView can load it. Returns the
+  /// index.html path inside the preview dir, or null.
+  Future<String?> _exportPreviewFromHost(String hostIndexHtml) async {
+    try {
+      final base = await getApplicationDocumentsDirectory();
+      final prevDir = Directory('${base.path}/ovid/preview');
+      if (prevDir.existsSync()) prevDir.deleteSync(recursive: true);
+      prevDir.createSync(recursive: true);
+      final srcFile = File(hostIndexHtml);
+      if (!srcFile.existsSync()) return null;
+      final srcDir = srcFile.parent;
+      // Copy the project tree (bounded: web assets only, max 400 files).
+      var count = 0;
+      for (final e in srcDir.listSync(recursive: true, followLinks: false)) {
+        if (count++ > 400) break;
+        if (e is! File) continue;
+        final name = e.path.substring(srcDir.path.length + 1);
+        final ext = name.contains('.')
+            ? name.split('.').last.toLowerCase()
+            : '';
+        if (!['html', 'css', 'js', 'svg', 'json', 'png', 'jpg', 'jpeg',
+              'gif', 'webp', 'ico', 'woff', 'woff2', 'ttf', 'map']
+            .contains(ext)) {
+          continue;
+        }
+        try {
+          final dest = File('${prevDir.path}/$name');
+          dest.parent.createSync(recursive: true);
+          e.copySync(dest.path);
+        } catch (_) {}
+      }
+      return '${prevDir.path}/${hostIndexHtml.split('/').last}';
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// User-facing: close tab at index. Keeps at least one tab alive.
   void closeBrowserTab(int index) {
     final tabs = browserTabs;
@@ -610,6 +714,9 @@ class AgentService extends ChangeNotifier {
 
   /// Agent-facing: get (creating if needed) the controller for a tab.
   WebViewController controllerForTab(BrowserTab tab) {
+    // NOTE: file access for local previews is handled by the platform
+    // impl — webview_flutter_android's loadFile() sets
+    // settings.setAllowFileAccess(true) itself.
     tab.controller ??= WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setNavigationDelegate(
@@ -2511,6 +2618,10 @@ class AgentService extends ChangeNotifier {
     }
 
     final runId = DateTime.now().millisecondsSinceEpoch.toString();
+    // PIN the run bucket for the whole run: even if the user switches
+    // sessions mid-task, this run's cancel/queue/abort state stays bound
+    // to THIS session (fixes the session-switch race).
+    _pinnedRun = _run;
     activeRunId = runId;
     _runStart = DateTime.now();
     lastError = null;
@@ -2612,7 +2723,15 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
 
     try {
       var overflowRecovered = false;
-      for (var turn = 0; turn < 12; turn++) {
+      // ── NEVER-STOP LOOP (DSH parity) ─────────────────────────────────
+      // The loop is bounded by TASK COMPLETION, not turn count. A soft
+      // turn budget (12) still exists, but hitting it mid-work no longer
+      // ends the run: we inject a continuation nudge and keep going —
+      // context pressure is managed by _maybeCompact (auto-compaction),
+      // exactly like DSH. Only a final answer, a user cancel, or an
+      // unrecoverable provider error stops the loop.
+      var turnsWithoutProgress = 0;
+      for (var turn = 0;; turn++) {
         if (_cancelRequested) {
           _emit('done', 'stopped by user');
           break;
@@ -2648,6 +2767,33 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
               lastError ?? 'context window still over capacity after pruning',
             );
           }
+        }
+        // ── Soft turn budget → CONTINUE, not stop ──
+        if (msg != null && turn >= 12 && turn % 12 == 0) {
+          // Budget hit but the model is still mid-task (or just produced
+          // something). Compact history and nudge the model to continue —
+          // DSH-style: task completion is the only real bound.
+          await _maybeCompact(s, p);
+          msgs.add({
+            'role': 'user',
+            'content':
+                '[system] Continue the task from the last tool results. '
+                'Do not restart; keep working until the task is complete, '
+                'then give your final answer.',
+          });
+          turnsWithoutProgress++;
+          if (turnsWithoutProgress > 5) {
+            // Model keeps looping without a final answer after 5 nudges —
+            // surface to the user instead of burning tokens forever.
+            _emit('done', 'turn budget exhausted — task paused, ask to continue');
+            _appendAssistant(
+              '⏸ Long task paused after $turn rounds. Reply "continue" and '
+              'I will pick up exactly where I left off.',
+              session: s,
+            );
+            break;
+          }
+          continue;
         }
         // Meter tokens for the Usage screen (real data, DSH StatsLine style).
         if (msg != null) {
@@ -2691,9 +2837,26 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
           break;
         }
         if (msg == null) {
-          _emit('err', lastError ?? 'unknown model error');
+          // ── NEVER-STOP: transient failures retry with backoff ──────
+          // 429/5xx/network/timeouts used to kill the run here. Now they
+          // back off and retry inside _callLlm; if retries exhausted we
+          // still retry at the run level a few times before surfacing.
+          final err = lastError ?? 'unknown model error';
+          final transient = _looksTransientProviderError(err);
+          if (transient && turnsWithoutProgress < 6) {
+            turnsWithoutProgress++;
+            final wait = Duration(seconds: 5 * turnsWithoutProgress);
+            _emit(
+              'think',
+              'provider hiccup ($err) — retrying in ${wait.inSeconds}s…',
+            );
+            await Future.delayed(wait);
+            // Un-cancel any accidental flag? No — user cancel is sacred.
+            continue;
+          }
+          _emit('err', err);
           _appendAssistant(
-            '⚠️ ${lastError ?? "The model request failed."}\n\n'
+            '⚠️ $err\n\n'
             'If the model/provider is already configured, increase "AI response timeout" in Settings, or try again.',
             session: s,
           );
@@ -2702,6 +2865,9 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
               .inMilliseconds;
           break;
         }
+        // Model produced output → progress. Decay the retry counter so a
+        // long task with occasional hiccups never exhausts its budget.
+        if (turnsWithoutProgress > 0) turnsWithoutProgress--;
 
         // Stamp elapsed on the live message bubble.
         if (_liveMsg != null) {
@@ -2781,15 +2947,17 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     } finally {
       activeRunId = null;
       _cancelRequested = false;
+      // Un-pin: next run binds to whatever session is active then.
+      final pinned = _pinnedRun;
+      _pinnedRun = null;
       // Foreground notification retires with the run (covers error paths
       // where no 'done'/'err' event ever fires).
       AgentNotificationService.I.agentIdle();
       notifyListeners();
-      // Auto-start the next queued message (DSH queue behavior). A cancel
-      // clears nothing — queued messages still run after the stop.
-      if (_queue.isNotEmpty) {
-        final next = _queue.removeAt(0);
-        // Delay so the UI can settle; also lets listeners see "idle" state.
+      // The queue auto-continue must run on the RUNNING session's queue,
+      // not whatever session the UI switched to mid-run.
+      if (pinned != null && pinned.queue.isNotEmpty) {
+        final next = pinned.queue.removeAt(0);
         Future.delayed(const Duration(milliseconds: 250), () {
           // Record the queued message as a user message in the session
           // (the normal send path does this via AppState.sendMessage).
@@ -2835,7 +3003,45 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     AppState.I.persistSessions();
   }
 
+  /// LLM call with NEVER-STOP retry semantics (DSH parity):
+  /// transient failures (429/5xx/network/timeout) back off and retry up
+  /// to 4 times inside this call; only then does it give up and return
+  /// null (the run loop retries a few more times on top). A user cancel
+  /// aborts immediately with no retry.
   Future<Map<String, dynamic>?> _callLlm(
+    ProviderConfig p,
+    List<Map<String, dynamic>> msgs,
+    ChatSession session, {
+    bool includeTools = true,
+  }) async {
+    var lastErr = 'unknown';
+    for (var attempt = 0; attempt <= 4; attempt++) {
+      if (_cancelRequested) return null;
+      final r = await _callLlmOnce(
+        p,
+        msgs,
+        session,
+        includeTools: includeTools,
+      );
+      if (r != null) return r;
+      lastErr = lastError ?? lastErr;
+      final err = lastError ?? lastErr;
+      // Retry ONLY transient errors; auth/model errors surface now.
+      if (!_looksTransientProviderError(err) || _cancelRequested) {
+        return null;
+      }
+      if (attempt < 4) {
+        // 3s, 9s, 27s, 60s — exponential-ish backoff.
+        final wait = [3, 9, 27, 60][attempt];
+        _emit('think', 'retrying ${p.name} in ${wait}s (attempt ${attempt + 2}/5)…');
+        await Future.delayed(Duration(seconds: wait));
+      }
+    }
+    lastError = lastErr;
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> _callLlmOnce(
     ProviderConfig p,
     List<Map<String, dynamic>> msgs,
     ChatSession session, {
@@ -2898,13 +3104,14 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
       req.add(bodyBytes);
 
       // Total stream deadline — user-configurable in Settings (default 2 min).
-      final streamDeadline = DateTime.now().add(
-        Duration(seconds: AppState.I.responseTimeoutSec),
-      );
-      // Time-to-first-response (headers) — also respects the settings value;
-      // slow/reasoning models often take >30s before the first SSE byte.
+      // ── NEVER-STOP semantics: the deadline is per-CHUNK IDLE, not total ──
+      // A reasoning model may think for minutes before the first byte and
+      // stream for an hour on a long task — as long as bytes keep arriving
+      // (or the first byte arrives within the budget), the stream lives.
+      // The timeout setting = max silence between events + first-byte wait.
+      final idleBudget = Duration(seconds: AppState.I.responseTimeoutSec);
       final res = await req.close().timeout(
-        Duration(seconds: AppState.I.responseTimeoutSec),
+        idleBudget,
         onTimeout: () {
           lastError =
               'no response from ${p.name} for '
@@ -2982,14 +3189,12 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
           in res
               .cast<List<int>>()
               .transform(SseLineSplitter(maxBytes: 8 * 1024 * 1024))
-              .timeout(
-                streamDeadline.difference(DateTime.now()),
-                onTimeout: (sink) {
-                  lastError =
-                      'model stream exceeded ${AppState.I.responseTimeoutSec}s — Settings me timeout badhayein';
-                  throw TimeoutException(lastError ?? 'model stream timeout');
-                },
-              )) {
+              .transform(_IdleResetTimeout(idleBudget, (msg) {
+                lastError =
+                    'model stream idle for ${idleBudget.inSeconds}s — Settings '
+                    'me timeout badhayein';
+                return TimeoutException(lastError ?? 'model stream timeout');
+              }))) {
         final line = raw.trim();
         if (line.isEmpty || !line.startsWith('data:')) continue;
         final payload = line.substring(5).trim();
@@ -3193,9 +3398,12 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
           final work = await _sessionWorkDir();
           if (useSandbox) {
             // Native bionic sandbox (bash/python/node/apt) — full tooling.
+            // 10-minute cap: builds/installs/test-suites need real time
+            // (60s used to kill them mid-run). Longer work → the model
+            // already has job_start (background jobs, unbounded).
             final out = await SandboxService.I
                 .exec(['bash', '-c', cmd], hostWorkDir: work)
-                .timeout(const Duration(seconds: 60));
+                .timeout(const Duration(minutes: 10));
             for (final l in const LineSplitter().convert(out.trim())) {
               _emit('shellOut', l);
             }
@@ -3206,7 +3414,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
           // Phone terminal tier — device shell, no install needed.
           final out = await SandboxService.I
               .execHost(cmd, hostWorkDir: work)
-              .timeout(const Duration(seconds: 60));
+              .timeout(const Duration(minutes: 10));
           for (final l in const LineSplitter().convert(out.trim())) {
             _emit('shellOut', l);
           }
@@ -3259,6 +3467,24 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
           'Browser panel me ye page khulega:\n$url',
         );
         if (!ok) return 'DENIED by user';
+        // ── file:// / local-path interception (ERR_ACCESS_DENIED fix) ──
+        // The agent sometimes passes a sandbox-internal path (e.g.
+        // /data/data/com.termux/... or file:///...) — the WebView can
+        // NEVER load those (they belong to another app or the sandbox).
+        // Instead: resolve the file in the SESSION WORKSPACE, copy the
+        // web project into the app-docs preview dir, and open the local
+        // preview tab. Never ERR_ACCESS_DENIED again.
+        final localTarget = await _resolveLocalWebTarget(url);
+        if (localTarget != null) {
+          final prev = await _exportPreviewFromHost(localTarget);
+          if (prev != null) {
+            openPreviewTab(prev);
+            return 'preview rendered in Browser panel ✓ (local file: '
+                '${localTarget.split('/').last})';
+          }
+          return 'local file not found: $url — save the project files in '
+              'the session workspace first, then retry.';
+        }
         _emit('nav', url);
         browserBusy = true;
         notifyListeners();
@@ -3311,6 +3537,17 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
           'Browser me ye page khulega:\n$url',
         );
         if (!ok) return 'DENIED by user';
+        // Same local-file interception as browser_open (ERR_ACCESS_DENIED
+        // fix): file:// or sandbox paths → workspace preview tab.
+        final localTarget = await _resolveLocalWebTarget(url);
+        if (localTarget != null) {
+          final prev = await _exportPreviewFromHost(localTarget);
+          if (prev != null) {
+            openPreviewTab(prev);
+            return 'preview rendered in Browser panel ✓ (local file)';
+          }
+          return 'local file not found: $url';
+        }
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
         tab.controller!.loadRequest(Uri.parse(url));
@@ -4014,8 +4251,20 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
       case 'preview':
         _emit('think', 'rendering preview…');
         try {
-          final path = await RepoCache.I.exportPreview('');
-          if (path == null) return 'no index.html found in workspace';
+          // Repo cache first (synced GitHub project)…
+          var path = await RepoCache.I.exportPreview('');
+          // …fall back to the session workspace (agent-built project,
+          // e.g. run_shell wrote index.html in /work) — this is the path
+          // that used to leak com.termux URLs and ERR_ACCESS_DENIED.
+          path ??= await _resolveLocalWebTarget('index.html') != null
+              ? await _exportPreviewFromHost(
+                  (await _resolveLocalWebTarget('index.html'))!,
+                )
+              : null;
+          if (path == null) {
+            return 'no index.html found in workspace — create the web '
+                'files first (file_write or run_shell), then call preview.';
+          }
           openPreviewTab(path);
           _emit('page', 'preview ready');
           return 'preview rendered in Browser panel ✓ — open the Browser '
@@ -4199,6 +4448,42 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
         l.contains('prompt too large') ||
         l.contains('reduce the length');
   }
+
+  /// Heuristic: provider failures worth retrying (DSH never-stop parity):
+  /// rate limits, server errors, network blips, timeouts. Auth/inputs
+  /// (401/403/404/model-not-found) and payload-cap errors are NOT
+  /// transient — retrying the same oversized payload just burns time.
+  static bool isTransientProviderError(String err) {
+    final l = err.toLowerCase();
+    // Non-retryable classes first.
+    if (l.contains('response exceeded') || l.contains('api key') ||
+        l.contains('invalid') && l.contains('key')) {
+      return false;
+    }
+    return l.contains('rate limit') ||
+        l.contains('429') ||
+        l.contains('too many requests') ||
+        l.contains('timeout') ||
+        l.contains('timed out') ||
+        l.contains('no response from') ||
+        l.contains('stream error') ||
+        l.contains('connection') ||
+        l.contains('network') ||
+        l.contains('socket') ||
+        l.contains('handshake') ||
+        l.contains('500') ||
+        l.contains('502') ||
+        l.contains('503') ||
+        l.contains('504') ||
+        l.contains('server error') ||
+        l.contains('bad gateway') ||
+        l.contains('service unavailable') ||
+        l.contains('overloaded') ||
+        l.contains('internal error');
+  }
+
+  bool _looksTransientProviderError(String err) =>
+      isTransientProviderError(err);
 
   /// Heuristic: tool result text that reads as a failure → error state dot.
   bool _looksLikeToolError(String result) {
@@ -5327,6 +5612,69 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
       caseSensitive: false,
     ).firstMatch(raw);
     return m != null ? raw.substring(0, m.start).trim() : raw;
+  }
+}
+
+/// IDLE-reset timeout for SSE streams (DSH never-stop parity).
+///
+/// Unlike `Stream.timeout` (a total deadline), this transformer resets
+/// its countdown on EVERY event: a stream may legally run for hours as
+/// long as chunks keep arriving within [idleLimit] of each other. This
+/// is what lets long tasks / reasoning models stream continuously
+/// without the old 2-minute total cap killing the run mid-answer.
+class _IdleResetTimeout<T> extends StreamTransformerBase<T, T> {
+  final Duration idleLimit;
+  final TimeoutException Function(String message) _makeError;
+
+  const _IdleResetTimeout(this.idleLimit, this._makeError);
+
+  @override
+  Stream<T> bind(Stream<T> stream) {
+    late final StreamController<T> controller;
+    Timer? timer;
+    StreamSubscription<T>? sub;
+    var done = false;
+
+    void fail() {
+      done = true;
+      timer?.cancel();
+      sub?.cancel();
+      controller.addError(_makeError('idle ${idleLimit.inSeconds}s'));
+      controller.close();
+    }
+
+    controller = StreamController<T>(
+      onListen: () {
+        timer = Timer(idleLimit, fail);
+        sub = stream.listen(
+          (data) {
+            if (done) return;
+            timer?.cancel();
+            timer = Timer(idleLimit, fail); // ← reset on every event
+            controller.add(data);
+          },
+          onError: (Object e) {
+            if (done) return;
+            timer?.cancel();
+            done = true;
+            controller.addError(e);
+            controller.close();
+          },
+          onDone: () {
+            if (done) return;
+            timer?.cancel();
+            done = true;
+            controller.close();
+          },
+          cancelOnError: true,
+        );
+      },
+      onCancel: () {
+        timer?.cancel();
+        return sub?.cancel();
+      },
+    );
+    return controller.stream;
   }
 }
 

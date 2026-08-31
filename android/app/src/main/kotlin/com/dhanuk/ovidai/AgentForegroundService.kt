@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 
 /**
@@ -18,12 +19,16 @@ import androidx.core.app.NotificationCompat
  * Started from Dart via the ovid/native method channel when an agent run
  * starts; stopped when the run finishes or the user taps Stop.
  *
+ * Holds a PARTIAL WakeLock for the run's duration so Doze/device-idle
+ * can't throttle CPU/network mid-task (hours-long runs).
+ *
  * Notification actions:
  *  - ACTION_STOP → broadcasts "ovid.agent.STOP" (AgentService listens,
  *    cancels the active run; identical to tapping Stop in the chat UI).
  *
- * No PAUSE action: mid-LLM-stream pause isn't cancellable without
- * killing the HTTP request; Stop covers the user intent ("make it stop").
+ * Hardened: any failure inside startForeground is caught and the service
+ * stops itself instead of crashing the whole app (previously a missing
+ * manifest permission crashed the process on every agent message).
  */
 class AgentForegroundService : Service() {
 
@@ -35,20 +40,57 @@ class AgentForegroundService : Service() {
         const val EXTRA_TEXT = "text"
     }
 
+    private var wakeLock: PowerManager.WakeLock? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
         val title = intent?.getStringExtra(EXTRA_TITLE) ?: "Ovid AI"
         val text = intent?.getStringExtra(EXTRA_TEXT) ?: "Agent is working…"
-        startForeground(NOTIFICATION_ID, buildNotification(title, text))
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification(title, text))
+        } catch (e: Exception) {
+            // Permission denial / notification-policy failure must NEVER
+            // crash the app — the agent run continues without the
+            // keep-alive notification.
+            releaseWakeLock()
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        acquireWakeLock()
         // STICKY: if the system kills us under memory pressure, restart —
         // the Dart side re-syncs notification state on the next event.
         return START_STICKY
+    }
+
+    private fun acquireWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) return
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ovid:agent_run").apply {
+                // 6h ceiling; the service re-acquires on update ticks.
+                setReferenceCounted(false)
+                acquire(6 * 60 * 60 * 1000L)
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            wakeLock?.let { if (it.isHeld) it.release() }
+        } catch (_: Exception) {}
+        wakeLock = null
+    }
+
+    override fun onDestroy() {
+        releaseWakeLock()
+        super.onDestroy()
     }
 
     private fun buildNotification(title: String, text: String): Notification {

@@ -713,8 +713,10 @@ class AppState extends ChangeNotifier {
 
   /// AI response timeout (seconds, user-configurable in Settings).
   static const _kResponseTimeout = 'ovid_response_timeout_sec';
-  int responseTimeoutSec = 120;
-  static const timeoutPresets = [60, 120, 300, 600];
+  /// Per-EVENT idle timeout (never-stop semantics: as long as chunks keep
+  /// arriving the stream runs indefinitely; this is the max silence).
+  int responseTimeoutSec = 300;
+  static const timeoutPresets = [120, 300, 600, 1800, 3600];
 
   // ── Context window + output caps (user-configurable, DSH settings) ─
   /// 0 = auto (per-model table, 1M fallback).  Any positive value is the

@@ -140,16 +140,19 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // ── App lifecycle → MCP lifecycle (DSH tier-2 parity) ──
     // resume  → respawn every server the user wants connected
-    // paused  → tear processes down (Android will kill them anyway when
-    //           memory-pressured; killing now avoids zombie stdio pipes)
+    // NOTE: `paused` intentionally does NOTHING now — tearing MCP down on
+    // background KILLED in-flight mcp__ tool calls mid-run (the agent run
+    // survived but got garbage results). The foreground service keeps the
+    // process + Dart alive while backgrounded, so the servers stay up too.
+    // Only a full detach (process teardown) stops them.
     switch (state) {
       case AppLifecycleState.resumed:
         unawaited(AppState.I.reconnectMcpServers());
         break;
-      case AppLifecycleState.paused:
       case AppLifecycleState.detached:
         unawaited(McpService.I.disconnectAll());
         break;
+      case AppLifecycleState.paused:
       case AppLifecycleState.inactive:
       case AppLifecycleState.hidden:
         break;
