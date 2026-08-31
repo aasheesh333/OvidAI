@@ -51,6 +51,16 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Foreground service: keeps the app alive while the AI agent
+             works in the background (notification with Stop action). -->
+        <service
+            android:name=".AgentForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"/>
+        <!-- Receiver for the notification's Stop button. -->
+        <receiver
+            android:name=".AgentStopReceiver"
+            android:exported="false"/>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../core/theme.dart';
+import 'agent_notification_service.dart';
 import 'state.dart';
 import 'sandbox_service.dart';
 import 'github_service.dart';
@@ -836,6 +837,13 @@ class AgentService extends ChangeNotifier {
     // DSH ToolRow parity: shell output streams into the live tool card.
     if (kind == 'shellOut' && _activeToolMsg != null) {
       _toolStream('$text\n');
+    }
+    // Foreground-notification mirror (agent keep-alive): progress events
+    // update the ongoing notification; done/err retires it.
+    if (kind == 'think' || kind == 'shell' || kind == 'file' || kind == 'nav') {
+      AgentNotificationService.I.agentWorking(text);
+    } else if (kind == 'done' || kind == 'err') {
+      AgentNotificationService.I.agentIdle();
     }
     notifyListeners();
   }
@@ -2724,6 +2732,9 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     } finally {
       activeRunId = null;
       _cancelRequested = false;
+      // Foreground notification retires with the run (covers error paths
+      // where no 'done'/'err' event ever fires).
+      AgentNotificationService.I.agentIdle();
       notifyListeners();
       // Auto-start the next queued message (DSH queue behavior). A cancel
       // clears nothing — queued messages still run after the stop.

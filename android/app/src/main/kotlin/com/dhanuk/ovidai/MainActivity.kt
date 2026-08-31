@@ -4,6 +4,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import java.io.File
 import java.util.zip.ZipFile
@@ -26,6 +27,69 @@ class MainActivity : FlutterActivity() {
                         } else {
                             result.error("UNAVAILABLE", "nativeLibraryDir is null", null)
                         }
+                    }
+                    "agentServiceStart" -> {
+                        // Foreground service: keeps the app alive while the
+                        // agent works. Args: title, text (notification copy).
+                        try {
+                            val intent = Intent(this, AgentForegroundService::class.java)
+                            intent.putExtra(
+                                AgentForegroundService.EXTRA_TITLE,
+                                call.argument<String>("title") ?: "Ovid AI"
+                            )
+                            intent.putExtra(
+                                AgentForegroundService.EXTRA_TEXT,
+                                call.argument<String>("text") ?: "Agent is working…"
+                            )
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(intent)
+                            } else {
+                                startService(intent)
+                            }
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("START_FAIL", "${e.message}", null)
+                        }
+                    }
+                    "agentServiceUpdate" -> {
+                        try {
+                            val intent = Intent(this, AgentForegroundService::class.java)
+                            intent.putExtra(
+                                AgentForegroundService.EXTRA_TITLE,
+                                call.argument<String>("title") ?: "Ovid AI"
+                            )
+                            intent.putExtra(
+                                AgentForegroundService.EXTRA_TEXT,
+                                call.argument<String>("text") ?: "Agent is working…"
+                            )
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(intent)
+                            } else {
+                                startService(intent)
+                            }
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("UPDATE_FAIL", "${e.message}", null)
+                        }
+                    }
+                    "agentServiceStop" -> {
+                        try {
+                            stopService(Intent(this, AgentForegroundService::class.java))
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("STOP_FAIL", "${e.message}", null)
+                        }
+                    }
+                    "agentStopHandler" -> {
+                        // Dart registers the notification-Stop callback.
+                        AgentNotificationBridge.stopHandler = {
+                            // Invoke back into Dart on the same channel.
+                            MethodChannel(
+                                flutterEngine.dartExecutor.binaryMessenger,
+                                channelName
+                            ).invokeMethod("onAgentStop", null)
+                        }
+                        result.success(true)
                     }
                     "readBootstrapPayload" -> {
                         // The sandbox bootstrap zip ships as

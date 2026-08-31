@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'core/agent_service.dart';
+import 'core/agent_notification_service.dart';
 import 'core/firebase_service.dart';
 import 'core/github_service.dart';
 import 'core/mcp_service.dart';
@@ -120,6 +121,9 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Foreground-notification wiring (agent keep-alive): registers the
+    // notification Stop-button handler.
+    unawaited(AgentNotificationService.I.init());
     // Ask for telemetry consent once (Play policy) after first frame.
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAskConsent());
     // MCP auto-reconnect: respawn servers the user had connected.
