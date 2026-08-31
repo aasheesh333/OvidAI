@@ -1552,5 +1552,73 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         }
       },
     );
+
+    test('destructive command detector catches the killers', () {
+      const killers = [
+        'rm -rf /',
+        'rm -rf /data/something',
+        'rm -rf ~',
+        r'rm -rf $HOME',
+        r'rm -rf $PREFIX',
+        'rm -fr /system',
+        'dd if=/dev/zero of=/dev/block/mmcblk0',
+        'mkfs.ext4 /dev/sda1',
+        ':(){ :|:& };:',
+        'chmod -R 777 /',
+        'reboot',
+        'shutdown -h now',
+        'find / -name x -delete',
+      ];
+      for (final k in killers) {
+        expect(
+          AgentService.isDestructiveCommand(k),
+          isTrue,
+          reason: 'should flag: $k',
+        );
+      }
+    });
+
+    test('destructive command detector spares normal work', () {
+      const fine = [
+        'rm -rf ./node_modules',
+        'rm -rf build dist',
+        'npm install',
+        'echo hi > out.txt',
+        'git push origin main',
+        'find src -name "*.dart" | xargs grep foo',
+        'ls -la',
+      ];
+      for (final f in fine) {
+        expect(
+          AgentService.isDestructiveCommand(f),
+          isFalse,
+          reason: 'should NOT flag: $f',
+        );
+      }
+    });
+
+    test('read-only classifier: safe commands, compounds, and mutants', () {
+      // Plain read-only.
+      expect(AgentService.isReadOnlyCommand('ls -la'), isTrue);
+      expect(AgentService.isReadOnlyCommand('cat README.md'), isTrue);
+      expect(AgentService.isReadOnlyCommand('git status'), isTrue);
+      expect(AgentService.isReadOnlyCommand('npm ping'), isTrue);
+      // Compound of read-only parts is fine.
+      expect(
+        AgentService.isReadOnlyCommand('git status && git diff HEAD~1'),
+        isTrue,
+      );
+      // Piped read-only is fine.
+      expect(
+        AgentService.isReadOnlyCommand('cat log.txt | grep error'),
+        isTrue,
+      );
+      // Write-capable commands are NOT read-only.
+      expect(AgentService.isReadOnlyCommand('npm install'), isFalse);
+      expect(AgentService.isReadOnlyCommand('echo hi > file.txt'), isFalse);
+      expect(AgentService.isReadOnlyCommand('rm foo.txt'), isFalse);
+      // Read-only command used to WRITE is not read-only (redirection).
+      expect(AgentService.isReadOnlyCommand('cat a > b'), isFalse);
+    });
   });
 }

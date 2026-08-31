@@ -216,6 +216,11 @@ class _SessionStudio {
   final Map<String, String> fileBuffer = {};
   final List<String> openFiles = [];
   String? activeFilePath;
+
+  /// Last mtime (ms) we synced each open file from disk — powers live
+  /// follow: shell commands (sed/mv/git checkout) that change open files
+  /// get picked up and the editor re-renders.
+  final Map<String, int> syncedMtime = {};
 }
 
 /// ═════════════════════════════ OpenAI-compatible LLM bridge ═══════════
@@ -709,7 +714,51 @@ class AgentService extends ChangeNotifier {
     st.fileBuffer[path] = content;
     if (!st.openFiles.contains(path)) st.openFiles.add(path);
     st.activeFilePath = path;
+    // Track disk sync point so a later shell-edit diff sees this as
+    // the known state (host files only — repo: paths skip mtime checks).
+    _touchSyncedMtime(path);
     notifyListeners();
+  }
+
+  void _touchSyncedMtime(String path) async {
+    try {
+      final host = await _resolveFsPath(path);
+      if (host == null || host.startsWith('repo:')) return;
+      final f = File(host);
+      if (f.existsSync()) {
+        _studio.syncedMtime[path] = f.lastModifiedSync().millisecondsSinceEpoch;
+      }
+    } catch (_) {}
+  }
+
+  /// Live file follow (P9): after shell commands, check every open tab's
+  /// workspace file for on-disk changes (sed/awk/git checkout/npm codegen)
+  /// and refresh the studio buffer + editor when they changed. Called
+  /// opportunistically after run_shell/job_output — cheap (stat only).
+  Future<void> syncOpenFilesFromDisk() async {
+    final st = _studio;
+    if (st.openFiles.isEmpty) return;
+    var changed = false;
+    for (final path in st.openFiles.toList()) {
+      try {
+        final host = await _resolveFsPath(path);
+        if (host == null || host.startsWith('repo:')) continue;
+        final f = File(host);
+        if (!f.existsSync()) continue;
+        final mtime = f.lastModifiedSync().millisecondsSinceEpoch;
+        if ((st.syncedMtime[path] ?? -1) >= mtime) continue;
+        st.syncedMtime[path] = mtime;
+        // Size guard: don't slurp huge binaries into the editor.
+        if (f.lengthSync() > 2 * 1024 * 1024) continue;
+        final content = await f.readAsString();
+        if (content != st.fileBuffer[path]) {
+          st.fileBuffer[path] = content;
+          changed = true;
+          _emit('file', 'live-reloaded $path (changed on disk)');
+        }
+      } catch (_) {}
+    }
+    if (changed) notifyListeners();
   }
 
   void newStudioFile(String path) {
@@ -3150,6 +3199,8 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
             for (final l in const LineSplitter().convert(out.trim())) {
               _emit('shellOut', l);
             }
+            // Live file follow: shell may have edited open studio tabs.
+            unawaited(syncOpenFilesFromDisk());
             return out.isEmpty ? '(no output)' : out;
           }
           // Phone terminal tier — device shell, no install needed.
@@ -3996,7 +4047,8 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     r'\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(/|\$HOME|~)',
     r'\bdd\s+[^|]*if=/dev/(block|zero|random)',
     r'\bmkfs(\.\w+)?\s',
-    r'\b:\(\)\s*\{.*\};\s*:',
+    // Fork bomb: `:(){ :|:& };:` (with or without spaces).
+    r':\s*\(\s*\)\s*\{.*\}\s*;\s*:',
     r'\bchmod\s+-R\s+777\s+/',
     r'\bchown\s+-R\s+\S+\s+/\s*$',
     r'\b(reboot|shutdown|halt)\b',
@@ -4005,11 +4057,13 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     r'\bfind\s+/.*-delete\b',
   ];
 
-  bool _isDestructiveCommand(String cmd) {
-    final l = cmd;
+  bool _isDestructiveCommand(String cmd) => isDestructiveCommand(cmd);
+
+  /// Public (testable) form of the destructive-command detector.
+  static bool isDestructiveCommand(String cmd) {
     for (final pat in _destructivePatterns) {
       try {
-        if (RegExp(pat, dotAll: true).hasMatch(l)) return true;
+        if (RegExp(pat, dotAll: true).hasMatch(cmd)) return true;
       } catch (_) {}
     }
     return false;
@@ -4030,9 +4084,21 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     'netstat', 'ping', 'dig', 'nslookup', 'traceroute', 'tree',
   ];
 
-  bool _isReadOnlyCommand(String cmd) {
+  bool _isReadOnlyCommand(String cmd) => isReadOnlyCommand(cmd);
+
+  /// Public (testable) form of the read-only command classifier.
+  static bool isReadOnlyCommand(String cmd) {
     final c = cmd.trim();
     if (c.isEmpty) return false;
+    // ANY output redirection (> >> 2>) makes a segment write-capable.
+    if (RegExp(r'(?<![|0-9])>\s*\S').hasMatch(c) ||
+        RegExp(r'[^|]2>\s*\S').hasMatch(c)) {
+      return false;
+    }
+    // Input redirection (<) can read anything — treat as non-read-only.
+    if (c.contains('<')) return false;
+    // Command substitution can hide anything.
+    if (c.contains('\$(') || c.contains('`')) return false;
     // Compound commands (&&, ;, |) are safe only if EVERY segment is.
     for (final seg in c.split(RegExp(r'&&|\|\||;|\|'))) {
       final s = seg.trim();
@@ -5078,6 +5144,8 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     final lines = (args['lines'] as num?)?.toInt() ?? 30;
     final job = _jobs[id];
     if (job == null) return 'Job #$id not found.';
+    // Live file follow: watchers/builders may have rewritten open tabs.
+    unawaited(syncOpenFilesFromDisk());
     final out = job.output.toString().trim();
     if (out.isEmpty) return 'Job #$id has no output yet.';
     final allLines = const LineSplitter().convert(out);
