@@ -43,10 +43,18 @@ class SkillService {
   SkillService._();
   static final SkillService I = SkillService._();
 
+  /// Test seam: a fresh isolated instance (private ctor is shared with I).
+  SkillService.forTest() : this._();
+
   final List<Skill> _skills = [];
   final Set<String> _roots = {};
 
   List<Skill> get skills => List.unmodifiable(_skills);
+
+  /// Skills the user can invoke from the composer with `/name` or the
+  /// slash suggestion menu.
+  List<Skill> get userSkills =>
+      List.unmodifiable(_skills.where((s) => s.userInvocable));
 
   /// Register a search root (workspace, custom dirs, etc).
   void addRoot(String path) {
@@ -92,7 +100,7 @@ class SkillService {
   Future<Skill?> _parse(File file, String path) async {
     try {
       final raw = await file.readAsString();
-      final name = _basename(path);
+      var name = _basename(path);
       var description = '';
       var whenToUse = '';
       var modelInvocable = true;
@@ -115,7 +123,7 @@ class SkillService {
             }
             switch (key) {
               case 'name':
-                description = value; // placeholder if no name field; overridden below
+                if (value.isNotEmpty) name = value;
               case 'description':
                 description = value;
               case 'whenToUse':
@@ -156,6 +164,10 @@ class SkillService {
     }
     return null;
   }
+
+  /// Test seam: parse a single SKILL.md file through the real frontmatter
+  /// parser without registering a root.
+  Future<Skill?> parseForTest(File file, String path) => _parse(file, path);
 
   /// Catalog block injected into the system prompt.
   String catalogBlock({int maxDescChars = 500}) {

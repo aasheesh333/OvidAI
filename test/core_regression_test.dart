@@ -11,6 +11,7 @@ import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/github_service.dart';
 import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
+import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -2306,6 +2307,191 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         await server.close(force: true);
         app.deleteSession(session.id);
       }
+    });
+  });
+
+  group('PR10: modes, skills upload, folder pinning', () {
+    test('ChatSession.mode + workspaceFolder JSON round-trip (legacy default)', () {
+      final s = ChatSession(
+        id: 's1',
+        title: 't',
+        model: 'm',
+        mode: 'studio',
+        workspaceFolder: '/storage/emulated/0/MyProj',
+      );
+      final j = s.toJson();
+      expect(j['mode'], 'studio');
+      expect(j['workspaceFolder'], '/storage/emulated/0/MyProj');
+      final back = ChatSession.fromJson(j);
+      expect(back.mode, 'studio');
+      expect(back.workspaceFolder, '/storage/emulated/0/MyProj');
+
+      // Legacy sessions without a mode field default to General.
+      final legacy = ChatSession.fromJson({
+        'id': 's2',
+        'title': 'old',
+        'model': 'm',
+      });
+      expect(legacy.mode, 'auto');
+      expect(legacy.workspaceFolder, isNull);
+    });
+
+    test('AppState.setSessionMode only changes the ACTIVE session', () async {
+      final app = AppState.I;
+      final a = ChatSession(id: 'mode-a', title: 'A', model: 'm', mode: 'auto');
+      final b = ChatSession(id: 'mode-b', title: 'B', model: 'm', mode: 'auto');
+      app.sessions.insert(0, b);
+      app.sessions.insert(0, a);
+      app.activeSessionId = a.id;
+
+      app.setSessionMode('safe');
+      expect(a.mode, 'safe');
+      expect(b.mode, 'auto', reason: 'other session must never bleed');
+
+      app.selectSession(b.id);
+      app.setSessionMode('drive');
+      expect(b.mode, 'drive');
+      expect(a.mode, 'safe');
+
+      app.sessions.removeWhere((x) => x.id == 'mode-a' || x.id == 'mode-b');
+    });
+
+    test('AgentService.mode resolves per-session, never global', () {
+      final app = AppState.I;
+      final a = ChatSession(id: 'm-a', title: 'A', model: 'm', mode: 'safe');
+      app.sessions.insert(0, a);
+      app.activeSessionId = a.id;
+      expect(AgentService.I.mode, AgentMode.safe);
+
+      final b = ChatSession(id: 'm-b', title: 'B', model: 'm', mode: 'drive');
+      app.sessions.insert(0, b);
+      app.activeSessionId = b.id;
+      expect(AgentService.I.mode, AgentMode.drive);
+
+      app.activeSessionId = a.id;
+      expect(AgentService.I.mode, AgentMode.safe);
+
+      app.sessions.removeWhere((x) => x.id == 'm-a' || x.id == 'm-b');
+    });
+
+    test('Read-Only mode hard-blocks mutating tools in dispatch', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'ro-s', title: 'RO', model: 'm', mode: 'safe');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      final agent = AgentService.I;
+
+      // Non-read-only shell is refused with the read-only message.
+      expect(
+        await agent.dispatchForTest('run_shell', {'command': 'touch /tmp/x'}),
+        contains('READ-ONLY MODE'),
+      );
+      // file_write is refused.
+      expect(
+        await agent.dispatchForTest('file_write', {
+          'path': 'a.dart',
+          'content': 'x',
+        }),
+        contains('READ-ONLY MODE'),
+      );
+      // fs_edit view is still allowed (read-only), so no READ-ONLY denial.
+      expect(
+        await agent.dispatchForTest('fs_edit', {'command': 'view', 'path': 'a.dart'}),
+        isNot(contains('READ-ONLY MODE')),
+      );
+      // Read-only shell command is NOT hard-blocked (it proceeds to
+      // approval/execution rather than the read-only gate).
+      expect(
+        await agent.dispatchForTest('run_shell', {'command': 'ls -la'}),
+        isNot(contains('READ-ONLY MODE')),
+      );
+
+      app.sessions.removeWhere((x) => x.id == 'ro-s');
+    });
+
+    test('subagent child inherits parent mode and cannot escalate', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'sub-s', title: 'S', model: 'm', mode: 'safe');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      final agent = AgentService.I;
+
+      // Safe parent + no mode arg → child stays safe.
+      final child1 = agent.childForTest();
+      expect(child1.mode, AgentMode.safe);
+
+      // Safe parent + explicit drive → still clamped to safe.
+      final child2 = agent.childForTest(modeName: 'drive');
+      expect(child2.mode, AgentMode.safe);
+
+      // Safe parent + explicit auto → auto is less privileged than safe?
+      // safe rank 0 < auto rank 1 → auto is MORE privilege, so clamped.
+      final child3 = agent.childForTest(modeName: 'auto');
+      expect(child3.mode, AgentMode.safe);
+
+      app.sessions.removeWhere((x) => x.id == 'sub-s');
+    });
+
+    test('SkillService parses frontmatter name correctly', () async {
+      final dir = Directory.systemTemp.createTempSync('ovid-skills-test');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final f = File('${dir.path}/my-skill.md');
+      f.writeAsStringSync('''---
+name: "Hindi Translator"
+description: Translates to Hindi
+whenToUse: user wants Hindi
+user-invocable: true
+---
+Translate the following. This is the skill body.''');
+
+      final svc = SkillService.forTest();
+      final skill = await svc.parseForTest(f, f.path);
+      expect(skill, isNotNull);
+      expect(skill!.name, 'Hindi Translator', reason: 'frontmatter name wins');
+      expect(skill.description, 'Translates to Hindi');
+      expect(skill.whenToUse, 'user wants Hindi');
+      expect(skill.userInvocable, isTrue);
+      expect(skill.content, contains('Translate the following.'));
+    });
+
+    test('deleteMessagesFrom index 0 also resets compacted summary', () async {
+      final app = AppState.I;
+      final s = ChatSession(
+        id: 'clear-s',
+        title: 'C',
+        model: 'm',
+        messages: [Message(role: 'user', content: 'hi')],
+      );
+      s.compactedSummary = 'older summary';
+      s.compactedAtCount = 12;
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+
+      app.deleteMessagesFrom(s.id, 0);
+      expect(s.messages, isEmpty);
+      expect(s.compactedSummary, isNull);
+      expect(s.compactedAtCount, 0);
+
+      app.sessions.removeWhere((x) => x.id == 'clear-s');
+    });
+
+    test('_sessionWorkDir honors a pinned workspace folder', () async {
+      final app = AppState.I;
+      final pinned = Directory.systemTemp.createTempSync('ovid-pinned');
+      addTearDown(() => pinned.deleteSync(recursive: true));
+      final s = ChatSession(
+        id: 'pin-s',
+        title: 'P',
+        model: 'm',
+        workspaceFolder: pinned.path,
+      );
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+
+      final work = await AgentService.I.sessionWorkDirForTest();
+      expect(work.path, pinned.path);
+
+      app.sessions.removeWhere((x) => x.id == 'pin-s');
     });
   });
 }

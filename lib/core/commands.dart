@@ -102,8 +102,7 @@ class CommandService {
         handler: (args) async {
           final s = AppState.I.activeSession;
           if (s == null) return CommandResult(feedback: 'No active session.');
-          final idx = s.messages.isEmpty ? 0 : 0;
-          AppState.I.deleteMessagesFrom(s.id, idx);
+          AppState.I.deleteMessagesFrom(s.id, 0);
           return CommandResult(feedback: 'Session cleared.');
         },
       ),

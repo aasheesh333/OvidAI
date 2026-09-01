@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -286,6 +287,10 @@ class _StatsLine extends StatelessWidget {
                     if (AgentService.I.lastRunElapsedMs != null)
                       'last ${(AgentService.I.lastRunElapsedMs! / 1000).toStringAsFixed(1)}s',
                     'Input ${_fmtTok(input)} tok · Output ${_fmtTok(output)} tok',
+                    if (AgentService.I.sessionDecodeTokens > 0)
+                      'decode ${_fmtTok(AgentService.I.sessionDecodeTokens)} tok',
+                    if (AgentService.I.sessionTtftMs > 0)
+                      'ttft ${AgentService.I.sessionTtftMs} ms',
                     if (s.compactedSummary != null) 'compacted',
                   ].join('  |  '),
                   maxLines: 1,
@@ -298,7 +303,10 @@ class _StatsLine extends StatelessWidget {
               // Context ring — 12px arc + % label (DSH "% of context used").
               Tooltip(
                 message:
-                    '${pct.toStringAsFixed(0)}% of ${_fmtTok(window)} context used',
+                    '${pct.toStringAsFixed(0)}% of ${_fmtTok(window)} context used · '
+                    'breakdown: sys ${_fmtTok(AgentService.I.sessionSystemTokens)} · '
+                    'tool ${_fmtTok(AgentService.I.sessionToolTokens)} · '
+                    'msgs ${_fmtTok(AgentService.I.sessionMessageTokens)}',
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -2311,9 +2319,23 @@ class _MessageView extends StatelessWidget {
   );
 }
 
-/// Staged-attachment preview chip shown above the composer text field.
-/// Shows file icon + name + size with an ✕ to remove.  Hidden when no
-/// attachment is staged.
+/// One row in the composer slash-suggestion menu (commands + skills).
+class _SlashSuggestion {
+  final IconData icon;
+  final String name; // '/help' style, slash included
+  final String description;
+  final String hint;
+  const _SlashSuggestion({
+    required this.icon,
+    required this.name,
+    required this.description,
+    required this.hint,
+  });
+}
+
+/// Staged-attachment preview chips shown above the composer text field.
+/// Each chip shows file icon + name + size with an ✕ to remove. Hidden
+/// when nothing is staged.
 class _AttachmentChip extends StatelessWidget {
   const _AttachmentChip();
 
@@ -2340,44 +2362,58 @@ class _AttachmentChip extends StatelessWidget {
     return AnimatedBuilder(
       animation: AgentService.I,
       builder: (_, _) {
-        final att = AgentService.I.pendingAttachment;
-        if (att == null) return const SizedBox.shrink();
-        return Container(
-          margin: const EdgeInsets.fromLTRB(6, 6, 6, 2),
-          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-          decoration: BoxDecoration(
-            color: Aether.surface,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: Aether.accent.withValues(alpha: 0.4)),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(_iconFor(att.name), size: 16, color: Aether.accent),
-              const SizedBox(width: 7),
-              Flexible(
-                child: Text(
-                  att.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
+        final atts = AgentService.I.pendingAttachments;
+        if (atts.isEmpty) return const SizedBox.shrink();
+        return Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            for (final att in atts)
+              Container(
+                margin: const EdgeInsets.only(top: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Aether.surface,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: Aether.accent.withValues(alpha: 0.4),
                   ),
                 ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(_iconFor(att.name), size: 16, color: Aether.accent),
+                    const SizedBox(width: 7),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 150),
+                      child: Text(
+                        att.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      _fmtSize(att.size),
+                      style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                    ),
+                    const SizedBox(width: 4),
+                    GestureDetector(
+                      onTap: () => AgentService.I.removeAttachment(att.name),
+                      child: Icon(
+                        Icons.close,
+                        size: 15,
+                        color: Aether.textMuted,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-              const SizedBox(width: 6),
-              Text(
-                _fmtSize(att.size),
-                style: TextStyle(fontSize: 11, color: Aether.textFaint),
-              ),
-              const SizedBox(width: 4),
-              GestureDetector(
-                onTap: () => AgentService.I.clearAttachment(),
-                child: Icon(Icons.close, size: 15, color: Aether.textMuted),
-              ),
-            ],
-          ),
+          ],
         );
       },
     );
@@ -2408,6 +2444,65 @@ class _InputBarState extends State<_InputBar> {
   /// distinct from the normal accent send.
   static const _queueColor = Color(0xFF0E9F9F);
 
+  String _slashQuery = '';
+
+  /// Command/skill suggestions for the current slash input, or empty when
+  /// the composer isn't in slash-command mode (text starts with `/` and
+  /// the first token has no space yet).
+  List<_SlashSuggestion> get _suggestions {
+    final q = _slashQuery;
+    if (q.isEmpty) return const [];
+    final query = q.toLowerCase();
+    final out = <_SlashSuggestion>[];
+    for (final c in CommandService.I.commands) {
+      if (c.name.startsWith(query)) {
+        out.add(
+          _SlashSuggestion(
+            icon: Icons.terminal_rounded,
+            name: '/${c.name}',
+            description: c.description,
+            hint: c.hint,
+          ),
+        );
+      }
+    }
+    for (final s in SkillService.I.userSkills) {
+      if (s.name.toLowerCase().startsWith(query)) {
+        out.add(
+          _SlashSuggestion(
+            icon: Icons.auto_fix_high_outlined,
+            name: '/${s.name}',
+            description: s.description.isEmpty ? 'Skill' : s.description,
+            hint: '',
+          ),
+        );
+      }
+    }
+    return out;
+  }
+
+  void _onTextChanged() {
+    final t = controller.text;
+    String query = '';
+    if (t.startsWith('/')) {
+      final body = t.substring(1);
+      final space = body.indexOf(' ');
+      query = space < 0 ? body : body.substring(0, space);
+      query = query.toLowerCase();
+    }
+    if (query != _slashQuery) {
+      setState(() => _slashQuery = query);
+    }
+  }
+
+  void _applySuggestion(_SlashSuggestion s) {
+    controller.text = '${s.name} ';
+    controller.selection = TextSelection.collapsed(
+      offset: controller.text.length,
+    );
+    setState(() => _slashQuery = '');
+  }
+
   void _attachSheet(BuildContext context) {
     showModalBottomSheet(
       context: context,
@@ -2420,7 +2515,7 @@ class _InputBarState extends State<_InputBar> {
               sheetCtx,
               Icons.photo_library_outlined,
               'Photos & videos',
-              'Pick from gallery',
+              'Pick from gallery (multiple, max 20 MB each)',
               () => _pickMedia(sheetCtx),
             ),
             _attachOption(
@@ -2436,6 +2531,16 @@ class _InputBarState extends State<_InputBar> {
               'Document',
               'PDF, code, text, CSV files',
               () => _pickDocument(sheetCtx),
+            ),
+            _attachOption(
+              sheetCtx,
+              Icons.folder_open_outlined,
+              'Pick folder',
+              'Agent works inside this folder only',
+              () {
+                Navigator.pop(sheetCtx);
+                _pickFolder();
+              },
             ),
             _attachOption(
               sheetCtx,
@@ -2496,6 +2601,7 @@ class _InputBarState extends State<_InputBar> {
         'doc',
         'docx',
       ],
+      allowMultiple: true,
       withData: false,
     );
     await _stagePicked(result);
@@ -2506,24 +2612,100 @@ class _InputBarState extends State<_InputBar> {
     Navigator.pop(sheetCtx);
     final result = await FilePicker.platform.pickFiles(
       type: FileType.media,
+      allowMultiple: true,
       withData: false,
     );
     await _stagePicked(result);
   }
 
+  /// Pin a working folder for the ACTIVE session. The agent then does ALL
+  /// work inside it — shell cwd, file edits, jobs, attachments, skills.
+  Future<void> _pickFolder() async {
+    final dir = await _pickWritableFolder(context);
+    if (dir == null) return;
+    AppState.I.setSessionWorkspaceFolder(dir.path);
+    _toast('Working folder set: ${dir.path.split('/').last} — the agent will work only here.');
+  }
+
+  /// Pick a folder and verify write access (requesting All Files Access
+  /// when Android scoped storage blocks writes). Returns null on cancel or
+  /// when the folder is still read-only.
+  Future<Directory?> _pickWritableFolder(BuildContext ctx) async {
+    String? path;
+    try {
+      path = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: 'Pick working folder',
+      );
+    } catch (_) {
+      path = null;
+    }
+    if (path == null) {
+      _toast('No folder selected.');
+      return null;
+    }
+    final dir = Directory(path);
+    if (!dir.existsSync()) {
+      _toast('That folder is not accessible.');
+      return null;
+    }
+    var writable = false;
+    try {
+      final probe = File('$path/.ovid_probe');
+      await probe.writeAsString('ok');
+      writable = true;
+      await probe.delete();
+    } catch (_) {
+      writable = false;
+    }
+    if (writable) return dir;
+
+    // Android scoped storage: ask for All Files Access once, then retry.
+    final granted = await AgentService.I.requestAllFilesAccess();
+    if (!granted) {
+      _toast(
+        'That folder is read-only for Ovid. Grant All Files Access in '
+        'Android settings, or pick a folder inside app storage.',
+      );
+      return null;
+    }
+    try {
+      final probe = File('$path/.ovid_probe');
+      await probe.writeAsString('ok');
+      writable = true;
+      await probe.delete();
+    } catch (_) {
+      writable = false;
+    }
+    if (!writable) {
+      _toast('Folder is still read-only — pick a different one.');
+      return null;
+    }
+    return dir;
+  }
+
   Future<void> _stagePicked(FilePickerResult? result) async {
     if (result == null || result.files.isEmpty) return;
-    final f = result.files.first;
-    final path = f.path;
-    if (path == null) {
+    final files = result.files.where((f) => f.path != null).toList();
+    if (files.isEmpty) {
       _toast('Could not access that file.');
       return;
     }
-    final err = await AgentService.I.attachFile(path, f.name);
-    if (err != null) {
-      _toast(err);
+    var ok = 0;
+    final errors = <String>[];
+    for (final f in files) {
+      final err = await AgentService.I.attachFile(f.path!, f.name);
+      if (err != null) {
+        errors.add(err);
+      } else {
+        ok++;
+      }
+    }
+    if (ok == 0) {
+      _toast(errors.isEmpty ? 'No files attached.' : errors.first);
+    } else if (errors.isEmpty) {
+      _toast('Attached $ok file${ok == 1 ? '' : 's'} — sent with your next message.');
     } else {
-      _toast('Attached ${f.name} — it will be sent with your next message.');
+      _toast('Attached $ok · ${errors.length} skipped (${errors.first})');
     }
   }
 
@@ -2623,8 +2805,81 @@ class _InputBarState extends State<_InputBar> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // ── Staged attachment preview chip (dismissible) ──
+              // ── Staged attachment preview chips (dismissible) ──
               const _AttachmentChip(),
+              // ── Slash suggestion menu (shows the moment `/` is typed) ──
+              if (_suggestions.isNotEmpty)
+                Container(
+                  margin: const EdgeInsets.fromLTRB(6, 2, 6, 0),
+                  constraints: const BoxConstraints(maxHeight: 190),
+                  decoration: BoxDecoration(
+                    color: Aether.surface,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Aether.hairline),
+                  ),
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    itemCount: _suggestions.length,
+                    separatorBuilder: (_, _) => Divider(
+                      height: 1,
+                      thickness: 0.5,
+                      color: Aether.hairline,
+                    ),
+                    itemBuilder: (_, i) {
+                      final s = _suggestions[i];
+                      return InkWell(
+                        onTap: () => _applySuggestion(s),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 8,
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(s.icon, size: 16, color: Aether.accent),
+                              const SizedBox(width: 9),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      s.name,
+                                      style: const TextStyle(
+                                        fontSize: 13.5,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    if (s.description.isNotEmpty) ...[
+                                      const SizedBox(height: 1),
+                                      Text(
+                                        s.description,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: Aether.textFaint,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                              if (s.hint.isNotEmpty)
+                                Text(
+                                  s.hint,
+                                  style: TextStyle(
+                                    fontSize: 10.5,
+                                    color: Aether.textFaint,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
               // ── Text area — full card width ──
               TextField(
                 controller: controller,
@@ -2641,6 +2896,7 @@ class _InputBarState extends State<_InputBar> {
                   focusedBorder: InputBorder.none,
                   contentPadding: EdgeInsets.fromLTRB(10, 8, 10, 4),
                 ),
+                onChanged: (_) => _onTextChanged(),
                 onSubmitted: (_) => onSend(),
               ),
               // ── Toolbar row ──
@@ -3567,26 +3823,49 @@ class _WorkspaceChip extends StatelessWidget {
       builder: (_, _) {
         final s = AppState.I.activeSession;
         String label = 'sandbox';
+        var isFolder = false;
         if (s != null) {
-          final repo = AppState.I.getRepoForSession(s.id);
-          if (repo != null && repo.contains('/')) {
-            label = repo.split('/').last;
-          } else if (repo != null && repo.isNotEmpty) {
-            label = repo;
+          final folder = s.workspaceFolder;
+          if (folder != null && folder.isNotEmpty) {
+            label = folder.split('/').last;
+            isFolder = true;
+          } else {
+            final repo = AppState.I.getRepoForSession(s.id);
+            if (repo != null && repo.contains('/')) {
+              label = repo.split('/').last;
+            } else if (repo != null && repo.isNotEmpty) {
+              label = repo;
+            }
           }
         }
         return GestureDetector(
-          onTap: () => openStudio(context),
+          onTap: () {
+            if (isFolder) {
+              _showFolderSheet(context);
+            } else {
+              openStudio(context);
+            }
+          },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Aether.hairline),
+              border: Border.all(
+                color: isFolder
+                    ? Aether.accent.withValues(alpha: 0.5)
+                    : Aether.hairline,
+              ),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.folder_outlined, size: 14, color: Aether.textMuted),
+                Icon(
+                  isFolder
+                      ? Icons.folder_special_outlined
+                      : Icons.folder_outlined,
+                  size: 14,
+                  color: isFolder ? Aether.accent : Aether.textMuted,
+                ),
                 const SizedBox(width: 6),
                 ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 90),
@@ -3598,7 +3877,7 @@ class _WorkspaceChip extends StatelessWidget {
                       fontSize: 13,
                       fontWeight: FontWeight.w500,
                       height: 20 / 13,
-                      color: Aether.textMuted,
+                      color: isFolder ? Aether.accent : Aether.textMuted,
                     ),
                   ),
                 ),
@@ -3608,6 +3887,131 @@ class _WorkspaceChip extends StatelessWidget {
         );
       },
     );
+  }
+
+  void _showFolderSheet(BuildContext context) {
+    final s = AppState.I.activeSession;
+    if (s == null) return;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            const Text(
+              'Working folder',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Text(
+                s.workspaceFolder ?? '',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+            ),
+            const SizedBox(height: 6),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.drive_file_move_outline, size: 18),
+              title: const Text('Change folder', style: TextStyle(fontSize: 13.5)),
+              onTap: () {
+                Navigator.pop(context);
+                // Reuse the attach-sheet folder picker flow.
+                AppState.I.setSessionWorkspaceFolder(null);
+                // Show the attach sheet again? Simpler: direct pick here.
+                _pickFolderDirect(context);
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.clear_all_outlined, size: 18),
+              title: const Text('Clear folder (sandbox)', style: TextStyle(fontSize: 13.5)),
+              onTap: () {
+                AppState.I.setSessionWorkspaceFolder(null);
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Working folder cleared — back to sandbox.'),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickFolderDirect(BuildContext context) async {
+    String? path;
+    try {
+      path = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: 'Pick working folder',
+      );
+    } catch (_) {
+      path = null;
+    }
+    if (path == null) return;
+    final dir = Directory(path);
+    if (!dir.existsSync()) return;
+    var writable = false;
+    try {
+      final probe = File('$path/.ovid_probe');
+      await probe.writeAsString('ok');
+      writable = true;
+      await probe.delete();
+    } catch (_) {}
+    if (!writable) {
+      final granted = await AgentService.I.requestAllFilesAccess();
+      if (!granted) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('That folder is read-only for Ovid.'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
+      try {
+        final probe = File('$path/.ovid_probe');
+        await probe.writeAsString('ok');
+        writable = true;
+        await probe.delete();
+      } catch (_) {
+        writable = false;
+      }
+      if (!writable) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Folder is still read-only — pick a different one.'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
+    }
+    AppState.I.setSessionWorkspaceFolder(path);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Working folder: ${path.split('/').last}'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 }
 

@@ -305,6 +305,18 @@ class ChatSession {
   /// enables "Share session memory" in Settings.
   String? sandboxId;
 
+  /// Per-session agent access mode (DSH per-conversation mode parity).
+  /// One of 'safe' (Read-Only), 'auto' (General), 'drive' (Full Access),
+  /// 'studio' (Studio). Parallel sessions keep INDEPENDENT modes — no
+  /// cross-session mode bleed. Persisted with the session.
+  String mode;
+
+  /// User-pinned working folder (picked from the composer). When set and
+  /// the directory exists, ALL agent work happens inside it — shell cwd,
+  /// file edits, jobs, attachments, skills roots. Null = per-session
+  /// sandbox workspace. Persisted with the session.
+  String? workspaceFolder;
+
   /// Per-session Studio repo (owner/name).  Each session can work on a
   /// different repo; new sessions start with the global default (the last
   /// connected repo).  Persisted with the session.
@@ -341,6 +353,8 @@ class ChatSession {
     this.providerId,
     this.sandboxId,
     this.repo,
+    this.mode = 'auto',
+    this.workspaceFolder,
     this.compactedSummary,
     this.goal,
     this.compactedAtCount = 0,
@@ -362,6 +376,8 @@ class ChatSession {
     providerId: j['providerId'] as String?,
     sandboxId: j['sandboxId'] as String?,
     repo: j['repo'] as String?,
+    mode: j['mode'] as String? ?? 'auto',
+    workspaceFolder: j['workspaceFolder'] as String?,
     compactedSummary: j['compactedSummary'] as String?,
     compactedAtCount: (j['compactedAtCount'] as num?)?.toInt() ?? 0,
     goal: j['goal'] == null
@@ -394,6 +410,9 @@ class ChatSession {
     if (providerId != null) 'providerId': providerId,
     'sandboxId': sandboxId ?? id,
     if (repo != null) 'repo': repo,
+    'mode': mode,
+    if (workspaceFolder != null && workspaceFolder!.isNotEmpty)
+      'workspaceFolder': workspaceFolder,
     if (compactedSummary != null) 'compactedSummary': compactedSummary,
     if (compactedAtCount > 0) 'compactedAtCount': compactedAtCount,
     if (goal != null) 'goal': goal,
@@ -443,7 +462,6 @@ class AppState extends ChangeNotifier {
       maxOutputTokens = prefs.getInt(_kMaxOutputTokens) ?? 0;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
       lightTheme = prefs.getBool(_kTheme) ?? false;
-      customInstructions = prefs.getString(_kCustomInstructions) ?? '';
       memoryEnabled = prefs.getBool(_kMemoryEnabled) ?? true;
       showReasoning = prefs.getBool(_kShowReasoning) ?? true;
       githubSync = prefs.getBool(_kGithubSync) ?? true;
@@ -633,7 +651,6 @@ class AppState extends ChangeNotifier {
       _seed();
       memories.clear();
       usageLog.clear();
-      customInstructions = '';
       memoryEnabled = true;
       showReasoning = true;
       githubSync = true;
@@ -671,10 +688,6 @@ class AppState extends ChangeNotifier {
   bool lightTheme = false;
 
   // ── User settings that gate REAL features (persisted, Settings screen) ──
-  /// Custom instructions appended to the system prompt every turn.
-  static const _kCustomInstructions = 'ovid_custom_instructions';
-  String customInstructions = '';
-
   /// Memory plugin (RAG "Memory" toggle): writes + searches across sessions.
   static const _kMemoryEnabled = 'ovid_memory_enabled';
   bool memoryEnabled = true;
@@ -729,15 +742,6 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kShareMemory, v);
-    } catch (_) {}
-  }
-
-  Future<void> setCustomInstructions(String v) async {
-    customInstructions = v;
-    notifyListeners();
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_kCustomInstructions, v);
     } catch (_) {}
   }
 
@@ -941,6 +945,30 @@ class AppState extends ChangeNotifier {
   /// circular import).
   void Function(String sessionId)? onSessionSwitched;
 
+  /// Set the ACTIVE session's agent mode (per-session, persisted). Other
+  /// sessions' modes are untouched — parallel sessions never bleed.
+  void setSessionMode(String m) {
+    final s = activeSession;
+    if (s == null || s.mode == m) return;
+    s.mode = m;
+    notifyListeners();
+    persistSessions();
+  }
+
+  /// Pin the ACTIVE session's working folder (composer folder picker).
+  /// Null/empty clears it — the agent falls back to the sandbox workspace.
+  void setSessionWorkspaceFolder(String? path) {
+    final s = activeSession;
+    if (s == null) return;
+    final normalized = (path == null || path.trim().isEmpty)
+        ? null
+        : path.trim();
+    if (s.workspaceFolder == normalized) return;
+    s.workspaceFolder = normalized;
+    notifyListeners();
+    persistSessions();
+  }
+
   void newSession() {
     final s = ChatSession(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
@@ -989,12 +1017,17 @@ class AppState extends ChangeNotifier {
   void Function(String sessionId)? onSessionDeleted;
 
   /// Remove all messages from [index] onward in the named session
-  /// (DSH "Revert"/"Edit & resend" semantics).
+  /// (DSH "Revert"/"Edit & resend" semantics). Clearing from index 0 also
+  /// resets the compacted summary so the agent truly starts fresh.
   void deleteMessagesFrom(String sessionId, int index) {
     final s = sessions.where((x) => x.id == sessionId).firstOrNull;
     if (s == null) return;
     final idx = index.clamp(0, s.messages.length);
     s.messages.removeRange(idx, s.messages.length);
+    if (idx == 0) {
+      s.compactedSummary = null;
+      s.compactedAtCount = 0;
+    }
     notifyListeners();
     persistSessions();
   }

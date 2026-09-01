@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import '../core/agent_service.dart';
 import '../core/firebase_service.dart';
+import '../core/skills.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'auth_screen.dart';
@@ -123,13 +125,12 @@ class SettingsScreen extends StatelessWidget {
           ),
 
           const SectionHeader('Personalization'),
-          _SettingsSwitchTile(
-            icon: Icons.tune,
-            title: 'Custom instructions',
-            subtitleOn: 'Active — appended to every AI request',
-            subtitleOff: 'Set how the AI should respond',
-            getter: _getCustomInstructionsOn,
-            onTap: () => _openCustomInstructions(context),
+          _navTile(
+            context,
+            Icons.auto_fix_high_outlined,
+            'Skills',
+            'Upload .md skill files the agent uses in chat',
+            const SkillsScreen(),
           ),
           const _SettingsSwitchTile(
             icon: Icons.psychology_outlined,
@@ -353,7 +354,6 @@ class _SettingsSwitchTile extends StatelessWidget {
   final String subtitleOff;
   final bool Function() getter;
   final Future<void> Function(bool)? setter;
-  final VoidCallback? onTap;
   const _SettingsSwitchTile({
     required this.icon,
     required this.title,
@@ -361,7 +361,6 @@ class _SettingsSwitchTile extends StatelessWidget {
     required this.subtitleOff,
     required this.getter,
     this.setter,
-    this.onTap,
   });
 
   @override
@@ -389,7 +388,7 @@ class _SettingsSwitchTile extends StatelessWidget {
                   : (x) => setter!(x),
             ),
           ),
-          onTap: onTap ?? (setter == null ? null : () => setter!(!getter())),
+          onTap: setter == null ? null : () => setter!(!getter()),
         );
       },
     );
@@ -405,55 +404,6 @@ bool _getGithubSync() => AppState.I.githubSync;
 Future<void> _setGithubSync(bool v) => AppState.I.setGithubSync(v);
 bool _getAutoRunSafe() => AppState.I.autoRunSafeCommands;
 Future<void> _setAutoRunSafe(bool v) => AppState.I.setAutoRunSafeCommands(v);
-bool _getCustomInstructionsOn() =>
-    AppState.I.customInstructions.trim().isNotEmpty;
-
-/// Custom instructions — tap opens the editor dialog; the switch mirrors
-/// whether instructions exist (empty = off).
-void _openCustomInstructions(BuildContext context) {
-  final controller = TextEditingController(
-    text: AppState.I.customInstructions,
-  );
-  showDialog<void>(
-    context: context,
-    builder: (d) => AlertDialog(
-      title: const Text('Custom instructions', style: TextStyle(fontSize: 15)),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            'Appended to every AI request, with priority. '
-            'Example: "Always answer in Hindi. Be brief."',
-            style: TextStyle(fontSize: 12, color: Aether.textFaint),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: controller,
-            maxLines: 6,
-            minLines: 4,
-            autofocus: true,
-            decoration: const InputDecoration(
-              hintText: 'How should the AI respond?',
-            ),
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(d),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () {
-            AppState.I.setCustomInstructions(controller.text.trim());
-            Navigator.pop(d);
-          },
-          child: const Text('Save'),
-        ),
-      ],
-    ),
-  );
-}
 
 /// Live on-device storage usage (replaces the hardcoded "214 MB" string).
 class _StorageTile extends StatefulWidget {
@@ -932,6 +882,270 @@ class _DeleteAllDataScreenState extends State<_DeleteAllDataScreen> {
             onPressed: _delete,
             icon: const Icon(Icons.delete_forever_outlined, size: 18),
             label: const Text('Delete all data'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// ── Skills screen (Settings → Personalization → Skills) ────────────────
+/// Upload .md skill files ONLY. Uploaded skills live in a GLOBAL app-docs
+/// folder (`<docs>/skills`) that SkillService scans on every run, so the
+/// agent can use them in any chat via the `skill` tool, `/skill-name`
+/// invocation, or the composer slash menu.
+class SkillsScreen extends StatefulWidget {
+  const SkillsScreen({super.key});
+  @override
+  State<SkillsScreen> createState() => _SkillsScreenState();
+}
+
+class _SkillsScreenState extends State<SkillsScreen> {
+  List<Skill> _skills = const [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+  }
+
+  Future<void> _reload() async {
+    setState(() => _loading = true);
+    await AgentService.I.refreshSkills();
+    if (!mounted) return;
+    // Show ONLY global user-uploaded skills here — workspace skills are
+    // managed by the agent inside each session.
+    final docs = await getApplicationDocumentsDirectory();
+    final root = '${docs.path}/skills';
+    final all = SkillService.I.skills.where((s) => s.path.startsWith(root));
+    setState(() {
+      _skills = all.toList()..sort((a, b) => a.name.compareTo(b.name));
+      _loading = false;
+    });
+  }
+
+  Future<void> _upload() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['md'],
+      allowMultiple: true,
+      withData: false,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final docs = await getApplicationDocumentsDirectory();
+    final dir = Directory('${docs.path}/skills');
+    dir.createSync(recursive: true);
+
+    var ok = 0;
+    final errors = <String>[];
+    for (final f in result.files) {
+      final src = f.path;
+      final name = f.name;
+      if (src == null || !name.toLowerCase().endsWith('.md')) {
+        errors.add('$name — not a .md file');
+        continue;
+      }
+      try {
+        final srcFile = File(src);
+        final size = await srcFile.length();
+        if (size > 512 * 1024) {
+          errors.add('$name — too large (${(size / 1024).toStringAsFixed(0)} KB, max 512 KB)');
+          continue;
+        }
+        // Collision-safe: suffix if a skill with this name already exists.
+        var destName = name;
+        var dest = File('${dir.path}/$destName');
+        var n = 1;
+        while (dest.existsSync()) {
+          final dot = name.lastIndexOf('.');
+          destName = dot > 0
+              ? '${name.substring(0, dot)}_$n${name.substring(dot)}'
+              : '${name}_$n';
+          dest = File('${dir.path}/$destName');
+          n++;
+        }
+        await srcFile.copy(dest.path);
+        ok++;
+      } catch (e) {
+        errors.add('$name — $e');
+      }
+    }
+    await _reload();
+    if (!mounted) return;
+    final msg = errors.isEmpty
+        ? '$ok skill${ok == 1 ? '' : 's'} uploaded — the agent can now use '
+              '${ok == 1 ? 'it' : 'them'} in any chat.'
+        : '$ok uploaded · ${errors.length} skipped: ${errors.take(2).join(' · ')}';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  Future<void> _delete(Skill s) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete "${s.name}"?', style: const TextStyle(fontSize: 15)),
+        content: const Text('The agent will no longer see this skill in chat.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete', style: TextStyle(color: Aether.danger)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      final f = File(s.path);
+      if (f.existsSync()) await f.delete();
+    } catch (_) {}
+    await _reload();
+  }
+
+  Future<void> _preview(Skill s) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(s.name, style: const TextStyle(fontSize: 16)),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Text(
+              s.content,
+              style: TextStyle(fontSize: 12.5, height: 1.5, color: Aether.textMuted),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: const Text('Skills'),
+        actions: [
+          IconButton(
+            tooltip: 'Upload .md skill',
+            onPressed: _upload,
+            icon: const Icon(Icons.upload_file_outlined, size: 20),
+          ),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
+          : _skills.isEmpty
+          ? _empty(context)
+          : ListView.separated(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 40),
+              itemCount: _skills.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 8),
+              itemBuilder: (_, i) {
+                final s = _skills[i];
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: Aether.surface,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Aether.hairline),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.auto_fix_high_outlined,
+                        size: 18,
+                        color: Aether.accent,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              s.name,
+                              style: const TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            if (s.description.isNotEmpty) ...[
+                              const SizedBox(height: 2),
+                              Text(
+                                s.description,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  color: Aether.textFaint,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Preview',
+                        onPressed: () => _preview(s),
+                        icon: Icon(Icons.visibility_outlined, size: 17, color: Aether.textMuted),
+                      ),
+                      IconButton(
+                        tooltip: 'Delete',
+                        onPressed: () => _delete(s),
+                        icon: Icon(Icons.delete_outline, size: 17, color: Aether.danger),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+    );
+  }
+
+  Widget _empty(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.auto_fix_high_outlined, size: 40, color: Aether.textFaint),
+          const SizedBox(height: 12),
+          const Text(
+            'No skills yet',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 6),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 40),
+            child: Text(
+              'Upload .md skill files. The agent can then call them in any '
+              'chat with the skill tool, or you can type /name directly.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.5,
+                color: Aether.textFaint,
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: _upload,
+            icon: const Icon(Icons.upload_file_outlined, size: 18),
+            label: const Text('Upload .md skill'),
           ),
         ],
       ),

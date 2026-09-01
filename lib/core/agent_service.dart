@@ -337,11 +337,52 @@ class AgentService extends ChangeNotifier {
     _refreshSkillRoots();
   }
 
-  /// Named private constructor for subagent children (same body as [_]).
-  AgentService._internal() : this._();
+  /// Named private constructor for subagent children. Detached so their
+  /// mode access never touches a real session (parallel-run mode-bleed fix).
+  factory AgentService._internal() {
+    final a = AgentService._();
+    a._detachMode();
+    return a;
+  }
+
   static final AgentService I = AgentService._();
 
-  AgentMode mode = AgentMode.auto;
+  AgentMode _detachedMode = AgentMode.auto;
+  bool _detached = false;
+
+  /// The agent mode that applies to the current execution context.
+  ///
+  /// Per-session (DSH per-conversation parity): inside a run this resolves
+  /// to the RUNNING session's persisted mode; outside a run it resolves to
+  /// the ACTIVE session's mode. Subagent children are detached — they use
+  /// an explicit [_detachedMode] instead of mutating a real session.
+  AgentMode get mode {
+    if (_detached) return _detachedMode;
+    final s = _runCtx?.session ?? AppState.I.activeSession;
+    return AgentMode.values.firstWhere(
+      (m) => m.name == s?.mode,
+      orElse: () => AgentMode.auto,
+    );
+  }
+
+  set mode(AgentMode m) {
+    if (_detached) {
+      _detachedMode = m;
+      return;
+    }
+    final s = _runCtx?.session ?? AppState.I.activeSession;
+    if (s == null) return;
+    s.mode = m.name;
+    AppState.I.persistSessions();
+  }
+
+  /// Detached-mode flag for subagent children — their `mode` access must
+  /// never read or write the parent session's persisted mode (parallel-run
+  /// mode-bleed fix).
+  void _detachMode() {
+    _detached = true;
+    _detachedMode = AgentMode.auto;
+  }
 
   final List<AgentEvent> events = [];
 
@@ -1020,6 +1061,18 @@ class AgentService extends ChangeNotifier {
   /// with this as `cwd` bound to /work inside the jail.
   Future<Directory> _sessionWorkDir() async {
     final s = _runSession;
+    // User-pinned working folder wins when it still exists on disk.
+    final pinned = s?.workspaceFolder;
+    if (pinned != null && pinned.trim().isNotEmpty) {
+      final d = Directory(pinned);
+      if (d.existsSync()) return d;
+      // Pinned folder vanished (unmounted SD / deleted) — emit a note and
+      // fall back to the sandbox workspace rather than hard-failing.
+      _emit(
+        'think',
+        'working folder gone (${pinned.split('/').last}) — using sandbox',
+      );
+    }
     final sid = s?.sandboxId ?? s?.id ?? 'default';
     return SandboxService.I.workDirFor(sid);
   }
@@ -1035,12 +1088,15 @@ class AgentService extends ChangeNotifier {
   Set<String> _readPathsFor(String sid) =>
       _readPaths.putIfAbsent(sid, () => {});
 
-  // ── Pending attachment (chatbox file upload) ──
-  /// Set when the user attaches a file via the composer's + button. The
-  /// file is copied into the session workspace immediately; on the next
-  /// send, a note is prepended to the prompt telling the agent the file is
-  /// in the workspace (it reads it via read_attachment / run_shell).
-  ({String name, String path, int size})? pendingAttachment;
+  // ── Pending attachments (chatbox file upload) ──
+  /// Staged files (composer + button). Each file is copied into the
+  /// session workspace immediately; on the next send, a system note lists
+  /// them all and the agent reads them from the workspace.
+  final List<({String name, String path, int size})> pendingAttachments = [];
+
+  /// Back-compat alias for the first staged file (single-attach UI).
+  ({String name, String path, int size})? get pendingAttachment =>
+      pendingAttachments.isEmpty ? null : pendingAttachments.first;
 
   /// Attach a local file: copy into the session workspace and stage it.
   /// Returns a human-readable error string, or null on success.
@@ -1067,7 +1123,7 @@ class AgentService extends ChangeNotifier {
         n++;
       }
       await src.copy(dest.path);
-      pendingAttachment = (name: destName, path: dest.path, size: size);
+      pendingAttachments.add((name: destName, path: dest.path, size: size));
       _emit('attach', 'attached $destName (${_fmtSize(size)})');
       notifyListeners();
       return null;
@@ -1076,9 +1132,15 @@ class AgentService extends ChangeNotifier {
     }
   }
 
-  /// Clear the staged attachment (user removed it, or after send).
+  /// Remove one staged attachment by name (composer chip ✕).
+  void removeAttachment(String name) {
+    pendingAttachments.removeWhere((a) => a.name == name);
+    notifyListeners();
+  }
+
+  /// Clear all staged attachments (after send).
   void clearAttachment() {
-    pendingAttachment = null;
+    pendingAttachments.clear();
     notifyListeners();
   }
 
@@ -1103,7 +1165,7 @@ class AgentService extends ChangeNotifier {
   bool get anyBusy => _runs.values.any((r) => r.activeRunId != null);
 
   void setMode(AgentMode m) {
-    mode = m;
+    mode = m; // writes to active session (or detached child)
     events.add(AgentEvent('think', 'access mode → ${m.label}'));
     notifyListeners();
   }
@@ -2866,23 +2928,26 @@ class AgentService extends ChangeNotifier {
     // system prompt is assembled.
     await _refreshSkillRoots();
 
-    // ── Staged attachment (chatbox upload) ──
-    // The file is already in the session workspace; capture it so we can
-    // inject a system note below telling the agent to read it, and stamp
-    // it onto the user message that carried it (in-chat chip display).
-    final att = pendingAttachment;
-    if (att != null) {
-      pendingAttachment = null;
+    // ── Staged attachments (chatbox upload) ──
+    // Files are already in the session workspace; capture them so we can
+    // inject a system note below telling the agent to read them, and stamp
+    // them onto the user message that carried them (in-chat chip display).
+    final atts = List.of(pendingAttachments);
+    if (atts.isNotEmpty) {
+      pendingAttachments.clear();
       final lastUser = s.messages.lastWhere(
         (m) => m.role == 'user',
         orElse: () => Message(role: 'user', content: originalPrompt),
       );
-      if (lastUser.content == originalPrompt &&
-          lastUser.attachments.every((a) => a.name != att.name)) {
-        lastUser.attachments = [
-          ...lastUser.attachments,
-          MessageAttachment(name: att.name, size: att.size),
-        ];
+      if (lastUser.content == originalPrompt) {
+        for (final att in atts) {
+          if (lastUser.attachments.every((a) => a.name != att.name)) {
+            lastUser.attachments = [
+              ...lastUser.attachments,
+              MessageAttachment(name: att.name, size: att.size),
+            ];
+          }
+        }
       }
     }
 
@@ -2892,6 +2957,21 @@ You are Ovid's on-device coding & browsing agent running INSIDE a Flutter app.
 Environment: Android device with a native Linux sandbox (python3/node/git via apt),
 a live Browser panel, and the user's connected GitHub repo (${GitHubService.I.login ?? 'github'}).
 Access mode: ${mode.label.toUpperCase()} — ${mode.hint}
+${mode == AgentMode.safe ? '''
+MODE RESTRICTIONS (Read-Only): you are in a read-only session. You may read
+files, list directories, search, browse pages and run read-only shell commands.
+The following are HARD-BLOCKED and will fail if you try them: file_write,
+fs_edit (create/str_replace/insert), commit, git_clone, git_push, job_start,
+job_kill, catalog mutations, plugin/MCP installs, browser typing/clicking.
+Do not attempt them — instead explain what needs to change and ask the user
+to switch to General or Studio mode.''' : ''}
+${s.workspaceFolder == null || s.workspaceFolder!.isEmpty ? '''
+Workspace: per-session sandbox folder (session id: ${s.sandboxId ?? s.id}).
+All files, edits and shell commands happen inside this workspace.''' : '''
+Working folder: ${s.workspaceFolder}
+The user pinned this chat to the folder above — ALL file operations, edits,
+shell commands, jobs and attachments MUST happen inside this folder. Do not
+touch anything outside it.'''}
 Session isolation: this chat has its OWN sandbox workspace (id: ${s.sandboxId ?? s.id}).
 Other chats' files are NOT visible to you — don't ask about them, they're
 inaccessible here. ${AppState.I.shareSessionMemory ? 'The user enabled "Share session memory" — you may search across all chats via memory_search.' : ''}
@@ -2932,7 +3012,6 @@ ${s.goal != null && s.goal!['status'] == 'active' ? '\nACTIVE GOAL (round ${s.go
 ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a [reminder] message arrives, treat its prompt as a user request and act on it.' : ''}
 ${s.todos.isNotEmpty ? '\nSESSION TODOS (${s.todos.length} item${s.todos.length == 1 ? '' : 's'} — follow this checklist, do not abandon it):\n${s.todos.map((t) => '- [${t['status'] == 'completed' ? 'x' : t['status'] == 'in_progress' ? '~' : ' '}] ${t['content']}').join('\n')}\nWork through the todo list. Mark items in_progress BEFORE doing them and completed AFTER they are done. If all items are completed, say so and give your final answer.' : ''}
 ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock()}'}
-${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTIONS (follow with priority):\n${AppState.I.customInstructions.trim()}'}
 ''';
 
     // ── Context compaction (DSH dsh-compaction-basic parity) ──
@@ -2951,15 +3030,17 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
               '[Earlier conversation summary — treat as established context]\n'
               '${s.compactedSummary}',
         },
-      // Staged attachment note — the file is in the session workspace.
-      if (att != null)
+      // Staged attachments note — the files are in the session workspace.
+      if (atts.isNotEmpty)
         {
           'role': 'system',
           'content':
-              '[User attached a file this turn: "${att.name}" '
-              '(${_fmtSize(att.size)}). It is saved in THIS session workspace. '
-              'Read it with read_attachment("${att.name}") or run_shell, then '
-              'respond to the user\'s message.]',
+              '[User attached ${atts.length} file${atts.length == 1 ? '' : 's'} '
+              'this turn: '
+              '${atts.map((a) => '"${a.name}" (${_fmtSize(a.size)})').join(', ')}. '
+              'They are saved in THIS session workspace. '
+              'Read them with read_attachment or run_shell, then respond to '
+              'the user\'s message.]',
         },
       // Full message history — compaction (_maybeCompact) already ran above
       // and merges anything that would overflow this model's window into
@@ -3710,6 +3791,19 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
 
   // ── TOOL DISPATCH (with mode-based approvals) ─────────────────────────
   Future<String> _dispatch(String name, Map<String, dynamic> args) async {
+    // Per-run tool accounting — one step per tool dispatch, wall-clock
+    // duration into toolMs (surfaced in the composer StatsLine).
+    final sw = Stopwatch()..start();
+    _runResolved.steps += 1;
+    try {
+      return await _dispatchInner(name, args);
+    } finally {
+      sw.stop();
+      _runResolved.toolMs += sw.elapsedMilliseconds;
+    }
+  }
+
+  Future<String> _dispatchInner(String name, Map<String, dynamic> args) async {
     // ── Plan mode enforcement (DSH exit_plan_mode flow) ──
     // While planning, only read-only tools are allowed.  The AI must
     // present its plan via exit_plan_mode and get user approval first.
@@ -3719,6 +3813,13 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
           'and call exit_plan_mode for user approval. After approval, '
           'execution tools unlock.';
     }
+    // ── Read-Only mode hard gate (DSH plan-mode-style block) ──
+    // In Read-Only mode the agent is RESTRICTED, not merely asked: writes,
+    // edits, commits and non-read-only shell commands are refused at the
+    // dispatch layer with an instructive message. Read-only shell commands
+    // still run when auto-run-safe is on (or ask otherwise).
+    final roBlock = _readOnlyBlock(name, args);
+    if (roBlock != null) return roBlock;
     switch (name) {
       case 'run_shell':
         final cmd = args['command'] as String;
@@ -4742,6 +4843,58 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     }
   }
 
+  /// Hard Read-Only gate. Returns a denial message when [name] is not
+  /// allowed in Read-Only mode, else null. Mirrors the plan-mode block:
+  /// the model learns from the tool result and adapts instead of spamming
+  /// approval dialogs.
+  String? _readOnlyBlock(String name, Map<String, dynamic> args) {
+    if (mode != AgentMode.safe) return null;
+
+    const roDenied = 'READ-ONLY MODE: this action is blocked. The user '
+        'selected Read-Only — you may read, search, browse and run '
+        'read-only shell commands, but you may NOT write files, edit code, '
+        'start jobs or commit. Explain what you need to change and ask the '
+        'user to switch to General or Studio mode.';
+
+    switch (name) {
+      // Write-capable tools — always blocked in Read-Only.
+      case 'file_write':
+      case 'commit':
+      case 'git_clone':
+      case 'git_push':
+      case 'job_start':
+      case 'job_kill':
+      case 'catalog_add_provider':
+      case 'catalog_remove_provider':
+      case 'catalog_add_mcp':
+      case 'catalog_remove_mcp':
+      case 'catalog_add_plugin':
+      case 'catalog_add_marketplace':
+      case 'agent_install_plugin':
+      case 'agent_install_mcp':
+        return roDenied;
+      case 'fs_edit':
+        // Only the view subcommand is read-only.
+        final cmd = (args['command'] as String? ?? '').toLowerCase();
+        if (cmd != 'view') return roDenied;
+        return null;
+      case 'run_shell':
+        // Read-only commands run when auto-run-safe is on (or after the
+        // normal approval ask). Anything mutating is refused outright.
+        final c = (args['command'] as String? ?? '').trim();
+        if (c.isEmpty || !_isReadOnlyCommand(c)) return roDenied;
+        return null;
+      case 'browser_type':
+      case 'browser_press_key':
+      case 'browser_click':
+      case 'browser_evaluate':
+        // Page interactions can submit forms/press buy buttons — blocked.
+        return roDenied;
+      default:
+        return null;
+    }
+  }
+
   Future<bool> _askUser(String t, String s, String d) async {
     final req = ApprovalRequest(tool: t, summary: s, detail: d);
     pendingApproval = req;
@@ -5679,14 +5832,65 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
   // ── Skills (reusable instruction bundles) ─────────────────────────────
   Future<void> _refreshSkillRoots() async {
     SkillService.I.clearRoots();
-    // Workspace roots: current session's sandbox + repo cache, plus
-    // custom dirs later when configured.
+    // Global user skills (Settings → Skills upload) — visible in EVERY
+    // session so the agent can use them in any chat.
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      SkillService.I.addRoot('${docs.path}/skills');
+    } catch (_) {}
+    // Workspace roots: current session's sandbox (or pinned folder) so
+    // project-local skills also show up.
     try {
       final work = await _sessionWorkDir();
       SkillService.I.addRoot('${work.path}/.dsh/skills');
       SkillService.I.addRoot('${work.path}/.agents/skills');
     } catch (_) {}
     await SkillService.I.reload();
+  }
+
+  /// Public test/UI seam: re-scan skill roots now (Settings → Skills).
+  Future<void> refreshSkills() => _refreshSkillRoots();
+
+  /// True when the app holds All Files Access (Android 11+ MANAGE_EXTERNAL
+  /// STORAGE) — needed to write inside arbitrary user-pinned folders.
+  Future<bool> hasAllFilesAccess() async {
+    try {
+      final status = await Permission.manageExternalStorage.status;
+      return status.isGranted;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Ask the user to grant All Files Access via the system settings screen.
+  Future<bool> requestAllFilesAccess() async {
+    try {
+      final status = await Permission.manageExternalStorage.request();
+      return status.isGranted;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Test seam: run a tool through the real dispatch gates (plan mode +
+  /// read-only mode + approval) without a live model loop.
+  Future<String> dispatchForTest(String name, Map<String, dynamic> args) =>
+      _dispatch(name, args);
+
+  /// Test seam: create a detached subagent child and optionally request a
+  /// mode — verifies inheritance/clamping without spawning a run.
+  AgentService childForTest({String? modeName}) {
+    final child = AgentService._internal();
+    final parentMode = mode;
+    child.mode = parentMode;
+    if (modeName != null) {
+      for (final m in AgentMode.values) {
+        if (m.name == modeName && _modeRank(m) <= _modeRank(parentMode)) {
+          child.mode = m;
+        }
+      }
+    }
+    return child;
   }
 
   Future<String> _handleSkill(Map<String, dynamic> args) async {
@@ -5741,6 +5945,16 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     return 'Background subagents ($scope, ${_subagents.length} total):\n$lines';
   }
 
+  // ── Mode privilege ranking (restriction order) ──────────────────────
+  /// Read-Only < General < Studio < Full Access. Used to ensure a subagent
+  /// can never be dispatched with MORE privilege than its parent.
+  static int _modeRank(AgentMode m) => switch (m) {
+    AgentMode.safe => 0,
+    AgentMode.auto => 1,
+    AgentMode.studio => 2,
+    AgentMode.drive => 3,
+  };
+
   Future<String> _handleDispatchAgent(Map<String, dynamic> args) async {
     final prompt = args['prompt'] as String;
     final modeName = args['mode'] as String?;
@@ -5756,9 +5970,15 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     // Child inherits planMode → mutating tools stay blocked while the
     // parent agent is planning (no plan-mode escape via subagent).
     child.planMode = planMode;
+    // Child inherits the parent's mode by default. An explicit `mode` arg
+    // can only DOWNGRADE privilege (a Read-Only parent can never spawn a
+    // Full-Access child) — mode restrictions are never escapable.
+    child.mode = parentMode;
     if (modeName != null) {
       for (final m in AgentMode.values) {
-        if (m.name == modeName) child.mode = m;
+        if (m.name == modeName && _modeRank(m) <= _modeRank(parentMode)) {
+          child.mode = m;
+        }
       }
     }
     // Pipe the child's internal events into the parent's live subagent
@@ -5792,7 +6012,6 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
       return 'Subagent failed: $e';
     } finally {
       child.dispose();
-      mode = parentMode;
     }
   }
 
