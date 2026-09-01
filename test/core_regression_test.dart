@@ -1937,5 +1937,375 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       // Read-only command used to WRITE is not read-only (redirection).
       expect(AgentService.isReadOnlyCommand('cat a > b'), isFalse);
     });
+
+    // ─── Session/model isolation (P0 fix) ────────────────────────────
+    test('parallel same-provider runs keep models + streams isolated', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final provider = app.providerById('ollama-local')!;
+      final originals = ({
+        'baseUrl': provider.baseUrl,
+        'models': List<String>.of(provider.models),
+        'selectedModel': provider.selectedModel,
+      });
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final bodies = <String>[];
+
+      final sessionA = ChatSession(
+        id: 'par-a',
+        title: 'A',
+        providerId: provider.id,
+        model: 'model-a',
+        messages: [Message(role: 'user', content: 'prompt A')],
+      );
+      final sessionB = ChatSession(
+        id: 'par-b',
+        title: 'B',
+        providerId: provider.id,
+        model: 'model-b',
+        messages: [Message(role: 'user', content: 'prompt B')],
+      );
+      app.sessions.addAll([sessionA, sessionB]);
+      app.activeSessionId = sessionA.id;
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['model-a', 'model-b'];
+
+      final serverTask = () async {
+        await for (final request in server) {
+          final body = await utf8.decoder.bind(request).join();
+          final payload = jsonDecode(body) as Map<String, dynamic>;
+          bodies.add(payload['model'] as String);
+          request.response.headers.chunkedTransferEncoding = true;
+          request.response.add(
+            utf8.encode(
+              'data: ${jsonEncode({
+                'choices': [
+                  {
+                    'delta': {'content': 'reply-for-${payload['model']}'},
+                    'finish_reason': 'stop',
+                  },
+                ],
+              })}\n\n',
+            ),
+          );
+          await request.response.flush();
+          try {
+            await request.response.close();
+          } catch (_) {}
+        }
+      }();
+      unawaited(serverTask);
+
+      try {
+        // Start both runs — A on active session, B background via sessionId.
+        final runA = agent.runTask('prompt A', sessionId: sessionA.id);
+        final runB = agent.runTask('prompt B', sessionId: sessionB.id);
+        await runA.timeout(const Duration(seconds: 10));
+        await runB.timeout(const Duration(seconds: 10));
+
+        // Each request was made with its OWN session's model.
+        expect(bodies, contains('model-a'));
+        expect(bodies, contains('model-b'));
+
+        // Each session's assistant output contains only its own reply —
+        // no cross-session merge when two same-provider runs are parallel.
+        final aText = sessionA.messages
+            .where((m) => m.role == 'assistant')
+            .map((m) => m.content)
+            .join('\n');
+        final bText = sessionB.messages
+            .where((m) => m.role == 'assistant')
+            .map((m) => m.content)
+            .join('\n');
+        expect(aText, contains('reply-for-model-a'));
+        expect(aText, isNot(contains('reply-for-model-b')));
+        expect(bText, contains('reply-for-model-b'));
+        expect(bText, isNot(contains('reply-for-model-a')));
+      } finally {
+        provider
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+        await server.close(force: true);
+        app.deleteSession(sessionA.id);
+        app.deleteSession(sessionB.id);
+      }
+    });
+
+    test('mid-run model switch never changes the in-flight session model', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final provider = app.providerById('ollama-local')!;
+      final originals = ({
+        'baseUrl': provider.baseUrl,
+        'models': List<String>.of(provider.models),
+        'selectedModel': provider.selectedModel,
+      });
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      String? capturedModel;
+
+      final sessionA = ChatSession(
+        id: 'model-a2',
+        title: 'A',
+        providerId: provider.id,
+        model: 'deepseek-chat',
+        messages: [Message(role: 'user', content: 'hello')],
+      );
+      final sessionB = ChatSession(
+        id: 'model-b2',
+        title: 'B',
+        providerId: provider.id,
+        model: 'deepseek-reasoner',
+        messages: [Message(role: 'user', content: 'hi B')],
+      );
+      app.sessions.addAll([sessionA, sessionB]);
+      app.activeSessionId = sessionA.id;
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['deepseek-chat', 'deepseek-reasoner'];
+
+      final serverTask = server.first.then((request) async {
+        final body = await utf8.decoder.bind(request).join();
+        capturedModel = jsonDecode(body)['model'] as String?;
+        request.response.headers.chunkedTransferEncoding = true;
+        // Slow stream — time to switch sessions and setModel mid-run.
+        for (var i = 0; i < 2; i++) {
+          request.response.add(
+            utf8.encode(
+              'data: ${jsonEncode({
+                'choices': [
+                  {'delta': {'content': 'chunk$i '}},
+                ],
+              })}\n\n',
+            ),
+          );
+          await request.response.flush();
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+        }
+        try {
+          await request.response.close();
+        } catch (_) {}
+      });
+
+      try {
+        final run = agent.runTask('hello', sessionId: sessionA.id);
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        // Switch to B AND setModel on the shared provider mid-run.
+        app.selectSession(sessionB.id);
+        app.setModel(provider.id, 'deepseek-reasoner');
+        await run.timeout(const Duration(seconds: 10));
+        await serverTask.timeout(const Duration(seconds: 10));
+
+        // The model sent on the wire stayed deepseek-chat.
+        expect(capturedModel, 'deepseek-chat');
+        // B's session still has its own model.
+        expect(sessionB.model, 'deepseek-reasoner');
+      } finally {
+        provider
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+        await server.close(force: true);
+        app.deleteSession(sessionA.id);
+        app.deleteSession(sessionB.id);
+      }
+    });
+
+    test('switching sessions does not mutate provider.selectedModel', () {
+      final app = AppState.I;
+      final provider = app.providerById('ollama-local')!;
+      final origSel = provider.selectedModel;
+      final origModels = List<String>.of(provider.models);
+      provider.models = ['m1', 'm2'];
+
+      final sA = ChatSession(
+        id: 'sel-a',
+        title: 'A',
+        providerId: provider.id,
+        model: 'm1',
+      );
+      final sB = ChatSession(
+        id: 'sel-b',
+        title: 'B',
+        providerId: provider.id,
+        model: 'm2',
+      );
+      app.sessions.addAll([sA, sB]);
+      try {
+        provider.selectedModel = 'm1';
+        app.selectSession(sB.id);
+        expect(
+          provider.selectedModel,
+          'm1',
+          reason: 'session switch must not write to shared provider'
+              'selectedModel — that is how model bleed happens',
+        );
+        app.newSession();
+        expect(provider.selectedModel, 'm1');
+      } finally {
+        provider
+          ..selectedModel = origSel
+          ..models = origModels;
+        app.deleteSession(sA.id);
+        app.deleteSession(sB.id);
+      }
+    });
+
+    // ─── Todo injection + follow-through (P0 fix) ────────────────────
+    test('session todos are injected into the model context', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final provider = app.providerById('ollama-local')!;
+      final originals = ({
+        'baseUrl': provider.baseUrl,
+        'models': List<String>.of(provider.models),
+        'selectedModel': provider.selectedModel,
+      });
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final requestBodies = <Map<String, dynamic>>[];
+
+      final session = ChatSession(
+        id: 'todo-inj',
+        title: 'Todo',
+        providerId: provider.id,
+        model: 'test-model',
+        messages: [Message(role: 'user', content: 'do the task')],
+      );
+      session.todos.addAll([
+        {'content': 'read the file', 'status': 'completed'},
+        {'content': 'edit the file', 'status': 'in_progress'},
+        {'content': 'run tests', 'status': 'pending'},
+      ]);
+      app.sessions.add(session);
+      app.activeSessionId = session.id;
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['test-model'];
+
+      // Serve EVERY request (run + todo follow-through nudge) so the run
+      // can complete even when the nudge fires a follow-up turn.
+      final serverTask = () async {
+        await for (final request in server) {
+          final body = await utf8.decoder.bind(request).join();
+          requestBodies.add(jsonDecode(body) as Map<String, dynamic>);
+          request.response.headers.chunkedTransferEncoding = true;
+          request.response.add(
+            utf8.encode(
+              'data: ${jsonEncode({
+                'choices': [
+                  {
+                    'delta': {'content': 'done'},
+                    'finish_reason': 'stop',
+                  },
+                ],
+              })}\n\n',
+            ),
+          );
+          await request.response.flush();
+          try {
+            await request.response.close();
+          } catch (_) {}
+        }
+      }();
+      unawaited(serverTask);
+
+      try {
+        await agent
+            .runTask('do the task', sessionId: session.id)
+            .timeout(const Duration(seconds: 10));
+        expect(requestBodies, isNotEmpty);
+        final sys =
+            (requestBodies.first['messages'] as List)
+                .firstWhere((m) => m['role'] == 'system')['content']
+                as String;
+        expect(sys, contains('SESSION TODOS'));
+        expect(sys, contains('edit the file'));
+        expect(sys, contains('run tests'));
+      } finally {
+        provider
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+        await server.close(force: true);
+        app.deleteSession(session.id);
+      }
+    });
+
+    test('pending todos nudge the model once, then finish', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final provider = app.providerById('ollama-local')!;
+      final originals = ({
+        'baseUrl': provider.baseUrl,
+        'models': List<String>.of(provider.models),
+        'selectedModel': provider.selectedModel,
+      });
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final bodies = <Map<String, dynamic>>[];
+
+      final session = ChatSession(
+        id: 'todo-nudge',
+        title: 'Todo Nudge',
+        providerId: provider.id,
+        model: 'test-model',
+        messages: [Message(role: 'user', content: 'fix the bug')],
+      );
+      session.todos.addAll([
+        {'content': 'find the bug', 'status': 'pending'},
+      ]);
+      app.sessions.add(session);
+      app.activeSessionId = session.id;
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['test-model'];
+
+      final serverTask = () async {
+        await for (final request in server) {
+          final body = await utf8.decoder.bind(request).join();
+          bodies.add(jsonDecode(body) as Map<String, dynamic>);
+          // Mark the todo completed on second request so the loop stops.
+          if (bodies.length >= 2) {
+            session.todos.clear();
+            session.todos.add({'content': 'find the bug', 'status': 'completed'});
+          }
+          request.response.headers.chunkedTransferEncoding = true;
+          request.response.add(
+            utf8.encode(
+              'data: ${jsonEncode({
+                'choices': [
+                  {
+                    'delta': {'content': 'done'},
+                    'finish_reason': 'stop',
+                  },
+                ],
+              })}\n\n',
+            ),
+          );
+          await request.response.flush();
+          try {
+            await request.response.close();
+          } catch (_) {}
+        }
+      }();
+      unawaited(serverTask);
+
+      try {
+        await agent
+            .runTask('fix the bug', sessionId: session.id)
+            .timeout(const Duration(seconds: 10));
+        // First request: direct answer. Second: nudge continuation with
+        // pending todos injected again. Then it stops cleanly.
+        expect(bodies.length, greaterThanOrEqualTo(2));
+        expect(session.messages.last.content, contains('done'));
+      } finally {
+        provider
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+        await server.close(force: true);
+        app.deleteSession(session.id);
+      }
+    });
   });
 }

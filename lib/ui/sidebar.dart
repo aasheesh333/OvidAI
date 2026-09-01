@@ -1,12 +1,20 @@
 import 'package:flutter/material.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
+import '../core/agent_service.dart';
 import 'settings_screen.dart';
 
 /// Sessions sidebar — DeepSeek-style harness: auto-named sessions,
 /// search, new session, swipe to delete, long-press rename.
-class SessionsSidebar extends StatelessWidget {
+class SessionsSidebar extends StatefulWidget {
   const SessionsSidebar({super.key});
+
+  @override
+  State<SessionsSidebar> createState() => _SessionsSidebarState();
+}
+
+class _SessionsSidebarState extends State<SessionsSidebar> {
+  String _query = '';
 
   @override
   Widget build(BuildContext context) {
@@ -95,11 +103,12 @@ class SessionsSidebar extends StatelessWidget {
             ),
             const SizedBox(height: 14),
 
-            // Search (visual)
+            // Search — filters the session list live (DSH parity).
             Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
               child: TextField(
-                style: TextStyle(fontSize: 13),
+                onChanged: (v) => setState(() => _query = v.trim()),
+                style: const TextStyle(fontSize: 13),
                 decoration: InputDecoration(
                   hintText: 'Search sessions',
                   prefixIcon: Icon(
@@ -108,6 +117,13 @@ class SessionsSidebar extends StatelessWidget {
                     color: Aether.textFaint,
                   ),
                   isDense: true,
+                  suffixIcon: _query.isEmpty
+                      ? null
+                      : IconButton(
+                          visualDensity: VisualDensity.compact,
+                          icon: const Icon(Icons.close, size: 14),
+                          onPressed: () => setState(() => _query = ''),
+                        ),
                 ),
               ),
             ),
@@ -130,15 +146,38 @@ class SessionsSidebar extends StatelessWidget {
             Expanded(
               child: AnimatedBuilder(
                 animation: app,
-                builder: (_, _) => ListView.builder(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  itemCount: app.sessions.length,
-                  itemBuilder: (_, i) {
-                    final s = app.sessions[i];
-                    final active = s.id == app.activeSessionId;
-                    return _SessionTile(session: s, active: active);
-                  },
-                ),
+                builder: (_, _) {
+                  final q = _query.toLowerCase();
+                  final visible = q.isEmpty
+                      ? app.sessions
+                      : app.sessions
+                            .where(
+                              (s) =>
+                                  s.title.toLowerCase().contains(q) ||
+                                  s.model.toLowerCase().contains(q),
+                            )
+                            .toList();
+                  if (visible.isEmpty) {
+                    return Center(
+                      child: Text(
+                        'No sessions match "$_query"',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Aether.textFaint,
+                        ),
+                      ),
+                    );
+                  }
+                  return ListView.builder(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    itemCount: visible.length,
+                    itemBuilder: (_, i) {
+                      final s = visible[i];
+                      final active = s.id == app.activeSessionId;
+                      return _SessionTile(session: s, active: active);
+                    },
+                  );
+                },
               ),
             ),
 
@@ -198,71 +237,115 @@ class _SessionTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = AppState.I;
-    return Dismissible(
-      key: ValueKey(session.id),
-      direction: DismissDirection.endToStart,
-      onDismissed: (_) => app.deleteSession(session.id),
-      background: Container(
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 20),
-        decoration: BoxDecoration(
-          color: Aether.danger.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: const Icon(Icons.delete_outline, color: Aether.danger, size: 18),
-      ),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(10),
-        onTap: () {
-          app.selectSession(session.id);
-          Navigator.maybePop(context);
-        },
-        onLongPress: () => _rename(context),
-        child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 1.5),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-          decoration: BoxDecoration(
-            color: active ? Aether.surfaceRaised : Colors.transparent,
+    return AnimatedBuilder(
+      animation: AgentService.I,
+      builder: (_, _) {
+        final running = AgentService.I.busyFor(session.id);
+        return Dismissible(
+          key: ValueKey(session.id),
+          direction: DismissDirection.endToStart,
+          onDismissed: (_) => app.deleteSession(session.id),
+          background: Container(
+            alignment: Alignment.centerRight,
+            padding: const EdgeInsets.only(right: 20),
+            decoration: BoxDecoration(
+              color: Aether.danger.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Icon(
+              Icons.delete_outline,
+              color: Aether.danger,
+              size: 18,
+            ),
+          ),
+          child: InkWell(
             borderRadius: BorderRadius.circular(10),
-          ),
-          child: Row(
-            children: [
-              Icon(
-                session.messages.any((m) => m.kind == MsgKind.imageGen)
-                    ? Icons.image_outlined
-                    : Icons.chat_bubble_outline,
-                size: 14,
-                color: active ? Aether.accent : Aether.textFaint,
+            onTap: () {
+              app.selectSession(session.id);
+              Navigator.maybePop(context);
+            },
+            onLongPress: () => _rename(context),
+            child: Container(
+              margin: const EdgeInsets.symmetric(vertical: 1.5),
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 11,
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      session.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: active ? FontWeight.w600 : FontWeight.w400,
-                        color: active ? Aether.text : Aether.textMuted,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      session.model,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-                    ),
-                  ],
-                ),
+              decoration: BoxDecoration(
+                color: active ? Aether.surfaceRaised : Colors.transparent,
+                borderRadius: BorderRadius.circular(10),
               ),
-            ],
+              child: Row(
+                children: [
+                  Icon(
+                    session.messages.any((m) => m.kind == MsgKind.imageGen)
+                        ? Icons.image_outlined
+                        : Icons.chat_bubble_outline,
+                    size: 14,
+                    color: active ? Aether.accent : Aether.textFaint,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          session.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: active
+                                ? FontWeight.w600
+                                : FontWeight.w400,
+                            color: active ? Aether.text : Aether.textMuted,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                session.model,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 10.5,
+                                  color: Aether.textFaint,
+                                ),
+                              ),
+                            ),
+                            if (running) ...[
+                              const SizedBox(width: 4),
+                              Container(
+                                width: 6,
+                                height: 6,
+                                decoration: const BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: Aether.accent,
+                                ),
+                              ),
+                              const SizedBox(width: 3),
+                              Text(
+                                'running',
+                                style: TextStyle(
+                                  fontSize: 9.5,
+                                  color: Aether.accent,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 

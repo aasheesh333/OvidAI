@@ -855,11 +855,12 @@ class AppState extends ChangeNotifier {
   }
 
   void _restoreSelectedModel() {
-    final session = activeSession;
-    final provider = providerForSession(session);
-    if (session != null && provider != null) {
-      provider.selectedModel = session.model;
-    }
+    // Session switching no longer mutates the shared provider's
+    // selectedModel. The session's own `model` is the single source of
+    // truth; provider.selectedModel is only a "last used" convenience
+    // for future sessions. Writing it here used to make switching from
+    // session A (model X) to session B (model Y) silently change the
+    // provider field that A's in-flight run could read back.
   }
 
   ChatSession _ensureActiveSession() {
@@ -919,11 +920,9 @@ class AppState extends ChangeNotifier {
     sessions.insert(0, s);
     activeSessionId = s.id;
     onSessionSwitched?.call(s.id);
-    // Restore the selected-model pointer on the provider.
-    if (s.providerId != null) {
-      final p = providerById(s.providerId);
-      if (p != null) p.selectedModel = s.model;
-    }
+    // No provider.selectedModel mutation here — the provider field is
+    // shared. Session A's in-flight run must never observe a model
+    // selection that came from creating/switching to session B.
     notifyListeners();
     persistSessions();
   }

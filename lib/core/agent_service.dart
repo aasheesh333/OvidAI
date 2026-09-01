@@ -173,6 +173,17 @@ class _BgJob {
 /// Per-session agent run state — one per ChatSession so many sessions run
 /// in parallel without interfering (DSH multi-session parity).  Switching
 /// sessions NEVER stops another session's run.
+/// Async execution context for ONE agent run. Stored as a Zone value so
+/// every `await` continuation inside the run (SSE stream handlers, tool
+/// dispatch, subagent loops) resolves run state to THIS run's bucket —
+/// never another session's, no matter how many sessions run in parallel.
+class _RunCtx {
+  final _AgentRun run;
+  final ChatSession session;
+  final ProviderConfig provider;
+  const _RunCtx(this.run, this.session, this.provider);
+}
+
 class _AgentRun {
   String? activeRunId;
   bool cancelRequested = false;
@@ -198,6 +209,15 @@ class _AgentRun {
   /// DSH "Produced" panel data — files created/modified in this run
   /// (file_write / fs_edit create / commit), cleared per run.
   final List<({String path, int size})> produced = [];
+
+  /// Surface of the last model-layer failure for THIS run — HTTP status,
+  /// network error, or timeout. Per-session: another session's failure
+  /// must never overwrite this session's error surface.
+  String? lastError;
+
+  /// True once this run has nudged the model to continue because its todo
+  /// list still has pending items. Resets when todo_write updates the list.
+  bool todoNudgeSent = false;
 }
 
 /// Session event (DSH SessionEvent equivalent) — durable facts about what
@@ -278,29 +298,40 @@ class AgentService extends ChangeNotifier {
   /// session-switch race where mid-run cancel flags/queues were read
   /// from the WRONG session (new session = fresh flags = "AI randomly
   /// ignores stop", or worse: old run's abort targeted nothing).
-  _AgentRun? _pinnedRun;
-  _AgentRun get _runResolved => _pinnedRun ?? _run;
+  ///
+  /// Parallel-session safety: the running run's bucket is carried in a
+  /// Dart Zone value ([_runCtxKey]) that accompanies EVERY async
+  /// continuation of runTask's body — SSE stream handlers, tool dispatch,
+  /// subagent loops. Two sessions running at the same time NEVER see
+  /// each other's bucket because each lives in its own Zone.
+  static const _runCtxKey = #ovidAgentRunCtx;
 
-  /// Session id the pinned run is executing in (null when idle). Used to
-  /// keep assistant output + queued continuations bound to the RUNNING
-  /// session across mid-run session switches (session-bleed fix).
-  String? _pinnedRunId;
+  /// The per-run execution context active in the current async Zone.
+  _RunCtx? get _runCtx => Zone.current[_runCtxKey] as _RunCtx?;
 
-  /// The session a RUNNING agent action belongs to: the pinned run's
-  /// session if a run is live, else the active one. Mid-run tool calls
-  /// (file_read, fs_edit, memory/schedule handlers…) MUST route through
-  /// this so a session switch mid-run can't make the run touch the
-  /// wrong session's workspace/studio/notes.
-  ChatSession? get _runSession =>
-      AppState.I.sessionById(_pinnedRunId) ?? AppState.I.activeSession;
+  /// The run bound to the session a RUNNING agent action belongs to,
+  /// else the active session's bucket. Mid-run tool calls MUST route
+  /// through this so a session switch mid-run can't make the run touch
+  /// the wrong session's workspace/studio/notes.
+  _AgentRun get _runResolved => _runCtx?.run ?? _run;
+
+  String? get _pinnedRunId => _runCtx?.session.id;
+
+  ChatSession? get _runSession => _runCtx?.session ?? AppState.I.activeSession;
 
   String _currentRunKey() => AppState.I.activeSession?.id ?? '';
 
-  // ── Compatibility accessors ───────────────────────────────────────────
-  // Run-INTERNAL accessors (cancel flag, active request, queue drain)
-  // resolve to the RUNNING run (pinned) so a mid-run session switch can
-  // never corrupt the live execution. UI-read accessors (queuedMessages,
-  // pendingApproval display, busy) still read the ACTIVE session's run.
+  /// The `_AgentRun` bucket OWNED by [sessionId] — never the active
+  /// session's. Used when a run starts targeting a session other than
+  /// the currently-active one (e.g. background queue continuation after
+  /// the user switched chats).
+  _AgentRun _runFor(String sessionId) =>
+      _runs.putIfAbsent(sessionId, () => _AgentRun());
+
+  // ── Run-context accessors ─────────────────────────────────────────────
+  // All run-internal accessors resolve to _runResolved (the live run in
+  // the current zone). UI-read accessors (queuedMessages, busy) still
+  // read the ACTIVE session's run.
   String? get activeRunId => _runResolved.activeRunId;
   set activeRunId(String? v) => _runResolved.activeRunId = v;
   ApprovalRequest? get pendingApproval => _runResolved.pendingApproval;
@@ -325,6 +356,10 @@ class AgentService extends ChangeNotifier {
   set lastRunElapsedMs(int? v) => _runResolved.lastRunElapsedMs = v;
   int? get lastPromptTokens => _runResolved.lastPromptTokens;
   set lastPromptTokens(int? v) => _runResolved.lastPromptTokens = v;
+  String? get lastError => _runResolved.lastError;
+  set lastError(String? v) => _runResolved.lastError = v;
+  bool get todoNudgeSent => _runResolved.todoNudgeSent;
+  set todoNudgeSent(bool v) => _runResolved.todoNudgeSent = v;
 
   /// Files produced in the active session's current/latest run (DSH
   /// "Produced" cards). Read-only view for the UI.
@@ -332,7 +367,7 @@ class AgentService extends ChangeNotifier {
       List.unmodifiable(_run.produced);
 
   void _recordProduced(String path, int size) {
-    final r = _run;
+    final r = _runResolved;
     final i = r.produced.indexWhere((e) => e.path == path);
     if (i >= 0) {
       r.produced[i] = (path: path, size: size);
@@ -927,10 +962,6 @@ class AgentService extends ChangeNotifier {
   Set<String> _readPathsFor(String sid) =>
       _readPaths.putIfAbsent(sid, () => {});
 
-  /// Surface of the last model-layer failure (HTTP status, network error,
-  /// timeout) so the UI can show the REAL error instead of a dummy string.
-  String? lastError;
-
   // ── Pending attachment (chatbox file upload) ──
   /// Set when the user attaches a file via the composer's + button. The
   /// file is copied into the session workspace immediately; on the next
@@ -1043,17 +1074,15 @@ class AgentService extends ChangeNotifier {
   }
 
   // ── Provider / endpoint resolution ────────────────────────────────────
-  ProviderConfig? get _provider {
-    final app = AppState.I;
-    final session = app.activeSession;
-    final provider = app.providerForSession(session);
-    if (session == null || provider == null || !provider.isConfigured) {
-      return null;
-    }
+  /// Resolve the configured provider for [session]. Never mutates the
+  /// provider — session.model is the single source of truth for which
+  /// model a run uses.
+  ProviderConfig? _providerFor(ChatSession session) {
+    final provider = AppState.I.providerForSession(session);
+    if (provider == null || !provider.isConfigured) return null;
     if (session.model.isEmpty || session.model == 'Select a provider') {
       return null;
     }
-    provider.selectedModel = session.model;
     return provider;
   }
 
@@ -2569,13 +2598,11 @@ class AgentService extends ChangeNotifier {
   /// no approval prompts).  Runs the model with tool calls and returns
   /// the final assistant text.  Used by dispatch_agent.
   Future<String> runSubagent(String prompt) async {
-    final p = _provider;
-    if (p == null) {
-      final sel = AppState.I.providerForSession(AppState.I.activeSession);
-      if (sel == null) return 'No provider configured for subagent.';
-      return await _runSubagentLoop(sel, prompt);
-    }
-    return await _runSubagentLoop(p, prompt);
+    final session = _runSession;
+    if (session == null) return 'No active session for subagent.';
+    final sel = _providerFor(session);
+    if (sel == null) return 'No provider configured for subagent.';
+    return await _runSubagentLoop(sel, prompt);
   }
 
   Future<String> _runSubagentLoop(ProviderConfig p, String prompt) async {
@@ -2640,37 +2667,50 @@ class AgentService extends ChangeNotifier {
     }
   }
 
-  Future<void> runTask(String originalPrompt) async {
-    final p = _provider;
-    final s = AppState.I.activeSession;
+  Future<void> runTask(String originalPrompt, {String? sessionId}) async {
+    final s = AppState.I.sessionById(sessionId) ?? AppState.I.activeSession;
     if (s == null) {
       _emit('err', 'No active chat session');
       return;
     }
-    if (p == null) {
-      final selected = AppState.I.providerForSession(s);
-      final error = selected == null
+    final p = AppState.I.providerForSession(s);
+    if (p == null ||
+        !p.isConfigured ||
+        s.model.isEmpty ||
+        s.model == 'Select a provider') {
+      final error = p == null
           ? 'Select a provider and model before sending a message.'
-          : selected.requiresApiKey && !selected.hasKey
-          ? 'Add an API key for ${selected.name} before sending a message.'
+          : p.requiresApiKey && !p.hasKey
+          ? 'Add an API key for ${p.name} before sending a message.'
           : 'The selected provider is not configured correctly.';
       _emit('err', error);
-      _appendAssistant('Provider setup required: $error');
+      _appendAssistant('Provider setup required: $error', session: s);
       return;
     }
 
+    // Parallel-session safety: the ENTIRE run body runs inside a Zone
+    // carrying this run's context (bucket + session + provider). Every
+    // async continuation — SSE stream handlers, tool dispatch, subagent
+    // loops — inherits it, so two runs never see each other's state.
+    final ctx = _RunCtx(_runFor(s.id), s, p);
+    return runZoned(
+      () => _runTaskBody(originalPrompt, ctx),
+      zoneValues: {_runCtxKey: ctx},
+    );
+  }
+
+  Future<void> _runTaskBody(String originalPrompt, _RunCtx ctx) async {
+    final s = ctx.session;
+    final p = ctx.provider;
     final runId = DateTime.now().millisecondsSinceEpoch.toString();
-    // PIN the run bucket for the whole run: even if the user switches
-    // sessions mid-task, this run's cancel/queue/abort state stays bound
-    // to THIS session (fixes the session-switch race).
-    _pinnedRun = _run;
-    _pinnedRunId = s.id;
+    // This run's bucket state — resolve nothing through the active session.
     activeRunId = runId;
     _runStart = DateTime.now();
     lastError = null;
-    _run.produced.clear(); // DSH "Produced" panel resets per run
+    todoNudgeSent = false;
+    _runResolved.produced.clear(); // DSH "Produced" panel resets per run
     events.clear();
-    _emit('think', 'planning with ${p.selectedModel} · ${mode.label} mode');
+    _emit('think', 'planning with ${s.model} · ${mode.label} mode');
 
     // ── Staged attachment (chatbox upload) ──
     // The file is already in the session workspace; capture it so we can
@@ -2736,6 +2776,7 @@ Execution tiers: run_shell picks the best tier automatically.
   works the same in every tier via the catalog_* tools.
 ${s.goal != null && s.goal!['status'] == 'active' ? '\nACTIVE GOAL (round ${s.goal!['round']}): "${s.goal!['objective']}". This user message is a goal round — work toward the objective, then update_goal with progress. Do not restate the goal; just advance it.' : ''}
 ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a [reminder] message arrives, treat its prompt as a user request and act on it.' : ''}
+${s.todos.isNotEmpty ? '\nSESSION TODOS (${s.todos.length} item${s.todos.length == 1 ? '' : 's'} — follow this checklist, do not abandon it):\n${s.todos.map((t) => '- [${t['status'] == 'completed' ? 'x' : t['status'] == 'in_progress' ? '~' : ' '}] ${t['content']}').join('\n')}\nWork through the todo list. Mark items in_progress BEFORE doing them and completed AFTER they are done. If all items are completed, say so and give your final answer.' : ''}
 ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTIONS (follow with priority):\n${AppState.I.customInstructions.trim()}'}
 ''';
 
@@ -2879,7 +2920,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
               time: DateTime.now(),
               providerId: p.id,
               providerName: p.name,
-              model: _baseModelOf(p.selectedModel ?? ''),
+              model: _baseModelOf(s.model),
               promptTokens: pt,
               completionTokens: ct,
               totalTokens: (u?['total_tokens'] as num?)?.toInt() ?? pt + ct,
@@ -2946,6 +2987,36 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
             _drainQueueIntoMsgs(msgs);
             continue;
           }
+          // Todo follow-through: if the session still has pending todos and
+          // the model stopped, nudge once to continue instead of silently
+          // dropping the checklist.
+          final pendingTodos = s.todos.where(
+            (t) => (t['status'] ?? 'pending') != 'completed',
+          );
+          if (pendingTodos.isNotEmpty &&
+              !todoNudgeSent &&
+              turnsWithoutProgress < 5) {
+            todoNudgeSent = true;
+            final pending = pendingTodos
+                .map(
+                  (t) =>
+                      '- [${t['status'] == 'in_progress' ? '~' : ' '}] ${t['content']}',
+                )
+                .join('\n');
+            msgs.add({'role': 'assistant', 'content': msg['content'] ?? ''});
+            _finalizeLive();
+            msgs.add({
+              'role': 'user',
+              'content':
+                  '[system] Your SESSION TODOS still has pending items:\n'
+                  '$pending\n\n'
+                  'Continue working on them. Mark each item in_progress '
+                  'before starting it and completed when done. If a pending '
+                  'item is already done or no longer relevant, update the '
+                  'list with todo_write. Then give your final answer.',
+            });
+            continue;
+          }
           _finalizeLive();
           _emit('done', 'completed');
           break;
@@ -3004,18 +3075,18 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     } finally {
       activeRunId = null;
       _cancelRequested = false;
-      // Un-pin: next run binds to whatever session is active then.
-      final pinned = _pinnedRun;
-      final pinnedSessionId = _pinnedRunId;
-      _pinnedRun = null;
-      _pinnedRunId = null;
+      // The Zone exits with this function — there is nothing to pop.
+      // The queue auto-continue continues on THIS run's session, captured
+      // from the zone (never the currently-active session in the UI).
+      final pinned = ctx.run;
+      final pinnedSessionId = ctx.session.id;
       // Foreground notification retires with the run (covers error paths
       // where no 'done'/'err' event ever fires).
       AgentNotificationService.I.agentIdle();
       notifyListeners();
       // The queue auto-continue must run on the RUNNING session's queue,
       // not whatever session the UI switched to mid-run.
-      if (pinned != null && pinned.queue.isNotEmpty) {
+      if (pinned.queue.isNotEmpty) {
         final next = pinned.queue.removeAt(0);
         Future.delayed(const Duration(milliseconds: 250), () {
           // Route the queued message to the RUNNING session — never the
@@ -3031,11 +3102,12 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
             }
             AppState.I.refresh();
             AppState.I.persistSessions();
-            // Auto-switch the UI to the session that keeps running, so
-            // the user sees the continuation where it belongs.
-            AppState.I.activeSessionId = target.id;
-            runTask(next);
+            // Run the continuation in the background — do NOT yank the
+            // user out of the session they're currently reading. DSH web
+            // shows a badge on the busy session instead.
+            runTask(next, sessionId: target.id);
           } else {
+            // Session was deleted — fall back to the active session.
             AppState.I.sendMessage(next);
             runTask(next);
           }
@@ -3146,8 +3218,11 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
       req.headers.set('Content-Type', 'application/json');
       req.headers.set('Accept', 'text/event-stream');
 
-      // Strip effort suffix (e.g. "gpt-5.2 · High") → real model id + effort
-      final raw = p.selectedModel ?? '';
+      // Strip effort suffix (e.g. "gpt-5.2 · High") → real model id + effort.
+      // The model is the SESSION's model — captured per run — never the
+      // shared provider.selectedModel (parallel sessions on the same
+      // provider used to cross-wire their models here).
+      final raw = session.model;
       final effMatch = RegExp(
         r'·\s*(low|medium|high)$',
         caseSensitive: false,
@@ -3781,7 +3856,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
         _emit('think', 'searching memory: $q2');
         final app = AppState.I;
         final share = app.shareSessionMemory;
-        final current = app.activeSession;
+        final current = _runSession;
         if (current == null) return 'no active session';
         final hits = <String>[];
         // Durable saved memories first (memory_save items).
@@ -4481,8 +4556,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     // While a run is pinned, default to THE RUNNING session — a mid-run
     // session switch must never redirect assistant output into the
     // newly-active chat (session bleed).
-    final s = session ??
-        (AppState.I.sessionById(_pinnedRunId) ?? AppState.I.activeSession);
+    final s = session ?? _runSession;
     if (s == null || text.trim().isEmpty) return;
     s.messages.add(Message(role: 'assistant', kind: kind, content: text));
     AppState.I.refresh();
@@ -5064,6 +5138,9 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     if (s == null) return 'no active session';
     s.todos.clear();
     s.todos.addAll(todos);
+    // New list means the model is actively tracking it again — allow one
+    // more follow-through nudge if it stops with pending items.
+    todoNudgeSent = false;
     AppState.I.refresh();
     AppState.I.persistSessions();
     final done = todos.where((t) => t['status'] == 'completed').length;
