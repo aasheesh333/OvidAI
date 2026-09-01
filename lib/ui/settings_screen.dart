@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
@@ -212,15 +213,19 @@ class SettingsScreen extends StatelessWidget {
           ),
 
           const SectionHeader('Data controls'),
-          _settingTile(
+          _navTile(
+            context,
             Icons.download_outlined,
             'Export chats',
             'Download all sessions as JSON',
+            const _ExportChatsScreen(),
           ),
-          _settingTile(
+          _navTile(
+            context,
             Icons.delete_outline,
             'Delete all data',
             'Chats, keys and settings · irreversible',
+            const _DeleteAllDataScreen(),
           ),
           const _StorageTile(),
 
@@ -793,6 +798,142 @@ class _ContextModelScreen extends StatelessWidget {
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+class _ExportChatsScreen extends StatefulWidget {
+  const _ExportChatsScreen();
+  @override
+  State<_ExportChatsScreen> createState() => _ExportChatsScreenState();
+}
+
+class _ExportChatsScreenState extends State<_ExportChatsScreen> {
+  bool _busy = false;
+
+  Future<void> _export() async {
+    setState(() => _busy = true);
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File(
+        '${dir.path}/ovid-sessions-${DateTime.now().millisecondsSinceEpoch}.json',
+      );
+      final payload = {
+        'exportedAt': DateTime.now().toIso8601String(),
+        'sessions': AppState.I.sessions.map((s) => s.toJson()).toList(),
+      };
+      await file.writeAsString(
+        const JsonEncoder.withIndent('  ').convert(payload),
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Exported to:\n${file.path}'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Export failed: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Export chats')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Text(
+            'Exports every session (messages, todos, goals, schedules, '
+            'attachments metadata) as a single JSON file saved to the app '
+            'documents directory.',
+            style: TextStyle(fontSize: 13.5, height: 1.6, color: Aether.textMuted),
+          ),
+          const SizedBox(height: 20),
+          FilledButton.icon(
+            onPressed: _busy ? null : _export,
+            icon: _busy
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.download_outlined, size: 18),
+            label: Text(_busy ? 'Exporting…' : 'Export all sessions'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DeleteAllDataScreen extends StatefulWidget {
+  const _DeleteAllDataScreen();
+  @override
+  State<_DeleteAllDataScreen> createState() => _DeleteAllDataScreenState();
+}
+
+class _DeleteAllDataScreenState extends State<_DeleteAllDataScreen> {
+  Future<void> _delete() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete ALL data?'),
+        content: const Text(
+          'This removes every session, saved API key, provider config, '
+          'plugin state, and setting. The app will reset to defaults. '
+          'This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text(
+              'Delete everything',
+              style: TextStyle(color: Aether.danger),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await AppState.I.deleteAllData();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('All data deleted.')),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Delete all data')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Text(
+            'Deletes every session, all API keys, providers, plugin state, '
+            'and app preferences. Sandbox workspaces are removed too.',
+            style: TextStyle(fontSize: 13.5, height: 1.6, color: Aether.textMuted),
+          ),
+          const SizedBox(height: 20),
+          FilledButton.icon(
+            style: FilledButton.styleFrom(backgroundColor: Aether.danger),
+            onPressed: _delete,
+            icon: const Icon(Icons.delete_forever_outlined, size: 18),
+            label: const Text('Delete all data'),
+          ),
+        ],
       ),
     );
   }

@@ -613,6 +613,45 @@ class AppState extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// Delete all user data: sessions, workspaces, providers, keys, plugin
+  /// state, usage log, memories, and app preferences. Resets in-memory
+  /// state to defaults and seeds a fresh session.
+  Future<void> deleteAllData() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.clear();
+      // Secure-storage keys (API credentials, MCP env) are cleared below.
+      for (final s in List.of(sessions)) {
+        final sid = s.sandboxId;
+        if (sid != null) unawaited(SandboxService.I.deleteWorkspace(sid));
+      }
+      sessions.clear();
+      activeSessionId = null;
+      providers.clear();
+      plugins.clear();
+      mcpServers.clear();
+      _seed();
+      memories.clear();
+      usageLog.clear();
+      customInstructions = '';
+      memoryEnabled = true;
+      showReasoning = true;
+      githubSync = true;
+      autoRunSafeCommands = true;
+      shareSessionMemory = false;
+      lastSelectedModel = '';
+      lastSelectedProviderId = null;
+      try {
+        await _secureStorage.deleteAll();
+      } catch (_) {}
+      _ensureActiveSession();
+      notifyListeners();
+      await persistSessions();
+      await persistProviderState();
+      await persistPluginState();
+    } catch (_) {}
+  }
+
   int navIndex = 0; // 0 Chat, 1 Studio, 2 Browser, 3 Plugins, 4 Settings
   bool sandboxInstalled = false; // native bionic sandbox on-device
 

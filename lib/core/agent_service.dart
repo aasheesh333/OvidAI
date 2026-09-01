@@ -15,6 +15,8 @@ import 'sandbox_service.dart';
 import 'github_service.dart';
 import 'repo_cache.dart';
 import 'mcp_service.dart';
+import 'skills.dart';
+import 'commands.dart';
 
 /// A persistent browser tab — owns its WebView controller lazily so the
 /// page state survives across BrowserScreen open/close cycles.
@@ -170,6 +172,49 @@ class _BgJob {
   _BgJob({required this.id, required this.name, required this.command});
 }
 
+/// A background subagent spawned via dispatch_agent with
+/// `run_in_background: true`. Runs on its own AgentService instance and
+/// accepts queued follow-up messages until finished or interrupted.
+class _BgSubagent {
+  final String id;
+  final String label;
+  final AgentService child;
+  final AgentMode parentMode;
+  final String prompt;
+  final List<String> messages = [];
+  bool interrupted = false;
+  bool finished = false;
+  String result = '';
+
+  _BgSubagent({
+    required this.id,
+    required this.label,
+    required this.child,
+    required this.parentMode,
+    required this.prompt,
+  });
+
+  Future<void> run() async {
+    try {
+      final answer = await child.runSubagent(prompt);
+      result = answer;
+      // Drain queued follow-ups.
+      while (!interrupted && messages.isNotEmpty) {
+        final next = messages.removeAt(0);
+        final follow = await child.runSubagent(
+          'Continue the previous task. New instruction: $next',
+        );
+        result = follow;
+      }
+    } catch (e) {
+      result = 'Subagent failed: $e';
+    } finally {
+      finished = true;
+      child.dispose();
+    }
+  }
+}
+
 /// Per-session agent run state — one per ChatSession so many sessions run
 /// in parallel without interfering (DSH multi-session parity).  Switching
 /// sessions NEVER stops another session's run.
@@ -218,6 +263,20 @@ class _AgentRun {
   /// True once this run has nudged the model to continue because its todo
   /// list still has pending items. Resets when todo_write updates the list.
   bool todoNudgeSent = false;
+
+  /// Per-run session stats — steps, turns, timing, token breakdown.
+  int steps = 0;
+  int turns = 0;
+  int llmMs = 0;
+  int ttftMs = 0;
+  int decodeTokens = 0;
+  int toolMs = 0;
+
+  /// Context breakdown (system/tools/messages heuristic tokens) from the
+  /// last measured request envelope.
+  int systemTokens = 0;
+  int toolTokens = 0;
+  int messageTokens = 0;
 }
 
 /// Session event (DSH SessionEvent equivalent) — durable facts about what
@@ -273,6 +332,9 @@ class AgentService extends ChangeNotifier {
     AppState.I.onSessionDeleted = dropSessionRun;
     // Per-session browser tabs: lazy-restore on session switch.
     AppState.I.onSessionSwitched = onSessionSwitched;
+    // Composer commands + skills catalog.
+    CommandService.I.registerBuiltins();
+    _refreshSkillRoots();
   }
 
   /// Named private constructor for subagent children (same body as [_]).
@@ -360,6 +422,16 @@ class AgentService extends ChangeNotifier {
   set lastError(String? v) => _runResolved.lastError = v;
   bool get todoNudgeSent => _runResolved.todoNudgeSent;
   set todoNudgeSent(bool v) => _runResolved.todoNudgeSent = v;
+
+  int get sessionSteps => _run.steps;
+  int get sessionTurns => _run.turns;
+  int get sessionLlmMs => _run.llmMs;
+  int get sessionTtftMs => _run.ttftMs;
+  int get sessionDecodeTokens => _run.decodeTokens;
+  int get sessionToolMs => _run.toolMs;
+  int get sessionSystemTokens => _run.systemTokens;
+  int get sessionToolTokens => _run.toolTokens;
+  int get sessionMessageTokens => _run.messageTokens;
 
   /// Files produced in the active session's current/latest run (DSH
   /// "Produced" cards). Read-only view for the UI.
@@ -546,6 +618,7 @@ class AgentService extends ChangeNotifier {
   /// tabs to life (lazy restore) so switching is instant and isolated.
   Future<void> onSessionSwitched(String sessionId) async {
     await _restoreSessionTabsIfNeeded(sessionId);
+    await _refreshSkillRoots();
     notifyListeners();
   }
 
@@ -1898,8 +1971,85 @@ class AgentService extends ChangeNotifier {
                   '"quick" (phone terminal). Default: current mode.',
               'enum': ['studio', 'quick'],
             },
+            'run_in_background': {
+              'type': 'boolean',
+              'description':
+                  'Run the subagent in the background and return an id '
+                  'immediately. Use send_message / interrupt_agent / '
+                  'list_agents to manage it.',
+            },
           },
           'required': ['prompt'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'skill',
+        'description':
+            'Load a skill by name — a reusable instruction bundle that '
+            'teaches you how to perform a specific task. Use when the '
+            'user asks for a known workflow, or when a catalog entry '
+            'matches the request.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'name': {
+              'type': 'string',
+              'description': 'Skill name (from the AVAILABLE SKILLS catalog)',
+            },
+          },
+          'required': ['name'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'send_message',
+        'description':
+            'Send a message to a running background subagent. The message '
+            'is queued as its next turn.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'subagent_id': {'type': 'string'},
+            'message': {'type': 'string'},
+          },
+          'required': ['subagent_id', 'message'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'interrupt_agent',
+        'description': 'Interrupt a running background subagent.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'agent_id': {'type': 'string'},
+          },
+          'required': ['agent_id'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'list_agents',
+        'description':
+            'List background subagents. scope: children (direct) or '
+            'descendants (all).',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'scope': {
+              'type': 'string',
+              'enum': ['children', 'descendants'],
+            },
+          },
         },
       },
     },
@@ -2712,6 +2862,10 @@ class AgentService extends ChangeNotifier {
     events.clear();
     _emit('think', 'planning with ${s.model} · ${mode.label} mode');
 
+    // Ensure skills are scanned for this session's workspace BEFORE the
+    // system prompt is assembled.
+    await _refreshSkillRoots();
+
     // ── Staged attachment (chatbox upload) ──
     // The file is already in the session workspace; capture it so we can
     // inject a system note below telling the agent to read it, and stamp
@@ -2777,6 +2931,7 @@ Execution tiers: run_shell picks the best tier automatically.
 ${s.goal != null && s.goal!['status'] == 'active' ? '\nACTIVE GOAL (round ${s.goal!['round']}): "${s.goal!['objective']}". This user message is a goal round — work toward the objective, then update_goal with progress. Do not restate the goal; just advance it.' : ''}
 ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a [reminder] message arrives, treat its prompt as a user request and act on it.' : ''}
 ${s.todos.isNotEmpty ? '\nSESSION TODOS (${s.todos.length} item${s.todos.length == 1 ? '' : 's'} — follow this checklist, do not abandon it):\n${s.todos.map((t) => '- [${t['status'] == 'completed' ? 'x' : t['status'] == 'in_progress' ? '~' : ' '}] ${t['content']}').join('\n')}\nWork through the todo list. Mark items in_progress BEFORE doing them and completed AFTER they are done. If all items are completed, say so and give your final answer.' : ''}
+${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock()}'}
 ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTIONS (follow with priority):\n${AppState.I.customInstructions.trim()}'}
 ''';
 
@@ -2915,6 +3070,35 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
                 );
           }
           lastPromptTokens = pt;
+          // Per-run session stats.
+          _runResolved.turns += 1;
+          _runResolved.decodeTokens += ct;
+          _runResolved.llmMs +=
+              (msg['elapsedMs'] as int?) ??
+              (msg['ttftMs'] as int?) ??
+              0;
+          final ttft = (msg['ttftMs'] as int?) ?? 0;
+          if (ttft > 0 && _runResolved.ttftMs == 0) {
+            _runResolved.ttftMs = ttft;
+          }
+          // Context breakdown heuristic (system/tools/messages).
+          var sysTok = 0;
+          var toolTok = 0;
+          var msgTok = 0;
+          for (final m in msgs) {
+            final content = m['content'];
+            final role = m['role'];
+            if (role == 'system') {
+              sysTok += estimateMessageTokens(content is String ? content : '');
+            } else if (role == 'tool') {
+              toolTok += estimateMessageTokens(content is String ? content : '');
+            } else {
+              msgTok += estimateMessageTokens(content is String ? content : '');
+            }
+          }
+          _runResolved.systemTokens = sysTok;
+          _runResolved.toolTokens = toolTok;
+          _runResolved.messageTokens = msgTok;
           AppState.I.appendUsage(
             UsageEntry(
               time: DateTime.now(),
@@ -3196,6 +3380,8 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
     bool includeTools = true,
   }) async {
     HttpClient? client;
+    final ttftWatch = Stopwatch()..start();
+    int? ttftMs;
     try {
       client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 20);
@@ -3376,12 +3562,14 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
 
         final c = delta['content'];
         if (c is String && c.isNotEmpty) {
+          ttftMs ??= ttftWatch.elapsedMilliseconds;
           contentBuf.write(c);
           _streamToBubble(session, c);
         }
         // Reasoning tokens — DeepSeek `reasoning_content` / OpenRouter `reasoning`
         final r = delta['reasoning_content'] ?? delta['reasoning'];
         if (r is String && r.isNotEmpty) {
+          ttftMs ??= ttftWatch.elapsedMilliseconds;
           reasoningBuf.write(r);
           _streamReasoning(session, r);
         }
@@ -3433,6 +3621,7 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
         'elapsedMs': DateTime.now()
             .difference(_runStart ?? DateTime.now())
             .inMilliseconds,
+        'ttftMs': ?ttftMs,
       };
     } catch (e) {
       // A user-initiated cancel aborts the request — surface it as stopped,
@@ -4323,6 +4512,18 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
 
       case 'todo_write':
         return await _handleTodoWrite(args);
+
+      case 'skill':
+        return await _handleSkill(args);
+
+      case 'send_message':
+        return await _handleSendMessage(args);
+
+      case 'interrupt_agent':
+        return _handleInterruptAgent(args);
+
+      case 'list_agents':
+        return _handleListAgents(args);
 
       case 'ask_user_question':
         return await _handleAskUserQuestion(args);
@@ -5475,9 +5676,75 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
   int _subagentDepth = 0;
   static const _maxSubagentDepth = 2;
 
+  // ── Skills (reusable instruction bundles) ─────────────────────────────
+  Future<void> _refreshSkillRoots() async {
+    SkillService.I.clearRoots();
+    // Workspace roots: current session's sandbox + repo cache, plus
+    // custom dirs later when configured.
+    try {
+      final work = await _sessionWorkDir();
+      SkillService.I.addRoot('${work.path}/.dsh/skills');
+      SkillService.I.addRoot('${work.path}/.agents/skills');
+    } catch (_) {}
+    await SkillService.I.reload();
+  }
+
+  Future<String> _handleSkill(Map<String, dynamic> args) async {
+    final name = (args['name'] as String).trim();
+    if (name.isEmpty) return 'skill name is required';
+    await _refreshSkillRoots();
+    final skill = SkillService.I.find(name);
+    if (skill == null) {
+      final catalog = SkillService.I.catalogBlock();
+      return 'Skill "$name" not found.\n\n'
+          '${catalog.isEmpty ? 'No skills are installed yet.' : catalog}';
+    }
+    _emit('think', 'skill loaded: ${skill.name}');
+    return '<skill_content>\n${skill.content}\n</skill_content>';
+  }
+
+  // ── Background subagents ──────────────────────────────────────────────
+  final Map<String, _BgSubagent> _subagents = {};
+  int _subagentCounter = 0;
+
+  Future<String> _handleSendMessage(Map<String, dynamic> args) async {
+    final id = args['subagent_id'] as String;
+    final message = args['message'] as String;
+    final sub = _subagents[id];
+    if (sub == null) return 'Subagent $id not found (list_agents shows active ids).';
+    if (sub.finished) return 'Subagent $id already finished.';
+    sub.messages.add(message);
+    _emit('think', 'queued message for subagent $id');
+    return 'message queued as the next turn for subagent $id';
+  }
+
+  String _handleInterruptAgent(Map<String, dynamic> args) {
+    final id = args['agent_id'] as String;
+    final sub = _subagents[id];
+    if (sub == null) return 'Subagent $id not found.';
+    if (sub.finished) return 'Subagent $id already finished.';
+    sub.interrupted = true;
+    try {
+      sub.child.cancelRun();
+    } catch (_) {}
+    _emit('think', 'interrupted subagent $id');
+    return 'interrupted subagent $id';
+  }
+
+  String _handleListAgents(Map<String, dynamic> args) {
+    final scope = args['scope'] as String? ?? 'children';
+    if (_subagents.isEmpty) return 'No background subagents.';
+    final lines = _subagents.values.map((s) {
+      final status = s.finished ? 'finished' : s.interrupted ? 'stopped' : 'running';
+      return '${s.id} [$status] — ${cleanTruncate(s.label, 60)}';
+    }).join('\n');
+    return 'Background subagents ($scope, ${_subagents.length} total):\n$lines';
+  }
+
   Future<String> _handleDispatchAgent(Map<String, dynamic> args) async {
     final prompt = args['prompt'] as String;
     final modeName = args['mode'] as String?;
+    final background = args['run_in_background'] as bool? ?? false;
     _emit('think', 'dispatching subagent…');
     if (_subagentDepth >= _maxSubagentDepth) {
       return 'Subagent depth limit ($_maxSubagentDepth) reached — '
@@ -5503,6 +5770,20 @@ ${AppState.I.customInstructions.trim().isEmpty ? '' : '\nUSER CUSTOM INSTRUCTION
       }
     });
     child._emit('think', 'subagent task: ${cleanTruncate(prompt, 80)}');
+    if (background) {
+      final id = 'sub-${++_subagentCounter}';
+      final sub = _BgSubagent(
+        id: id,
+        label: cleanTruncate(prompt, 80),
+        child: child,
+        parentMode: parentMode,
+        prompt: prompt,
+      );
+      _subagents[id] = sub;
+      _emit('think', 'started background subagent $id');
+      unawaited(sub.run());
+      return 'started background subagent $id';
+    }
     try {
       final answer = await child.runSubagent(prompt);
       _emit('think', 'subagent finished (${answer.length} chars)');

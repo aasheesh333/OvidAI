@@ -10,6 +10,8 @@ import 'sandbox_setup.dart';
 import 'browser_screen.dart';
 import 'sidebar.dart';
 import '../core/agent_service.dart';
+import '../core/commands.dart';
+import '../core/skills.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
@@ -805,9 +807,53 @@ class _ChatScreenState extends State<ChatScreen>
                 _InputBar(
                   controller: _input,
                   running: s == null ? false : AgentService.I.busyFor(s.id),
-                  onSend: () {
+                  onSend: () async {
                     final t = _input.text.trim();
                     if (t.isEmpty) return;
+
+                    // ── Composer command system ───────────────────────
+                    if (t.startsWith('/')) {
+                      final result = await CommandService.I.execute(t);
+                      if (result != null) {
+                        _input.clear();
+                        if (result.feedback != null &&
+                            result.feedback!.isNotEmpty &&
+                            context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(result.feedback!),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        }
+                        final prompt = result.prompt;
+                        if (prompt != null && prompt.isNotEmpty && context.mounted) {
+                          _sendPrompt(context, s, prompt);
+                        }
+                        return;
+                      }
+                      // Skill direct invocation: /skill-name [args].
+                      final parsed = CommandService.parse(t);
+                      if (parsed != null) {
+                        final skill = SkillService.I.find(parsed.name);
+                        if (skill != null && skill.userInvocable) {
+                          _input.clear();
+                          final argsText = parsed.args.isEmpty
+                              ? ''
+                              : '\n\nUser instruction: ${parsed.args}';
+                          if (context.mounted) {
+                            _sendPrompt(
+                              context,
+                              s,
+                              '<skill_content>\n${skill.content}\n</skill_content>'
+                              '$argsText',
+                            );
+                          }
+                          return;
+                        }
+                      }
+                      // Unknown /command falls through to the agent.
+                    }
 
                     // ── DSH-web busy behavior: typing while running queues
                     // the message to auto-run after the current turn. ──
@@ -817,61 +863,7 @@ class _ChatScreenState extends State<ChatScreen>
                       return;
                     }
 
-                    final session = app.activeSession;
-                    final provider = app.providerForSession(session);
-                    if (provider == null ||
-                        session == null ||
-                        session.model == 'Select a provider') {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: const Text(
-                            'Select a provider and model before sending.',
-                          ),
-                          action: SnackBarAction(
-                            label: 'Select',
-                            onPressed: () => _modelPicker(context),
-                          ),
-                        ),
-                      );
-                      return;
-                    }
-                    if (!provider.isConfigured) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            'Add an API key for ${provider.name} first.',
-                          ),
-                        ),
-                      );
-                      return;
-                    }
-                    final selectedModel = session.model.split('·').first.trim();
-                    if (!provider.models.contains(selectedModel)) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'The selected model is no longer available.',
-                          ),
-                        ),
-                      );
-                      return;
-                    }
-
-                    app.sendMessage(t);
-                    _input.clear();
-                    _drafts.remove(session.id);
-                    // New user message → snap to bottom so the user sees the
-                    // answer start, regardless of where they were scrolled.
-                    _atBottom = true;
-                    Future.delayed(const Duration(milliseconds: 80), () {
-                      if (_scroll.hasClients) {
-                        _scroll.jumpTo(_scroll.position.maxScrollExtent);
-                      }
-                    });
-                    // Launch the real agent (BYOK + tool-use, SSE streaming).
-                    // AgentService.busy drives the send/stop button + typing
-                    // bubble via the AnimatedBuilder below.
-                    AgentService.I.runTask(t);
+                    if (context.mounted) _sendPrompt(context, s, t);
                   },
                 ),
               ],
@@ -880,6 +872,58 @@ class _ChatScreenState extends State<ChatScreen>
         );
       },
     );
+  }
+
+  /// Common send path — validates provider/model and launches the agent.
+  void _sendPrompt(BuildContext context, ChatSession? s, String t) {
+    final app = AppState.I;
+    final session = app.activeSession;
+    final provider = app.providerForSession(session);
+    if (provider == null ||
+        session == null ||
+        session.model == 'Select a provider') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text(
+            'Select a provider and model before sending.',
+          ),
+          action: SnackBarAction(
+            label: 'Select',
+            onPressed: () => _modelPicker(context),
+          ),
+        ),
+      );
+      return;
+    }
+    if (!provider.isConfigured) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Add an API key for ${provider.name} first.'),
+        ),
+      );
+      return;
+    }
+    final selectedModel = session.model.split('·').first.trim();
+    if (!provider.models.contains(selectedModel)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('The selected model is no longer available.'),
+        ),
+      );
+      return;
+    }
+
+    app.sendMessage(t);
+    _input.clear();
+    _drafts.remove(session.id);
+    // New user message → snap to bottom so the user sees the answer start.
+    _atBottom = true;
+    Future.delayed(const Duration(milliseconds: 80), () {
+      if (_scroll.hasClients) {
+        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      }
+    });
+    AgentService.I.runTask(t);
   }
 
   void _modelPicker(BuildContext context) {
@@ -2589,7 +2633,7 @@ class _InputBarState extends State<_InputBar> {
                 // DSH composer: 16px input, 24px line-height.
                 style: const TextStyle(fontSize: 16, height: 24 / 16),
                 decoration: const InputDecoration(
-                  hintText: 'Describe what you want to build…',
+                  hintText: 'Describe what you want to build…  / for commands',
                   hintStyle: TextStyle(fontSize: 16, height: 24 / 16),
                   filled: false,
                   border: InputBorder.none,
