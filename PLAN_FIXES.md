@@ -335,3 +335,10 @@ upgrades webview_flutter or a platform channel is added.
   pre-check + 150-400ms randomized settle), W11 BROWSER METHOD system
   prompt block, W12 4 tests. browser_console deferred (no doc-created
   injection point in webview_flutter 4.8). Tests 193 → 197.
+- 2026-09-02 ALL CI GREEN: PR22 (f6155f3), PR23 (27393c4), PR25
+  (120da71), PR27 (c81d339), PR28 (6539cd2) — Build APK + Device Test
+  both success on every commit. PR24 (1e91769) Device Test green; its
+  Build run was superseded by the PR25 push (concurrency cancel —
+  covered by PR25's identical green build). PR26 (f42bd1d) Device Test
+  green, Build cancelled by PR27 push (same coverage). Final state:
+  197 tests, analyze 0 issues, head = 6539cd2.
