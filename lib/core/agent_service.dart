@@ -1544,6 +1544,10 @@ class AgentService extends ChangeNotifier {
     String content, {
     required String toolLabel,
   }) async {
+    // PR25/D1: capture the BEFORE content for the diff card (DSH
+    // replayable diff metadata parity) — a create has no before (whole
+    // file shows as + lines).
+    final before = _readFileBefore(path);
     final repoOwns =
         RepoCache.I.files.containsKey(path) || RepoCache.I.repoFull != null;
     if (repoOwns) {
@@ -1555,6 +1559,15 @@ class AgentService extends ChangeNotifier {
     await _mirrorToDisk(path, content);
     _recordProduced(path, content.length);
     _emit('file', '$toolLabel $path');
+    // Diff card: real +/- hunks instead of a bare "written ✓".
+    final diff = buildEditDiff(path, before, content);
+    final m = _activeToolMsg;
+    if (m != null) {
+      m
+        ..toolDetail = diff
+        ..toolState = 'running'; // _toolFinish flips to ok with the result
+      AppState.I.refresh();
+    }
     return repoOwns
         ? 'written ✓ · $path · ${content.length} chars '
             '(workspace + repo cache — commit() to push)'
@@ -1571,6 +1584,114 @@ class AgentService extends ChangeNotifier {
     final f = File(safe);
     f.parent.createSync(recursive: true);
     f.writeAsStringSync(content);
+  }
+
+  /// Read the CURRENT on-disk/repo content of [path] (pre-edit "before"),
+  /// or null when it does not exist yet (a create).
+  String? _readFileBefore(String path) {
+    try {
+      if (RepoCache.I.files.containsKey(path)) {
+        return RepoCache.I.read(path);
+      }
+      final work = _runSession == null ? null : _workspaceRootMaybe();
+      if (work != null) {
+        final safe = containedPath(work, path);
+        if (safe != null && File(safe).existsSync()) {
+          return File(safe).readAsStringSync();
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Sync workspace root for the running session (no await — used by the
+  /// sync pre-edit read above).
+  Directory? _workspaceRootMaybe() {
+    final s = _runSession;
+    if (s == null) return null;
+    try {
+      return workspaceRootFor(s);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Attach a real +/- diff to the active tool card (PR25/D1). Called by
+  /// every edit path right before returning the short result line.
+  void _attachDiffCard(String path, String? before, String after) {
+    try {
+      final m = _activeToolMsg;
+      if (m == null) return;
+      m.toolDetail = buildEditDiff(path, before, after);
+      AppState.I.refresh();
+    } catch (_) {}
+  }
+
+  /// DSH diff-card parity (PR25): build a compact unified-style diff for
+  /// display on the tool card. Line-based, LCS-free (edit scripts are
+  /// small); caps: 400 diff lines, after which `… N more lines` truncates.
+  /// Format: `diff <path>\n@@\n` then `+`/`-`/context lines; the card's
+  /// _DiffLine renderer colors + and − rows.
+  static String buildEditDiff(
+    String path,
+    String? before,
+    String after, {
+    int maxLines = 400,
+  }) {
+    final buf = StringBuffer('diff $path\n');
+    if (before == null) {
+      // Whole-file create: every line is an addition.
+      final lines = after.split('\n');
+      final shown = lines.length > maxLines;
+      for (final l in lines.take(maxLines)) {
+        buf.writeln('+$l');
+      }
+      if (shown) buf.writeln('… ${lines.length - maxLines} more lines');
+      return buf.toString();
+    }
+    if (before == after) {
+      buf.writeln('(no changes)');
+      return buf.toString();
+    }
+    final a = before.split('\n');
+    final b = after.split('\n');
+    // Simple Myers-lite: common prefix + suffix, middle replaced.
+    var pre = 0;
+    while (pre < a.length && pre < b.length && a[pre] == b[pre]) {
+      pre++;
+    }
+    var suf = 0;
+    while (suf < a.length - pre &&
+        suf < b.length - pre &&
+        a[a.length - 1 - suf] == b[b.length - 1 - suf]) {
+      suf++;
+    }
+    final removed = a.skip(pre).take(a.length - pre - suf).toList();
+    final added = b.skip(pre).take(b.length - pre - suf).toList();
+    var count = 0;
+    void line(String prefix, String l) {
+      if (count >= maxLines) return;
+      buf.writeln('$prefix$l');
+      count++;
+    }
+
+    if (pre > 0) {
+      line(' ', a[pre - 1]);
+    }
+    for (final l in removed) {
+      line('-', l);
+    }
+    for (final l in added) {
+      line('+', l);
+    }
+    if (suf > 0) {
+      line(' ', b[b.length - suf]);
+    }
+    final total = removed.length + added.length;
+    if (count >= maxLines) {
+      buf.writeln('… ${total > maxLines ? total - maxLines : 0} more lines');
+    }
+    return buf.toString();
   }
 
   // ── fs tools state (read-before-write policy, DSH observation gate) ──
@@ -6514,6 +6635,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           await _mirrorToDisk(path, updated);
           _recordProduced(path, updated.length);
           _emit('file', 'edited $path');
+          _attachDiffCard(path, repoContent, updated);
           return 'edited $path ✓ (str_replace)';
         }
         // Host file?
@@ -6551,6 +6673,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         }
         _recordProduced(path, updatedHost.length);
         _emit('file', 'edited $path');
+        _attachDiffCard(path, content, updatedHost);
         return 'edited $path ✓ (str_replace)';
 
       case 'insert':
@@ -6593,6 +6716,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           }
         }
         _emit('file', 'edited $path');
+        _attachDiffCard(path, raw, updated);
         return 'inserted at line $insertLine in $path ✓';
 
       default:
@@ -7263,6 +7387,16 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
   /// read-only mode + approval) without a live model loop.
   Future<String> dispatchForTest(String name, Map<String, dynamic> args) =>
       _dispatch(name, args);
+
+  /// PR25 test seam: arm an active tool card (as a real run's _toolStart
+  /// would) so edit paths have somewhere to attach the diff.
+  @visibleForTesting
+  void armToolCardForTest(String toolName) {
+    final s = _runSession;
+    if (s == null) return;
+    final m = _toolStart(toolName, 'test');
+    _activeToolMsg = m; // _toolStart already sets it; keep explicit.
+  }
 
   /// Test seam: the request-message array this session's history replays to.
   @visibleForTesting

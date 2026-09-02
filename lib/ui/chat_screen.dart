@@ -2047,6 +2047,20 @@ class _ToolCardState extends State<_ToolCard>
     _ => Icons.bolt_outlined,
   };
 
+  /// PR25/D3: (+added, −removed) counts from the card's real diff body —
+  /// null when this card carries no diff (non-edit tools).
+  (int, int)? _diffCountsOf(String? detail) {
+    final d = (detail ?? '').trim();
+    if (!d.startsWith('diff ')) return null;
+    var add = 0;
+    var rem = 0;
+    for (final l in d.split('\n')) {
+      if (l.startsWith('+') && !l.startsWith('+++')) add++;
+      if (l.startsWith('-') && !l.startsWith('---')) rem++;
+    }
+    return (add, rem);
+  }
+
   @override
   Widget build(BuildContext context) {
     final m = widget.m;
@@ -2056,6 +2070,8 @@ class _ToolCardState extends State<_ToolCard>
     final stopped = m.toolState == 'stopped';
     final iconKind = AgentService.toolIcon(m.toolName ?? '');
     final hasDetail = (m.toolDetail ?? '').trim().isNotEmpty;
+    // PR25/D3: +N/−M chip data (null for non-diff cards).
+    final diffCounts = _diffCountsOf(m.toolDetail);
     // dispatch_agent rows own a real child session — the row becomes a link
     // into that transcript (and the child may still be running).
     final childSessionId = m.toolSessionId;
@@ -2125,6 +2141,19 @@ class _ToolCardState extends State<_ToolCard>
                         ),
                       ),
                     ),
+                    // PR25/D3: edit cards show a +N/−M line-count chip
+                    // (DSH diff-row parity) computed from the real diff.
+                    if (diffCounts != null) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        '+${diffCounts.$1} −${diffCounts.$2}',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontFamily: Aether.mono,
+                          color: Aether.success,
+                        ),
+                      ),
+                    ],
                   ] else
                     const Spacer(),
                   if (hasDetail)
@@ -2282,6 +2311,38 @@ class _DetailBodyState extends State<_DetailBody> {
                 ),
               ),
             ),
+          // PR25/D5: diff header — path + counts + full-screen open.
+          if (isDiff && detail.startsWith('diff '))
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      detail.split('\n').first.replaceFirst('diff ', ''),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontFamily: Aether.mono,
+                        fontSize: 11,
+                        color: Aether.textFaint,
+                      ),
+                    ),
+                  ),
+                  InkWell(
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => _DiffViewerScreen(detail: detail),
+                      ),
+                    ),
+                    child: Text(
+                      'open full',
+                      style: TextStyle(fontSize: 11, color: Aether.accent),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ConstrainedBox(
             constraints: const BoxConstraints(maxHeight: 340),
             child: SingleChildScrollView(
@@ -2349,6 +2410,54 @@ class _DiffLine extends StatelessWidget {
           fontSize: 11.5,
           height: 1.45,
           color: color,
+        ),
+      ),
+    );
+  }
+}
+
+/// PR25/D5: full-screen diff viewer — the details surface DSH gives its
+/// diff cards (chat rows cap at 8/16 lines; this shows every hunk with
+/// copy).
+class _DiffViewerScreen extends StatelessWidget {
+  final String detail;
+  const _DiffViewerScreen({required this.detail});
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = const LineSplitter().convert(detail);
+    final header = lines.firstOrNull ?? '';
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        backgroundColor: Aether.bg,
+        title: Text(
+          header.replaceFirst('diff ', ''),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 14),
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Copy diff',
+            icon: const Icon(Icons.copy, size: 18),
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: detail));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Diff copied'),
+                  duration: Duration(milliseconds: 1200),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+      body: Scrollbar(
+        child: ListView.builder(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+          itemCount: lines.length,
+          itemBuilder: (_, i) => _DiffLine(lines[i]),
         ),
       ),
     );

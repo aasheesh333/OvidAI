@@ -4739,6 +4739,98 @@ block</pre>
     });
   });
 
+  group('PR25: edit diff cards', () {
+    test('buildEditDiff: create = all + lines; replace = context + hunks',
+        () {
+      // Create (no before): whole file as additions.
+      final created = AgentService.buildEditDiff(
+        'lib/new.dart',
+        null,
+        'a\nb\nc',
+      );
+      expect(created, startsWith('diff lib/new.dart'));
+      expect(created.split('\n'), containsAll(['+a', '+b', '+c']));
+
+      // Replace in the middle: context line + -old + +new + context.
+      final replaced = AgentService.buildEditDiff(
+        'lib/x.dart',
+        'one\ntwo\nthree\nfour',
+        'one\nTWO!\nfour',
+      );
+      expect(replaced, startsWith('diff lib/x.dart'));
+      expect(replaced, contains(' one')); // context above
+      expect(replaced, contains('-two'));
+      expect(replaced, contains('-three'));
+      expect(replaced, contains('+TWO!'));
+      expect(replaced, contains(' four')); // context below
+
+      // No change → explicit marker.
+      final same = AgentService.buildEditDiff(
+        'a.txt',
+        'same',
+        'same',
+      );
+      expect(same, contains('(no changes)'));
+    });
+
+    test('buildEditDiff caps at 400 lines with a truncation notice', () {
+      final big = List.generate(1000, (i) => 'line $i').join('\n');
+      final diff = AgentService.buildEditDiff('big.txt', null, big);
+      expect(diff, contains('more lines'));
+      final bodyLines = diff
+          .split('\n')
+          .where((l) => l.startsWith('+') && !l.startsWith('+++'))
+          .length;
+      expect(bodyLines, lessThanOrEqualTo(401)); // cap + truncation row
+    });
+
+    test('edit tools attach the diff to the tool card detail', () async {
+      final app = AppState.I;
+      final s = ChatSession(
+        id: 'diff1',
+        title: 'D',
+        model: 'm',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() {
+        app.sessions.removeWhere((x) => x.id == s.id);
+        app.activeSessionId = '';
+      });
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      // Observe (view) then edit — the read-before-write gate.
+      final ws = await AgentService.I.sessionWorkDirForTest();
+      File('${ws.path}/cfg.txt').writeAsStringSync('alpha\nbeta\n');
+      await AgentService.I.dispatchForTest(
+        'fs_edit',
+        {'command': 'view', 'path': 'cfg.txt'},
+      );
+
+      // Arm a card as a real run's _toolStart would, then edit: the diff
+      // must land on that card's detail (D1 contract).
+      AgentService.I.armToolCardForTest('fs_edit');
+      final res = await AgentService.I.dispatchForTest(
+        'fs_edit',
+        {
+          'command': 'str_replace',
+          'path': 'cfg.txt',
+          'old_str': 'beta',
+          'new_str': 'gamma',
+        },
+      );
+      expect(res, contains('edited'));
+      // The active tool card now carries a real diff in its detail.
+      final msg = s.messages.where((m) => m.toolName == 'fs_edit').last;
+      expect((msg.toolDetail ?? ''), startsWith('diff cfg.txt'));
+      expect(msg.toolDetail, contains('-beta'));
+      expect(msg.toolDetail, contains('+gamma'));
+      expect(File('${ws.path}/cfg.txt').readAsStringSync(), contains('gamma'));
+    });
+  });
+
   group('PR21: workflow + ralph orchestration', () {
     ChatSession newParent(String id) {
       final app = AppState.I;
