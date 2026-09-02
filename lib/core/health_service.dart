@@ -201,6 +201,94 @@ class HealthService extends ChangeNotifier {
           repairable: true,
         ),
       );
+
+      // ── PR22: DSH-workload probes (the exact on-device failure class) ──
+      // npx smoke: exercises the env shebang chain end-to-end (usr/bin/env
+      // compat symlink + patched shebangs). If this passes, every npm/npx
+      // shebang tool works.
+      if (probe['node'] == true) {
+        var npxOk = false;
+        var npxDetail = 'npx shebang chain resolves (usr compat ✓).';
+        try {
+          final (code, o) = await sandbox
+              .execChecked(['npx', '--version'])
+              .timeout(const Duration(seconds: 20));
+          npxOk = code == 0;
+          if (!npxOk) {
+            final tail = o.trim().split('\n');
+            npxDetail = 'npx --version exited $code — '
+                '${tail.isEmpty ? "no output" : tail.last}';
+          }
+        } catch (e) {
+          npxDetail = 'npx failed: $e';
+        }
+        out.add(
+          HealthCheck(
+            name: 'npx / shebang chain',
+            points: 0,
+            ok: npxOk,
+            detail: npxDetail,
+            repairable: true,
+          ),
+        );
+        // node smoke: links libz + friends at exec time — catches the
+        // "library libz.so.1 not found" class without running a build.
+        var nodeOk = false;
+        var nodeDetail = 'node links native libs (zlib ✓).';
+        try {
+          final (code, o) = await sandbox
+              .execChecked(['node', '-e', 'console.log(1+1)'])
+              .timeout(const Duration(seconds: 20));
+          nodeOk = code == 0 && o.contains('2');
+          if (!nodeOk) {
+            nodeDetail =
+                'node smoke failed ($code) — likely a missing lib symlink '
+                '(libz.so.1). Tap Repair.';
+          }
+        } catch (e) {
+          nodeDetail = 'node failed: $e';
+        }
+        out.add(
+          HealthCheck(
+            name: 'Node native link (libz)',
+            points: 0,
+            ok: nodeOk,
+            detail: nodeDetail,
+            repairable: true,
+          ),
+        );
+        // mkdtemp in OUR tmp: the spill/npm-cache failure class — node's
+        // mkdtemp falls back to the compiled-in Termux TMPDIR without
+        // the env override.
+        var tmpOk = false;
+        var tmpDetail = 'mkdtemp uses the sandbox TMPDIR ✓.';
+        try {
+          final (code, o) = await sandbox.execChecked([
+            'node',
+            '-e',
+            "const fs=require('fs'),os=require('os');"
+                "const d=fs.mkdtempSync(require('path').join(os.tmpdir(),"
+                "'ovid-'));console.log(d)",
+          ]).timeout(const Duration(seconds: 20));
+          tmpOk = code == 0 && o.contains('/sandbox');
+          if (!tmpOk) {
+            tmpDetail =
+                'node tmpdir points outside the sandbox (EACCES class). '
+                'Tap Repair.';
+          }
+        } catch (e) {
+          tmpDetail = 'mkdtemp probe failed: $e';
+        }
+        out.add(
+          HealthCheck(
+            name: 'TMPDIR / mkdtemp',
+            points: 0,
+            ok: tmpOk,
+            detail: tmpDetail,
+            repairable: true,
+          ),
+        );
+      }
     }
 
     // Provider configured — not repairable from Health (needs the user's key).
@@ -229,6 +317,10 @@ class HealthService extends ChangeNotifier {
   /// with verbose lines surfaced to the UI.  Re-runs the checks after.
   Future<HealthReport> repair(void Function(String line) onLine) async {
     final sandbox = SandboxService.I;
+    // PR22: self-heal first (usr symlink, lib links, shebangs, exec bits)
+    // — cheap + fixes the bad-interpreter/libz/EACCES class without a
+    // full runtime reinstall.
+    await sandbox.selfHealNow(onLine: onLine);
     await sandbox.installCoreRuntimes((phase, progress, line) => onLine(line));
     return runChecks();
   }

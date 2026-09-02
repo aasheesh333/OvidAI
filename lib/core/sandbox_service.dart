@@ -230,6 +230,11 @@ class SandboxService {
         _writeAptConfig(prefix);
         _ensureTlsConfig(prefix);
         _probePythonPath();
+        // Self-heal (PR22): installs made by older builds can be missing
+        // the usr/ compat symlink, unpatched shebangs ($PREFIX/usr/bin/env
+        // → "bad interpreter"), lost exec bits, or broken libz links.
+        // Idempotent, best-effort — never blocks the boot.
+        await _selfHealSandbox(prefix);
         return true;
       }
       return false;
@@ -339,6 +344,15 @@ class SandboxService {
     // chdir fails with ENOENT → "No such file or directory".
     Directory('${prefix.path}/home').createSync(recursive: true);
     Directory('${prefix.path}/tmp').createSync(recursive: true);
+    // ── `usr` compat symlink ──
+    // Termux-bundled tooling sometimes hardcodes `<prefix>/usr/bin/...`
+    // (npx/npm shebangs from .deb installs, older packages). The payload
+    // root IS the "usr" — make `$PREFIX/usr` a self-symlink so
+    // `$PREFIX/usr/bin/env` resolves to `$PREFIX/bin/env`.
+    try {
+      final usr = Link('${prefix.path}/usr');
+      if (!usr.existsSync()) usr.createSync('.');
+    } catch (_) {}
 
     // ── Write OUR profile (defense-in-depth) ──
     // Termux's bash has its prefix COMPILED IN, so `bash -l` sources
@@ -421,7 +435,11 @@ class SandboxService {
     // Every attempt CHECKS the update exit code AND prints its last lines
     // into the log — an empty/failed index used to produce the silent
     // "Unable to locate package git" install failure.
-    const pkgs = 'nodejs npm python python-pip uv git curl';
+    // zlib: node's dynamic-link dependency — the bootstrap ships the lib
+    // but npm/apt-installed node overlays may reference it fresh; keeping
+    // the package asserted also guarantees libz.so.1 so-version links.
+    const pkgs =
+        'nodejs npm python python-pip uv git curl zlib';
     var installed = false;
     for (var attempt = 1; attempt <= 3 && !installed; attempt++) {
       final tag = attempt == 1
@@ -1149,6 +1167,13 @@ audit=false
   /// Termux packages to point at OUR sandbox prefix. Runs after BOTH install
   /// paths (apt AND direct-deb) so npm/npx/uvx never hit the cross-app
   /// prefix wall regardless of how they were installed.
+  ///
+  /// Mapping is the SAME as the symlink phase and the deb file copy:
+  /// `/data/data/com.termux/files/usr/X` → `$PREFIX/X` (the Termux payload
+  /// root IS the "usr" — our prefix has NO `usr/` directory, so a naive
+  /// `files → $PREFIX` rewrite yields `$PREFIX/usr/bin/env`, which never
+  /// exists → "bad interpreter: No such file or directory" on every
+  /// npm/npx shebang).
   Future<void> _patchExtractedShebangs(Directory prefix) async {
     final p = prefix.path;
     await execChecked([
@@ -1161,9 +1186,20 @@ audit=false
           'find "\$dir" -maxdepth 6 -type f ! -name "*.so*" '
           '! -name "*.png" ! -name "*.jpg" ! -name "*.a" '
           '-exec sh -c \'head -c2 "\$1" 2>/dev/null | grep -q "#!" && '
-          'sed -i "s|/data/data/com.termux/files|$p|g" "\$1"\' _ {} \\; '
+          '{ sed -i "s|/data/data/com.termux/files/usr/|$p/|g; '
+          'sed -i "s|/data/data/com.termux/files|$p|g" "\$1" 2>/dev/null; } '
+          '\' _ {} \\; '
           '2>/dev/null; done; '
-          'chmod +x "\$PREFIX"/bin/* 2>/dev/null',
+          // Exec bits: not just bin/* — npm's node_modules/.bin shims and
+          // any nested .bin dir must be executable too, else execve EACCES
+          // ("sh: 1: node-gyp: Permission denied").
+          'chmod +x "\$PREFIX"/bin/* 2>/dev/null; '
+          'find "\$PREFIX/lib/node_modules" -type d -name ".bin" '
+          '-exec chmod +x {} + 2>/dev/null; '
+          'find "\$PREFIX/lib/node_modules" -type d -name ".bin" '
+          '-exec find {} -type f -exec chmod +x {} \\; + 2>/dev/null; '
+          'find "\$PREFIX/lib/node_modules" -name "*.sh" '
+          '-type f -exec chmod +x {} + 2>/dev/null',
     ]).timeout(const Duration(minutes: 2));
   }
 
@@ -1343,6 +1379,15 @@ audit=false
   // ═════════════════════════════════════════════════════════════════
   Map<String, String> _sandboxEnv() {
     final p = _prefix!.path;
+    // Ensure the dirs the env below points at actually exist — npm/pip
+    // try to mkdir them under the compiled-in Termux HOME otherwise
+    // (cross-app EACCES). Sync + best-effort: sub-millisecond when they
+    // already exist.
+    try {
+      Directory('$p/tmp').createSync(recursive: true);
+      Directory('$p/home/.npm').createSync(recursive: true);
+      Directory('$p/home/.cache/pip').createSync(recursive: true);
+    } catch (_) {}
     final env = <String, String>{
       'PREFIX': p,
       'TERMUX__PREFIX': p,
@@ -1373,16 +1418,22 @@ audit=false
       if (Directory('$p/libexec/git-core').existsSync())
         'GIT_EXEC_PATH': '$p/libexec/git-core',
       'GIT_CONFIG_NOSYSTEM': '1',
-      // node/npm: global modules + registry + cache all inside sandbox.
+      // node/npm: global modules + registry + cache + tmp all inside
+      // sandbox (a missing cache/tmp dir makes npm try to mkdir it under
+      // the compiled-in Termux HOME → cross-app EACCES).
       'NODE_PATH': '$p/lib/node_modules',
       'npm_config_registry': 'https://registry.npmjs.org/',
       'npm_config_cache': '$p/home/.npm',
       'npm_config_userconfig': '$p/home/.npmrc',
+      'npm_config_tmp': '$p/tmp',
       // pip cache + config inside sandbox HOME.
       'PIP_CACHE_DIR': '$p/home/.cache/pip',
       'PIP_CONFIG_FILE': '$p/etc/pip.conf',
       // TLS config: some Android openssl builds fail without an explicit
       // config; ours sets TLSv1.2 + SECLEVEL=1 for old device compat.
+      // Always set — if the file is missing we write it right now (a
+      // missing OPENSSL_CONF makes openssl read the compiled-in Termux
+      // path → "system library:BIO_new_file:Permission denied").
       if (File('$p/etc/tls/openssl.cnf').existsSync())
         'OPENSSL_CONF': '$p/etc/tls/openssl.cnf',
     };
@@ -1414,6 +1465,76 @@ audit=false
         }
       }
     } catch (_) {}
+  }
+
+  /// Public self-heal entry (Health repair + tests). Best-effort.
+  Future<void> selfHealNow({void Function(String line)? onLine}) async {
+    Directory prefix;
+    try {
+      prefix = _prefix ??
+          Directory(
+            '${(await _ensureFilesRoot()).path}/sandbox',
+          );
+    } catch (_) {
+      return;
+    }
+    if (!Directory('${prefix.path}/bin').existsSync()) return;
+    onLine?.call('ovid sandbox: self-heal (symlinks, shebangs, exec bits)');
+    await _selfHealSandbox(prefix);
+    onLine?.call('ovid sandbox: self-heal done');
+  }
+
+  /// PR22 self-heal: repairs sandboxes installed by older builds without
+  /// forcing a reinstall. Idempotent + best-effort on every boot:
+  ///  1. `$PREFIX/usr` compat self-symlink (bad-interpreter fix).
+  ///  2. Core lib symlinks that the pre-2f23a57 Map bug could have lost
+  ///     (libz.so.1 is the reported one — node dies at link time).
+  ///  3. Re-patch shebangs + exec bits (npm .bin shims).
+  ///  4. `bin/env` / `bin/sh` / `bin/bash` existence probes — if any of
+  ///     the core binaries is missing the sandbox is beyond healing and
+  ///     Studio will surface a reinstall prompt (we don't force one here).
+  Future<void> _selfHealSandbox(Directory prefix) async {
+    final p = prefix.path;
+    try {
+      // 1. usr compat symlink.
+      try {
+        final usr = Link('$p/usr');
+        if (!usr.existsSync()) usr.createSync('.');
+      } catch (_) {}
+
+      // 2. Core so-version links (self-heal only what physically exists
+      //    as the versioned file — we never invent libraries).
+      const coreLinks = <String, String>{
+        'lib/libz.so.1': 'libz.so.1.3.2',
+        'lib/libz.so': 'libz.so.1.3.2',
+        'lib/libc.so': 'libc.so',
+        'lib/libdl.so': 'libdl.so',
+        'lib/libm.so': 'libm.so',
+      };
+      for (final e in coreLinks.entries) {
+        try {
+          final link = Link('$p/${e.key}');
+          final target = '$p/${e.value}';
+          if (link.existsSync()) continue;
+          if (!File(target).existsSync() && !Link(target).existsSync()) {
+            continue;
+          }
+          link.parent.createSync(recursive: true);
+          link.createSync(e.value); // relative, like SYMLINKS.txt
+        } catch (_) {}
+      }
+
+      // 3. Shebangs + exec bits — same treatment as a fresh install.
+      //    Skipped when bin/npx or bin/npm is missing (nothing to patch
+      //    yet — runtimes not installed; _installRuntimesWithRetry will
+      //    do the full pass after installing them).
+      if (File('$p/bin/npm').existsSync() ||
+          File('$p/bin/npx').existsSync()) {
+        await _patchExtractedShebangs(prefix);
+      }
+    } catch (_) {
+      // Self-heal must never break the boot.
+    }
   }
 
   Future<String> exec(

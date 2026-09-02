@@ -7912,11 +7912,13 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     _jobs[id] = job;
     _emit('shell', 'job #$id started: $name');
     try {
-      if (mode == AgentMode.studio && SandboxService.I.isInstalled) {
+      if (SandboxService.I.isInstalled) {
         // Sandbox spawn — _sandboxEnv() provides the full DSH env set
-        // (PATH, GIT_EXEC_PATH, NODE_PATH, npm_config_*, PYTHONPATH, TLS).
-        // The old code overrode PATH with glibc-style /usr/* dirs — that
-        // clobbered $PREFIX/bin and broke every sandbox job command.
+        // (PATH, GIT_EXEC_PATH, NODE_PATH, npm_config_*, PYTHONPATH, TLS,
+        // TMPDIR/HOME — without them Termux-built node/npm fall back to
+        // /data/data/com.termux/... cross-app paths → EACCES everywhere).
+        // ANY mode: a non-studio job with the sandbox installed must run
+        // inside it too — /system/bin/sh has no node at all.
         job.process = await SandboxService.I.spawn(
           ['bash', '-c', cmd],
           hostWorkDir: work,
