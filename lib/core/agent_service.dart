@@ -300,7 +300,7 @@ class QuestionOption {
 
 /// Background job (DSH ctx.jobs equivalent) — a running Process with a
 /// name, output buffer, and lifecycle state.
-class _BgJob {
+class BgJob {
   final int id;
   final String name;
   final String command;
@@ -311,7 +311,7 @@ class _BgJob {
   int? exitCode;
   final DateTime startedAt = DateTime.now();
   final StringBuffer output = StringBuffer();
-  _BgJob({required this.id, required this.name, required this.command});
+  BgJob({required this.id, required this.name, required this.command});
 
   Duration get elapsed => DateTime.now().difference(startedAt);
   String get state =>
@@ -370,20 +370,20 @@ class SubagentInfo {  final String id;
 /// dispatch, subagent loops) resolves run state to THIS run's bucket —
 /// never another session's, no matter how many sessions run in parallel.
 class _RunCtx {
-  final _AgentRun run;
+  final AgentRun run;
   final ChatSession session;
   final ProviderConfig provider;
   const _RunCtx(this.run, this.session, this.provider);
 }
 
-class _AgentRun {
+class AgentRun {
   String? activeRunId;
   bool cancelRequested = false;
   HttpClientRequest? activeRequest;
   final List<String> queue = [];
   ApprovalRequest? pendingApproval;
   bool planMode = false;
-  final Map<int, _BgJob> jobs = {};
+  final Map<int, BgJob> jobs = {};
   int jobCounter = 0;
   /// Per-tool call counts within THIS run (repeat-tool reminder, PR18).
   final Map<String, int> toolCallCounts = {};
@@ -412,6 +412,12 @@ class _AgentRun {
   /// True once this run has nudged the model to continue because its todo
   /// list still has pending items. Resets when todo_write updates the list.
   bool todoNudgeSent = false;
+
+  /// PR23/Q1: the model string snapshotted at RUN START (DSH
+  /// prompt-assembly-boundary parity). Every LLM call of THIS run uses
+  /// it — a mid-run picker switch changes the NEXT run (a new queued
+  /// message), never the in-flight one.
+  String? modelSnapshot;
 
   /// Per-run session stats — steps, turns, timing, token breakdown.
   int steps = 0;
@@ -551,11 +557,11 @@ class AgentService extends ChangeNotifier {
   // Every session owns an independent _AgentRun (cancel flag, HTTP
   // request, queue, approval, jobs, plan mode, live streaming buffers).
   // 10+ sessions can run at once; switching sessions NEVER stops a run.
-  final Map<String, _AgentRun> _runs = {};
+  final Map<String, AgentRun> _runs = {};
 
   /// The run bound to the current target session.  Subagents (no session)
   /// use a detached run keyed to ''.
-  _AgentRun get _run => _runs.putIfAbsent(_currentRunKey(), () => _AgentRun());
+  AgentRun get _run => _runs.putIfAbsent(_currentRunKey(), () => AgentRun());
 
   /// While a run is active, `_run` resolves to THE RUNNING run's bucket —
   /// NOT whatever session is currently active in the UI. This kills the
@@ -577,7 +583,7 @@ class AgentService extends ChangeNotifier {
   /// else the active session's bucket. Mid-run tool calls MUST route
   /// through this so a session switch mid-run can't make the run touch
   /// the wrong session's workspace/studio/notes.
-  _AgentRun get _runResolved => _runCtx?.run ?? _run;
+  AgentRun get _runResolved => _runCtx?.run ?? _run;
 
   String? get _pinnedRunId => _runCtx?.session.id;
 
@@ -594,8 +600,8 @@ class AgentService extends ChangeNotifier {
   /// session's. Used when a run starts targeting a session other than
   /// the currently-active one (e.g. background queue continuation after
   /// the user switched chats).
-  _AgentRun _runFor(String sessionId) =>
-      _runs.putIfAbsent(sessionId, () => _AgentRun());
+  AgentRun _runFor(String sessionId) =>
+      _runs.putIfAbsent(sessionId, () => AgentRun());
 
   // ── Run-context accessors ─────────────────────────────────────────────
   // All run-internal accessors resolve to _runResolved (the live run in
@@ -627,7 +633,7 @@ class AgentService extends ChangeNotifier {
   List<String> get _queue => _runResolved.queue;
   /// UI view: the ACTIVE session's queue (per-session isolation test).
   List<String> get queuedMessages => List.unmodifiable(_run.queue);
-  Map<int, _BgJob> get _jobs => _runResolved.jobs;
+  Map<int, BgJob> get _jobs => _runResolved.jobs;
   int get _jobCounter => _runResolved.jobCounter;
   set _jobCounter(int v) => _runResolved.jobCounter = v;
 
@@ -716,7 +722,7 @@ class AgentService extends ChangeNotifier {
     if (r != null) _cancelBucket(r);
   }
 
-  void _cancelBucket(_AgentRun r) {
+  void _cancelBucket(AgentRun r) {
     if (r.activeRunId == null) return;
     r.cancelRequested = true;
     // Abort the in-flight request — works while connecting AND while
@@ -807,6 +813,27 @@ class AgentService extends ChangeNotifier {
     activeRunId = null;
     notifyListeners();
   }
+
+  /// PR23 test seams.
+  @visibleForTesting
+  Future<String> expandReferencesForTest(
+    String text,
+    ChatSession s,
+  ) => expandReferences(text, s);
+
+  @visibleForTesting
+  Future<void> drainQueueIntoMsgsForTest(
+    List<Map<String, dynamic>> msgs, {
+    String? forSessionId,
+  }) async {
+    if (forSessionId != null) setRunSessionForTest(forSessionId);
+    await _drainQueueIntoMsgs(msgs);
+    if (forSessionId != null) setRunSessionForTest('');
+  }
+
+  @visibleForTesting
+  // ignore: avoid_returning_this
+  AgentRun runBucketForTest(String sessionId) => _runFor(sessionId);
 
   /// Browser live state
   String? browserUrl;
@@ -1463,6 +1490,13 @@ class AgentService extends ChangeNotifier {
       try {
         final root = workspaceRootFor(s);
         final rel = token;
+        // PR23/M5: traversal guard — refuse anything with a `..` path
+        // SEGMENT that would escape the workspace root
+        // (@../../secrets class). A file literally named `a..b` is fine.
+        final segs = rel.split(RegExp(r'[/\\]')).where((p) => p.isNotEmpty);
+        if (segs.contains('..') || segs.contains('.')) {
+          continue; // silently skip, like an unresolvable mention
+        }
         final f = File('${root.path}/$rel');
         if (f.existsSync()) {
           blocks.add(
@@ -3215,7 +3249,9 @@ class AgentService extends ChangeNotifier {
   /// join the NEXT LLM request of the CURRENT run — not a separate run
   /// after full completion. Drains the queue into [msgs] as user turns
   /// and records them in the session so the chat bubble shows immediately.
-  void _drainQueueIntoMsgs(List<Map<String, dynamic>> msgs) {
+  /// PR23/M6: queued text gets the SAME @reference expansion as a direct
+  /// send — a queued "@notes.txt summarize" must not reach the model raw.
+  Future<void> _drainQueueIntoMsgs(List<Map<String, dynamic>> msgs) async {
     if (_queue.isEmpty) return;
     while (_queue.isNotEmpty) {
       final queued = _queue.removeAt(0);
@@ -3232,7 +3268,13 @@ class AgentService extends ChangeNotifier {
       } else {
         AppState.I.sendMessage(queued);
       }
-      msgs.add({'role': 'user', 'content': queued});
+      var modelText = queued;
+      if (target != null && queued.contains('@')) {
+        try {
+          modelText = await expandReferences(queued, target);
+        } catch (_) {}
+      }
+      msgs.add({'role': 'user', 'content': modelText});
     }
     _emit('think', 'queued message joined this run');
   }
@@ -3643,7 +3685,11 @@ class AgentService extends ChangeNotifier {
     // carrying this run's context (bucket + session + provider). Every
     // async continuation — SSE stream handlers, tool dispatch, subagent
     // loops — inherits it, so two runs never see each other's state.
-    final ctx = _RunCtx(_runFor(s.id), s, p);
+    final bucket = _runFor(s.id);
+    // PR23/Q1: snapshot the model at run start — every LLM call of this
+    // run uses it; a mid-run picker switch only affects the next run.
+    bucket.modelSnapshot = s.model;
+    final ctx = _RunCtx(bucket, s, p);
     return runZoned(
       () => _runTaskBody(prompt, ctx, freshTurn: freshTurn),
       zoneValues: {_runCtxKey: ctx},
@@ -4033,7 +4079,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           if (_queue.isNotEmpty) {
             msgs.add({'role': 'assistant', 'content': msg['content'] ?? ''});
             _finalizeLive();
-            _drainQueueIntoMsgs(msgs);
+            await _drainQueueIntoMsgs(msgs);
             continue;
           }
           // Todo follow-through: if the session still has pending todos and
@@ -4139,7 +4185,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         // Queued mid-run messages join the very next request (opencode
         // behavior) — injected right after tool results, before the loop's
         // next _callLlm.
-        _drainQueueIntoMsgs(msgs);
+        await _drainQueueIntoMsgs(msgs);
         // Soft turn budget, applied AFTER the reply was fully processed:
         // compact history and nudge the model to keep going. Task completion
         // is still the only real bound.
@@ -4219,11 +4265,21 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
             // Run the continuation in the background — do NOT yank the
             // user out of the session they're currently reading. DSH web
             // shows a badge on the busy session instead.
-            runTask(next, sessionId: target.id, freshTurn: false);
+            // PR23/M6: expand @refs in queued continuations too.
+            unawaited(
+              runTask(
+                next,
+                sessionId: target.id,
+                freshTurn: false,
+                expandRefsFor: target,
+              ),
+            );
           } else {
             // Session was deleted — fall back to the active session.
             AppState.I.sendMessage(next);
-            runTask(next, freshTurn: false);
+            unawaited(
+              runTask(next, freshTurn: false, expandRefsFor: target),
+            );
           }
         });
       }
@@ -4415,10 +4471,13 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       req.headers.set('Accept', 'text/event-stream');
 
       // Strip effort suffix (e.g. "gpt-5.2 · High") → real model id + effort.
-      // The model is the SESSION's model — captured per run — never the
-      // shared provider.selectedModel (parallel sessions on the same
-      // provider used to cross-wire their models here).
-      final raw = session.model;
+      // PR23/Q1: the model is snapshotted at RUN START — a mid-run picker
+      // switch changes the NEXT run (new queued message), never the
+      // in-flight one (DSH prompt-assembly-boundary parity). Falls back
+      // to the live session model only for runs started before the field
+      // existed. Never the shared provider.selectedModel (parallel
+      // sessions on the same provider used to cross-wire their models).
+      final raw = _runResolved.modelSnapshot ?? session.model;
       final effMatch = RegExp(
         r'·\s*(low|medium|high)$',
         caseSensitive: false,
@@ -7908,7 +7967,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     final name = args['name'] as String? ?? 'job';
     final id = ++_jobCounter;
     final work = await _sessionWorkDir();
-    final job = _BgJob(id: id, name: name, command: cmd);
+    final job = BgJob(id: id, name: name, command: cmd);
     _jobs[id] = job;
     _emit('shell', 'job #$id started: $name');
     try {
@@ -7960,7 +8019,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         'job_kill {id: $id} to stop.';
   }
 
-  void _trimJobOutput(_BgJob job) {
+  void _trimJobOutput(BgJob job) {
     final s = job.output.toString();
     if (s.length > 10000) {
       job.output.clear();
@@ -7976,7 +8035,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     r'https?://(?:localhost|127\.0\.0\.1|\[::1\]):(\d{2,5})[^\s"<>]*',
   );
 
-  void _detectDevServer(_BgJob job, String chunk) {
+  void _detectDevServer(BgJob job, String chunk) {
     final m = _devServerRe.firstMatch(chunk);
     if (m == null) return;
     final url = m.group(0)!;

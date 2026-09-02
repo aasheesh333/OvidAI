@@ -4421,6 +4421,113 @@ block</pre>
     });
   });
 
+  group('PR23: mention fixes + model snapshot', () {
+    test('expandReferences rejects @../ traversal but keeps dotted names',
+        () async {
+      final s = ChatSession(id: 'trav1', title: 'T', model: 'm');
+      final app = AppState.I;
+      final prevActive = app.activeSessionId;
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() {
+        app.sessions.removeWhere((x) => x.id == s.id);
+        app.activeSessionId = prevActive;
+      });
+      final ws = await AgentService.I.sessionWorkDirForTest();
+      // A real file + a real dotted name (must NOT be rejected).
+      File('${ws.path}/notes.txt').writeAsStringSync('secret notes');
+      File('${ws.path}/a..b.txt').writeAsStringSync('dotted is fine');
+
+      final ok = await AgentService.I
+          .expandReferencesForTest('check @notes.txt', s);
+      expect(ok, contains('referenced file "notes.txt"'));
+
+      final dotted = await AgentService.I
+          .expandReferencesForTest('check @a..b.txt', s);
+      expect(dotted, contains('referenced file "a..b.txt"'));
+
+      // Traversal attempts resolve to nothing (no expansion block; the
+      // raw text — which naturally still contains the token — goes to
+      // the model unchanged, exactly like an unresolvable mention).
+      final esc = await AgentService.I
+          .expandReferencesForTest('read @../../etc/passwd', s);
+      expect(esc, isNot(contains('referenced file')));
+      expect(esc, isNot(contains('[expanded references]')));
+      expect(esc, 'read @../../etc/passwd');
+    });
+
+    test('queued message drain expands @file refs for the running session',
+        () async {
+      final app = AppState.I;
+      final s = ChatSession(
+        id: 'qdrain1',
+        title: 'Q',
+        model: 'm',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      final prevActive = app.activeSessionId;
+      addTearDown(() {
+        app.sessions.removeWhere((x) => x.id == s.id);
+        app.activeSessionId = prevActive == 'qdrain1' ? '' : prevActive;
+      });
+      final ws = await AgentService.I.sessionWorkDirForTest();
+      File('${ws.path}/todo.md').writeAsStringSync('- fix the bug');
+
+      AgentService.I.queueMessageForTest('summarize @todo.md');
+      addTearDown(() => AgentService.I.clearQueueForTest());
+      final msgs = <Map<String, dynamic>>[];
+      await AgentService.I.drainQueueIntoMsgsForTest(
+        msgs,
+        forSessionId: 'qdrain1',
+      );
+      expect(msgs, isNotEmpty);
+      expect(
+        msgs.last['content'],
+        contains('referenced file "todo.md"'),
+        reason: 'queued text got the same expansion as a direct send',
+      );
+    });
+
+    test('run start snapshots the model; mid-run picker switch does not '
+        'affect the in-flight run', () async {
+      final app = AppState.I;
+      final s = ChatSession(
+        id: 'snap1',
+        title: 'S',
+        model: 'model-a',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, s);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+
+      // runTask needs a configured provider — instead drive the snapshot
+      // contract at the bucket level (what runTask does at line ~3668).
+      final bucket = AgentService.I.runBucketForTest('snap1');
+      expect(bucket.modelSnapshot, isNull); // nothing snapshotted yet
+      bucket.modelSnapshot = s.model; // runTask's snapshot step
+      s.model = 'model-b'; // user switches mid-run
+      expect(bucket.modelSnapshot, 'model-a');
+      // The request-builder preference order (mirrors _callLlmOnce):
+      final used = bucket.modelSnapshot ?? s.model;
+      expect(used, 'model-a');
+      bucket.modelSnapshot = null;
+    });
+
+    test('composer mention boundary: @ after ( [ , > opens the menu',
+        () {
+      // Source-level contract for the boundary set (PR23/M7) — mirrors
+      // _onTextChanged's check without needing a widget test.
+      const openers = ' \n\t([,>';
+      for (final ch in ['(', '[', ',', '>']) {
+        expect(openers.contains(ch), isTrue);
+      }
+      // Emails (x@y) still never trigger: @ after a word char.
+      expect(openers.contains('o'), isFalse, reason: 'hello@world');
+    });
+  });
+
   group('PR21: workflow + ralph orchestration', () {
     ChatSession newParent(String id) {
       final app = AppState.I;

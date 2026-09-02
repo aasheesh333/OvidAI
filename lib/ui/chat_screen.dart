@@ -3479,17 +3479,38 @@ class _InputBarState extends State<_InputBar> {
     }
     // ── @file: workspace files (DSH file-reference parity) ──
     // Files under the active session's workspace; directory descent via
-    // the query (type `@src/` to descend). The model receives the chip
-    // expanded with a section heading at send time.
+    // the query (type `@src/` to descend into a folder, `@src/ma` to
+    // fuzzy-match INSIDE it). The model receives the chip expanded with
+    // a section heading at send time.
+    var fileHits = 0;
     try {
       final ws = agent.workspaceRootFor(parent);
-      final entities = ws.listSync(recursive: false);
+      // Descent: any `/` in the query means we're INSIDE a subfolder —
+      // list that folder (depth-capped) and match on the LAST segment.
+      var dir = ws;
+      var lastSeg = query;
+      if (query.contains('/')) {
+        final parts = query.split('/')
+          ..removeWhere((p) => p.isEmpty);
+        // Walk the leading segments as directories (depth cap 3).
+        for (var i = 0; i < parts.length - 1 && i < 3; i++) {
+          final next = Directory('${dir.path}/${parts[i]}');
+          if (next.existsSync()) dir = next;
+        }
+        lastSeg = parts.last;
+      }
+      final entities = dir.listSync(recursive: false);
       for (final e in entities) {
         final base = e.path.split('/').last;
         if (base.startsWith('.')) continue; // .spill etc.
         final isDir = e is Directory;
-        final score = _fuzzyScore(base, query);
+        final score = _fuzzyScore(base, lastSeg);
         if (score == null) continue;
+        fileHits++;
+        // Display path relative to the workspace root for descent rows.
+        final rel = e.path.startsWith(ws.path) && e.path != ws.path
+            ? e.path.substring(ws.path.length + 1)
+            : base;
         scored.add((
           score: score,
           order: order++,
@@ -3497,16 +3518,33 @@ class _InputBarState extends State<_InputBar> {
             icon: isDir
                 ? Icons.folder_outlined
                 : Icons.insert_drive_file_outlined,
-            name: base,
-            description: isDir ? 'directory — @name/ to descend' : 'workspace file',
+            name: rel,
+            description: isDir ? 'directory — @$rel/ to descend' : 'workspace file',
             hint: '',
-            insert: '@$base${isDir ? '/' : ' '}',
+            insert: '@$rel${isDir ? '/' : ' '}',
             group: 'Files',
           ),
         ));
       }
     } catch (_) {
       // Workspace not ready — files just don't appear.
+    }
+    // PR23/M2: an EMPTY menu looks like a dead feature — show a hint row
+    // explaining what @ can reference instead of rendering nothing.
+    if (fileHits == 0 && agent.subagentsOf(parent.id).isEmpty) {
+      scored.add((
+        score: 999,
+        order: order++,
+        s: _SlashSuggestion(
+          icon: Icons.info_outline,
+          name: 'no files yet',
+          description: 'The agent creates workspace files as it works — '
+              'try @session:<id> to cite another chat',
+          hint: '',
+          insert: '@',
+          group: 'Files',
+        ),
+      ));
     }
     // ── @session: this chat's sessions (DSH session-reference parity) ──
     for (final s in app.rootSessions.take(30)) {
@@ -3557,7 +3595,11 @@ class _InputBarState extends State<_InputBar> {
       final at = head.lastIndexOf('@');
       if (at >= 0) {
         final token = head.substring(at + 1);
-        final boundaryOk = at == 0 || ' \n\t'.contains(head[at - 1]);
+        // Boundary: @ at start, after whitespace, or after a common
+        // enclosing char ( `( [ , >` — chat/prose contexts; `x@` emails
+        // still never trigger). PR23/M7.
+        final boundaryOk = at == 0 ||
+            ' \n\t([,>'.contains(head[at - 1]);
         if (boundaryOk && !token.contains(RegExp(r'\s'))) {
           mention = true;
           mentionQuery = token.toLowerCase();
@@ -3565,10 +3607,13 @@ class _InputBarState extends State<_InputBar> {
         }
       }
     }
+    // PR23/M4: include _mentionStart in the change guard — a stale start
+    // offset (caret moved to a different @token) corrupts insertion.
     if (active != _slashActive ||
         query != _slashQuery ||
         mention != _mentionActive ||
-        mentionQuery != _mentionQuery) {
+        mentionQuery != _mentionQuery ||
+        mentionStart != _mentionStart) {
       setState(() {
         _slashActive = active;
         _slashQuery = query;

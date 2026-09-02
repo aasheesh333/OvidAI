@@ -1172,6 +1172,8 @@ class AppState extends ChangeNotifier {
     }
     sessions.insert(0, session);
     activeSessionId = session.id;
+    // PR23/M1: workspace exists from the first moment (see newSession).
+    _warmWorkspace(session.id);
     return session;
   }
 
@@ -1186,6 +1188,8 @@ class AppState extends ChangeNotifier {
     // running session (DSH multi-session behavior).  Lazy-restore the
     // newly-active session's browser tabs (per-session browsers).
     onSessionSwitched?.call(id);
+    // PR23/M1: make sure the workspace dir exists for the mention menu.
+    _warmWorkspace(id);
     notifyListeners();
     persistSessions();
   }
@@ -1237,11 +1241,25 @@ class AppState extends ChangeNotifier {
     sessions.insert(0, s);
     activeSessionId = s.id;
     onSessionSwitched?.call(s.id);
+    // PR23/M1: the @file mention menu lists workspace files — the dir
+    // must exist BEFORE the first agent run, else the menu is empty and
+    // "@" looks dead. Best-effort warm-up.
+    _warmWorkspace(s.id);
     // No provider.selectedModel mutation here — the provider field is
     // shared. Session A's in-flight run must never observe a model
     // selection that came from creating/switching to session B.
     notifyListeners();
     persistSessions();
+  }
+
+  /// Ensure a session's workspace dir exists (mention menu + agent runs
+  /// both rely on it). Best-effort + async — never blocks UI.
+  void _warmWorkspace(String sessionId) {
+    unawaited(() async {
+      try {
+        await SandboxService.I.workDirFor(sessionId);
+      } catch (_) {}
+    }());
   }
 
   void deleteSession(String id) {

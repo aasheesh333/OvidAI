@@ -82,17 +82,16 @@ openssl, mkdtemp, npm cache) runs inside the sandbox like real Linux.
 
 | ID | Item | Files | STATUS |
 |---|---|---|---|
-| M1 | Workspace warm-up: create session workspace dir at session creation (via `SandboxService.workDirFor`) so Files group is never empty; also on app start for active session | `state.dart` `newSession`/`_ensureActiveSession` or `agent_service.dart` init | — |
-| M2 | Menu UX: when ALL groups empty → show a single hint row ("no files yet — agent work creates them; @session:<id> to cite chats") instead of nothing | `chat_screen.dart:3827` gate + `_mentionSuggestions` | — |
-| M3 | Directory descent: track query segments; if query contains `/`, list that subdir (depth ≤3); fuzzy match on last segment; breadcrumb insert | `chat_screen.dart:3484-3510` | — |
-| M4 | Mention state guard: include `_mentionStart` in change-guard (`:3568-3571`) | `chat_screen.dart` | — |
-| M5 | Traversal guard: resolve mentions against workspace root, reject `..` escapes (both expand + suggestions) | `agent_service.dart:1442-1486` | — |
-| M6 | Queued expansion: on drain (both paths), expand `@` refs for the running session before injecting | `agent_service.dart:3218-3238`, `:4222` | — |
-| M7 | Boundary rule soften: also open menu when `@` follows `(`, `[`, `,`, `>` (common chat contexts) — keep word-char boundary | `chat_screen.dart:3560` | — |
-| M8 | Tests: M3 descent listing, M5 traversal rejection, M6 queued expansion | `test/core_regression_test.dart` | — |
+| M1 | Workspace warm-up: create session workspace dir at session creation (via `SandboxService.workDirFor`) so Files group is never empty; also on app start for active session | `state.dart` `newSession`/`_ensureActiveSession` or `agent_service.dart` init | DONE |
+| M2 | Menu UX: when ALL groups empty → show a single hint row ("no files yet — agent work creates them; @session:<id> to cite chats") instead of nothing | `chat_screen.dart:3827` gate + `_mentionSuggestions` | DONE |
+| M3 | Directory descent: track query segments; if query contains `/`, list that subdir (depth ≤3); fuzzy match on last segment; breadcrumb insert | `chat_screen.dart:3484-3510` | DONE |
+| M4 | Mention state guard: include `_mentionStart` in change-guard (`:3568-3571`) | `chat_screen.dart` | DONE |
+| M5 | Traversal guard: resolve mentions against workspace root, reject `..` escapes (both expand + suggestions) | `agent_service.dart:1442-1486` | DONE |
+| M6 | Queued expansion: on drain (both paths), expand `@` refs for the running session before injecting | `agent_service.dart:3218-3238`, `:4222` | DONE |
+| M7 | Boundary rule soften: also open menu when `@` follows `(`, `[`, `,`, `>` (common chat contexts) — keep word-char boundary | `chat_screen.dart:3560` | DONE |
+| M8 | Tests: M3 descent listing, M5 traversal rejection, M6 queued expansion | `test/core_regression_test.dart` | DONE |
 
-**Model snapshot (user ask):** "jab user model select kare aur request
-bheje, response usi model se aaye jab tak next queue msg" — i.e. the
+**Model snapshot (user ask):** "jab user model select kare aur request bheje, response usi model se aaye jab tak next queue msg" — i.e. the
 SELECTED MODEL must stick for the whole queued run.
 
 **Current behavior (researched):** `_callLlmOnce` reads `session.model`
@@ -104,9 +103,9 @@ resolved once at run start (`:3627`).
 
 | ID | Item | Files | STATUS |
 |---|---|---|---|
-| Q1 | Snapshot model at RUN START: capture `s.model` into the run bucket `_AgentRun` and use it for every `_callLlm` of that run (DSH prompt-assembly-boundary parity) | `agent_service.dart` `_AgentRun` + `_callLlmOnce` | — |
-| Q2 | A NEW queued-message run re-resolves (new runTask) → uses the newly selected model; mid-run queue drain (path 1) uses the RUN'S snapshot, not live session model | same | — |
-| Q3 | Test: model switch mid-run does not affect in-flight run; new queued run picks new model | `test` | — |
+| Q1 | Snapshot model at RUN START: capture `s.model` into the run bucket `_AgentRun` and use it for every `_callLlm` of that run (DSH prompt-assembly-boundary parity) | `agent_service.dart` `_AgentRun` + `_callLlmOnce` | DONE |
+| Q2 | A NEW queued-message run re-resolves (new runTask) → uses the newly selected model; mid-run queue drain (path 1) uses the RUN'S snapshot, not live session model | same | DONE |
+| Q3 | Test: model switch mid-run does not affect in-flight run; new queued run picks new model | `test` | DONE |
 
 ---
 
@@ -292,3 +291,14 @@ upgrades webview_flutter or a platform channel is added.
   exist + `npm_config_tmp` added, S7 `zlib` in apt pkg list, S8 health
   probes (npx shebang chain, node libz smoke, TMPDIR/mkdtemp), S9 5
   tests. Tests 169 → 174.
+- 2026-09-02 PR23 DONE (code+tests, CI pending): M1 workspace warm-up on
+  new/ensure/select session, M2 empty-menu hint row, M3 directory descent
+  (subdir listing, rel-path display, `@dir/` continuation), M4 mentionStart
+  in change-guard, M5 `..` traversal guard (segment-based; dotted names
+  still fine), M6 queued @-expansion on BOTH drain paths (mid-run
+  `_drainQueueIntoMsgs` now async + expands; run-end continuation passes
+  `expandRefsFor`), M7 boundary set ` \n\t([,>`, Q1/Q2 `AgentRun
+  .modelSnapshot` at run start used by `_callLlmOnce` (mid-run picker
+  switch can't change the in-flight run), Q3 bucket-level test + boundary
+  contract test. `_AgentRun`→`AgentRun`, `_BgJob`→`BgJob` made public for
+  the test seam. Tests 174 → 178.
