@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ffi' as ffi;
 
 import 'package:archive/archive.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -12,8 +13,11 @@ import 'package:ovid_ai/core/commands.dart';
 import 'package:ovid_ai/core/github_service.dart';
 import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
+import 'package:ovid_ai/core/session_ledger.dart';
+import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/theme.dart';
+import 'package:sqlite3/open.dart' show open, OperatingSystem;
 import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -27,6 +31,23 @@ void main() {
     HttpOverrides.global = null;
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
+    // Ledger + FTS5 search roots: no path_provider channel in unit tests.
+    final tmp = Directory.systemTemp.createTempSync('ovid-pr19');
+    SessionLedger.rootOverrideForTest = tmp;
+    SessionSearch.dbPathOverrideForTest = '${tmp.path}/search.db';
+    CommandService.exportDirOverrideForTest = tmp.path;
+    // sqlite3 needs the system lib on the host (the APK bundles its own
+    // via sqlite3_flutter_libs); dev-<name> symlink missing the .so → load
+    // the versioned lib directly.
+    if (Platform.isLinux) {
+      open.overrideFor(OperatingSystem.linux, () {
+        try {
+          return ffi.DynamicLibrary.open('libsqlite3.so.0');
+        } catch (_) {
+          return ffi.DynamicLibrary.open('/usr/lib/x86_64-linux-gnu/libsqlite3.so.0');
+        }
+      });
+    }
     app = AppState.I;
     await app.initialize();
   });
@@ -3927,6 +3948,136 @@ block</pre>
         'd': 100,
       });
       expect(old.cacheReadTokens, 0);
+    });
+  });
+
+  group('PR19: session domain — ledger, recovery, FTS5, export', () {
+    ChatSession newSession(String id) {
+      final app = AppState.I;
+      final s = ChatSession(id: id, title: 'Title of $id', model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == id));
+      return s;
+    }
+
+    test('ledger append → read round-trip with stable seq', () async {
+      final s = newSession('sd-l1');
+      await SessionLedger.I.append(s.id, 'turn_start', {'turn': 0});
+      await SessionLedger.I.append(s.id, 'tool_start', {'tool': 'run_shell'});
+      await SessionLedger.I.append(s.id, 'tool_end', {
+        'tool': 'run_shell',
+        'ms': 12,
+        'ok': true,
+      });
+      await SessionLedger.I.append(s.id, 'turn_end', {
+        'steps': 1,
+        'turns': 1,
+      });
+      final events = await SessionLedger.I.read(s.id);
+      expect(events, hasLength(4));
+      expect(events.map((e) => e['seq']), [1, 2, 3, 4]);
+      expect(events.first['kind'], 'turn_start');
+      expect(events[2]['ms'], 12);
+      // Torn tail line is skipped, not fatal.
+      final f = File(
+        '${SessionLedger.rootOverrideForTest!.path}/${s.id}.jsonl',
+      );
+      f.writeAsStringSync('{broken json', mode: FileMode.append);
+      // A torn tail must not throw and must not lose earlier records.
+      final reread = await SessionLedger.I.read(s.id);
+      expect(reread, hasLength(4));
+    });
+
+    test('projection aggregates turns, steps, and tool counts', () async {
+      final s = newSession('sd-l2');
+      await SessionLedger.I.append(s.id, 'turn_start', {'turn': 0});
+      await SessionLedger.I.append(s.id, 'tool_start', {'tool': 'fs_glob'});
+      await SessionLedger.I.append(s.id, 'tool_end', {'tool': 'fs_glob', 'ms': 10});
+      await SessionLedger.I.append(s.id, 'tool_start', {'tool': 'fs_glob'});
+      await SessionLedger.I.append(s.id, 'tool_end', {'tool': 'fs_glob', 'ms': 5});
+      await SessionLedger.I.append(s.id, 'turn_end', {'steps': 2});
+      final p = await SessionLedger.I.projection(s.id);
+      expect(p.turns, 1);
+      expect(p.steps, 2);
+      expect(p.toolMs, 15);
+      expect(p.toolCounts['fs_glob'], 2);
+      await SessionLedger.I.close(s.id);
+    });
+
+    test('TOOL_OUTCOME_UNKNOWN: running rows resolve on recovery', () {
+      final s = newSession('sd-l3');
+      s.messages.add(
+        Message(
+          role: 'assistant',
+          kind: MsgKind.tool,
+          toolName: 'run_shell',
+          toolState: 'running',
+        ),
+      );
+      AgentService.I.recoverInterruptedRunsForTest();
+      expect(s.messages.last.toolState, 'unknown');
+      expect(
+        s.messages.last.toolDetail,
+        contains('outcome unknown'),
+      );
+    });
+
+    test('FTS5 search: ranked hits with snippets + session filter', () async {
+      final s1 = newSession('sd-f1');
+      s1.messages.addAll([
+        Message(role: 'user', content: 'fix the kafka consumer rebalance bug'),
+        Message(role: 'assistant', content: 'the rebalance timeout was too low'),
+      ]);
+      final s2 = newSession('sd-f2');
+      s2.messages.add(
+        Message(role: 'user', content: 'kafka topic partition design notes'),
+      );
+
+      final res = await AgentService.I.dispatchForTest('session_search', {
+        'query': 'kafka',
+        'limit': 10,
+      });
+      expect(res, contains('sd-f1'));
+      expect(res, contains('sd-f2'), reason: 'cross-session by default');
+      expect(res, contains('rebalance'), reason: 'snippet excerpts shown');
+
+      // scope:this — only the run session's rows survive.
+      AgentService.setRunSessionForTest(s2.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+      final scoped2 = await AgentService.I.dispatchForTest('session_search', {
+        'query': 'kafka',
+        'scope': 'this',
+      });
+      expect(scoped2, contains('sd-f2'));
+      expect(scoped2, isNot(contains('sd-f1')));
+    });
+
+    test('export ZIP contains sessions.json and ledger jsonl', () async {
+      // Touching the agent service registers the built-in commands
+      // (its constructor calls registerBuiltins).
+      final cmd = CommandService.I;
+      expect(AgentService.I, isNotNull);
+      final s = newSession('sd-e1');
+      s.messages.add(Message(role: 'user', content: 'export me'));
+      await SessionLedger.I.append(s.id, 'note', {'note': 'for export'});
+      // Drive the /export command handler.
+      final res = await cmd.execute('/export');
+      expect(res, isNotNull);
+      final feedback = res!.feedback ?? '';
+      expect(feedback, contains('.zip'));
+      final zipPath = feedback.split('\n').last.trim();
+      final bytes = File(zipPath).readAsBytesSync();
+      final archive = ZipDecoder().decodeBytes(bytes);
+      final names = archive.map((f) => f.name).toList();
+      expect(names, contains('manifest.json'));
+      expect(names, contains('sessions.json'));
+      expect(names, contains('ledgers/sd-e1.jsonl'));
+      final sessionsJson = String.fromCharCodes(
+        archive.firstWhere((f) => f.name == 'sessions.json').content,
+      );
+      expect(sessionsJson, contains('"id": "sd-e1"'));
+      await SessionLedger.I.close(s.id);
     });
   });
 }

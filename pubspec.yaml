@@ -49,6 +49,8 @@ dependencies:
   permission_handler: ^12.0.3
   file_picker: ^10.1.2
   url_launcher: ^6.3.1
+  sqlite3: ^2.4.0
+  sqlite3_flutter_libs: ^0.5.24
 
 
 dev_dependencies:

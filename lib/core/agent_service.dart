@@ -16,6 +16,8 @@ import 'sandbox_service.dart';
 import 'github_service.dart';
 import 'repo_cache.dart';
 import 'mcp_service.dart';
+import 'session_ledger.dart';
+import 'session_search.dart';
 import 'skills.dart';
 import 'commands.dart';
 
@@ -490,7 +492,10 @@ class AgentService extends ChangeNotifier {
     AppState.I.onSessionSwitched = onSessionSwitched;
     // Cold resume: rebuild subagent handles from the persisted lineage
     // after sessions load (DSH durable-descriptor parity).
-    AppState.I.onSessionsLoaded = restoreSubagentHandles;
+    AppState.I.onSessionsLoaded = () {
+      restoreSubagentHandles();
+      _recoverInterruptedRuns();
+    };
     // Composer commands + skills catalog.
     CommandService.I.registerBuiltins();
     _refreshSkillRoots();
@@ -2402,17 +2407,29 @@ class AgentService extends ChangeNotifier {
       'function': {
         'name': 'session_search',
         'description':
-            'Search past and current session events — tool calls, shell '
-            'commands, file edits, mode changes, approvals, errors.  Use '
-            'this to recall what happened earlier (e.g. "what commands '
-            'have I run?", "which files were edited?").',
+            'Full-text search across ALL sessions (FTS5, bm25-ranked, with '
+            'snippet excerpts). Use this to recall anything discussed or '
+            'produced earlier — messages, findings, file contents pasted in '
+            'chat. scope "this" limits to the current session.',
         'parameters': {
           'type': 'object',
           'properties': {
-            'query': {'type': 'string'},
+            'query': {
+              'type': 'string',
+              'description': 'Search text; quoted phrases match literally',
+            },
             'limit': {
               'type': 'integer',
               'description': 'Max results (default 20)',
+            },
+            'cursor': {
+              'type': 'integer',
+              'description': 'Paging offset from a previous call (opaque)',
+            },
+            'scope': {
+              'type': 'string',
+              'enum': ['all', 'this'],
+              'description': 'all (default) = every session; this = current',
             },
           },
           'required': ['query'],
@@ -3613,6 +3630,18 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           break;
         }
         _resetLiveBuffers();
+        // Ledger (PR19): one turn_start barrier per model request — the
+        // checkpoint BEFORE the LLM call is what recovery reasons about.
+        unawaited(
+          SessionLedger.I.append(s.id, 'turn_start', {'turn': turn}),
+        );
+        unawaited(
+          SessionLedger.I.append(s.id, 'checkpoint', {
+            'at': 'pre-llm',
+            'turn': turn,
+            'msgs': msgs.length,
+          }),
+        );
         var msg = await _callLlm(p, msgs, s);
         if (msg == null && _looksLikeContextOverflow(lastError)) {
           // DSH context-overflow recovery (C1 fixed): the provider rejected
@@ -3933,9 +3962,19 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       _cancelRequested = false;
       // The Zone exits with this function — there is nothing to pop.
       // The queue auto-continue continues on THIS run's session, captured
-      // from the zone (never the currently-active session in the UI).
+      // from the zone (never the currently-active one in the UI).
       final pinned = ctx.run;
       final pinnedSessionId = ctx.session.id;
+      // Ledger (PR19): run_end closes every open span — the barrier that
+      // makes TOOL_OUTCOME_UNKNOWN resolvable on recovery.
+      unawaited(
+        SessionLedger.I.append(pinnedSessionId, 'turn_end', {
+          'steps': pinned.steps,
+          'turns': pinned.turns,
+          'toolMs': pinned.toolMs,
+          'llmMs': pinned.llmMs,
+        }),
+      );
       // LLM session title (DSH parity): one cheap background call after
       // the first real exchange — fire-and-forget, heuristic stays on fail.
       unawaited(maybeGenerateSessionTitle(ctx.session));
@@ -4469,8 +4508,44 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     // duration into toolMs (surfaced in the composer StatsLine).
     final sw = Stopwatch()..start();
     _runResolved.steps += 1;
+    // Ledger (PR19): pre-tool checkpoint barrier — a crash between these
+    // two lines is exactly what TOOL_OUTCOME_UNKNOWN recovery resolves.
+    final ledgerSid = _runSession?.id;
+    if (ledgerSid != null) {
+      unawaited(
+        SessionLedger.I.append(ledgerSid, 'tool_start', {'tool': name}),
+      );
+      unawaited(
+        SessionLedger.I.append(ledgerSid, 'checkpoint', {
+          'at': 'pre-tool',
+          'tool': name,
+        }),
+      );
+    }
     try {
-      return await _dispatchInner(name, args);
+      final res = await _dispatchInner(name, args);
+      if (ledgerSid != null) {
+        unawaited(
+          SessionLedger.I.append(ledgerSid, 'tool_end', {
+            'tool': name,
+            'ms': sw.elapsedMilliseconds,
+            'ok': !res.startsWith('DENIED') && !_looksLikeToolError(res),
+          }),
+        );
+      }
+      return res;
+    } catch (e) {
+      if (ledgerSid != null) {
+        unawaited(
+          SessionLedger.I.append(ledgerSid, 'tool_end', {
+            'tool': name,
+            'ms': sw.elapsedMilliseconds,
+            'ok': false,
+            'error': '$e',
+          }),
+        );
+      }
+      rethrow;
     } finally {
       sw.stop();
       _runResolved.toolMs += sw.elapsedMilliseconds;
@@ -6937,6 +7012,38 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     notifyListeners();
   }
 
+  /// C9 recovery (DSH TOOL_OUTCOME_UNKNOWN parity): after an app death,
+  /// any chat session left with a tool row stuck at state 'running' had no
+  /// verdict — it spun forever. On session load, every such row is resolved
+  /// as UNKNOWN with an honest note, and the ledger records the recovery.
+  void _recoverInterruptedRuns() {
+    for (final s in AppState.I.sessions) {
+      final stuck = s.messages
+          .where((m) => m.kind == MsgKind.tool && m.toolState == 'running')
+          .toList();
+      if (stuck.isEmpty) continue;
+      for (final m in stuck) {
+        m.toolState = 'unknown';
+        m.toolDetail =
+            '${m.toolDetail ?? ''}\n'
+            '[outcome unknown — the app stopped before this tool replied. '
+            'Its effect may or may not have happened; verify before relying '
+            'on it.]';
+      }
+      unawaited(
+        SessionLedger.I.append(s.id, 'note', {
+          'note': 'recovered ${stuck.length} tool row(s) as UNKNOWN '
+              '(app death mid-run)',
+        }),
+      );
+      AppState.I.persistSessions();
+    }
+  }
+
+  /// Test seam for [_recoverInterruptedRuns].
+  @visibleForTesting
+  void recoverInterruptedRunsForTest() => _recoverInterruptedRuns();
+
   Future<String> _handleSendMessage(Map<String, dynamic> args) async {
     final id = args['subagent_id'] as String;
     final message = args['message'] as String;
@@ -7426,34 +7533,54 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
   // so session_search queries both messages and the event log.
   final List<SessionEvent> _sessionEvents = [];
 
-  String _handleSessionSearch(Map<String, dynamic> args) {
-    final query = (args['query'] as String).toLowerCase();
+  Future<String> _handleSessionSearch(Map<String, dynamic> args) async {
+    final query = (args['query'] as String).trim();
     final limit = (args['limit'] as num?)?.toInt() ?? 20;
-    // Search session messages + event log.
-    final s = _runSession;
-    final results = <String>[];
-    // Messages.
-    if (s != null) {
-      for (final m in s.messages) {
-        if (m.content.toLowerCase().contains(query)) {
-          results.add('[${m.role}] ${cleanTruncate(m.content, 120)}');
-          if (results.length >= limit) break;
-        }
-      }
+    final cursor = (args['cursor'] as num?)?.toInt() ?? 0;
+    final scope = args['scope'] as String? ?? 'all'; // all | this
+    if (query.isEmpty) return 'query is required';
+
+    // Reindex from the live session list (derived data — cheap rebuild).
+    final app = AppState.I;
+    await SessionSearch.I.reindex([
+      for (final s in app.sessions)
+        (
+          id: s.id,
+          model: s.model,
+          rows: [
+            for (final m in s.messages)
+              if (m.content.trim().isNotEmpty)
+                (role: m.role, content: m.content),
+          ],
+        ),
+    ]);
+
+    final hits = await SessionSearch.I.search(
+      query,
+      limit: limit,
+      cursor: cursor,
+      sessionId: scope == 'this' ? (_runSession?.id ?? app.activeSessionId) : null,
+    );
+    if (hits.isEmpty) {
+      return 'No matches for "$query"'
+          '${cursor > 0 ? ' (cursor $cursor)' : ''}.';
     }
-    // Events (this session only — parallel sessions stay isolated).
-    final evSessionId = _pinnedRunId ?? AppState.I.activeSessionId;
-    for (final e in _sessionEvents) {
-      if (e.sessionId != null && e.sessionId != evSessionId) continue;
-      if (e.data.toLowerCase().contains(query) ||
-          e.type.toLowerCase().contains(query)) {
-        results.add('[${e.type}] ${e.data}');
-        if (results.length >= limit) break;
-      }
+    final lines = [
+      for (final h in hits)
+        '[${h.role} · ${_sessionShortName(h.sessionId)}] ${h.snippet}',
+    ];
+    final more = hits.length >= limit ? '\n(more: re-call with cursor ${cursor + limit})' : '';
+    return 'session_search "$query" → ${hits.length} result(s):\n'
+        '${lines.join('\n')}$more';
+  }
+
+  /// Short human name for a session id in search results.
+  String _sessionShortName(String sessionId) {
+    final s = AppState.I.sessionById(sessionId);
+    if (s == null) {
+      return sessionId.length > 8 ? sessionId.substring(0, 8) : sessionId;
     }
-    if (results.isEmpty) return 'No matches for "$query".';
-    return 'session_search "$query" → ${results.length} results:\n'
-        '${results.join('\n')}';
+    return cleanTruncate(s.title, 28);
   }
 
   Future<String> _requestSystemPermission(String name) async {

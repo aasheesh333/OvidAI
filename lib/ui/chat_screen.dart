@@ -10,6 +10,7 @@ import '../core/theme.dart';
 import '../core/state.dart';
 import 'sandbox_setup.dart';
 import 'browser_screen.dart';
+import 'trajectory_screen.dart';
 import 'sidebar.dart';
 import 'subagent_screen.dart';
 import '../core/agent_service.dart';
@@ -742,6 +743,17 @@ class _ChatScreenState extends State<ChatScreen>
                     ],
                   );
                 },
+              ),
+              IconButton(
+                tooltip: 'Trajectory — event ledger',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.timeline_outlined, size: 19),
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        TrajectoryScreen(sessionId: s?.id ?? ''),
+                  ),
+                ),
               ),
               IconButton(
                 tooltip: 'Studio — code & terminal',
@@ -1861,6 +1873,8 @@ class _ToolCardState extends State<_ToolCard>
                   const SizedBox(width: 10),
                   if (failed)
                     _StateDot(Aether.dangerC)
+                  else if (m.toolState == 'unknown')
+                    _StateDot(Aether.textFaint)
                   else if (stopped)
                     _StateDot(Aether.warn)
                   else if (running)

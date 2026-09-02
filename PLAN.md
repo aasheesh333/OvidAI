@@ -45,7 +45,7 @@ specs in §2. Findings below are code-level defects, separate from the feature g
 | C6 | ~~No cache buckets / tok/s / TTFT first-turn-only~~ **FIXED** (PR18) — cache_read/write parsed into UsageEntry, decode tok/s, per-turn TTFT average on the stats line | `_runTaskBody` metering | closed |
 | C7 | ~~`file_write` writes only to RepoCache; `fs_edit create` only to disk~~ **FIXED** (PR17) — one `_writeWorkspaceFile` path: disk + repo cache together, mirrors both ways | split write paths | closed |
 | C8 | ~~No spill store / output retention notices~~ **FIXED** (PR18) — `spillToolOutput` persists overflow to `.spill/`, exact omission notice + tool-shaped locator | `agent_service.dart` `spillToolOutput` | closed |
-| C9 | No checkpoints / `TOOL_OUTCOME_UNKNOWN` | no persistence barrier | a kill mid-tool leaves rows spinning forever |
+| C9 | ~~No checkpoints / `TOOL_OUTCOME_UNKNOWN`~~ **FIXED** (PR19) — ledger checkpoint barriers + `_recoverInterruptedRuns` resolves stuck rows as `unknown` on load | `session_ledger.dart` | closed |
 | C10 | ~~`web_search` is single-query DuckDuckGo scraping, no URLs~~ **FIXED** — DSH-parity `queries` array (1–4, exact dupes run once), concurrent fan-out, URL-dedup + round-robin merge, `Sources:` lines as `[title](url) — snippet` markdown links, cap notice, cite footer; one failed query fails the call (`Error: …`) | `agent_service.dart` `_webSearch`/`_ddgSearch` | closed (PR14 tests) |
 | C11 | ~~MCP: JSON-RPC errors returned as results; timeout yields `'null'`; no dead-process watcher~~ **FIXED** — full `mcp_service.dart` rewrite: `McpRpcResult` (errors never masquerade as results), 30s timeout with explicit message, process-death watcher + `_lastDeath` diagnostics, `notifications/tools/list_changed` → re-discovery, `isError` honoured, text/resource/image content kept apart, 6000-char head+tail trim; proxy tool gated on server existence | `mcp_service.dart` | reliability gap closed (PR13 tests) |
 | C12 | ~~Dead `MsgKind` branches~~ **FIXED** (PR17) — `imageGen` now constructed by real image-gen; `code` branch removed; `turnTail` documented reserved | `chat_screen.dart`, `state.dart` | closed |
@@ -162,14 +162,14 @@ Every user-visible feature DSH web ships, derived from the installed package set
 | 19 | Model selection | HALF — AppBar picker with per-model effort variants + `/model` command; no composer-seat trigger, no routable-block row | `chat_screen.dart` `_ModelPickerSheet`, `commands.dart` |
 | 20 | Permission presets | DONE — `AgentMode` presets + mode sheet + `/permission [preset]` with kebab-case names and a Full-access `confirm` acknowledgement | `commands.dart`, `chat_screen.dart` `_ModeChip` |
 | 21 | Approval panel | MISS — auto-run toggle only | `settings_screen.dart:204` |
-| 22 | Trajectory view | MISS — no event ledger tab | — |
-| 23 | Session log export | HALF — Export chats (JSON); no ZIP with logs + attachments + descendants | `settings_screen.dart:799` |
+| 22 | Trajectory view | DONE (PR19) — TrajectoryScreen: ledger records + stats projection strip, per-record detail | `lib/ui/trajectory_screen.dart` · `session_ledger.dart` |
+| 23 | Session log export | DONE (PR19) — `/export` writes a ZIP: manifest + sessions.json (lineage included) + per-session ledger JSONL | `commands.dart` `_exportSessionsZip` |
 | 24 | Directory picker | DONE — working-folder chip → `_pickFolderDirect` with All-Files-Access retry | `chat_screen.dart:3852` |
 | 25 | Settings domain | DONE — full settings tree (account, providers, plugins, memory, reasoning, GitHub sync, auto-run, skills, privacy, theme, timeout, context/output, export, delete) | `settings_screen.dart` |
 | 26 | Brand / connection | DONE (PR17) — `ConnectionService` 204-probe + sidebar brand chip (online/offline/checking, tap re-probes) | `lib/core/connection_service.dart` · `sidebar.dart` |
 | 27 | Theme | DONE — dark default + light theme toggle | `settings_screen.dart:530` |
 | 28 | Locale | MISS — English only | — |
-| 29 | Cross-session search | HALF — sidebar title search + `session_search` tool; no FTS5 content search with snippets | `sidebar.dart:115`, `agent_service.dart` |
+| 29 | Cross-session search | DONE (PR19) — FTS5 (`SessionSearch`): bm25-ranked snippets, `session_search` tool with scope/cursor; sidebar title search stays | `session_search.dart` · `agent_service.dart` `_handleSessionSearch` |
 | 30 | LLM session titles | DONE (PR17) — `maybeGenerateSessionTitle` after the first exchange (budgeted, thinking off, once per session, heuristic fallback, never overwrites a rename) | `agent_service.dart` |
 | 31 | Web search / fetch | DONE — `web_search` is DSH-parity multi-query (1–4 concurrent, URL-dedup round-robin, markdown-link citations, cap notice); `fetch_url` renders HTML → markdown (`_htmlToMarkdown`); both gated behind installed plugins | `agent_service.dart` `_webSearch`, `fetch_url` |
 | 32 | Precise file editor | DONE — `fs_edit` view/create/str_replace/insert, numbered `view`, single-occurrence enforcement, read-before-edit, and workspace path containment | `agent_service.dart` `_handleFsEdit`, `containedPath` |
@@ -179,7 +179,7 @@ Every user-visible feature DSH web ships, derived from the installed package set
 | 36 | Checkpoints / recovery | MISS — no checkpoint policy, no `TOOL_OUTCOME_UNKNOWN` semantics | — |
 | 37 | Spill + retention | DONE (PR18) — `spillToolOutput` spill store + exact omission notices + locators (C8) | `agent_service.dart` `spillToolOutput` |
 | 38 | FS observation policy | DONE (PR18) — read-before-edit (`FS_NOT_OBSERVED`) + CAS version guard (`FS_STALE_VERSION` on stale writes, re-read to retry) | `agent_service.dart` `_fsMarkObserved`/`_fsCheckFresh` |
-| 39 | Session stats projection | HALF — usage log aggregation; no turn/step/TTFT wall-time projection | `usage_screen.dart` |
+| 39 | Session stats projection | DONE (PR19) — `SessionLedger.projection` (turns/steps/tool+llm wall time/per-tool counts), surfaced in the trajectory header | `session_ledger.dart` |
 | 40 | Sandbox / shell | DONE — native Linux sandbox, multi-terminal, per-session workspaces, `run_shell`, `job_start` | `sandbox_service.dart:92-124`, `studio_screen.dart:740` |
 | 41 | MCP client | DONE — `McpService` JSON-RPC 2.0 (connect / tools-list / tools-call / disconnect) | `mcp_service.dart:15-158` |
 | 42 | Plugin inventory | DONE — PluginsScreen + categories + MCP config import + persisted marketplace registry that merges catalogs on open and on refresh | `plugins_screen.dart`, `state.dart` marketplaces block |
@@ -303,6 +303,40 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 49. ~~`web_search`~~ DONE — 1–4 concurrent queries, URL dedup, real citation URLs; `fetch_url` → markdown (C10 closed, PR14).
 50. ~~MCP reliability~~ DONE — errors surface as errors, dead-process watcher, `tools/list_changed` honoured (C11 closed by the `mcp_service.dart` rewrite + PR13 tests).
 
+### PR19 — Session domain: ledger, checkpoints, trajectory, FTS5 (DONE)
+- **Event ledger (full event-sourcing, parallel — zero model-rewrite risk)**
+  `lib/core/session_ledger.dart`: append-only JSONL per session
+  (`<docs>/session-ledgers/<id>.jsonl`), seq-ordered, torn-tail tolerant,
+  best-effort writes (a failing disk never breaks a run). Wired:
+  `turn_start` + `checkpoint(pre-llm)` per model request, `tool_start` +
+  `checkpoint(pre-tool)` + `tool_end(ms, ok)` per dispatch, `turn_end`
+  (steps/turns/toolMs/llmMs) at run end, recovery `note`s. `read()` flushes
+  open sinks first so just-written lines are visible.
+- **C9 / TOOL_OUTCOME_UNKNOWN** — `_recoverInterruptedRuns` on session load:
+  tool rows stuck at `running` after an app death resolve to `unknown`
+  (grey dot in `_ToolCard`) with an honest "outcome unknown — verify before
+  relying on it" note; the ledger records the recovery. No more spinners.
+- **#22 Trajectory view** — `lib/ui/trajectory_screen.dart` (AppBar timeline
+  icon): per-session ledger records with seq/timestamp/duration/data +
+  summary strip from the projection (turns, steps, wall/llm/tool time, top
+  tools ×count) + refresh.
+- **#39 stats projection** — `SessionLedger.projection`: exact turn/step
+  counts, tool/llm wall times, per-tool counts.
+- **#23 export ZIP** — `/export` writes a ZIP (manifest.json, sessions.json
+  with full lineage, `ledgers/<id>.jsonl`) — test seam
+  `CommandService.exportDirOverrideForTest`.
+- **#29 FTS5 search** — deps `sqlite3` + `sqlite3_flutter_libs`; `SessionSearch`
+  (`lib/core/session_search.dart`): on-device FTS5 index rebuilt from live
+  sessions (derived data — sessions stay the source of truth), bm25-ranked
+  results with snippet excerpts; `session_search` tool upgraded: cross-session
+  by default, `scope: this|all`, `cursor` paging. Host tests load
+  `libsqlite3.so.0` via `open.overrideFor`.
+- **Realtime install parity (agent path)** — `agent_install_plugin` on
+  MCP-category plugins now REALLY connects the server + persists intent +
+  lists discovered tools (was: flag flip only — the exact "marketplace kaam
+  nahi karta" report); `agent_install_mcp` lists discovered tool names.
+- Tests: PR19 group — 147 → 153.
+
 ### PR18 — Context engineering (DONE)
 - **C8 spill store** — `spillToolOutput`: oversized tool output (>cap) is
   persisted to `<workspace>/.spill/<id>.txt`; the model gets head/tail with an
@@ -406,7 +440,7 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 52. Presets / persona (optional — evaluate whether mobile needs preset stacks).
 53. Ralph loop tool (optional, gated on explicit user request like DSH).
 
-**Verification gate after every phase:** `flutter analyze` (0 issues) + `flutter test` (141 tests) + commit + push + CI green on `ci/verified-android-build-20260827`.
+**Verification gate after every phase:** `flutter analyze` (0 issues) + `flutter test` (153 tests) + commit + push + CI green on `ci/verified-android-build-20260827`.
 
 ---
 
