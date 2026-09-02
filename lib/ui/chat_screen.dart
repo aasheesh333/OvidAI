@@ -4716,24 +4716,62 @@ class _DshMarkdown extends StatelessWidget {
 
 /// Open a markdown link: http(s) in the in-app browser (so the agent and the
 /// user share one browsing surface), everything else (mailto:, tel:, custom
-/// schemes) through the platform handler.
+/// schemes) through the platform handler. External launches that nothing can
+/// handle fall back to the in-app browser so the tap never dies silently.
 Future<void> _openLink(
   BuildContext context,
   String text,
   String? href,
   String title,
 ) async {
-  final raw = href?.trim();
-  if (raw == null || raw.isEmpty) return;
-  final uri = Uri.tryParse(raw);
+  var raw = href?.trim();
+  if (raw == null || raw.isEmpty) {
+    // Bare-domain text ("example.com", "www.x.dev/y") — open it too.
+    final t = text.trim();
+    if (t.isEmpty) return;
+    final domainLike = RegExp(
+      r'^(www\.)?[\w-]+(\.[\w-]+)+(/.*)?$',
+    ).firstMatch(t);
+    if (domainLike == null) return;
+    raw = t.startsWith('www.') ? 'https://$t' : 'https://$t';
+  }
+  var uri = Uri.tryParse(raw);
+  // Schemeless hrefs ("example.com/a") are relative in markdown terms, but
+  // browsers expect a scheme — normalize before deciding anything.
+  if (uri != null && uri.scheme.isEmpty && uri.host.isNotEmpty) {
+    uri = Uri.tryParse('https://$raw');
+  }
   if (uri == null) return;
+  final messenger = ScaffoldMessenger.of(context);
+  void fallback() => launchUrl(uri!, mode: LaunchMode.externalApplication);
   if (uri.scheme == 'http' || uri.scheme == 'https') {
-    await BrowserScreen.open(context, url: raw);
+    await BrowserScreen.open(context, url: uri.toString());
     return;
   }
   try {
-    await launchUrl(uri, mode: LaunchMode.externalApplication);
-  } catch (_) {}
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!ok) {
+      // No handler (missing <queries> entry / app not installed) — tell the
+      // user instead of swallowing the failure.
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('No app can open ${uri.scheme} links.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  } catch (_) {
+    try {
+      fallback();
+    } catch (_) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Could not open this link.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
 }
 
 /// Copyable fenced code box with lang label, copy, and diff coloring.

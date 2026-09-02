@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../core/theme.dart';
 import 'agent_notification_service.dart';
 import 'state.dart';
@@ -104,6 +105,76 @@ String cleanReasoningText(String raw) {
 }
 
 String _fmtK(int n) => n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}K' : '$n';
+
+/// Minimal HTML → markdown for `fetch_url` (turndown-style, no deps).
+///
+/// The old renderer stripped every tag to a flat space, which destroyed
+/// headings, lists, links and code — the model got prose soup it could not
+/// cite. This keeps document structure the model can actually use:
+/// headings as `#`, links as `[text](url)`, images dropped, code fenced.
+@visibleForTesting
+String htmlToMarkdownForTest(String html) => _htmlToMarkdown(html);
+
+// Exposed via the service for the fetch_url tool.
+// ignore: unused_element
+String _htmlToMarkdown(String html) {
+  var s = html;
+  // Drop non-content blocks entirely.
+  s = s
+      .replaceAll(RegExp(r'<!--[\s\S]*?-->', multiLine: true), '')
+      .replaceAll(RegExp(r'<script[\s\S]*?</script>', multiLine: true), '')
+      .replaceAll(RegExp(r'<style[\s\S]*?</style>', multiLine: true), '')
+      .replaceAll(RegExp(r'<noscript[\s\S]*?</noscript>', multiLine: true), '')
+      .replaceAll(RegExp(r'<(nav|footer|aside)[\s\S]*?</\1>',
+          multiLine: true, caseSensitive: false), '');
+
+  String tag(String re, String Function(Match) f) =>
+      s = s.replaceAllMapped(RegExp(re, multiLine: true, caseSensitive: false), f);
+
+  tag(r'<h1[^>]*>([\s\S]*?)</h1>', (m) => '\n# ${m[1]}\n');
+  tag(r'<h2[^>]*>([\s\S]*?)</h2>', (m) => '\n## ${m[1]}\n');
+  tag(r'<h3[^>]*>([\s\S]*?)</h3>', (m) => '\n### ${m[1]}\n');
+  tag(r'<h[456][^>]*>([\s\S]*?)</h[456]>', (m) => '\n#### ${m[1]}\n');
+  // Links keep their href so the model can cite the source.
+  tag(r'<a[^>]*href="([^"#]*)"[^>]*>([\s\S]*?)</a>', (m) {
+    final label = (m[2] ?? '').trim();
+    if (label.isEmpty) return '';
+    return '[${label.replaceAll('\n', ' ')}](${m[1]})';
+  });
+  tag(r'<img[^>]*alt="([^"]*)"[^>]*>', (m) =>
+      (m[1] ?? '').trim().isEmpty ? '' : ' [image: ${m[1]}] ');
+  tag(r'<img[^>]*>', (m) => '');
+  tag(r'<(br|hr)\s*/?>', (m) => m[1]!.toLowerCase() == 'hr' ? '\n\n---\n\n' : '\n');
+  tag(r'</(p|div|section|article|li|tr|table|ul|ol|h1|h2|h3|h4|h5|h6)>',
+      (m) => '\n');
+  tag(r'<li[^>]*>', (m) => '\n- ');
+  tag(r'<pre[^>]*>([\s\S]*?)</pre>', (m) => '\n```\n${m[1]}\n```\n');
+  tag(r'<(strong|b)[^>]*>([\s\S]*?)</\1>', (m) => '**${m[2]}**');
+  tag(r'<(em|i)[^>]*>([\s\S]*?)</\1>', (m) => '*${m[2]}*');
+  tag(r'<code[^>]*>([\s\S]*?)</code>', (m) => '`${m[1]}`');
+  tag(r'<blockquote[^>]*>', (m) => '\n> ');
+
+  // Strip everything left (tags, entities we don't specifically handle).
+  s = s.replaceAll(RegExp(r'<[^>]+>'), ' ');
+  const entities = {
+    '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"',
+    '&#39;': "'", '&apos;': "'", '&nbsp;': ' ', '&mdash;': '—',
+    '&ndash;': '–', '&hellip;': '…', '&copy;': '©', '&reg;': '®',
+  };
+  for (final e in entities.entries) {
+    s = s.replaceAll(e.key, e.value);
+  }
+  s = s.replaceAllMapped(RegExp(r'&#(\d+);'), (m) =>
+      String.fromCharCode(int.parse(m[1] ?? '0')));
+
+  // Collapse the noise: 3+ newlines → 2, runs of spaces → 1.
+  s = s
+      .replaceAll('\r', '')
+      .replaceAll(RegExp(r'\n{3,}'), '\n\n')
+      .replaceAll(RegExp(r'[ \t]{2,}'), ' ')
+      .trim();
+  return s;
+}
 
 /// Boundary-aware truncation that never strands a half-cut character or a
 /// dangling ellipsis inside a word. Returns text no longer than [max].
@@ -929,6 +1000,46 @@ class AgentService extends ChangeNotifier {
           onWebResourceError: (_) {
             tab.loading = false;
           },
+          // Android pages hand off to other apps via intent:// URLs (Play
+          // Store, YouTube, WhatsApp share, …). The WebView cannot load
+          // them itself, so the navigation would silently die. Route each
+          // one to the platform and let the OS pick the target app; when
+          // nothing handles it, fall back to the plain https URL that
+          // intent:// URLs always carry as a fallback query param.
+          onNavigationRequest: (request) async {
+            final url = request.url;
+            final uri = Uri.tryParse(url);
+            if (uri == null) return NavigationDecision.navigate;
+            if (uri.scheme == 'intent') {
+              // intent://<host>/path#Intent;scheme=…;package=…;S.browser_fallback_url=<url>;end
+              final fallback = uri.queryParameters['browser_fallback_url'];
+              var target = url.replaceFirst('intent://', 'https://');
+              final hash = target.indexOf('#');
+              if (hash >= 0) target = target.substring(0, hash);
+              if (fallback != null &&
+                  fallback.startsWith('http') &&
+                  Uri.tryParse(fallback) != null) {
+                target = fallback;
+              }
+              // Move the tab to the target instead of launching outside:
+              // the agent/user tapped it inside OUR browser, and the page
+              // is usually a mobile web URL.
+              tab.controller?.loadRequest(Uri.parse(target));
+              return NavigationDecision.prevent;
+            }
+            if (uri.scheme != 'http' &&
+                uri.scheme != 'https' &&
+                uri.scheme != 'about' &&
+                uri.scheme != 'data' &&
+                !url.startsWith('file:')) {
+              // mailto:, tel:, whatsapp:, custom schemes → the OS handler.
+              try {
+                await launchUrl(uri, mode: LaunchMode.externalApplication);
+              } catch (_) {}
+              return NavigationDecision.prevent;
+            }
+            return NavigationDecision.navigate;
+          },
         ),
       );
     if (!tab.loadedOnce) {
@@ -1306,8 +1417,9 @@ class AgentService extends ChangeNotifier {
       if (p.name == 'File Reader') tools.add(_fileReadTool);
       if (p.name == 'Web Fetch & Reader') tools.add(_webFetchTool);
       if (p.name == 'Code Runner') tools.add(_codeRunnerTool);
-      if (p.category == 'MCP' && p.installed && p.enabled) {
-        tools.add(_mcpProxyTool(p));
+      if (p.category == 'MCP') {
+        final proxy = _mcpProxyTool(p);
+        if (proxy != null) tools.add(proxy);
       }
     }
     // ── User settings gates (persisted toggles from Settings screen) ──
@@ -2562,8 +2674,14 @@ class AgentService extends ChangeNotifier {
     },
   };
 
-  // MCP proxy — generic tool for any installed MCP server
-  Map<String, dynamic> _mcpProxyTool(PluginItem p) {
+  // MCP proxy — generic tool for an installed MCP plugin. Only offered
+  // while the plugin is installed AND its server actually exists in the
+  // catalog; a removed server must not keep advertising its proxy tool.
+  Map<String, dynamic>? _mcpProxyTool(PluginItem p) {
+    final hasServer = AppState.I.mcpServers.any(
+      (s) => s.name.toLowerCase() == p.name.toLowerCase(),
+    );
+    if (!hasServer) return null;
     final safe = p.name
         .toLowerCase()
         .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
@@ -4209,20 +4327,8 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
             Uri.parse(u),
             headers: {'User-Agent': 'OvidAgent/1.0'},
           );
-          var body = utf8.decode(r.bytes, allowMalformed: true);
-          body = body
-              .replaceAll(
-                RegExp(r'<script[\s\S]*?</script>', multiLine: true),
-                '',
-              )
-              .replaceAll(
-                RegExp(r'<style[\s\S]*?</style>', multiLine: true),
-                '',
-              )
-              .replaceAll(RegExp(r'<[^>]+>'), ' ')
-              .replaceAll(RegExp(r'\s{2,}'), '\n')
-              .trim();
-          return cleanTruncate(body, 5000);
+          final body = utf8.decode(r.bytes, allowMalformed: true);
+          return cleanTruncate(_htmlToMarkdown(body), 8000);
         } catch (e) {
           return 'fetch failed: $e';
         }

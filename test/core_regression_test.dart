@@ -2999,4 +2999,96 @@ Translate the following. This is the skill body.''');
       expect(parent.messages.last.content, 'hello');
     });
   });
+
+  group('PR13: web links + MCP reliability', () {
+    test('fetch_url renders HTML as markdown, not tag-stripped soup', () {
+      // Direct unit check of the renderer the tool uses.
+      final fn = htmlToMarkdownForTest;
+      const html = '''
+<html><head><style>x{}</style><script>bad()</script></head>
+<body><nav>junk</nav>
+<h1>Title &amp; More</h1>
+<p>Hello <strong>world</strong>, see <a href="https://ex.com/a">docs</a>.</p>
+<ul><li>one</li><li>two</li></ul>
+<pre>code()
+block</pre>
+<footer>junk</footer></body></html>''';
+      final md = fn(html);
+      expect(md, contains('# Title & More'));
+      expect(md, contains('**world**'));
+      expect(md, contains('[docs](https://ex.com/a)'));
+      expect(md, contains('- one'));
+      expect(md, contains('```\ncode()\nblock'));
+      expect(md, isNot(contains('<script')));
+      expect(md, isNot(contains('junk')), reason: 'nav/footer dropped');
+      expect(md, isNot(contains('bad()')));
+    });
+
+    test('MCP tool result is capped with an exact omission notice', () {
+      final big = 'x' * 20000;
+      final out = McpService.trimResultForTest(big);
+      expect(out.length, lessThan(20000));
+      expect(out, contains('characters omitted'));
+      expect(out.startsWith('xxxx'), isTrue);
+      expect(out.endsWith('xxxx'), isTrue);
+      final small = 'fine';
+      expect(McpService.trimResultForTest(small), 'fine');
+    });
+
+    test('MCP JSON-RPC errors surface as errors, never as results', () async {
+      // A server that replies with a JSON-RPC error object must not have
+      // that error stringified into a successful tool result.
+      final res = await McpService.callToolForTest(
+        replies: [
+          '{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Invalid params"}}',
+        ],
+        method: 'tools/call',
+      );
+      expect(res, contains('MCP error'));
+      expect(res, contains('Invalid params'));
+    });
+
+    test('MCP timeout surfaces as a timeout error, not the text "null"',
+        () async {
+      McpService.rpcTimeoutSecondsForTest = 1; // shrink the deadline
+      try {
+        final res = await McpService.callToolForTest(
+          replies: const [],
+          method: 'tools/call',
+        );
+        expect(res, contains('MCP error'));
+        expect(res, contains('timed out'));
+        expect(res, isNot(contains('null')),
+            reason: 'the old code handed the model the literal string "null"');
+      } finally {
+        McpService.rpcTimeoutSecondsForTest = 30;
+      }
+    });
+
+    test('MCP callTool honours isError from the server', () async {
+      final res = await McpService.callToolForTest(
+        replies: [
+          '{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"boom"}]}}',
+        ],
+        method: 'tools/call',
+      );
+      expect(res, contains('MCP error'));
+      expect(res, contains('boom'));
+    });
+
+    test('MCP callTool keeps text/resource/image content apart', () async {
+      final res = await McpService.callToolForTest(
+        replies: [
+          '{"jsonrpc":"2.0","id":1,"result":{"content":['
+          '{"type":"text","text":"hello"},'
+          '{"type":"resource","resource":{"text":"res-body"}},'
+          '{"type":"image","data":"..."}]}}',
+        ],
+        method: 'tools/call',
+      );
+      expect(res, contains('hello'));
+      expect(res, contains('[resource] res-body'));
+      expect(res, contains('image content returned'));
+    });
+  });
 }
