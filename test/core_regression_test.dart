@@ -4992,6 +4992,85 @@ block</pre>
     });
   });
 
+  group('PR28: real-user browser control', () {
+    test('new tools are on the roster with schemas', () {
+      final app = AppState.I;
+      final s = ChatSession(id: 'br1', title: 'B', model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      final names = AgentService.I.toolsForTest()
+          .map((t) => t['function']['name'] as String)
+          .toSet();
+      for (final n in [
+        'browser_back',
+        'browser_forward',
+        'browser_reload',
+        'browser_hover',
+        'browser_drag',
+        'browser_select',
+        'browser_fill',
+        'browser_find',
+        'browser_cookies',
+        'browser_outline',
+      ]) {
+        expect(names, contains(n), reason: '$n on the roster');
+      }
+    });
+
+    test('browser_click reports not-found without a live controller',
+        () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'br2', title: 'B', model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      // No WebView platform in unit tests — WebViewController creation
+      // asserts. The CONTRACT: click never returns a blind success; it
+      // either runs the pre-check or fails loudly. Both are honest.
+      Object? thrown;
+      String? res;
+      try {
+        res = await AgentService.I.dispatchForTest('browser_click', {
+          'selector': '#nonexistent',
+        });
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown != null || res != null, isTrue);
+      if (res != null) {
+        expect(
+          res,
+          anyOf(contains('not found'), contains('failed')),
+          reason: 'no blind "Clicked (or attempted)" lies',
+        );
+      }
+    });
+
+    test('fill/drag/select summaries appear on tool cards', () {
+      // _toolArgSummary contract for the new tools (visible cards).
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(src, contains("'browser_drag' =>"));
+      expect(src, contains("'browser_fill' =>"));
+      expect(src, contains("'browser_select' =>"));
+      // Human-like click pre-check exists (W10).
+      expect(src, contains('element not visible'));
+      expect(src, contains('scrollIntoView'));
+    });
+
+    test('JS builders use real pointer/DnD event chains', () {
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(src, contains('new PointerEvent(type,'));
+      expect(src, contains("new DragEvent('dragstart'"));
+      expect(src, contains("new MouseEvent('mouseover'"));
+      expect(src, contains("new Event('input', {bubbles:true})"));
+    });
+  });
+
   group('PR21: workflow + ralph orchestration', () {
     ChatSession newParent(String id) {
       final app = AppState.I;

@@ -2205,6 +2205,141 @@ class AgentService extends ChangeNotifier {
         },
       },
     },
+    // ── PR28: real-user browser control (chrome-devtools-mcp parity) ──
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_back',
+        'description': 'Go back one step in the active tab\'s history.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_forward',
+        'description': 'Go forward one step in the active tab\'s history.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_reload',
+        'description': 'Reload the active tab (ignore cache).',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_hover',
+        'description':
+            'Hover over an element (CSS selector) — dispatches '
+            'mouseover/mouseenter/mousemove like a real pointer.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'selector': {'type': 'string'},
+          },
+          'required': ['selector'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_drag',
+        'description':
+            'Drag element `from` (CSS selector) onto element `to` via a '
+            'pointerdown/move/up sequence (HTML5 drag + mouse events).',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'from': {'type': 'string'},
+            'to': {'type': 'string'},
+          },
+          'required': ['from', 'to'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_select',
+        'description':
+            'Pick an option on a <select> dropdown by CSS selector + value.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'selector': {'type': 'string'},
+            'value': {'type': 'string'},
+          },
+          'required': ['selector', 'value'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_fill',
+        'description':
+            'Fill several form fields in one call: {"selector": "value", …}. '
+            'Dispatches input+change per field like browser_type.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'fields': {
+              'type': 'object',
+              'description': 'Map of CSS selector → text to type',
+            },
+          },
+          'required': ['fields'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_find',
+        'description':
+            'Count occurrences of text on the page and report the first '
+            'match\'s surrounding snippet.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'text': {'type': 'string'},
+          },
+          'required': ['text'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_cookies',
+        'description':
+            'Read the page\'s cookies (document.cookie — session-visible '
+            'ones). Args: {get: "name"} for one cookie.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'get': {'type': 'string', 'description': 'single cookie name'},
+          },
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_outline',
+        'description':
+            'Visual outline capture (webview_flutter has no pixel '
+            'screenshot API): returns the page\'s interactive skeleton — '
+            'headings, links, buttons, inputs with their labels.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
     // ── Core agent tools ──
     {
       'type': 'function',
@@ -3946,6 +4081,13 @@ You are Ovid's on-device coding & browsing agent running INSIDE a Flutter app.
 Environment: Android device with a native Linux sandbox (python3/node/git via apt),
 a live Browser panel, and the user's connected GitHub repo (${GitHubService.I.login ?? 'github'}).
 Browser default viewport: ${AppState.I.browserDesktopMode ? 'DESKTOP (1280px logical — sites serve desktop layouts)' : 'MOBILE (device viewport)'}.
+BROWSER METHOD: browse like a careful human — snapshot first to locate real
+selectors, verify elements exist/are visible before clicking (a click that
+returns "not visible" means: scroll or wait, then retry), read after acting
+to confirm the result. Use browser_fill for whole forms, browser_select for
+dropdowns, browser_drag for drag-and-drop, browser_hover for menus that open
+on hover, browser_back/forward/reload for navigation, browser_find to
+locate text, browser_outline for a quick page skeleton.
 Access mode: ${mode.label.toUpperCase()} — ${mode.hint}
 ${mode == AgentMode.safe ? '''
 MODE RESTRICTIONS (Read-Only): you are in a read-only session. You may read
@@ -5712,10 +5854,41 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         final sel = args['selector'] as String;
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
+        // PR28/W10 human-like click: scroll into view, VERIFY the element
+        // is visible (a blind dispatch on a hidden element silently does
+        // nothing — the model then hallucinates success), small settle
+        // delay, then click.
+        final check = '''
+(() => {
+  const el = document.querySelector(${jsonEncode(sel)});
+  if (!el) return 'MISSING';
+  el.scrollIntoView({block:'center', behavior:'instant'});
+  const r = el.getBoundingClientRect();
+  const visible = r.width > 0 && r.height > 0 &&
+    r.bottom >= 0 && r.top <= innerHeight;
+  return visible ? 'OK' : 'HIDDEN';
+})()''';
+        try {
+          final pre = await tab.controller!
+              .runJavaScriptReturningResult(check)
+              .timeout(const Duration(seconds: 5));
+          final state = pre.toString();
+          if (state.contains('MISSING')) {
+            return 'element not found: $sel — use browser_snapshot to '
+                'locate the right selector first';
+          }
+          if (state.contains('HIDDEN')) {
+            return 'element not visible: $sel — scroll (browser_scroll) or '
+                'wait (browser_wait_for) first, then click';
+          }
+        } catch (_) {}
+        await Future.delayed(
+          Duration(milliseconds: 150 + DateTime.now().millisecond % 250),
+        );
         final js = 'document.querySelector(${jsonEncode(sel)})?.click()';
         await tab.controller!.runJavaScript(js);
         _emit('shell', 'click: $sel');
-        return 'Clicked $sel (or attempted)';
+        return 'Clicked $sel (visible, scrolled into view)';
       case 'browser_evaluate':
         final expr = args['expression'] as String;
         final tab = _activeTab;
@@ -5876,6 +6049,257 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         return found
             ? 'found: $text (after ${sw.elapsedMilliseconds}ms)'
             : 'timeout: "$text" did not appear within ${timeoutMs}ms';
+
+      // ── PR28: real-user browser control (chrome-devtools-mcp parity) ──
+      case 'browser_back':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        try {
+          await tab.controller!.goBack();
+          _emit('nav', 'back');
+          return 'went back (now: ${tab.url})';
+        } catch (e) {
+          return 'back failed: $e';
+        }
+
+      case 'browser_forward':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        try {
+          await tab.controller!.goForward();
+          _emit('nav', 'forward');
+          return 'went forward (now: ${tab.url})';
+        } catch (e) {
+          return 'forward failed: $e';
+        }
+
+      case 'browser_reload':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        try {
+          await tab.controller!.reload();
+          _emit('nav', 'reload');
+          return 'reloaded ${tab.url}';
+        } catch (e) {
+          return 'reload failed: $e';
+        }
+
+      case 'browser_hover':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        final sel = args['selector'] as String;
+        // Human-like: scroll into view, then a full pointer event chain.
+        final js = '''
+(() => {
+  const el = document.querySelector(${jsonEncode(sel)});
+  if (!el) return 'no element: $sel';
+  el.scrollIntoView({block:'center', behavior:'instant'});
+  const r = el.getBoundingClientRect();
+  const x = r.x + r.width/2, y = r.y + r.height/2;
+  const opts = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+                button:0, buttons:1};
+  el.dispatchEvent(new MouseEvent('mouseover', opts));
+  el.dispatchEvent(new MouseEvent('mouseenter', {...opts, bubbles:false}));
+  el.dispatchEvent(new MouseEvent('mousemove', opts));
+  return 'hovered $sel at \${Math.round(x)},\${Math.round(y)}';
+})()''';
+        try {
+          final r = await tab.controller!.runJavaScriptReturningResult(js);
+          _emit('shell', 'hover $sel');
+          return r.toString();
+        } catch (e) {
+          return 'hover failed: $e';
+        }
+
+      case 'browser_drag':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        final fromSel = args['from'] as String;
+        final toSel = args['to'] as String;
+        final js = '''
+(() => {
+  const from = document.querySelector(${jsonEncode(fromSel)});
+  const to = document.querySelector(${jsonEncode(toSel)});
+  if (!from) return 'no source: $fromSel';
+  if (!to) return 'no target: $toSel';
+  from.scrollIntoView({block:'center', behavior:'instant'});
+  const fr = from.getBoundingClientRect();
+  const tr = to.getBoundingClientRect();
+  const fx = fr.x+fr.width/2, fy = fr.y+fr.height/2;
+  const tx = tr.x+tr.width/2, ty = tr.y+tr.height/2;
+  const mk = (type, x, y) => new PointerEvent(type, {
+    bubbles:true, cancelable:true, pointerId:1, pointerType:'mouse',
+    isPrimary:true, button:0, buttons:1, clientX:x, clientY:y});
+  from.dispatchEvent(mk('pointerdown', fx, fy));
+  from.dispatchEvent(new MouseEvent('mousedown', {bubbles:true,cancelable:true,clientX:fx,clientY:fy,button:0}));
+  to.dispatchEvent(mk('pointermove', tx, ty));
+  to.dispatchEvent(new MouseEvent('mousemove', {bubbles:true,cancelable:true,clientX:tx,clientY:ty}));
+  to.dispatchEvent(mk('pointerup', tx, ty));
+  to.dispatchEvent(new MouseEvent('mouseup', {bubbles:true,cancelable:true,clientX:tx,clientY:ty,button:0}));
+  // HTML5 DnD chain too — frameworks listen to either.
+  const dt = new DataTransfer();
+  const dd = new DragEvent('dragstart', {bubbles:true, dataTransfer:dt});
+  from.dispatchEvent(dd);
+  to.dispatchEvent(new DragEvent('dragover', {bubbles:true, dataTransfer:dt}));
+  to.dispatchEvent(new DragEvent('drop', {bubbles:true, dataTransfer:dt}));
+  from.dispatchEvent(new DragEvent('dragend', {bubbles:true, dataTransfer:dt}));
+  return 'dragged $fromSel → $toSel';
+})()''';
+        try {
+          final r = await tab.controller!.runJavaScriptReturningResult(js);
+          _emit('shell', 'drag $fromSel → $toSel');
+          return r.toString();
+        } catch (e) {
+          return 'drag failed: $e';
+        }
+
+      case 'browser_select':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        final sel = args['selector'] as String;
+        final value = args['value'] as String;
+        final js = '''
+(() => {
+  const el = document.querySelector(${jsonEncode(sel)});
+  if (!el) return 'no element: $sel';
+  if (el.tagName.toLowerCase() !== 'select') return 'not a <select>: $sel';
+  el.scrollIntoView({block:'center', behavior:'instant'});
+  el.value = ${jsonEncode(value)};
+  el.dispatchEvent(new Event('input', {bubbles:true}));
+  el.dispatchEvent(new Event('change', {bubbles:true}));
+  return 'selected \${el.value} in $sel';
+})()''';
+        try {
+          final r = await tab.controller!.runJavaScriptReturningResult(js);
+          _emit('shell', 'select $sel');
+          return r.toString();
+        } catch (e) {
+          return 'select failed: $e';
+        }
+
+      case 'browser_fill':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        final fields = (args['fields'] as Map?)?.cast<String, String>() ??
+            const <String, String>{};
+        if (fields.isEmpty) return 'fields map is empty';
+        final js = '''
+(() => {
+  const fields = ${jsonEncode(fields)};
+  const done = [];
+  for (const [sel, text] of Object.entries(fields)) {
+    const el = document.querySelector(sel);
+    if (!el) { done.push('MISSING ' + sel); continue; }
+    el.focus();
+    el.value = text;
+    el.dispatchEvent(new Event('input', {bubbles:true}));
+    el.dispatchEvent(new Event('change', {bubbles:true}));
+    done.push(sel + '←' + text.length + ' chars');
+  }
+  return done.join('; ');
+})()''';
+        try {
+          final r = await tab.controller!.runJavaScriptReturningResult(js);
+          _emit('shell', 'fill ${fields.length} fields');
+          return r.toString();
+        } catch (e) {
+          return 'fill failed: $e';
+        }
+
+      case 'browser_find':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        final text = args['text'] as String;
+        final js = '''
+(() => {
+  const t = ${jsonEncode(text)};
+  const body = document.body ? document.body.innerText : '';
+  const lower = body.toLowerCase();
+  const needle = t.toLowerCase();
+  let count = 0, idx = 0;
+  while ((idx = lower.indexOf(needle, idx)) !== -1) { count++; idx += needle.length; }
+  if (count === 0) return 'not found: "' + t + '"';
+  const at = lower.indexOf(needle);
+  const from = Math.max(0, at - 60);
+  const snippet = body.substring(from, Math.min(body.length, at + needle.length + 60)).replace(/\\s+/g, ' ');
+  return count + ' match(es) for "' + t + '" — first: …' + snippet + '…';
+})()''';
+        try {
+          final r = await tab.controller!.runJavaScriptReturningResult(js);
+          _emit('shell', 'find "$text"');
+          return r.toString();
+        } catch (e) {
+          return 'find failed: $e';
+        }
+
+      case 'browser_cookies':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        final get = args['get'] as String?;
+        final js = get == null
+            ? 'document.cookie || "(no cookies)"'
+            : '''
+(() => {
+  const c = document.cookie.split('; ').find(r => r.startsWith(${jsonEncode(get)} + '='));
+  return c ? c : 'no cookie: ${get.replaceAll("'", r"\'")}';
+})()''';
+        try {
+          final r = await tab.controller!.runJavaScriptReturningResult(js);
+          final raw = r.toString();
+          final text = raw.startsWith('"') && raw.endsWith('"')
+              ? jsonDecode(raw) as String
+              : raw;
+          return 'cookies: $text';
+        } catch (e) {
+          return 'cookies failed: $e';
+        }
+
+      case 'browser_outline':
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        const js = r'''
+(() => {
+  const out = [];
+  const h = document.querySelectorAll('h1,h2,h3');
+  for (const el of h) {
+    if (out.length >= 12) break;
+    const t = el.innerText.trim().slice(0, 60);
+    if (t) out.push('## ' + t);
+  }
+  const links = document.querySelectorAll('a[href]');
+  let n = 0;
+  for (const el of links) {
+    if (n >= 10) break;
+    const t = el.innerText.trim().slice(0, 40);
+    if (t && el.getClientRects().length) { out.push('link: ' + t); n++; }
+  }
+  const btns = document.querySelectorAll('button,[role="button"]');
+  let b = 0;
+  for (const el of btns) {
+    if (b >= 10) break;
+    const t = (el.innerText || el.getAttribute('aria-label') || '').trim().slice(0, 40);
+    if (t && el.getClientRects().length) { out.push('btn: ' + t); b++; }
+  }
+  const inputs = document.querySelectorAll('input,textarea,select');
+  let i = 0;
+  for (const el of inputs) {
+    if (i >= 10) break;
+    if (!el.getClientRects().length) continue;
+    out.push('input: ' + (el.name || el.placeholder || el.type)); i++;
+  }
+  return out.join('\n');
+})()''';
+        try {
+          final r = await tab.controller!.runJavaScriptReturningResult(js);
+          final raw = r.toString();
+          final text = raw.startsWith('"') && raw.endsWith('"')
+              ? jsonDecode(raw) as String
+              : raw;
+          _emit('page', 'outline capture');
+          return 'Page outline:\n$text';
+        } catch (e) {
+          return 'outline failed: $e';
+        }
 
       case 'browser_snapshot':
         final tab = _activeTab;
@@ -6300,6 +6724,13 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       'browser_scroll' => args['direction'],
       'browser_press_key' => args['key'],
       'browser_wait_for' => args['text'],
+      // PR28 tools
+      'browser_hover' || 'browser_select' => args['selector'],
+      'browser_drag' =>
+          '${args['from']} → ${args['to']}',
+      'browser_fill' => '${(args['fields'] as Map?)?.length ?? 0} fields',
+      'browser_find' => args['text'],
+      'browser_cookies' => args['get'] ?? 'all',
       'create_goal' => args['objective'],
       'schedule_create' => args['prompt'],
       'memory_save' => args['content'],
@@ -6482,6 +6913,17 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     'browser_switch_tab' => 'Switch tab',
     'browser_list_tabs' => 'List tabs',
     'browser_close_tab' => 'Close tab',
+    // PR28 tools
+    'browser_back' => 'Back',
+    'browser_forward' => 'Forward',
+    'browser_reload' => 'Reload',
+    'browser_hover' => 'Hover',
+    'browser_drag' => 'Drag',
+    'browser_select' => 'Select',
+    'browser_fill' => 'Fill form',
+    'browser_find' => 'Find text',
+    'browser_cookies' => 'Cookies',
+    'browser_outline' => 'Page outline',
     'generate_image' => 'Generate image',
     'read_attachment' => 'Read attachment',
     'preview' => 'Preview',

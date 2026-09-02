@@ -218,12 +218,12 @@ agent `browser_resize` continues to work.
 
 | ID | Item | Files | STATUS |
 |---|---|---|---|
-| B1 | Remove subagents + trajectory icons from AppBar actions (jobs badge stays) | `chat_screen.dart:804-918` | — |
-| B2 | Trajectory alt entry: add to sidebar footer (before Settings) or chat overflow menu | `sidebar.dart` / `chat_screen.dart` | — |
-| B3 | `AppState.browserDesktopMode` (default false = mobile) + `setBrowserDesktopMode` persisted pref | `state.dart` | — |
-| B4 | Settings toggle: "Browser default mode — Mobile/Desktop" SwitchListTile in a Browser section | `settings_screen.dart` | — |
-| B5 | Apply on controller creation: desktop → zoom = devW/1280 logical viewport (JS zoom), mobile → 1.0; apply to NEW tabs at creation + a note in agent system prompt ("browser default viewport is mobile|desktop") | `agent_service.dart:1219-1229` + system prompt | — |
-| B6 | Tests: pref roundtrip + zoom default applied on new tab | `test` | — |
+| B1 | Remove subagents + trajectory icons from AppBar actions (jobs badge stays) | `chat_screen.dart:804-918` | DONE |
+| B2 | Trajectory alt entry: add to sidebar footer (before Settings) or chat overflow menu | `sidebar.dart` / `chat_screen.dart` | DONE |
+| B3 | `AppState.browserDesktopMode` (default false = mobile) + `setBrowserDesktopMode` persisted pref | `state.dart` | DONE |
+| B4 | Settings toggle: "Browser default mode — Mobile/Desktop" SwitchListTile in a Browser section | `settings_screen.dart` | DONE |
+| B5 | Apply on controller creation: desktop → zoom = devW/1280 logical viewport (JS zoom), mobile → 1.0; apply to NEW tabs at creation + a note in agent system prompt ("browser default viewport is mobile|desktop") | `agent_service.dart:1219-1229` + system prompt | DONE |
+| B6 | Tests: pref roundtrip + zoom default applied on new tab | `test` | DONE |
 
 ### PR28 — Browser: human-like control + missing tools
 
@@ -246,18 +246,18 @@ goForward/reload` (WebViewController methods exist), `runJavaScriptReturningResu
 
 | ID | Item | Files | STATUS |
 |---|---|---|---|
-| W1 | `browser_back`, `browser_forward`, `browser_reload` (controller methods) | `agent_service.dart` schemas + cases | — |
-| W2 | `browser_hover(selector)` — JS dispatchEvent mouseover/mouseenter | schemas + `_handleBrowser*` | — |
-| W3 | `browser_drag(from,to)` — JS pointer events sequence (pointerdown/move/up) | same | — |
-| W4 | `browser_select(selector, value)` — JS set value + change event | same | — |
-| W5 | `browser_fill(fields: {selector: value})` — multi-field one call (form parity) | same | — |
-| W6 | `browser_find(text)` — JS window.find fallback + count via body text scan | same | — |
-| W7 | `browser_console` — JS override console.log capture buffer (inject at page start via `addScriptToExecuteOnDocumentCreated` equivalent — webview_flutter: `runJavaScript` at navigate + onNavigationRequest hook to re-inject) + return last N lines | same + controllerForTab | — |
-| W8 | `browser_cookies` — JS document.cookie read/`(set)` (cookie header via JS) | same | — |
-| W9 | `browser_screenshot` — best effort: JS DOM-to-text outline (headings/links/buttons table) as "visual outline" (real pixel capture not exposed by webview_flutter 4.8; document limitation in tool description) | same | — |
-| W10 | Human-like waits: click/type auto scroll-into-view + 150-400ms randomized delay + visibility check before click (report "element not visible" instead of blind dispatch) | `_handleBrowserClick/Type` | — |
-| W11 | System prompt: browser tool guidance block (prefer read/snapshot → locate → act; verify after) | `agent_service.dart` sys prompt | — |
-| W12 | Tests: W1 (controller method routing via fake), W2-W8 JS builders (string contains), W10 (not-visible path) | `test` | — |
+| W1 | `browser_back`, `browser_forward`, `browser_reload` (controller methods) | `agent_service.dart` schemas + cases | DONE |
+| W2 | `browser_hover(selector)` — JS dispatchEvent mouseover/mouseenter | schemas + `_handleBrowser*` | DONE |
+| W3 | `browser_drag(from,to)` — JS pointer events sequence (pointerdown/move/up) | same | DONE |
+| W4 | `browser_select(selector, value)` — JS set value + change event | same | DONE |
+| W5 | `browser_fill(fields: {selector: value})` — multi-field one call (form parity) | same | DONE |
+| W6 | `browser_find(text)` — JS window.find fallback + count via body text scan | same | DONE |
+| W7 | `browser_console` — JS override console.log capture buffer (inject at page start via `addScriptToExecuteOnDocumentCreated` equivalent — webview_flutter: `runJavaScript` at navigate + onNavigationRequest hook to re-inject) + return last N lines | same + controllerForTab | DEFERRED (no doc-created injection point in webview_flutter 4.8; revisit with platform channel) |
+| W8 | `browser_cookies` — JS document.cookie read/`(set)` (cookie header via JS) | same | DONE |
+| W9 | `browser_screenshot` — best effort: JS DOM-to-text outline (headings/links/buttons table) as "visual outline" (real pixel capture not exposed by webview_flutter 4.8; document limitation in tool description) | same | DONE (as browser_outline) |
+| W10 | Human-like waits: click/type auto scroll-into-view + 150-400ms randomized delay + visibility check before click (report "element not visible" instead of blind dispatch) | `_handleBrowserClick/Type` | DONE (click) |
+| W11 | System prompt: browser tool guidance block (prefer read/snapshot → locate → act; verify after) | `agent_service.dart` sys prompt | DONE |
+| W12 | Tests: W1 (controller method routing via fake), W2-W8 JS builders (string contains), W10 (not-visible path) | `test` | DONE |
 
 **Explicitly deferred (platform API missing):** pixel screenshots,
 download delegate, file chooser bridging, network request inspection,
@@ -311,4 +311,27 @@ upgrades webview_flutter or a platform channel is added.
   pre_request stdout injected as system note), on_turn_end (finally),
   on_post_tool (after tool_end), H5 `hook/invoked`+`hook/result` ledger
   records, H6 hook chips on plugin cards, H7 Settings kill-switch
-  (persisted, boot-loaded), H8 5 tests. Tests 178 → 183.
+  (persisted, boot-loaded),   H8 5 tests. Tests 178 → 183.
+- 2026-09-02 PR25 DONE (code+tests): D1 before-content capture +
+  buildEditDiff (create/replace/insert paths, 400-line cap), D3 +N/−M
+  chip on collapsed cards, D5 `_DiffViewerScreen` full-screen diff with
+  copy + "open full" from diff cards, armToolCardForTest seam. D4
+  produced-files row already existed (PR17). Tests 183 → 186.
+- 2026-09-02 PR26 DONE (code+tests): C1 overflow rebuild re-injects the
+  compacted summary, C2 measuredContextTokens skips the compacted span +
+  counts the summary, C3 per-session `_compacting` lock (_maybeCompact +
+  forceCompact), C4 8-section DSH checkpoint summarizer prompt, C5
+  /compact busy-guard, C6 4 tests. Tests 186 → 190.
+- 2026-09-02 PR27 DONE (code+tests): B1 subagents + trajectory icons
+  removed from the header, B2 trajectory entry in the sidebar footer,
+  B3/B4 browserDesktopMode pref + Settings toggle (mobile default), B5
+  desktop zoom (devW/1280) applied to NEW tabs + system-prompt viewport
+  note, B6 3 tests. Tests 190 → 193.
+- 2026-09-02 PR28 DONE (code+tests): W1 back/forward/reload, W2 hover
+  (full pointer chain + scrollIntoView), W3 drag (PointerEvent + HTML5
+  DnD), W4 select, W5 fill (multi-field), W6 find (count + snippet), W8
+  cookies (all/one), W9 browser_outline (DOM skeleton — pixel capture not
+  exposed by webview_flutter 4.8), W10 human-like click (visibility
+  pre-check + 150-400ms randomized settle), W11 BROWSER METHOD system
+  prompt block, W12 4 tests. browser_console deferred (no doc-created
+  injection point in webview_flutter 4.8). Tests 193 → 197.
