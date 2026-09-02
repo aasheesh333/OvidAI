@@ -1257,6 +1257,12 @@ class AgentService extends ChangeNotifier {
       );
     if (!tab.loadedOnce) {
       tab.loadedOnce = true;
+      // PR27/B5: apply the persisted default viewport mode to NEW tabs —
+      // desktop = 1280px logical width via the same zoom mechanism
+      // browser_resize uses; mobile (default) = device viewport (1.0).
+      if (AppState.I.browserDesktopMode && BrowserTab.devW > 0) {
+        tab.zoom = (BrowserTab.devW / 1280).clamp(0.25, 3.0);
+      }
       final previewPath = tab.localPreviewPath;
       if (previewPath != null) {
         tab.controller!.loadFile(previewPath);
@@ -3939,6 +3945,7 @@ class AgentService extends ChangeNotifier {
 You are Ovid's on-device coding & browsing agent running INSIDE a Flutter app.
 Environment: Android device with a native Linux sandbox (python3/node/git via apt),
 a live Browser panel, and the user's connected GitHub repo (${GitHubService.I.login ?? 'github'}).
+Browser default viewport: ${AppState.I.browserDesktopMode ? 'DESKTOP (1280px logical — sites serve desktop layouts)' : 'MOBILE (device viewport)'}.
 Access mode: ${mode.label.toUpperCase()} — ${mode.hint}
 ${mode == AgentMode.safe ? '''
 MODE RESTRICTIONS (Read-Only): you are in a read-only session. You may read

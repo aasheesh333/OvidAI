@@ -625,6 +625,7 @@ class AppState extends ChangeNotifier {
       showReasoning = prefs.getBool(_kShowReasoning) ?? true;
       githubSync = prefs.getBool(_kGithubSync) ?? true;
       workflowEnabled = prefs.getBool(_kWorkflowEnabled) ?? true;
+      browserDesktopMode = prefs.getBool(_kBrowserDesktopMode) ?? false;
       autoRunSafeCommands = prefs.getBool(_kAutoRunSafe) ?? true;
       chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0).clamp(
         chatFontScaleMin,
@@ -821,6 +822,7 @@ class AppState extends ChangeNotifier {
       showReasoning = true;
       githubSync = true;
       workflowEnabled = true;
+      browserDesktopMode = false;
       autoRunSafeCommands = true;
       shareSessionMemory = false;
       lastSelectedModel = '';
@@ -871,6 +873,13 @@ class AppState extends ChangeNotifier {
   /// Off = those tools leave the roster entirely.
   static const _kWorkflowEnabled = 'ovid_workflow_enabled';
   bool workflowEnabled = true;
+
+  /// PR27/B3: default browser mode — false = MOBILE viewport (default),
+  /// true = DESKTOP logical viewport (1280px wide via zoom). New tabs
+  /// apply it at controller creation; browser_resize still overrides
+  /// per-call.
+  static const _kBrowserDesktopMode = 'ovid_browser_desktop_mode';
+  bool browserDesktopMode = false;
 
   /// Auto-run safe commands: read-only shell commands skip confirmation.
   static const _kAutoRunSafe = 'ovid_auto_run_safe';
@@ -941,6 +950,15 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kWorkflowEnabled, v);
+    } catch (_) {}
+  }
+
+  Future<void> setBrowserDesktopMode(bool v) async {
+    browserDesktopMode = v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kBrowserDesktopMode, v);
     } catch (_) {}
   }
 

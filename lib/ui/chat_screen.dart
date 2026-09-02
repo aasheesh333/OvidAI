@@ -10,7 +10,6 @@ import '../core/theme.dart';
 import '../core/state.dart';
 import 'sandbox_setup.dart';
 import 'browser_screen.dart';
-import 'trajectory_screen.dart';
 import 'sidebar.dart';
 import 'subagent_screen.dart';
 import '../core/agent_service.dart';
@@ -802,54 +801,10 @@ class _ChatScreenState extends State<ChatScreen>
               ),
             ),
             actions: [
-              // Agents — subagent catalog for this chat (state, elapsed,
-              // transcript size; tap to open a child's own session).
-              AnimatedBuilder(
-                animation: Listenable.merge([app, AgentService.I]),
-                builder: (_, _) {
-                  final kids = s == null ? 0 : app.childrenOf(s.id).length;
-                  if (kids == 0) return const SizedBox.shrink();
-                  final live = s == null
-                      ? 0
-                      : app
-                            .childrenOf(s.id)
-                            .where((c) => AgentService.I.busyFor(c.id))
-                            .length;
-                  return Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      IconButton(
-                        tooltip: 'Subagents',
-                        visualDensity: VisualDensity.compact,
-                        icon: const Icon(Icons.account_tree_outlined, size: 19),
-                        onPressed: () => showSubagentCatalog(context, s!.id),
-                      ),
-                      Positioned(
-                        top: 8,
-                        right: 6,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 4,
-                            vertical: 1,
-                          ),
-                          decoration: BoxDecoration(
-                            color: live > 0 ? Aether.accent : Aether.textFaint,
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(
-                            '$kids',
-                            style: const TextStyle(
-                              fontSize: 8.5,
-                              fontWeight: FontWeight.w700,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  );
-                },
-              ),
+              // PR27/B1: the subagents + trajectory icons moved OFF the
+              // header (user ask) — subagents live on the subagent screen
+              // (chat "Open" links + the catalog sheet from a chat row),
+              // trajectory in the sidebar footer next to Settings.
               // Background jobs badge (DSH jobs header trigger): shows the
               // live job count of THIS session, popover lists producer/label/
               // state/per-second elapsed, with a Kill action per row.
@@ -898,17 +853,6 @@ class _ChatScreenState extends State<ChatScreen>
                     ],
                   );
                 },
-              ),
-              IconButton(
-                tooltip: 'Trajectory — event ledger',
-                visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.timeline_outlined, size: 19),
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) =>
-                        TrajectoryScreen(sessionId: s?.id ?? ''),
-                  ),
-                ),
               ),
               IconButton(
                 tooltip: 'Studio — code & terminal',

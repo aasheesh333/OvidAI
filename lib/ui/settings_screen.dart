@@ -217,6 +217,16 @@ class SettingsScreen extends StatelessWidget {
             getter: _getHooksEnabled,
             setter: _setHooksEnabled,
           ),
+          const _SettingsSwitchTile(
+            icon: Icons.desktop_windows_outlined,
+            title: 'Browser: desktop mode',
+            subtitleOn:
+                'ON — new tabs render at a 1280px desktop viewport (zoom)',
+            subtitleOff:
+                'OFF — new tabs use the device\'s mobile viewport (default)',
+            getter: _getBrowserDesktop,
+            setter: _setBrowserDesktop,
+          ),
           _settingTile(
             Icons.security_outlined,
             'Sandbox',
@@ -417,6 +427,10 @@ Future<void> _setAutoRunSafe(bool v) => AppState.I.setAutoRunSafeCommands(v);
 
 bool _getHooksEnabled() => HookService.I.enabled;
 Future<void> _setHooksEnabled(bool v) => HookService.I.setEnabled(v);
+
+bool _getBrowserDesktop() => AppState.I.browserDesktopMode;
+Future<void> _setBrowserDesktop(bool v) =>
+    AppState.I.setBrowserDesktopMode(v);
 
 /// Live on-device storage usage (replaces the hardcoded "214 MB" string).
 class _StorageTile extends StatefulWidget {

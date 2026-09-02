@@ -4,6 +4,7 @@ import '../core/theme.dart';
 import '../core/state.dart';
 import '../core/agent_service.dart';
 import 'settings_screen.dart';
+import 'trajectory_screen.dart';
 
 /// Sessions sidebar — DeepSeek-style harness: auto-named sessions,
 /// search, new session, swipe to delete, long-press rename.
@@ -223,6 +224,52 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
             ),
 
             const Divider(),
+            // PR27/B2: trajectory moved here from the chat header (the
+            // header keeps only jobs + studio + browser).
+            InkWell(
+              onTap: () {
+                final sid = app.activeSessionId ?? '';
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => TrajectoryScreen(sessionId: sid),
+                  ),
+                );
+              },
+              child: Container(
+                margin: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 11,
+                ),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 13,
+                      backgroundColor: Aether.surfaceRaised,
+                      child: Icon(
+                        Icons.timeline_outlined,
+                        size: 15,
+                        color: Aether.textMuted,
+                      ),
+                    ),
+                    SizedBox(width: 12),
+                    Text(
+                      'Trajectory — event ledger',
+                      style: TextStyle(fontSize: 13, color: Aether.textMuted),
+                    ),
+                    Spacer(),
+                    Icon(
+                      Icons.chevron_right,
+                      size: 16,
+                      color: Aether.textFaint,
+                    ),
+                  ],
+                ),
+              ),
+            ),
             // Settings at the very bottom — DeepSeek style.
             InkWell(
               onTap: () => Navigator.of(

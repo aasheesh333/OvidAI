@@ -4947,6 +4947,51 @@ block</pre>
     });
   });
 
+  group('PR27: header cleanup + browser mode', () {
+    test('browserDesktopMode pref round-trips (default mobile)', () async {
+      final app = AppState.I;
+      expect(app.browserDesktopMode, isFalse, reason: 'mobile default');
+      await app.setBrowserDesktopMode(true);
+      addTearDown(() => app.setBrowserDesktopMode(false));
+      expect(app.browserDesktopMode, isTrue);
+      // Reset defaults restores mobile.
+      await app.setBrowserDesktopMode(false);
+      expect(app.browserDesktopMode, isFalse);
+    });
+
+    test('new tabs pick up desktop zoom when the mode is on', () {
+      // The zoom formula at tab creation (PR27/B5 contract).
+      BrowserTab.devW = 360;
+      BrowserTab.devH = 720;
+      final tab = BrowserTab(url: 'https://x.test');
+      // Mobile (default): zoom stays 1.0.
+      expect(tab.zoom, 1.0);
+      // Desktop: 360/1280 → zoom < 1 (page renders as a wide window).
+      final desktopZoom = (BrowserTab.devW / 1280).clamp(0.25, 3.0);
+      expect(desktopZoom, lessThan(1.0));
+      tab.zoom = desktopZoom;
+      expect(tab.logicalWidth, 1280);
+    });
+
+    test('header shows jobs only: subagents + trajectory icons removed',
+        () {
+      final src = File('lib/ui/chat_screen.dart').readAsStringSync();
+      // The AppBar actions block no longer contains the removed icons.
+      final actionsStart = src.indexOf('actions: [');
+      final actionsEnd = src.indexOf('bottom:', actionsStart);
+      final block = src.substring(
+        actionsStart,
+        actionsEnd > 0 ? actionsEnd : actionsStart + 3000,
+      );
+      expect(block, isNot(contains('account_tree_outlined')));
+      expect(block, isNot(contains('timeline_outlined')));
+      expect(block, contains('terminal_outlined')); // jobs badge stays
+      // Trajectory still reachable — sidebar footer entry (PR27/B2).
+      final sidebar = File('lib/ui/sidebar.dart').readAsStringSync();
+      expect(sidebar, contains('TrajectoryScreen'));
+    });
+  });
+
   group('PR21: workflow + ralph orchestration', () {
     ChatSession newParent(String id) {
       final app = AppState.I;
