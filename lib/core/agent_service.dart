@@ -247,9 +247,15 @@ class _BgJob {
   Process? process;
   bool started = false;
   bool finished = false;
+  bool killed = false;
   int? exitCode;
+  final DateTime startedAt = DateTime.now();
   final StringBuffer output = StringBuffer();
   _BgJob({required this.id, required this.name, required this.command});
+
+  Duration get elapsed => DateTime.now().difference(startedAt);
+  String get state =>
+      killed ? 'stopping' : (!started ? 'pending' : !finished ? 'running' : 'done');
 }
 
 /// A dispatched subagent, tracked by the parent that spawned it.
@@ -517,8 +523,21 @@ class AgentService extends ChangeNotifier {
   set activeRunId(String? v) => _runResolved.activeRunId = v;
   ApprovalRequest? get pendingApproval => _runResolved.pendingApproval;
   set pendingApproval(ApprovalRequest? v) => _runResolved.pendingApproval = v;
-  bool get planMode => _runResolved.planMode;
-  set planMode(bool v) => _runResolved.planMode = v;
+  /// Plan mode, PERSISTED per session (DSH parity): the run bucket reads
+  /// through to the session's `planMode` field, so `/plan` survives
+  /// restarts and session switches, and the composer chip reads it.
+  bool get planMode =>
+      (_runSession ?? AppState.I.activeSession)?.planMode ?? false;
+  set planMode(bool v) {
+    final s = _runSession ?? AppState.I.activeSession;
+    if (s != null) {
+      s.planMode = v;
+      AppState.I.persistSessions();
+    }
+    // Keep the run bucket in step for reads outside a session context.
+    _runResolved.planMode = v;
+    AppState.I.refresh();
+  }
   bool get cancelRequested => _runResolved.cancelRequested;
   bool get _cancelRequested => _runResolved.cancelRequested;
   set _cancelRequested(bool v) => _runResolved.cancelRequested = v;
@@ -529,6 +548,35 @@ class AgentService extends ChangeNotifier {
   Map<int, _BgJob> get _jobs => _runResolved.jobs;
   int get _jobCounter => _runResolved.jobCounter;
   set _jobCounter(int v) => _runResolved.jobCounter = v;
+
+  /// UI view: live background jobs of [sessionId] (jobs badge popover).
+  /// A snapshot list of (id, name, state, elapsedSeconds, outputChars).
+  List<({int id, String name, String state, int elapsedSec, int outChars})>
+      jobsFor(String sessionId) {
+    final r = _runs[sessionId];
+    if (r == null) return const [];
+    return [
+      for (final j in r.jobs.values)
+        (
+          id: j.id,
+          name: j.name,
+          state: j.state,
+          elapsedSec: j.elapsed.inSeconds,
+          outChars: j.output.length,
+        ),
+    ];
+  }
+
+  /// UI action: kill a job from the popover (same path as job_kill).
+  void killJobFor(String sessionId, int jobId) {
+    final j = _runs[sessionId]?.jobs[jobId];
+    if (j == null || j.finished) return;
+    j.killed = true;
+    try {
+      j.process?.kill();
+    } catch (_) {}
+    notifyListeners();
+  }
   Message? get _activeToolMsg => _runResolved.activeToolMsg;
   set _activeToolMsg(Message? v) => _runResolved.activeToolMsg = v;
   DateTime? get _runStart => _runResolved.runStart;
@@ -1163,6 +1211,18 @@ class AgentService extends ChangeNotifier {
     }
   }
 
+  /// Resolve a produced path to its HOST directory (for "Show in folder").
+  /// Returns null when the file is not on this device's disk.
+  Future<String?> hostDirOf(String path) async {
+    try {
+      final host = await _resolveFsPath(path);
+      if (host == null || host.startsWith('repo:')) return null;
+      return File(host).parent.path;
+    } catch (_) {
+      return null;
+    }
+  }
+
   void _touchSyncedMtime(String path) async {
     try {
       final host = await _resolveFsPath(path);
@@ -1249,6 +1309,48 @@ class AgentService extends ChangeNotifier {
   /// Test seam: resolve the ACTIVE session's workspace directory without
   /// running an agent (tests stage files here before runTask).
   Future<Directory> sessionWorkDirForTest() async => _sessionWorkDir();
+
+  /// THE one write path for workspace files (C7). Every tool that writes
+  /// content to a path — `file_write`, `fs_edit create/str_replace/insert` —
+  /// goes through here so disk and repo cache can never diverge:
+  ///   • a path the repo owns (exists in RepoCache or repo is bound) is
+  ///     written to RepoCache AND mirrored to the session workspace on disk;
+  ///   • a workspace-only path is written to disk;
+  ///   • `run_shell cat` after `file_write` therefore sees the same bytes.
+  /// Returns a short human status line.
+  Future<String> _writeWorkspaceFile(
+    String path,
+    String content, {
+    required String toolLabel,
+  }) async {
+    final repoOwns =
+        RepoCache.I.files.containsKey(path) || RepoCache.I.repoFull != null;
+    if (repoOwns) {
+      RepoCache.I.write(path, content);
+      openStudioFile(path, content);
+    }
+    // Always mirror to disk so shell/fs tools and the produced-files lane
+    // see the same content — even for repo paths (workspace is the cwd).
+    await _mirrorToDisk(path, content);
+    _recordProduced(path, content.length);
+    _emit('file', '$toolLabel $path');
+    return repoOwns
+        ? 'written ✓ · $path · ${content.length} chars '
+            '(workspace + repo cache — commit() to push)'
+        : 'written ✓ · $path · ${content.length} chars';
+  }
+
+  /// Write [content] to the session-workspace mirror of [path] (best
+  /// effort — an uncontainable path, e.g. an absolute repo-only path, is
+  /// skipped silently; the repo cache stays the source for those).
+  Future<void> _mirrorToDisk(String path, String content) async {
+    final work = await _sessionWorkDir();
+    final safe = containedPath(work, path);
+    if (safe == null) return;
+    final f = File(safe);
+    f.parent.createSync(recursive: true);
+    f.writeAsStringSync(content);
+  }
 
   // ── fs tools state (read-before-write policy, DSH observation gate) ──
   /// Paths the AI has read via file_read/fs_edit view — str_replace/insert
@@ -3182,7 +3284,11 @@ class AgentService extends ChangeNotifier {
     return null;
   }
 
-  Future<void> runTask(String originalPrompt, {String? sessionId}) async {
+  Future<void> runTask(
+    String originalPrompt, {
+    String? sessionId,
+    bool freshTurn = true,
+  }) async {
     final s = AppState.I.sessionById(sessionId) ?? AppState.I.activeSession;
     if (s == null) {
       _emit('err', 'No active chat session');
@@ -3209,22 +3315,37 @@ class AgentService extends ChangeNotifier {
     // loops — inherits it, so two runs never see each other's state.
     final ctx = _RunCtx(_runFor(s.id), s, p);
     return runZoned(
-      () => _runTaskBody(originalPrompt, ctx),
+      () => _runTaskBody(originalPrompt, ctx, freshTurn: freshTurn),
       zoneValues: {_runCtxKey: ctx},
     );
   }
 
-  Future<void> _runTaskBody(String originalPrompt, _RunCtx ctx) async {
+  Future<void> _runTaskBody(
+    String originalPrompt,
+    _RunCtx ctx, {
+    bool freshTurn = true,
+  }) async {
     final s = ctx.session;
     final p = ctx.provider;
     final runId = DateTime.now().millisecondsSinceEpoch.toString();
     // This run's bucket state — resolve nothing through the active session.
     activeRunId = runId;
+    // Plan mode is persisted on the session — seed the run bucket from it
+    // so gate checks inside the run see the user's last /plan state.
+    ctx.run.planMode = s.planMode;
     _runStart = DateTime.now();
     lastError = null;
     todoNudgeSent = false;
     _runResolved.produced.clear(); // DSH "Produced" panel resets per run
     events.clear();
+    // DSH todo dock: the checklist is cleared at the start of each USER
+    // turn — a stale list from an earlier task must not steer this one.
+    // System continuations (queue drain, reminders, settlement notices)
+    // pass freshTurn: false and keep the live checklist.
+    if (freshTurn && s.todos.any((t) => t['status'] != 'completed')) {
+      s.todos.clear();
+      AppState.I.refresh();
+    }
     _emit('think', 'planning with ${s.model} · ${mode.label} mode');
 
     // Ensure skills are scanned for this session's workspace BEFORE the
@@ -3667,6 +3788,9 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       // from the zone (never the currently-active session in the UI).
       final pinned = ctx.run;
       final pinnedSessionId = ctx.session.id;
+      // LLM session title (DSH parity): one cheap background call after
+      // the first real exchange — fire-and-forget, heuristic stays on fail.
+      unawaited(maybeGenerateSessionTitle(ctx.session));
       // Foreground notification retires with the run (covers error paths
       // where no 'done'/'err' event ever fires).
       AgentNotificationService.I.agentIdle();
@@ -3692,11 +3816,11 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
             // Run the continuation in the background — do NOT yank the
             // user out of the session they're currently reading. DSH web
             // shows a badge on the busy session instead.
-            runTask(next, sessionId: target.id);
+            runTask(next, sessionId: target.id, freshTurn: false);
           } else {
             // Session was deleted — fall back to the active session.
             AppState.I.sendMessage(next);
-            runTask(next);
+            runTask(next, freshTurn: false);
           }
         });
       }
@@ -3743,13 +3867,71 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
   /// to 4 times inside this call; only then does it give up and return
   /// null (the run loop retries a few more times on top). A user cancel
   /// aborts immediately with no retry.
+  /// LLM-generated session title (DSH session-title-llm parity): one cheap
+  /// background call after the first real exchange — thinking disabled,
+  /// tight token budget, falls back to the heuristic title on any failure.
+  /// Never retried per session (the heuristic stays if this fails).
+  static const _titledSessions = <String>{};
+
+  Future<void> maybeGenerateSessionTitle(ChatSession s) async {
+    // Only once per session, only after a real exchange, only when the title
+    // is still the heuristic one.
+    if (_titledSessions.contains(s.id)) return;
+    if (s.messages.where((m) => m.role == 'assistant').isEmpty) return;
+    if (s.title != 'New chat' &&
+        !s.title.endsWith('…') &&
+        s.title != AppState.autoTitle(s.messages.first.content)) {
+      return; // user renamed it — never touch a human title
+    }
+    _titledSessions.add(s.id);
+    final p = AppState.I.providerById(s.providerId);
+    if (p == null || !p.hasKey) return;
+    try {
+      final firstExchange = s.messages
+          .take(6)
+          .map(
+            (m) => '${m.role == 'user' ? 'User' : 'Assistant'}: '
+                '${cleanTruncate(m.content, 300)}',
+          )
+          .join('\n');
+      final r = await _callLlm(
+        p,
+        [
+          {
+            'role': 'system',
+            'content':
+                'Generate a 3-6 word title for this conversation. Reply '
+                'with ONLY the title text — no quotes, no punctuation at '
+                'the end, no explanation. Use the conversation\'s language.',
+          },
+          {'role': 'user', 'content': firstExchange},
+        ],
+        s,
+        includeTools: false,
+      );
+      final choices = (r?['choices'] as List?)?.whereType<Map>().toList() ?? [];
+      if (choices.isEmpty) return;
+      final raw = choices.first['message']?['content'];
+      var title = (raw as String? ?? '').trim();
+      if (title.startsWith('"') && title.endsWith('"')) {
+        title = title.substring(1, title.length - 1);
+      }
+      title = title.replaceAll('\n', ' ').trim();
+      if (title.isEmpty || title.length > 60) return;
+      s.title = title;
+      AppState.I.refresh();
+      AppState.I.persistSessions();
+    } catch (_) {
+      // Heuristic title stays — this is a cosmetic best-effort.
+    }
+  }
+
   Future<Map<String, dynamic>?> _callLlm(
     ProviderConfig p,
     List<Map<String, dynamic>> msgs,
     ChatSession session, {
     bool includeTools = true,
-  }) async {
-    var lastErr = 'unknown';
+  }) async {    var lastErr = 'unknown';
     for (var attempt = 0; attempt <= 4; attempt++) {
       if (_cancelRequested) return null;
       final r = await _callLlmOnce(
@@ -5025,12 +5207,10 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           'LOCAL EDIT (no push yet):\n$path\n${content.length} chars',
         );
         if (!ok) return 'DENIED by user';
-        RepoCache.I.write(path, content);
-        openStudioFile(path, content);
-        _recordProduced(path, content.length);
-        _emit('file', 'edited $path');
-        return 'written locally ✓ · $path · ${content.length} chars\n'
-            'call commit() to push, or preview() to see web build.';
+        // One write path (C7): disk + repo cache together — `run_shell cat`
+        // after a `file_write` must see the same bytes.
+        return await _writeWorkspaceFile(path, content,
+            toolLabel: 'edited');
 
       case 'commit':
         final message = (args['message'] ?? 'Ovid agent update') as String;
@@ -5624,8 +5804,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           return 'path escapes the session workspace: $path — use a path '
               'inside the workspace.';
         }
-        final f = File(safe);
-        if (f.existsSync()) {
+        if (File(safe).existsSync()) {
           return 'file already exists: $path — use str_replace to edit it';
         }
         final ok = await _maybeApprove(
@@ -5634,12 +5813,11 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           'CREATE FILE:\n$path\n${content.length} chars',
         );
         if (!ok) return 'DENIED by user';
-        f.parent.createSync(recursive: true);
-        f.writeAsStringSync(content);
         _readPathsFor(sid).add(path);
-        _recordProduced(path, content.length);
-        _emit('file', 'created $path');
-        return 'created $path ✓ · ${content.length} chars';
+        // One write path (C7): create also lands in the repo cache when
+        // the repo is bound, so commit() can push it.
+        return await _writeWorkspaceFile(path, content,
+            toolLabel: 'created');
 
       case 'str_replace':
         final oldStr = args['old_str'] as String? ?? '';
@@ -5668,6 +5846,8 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           if (!ok) return 'DENIED by user';
           RepoCache.I.write(path, updated);
           openStudioFile(path, updated);
+          // C7: repo edits mirror to disk too (shell cat sees the change).
+          await _mirrorToDisk(path, updated);
           _recordProduced(path, updated.length);
           _emit('file', 'edited $path');
           return 'edited $path ✓ (str_replace)';
@@ -5688,7 +5868,15 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           'EDIT $path:\nold: ${oldStr.length} chars → new: ${newStr.length} chars',
         );
         if (!ok) return 'DENIED by user';
-        File(host).writeAsStringSync(content.replaceFirst(oldStr, newStr));
+        final updatedHost = content.replaceFirst(oldStr, newStr);
+        File(host).writeAsStringSync(updatedHost);
+        // C7: workspace edits also land in the repo cache when the repo
+        // is bound, so commit() can push them.
+        if (RepoCache.I.repoFull != null) {
+          RepoCache.I.write(path, updatedHost);
+          openStudioFile(path, updatedHost);
+        }
+        _recordProduced(path, updatedHost.length);
         _emit('file', 'edited $path');
         return 'edited $path ✓ (str_replace)';
 
@@ -5721,8 +5909,15 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         if (repoContent != null) {
           RepoCache.I.write(path, updated);
           openStudioFile(path, updated);
+          // C7: repo insert mirrors to disk too.
+          await _mirrorToDisk(path, updated);
         } else if (host != null) {
           File(host).writeAsStringSync(updated);
+          // C7: workspace insert lands in the repo cache when bound.
+          if (RepoCache.I.repoFull != null) {
+            RepoCache.I.write(path, updated);
+            openStudioFile(path, updated);
+          }
         }
         _emit('file', 'edited $path');
         return 'inserted at line $insertLine in $path ✓';
@@ -6162,8 +6357,8 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     final s = _runSession;
     final g = s?.goal;
     if (g == null) return 'No goal in this session.';
-    if (!['active', 'complete', 'blocked'].contains(status)) {
-      return 'Invalid status "$status" — use active/complete/blocked.';
+    if (!['active', 'paused', 'complete', 'blocked'].contains(status)) {
+      return 'Invalid status "$status" — use active/paused/complete/blocked.';
     }
     if (progress != null && progress.isNotEmpty) {
       (g['progressLog'] as List?)?.add('r${g['round']}: $progress');
@@ -6171,7 +6366,11 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         (g['progressLog'] as List?)!.removeRange(0, 1);
       }
     }
-    g['round'] = ((g['round'] as num?)?.toInt() ?? 0) + 1;
+    // Pause/resume round-trips keep the round; every other update advances.
+    final wasPaused = g['status'] == 'paused';
+    if (!(status == 'paused' || (status == 'active' && wasPaused))) {
+      g['round'] = ((g['round'] as num?)?.toInt() ?? 0) + 1;
+    }
     g['status'] = status;
     AppState.I.persistSessions();
     _emit('think', 'goal → $status (round ${g['round']})');
@@ -6181,6 +6380,9 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         : status == 'blocked'
         ? 'Goal marked blocked (round ${g['round']}). Tell the user '
               'what you need to continue.'
+        : status == 'paused'
+        ? 'Goal paused (round ${g['round']}). No new rounds run until '
+              'the user resumes it.'
         : 'Goal active, round ${g['round']} recorded. Keep going or '
               'report to the user.';
   }
@@ -6328,7 +6530,8 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           }
           AppState.I.refresh();
           AppState.I.persistSessions();
-          unawaited(runTask(delivery, sessionId: s.id));
+          unawaited(
+            runTask(delivery, sessionId: s.id, freshTurn: false));
         }
       }
     }
@@ -6615,7 +6818,8 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     parent.messages.add(Message(role: 'user', content: report));
     AppState.I.refresh();
     AppState.I.persistSessions();
-    unawaited(runTask(report, sessionId: parent.id));
+    unawaited(
+      runTask(report, sessionId: parent.id, freshTurn: false));
     _emit('think', 'woke parent with report from ${sub.id}');
     return 'reported — the parent was woken with your message.';
   }
@@ -6810,7 +7014,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         AppState.I.persistSessions();
         // A full run: streaming bubbles, tool cards, compaction, jobs — all
         // inside the child's own session and workspace.
-        await runTask(next, sessionId: child.id);
+        await runTask(next, sessionId: child.id, freshTurn: false);
         sub.result = _lastAssistantText(child);
         if (sub.interrupted) break;
         if (sub.messages.isEmpty) break;
@@ -6881,7 +7085,8 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       parent.messages.add(Message(role: 'user', content: notice));
       AppState.I.refresh();
       AppState.I.persistSessions();
-      unawaited(runTask(notice, sessionId: parent.id));
+      unawaited(
+        runTask(notice, sessionId: parent.id, freshTurn: false));
     }
   }
 
@@ -7224,10 +7429,55 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
   Future<String> _generateImage(String prompt) async {
     final encoded = Uri.encodeQueryComponent(prompt);
     final url = 'https://image.pollinations.ai/prompt/$encoded';
-    // Pollinations generates on-demand — the URL IS the image. We just
-    // emit a markdown image so the chat bubble renders it.
-    _emit('done', 'image generated: $prompt');
-    return '![generated image]($url)\n\n*Generated via Pollinations.ai (free, no key).*';
+    _emit('think', 'generating image (pollinations)…');
+
+    // Pollinations generates on demand — the first GET waits for the
+    // render. Download the bytes for real (B3: no more placeholder
+    // gradient), save into the session workspace, and emit a durable
+    // imageGen row that renders the local file offline-safe.
+    try {
+      final r = await HttpShim.get(
+        Uri.parse(url),
+        headers: {'User-Agent': 'OvidAgent/1.0'},
+        timeout: const Duration(seconds: 90),
+        maxResponseBytes: 16 * 1024 * 1024,
+      );
+      if (r.status != 200) {
+        return 'image generation failed (HTTP ${r.status}) — '
+            'try again or rephrase the prompt.';
+      }
+      final work = await _sessionWorkDir();
+      final slug = prompt
+          .toLowerCase()
+          .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+          .replaceAll(RegExp(r'^-+|-+$'), '');
+      final name = 'gen-${DateTime.now().millisecondsSinceEpoch}'
+          '-${slug.isEmpty ? 'image' : (slug.length > 40 ? slug.substring(0, 40) : slug)}.jpg';
+      final f = File('${work.path}/$name');
+      f.parent.createSync(recursive: true);
+      f.writeAsBytesSync(r.bytes);
+      _recordProduced(name, r.bytes.length);
+
+      final s = _runSession;
+      if (s != null) {
+        s.messages.add(
+          Message(
+            role: 'assistant',
+            kind: MsgKind.imageGen,
+            content: prompt,
+            imagePath: f.path,
+          ),
+        );
+        AppState.I.refresh();
+        AppState.I.persistSessions();
+      }
+      _emit('done', 'image generated: ${f.path.split('/').last}');
+      return 'image generated ✓ · saved to the session workspace as '
+          '`$name` — the user sees it in chat. Size: '
+          '${(r.bytes.length / 1024).toStringAsFixed(0)} KB.';
+    } catch (e) {
+      return 'image generation failed: $e';
+    }
   }
 
   /// Strip HTML tags from a snippet for plain-text display.

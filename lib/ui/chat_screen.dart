@@ -690,6 +690,55 @@ class _ChatScreenState extends State<ChatScreen>
                   );
                 },
               ),
+              // Background jobs badge (DSH jobs header trigger): shows the
+              // live job count of THIS session, popover lists producer/label/
+              // state/per-second elapsed, with a Kill action per row.
+              AnimatedBuilder(
+                animation: AgentService.I,
+                builder: (_, _) {
+                  final jobs = s == null
+                      ? const <({int id, String name, String state, int elapsedSec, int outChars})>[]
+                      : AgentService.I.jobsFor(s.id);
+                  if (jobs.isEmpty) return const SizedBox.shrink();
+                  final running =
+                      jobs.where((j) => j.state == 'running').length;
+                  return Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      IconButton(
+                        tooltip: 'Background jobs',
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(Icons.terminal_outlined, size: 19),
+                        onPressed: () => _showJobsPopover(context, s!.id),
+                      ),
+                      Positioned(
+                        top: 8,
+                        right: 6,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 4,
+                            vertical: 1,
+                          ),
+                          decoration: BoxDecoration(
+                            color: running > 0
+                                ? Aether.accent
+                                : Aether.textFaint,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            '${jobs.length}',
+                            style: const TextStyle(
+                              fontSize: 8.5,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
               IconButton(
                 tooltip: 'Studio — code & terminal',
                 visualDensity: VisualDensity.compact,
@@ -928,6 +977,7 @@ class _ChatScreenState extends State<ChatScreen>
                           ],
                         ),
                 ),
+                const _GoalBar(),
                 const _TodoDock(),
                 const _StatsLine(),
                 _QueueDock(onEdited: () => setState(() {})),
@@ -1052,6 +1102,131 @@ class _ChatScreenState extends State<ChatScreen>
       }
     });
     AgentService.I.runTask(t);
+  }
+
+  /// Background jobs popover (DSH ui-jobs): one row per job with label,
+  /// state dot, per-second elapsed, output size, and a Kill action.
+  void _showJobsPopover(BuildContext context, String sessionId) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => AnimatedBuilder(
+        animation: AgentService.I,
+        builder: (_, _) {
+          final jobs = AgentService.I.jobsFor(sessionId);
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.terminal_outlined,
+                          size: 16, color: Aether.accent),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'Background jobs',
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        icon: Icon(Icons.close,
+                            size: 17, color: Aether.textFaint),
+                        onPressed: () => Navigator.pop(ctx),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  if (jobs.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 18),
+                      child: Text(
+                        'No background jobs in this session.',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          color: Aether.textMuted,
+                        ),
+                      ),
+                    )
+                  else
+                    Flexible(
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: [
+                          for (final j in jobs)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 4),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    width: 7,
+                                    height: 7,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: switch (j.state) {
+                                        'running' => Aether.accent,
+                                        'stopping' => Aether.warn,
+                                        'pending' => Aether.textFaint,
+                                        _ => Aether.success,
+                                      },
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          '#${j.id} ${j.name}',
+                                          style: const TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        Text(
+                                          '${j.state} · ${j.elapsedSec}s · '
+                                          '${j.outChars} chars of output',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: Aether.textMuted,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  if (j.state == 'running' ||
+                                      j.state == 'stopping')
+                                    IconButton(
+                                      tooltip: 'Kill job',
+                                      visualDensity: VisualDensity.compact,
+                                      icon: Icon(Icons.stop_circle_outlined,
+                                          size: 18, color: Aether.danger),
+                                      onPressed: () => AgentService.I
+                                          .killJobFor(sessionId, j.id),
+                                    ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 
   void _modelPicker(BuildContext context) {
@@ -2109,9 +2284,44 @@ class _ProducedFilesCard extends StatelessWidget {
                     fontFamily: Aether.mono,
                   ),
                 ),
-                trailing: Text(
+                subtitle: Text(
                   _fmtSize(f.size),
                   style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                ),
+                trailing: IconButton(
+                  tooltip: 'Show in folder',
+                  visualDensity: VisualDensity.compact,
+                  icon: Icon(
+                    Icons.folder_open_outlined,
+                    size: 17,
+                    color: Aether.textMuted,
+                  ),
+                  onPressed: () async {
+                    final dir = await AgentService.I.hostDirOf(f.path);
+                    if (!sheetCtx.mounted) return;
+                    final messenger = ScaffoldMessenger.of(sheetCtx);
+                    if (dir == null) {
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            '${_base(f.path)} is repo-only — not on local disk.',
+                          ),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                      return;
+                    }
+                    try {
+                      await launchUrl(Uri.file(dir));
+                    } catch (_) {
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content: Text('No file manager app to open folders.'),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                    }
+                  },
                 ),
                 onTap: () {
                   Navigator.pop(sheetCtx);
@@ -2303,8 +2513,7 @@ class _MessageView extends StatelessWidget {
                   : CrossAxisAlignment.start,
               children: [
                 switch (m.kind) {
-                  MsgKind.code => _code(),
-                  MsgKind.imageGen => _imageGen(),
+                  MsgKind.imageGen => _imageGen(context),
                   MsgKind.reasoning => _reasoning(),
                   MsgKind.tool => _toolCard(),
                   MsgKind.turnTail => _turnTail(),
@@ -2390,6 +2599,65 @@ class _MessageView extends StatelessWidget {
         onAction();
       });
     }
+    // DSH message feedback: like/dislike + note on final assistant rows.
+    // Re-clicking the same value retracts. A down-vote offers a note.
+    if (!isUser && m.kind == MsgKind.text && !m.thinking) {
+      items.add(
+        Tooltip(
+          message: m.feedback == 'up' ? 'Retract like' : 'Good answer',
+          waitDuration: const Duration(milliseconds: 500),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(4),
+            onTap: () {
+              m.feedback = m.feedback == 'up' ? null : 'up';
+              m.feedbackNote = null;
+              AppState.I.persistSessions();
+              onAction();
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+              child: Icon(
+                m.feedback == 'up'
+                    ? Icons.thumb_up_alt
+                    : Icons.thumb_up_alt_outlined,
+                size: 13,
+                color: m.feedback == 'up' ? Aether.accent : Aether.textFaint,
+              ),
+            ),
+          ),
+        ),
+      );
+      items.add(
+        Tooltip(
+          message: m.feedback == 'down' ? 'Retract dislike' : 'Bad answer',
+          waitDuration: const Duration(milliseconds: 500),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(4),
+            onTap: () {
+              if (m.feedback == 'down') {
+                m.feedback = null;
+                m.feedbackNote = null;
+                AppState.I.persistSessions();
+                onAction();
+                return;
+              }
+              m.feedback = 'down';
+              _askFeedbackNote(context);
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+              child: Icon(
+                m.feedback == 'down'
+                    ? Icons.thumb_down_alt
+                    : Icons.thumb_down_alt_outlined,
+                size: 13,
+                color: m.feedback == 'down' ? Aether.danger : Aether.textFaint,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.only(bottom: 8, top: 2),
       child: Row(
@@ -2418,6 +2686,65 @@ class _MessageView extends StatelessWidget {
 
   String _formatTime(DateTime t) =>
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  /// Optional note attached to a down-vote (DSH feedback note popover).
+  void _askFeedbackNote(BuildContext context) {
+    final c = TextEditingController();
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.fromLTRB(
+          16, 16, 16, MediaQuery.of(ctx).viewInsets.bottom + 16,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'What was wrong with this answer?',
+              style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Optional — the note stays on this device.',
+              style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: c,
+              autofocus: true,
+              maxLines: 3,
+              style: const TextStyle(fontSize: 13),
+              decoration: const InputDecoration(
+                hintText: 'e.g. wrong API, hallucinated paths…',
+              ),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Aether.accent,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+                onPressed: () {
+                  m.feedbackNote = c.text.trim();
+                  AppState.I.persistSessions();
+                  Navigator.pop(ctx);
+                  onAction();
+                },
+                child: const Text('Save', style: TextStyle(fontSize: 13.5)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _text(bool isUser) => Container(
     padding: EdgeInsets.symmetric(
@@ -2515,106 +2842,107 @@ class _MessageView extends StatelessWidget {
   /// DSH turn-tail parity — faint footer row (elapsed · stats).
   Widget _turnTail() => _TurnTailRow(m);
 
-  Widget _code() => Container(
-    clipBehavior: Clip.antiAlias,
-    decoration: BoxDecoration(
-      color: Aether.surface,
-      borderRadius: BorderRadius.circular(12),
-      border: Border.all(color: Aether.hairline),
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          color: Aether.surfaceAlt,
-          child: Row(
-            children: [
-              Text(
-                m.lang ?? 'code',
-                style: TextStyle(fontSize: 11, color: Aether.textMuted),
-              ),
-              const Spacer(),
-              _CopyButton(code: m.content),
-            ],
+  Widget _imageGen(BuildContext context) {
+    final file = m.imagePath != null ? File(m.imagePath!) : null;
+    final exists = file != null && file.existsSync();
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: Aether.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // The real generated image, saved in the session workspace.
+          AspectRatio(
+            aspectRatio: 1,
+            child: exists
+                ? Image.file(file, fit: BoxFit.cover,
+                    errorBuilder: (_, _, _) => _imageGenFallback())
+                : _imageGenFallback(),
           ),
-        ),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.all(12),
-          child: Text(
-            m.content,
-            style: TextStyle(
-              fontFamily: Aether.mono,
-              fontSize: 12,
-              height: 1.55,
-              color: Aether.text,
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  m.content,
+                  style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    if (exists) ...[
+                      _imageAction(
+                        Icons.open_in_full,
+                        'Open',
+                        () => _openLocalFile(context, m.imagePath!),
+                      ),
+                      const SizedBox(width: 14),
+                      Text(
+                        '${(file.lengthSync() / 1024).toStringAsFixed(0)} KB',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Aether.textFaint,
+                        ),
+                      ),
+                    ] else
+                      Text(
+                        'image file not in workspace',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Aether.textFaint,
+                        ),
+                      ),
+                  ],
+                ),
+              ],
             ),
           ),
-        ),
-      ],
+        ],
+      ),
+    );
+  }
+
+  Widget _imageGenFallback() => Container(
+    color: Aether.surfaceAlt,
+    child: const Center(
+      child: Icon(Icons.auto_awesome, color: Aether.accent, size: 40),
     ),
   );
 
-  Widget _imageGen() => Container(
-    clipBehavior: Clip.antiAlias,
-    decoration: BoxDecoration(
-      color: Aether.surface,
-      borderRadius: BorderRadius.circular(12),
-      border: Border.all(color: Aether.hairline),
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // dummy generated image
-        AspectRatio(
-          aspectRatio: 1,
-          child: Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  Color(0xFF1B1F3B),
-                  Color(0xFF0E2A4A),
-                  Color(0xFF111114),
-                ],
-              ),
+  Widget _imageAction(IconData icon, String label, VoidCallback onTap) =>
+      GestureDetector(
+        onTap: onTap,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 15, color: Aether.accent),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(fontSize: 11, color: Aether.accent),
             ),
-            child: const Center(
-              child: Icon(Icons.auto_awesome, color: Aether.accent, size: 40),
-            ),
-          ),
+          ],
         ),
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                m.content,
-                style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Icon(
-                    Icons.download_outlined,
-                    size: 15,
-                    color: Aether.textFaint,
-                  ),
-                  SizedBox(width: 14),
-                  Icon(Icons.refresh, size: 15, color: Aether.textFaint),
-                  SizedBox(width: 14),
-                  Icon(Icons.open_in_full, size: 14, color: Aether.textFaint),
-                ],
-              ),
-            ],
-          ),
+      );
+
+  /// Open a local workspace file with the best-matching app.
+  void _openLocalFile(BuildContext context, String path) {
+    try {
+      launchUrl(Uri.file(path));
+    } catch (_) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No app can open ${path.split('/').last}'),
+          behavior: SnackBarBehavior.floating,
         ),
-      ],
-    ),
-  );
+      );
+    }
+  }
 }
 
 /// One row in the composer slash-suggestion menu.
@@ -3346,6 +3674,8 @@ class _InputBarState extends State<_InputBar> {
                   // DSH-web workspace chip — current workspace/repo name.
                   const _WorkspaceChip(),
                   const SizedBox(width: 6),
+                  // DSH-web plan chip — amber, only while plan mode is on.
+                  const _PlanChip(),
                   // DSH-web mode selector — icon + text chip, opens the mode sheet.
                   const _ModeChip(),
                   // Model selector lives in the header AppBar — not duplicated here.
@@ -3460,6 +3790,173 @@ class _TypingBubble extends StatelessWidget {
 /// DSH-web QueueDock — a strip above the input bar showing queued messages
 /// with edit/remove actions. Shown only when [AgentService.queuedMessages]
 /// is non-empty.
+/// DSH-web GoalBar — the session goal as a strip above the composer dock:
+/// objective, round chip, status; edit / pause / resume / clear actions.
+/// Renders only while a goal exists. Pause/resume flips the goal status
+/// directly; clear marks it complete (the strip then disappears).
+class _GoalBar extends StatelessWidget {
+  const _GoalBar();
+
+  void _update(ChatSession s, String status) {
+    s.goal?['status'] = status;
+    AppState.I.persistSessions();
+    AppState.I.refresh();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AppState.I,
+      builder: (_, _) {
+        final s = AppState.I.activeSession;
+        final g = s?.goal;
+        if (s == null || g == null) return const SizedBox.shrink();
+        final status = g['status'] as String? ?? 'active';
+        final objective = g['objective'] as String? ?? '';
+        final round = (g['round'] as num?)?.toInt() ?? 0;
+        final color = switch (status) {
+          'active' => Aether.accent,
+          'paused' => Aether.warn,
+          'blocked' => Aether.danger,
+          _ => Aether.success, // complete
+        };
+        return Container(
+          margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+          decoration: BoxDecoration(
+            color: Aether.surface,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: color.withValues(alpha: 0.4)),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          child: Row(
+            children: [
+              Icon(Icons.flag_outlined, size: 14, color: color),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  objective,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12.5),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 6,
+                  vertical: 1,
+                ),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  'r$round · $status',
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                    color: color,
+                  ),
+                ),
+              ),
+              // Pause / resume.
+              if (status == 'active' || status == 'paused')
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: status == 'active' ? 'Pause goal' : 'Resume goal',
+                  icon: Icon(
+                    status == 'active'
+                        ? Icons.pause_outlined
+                        : Icons.play_arrow_outlined,
+                    size: 16,
+                    color: Aether.textMuted,
+                  ),
+                  onPressed: () =>
+                      _update(s, status == 'active' ? 'paused' : 'active'),
+                ),
+              // Edit objective.
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                tooltip: 'Edit objective',
+                icon: Icon(
+                  Icons.edit_outlined,
+                  size: 15,
+                  color: Aether.textMuted,
+                ),
+                onPressed: () => _editObjective(context, s, objective),
+              ),
+              // Clear (marks complete — the bar then hides).
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                tooltip: 'Clear goal',
+                icon: Icon(
+                  Icons.clear_outlined,
+                  size: 16,
+                  color: Aether.textFaint,
+                ),
+                onPressed: () => _update(s, 'complete'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _editObjective(BuildContext context, ChatSession s, String current) {
+    final c = TextEditingController(text: current);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.fromLTRB(
+          16, 16, 16, MediaQuery.of(ctx).viewInsets.bottom + 16,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Goal objective',
+              style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: c,
+              autofocus: true,
+              maxLines: 2,
+              style: const TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Aether.accent,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+                onPressed: () {
+                  final v = c.text.trim();
+                  if (v.isNotEmpty) {
+                    s.goal?['objective'] = v;
+                    AppState.I.persistSessions();
+                    AppState.I.refresh();
+                  }
+                  Navigator.pop(ctx);
+                },
+                child: const Text('Save', style: TextStyle(fontSize: 13.5)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// DSH-web TodoDock — live checklist written by todo_write tool.
 /// Shows above the chat input; each item shows status icon + text.
 /// Collapsed by default; tap header to expand full list.
@@ -4510,6 +5007,53 @@ class _WorkspaceChip extends StatelessWidget {
         ),
       );
     }
+  }
+}
+
+/// DSH-web plan chip — amber "Plan" indicator in the composer, visible only
+/// while plan mode is on for the active session. Tap exits plan mode.
+class _PlanChip extends StatelessWidget {
+  const _PlanChip();
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AppState.I,
+      builder: (_, _) {
+        final s = AppState.I.activeSession;
+        final on = s?.planMode ?? false;
+        if (!on) return const SizedBox.shrink();
+        return GestureDetector(
+          onTap: () {
+            AgentService.I.planMode = false;
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            decoration: BoxDecoration(
+              color: Aether.warn.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Aether.warn.withValues(alpha: 0.45)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.architecture, size: 14, color: Aether.warn),
+                const SizedBox(width: 6),
+                Text(
+                  'Plan',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    height: 20 / 13,
+                    color: Aether.warn,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 }
 

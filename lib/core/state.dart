@@ -165,7 +165,14 @@ class McpServer {
   });
 }
 
-enum MsgKind { text, code, imageGen, reasoning, tool, turnTail, compact }
+enum MsgKind {
+  text,
+  reasoning,
+  tool,
+  turnTail, // reserved: turn-tail lane rows (not constructed today)
+  compact,
+  imageGen,
+}
 
 /// Attachment metadata rendered as a chip under a user message.
 class MessageAttachment {
@@ -232,8 +239,22 @@ class Message {
     this.toolState = 'running',
     this.toolSessionId,
     this.attachments = const [],
+    this.imagePath,
+    this.feedback,
+    this.feedbackNote,
     DateTime? time,
   }) : time = time ?? DateTime.now();
+
+  /// Local file path for `MsgKind.imageGen` rows — the generated image
+  /// saved into the session workspace (rendered in-chat, tappable to open).
+  final String? imagePath;
+
+  /// User feedback on a FINAL assistant message (DSH message-feedback):
+  /// 'up' | 'down' | null. Re-clicking the same value retracts (null).
+  String? feedback;
+
+  /// Optional note attached to a down-vote (why it was bad).
+  String? feedbackNote;
 
   factory Message.fromJson(Map<String, dynamic> j) => Message(
     role: j['role'] as String? ?? 'user',
@@ -251,6 +272,9 @@ class Message {
     toolDetail: j['toolDetail'] as String?,
     toolState: j['toolState'] as String? ?? 'ok',
     toolSessionId: j['toolSessionId'] as String?,
+    imagePath: j['imagePath'] as String?,
+    feedback: j['feedback'] as String?,
+    feedbackNote: j['feedbackNote'] as String?,
     attachments: [
       for (final a in (j['attachments'] as List? ?? []))
         if (a is Map<String, dynamic>)
@@ -272,6 +296,10 @@ class Message {
     if (toolDetail != null) 'toolDetail': toolDetail,
     if (toolState != 'ok') 'toolState': toolState,
     if (toolSessionId != null) 'toolSessionId': toolSessionId,
+    if (imagePath != null) 'imagePath': imagePath,
+    if (feedback != null) 'feedback': feedback,
+    if (feedbackNote != null && feedbackNote!.isNotEmpty)
+      'feedbackNote': feedbackNote,
     if (attachments.isNotEmpty)
       'attachments': [for (final a in attachments) a.toJson()],
     'time': time.toIso8601String(),
@@ -383,6 +411,10 @@ class ChatSession {
   /// advanced by update_goal.  One goal per session at a time.  Persisted.
   Map<String, dynamic>? goal;
 
+  /// Plan mode (DSH /plan parity) — persisted per session so a restart or
+  /// session switch keeps the amber planning state.
+  bool planMode;
+
   /// Session-local reminders (DSH schedule equivalent) — created by
   /// schedule_create, fired by AgentService's timer.  Persisted.
   List<Map<String, dynamic>> schedules;
@@ -405,6 +437,7 @@ class ChatSession {
     this.workspaceFolder,
     this.compactedSummary,
     this.goal,
+    this.planMode = false,
     this.compactedAtCount = 0,
     this.parentId,
     this.agentLabel,
@@ -455,6 +488,7 @@ class ChatSession {
     goal: j['goal'] == null
         ? null
         : Map<String, dynamic>.from(j['goal'] as Map),
+    planMode: j['planMode'] as bool? ?? false,
     messages:
         (j['messages'] as List?)
             ?.map((m) => Message.fromJson(m as Map<String, dynamic>))
@@ -499,6 +533,7 @@ class ChatSession {
       'agentOutputHint': agentOutputHint,
     if (agentAllowedTools.isNotEmpty) 'agentAllowedTools': agentAllowedTools,
     if (goal != null) 'goal': goal,
+    if (planMode) 'planMode': planMode,
     'schedules': schedules,
     'todos': todos,
     'messages': messages.map((m) => m.toJson()).toList(),

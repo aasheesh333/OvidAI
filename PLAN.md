@@ -41,14 +41,14 @@ specs in §2. Findings below are code-level defects, separate from the feature g
 | # | Defect | Where | Note |
 |---|---|---|---|
 | C1 | Compaction cannot shrink the in-flight request | `msgs` built once; `forceCompact` only inserts a summary | overflow recovery grows the request; auto-compaction only helps the NEXT run |
-| C5 | Session todos never clear at turn start | `_runTaskBody` resets nudge/produced, not `s.todos` | stale checklist persists |
+| C5 | ~~Session todos never clear at turn start~~ **FIXED** (PR17) — cleared at USER turn start; system continuations keep the checklist (`freshTurn` flag) | `_runTaskBody` | closed |
 | C6 | No cache-read/cache-write token buckets, no tok/s, TTFT is first-turn only | `_runTaskBody` metering | Usage/stats parity gap |
-| C7 | `file_write` writes only to RepoCache; `fs_edit create` only to disk | split write paths | `file_write` then `run_shell cat` fails |
+| C7 | ~~`file_write` writes only to RepoCache; `fs_edit create` only to disk~~ **FIXED** (PR17) — one `_writeWorkspaceFile` path: disk + repo cache together, mirrors both ways | split write paths | closed |
 | C8 | No spill store / output retention notices | truncation is inline with a bare `…` | see Phase H |
 | C9 | No checkpoints / `TOOL_OUTCOME_UNKNOWN` | no persistence barrier | a kill mid-tool leaves rows spinning forever |
 | C10 | ~~`web_search` is single-query DuckDuckGo scraping, no URLs~~ **FIXED** — DSH-parity `queries` array (1–4, exact dupes run once), concurrent fan-out, URL-dedup + round-robin merge, `Sources:` lines as `[title](url) — snippet` markdown links, cap notice, cite footer; one failed query fails the call (`Error: …`) | `agent_service.dart` `_webSearch`/`_ddgSearch` | closed (PR14 tests) |
 | C11 | ~~MCP: JSON-RPC errors returned as results; timeout yields `'null'`; no dead-process watcher~~ **FIXED** — full `mcp_service.dart` rewrite: `McpRpcResult` (errors never masquerade as results), 30s timeout with explicit message, process-death watcher + `_lastDeath` diagnostics, `notifications/tools/list_changed` → re-discovery, `isError` honoured, text/resource/image content kept apart, 6000-char head+tail trim; proxy tool gated on server existence | `mcp_service.dart` | reliability gap closed (PR13 tests) |
-| C12 | Dead `MsgKind` branches (`code`, `imageGen`, `turnTail`) never constructed | `chat_screen.dart` | image-gen placeholder (B3) is unreachable |
+| C12 | ~~Dead `MsgKind` branches~~ **FIXED** (PR17) — `imageGen` now constructed by real image-gen; `code` branch removed; `turnTail` documented reserved | `chat_screen.dart`, `state.dart` | closed |
 
 ---
 
@@ -58,7 +58,7 @@ specs in §2. Findings below are code-level defects, separate from the feature g
 |---|-----|-------|----------|--------|
 | B1 | P0 | Marketplace catalog never loaded: `fetchMarketplaceCatalog` was only reachable from the agent command, never from the Plugins screen, and `addMarketplace` just appended a name. Now: registry persists (`ovid_marketplaces_v1`), the screen merges catalogs on open, has a refresh action, and the add sheet fetches + reports. **PR15**: Claude Code (`.claude-plugin/marketplace.json`) + Codex/Claude Desktop (map-form `mcpServers`) formats both parse; jsdelivr/githack mirror fallbacks; actionable failure message. | `lib/core/state.dart` marketplaces block · `lib/ui/plugins_screen.dart` | DONE |
 | B2 | P1 | Copy button copied an empty string on tool/turn rows while still showing "Copied to clipboard". | `lib/ui/chat_screen.dart` `_copyText`/`_actionRow` | DONE |
-| B3 | P1 | Image gen renders a dummy gradient placeholder and `_imageGenTool` produces no real image. Also unreachable — nothing constructs `MsgKind.imageGen`. | `chat_screen.dart` `_imageGen` · `agent_service.dart` `_imageGenTool` | BROKEN |
+| B3 | P1 | ~~Image gen renders a dummy gradient placeholder~~ **FIXED** (PR17) — real Pollinations download saved to the session workspace, `imageGen` row renders the file (tap-to-open, size, offline-safe). | `chat_screen.dart` `_imageGen` · `agent_service.dart` `_generateImage` | DONE |
 | B4 | P2 | Markdown tables overflowed (no horizontal scroll). Now `IntrinsicColumnWidth` + styled borders. | `chat_screen.dart` `_DshMarkdown` | DONE |
 | B5 | P2 | Reasoning text too large/heavy vs DSH. Now 12.5px muted body via `_DshMarkdown(fontSize:, color:)`. | `chat_screen.dart` `_ReasoningCard` | DONE |
 | B6 | P1 | Links not clickable, text not selectable. Now `selectable: true` + `onTapLink` (http(s) → in-app browser, others → `url_launcher`), user bubbles use `SelectableText`. | `pubspec.yaml` · `chat_screen.dart` | DONE |
@@ -145,18 +145,18 @@ Every user-visible feature DSH web ships, derived from the installed package set
 | 2 | Workspace browser | MISS — no workspace grouping / archive / fork / drag-reorder / content search | — |
 | 3 | Conversation shell | HALF — header + composer; no lineage seat, no view tabs, no workspace empty-state card | `chat_screen.dart` |
 | 4 | Streaming + Think row | DONE — streaming, folded step summaries, live `_ReasoningCard`, and the typing row now shows the live run status (retry/backoff/compaction) instead of a fixed label | `chat_screen.dart` `_ReasoningCard`/`_TypingBubble`, `agent_service.dart` `statusFor` |
-| 5 | Context meter + stats | HALF — `_StatsLine` occupancy ring (12px) + tooltip breakdown + Input/Output/decode/TTFT; no click-open panel with segmented bar, no cache-hit, no tok/s, TTFT is first-turn only, totals aggregate across sessions | `chat_screen.dart` `_StatsLine` · `usage_screen.dart` |
+| 5 | Context meter + stats | HALF — `_StatsLine` occupancy ring + tooltip + Input/Output/decode/TTFT; cache-hit/tok-s and click-open segmented-bar panel land in PR18 (metering buckets) | `chat_screen.dart` `_StatsLine` · `usage_screen.dart` |
 | 6 | Todo dock | DONE — `todo_write` + mid-run pending-todo nudge | `agent_service.dart:1719-1743,3255-3281` |
 | 7 | Queue dock | DONE — queue + strict steer + drain | `agent_service.dart:236,448-533` |
-| 8 | Plan mode | HALF — `/plan` toggle, `exit_plan_mode` gated on review, and a Chat about it / Decline / Approve card whose refusal note reaches the model; no composer "Plan x" chip, no plan-task placeholder, `planMode` is not persisted across restart | `agent_service.dart` `_handleExitPlanMode` · `chat_screen.dart` `_PlanReviewCard` |
+| 8 | Plan mode | DONE (PR17) — `/plan`, review card, persisted `planMode` (restart-safe), amber composer chip (tap exits); plan-task placeholder still open | `agent_service.dart` `_handleExitPlanMode` · `chat_screen.dart` `_PlanReviewCard`/`_PlanChip` |
 | 9 | Subagent lineage UI | DONE — child sessions with full transcripts, breadcrumb to the root chat, descendants menu with state/elapsed/rows, read-only one-shot composer, continuable composer with independent Stop, `@` mention of this chat's agents, parent card links into the child; PR16 adds settlement notices, the child→parent `report` tool, cold resume from durable `agentId`, and persona/output-shape dispatch args; still no keyboard-nav catalog tree and no per-child token totals | `lib/ui/subagent_screen.dart`, `chat_screen.dart` |
 | 10 | Workflow run tree | MISS — no run/phase/member tree | — |
 | 11 | Ralph loop | MISS | — |
-| 12 | Goal bar | HALF — `get_goal`/`create_goal`/`update_goal` tools; no GoalBar strip with pause/resume/clear | `agent_service.dart` goal cases |
-| 13 | Background jobs | HALF — `job_start/output/list/kill` + `_BgJob`; no header badge + popover | `agent_service.dart:178` |
+| 12 | Goal bar | DONE (PR17) — `_GoalBar` strip with objective/round/status + edit/pause/resume/clear; `paused` goal status added | `chat_screen.dart` `_GoalBar` · `agent_service.dart` goal cases |
+| 13 | Background jobs | DONE (PR17) — `job_start/output/list/kill` + AppBar badge + popover (state dot, per-second elapsed, output size, Kill) | `agent_service.dart` `jobsFor`/`killJobFor` · `chat_screen.dart` popover |
 | 14 | Tool presentation | HALF — `_ToolCard` rows with lifecycle dots + terminal/diff detail intents; no recursive subcall tree, no read/search/web intent cards, no details inspector, paths not cwd-relative | `chat_screen.dart` `_ToolCard`/`_DetailBody` |
-| 15 | Deliverables | HALF — turn-tail chip lane with 6-chip cap, "+N files" sheet, and tap-opens-that-file in Studio; no Show-in-folder, no clickable inline-code refs, not persisted per turn | `chat_screen.dart` `_ProducedFilesCard` |
-| 16 | Message feedback | MISS — no like/dislike/note | — |
+| 15 | Deliverables | HALF — chip lane + "+N" sheet + Studio open + Show-in-folder (PR17); clickable inline-code refs + per-turn persistence still open | `chat_screen.dart` `_ProducedFilesCard` |
+| 16 | Message feedback | DONE (PR17) — like/dislike on final assistant rows, note popover on down-vote, re-click retract, persisted | `chat_screen.dart` `_actionRow` |
 | 17 | User questions | DONE — `ask_user_question` + structured question card | `agent_service.dart:125-139,1750` |
 | 18 | Skills | DONE — `skills.dart` + SkillsScreen + `/`-invocable skills | `skills.dart`, `settings_screen.dart:897,1041` |
 | 19 | Model selection | HALF — AppBar picker with per-model effort variants + `/model` command; no composer-seat trigger, no routable-block row | `chat_screen.dart` `_ModelPickerSheet`, `commands.dart` |
@@ -166,11 +166,11 @@ Every user-visible feature DSH web ships, derived from the installed package set
 | 23 | Session log export | HALF — Export chats (JSON); no ZIP with logs + attachments + descendants | `settings_screen.dart:799` |
 | 24 | Directory picker | DONE — working-folder chip → `_pickFolderDirect` with All-Files-Access retry | `chat_screen.dart:3852` |
 | 25 | Settings domain | DONE — full settings tree (account, providers, plugins, memory, reasoning, GitHub sync, auto-run, skills, privacy, theme, timeout, context/output, export, delete) | `settings_screen.dart` |
-| 26 | Brand / connection | HALF — branding present; no connection-status chip / reset handling | — |
+| 26 | Brand / connection | DONE (PR17) — `ConnectionService` 204-probe + sidebar brand chip (online/offline/checking, tap re-probes) | `lib/core/connection_service.dart` · `sidebar.dart` |
 | 27 | Theme | DONE — dark default + light theme toggle | `settings_screen.dart:530` |
 | 28 | Locale | MISS — English only | — |
 | 29 | Cross-session search | HALF — sidebar title search + `session_search` tool; no FTS5 content search with snippets | `sidebar.dart:115`, `agent_service.dart` |
-| 30 | LLM session titles | HALF — first-message heuristic `_autoTitle`; no LLM-generated title | `state.dart:1055-1081` |
+| 30 | LLM session titles | DONE (PR17) — `maybeGenerateSessionTitle` after the first exchange (budgeted, thinking off, once per session, heuristic fallback, never overwrites a rename) | `agent_service.dart` |
 | 31 | Web search / fetch | DONE — `web_search` is DSH-parity multi-query (1–4 concurrent, URL-dedup round-robin, markdown-link citations, cap notice); `fetch_url` renders HTML → markdown (`_htmlToMarkdown`); both gated behind installed plugins | `agent_service.dart` `_webSearch`, `fetch_url` |
 | 32 | Precise file editor | DONE — `fs_edit` view/create/str_replace/insert, numbered `view`, single-occurrence enforcement, read-before-edit, and workspace path containment | `agent_service.dart` `_handleFsEdit`, `containedPath` |
 | 33 | Glob / grep | DONE — `fs_glob` (mtime-desc, capped, symlink-safe) + `fs_grep` (`include` glob, match-based cap, 2 MB skip, `SEARCH_BAD_PATTERN`); no ripgrep backend, no spill | `agent_service.dart` `_handleFsGlob`/`_handleFsGrep` |
@@ -303,6 +303,34 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 49. ~~`web_search`~~ DONE — 1–4 concurrent queries, URL dedup, real citation URLs; `fetch_url` → markdown (C10 closed, PR14).
 50. ~~MCP reliability~~ DONE — errors surface as errors, dead-process watcher, `tools/list_changed` honoured (C11 closed by the `mcp_service.dart` rewrite + PR13 tests).
 
+### PR17 — Quick wins: chat UX + core fixes (DONE)
+- **C5** todos cleared at USER turn start (`runTask(freshTurn:)` — system
+  continuations like queue drain/reminders/settlement keep the live checklist).
+- **C7** one write path — `_writeWorkspaceFile`/`_mirrorToDisk`: `file_write`
+  and `fs_edit create/str_replace/insert` now write disk AND repo cache
+  together; `run_shell cat` after `file_write` sees the same bytes.
+- **B3 real image-gen** — Pollinations download → session workspace file →
+  durable `MsgKind.imageGen` row with `imagePath`, rendered via `Image.file`
+  (tap-to-open, size label, offline-safe); **C12** dead `MsgKind.code`/ordering
+  cleaned (code branch removed; turnTail documented as reserved).
+- **#16 message feedback** — like/dislike on final assistant rows with note
+  popover on down-vote, persisted (`feedback`/`feedbackNote`), re-click retracts.
+- **#13 jobs badge + popover** — AppBar badge with live count, popover rows
+  (label/state/per-second elapsed/output size) with Kill; `jobsFor`/`killJobFor`.
+- **#12 goal bar** — strip above the composer dock: objective, round chip,
+  status colour; edit / pause / resume / clear; `paused` status added to
+  `update_goal` (pause/resume round-trips keep the round).
+- **#30 LLM session titles** — `maybeGenerateSessionTitle`: one cheap
+  post-exchange background call (thinking off, tools off), heuristic fallback,
+  never touches a human rename, once per session.
+- **#15 deliverables** — Show-in-folder per produced file (`hostDirOf` +
+  file-manager open), repo-only paths report clearly.
+- **#8 plan chip** — amber "Plan" composer chip (tap to exit); `planMode`
+  persisted on the session (JSON round-trip), run seeds from it.
+- **#26 connection chip** — `ConnectionService` (gstatic 204 probe, no new
+  dependency) + sidebar brand-row chip (online/offline, tap re-checks).
+- Tests: PR17 group — 134 → 141. PR9 todo tests moved to continuation runs.
+
 ### PR16 — Subagent parity gaps closed (DONE)
 - **Settlement notice** — when a background child settles, `_deliverSettlementNotice`
   tells the durable direct parent in its own turn stream (DSH wording: "Background
@@ -351,7 +379,7 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 52. Presets / persona (optional — evaluate whether mobile needs preset stacks).
 53. Ralph loop tool (optional, gated on explicit user request like DSH).
 
-**Verification gate after every phase:** `flutter analyze` (0 issues) + `flutter test` (119 tests) + commit + push + CI green on `ci/verified-android-build-20260827`.
+**Verification gate after every phase:** `flutter analyze` (0 issues) + `flutter test` (141 tests) + commit + push + CI green on `ci/verified-android-build-20260827`.
 
 ---
 

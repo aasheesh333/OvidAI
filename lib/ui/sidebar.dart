@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../core/connection_service.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import '../core/agent_service.dart';
@@ -54,6 +55,9 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                     'Ovid',
                     style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
                   ),
+                  const SizedBox(width: 8),
+                  // DSH brand/connection parity — live connection chip.
+                  const _ConnectionChip(),
                   const Spacer(),
                   IconButton(
                     tooltip: 'Close',
@@ -381,6 +385,70 @@ class _SessionTile extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Live connection-status chip beside the brand row (DSH parity).
+/// Green dot = online, red = offline, grey pulse = checking.
+/// Tap re-probes (also the "reset handling" affordance).
+class _ConnectionChip extends StatelessWidget {
+  const _ConnectionChip();
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: ConnectionService.I,
+      builder: (_, _) {
+        final c = ConnectionService.I;
+        final color = switch (c.status) {
+          ConnectionStatus.online => Aether.success,
+          ConnectionStatus.offline => Aether.danger,
+          ConnectionStatus.checking => Aether.textFaint,
+        };
+        final label = switch (c.status) {
+          ConnectionStatus.online => 'online',
+          ConnectionStatus.offline => 'offline',
+          ConnectionStatus.checking => '…',
+        };
+        return GestureDetector(
+          onTap: () => c.probe(),
+          child: Tooltip(
+            message: 'Connection: $label — tap to re-check',
+            waitDuration: const Duration(milliseconds: 500),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: color.withValues(alpha: 0.4)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w600,
+                      color: color,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

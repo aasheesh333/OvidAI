@@ -2216,7 +2216,7 @@ libncursesw.so.6.5←./lib/libncurses.so.6
 
       try {
         await agent
-            .runTask('do the task', sessionId: session.id)
+            .runTask('do the task', sessionId: session.id, freshTurn: false)
             .timeout(const Duration(seconds: 10));
         expect(requestBodies, isNotEmpty);
         final sys =
@@ -2296,7 +2296,7 @@ libncursesw.so.6.5←./lib/libncurses.so.6
 
       try {
         await agent
-            .runTask('fix the bug', sessionId: session.id)
+            .runTask('fix the bug', sessionId: session.id, freshTurn: false)
             .timeout(const Duration(seconds: 10));
         // First request: direct answer. Second: nudge continuation with
         // pending todos injected again. Then it stops cleanly.
@@ -3568,6 +3568,219 @@ block</pre>
         'content': 'i am not a subagent',
       });
       expect(res, contains('only available to subagents'));
+    });
+  });
+
+  group('PR17: quick wins — todos, write path, goal, plan, feedback', () {
+    ChatSession newSession(String id) {
+      final app = AppState.I;
+      final s = ChatSession(id: id, title: 'New chat', model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == id));
+      return s;
+    }
+
+    test('stale pending todos are cleared when a new turn starts', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final provider = app.providerById('ollama-local')!;
+      final originals = ({
+        'baseUrl': provider.baseUrl,
+        'models': List<String>.of(provider.models),
+        'selectedModel': provider.selectedModel,
+      });
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final requestBodies = <Map<String, dynamic>>[];
+
+      final session = ChatSession(
+        id: 'qw-t1',
+        title: 'Todo clear',
+        providerId: provider.id,
+        model: 'test-model',
+        messages: [Message(role: 'user', content: 'do the task')],
+      );
+      session.todos.addAll([
+        {'content': 'stale old task', 'status': 'pending'},
+      ]);
+      app.sessions.add(session);
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['test-model'];
+
+      final serverTask = () async {
+        await for (final request in server) {
+          final body = await utf8.decoder.bind(request).join();
+          requestBodies.add(jsonDecode(body) as Map<String, dynamic>);
+          request.response.headers.chunkedTransferEncoding = true;
+          request.response.add(
+            utf8.encode(
+              'data: ${jsonEncode({
+                'choices': [
+                  {
+                    'message': {'role': 'assistant', 'content': 'done'},
+                  },
+                ],
+                'usage': {
+                  'prompt_tokens': 10,
+                  'completion_tokens': 5,
+                  'total_tokens': 15,
+                },
+              })}\n\n',
+            ),
+          );
+          await request.response.flush();
+          await request.response.close();
+        }
+      }();
+      unawaited(serverTask);
+
+      try {
+        await agent
+            .runTask('do the task', sessionId: session.id)
+            .timeout(const Duration(seconds: 10));
+        // The turn STARTED fresh — the stale pending item is gone before
+        // the first request is assembled (C5).
+        expect(
+          session.todos.where((t) => t['status'] != 'completed'),
+          isEmpty,
+          reason: 'pending items from an earlier task must not leak into a '
+              'new turn',
+        );
+        // And the assembled system prompt carries no stale todo section.
+        final sys =
+            (requestBodies.first['messages'] as List)
+                .firstWhere((m) => m['role'] == 'system')['content']
+                as String;
+        expect(sys, isNot(contains('SESSION TODOS')));
+      } finally {
+        provider
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+        await server.close(force: true);
+        app.deleteSession(session.id);
+      }
+    });
+
+    test('file_write lands on disk AND the repo cache (C7)', () async {
+      final s = newSession('qw-t2');
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      final res = await AgentService.I.dispatchForTest('file_write', {
+        'path': 'c7_probe.txt',
+        'content': 'hello from file_write',
+      });
+      expect(res, contains('written'));
+
+      // Disk: the session workspace mirror exists with the same bytes.
+      final dir = await AgentService.I.sessionWorkDirForTest();
+      final disk = File('${dir.path}/c7_probe.txt');
+      expect(disk.existsSync(), isTrue, reason: 'mirrored to disk');
+      expect(disk.readAsStringSync(), 'hello from file_write');
+
+      // And fs_edit view (disk path) sees the same content — the exact
+      // split-write bug C7 existed for.
+      final view = await AgentService.I.dispatchForTest('fs_edit', {
+        'command': 'view',
+        'path': 'c7_probe.txt',
+      });
+      expect(view, contains('hello from file_write'));
+    });
+
+    test('goal pause/resume keeps the round, complete clears the bar',
+        () async {
+      final s = newSession('qw-t3');
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      final created = await AgentService.I.dispatchForTest('create_goal', {
+        'objective': 'ship the parity report',
+      });
+      expect(created, contains('round 0'));
+
+      final paused = await AgentService.I.dispatchForTest('update_goal', {
+        'status': 'paused',
+      });
+      expect(paused, contains('paused'));
+      expect(s.goal!['status'], 'paused');
+      final roundAtPause = s.goal!['round'] as int;
+
+      final resumed = await AgentService.I.dispatchForTest('update_goal', {
+        'status': 'active',
+        'progress': 'resumed work',
+      });
+      expect(resumed, contains('active'));
+      expect(
+        s.goal!['round'] as int,
+        roundAtPause,
+        reason: 'pause/resume round-trips keep the round',
+      );
+
+      final done = await AgentService.I.dispatchForTest('update_goal', {
+        'status': 'complete',
+      });
+      expect(done, contains('complete'));
+      expect(s.goal!['status'], 'complete');
+    });
+
+    test('plan mode persists on the session and survives reload', () {
+      final s = newSession('qw-t4');
+      s.planMode = true;
+      // JSON round-trip keeps the flag (restart survival).
+      final j = s.toJson();
+      expect(j['planMode'], isTrue);
+      final reloaded = ChatSession.fromJson(j);
+      expect(reloaded.planMode, isTrue);
+      // The setter writes through to the session.
+      AgentService.setRunSessionForTest(s.id);
+      AgentService.I.planMode = false;
+      expect(s.planMode, isFalse);
+      AgentService.setRunSessionForTest('');
+    });
+
+    test('message feedback persists and retracts (DSH message-feedback)',
+        () {
+      final s = newSession('qw-t5');
+      final m = Message(role: 'assistant', content: 'answer');
+      s.messages.add(m);
+
+      m.feedback = 'down';
+      m.feedbackNote = 'wrong API';
+      final j = m.toJson();
+      expect(j['feedback'], 'down');
+      expect(j['feedbackNote'], 'wrong API');
+      final reloaded = Message.fromJson(j);
+      expect(reloaded.feedback, 'down');
+      expect(reloaded.feedbackNote, 'wrong API');
+
+      // Retract on re-click semantics: null clears both.
+      m.feedback = null;
+      m.feedbackNote = null;
+      expect(m.toJson().containsKey('feedback'), isFalse);
+    });
+
+    test('imageGen message persists its workspace path', () {
+      final m = Message(
+        role: 'assistant',
+        kind: MsgKind.imageGen,
+        content: 'a cat astronaut',
+        imagePath: '/work/gen-123-cat.jpg',
+      );
+      final j = m.toJson();
+      expect(j['kind'], 'imageGen');
+      expect(j['imagePath'], '/work/gen-123-cat.jpg');
+      final reloaded = Message.fromJson(j);
+      expect(reloaded.kind, MsgKind.imageGen);
+      expect(reloaded.imagePath, '/work/gen-123-cat.jpg');
+    });
+
+    test('jobsFor snapshot exposes state and elapsed', () async {
+      final s = newSession('qw-t6');
+      // No jobs yet — empty snapshot, not an error.
+      expect(AgentService.I.jobsFor(s.id), isEmpty);
+      expect(AgentService.I.jobsFor('missing-session'), isEmpty);
     });
   });
 }
