@@ -3783,6 +3783,152 @@ block</pre>
       expect(AgentService.I.jobsFor('missing-session'), isEmpty);
     });
   });
+
+  group('PR18: context engineering — spill, budgets, CAS, metering', () {
+    ChatSession newSession(String id) {
+      final app = AppState.I;
+      final s = ChatSession(id: id, title: 'New chat', model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == id));
+      return s;
+    }
+
+    test('spillToolOutput returns small text untouched', () async {
+      final s = newSession('ce-s0');
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+      const small = 'short output';
+      final out = await spillToolOutput('run_shell', small, cap: 100);
+      expect(out, small, reason: 'fits — nothing spilled');
+    });
+
+    test('spillToolOutput persists overflow + exact notice + locator',
+        () async {
+      final s = newSession('ce-s1');
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      final big = List.generate(300, (i) => 'line-$i ${'x' * 50}').join('\n');
+      final out = await spillToolOutput('run_shell', big, cap: 1000);
+
+      expect(out, contains('characters omitted — full output saved to'));
+      expect(out, contains('.spill/'), reason: 'locator names the spill file');
+      expect(out, contains('sed -n'), reason: 'run_shell gets a line-range hint');
+      expect(out.startsWith('line-0'), isTrue, reason: 'head preserved');
+      expect(out.contains('line-299'), isTrue, reason: 'tail preserved');
+
+      // The spill file really exists in the workspace with the FULL text.
+      final dir = await AgentService.I.sessionWorkDirForTest();
+      final loc = RegExp(r'\.spill/\d+\.txt').firstMatch(out)!.group(0)!;
+      final f = File('${dir.path}/$loc');
+      expect(f.existsSync(), isTrue);
+      expect(f.readAsStringSync(), big);
+    });
+
+    test('grep-style tools get a narrower-pattern locator', () async {
+      final s = newSession('ce-s2');
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+      final big = 'y' * 5000;
+      final out = await spillToolOutput('fs_grep', big, cap: 500);
+      expect(out, contains('narrower `pattern`'));
+    });
+
+    test('FS CAS: edit after external change hits FS_STALE_VERSION',
+        () async {
+      final s = newSession('ce-s3');
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      final dir = await AgentService.I.sessionWorkDirForTest();
+      final f = File('${dir.path}/cas.txt');
+      f.writeAsStringSync('alpha\nbeta\n');
+
+      // Read (stamps the version)…
+      final view = await AgentService.I.dispatchForTest('fs_edit', {
+        'command': 'view',
+        'path': 'cas.txt',
+      });
+      expect(view, contains('alpha'));
+
+      // External mutation AFTER the read (a second session / shell echo).
+      f.writeAsStringSync('alpha\nBETA-CHANGED\n');
+
+      // …edit now fails with the stale-version guard.
+      final res = await AgentService.I.dispatchForTest('fs_edit', {
+        'command': 'str_replace',
+        'path': 'cas.txt',
+        'old_str': 'alpha',
+        'new_str': 'ALPHA',
+      });
+      expect(res, contains('FS_STALE_VERSION'));
+      expect(f.readAsStringSync(), contains('BETA-CHANGED'),
+          reason: 'the guard must not clobber the newer content');
+
+      // Re-read refreshes the stamp; the retry then succeeds.
+      await AgentService.I.dispatchForTest('fs_edit', {
+        'command': 'view',
+        'path': 'cas.txt',
+      });
+      final res2 = await AgentService.I.dispatchForTest('fs_edit', {
+        'command': 'str_replace',
+        'path': 'cas.txt',
+        'old_str': 'alpha',
+        'new_str': 'ALPHA',
+      });
+      expect(res2, contains('edited'));
+      expect(f.readAsStringSync(), contains('ALPHA'));
+    });
+
+    test('replayHistory skips the compacted span (C1 companion)', () {
+      final s = newSession('ce-s4');
+      for (var i = 0; i < 10; i++) {
+        s.messages.add(Message(role: 'user', content: 'msg-$i'));
+      }
+      s.compactedAtCount = 8;
+      s.compactedSummary = 'summary of the first eight';
+      final out = AgentService.I.replayHistoryForTest(s);
+      final contents = out
+          .map((m) => m['content'] as String? ?? '')
+          .where((c) => c.contains('msg-'))
+          .toList();
+      expect(contents, isNot(contains('msg-0')),
+          reason: 'compacted rows are not re-sent');
+      expect(contents.where((c) => c.contains('msg-8')), isNotEmpty);
+      expect(contents.where((c) => c.contains('msg-9')), isNotEmpty);
+    });
+
+    test('usage entries carry cache buckets and round-trip', () {
+      final e = UsageEntry(
+        time: DateTime.now(),
+        providerId: 'p',
+        providerName: 'P',
+        model: 'm',
+        promptTokens: 1000,
+        completionTokens: 100,
+        totalTokens: 1100,
+        cacheReadTokens: 800,
+        cacheWriteTokens: 200,
+        duration: const Duration(seconds: 2),
+      );
+      final j = e.toJson();
+      expect(j['cr'], 800);
+      expect(j['cw'], 200);
+      final back = UsageEntry.fromJson(j);
+      expect(back.cacheReadTokens, 800);
+      expect(back.cacheWriteTokens, 200);
+      // Old entries without buckets still load.
+      final old = UsageEntry.fromJson({
+        't': DateTime.now().toIso8601String(),
+        'pt': 5,
+        'ct': 5,
+        'tt': 10,
+        'd': 100,
+      });
+      expect(old.cacheReadTokens, 0);
+    });
+  });
 }
 
 /// Build one DuckDuckGo-style result block (anchor + snippet pair).

@@ -188,6 +188,52 @@ String cleanTruncate(String text, int max) {
   return '$safe…';
 }
 
+/// Spill + output retention (DSH spill-policy parity, C8/PR18).
+///
+/// Oversized tool output is PERSISTED out-of-context into the session
+/// workspace (`.spill/<id>.txt`) and the model gets a head/tail preview
+/// with an EXACT omission notice and a locator hint telling it how to
+/// read the middle — instead of a silent `…` that loses the content
+/// forever.
+///
+/// [toolName] names the calling tool for the locator hint. [cap] is the
+/// in-context character budget. Returns the exact same text when it fits.
+Future<String> spillToolOutput(
+  String toolName,
+  String text, {
+  int cap = 6000,
+}) async {
+  if (text.length <= cap) return text;
+  final service = AgentService.I;
+  final dir = await service.sessionWorkDirForTest();
+  final spillDir = Directory('${dir.path}/.spill');
+  spillDir.createSync(recursive: true);
+  final id = DateTime.now().millisecondsSinceEpoch;
+  final f = File('${spillDir.path}/$id.txt');
+  f.writeAsStringSync(text);
+  final relPath = '.spill/$id.txt';
+
+  final headLen = cap ~/ 2;
+  final tailLen = cap ~/ 2;
+  final head = text.substring(0, headLen);
+  final tail = text.substring(text.length - tailLen);
+  final omitted = text.length - headLen - tailLen;
+
+  // How to read the middle — pick by tool shape (DSH locator hints).
+  final locator = toolName == 'run_shell'
+      ? 'run_shell: `sed -n "L,LP" $relPath` for a line range, or '
+            '`grep -n "<pattern>" $relPath` to find lines'
+      : toolName == 'fs_grep' || toolName == 'fs_glob'
+      ? 're-run with a narrower `pattern` or an `include` glob; the full '
+            'output is saved at $relPath (fs_edit view can page it)'
+      : 'the full output is saved at $relPath — read it with fs_edit view '
+            '(path .spill/$id.txt) in chunks';
+  return '$head\n\n'
+      '[…$omitted characters omitted — full output saved to $relPath. '
+      '$locator…]\n\n'
+      '$tail';
+}
+
 class ApprovalRequest {
   final String tool;
   final String summary;
@@ -325,6 +371,8 @@ class _AgentRun {
   bool planMode = false;
   final Map<int, _BgJob> jobs = {};
   int jobCounter = 0;
+  /// Per-tool call counts within THIS run (repeat-tool reminder, PR18).
+  final Map<String, int> toolCallCounts = {};
   Message? activeToolMsg;
   DateTime? runStart;
   int? lastRunElapsedMs;
@@ -356,8 +404,23 @@ class _AgentRun {
   int turns = 0;
   int llmMs = 0;
   int ttftMs = 0;
+
+  /// TTFT samples across ALL turns (PR18) — the average feeds the stats
+  /// line; the old code recorded only the first turn's TTFT.
+  int ttftSamples = 0;
   int decodeTokens = 0;
   int toolMs = 0;
+
+  /// Cache accounting (PR18): KV tokens reused / newly written.
+  int cacheReadTokens = 0;
+  int cacheWriteTokens = 0;
+
+  /// Decode throughput: completion tokens per second over the run.
+  double get decodeTokPerSec =>
+      llmMs <= 0 ? 0 : decodeTokens / (llmMs / 1000);
+
+  /// Average TTFT over sampled turns (ms).
+  int get avgTtftMs => ttftSamples == 0 ? 0 : ttftMs ~/ ttftSamples;
 
   /// Context breakdown (system/tools/messages heuristic tokens) from the
   /// last measured request envelope.
@@ -599,6 +662,12 @@ class AgentService extends ChangeNotifier {
   int get sessionSystemTokens => _run.systemTokens;
   int get sessionToolTokens => _run.toolTokens;
   int get sessionMessageTokens => _run.messageTokens;
+
+  // PR18 metering views (stats line + usage panel).
+  double get sessionDecodeTokPerSec => _run.decodeTokPerSec;
+  int get sessionAvgTtftMs => _run.avgTtftMs;
+  int get sessionCacheReadTokens => _run.cacheReadTokens;
+  int get sessionCacheWriteTokens => _run.cacheWriteTokens;
 
   /// Files produced in the active session's current/latest run (DSH
   /// "Produced" cards). Read-only view for the UI.
@@ -1306,8 +1375,8 @@ class AgentService extends ChangeNotifier {
     return SandboxService.I.workDirFor(sid);
   }
 
-  /// Test seam: resolve the ACTIVE session's workspace directory without
-  /// running an agent (tests stage files here before runTask).
+  /// Resolve the ACTIVE session's workspace directory (also used by the
+  /// spill store for oversized tool output).
   Future<Directory> sessionWorkDirForTest() async => _sessionWorkDir();
 
   /// THE one write path for workspace files (C7). Every tool that writes
@@ -1354,6 +1423,37 @@ class AgentService extends ChangeNotifier {
 
   // ── fs tools state (read-before-write policy, DSH observation gate) ──
   /// Paths the AI has read via file_read/fs_edit view — str_replace/insert
+  /// require an observed path (FS_NOT_OBSERVED gate).
+
+  // ── FS observation CAS (PR18, DSH fs-observation-policy parity) ──
+  /// Last-observed content length + mtime per path. A write whose target
+  /// changed since the read is rejected with FS_STALE_VERSION — the model
+  /// re-reads and retries, so two sessions never clobber each other
+  /// silently. (Content hash would be exact; length+mtime is enough signal
+  /// for a mobile FS without hashing every read.)
+  final Map<String, ({int length, DateTime modified})> _fsObserved = {};
+
+  void _fsMarkObserved(String path, File f) {
+    try {
+      _fsObserved[path] = (
+        length: f.lengthSync(),
+        modified: f.lastModifiedSync(),
+      );
+    } catch (_) {}
+  }
+
+  /// null = fresh (no prior observation to go stale); true = matches;
+  /// false = STALE — the file changed since the last read.
+  bool? _fsCheckFresh(String path, File f) {
+    final seen = _fsObserved[path];
+    if (seen == null) return null;
+    try {
+      return f.lengthSync() == seen.length &&
+          f.lastModifiedSync().isAtSameMomentAs(seen.modified);
+    } catch (_) {
+      return false;
+    }
+  }
   /// require a prior read.  Keyed by session id so sessions don't leak.
   final Map<String, Set<String>> _readPaths = {};
   Set<String> _readPathsFor(String sid) =>
@@ -3031,7 +3131,12 @@ class AgentService extends ChangeNotifier {
     const proseBudget = 4000;
     const toolBudget = 1500;
     final out = <Map<String, dynamic>>[];
-    for (final m in s.messages) {
+    // Compacted span skip (PR18/C1): rows below compactedAtCount are
+    // already folded into s.compactedSummary — replaying them would
+    // re-send everything compaction just removed (and the summary
+    // injection below already carries the content forward).
+    final start = s.compactedAtCount.clamp(0, s.messages.length);
+    for (final m in s.messages.skip(start)) {
       if (m.kind == MsgKind.compact) continue;
       if (m.kind == MsgKind.tool) {
         final name = m.toolName ?? 'tool';
@@ -3337,6 +3442,7 @@ class AgentService extends ChangeNotifier {
     lastError = null;
     todoNudgeSent = false;
     _runResolved.produced.clear(); // DSH "Produced" panel resets per run
+    _runResolved.toolCallCounts.clear(); // repeat-tool reminder is per turn
     events.clear();
     // DSH todo dock: the checklist is cleared at the start of each USER
     // turn — a stale list from an earlier task must not steer this one.
@@ -3509,26 +3615,28 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         _resetLiveBuffers();
         var msg = await _callLlm(p, msgs, s);
         if (msg == null && _looksLikeContextOverflow(lastError)) {
-          // DSH context-overflow recovery: provider rejected the request as
-          // too long → force-prune the oldest span and retry ONCE.
+          // DSH context-overflow recovery (C1 fixed): the provider rejected
+          // the request as too long → force-prune the oldest span, then
+          // REBUILD the in-flight request from the compacted history —
+          // the old code only INSERTED the summary while keeping every
+          // old message, growing the request instead of shrinking it.
           if (!overflowRecovered) {
             overflowRecovered = true;
             await forceCompact(s, p);
-            msgs.removeWhere(
-              (m) =>
-                  m['role'] == 'system' &&
-                  (m['content'] as String? ?? '').startsWith(
-                    '[Earlier conversation summary',
-                  ),
+            // C1 fix: REBUILD the request from the compacted history — the
+            // old code only INSERTED the summary while keeping every old
+            // message, so the retry was LARGER than the rejected request.
+            // _replayHistory now skips the compacted span, so this rebuild
+            // is genuinely smaller: sys + summary + post-cutoff window.
+            msgs
+              ..clear()
+              ..add({'role': 'system', 'content': sys})
+              ..addAll(_replayHistory(s));
+            _emit(
+              'think',
+              'context overflow — request rebuilt from compacted history '
+              '(${msgs.length} rows)',
             );
-            final summary = s.compactedSummary;
-            if (summary != null && summary.isNotEmpty) {
-              msgs.insert(1, {
-                'role': 'system',
-                'content':
-                    '[Earlier conversation summary — treat as established context]\n$summary',
-              });
-            }
             msg = await _callLlm(p, msgs, s);
           }
           if (msg == null) {
@@ -3566,7 +3674,8 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
                 );
           }
           lastPromptTokens = pt;
-          // Per-run session stats.
+          // Per-run session stats (PR18): per-TURN TTFT (not just the
+          // first), decode tok/s, cache buckets.
           _runResolved.turns += 1;
           _runResolved.decodeTokens += ct;
           _runResolved.llmMs +=
@@ -3574,9 +3683,20 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
               (msg['ttftMs'] as int?) ??
               0;
           final ttft = (msg['ttftMs'] as int?) ?? 0;
-          if (ttft > 0 && _runResolved.ttftMs == 0) {
-            _runResolved.ttftMs = ttft;
+          if (ttft > 0) {
+            _runResolved.ttftMs = ttft; // latest turn's TTFT
+            _runResolved.ttftSamples++;
           }
+          // Cache accounting: OpenAI-compatible providers report
+          // prompt_tokens_details.{cached_tokens} (DeepSeek-style
+          // cache_read/cache_write also parsed).
+          final details = u?['prompt_tokens_details'] as Map<String, dynamic>?;
+          _runResolved.cacheReadTokens +=
+              (details?['cached_tokens'] as num?)?.toInt() ??
+              (u?['cache_read_tokens'] as num?)?.toInt() ??
+              0;
+          _runResolved.cacheWriteTokens +=
+              (u?['cache_write_tokens'] as num?)?.toInt() ?? 0;
           // Context breakdown heuristic (system/tools/messages).
           var sysTok = 0;
           var toolTok = 0;
@@ -3604,6 +3724,10 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
               promptTokens: pt,
               completionTokens: ct,
               totalTokens: (u?['total_tokens'] as num?)?.toInt() ?? pt + ct,
+              cacheReadTokens: (details?['cached_tokens'] as num?)?.toInt() ??
+                  (u?['cache_read_tokens'] as num?)?.toInt() ?? 0,
+              cacheWriteTokens:
+                  (u?['cache_write_tokens'] as num?)?.toInt() ?? 0,
               duration: Duration.zero,
             ),
           );
@@ -3722,7 +3846,17 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
               : _toolStart(name, _toolArgSummary(name, args));
           String result;
           try {
-            result = await _dispatch(name, args);
+            // Per-tool cooperative timeout budget (PR18, DSH
+            // tool-call-timeout-policy): each tool gets a deadline; slow
+            // tools surface a structured timeout error the model can read.
+            final budget = _toolTimeoutFor(name);
+            result = await _dispatch(name, args).timeout(
+              budget,
+              onTimeout: () =>
+                  'Error: tool "$name" timed out after ${budget.inSeconds}s '
+                  '— narrow the request (smaller path/pattern/range) and '
+                  'retry, or continue without it.',
+            );
             if (toolMsg != null) {
               _toolFinish(
                 state: result.startsWith('DENIED')
@@ -3737,10 +3871,24 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
             result = 'tool error: $e';
             if (toolMsg != null) _toolFinish(state: 'error', detail: result);
           }
+          // Repeat-tool reminder (PR18, DSH repeat-tool-reminder): the
+          // same tool called many times in one run gets a reminder that
+          // it is looping.
+          _runResolved.toolCallCounts[name] =
+              (_runResolved.toolCallCounts[name] ?? 0) + 1;
+          final repeats = _runResolved.toolCallCounts[name]!;
+          if (repeats == 6) {
+            result =
+                '$result\n\n[reminder] you have called "$name" $repeats '
+                'times this turn — if it keeps failing, explain the '
+                'problem to the user instead of repeating the same call.';
+          }
           msgs.add({
             'role': 'tool',
             'tool_call_id': tc['id'],
-            'content': cleanTruncate(result, 6000),
+            // Spill + retention (C8): oversized output is persisted to the
+            // session workspace and the model gets head/tail + locator.
+            'content': await spillToolOutput(name, result, cap: 6000),
           });
         }
         // Queued mid-run messages join the very next request (opencode
@@ -3924,6 +4072,28 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     } catch (_) {
       // Heuristic title stays — this is a cosmetic best-effort.
     }
+  }
+
+  /// Per-tool cooperative timeout budgets (PR18, DSH parity). Network and
+  /// process tools get generous deadlines; local fs reads stay tight; the
+  /// catch-all keeps a stuck tool from hanging the run forever.
+  Duration _toolTimeoutFor(String name) {
+    // Tools that legitimately wait on humans or long jobs are exempt.
+    if (name == 'ask_user_question' || name == 'exit_plan_mode' ||
+        name == 'request_permission' || name.startsWith('mcp__') ||
+        name == 'job_output' || name == 'job_list' || name == 'list_agents' ||
+        name == 'send_message' || name == 'dispatch_agent') {
+      return const Duration(minutes: 30);
+    }
+    return switch (name) {
+      'fetch_url' || 'web_search' => const Duration(seconds: 60),
+      'run_code' || 'job_start' => const Duration(minutes: 5),
+      'run_shell' => const Duration(minutes: 10),
+      'generate_image' => const Duration(seconds: 120),
+      'fs_grep' || 'fs_glob' => const Duration(seconds: 45),
+      'commit' || 'repo_sync' => const Duration(minutes: 3),
+      _ => const Duration(minutes: 2),
+    };
   }
 
   Future<Map<String, dynamic>?> _callLlm(
@@ -4473,7 +4643,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
               .replaceAll(RegExp(r'\s{2,}'), '\n')
               .trim();
           browserUrl = url;
-          browserPageText = cleanTruncate(body, 5000);
+          browserPageText = (await spillToolOutput(name, body, cap: 5000));
           notifyListeners();
           _emit('page', '${r.status} · ${body.length} chars');
           return browserPageText!;
@@ -4620,7 +4790,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
             headers: {'User-Agent': 'OvidAgent/1.0'},
           );
           final body = utf8.decode(r.bytes, allowMalformed: true);
-          return cleanTruncate(_htmlToMarkdown(body), 8000);
+          return await spillToolOutput(name, _htmlToMarkdown(body), cap: 8000);
         } catch (e) {
           return 'fetch failed: $e';
         }
@@ -4928,7 +5098,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           );
           final text = result.toString();
           _emit('shellOut', 'eval: $expr');
-          return cleanTruncate(text, 4000);
+          return await spillToolOutput(name, text, cap: 4000);
         } catch (e) {
           return 'JS error: $e';
         }
@@ -5091,7 +5261,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
               ? jsonDecode(raw) as String
               : raw;
           _emit('page', 'snapshot · interactive elements');
-          return cleanTruncate(text, 4000);
+          return await spillToolOutput(name, text, cap: 4000);
         } catch (e) {
           return 'snapshot failed: $e';
         }
@@ -5130,7 +5300,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         _readPathsFor(sid).add(path);
         openStudioFile(path, c);
         _emit('file', 'read $path');
-        return cleanTruncate(c, 6000);
+        return await spillToolOutput(name, c, cap: 6000);
 
       case 'fs_edit':
         return await _handleFsEdit(args);
@@ -5788,8 +5958,10 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         // Host file?
         final host = await _resolveFsPath(path);
         if (host == null) return 'file not found: $path';
-        final content = await File(host).readAsString();
+        final hf = File(host);
+        final content = await hf.readAsString();
         _readPathsFor(sid).add(path);
+        _fsMarkObserved(path, hf); // CAS: version stamp at read time
         _emit('file', 'view $path');
         return _numberedLines(content, 6000);
 
@@ -5855,7 +6027,15 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         // Host file?
         final host = await _resolveFsPath(path);
         if (host == null) return 'file not found: $path';
-        final content = await File(host).readAsString();
+        final hf = File(host);
+        // CAS version guard (PR18): the file changed since the last view —
+        // the model must re-read before editing (FS_STALE_VERSION).
+        if (_fsCheckFresh(path, hf) == false) {
+          return 'FS_STALE_VERSION: "$path" changed since you last read it '
+              '(another tool/session edited it). fs_edit view it again, '
+              'then retry the edit against the new content.';
+        }
+        final content = await hf.readAsString();
         final count = _countOccurrences(content, oldStr);
         if (count == 0) return 'old_str not found in $path';
         if (count > 1) {
@@ -5870,6 +6050,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         if (!ok) return 'DENIED by user';
         final updatedHost = content.replaceFirst(oldStr, newStr);
         File(host).writeAsStringSync(updatedHost);
+        _fsMarkObserved(path, hf); // re-stamp after our own write
         // C7: workspace edits also land in the repo cache when the repo
         // is bound, so commit() can push them.
         if (RepoCache.I.repoFull != null) {

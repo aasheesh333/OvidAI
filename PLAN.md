@@ -40,11 +40,11 @@ specs in §2. Findings below are code-level defects, separate from the feature g
 
 | # | Defect | Where | Note |
 |---|---|---|---|
-| C1 | Compaction cannot shrink the in-flight request | `msgs` built once; `forceCompact` only inserts a summary | overflow recovery grows the request; auto-compaction only helps the NEXT run |
+| C1 | ~~Compaction cannot shrink the in-flight request~~ **FIXED** (PR18) — overflow recovery REBUILDS from `sys + _replayHistory`, and replay skips the compacted span | `msgs` rebuild | closed |
 | C5 | ~~Session todos never clear at turn start~~ **FIXED** (PR17) — cleared at USER turn start; system continuations keep the checklist (`freshTurn` flag) | `_runTaskBody` | closed |
-| C6 | No cache-read/cache-write token buckets, no tok/s, TTFT is first-turn only | `_runTaskBody` metering | Usage/stats parity gap |
+| C6 | ~~No cache buckets / tok/s / TTFT first-turn-only~~ **FIXED** (PR18) — cache_read/write parsed into UsageEntry, decode tok/s, per-turn TTFT average on the stats line | `_runTaskBody` metering | closed |
 | C7 | ~~`file_write` writes only to RepoCache; `fs_edit create` only to disk~~ **FIXED** (PR17) — one `_writeWorkspaceFile` path: disk + repo cache together, mirrors both ways | split write paths | closed |
-| C8 | No spill store / output retention notices | truncation is inline with a bare `…` | see Phase H |
+| C8 | ~~No spill store / output retention notices~~ **FIXED** (PR18) — `spillToolOutput` persists overflow to `.spill/`, exact omission notice + tool-shaped locator | `agent_service.dart` `spillToolOutput` | closed |
 | C9 | No checkpoints / `TOOL_OUTCOME_UNKNOWN` | no persistence barrier | a kill mid-tool leaves rows spinning forever |
 | C10 | ~~`web_search` is single-query DuckDuckGo scraping, no URLs~~ **FIXED** — DSH-parity `queries` array (1–4, exact dupes run once), concurrent fan-out, URL-dedup + round-robin merge, `Sources:` lines as `[title](url) — snippet` markdown links, cap notice, cite footer; one failed query fails the call (`Error: …`) | `agent_service.dart` `_webSearch`/`_ddgSearch` | closed (PR14 tests) |
 | C11 | ~~MCP: JSON-RPC errors returned as results; timeout yields `'null'`; no dead-process watcher~~ **FIXED** — full `mcp_service.dart` rewrite: `McpRpcResult` (errors never masquerade as results), 30s timeout with explicit message, process-death watcher + `_lastDeath` diagnostics, `notifications/tools/list_changed` → re-discovery, `isError` honoured, text/resource/image content kept apart, 6000-char head+tail trim; proxy tool gated on server existence | `mcp_service.dart` | reliability gap closed (PR13 tests) |
@@ -177,8 +177,8 @@ Every user-visible feature DSH web ships, derived from the installed package set
 | 34 | Compaction | DONE — `/compact` + `MsgKind.compact` row | `commands.dart:113-124` |
 | 35 | Scheduled reminders | DONE — `schedule_create/list/delete`, one-shot + interval, ISO-with-offset accepted, delivery starts a real run and frames the reminder as untrusted data | `agent_service.dart` schedule block |
 | 36 | Checkpoints / recovery | MISS — no checkpoint policy, no `TOOL_OUTCOME_UNKNOWN` semantics | — |
-| 37 | Spill + retention | MISS — no spill store; outputs truncated inline without locator | — |
-| 38 | FS observation policy | HALF — read-before-edit enforced with an `FS_NOT_OBSERVED` code; no version CAS, so `FS_STALE_VERSION` does not exist | `agent_service.dart` `_handleFsEdit` |
+| 37 | Spill + retention | DONE (PR18) — `spillToolOutput` spill store + exact omission notices + locators (C8) | `agent_service.dart` `spillToolOutput` |
+| 38 | FS observation policy | DONE (PR18) — read-before-edit (`FS_NOT_OBSERVED`) + CAS version guard (`FS_STALE_VERSION` on stale writes, re-read to retry) | `agent_service.dart` `_fsMarkObserved`/`_fsCheckFresh` |
 | 39 | Session stats projection | HALF — usage log aggregation; no turn/step/TTFT wall-time projection | `usage_screen.dart` |
 | 40 | Sandbox / shell | DONE — native Linux sandbox, multi-terminal, per-session workspaces, `run_shell`, `job_start` | `sandbox_service.dart:92-124`, `studio_screen.dart:740` |
 | 41 | MCP client | DONE — `McpService` JSON-RPC 2.0 (connect / tools-list / tools-call / disconnect) | `mcp_service.dart:15-158` |
@@ -190,7 +190,7 @@ Every user-visible feature DSH web ships, derived from the installed package set
 | 47 | Credentials | DONE — secure key storage per provider + GitHub token persistence | `providers_screen.dart:248`, `github_service.dart:110` |
 | 48 | Telemetry | PLUS — health service instead of OTEL | `health_service.dart` |
 | 49 | Persona / presets | MISS — single design, no preset stack or seats | — |
-| 50 | Timeouts / retries | HALF — AI response timeout setting; no per-tool timeout budgets, no repeat-tool reminder | `settings_screen.dart:552` |
+| 50 | Timeouts / retries | DONE (PR18) — per-tool cooperative budgets (`_toolTimeoutFor`) with structured timeout errors + repeat-tool reminder at 6×/turn; global idle timeout stays | `agent_service.dart` `_toolTimeoutFor` |
 
 ### Ovid-only features (beyond DSH web) — PLUS
 
@@ -302,6 +302,33 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 48. Per-tool timeout budgets + repeat-tool reminder; timeouts on approval/question waits.
 49. ~~`web_search`~~ DONE — 1–4 concurrent queries, URL dedup, real citation URLs; `fetch_url` → markdown (C10 closed, PR14).
 50. ~~MCP reliability~~ DONE — errors surface as errors, dead-process watcher, `tools/list_changed` honoured (C11 closed by the `mcp_service.dart` rewrite + PR13 tests).
+
+### PR18 — Context engineering (DONE)
+- **C8 spill store** — `spillToolOutput`: oversized tool output (>cap) is
+  persisted to `<workspace>/.spill/<id>.txt`; the model gets head/tail with an
+  EXACT omission notice (`…N characters omitted — full output saved to…`) and a
+  tool-shaped locator (run_shell → sed/grep range hints, fs_grep/glob →
+  narrower-pattern hint, others → fs_edit paging). Wired into the dispatch loop
+  (all tool results), fetch_url, browser_evaluate/snapshot/read, file_read.
+- **#50 timeout budgets + repeat-tool reminder** — per-tool cooperative
+  deadlines (`_toolTimeoutFor`: web 60s, shell 10m, code 5m, image 2m, fs 45s,
+  mcp/ask/agents exempt 30m); a stuck tool surfaces a structured `Error: …
+  timed out after Ns` the model can act on. The same tool called 6× in one turn
+  gets a stop-looping reminder appended to its result.
+- **C6 metering** — cache-read/cache-write buckets parsed from
+  `prompt_tokens_details.cached_tokens` (DeepSeek `cache_read/write_tokens`
+  too) into UsageEntry (`cr`/`cw`, round-trip safe for old entries); per-TURN
+  TTFT sampling with average + decode tok/s on the stats line (`cache N tok`,
+  `x tok/s`, `ttft ~N ms`).
+- **C1 in-flight compaction** — overflow recovery now REBUILDS the request
+  (`sys + _replayHistory`); `_replayHistory` skips the compacted span
+  (`compactedAtCount`), so compacted rows are never re-sent and the retry is
+  genuinely smaller than the rejected request.
+- **#38 FS CAS** — `_fsMarkObserved` stamps length+mtime at read time
+  (fs_edit view); `str_replace` on a host file that changed since the read is
+  rejected with `FS_STALE_VERSION` (re-read to retry), own writes re-stamp —
+  two sessions can no longer silently clobber each other.
+- Tests: PR18 group — 141 → 147.
 
 ### PR17 — Quick wins: chat UX + core fixes (DONE)
 - **C5** todos cleared at USER turn start (`runTask(freshTurn:)` — system

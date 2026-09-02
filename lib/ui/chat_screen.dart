@@ -346,8 +346,12 @@ class _StatsLine extends StatelessWidget {
                     'Input ${_fmtTok(input)} tok · Output ${_fmtTok(output)} tok',
                     if (AgentService.I.sessionDecodeTokens > 0)
                       'decode ${_fmtTok(AgentService.I.sessionDecodeTokens)} tok',
-                    if (AgentService.I.sessionTtftMs > 0)
-                      'ttft ${AgentService.I.sessionTtftMs} ms',
+                    if (AgentService.I.sessionDecodeTokPerSec > 0)
+                      '${AgentService.I.sessionDecodeTokPerSec.toStringAsFixed(1)} tok/s',
+                    if (AgentService.I.sessionCacheReadTokens > 0)
+                      'cache ${_fmtTok(AgentService.I.sessionCacheReadTokens)} tok',
+                    if (AgentService.I.sessionAvgTtftMs > 0)
+                      'ttft ~${AgentService.I.sessionAvgTtftMs} ms',
                     if (s.compactedSummary != null) 'compacted',
                   ].join('  |  '),
                   maxLines: 1,

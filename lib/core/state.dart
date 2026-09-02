@@ -79,6 +79,11 @@ class UsageEntry {
   final int promptTokens;
   final int completionTokens;
   final int totalTokens;
+
+  /// Cache accounting (PR18, DSH token-meter parity): prompt_tokens
+  /// decomposed into cache-read (KV reused) and cache-write (new KV).
+  final int cacheReadTokens;
+  final int cacheWriteTokens;
   final Duration duration;
 
   UsageEntry({
@@ -89,6 +94,8 @@ class UsageEntry {
     required this.promptTokens,
     required this.completionTokens,
     required this.totalTokens,
+    this.cacheReadTokens = 0,
+    this.cacheWriteTokens = 0,
     required this.duration,
   });
 
@@ -100,6 +107,8 @@ class UsageEntry {
     'pt': promptTokens,
     'ct': completionTokens,
     'tt': totalTokens,
+    if (cacheReadTokens > 0) 'cr': cacheReadTokens,
+    if (cacheWriteTokens > 0) 'cw': cacheWriteTokens,
     'd': duration.inMilliseconds,
   };
 
@@ -111,6 +120,8 @@ class UsageEntry {
     promptTokens: j['pt'] as int? ?? 0,
     completionTokens: j['ct'] as int? ?? 0,
     totalTokens: j['tt'] as int? ?? 0,
+    cacheReadTokens: j['cr'] as int? ?? 0,
+    cacheWriteTokens: j['cw'] as int? ?? 0,
     duration: Duration(milliseconds: j['d'] as int? ?? 0),
   );
 }
