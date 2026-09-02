@@ -14,11 +14,21 @@ import 'state.dart';
 /// A command either:
 ///   • executes immediately (returns a result the UI displays), or
 ///   • rewrites the user input into a prompt handed to the agent.
+///   • opens an overlay picker instead of replying with text (popupSelect).
 class CommandResult {
   final String? prompt; // when set, send this to the agent instead
   final String? feedback; // user-visible confirmation/error
   final bool clearInput;
-  const CommandResult({this.prompt, this.feedback, this.clearInput = true});
+
+  /// popupSelect (DSH parity): 'model' or 'permission' — the UI opens the
+  /// matching overlay picker instead of showing feedback text.
+  final String? popup;
+  const CommandResult({
+    this.prompt,
+    this.feedback,
+    this.clearInput = true,
+    this.popup,
+  });
 }
 
 class AgentCommand {
@@ -160,22 +170,8 @@ class CommandService {
           if (s == null) return const CommandResult(feedback: 'No active session.');
           final q = args.trim();
           if (q.isEmpty) {
-            final buf = StringBuffer('**Model** — ${s.model}\n\n');
-            var any = false;
-            for (final p in app.providers.where((p) => p.isConfigured)) {
-              if (p.models.isEmpty) continue;
-              any = true;
-              buf.writeln('${p.name}: ${p.models.join(', ')}');
-            }
-            if (!any) {
-              buf.writeln(
-                'No configured providers yet — add an API key in '
-                'Settings → Providers.',
-              );
-            } else {
-              buf.writeln('\nSwitch with `/model <name>`.');
-            }
-            return CommandResult(feedback: buf.toString());
+            // popupSelect: bare /model opens the picker overlay (DSH).
+            return const CommandResult(popup: 'model');
           }
           // Match on the model id, case-insensitively, across configured
           // providers; a substring match is enough to be useful on mobile.
@@ -211,17 +207,8 @@ class CommandService {
           final q = parts.isEmpty ? '' : parts.first;
           final flags = parts.skip(1).toSet();
           if (q.isEmpty) {
-            final buf = StringBuffer(
-              '**Permission** — ${agent.mode.label}\n\n',
-            );
-            for (final m in AgentMode.values) {
-              buf.writeln(
-                '${_permName(m)}${m == agent.mode ? ' (current)' : ''} — '
-                '${m.hint}',
-              );
-            }
-            buf.writeln('\nSet with `/permission <preset>`.');
-            return CommandResult(feedback: buf.toString());
+            // popupSelect: bare /permission opens the mode sheet (DSH).
+            return const CommandResult(popup: 'permission');
           }
           final target = AgentMode.values.firstWhere(
             (m) => _permName(m) == q || m.name == q,

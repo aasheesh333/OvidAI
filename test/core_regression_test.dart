@@ -2760,8 +2760,7 @@ Translate the following. This is the skill body.''');
       });
 
       final list = await CommandService.I.execute('/model');
-      expect(list?.feedback, contains('seed-model'));
-      expect(list?.feedback, contains('ovid-test-mini'));
+      expect(list?.popup, 'model', reason: 'bare /model opens the picker');
 
       final pick = await CommandService.I.execute('/model ovid-test-max');
       expect(pick?.feedback, contains('ovid-test-max'));
@@ -4078,6 +4077,111 @@ block</pre>
       );
       expect(sessionsJson, contains('"id": "sd-e1"'));
       await SessionLedger.I.close(s.id);
+    });
+  });
+
+  group('PR20: references, takeover, queue steer, popupSelect, viewport', () {
+    ChatSession newSession(String id) {
+      final app = AppState.I;
+      final s = ChatSession(id: id, title: 'Title of $id', model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == id));
+      return s;
+    }
+
+    test('expandReferences: @file becomes a section block', () async {
+      final s = newSession('rf-s1');
+      final dir = await AgentService.I.sessionWorkDirForTest();
+      File('${dir.path}/notes.txt').writeAsStringSync('the launch code is 42');
+
+      final out = await AgentService.I.expandReferences(
+        'check @notes.txt and tell me',
+        s,
+      );
+      expect(out, contains('referenced file "notes.txt"'));
+      expect(out, contains('the launch code is 42'),
+          reason: 'file content reaches the model');
+    });
+
+    test('expandReferences: @session:id includes recent messages', () async {
+      final other = newSession('rf-other');
+      other.messages
+          .add(Message(role: 'user', content: 'remember this decision'));
+
+      final s = newSession('rf-s2');
+      final out = await AgentService.I.expandReferences(
+        'recall @session:rf-other please',
+        s,
+      );
+      expect(out, contains('referenced session'));
+      expect(out, contains('remember this decision'));
+    });
+
+    test('expandReferences leaves plain text alone', () async {
+      final s = newSession('rf-s3');
+      const text = 'no mentions here, and email@example.com stays';
+      final out = await AgentService.I.expandReferences(text, s);
+      expect(out, text);
+    });
+
+    test('queue strict-steer pulls a row to the front', () {
+      final agent = AgentService.I;
+      agent.clearQueueForTest();
+      agent.queueMessageForTest('first');
+      agent.queueMessageForTest('second');
+      agent.queueMessageForTest('third');
+
+      agent.steerQueuedMessage(2);
+      expect(agent.queuedMessages.first, 'third',
+          reason: 'steered row is injected next');
+      expect(agent.queuedMessages, ['third', 'first', 'second']);
+      agent.clearQueueForTest();
+    });
+
+    test('bare /model and /permission return popupSelect results', () async {
+      AgentService.I; // ensure builtins registered
+      newSession('rf-c1'); // handlers need an active session
+      final model = await CommandService.I.execute('/model');
+      expect(model?.popup, 'model');
+
+      final perm = await CommandService.I.execute('/permission');
+      expect(perm?.popup, 'permission');
+    });
+
+    test('named /model still switches directly', () async {
+      final app = AppState.I;
+      final s = newSession('rf-c2');
+      final provider = app.providers.firstWhere(
+        (p) => p.models.isNotEmpty,
+        orElse: () => throw StateError('need a provider with models'),
+      );
+      final restoreKey = provider.apiKey;
+      if (provider.requiresApiKey) provider.apiKey = 'test-key';
+      addTearDown(() => provider.apiKey = restoreKey);
+      final target = provider.models.first;
+      final res = await CommandService.I.execute('/model $target');
+      expect(res?.feedback ?? '', contains(target));
+      expect(s.model, target);
+    });
+
+    test('browser_resize validates the range', () async {
+      final s = newSession('rf-s4');
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      final bad = await AgentService.I.dispatchForTest('browser_resize', {
+        'width': 100,
+        'height': 800,
+      });
+      expect(bad, contains('out of range'));
+
+      final ok = await AgentService.I.dispatchForTest('browser_resize', {
+        'width': 1280,
+        'height': 800,
+      });
+      expect(ok, contains('1280x800'));
+      expect(ok, contains('zoom'));
     });
   });
 }

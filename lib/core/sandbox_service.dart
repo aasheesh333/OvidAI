@@ -99,6 +99,24 @@ class SandboxService {
     return d;
   }
 
+  /// Sync view of a session workspace (for @file pickers that cannot
+  /// await). Returns the cached-resolved path when available, else a
+  /// best-guess Directory that may not exist yet (the picker filters by
+  /// existsSync, so this is safe).
+  Directory workDirForSync(String sessionSandboxId) {
+    if (_syncRoot != null) {
+      return Directory('${_syncRoot!.path}/workspaces/ws_$sessionSandboxId');
+    }
+    return Directory('workspaces/ws_$sessionSandboxId');
+  }
+
+  Directory? _syncRoot;
+
+  /// Warm the sync root (call once at app start; safe to repeat).
+  Future<void> warmSyncRoot() async {
+    _syncRoot ??= await _ensureFilesRoot();
+  }
+
   /// Delete a session's workspace (session deleted → files go too).
   Future<void> deleteWorkspace(String sessionSandboxId) async {
     try {

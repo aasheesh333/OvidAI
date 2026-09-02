@@ -1001,6 +1001,9 @@ class _ChatScreenState extends State<ChatScreen>
                 _InputBar(
                   controller: _input,
                   running: s == null ? false : AgentService.I.busyFor(s.id),
+                  // DSH approval takeover parity: a pending approval LOCKS
+                  // the composer — the user answers the card, not the box.
+                  locked: AgentService.I.pendingApproval != null,
                   onSend: () async {
                     final t = _input.text.trim();
                     if (t.isEmpty) return;
@@ -1010,6 +1013,16 @@ class _ChatScreenState extends State<ChatScreen>
                       final result = await CommandService.I.execute(t);
                       if (result != null) {
                         _input.clear();
+                        // popupSelect (DSH parity): open the overlay picker.
+                        if (!context.mounted) return;
+                        if (result.popup == 'model') {
+                          _modelPicker(context);
+                          return;
+                        }
+                        if (result.popup == 'permission') {
+                          _showModeSheetFromCommand(context);
+                          return;
+                        }
                         if (result.feedback != null &&
                             result.feedback!.isNotEmpty &&
                             context.mounted) {
@@ -1069,8 +1082,49 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   /// Common send path — validates provider/model and launches the agent.
-  void _sendPrompt(BuildContext context, ChatSession? s, String t) {
-    final app = AppState.I;
+  /// `/permission` popupSelect: the mode sheet (same rows as the composer
+  /// mode chip), command-driven.
+  void _showModeSheetFromCommand(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            const Text(
+              'Agent access mode',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            for (final m in AgentMode.values)
+              ListTile(
+                dense: true,
+                title: Text(m.label, style: const TextStyle(fontSize: 13.5)),
+                subtitle: Text(
+                  m.hint,
+                  style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                ),
+                trailing: AgentService.I.mode == m
+                    ? Icon(Icons.check, size: 16, color: Aether.accent)
+                    : null,
+                onTap: () {
+                  Navigator.pop(context);
+                  AgentService.I.setMode(m);
+                },
+              ),
+            const SizedBox(height: 10),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _sendPrompt(BuildContext context, ChatSession? s, String t) {    final app = AppState.I;
     final session = app.activeSession;
     final provider = app.providerForSession(session);
     if (provider == null ||
@@ -1117,7 +1171,9 @@ class _ChatScreenState extends State<ChatScreen>
         _scroll.jumpTo(_scroll.position.maxScrollExtent);
       }
     });
-    AgentService.I.runTask(t);
+    // @file/@session references expand into model-visible context blocks
+    // (DSH file-reference parity) before the run starts.
+    AgentService.I.runTask(t, expandRefsFor: session);
   }
 
   /// Background jobs popover (DSH ui-jobs): one row per job with label,
@@ -3080,10 +3136,15 @@ class _AttachmentChip extends StatelessWidget {
 class _InputBar extends StatefulWidget {
   final TextEditingController controller;
   final bool running;
+
+  /// Approval takeover: when an approval/question card is pending, the
+  /// composer is disabled until the user answers it (DSH parity).
+  final bool locked;
   final VoidCallback onSend;
   const _InputBar({
     required this.controller,
     required this.running,
+    this.locked = false,
     required this.onSend,
   });
 
@@ -3094,6 +3155,7 @@ class _InputBar extends StatefulWidget {
 class _InputBarState extends State<_InputBar> {
   TextEditingController get controller => widget.controller;
   bool get running => widget.running;
+  bool get locked => widget.locked;
   VoidCallback get onSend => widget.onSend;
 
   /// DSH-web rule: running + empty draft = Stop; running + draft = Send
@@ -3260,11 +3322,60 @@ class _InputBarState extends State<_InputBar> {
         ),
       ));
     }
+    // ── @file: workspace files (DSH file-reference parity) ──
+    // Files under the active session's workspace; directory descent via
+    // the query (type `@src/` to descend). The model receives the chip
+    // expanded with a section heading at send time.
+    try {
+      final ws = agent.workspaceRootFor(parent);
+      final entities = ws.listSync(recursive: false);
+      for (final e in entities) {
+        final base = e.path.split('/').last;
+        if (base.startsWith('.')) continue; // .spill etc.
+        final isDir = e is Directory;
+        final score = _fuzzyScore(base, query);
+        if (score == null) continue;
+        scored.add((
+          score: score,
+          order: order++,
+          s: _SlashSuggestion(
+            icon: isDir
+                ? Icons.folder_outlined
+                : Icons.insert_drive_file_outlined,
+            name: base,
+            description: isDir ? 'directory — @name/ to descend' : 'workspace file',
+            hint: '',
+            insert: '@$base${isDir ? '/' : ' '}',
+            group: 'Files',
+          ),
+        ));
+      }
+    } catch (_) {
+      // Workspace not ready — files just don't appear.
+    }
+    // ── @session: this chat's sessions (DSH session-reference parity) ──
+    for (final s in app.rootSessions.take(30)) {
+      if (s.id == parent.id) continue;
+      final score = _fuzzyScore('${s.title} ${s.id}', query);
+      if (score == null) continue;
+      scored.add((
+        score: score,
+        order: order++,
+        s: _SlashSuggestion(
+          icon: Icons.chat_bubble_outline,
+          name: s.title,
+          description: '${s.messages.length} messages · ${s.id}',
+          hint: '',
+          insert: '@session:${s.id} ',
+          group: 'Sessions',
+        ),
+      ));
+    }
     scored.sort((a, b) {
       final c = a.score.compareTo(b.score);
       return c != 0 ? c : a.order.compareTo(b.order);
     });
-    return [for (final e in scored.take(12)) e.s];
+    return [for (final e in scored.take(14)) e.s];
   }
 
   void _onTextChanged() {
@@ -3662,20 +3773,26 @@ class _InputBarState extends State<_InputBar> {
                 controller: controller,
                 minLines: 1,
                 maxLines: 5,
+                // Approval takeover: locked while a card awaits an answer.
+                enabled: !locked,
                 // DSH composer: 16px input, 24px line-height.
                 style: const TextStyle(fontSize: 16, height: 24 / 16),
-                decoration: const InputDecoration(
-                  hintText:
-                      'Describe what you want to build…  / commands  @ agents',
-                  hintStyle: TextStyle(fontSize: 16, height: 24 / 16),
+                decoration: InputDecoration(
+                  hintText: locked
+                      ? 'Answer the approval card above first…'
+                      : 'Describe what you want to build…  / commands  @ agents',
+                  hintStyle: const TextStyle(fontSize: 16, height: 24 / 16),
                   filled: false,
                   border: InputBorder.none,
                   enabledBorder: InputBorder.none,
                   focusedBorder: InputBorder.none,
-                  contentPadding: EdgeInsets.fromLTRB(10, 8, 10, 4),
+                  disabledBorder: InputBorder.none,
+                  contentPadding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
                 ),
                 onChanged: (_) => _onTextChanged(),
-                onSubmitted: (_) => onSend(),
+                onSubmitted: (_) {
+                  if (!locked) onSend();
+                },
               ),
               // ── Toolbar row ──
               Row(
@@ -4284,6 +4401,22 @@ class _QueueRowState extends State<_QueueRow> {
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(fontSize: 12.5, color: Aether.text),
+            ),
+          ),
+          // Strict-steer (DSH parity): pull this row to the front so the
+          // running turn injects it on the very next request.
+          GestureDetector(
+            onTap: () {
+              agent.steerQueuedMessage(widget.index);
+              widget.onEdited();
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+              child: Icon(
+                Icons.fast_forward_outlined,
+                size: 14,
+                color: Aether.accent,
+              ),
             ),
           ),
           GestureDetector(

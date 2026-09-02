@@ -31,6 +31,17 @@ class BrowserTab {
   WebViewController? controller;
   bool loadedOnce = false;
 
+  /// Logical viewport emulation (B10, DSH browser-resize parity): zoom
+  /// factor applied to the tab's WebView — 0.5 renders the page as if the
+  /// window were ~2× wider (desktop-style layout), 2.0 = narrow mobile.
+  double zoom = 1.0;
+  int get logicalWidth => (devW / zoom).round();
+  int get logicalHeight => (devH / zoom).round();
+
+  /// Device viewport baseline (set at controller creation).
+  static int devW = 360;
+  static int devH = 720;
+
   /// Local preview tab: when set, [url] is display-only and the WebView
   /// loads this file:// path (agent `preview` tool output) instead.
   String? localPreviewPath;
@@ -499,6 +510,8 @@ class AgentService extends ChangeNotifier {
     // Composer commands + skills catalog.
     CommandService.I.registerBuiltins();
     _refreshSkillRoots();
+    // Warm the sync workspace root for the @file picker.
+    unawaited(SandboxService.I.warmSyncRoot());
   }
 
   @override
@@ -763,6 +776,20 @@ class AgentService extends ChangeNotifier {
     _queue[index] = newText;
     notifyListeners();
   }
+
+  /// Strict-steer (DSH parity): pull queued row [index] to the FRONT so the
+  /// current run injects it on the very next request — an implicit-AND
+  /// steering affordance per row.
+  void steerQueuedMessage(int index) {
+    if (index < 0 || index >= _queue.length) return;
+    final msg = _queue.removeAt(index);
+    _queue.insert(0, msg);
+    notifyListeners();
+  }
+
+  /// Test seam: enqueue without a live run.
+  @visibleForTesting
+  void queueMessageForTest(String text) => _queue.add(text);
 
   /// Remove a message from the queue.
   void removeQueuedMessage(int index) {
@@ -1108,6 +1135,16 @@ class AgentService extends ChangeNotifier {
 
   /// Agent-facing: get (creating if needed) the controller for a tab.
   WebViewController controllerForTab(BrowserTab tab) {
+    // Record the physical viewport baseline once (browser_resize derives
+    // logical sizes from it).
+    try {
+      final sz = PlatformDispatcher.instance.views.first.physicalSize;
+      final dpr = PlatformDispatcher.instance.views.first.devicePixelRatio;
+      if (sz.width > 0 && dpr > 0) {
+        BrowserTab.devW = (sz.width / dpr).round();
+        BrowserTab.devH = (sz.height / dpr).round();
+      }
+    } catch (_) {}
     // NOTE: file access for local previews is handled by the platform
     // impl — webview_flutter_android's loadFile() sets
     // settings.setAllowFileAccess(true) itself.
@@ -1383,6 +1420,69 @@ class AgentService extends ChangeNotifier {
   /// Resolve the ACTIVE session's workspace directory (also used by the
   /// spill store for oversized tool output).
   Future<Directory> sessionWorkDirForTest() async => _sessionWorkDir();
+
+  /// Sync view of a session's workspace root for the `@file` picker:
+  /// pinned folder when it exists, else the session's sandbox workdir
+  /// (sync-cached; may not exist yet — callers filter by existsSync).
+  Directory workspaceRootFor(ChatSession s) {
+    final pinned = s.workspaceFolder;
+    if (pinned != null && pinned.trim().isNotEmpty) {
+      final d = Directory(pinned);
+      if (d.existsSync()) return d;
+    }
+    return SandboxService.I.workDirForSync(s.sandboxId ?? s.id);
+  }
+
+  /// Expand `@name` / `@session:id` references in a composer message into
+  /// model-visible context blocks (DSH file/session reference parity):
+  /// `@file.txt` → a section heading with the file content; `@session:x` →
+  /// a heading with that session's recent messages. Unresolvable mentions
+  /// stay literal so the model can still see the intent.
+  Future<String> expandReferences(String text, ChatSession s) async {
+    final mentions = RegExp(r'@([\w./:-]+)').allMatches(text).toList();
+    if (mentions.isEmpty) return text;
+    final blocks = <String>[];
+    for (final m in mentions) {
+      final token = m.group(1)!;
+      // Session reference: @session:<id>
+      if (token.startsWith('session:')) {
+        final id = token.substring('session:'.length);
+        final other = AppState.I.sessionById(id);
+        if (other == null) continue;
+        final recent = other.messages
+            .take(10)
+            .map((x) => '${x.role}: ${cleanTruncate(x.content, 200)}')
+            .join('\n');
+        blocks.add(
+          '── referenced session "${other.title}" ($id) ──\n$recent',
+        );
+        continue;
+      }
+      // File reference: workspace file (or dir listing).
+      try {
+        final root = workspaceRootFor(s);
+        final rel = token;
+        final f = File('${root.path}/$rel');
+        if (f.existsSync()) {
+          blocks.add(
+            '── referenced file "$rel" ──\n'
+            '${cleanTruncate(await f.readAsString(), 4000)}',
+          );
+          continue;
+        }
+        final d = Directory('${root.path}/$rel');
+        if (d.existsSync()) {
+          final listing = d
+              .listSync()
+              .map((e) => e.path.split('/').last)
+              .join(', ');
+          blocks.add('── referenced directory "$rel" ──\n$listing');
+        }
+      } catch (_) {}
+    }
+    if (blocks.isEmpty) return text;
+    return '$text\n\n[expanded references]\n${blocks.join('\n\n')}';
+  }
 
   /// THE one write path for workspace files (C7). Every tool that writes
   /// content to a path — `file_write`, `fs_edit create/str_replace/insert` —
@@ -1739,6 +1839,25 @@ class AgentService extends ChangeNotifier {
             'expression': {'type': 'string'},
           },
           'required': ['expression'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_resize',
+        'description':
+            'Set the browser viewport for responsive testing. width/height '
+            'define the logical viewport (e.g. 1280x800 desktop, 390x844 '
+            'phone); the tab renders at that logical size via zoom. Applies '
+            'to the active tab.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'width': {'type': 'integer'},
+            'height': {'type': 'integer'},
+          },
+          'required': ['width', 'height'],
         },
       },
     },
@@ -3410,11 +3529,19 @@ class AgentService extends ChangeNotifier {
     String originalPrompt, {
     String? sessionId,
     bool freshTurn = true,
+    ChatSession? expandRefsFor,
   }) async {
     final s = AppState.I.sessionById(sessionId) ?? AppState.I.activeSession;
     if (s == null) {
       _emit('err', 'No active chat session');
       return;
+    }
+    // @file/@session expansion: the transcript row keeps the raw text the
+    // user typed; the MODEL receives the expanded blocks. Runs after the
+    // row was appended by sendMessage, so the chat UI stays clean.
+    var prompt = originalPrompt;
+    if (expandRefsFor != null && originalPrompt.contains('@')) {
+      prompt = await expandReferences(originalPrompt, expandRefsFor);
     }
     final p = AppState.I.providerForSession(s);
     if (p == null ||
@@ -3437,7 +3564,7 @@ class AgentService extends ChangeNotifier {
     // loops — inherits it, so two runs never see each other's state.
     final ctx = _RunCtx(_runFor(s.id), s, p);
     return runZoned(
-      () => _runTaskBody(originalPrompt, ctx, freshTurn: freshTurn),
+      () => _runTaskBody(prompt, ctx, freshTurn: freshTurn),
       zoneValues: {_runCtxKey: ctx},
     );
   }
@@ -5177,6 +5304,30 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         } catch (e) {
           return 'JS error: $e';
         }
+      case 'browser_resize':
+        final w = (args['width'] as num?)?.toInt() ?? 360;
+        final h = (args['height'] as num?)?.toInt() ?? 720;
+        if (w < 240 || w > 3840 || h < 320 || h > 2160) {
+          return 'viewport out of range (240-3840 × 320-2160)';
+        }
+        final tab = _activeTab;
+        // Logical viewport via zoom: the physical window is fixed on
+        // mobile, so a wider logical viewport = smaller zoom factor.
+        tab.zoom = (BrowserTab.devW / w).clamp(0.25, 3.0);
+        // Apply to a LIVE controller only — in unit tests (no WebView
+        // platform) the logical size records and the next navigate applies.
+        if (tab.controller != null) {
+          try {
+            await tab.controller!.runJavaScript(
+              'document.documentElement.style.zoom = "${tab.zoom}";',
+            );
+          } catch (_) {}
+        }
+        _emit('nav', 'viewport ${w}x$h');
+        return 'viewport set to ${w}x$h (logical; zoom '
+            '${tab.zoom.toStringAsFixed(2)}). browser_read/snapshot now see '
+            'the page at that size.';
+
       case 'browser_read':
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);

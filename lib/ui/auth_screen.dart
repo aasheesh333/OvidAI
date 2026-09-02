@@ -55,6 +55,26 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
+  Future<void> _google() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    final error = await FirebaseService.I.signInWithGoogle();
+    if (!mounted) return;
+    if (error == 'cancelled') {
+      // The user closed the picker — not an error worth shouting about.
+      setState(() => _busy = false);
+      return;
+    }
+    setState(() {
+      _busy = false;
+      _error = error;
+    });
+    if (error == null) Navigator.of(context).pop();
+  }
+
   @override
   Widget build(BuildContext context) {
     final fb = FirebaseService.I;
@@ -178,6 +198,21 @@ class _AuthScreenState extends State<AuthScreen> {
                   ),
                 )
               : Text(_signUp ? 'Create account' : 'Sign in'),
+        ),
+        const SizedBox(height: 10),
+        // Google sign-in (B7): native account picker → Firebase credential.
+        OutlinedButton.icon(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Aether.text,
+            side: BorderSide(color: Aether.hairlineStrong),
+            minimumSize: const Size(double.infinity, 48),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+          onPressed: _busy ? null : _google,
+          icon: const Icon(Icons.g_mobiledata, size: 24),
+          label: const Text('Continue with Google'),
         ),
         const SizedBox(height: 8),
         Row(

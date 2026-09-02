@@ -62,15 +62,15 @@ specs in §2. Findings below are code-level defects, separate from the feature g
 | B4 | P2 | Markdown tables overflowed (no horizontal scroll). Now `IntrinsicColumnWidth` + styled borders. | `chat_screen.dart` `_DshMarkdown` | DONE |
 | B5 | P2 | Reasoning text too large/heavy vs DSH. Now 12.5px muted body via `_DshMarkdown(fontSize:, color:)`. | `chat_screen.dart` `_ReasoningCard` | DONE |
 | B6 | P1 | Links not clickable, text not selectable. Now `selectable: true` + `onTapLink` (http(s) → in-app browser, others → `url_launcher`), user bubbles use `SelectableText`. | `pubspec.yaml` · `chat_screen.dart` | DONE |
-| B7 | P2 | No Google sign-in (email/password only, no `google_sign_in` dep). | `lib/ui/auth_screen.dart` | MISS |
+| B7 | P2 | ~~No Google sign-in~~ DONE (PR20) — `google_sign_in` + `signInWithGoogle` (Firebase credential); 'Continue with Google' on the auth screen. | `firebase_service.dart` · `auth_screen.dart` | DONE |
 | B8 | P1 | No subagent UI: a child's work was invisible (one count in the folded turn strip). Now every subagent is a real session with its own screen — transcript, lineage breadcrumb, descendants menu, status strip, read-only one-shot vs continuable composer with an independent Stop — reachable from the card's Open link, the AppBar Agents badge, or `@` in the composer. | `lib/ui/subagent_screen.dart` · `chat_screen.dart` `ChatTranscript`/`_ToolCard` | DONE |
 | B9 | P2 | Browser cookies/localStorage shared across sessions (tabs are per-session, the WebView profile is global). | `agent_service.dart` browser block | HALF |
-| B10 | P2 | No browser viewport-resize tool. | `lib/ui/browser_screen.dart` | MISS |
+| B10 | P2 | ~~No browser viewport-resize tool~~ DONE (PR20) — `browser_resize` (logical viewport via zoom; CSS applied on the live controller) | `agent_service.dart` `browser_resize` | DONE |
 | B11 | P1 | Attach sheet: removed 'Camera' (dead stub) and 'Pick folder'; kept Photos & videos / Document / Generate image. Folder pinning stays on the working-folder chip. | `chat_screen.dart` `_attachSheet` | DONE |
 | B12 | P2 | Slash menu was prefix-only, never opened on a bare `/`, and listed only builtins + skills. Now: opens on `/`, fuzzy-ranked, grouped Commands / Skills / MCP tools / Plugins. | `chat_screen.dart` `_suggestions` | DONE |
 | B13 | P2 | No post-clone workspace pick. Now Studio asks "sandbox or pick a folder" after a repo is bound + synced, with write probing and All-Files-Access retry. | `lib/ui/studio_screen.dart` `_offerWorkspaceFolder` | DONE |
 | B14 | P3 | Usage screen has no charts and no live counter; stats line lacks cache-hit and tok/s and aggregates globally. | `lib/ui/usage_screen.dart` · `chat_screen.dart` `_StatsLine` | HALF |
-| B15 | P3 | No cordis-style global approval overlay (badge / inventory / inspect). The approve/deny dock exists but does not lock the composer. | `chat_screen.dart` `_ApprovalDock` | HALF |
+| B15 | P3 | ~~No cordis-style approval overlay~~ DONE (PR20) — the composer LOCKS while a card is pending (DSH takeover semantics) | `chat_screen.dart` `_InputBar.locked` | DONE |
 | B16 | P2 | Plan review had no "Chat about it" and re-parsed framing prose. Now three actions (Chat about it / Decline / Approve) and the refusal note is handed back to the model. | `chat_screen.dart` `_PlanReviewCard` · `agent_service.dart` `_handleExitPlanMode` | DONE |
 | B17 | P2 | `/model` and `/permission` commands were missing (DSH has both, with a Full-access acknowledgement). | `lib/core/commands.dart` | DONE |
 | B18 | P1 | Agents couldn't open websites: Android 11+ package visibility hid browsers, so `launchUrl` threw `ActivityNotFoundException`. Now the manifest `<queries>` block declares ACTION_VIEW+BROWSABLE for `https`/`http` + `mailto`/`tel`/`sms`; `_openLink` handles bare domains, schemeless hrefs, and shows a snackbar when no app can handle the scheme; WebView `onNavigationRequest` converts `intent://` (browser_fallback_url) and routes custom schemes to `launchUrl`. | `android/app/src/main/AndroidManifest.xml` · `chat_screen.dart` `_openLink` · `agent_service.dart` `controllerForTab` | DONE |
@@ -147,7 +147,7 @@ Every user-visible feature DSH web ships, derived from the installed package set
 | 4 | Streaming + Think row | DONE — streaming, folded step summaries, live `_ReasoningCard`, and the typing row now shows the live run status (retry/backoff/compaction) instead of a fixed label | `chat_screen.dart` `_ReasoningCard`/`_TypingBubble`, `agent_service.dart` `statusFor` |
 | 5 | Context meter + stats | HALF — `_StatsLine` occupancy ring + tooltip + Input/Output/decode/TTFT; cache-hit/tok-s and click-open segmented-bar panel land in PR18 (metering buckets) | `chat_screen.dart` `_StatsLine` · `usage_screen.dart` |
 | 6 | Todo dock | DONE — `todo_write` + mid-run pending-todo nudge | `agent_service.dart:1719-1743,3255-3281` |
-| 7 | Queue dock | DONE — queue + strict steer + drain | `agent_service.dart:236,448-533` |
+| 7 | Queue dock | DONE — queue + per-row strict-steer (front-pull) + edit/delete + drain | `agent_service.dart` `steerQueuedMessage` · `chat_screen.dart` `_QueueRow` |
 | 8 | Plan mode | DONE (PR17) — `/plan`, review card, persisted `planMode` (restart-safe), amber composer chip (tap exits); plan-task placeholder still open | `agent_service.dart` `_handleExitPlanMode` · `chat_screen.dart` `_PlanReviewCard`/`_PlanChip` |
 | 9 | Subagent lineage UI | DONE — child sessions with full transcripts, breadcrumb to the root chat, descendants menu with state/elapsed/rows, read-only one-shot composer, continuable composer with independent Stop, `@` mention of this chat's agents, parent card links into the child; PR16 adds settlement notices, the child→parent `report` tool, cold resume from durable `agentId`, and persona/output-shape dispatch args; still no keyboard-nav catalog tree and no per-child token totals | `lib/ui/subagent_screen.dart`, `chat_screen.dart` |
 | 10 | Workflow run tree | MISS — no run/phase/member tree | — |
@@ -161,7 +161,7 @@ Every user-visible feature DSH web ships, derived from the installed package set
 | 18 | Skills | DONE — `skills.dart` + SkillsScreen + `/`-invocable skills | `skills.dart`, `settings_screen.dart:897,1041` |
 | 19 | Model selection | HALF — AppBar picker with per-model effort variants + `/model` command; no composer-seat trigger, no routable-block row | `chat_screen.dart` `_ModelPickerSheet`, `commands.dart` |
 | 20 | Permission presets | DONE — `AgentMode` presets + mode sheet + `/permission [preset]` with kebab-case names and a Full-access `confirm` acknowledgement | `commands.dart`, `chat_screen.dart` `_ModeChip` |
-| 21 | Approval panel | MISS — auto-run toggle only | `settings_screen.dart:204` |
+| 21 | Approval panel | DONE (PR20) — pending approvals LOCK the composer (takeover semantics) until answered; dock shows the card | `chat_screen.dart` `_InputBar.locked` |
 | 22 | Trajectory view | DONE (PR19) — TrajectoryScreen: ledger records + stats projection strip, per-record detail | `lib/ui/trajectory_screen.dart` · `session_ledger.dart` |
 | 23 | Session log export | DONE (PR19) — `/export` writes a ZIP: manifest + sessions.json (lineage included) + per-session ledger JSONL | `commands.dart` `_exportSessionsZip` |
 | 24 | Directory picker | DONE — working-folder chip → `_pickFolderDirect` with All-Files-Access retry | `chat_screen.dart:3852` |
@@ -185,8 +185,8 @@ Every user-visible feature DSH web ships, derived from the installed package set
 | 42 | Plugin inventory | DONE — PluginsScreen + categories + MCP config import + persisted marketplace registry that merges catalogs on open and on refresh | `plugins_screen.dart`, `state.dart` marketplaces block |
 | 43 | Code runtime | DONE — `run_code` + `preview` | `agent_service.dart` run_code |
 | 44 | Attachments | DONE — attach files into session workspace + chips in chat | `agent_service.dart:1101`, `chat_screen.dart` `_attachmentChips` |
-| 45 | File references | MISS — no `@file` / `@session` autocomplete | — |
-| 46 | Commands API | HALF — `CommandService` builtins incl. `/model` + `/permission`; `/` menu opens on a bare slash with fuzzy ranking and Commands/Skills/MCP/Plugins groups; no popupSelect overlay, no image-envelope enforcement | `commands.dart`, `chat_screen.dart` `_suggestions` |
+| 45 | File references | DONE (PR20) — `@file`/`@session:<id>`/`@subagent` autocomplete in the composer; mentions expand into model-visible blocks at send | `chat_screen.dart` `_mentionSuggestions` · `agent_service.dart` `expandReferences` |
+| 46 | Commands API | DONE (PR20) — popupSelect: bare `/model` → model sheet, `/permission` → mode sheet; fuzzy `/` menu with all groups; image-envelope still open | `commands.dart` `CommandResult.popup` · `chat_screen.dart` |
 | 47 | Credentials | DONE — secure key storage per provider + GitHub token persistence | `providers_screen.dart:248`, `github_service.dart:110` |
 | 48 | Telemetry | PLUS — health service instead of OTEL | `health_service.dart` |
 | 49 | Persona / presets | MISS — single design, no preset stack or seats | — |
@@ -302,6 +302,31 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 48. Per-tool timeout budgets + repeat-tool reminder; timeouts on approval/question waits.
 49. ~~`web_search`~~ DONE — 1–4 concurrent queries, URL dedup, real citation URLs; `fetch_url` → markdown (C10 closed, PR14).
 50. ~~MCP reliability~~ DONE — errors surface as errors, dead-process watcher, `tools/list_changed` honoured (C11 closed by the `mcp_service.dart` rewrite + PR13 tests).
+
+### PR20 — References, takeover, sign-in, queue steer, viewport (DONE)
+- **#45 `@file` / `@session`** — composer `@` menu now lists workspace files
+  (directory descent via `name/`, hidden dot-entries skipped), this chat's
+  root sessions (`@session:<id>`), and subagents (existing). At send,
+  `runTask(expandRefsFor:)` expands mentions into model-visible blocks:
+  `── referenced file "x" ──` with content (4 KB cap) / dir listing, or the
+  session's recent messages; unresolvable mentions stay literal. Sync root
+  via `SandboxService.workDirForSync` + `warmSyncRoot` (no await in picker).
+- **B15 approval takeover** — `_InputBar(locked:)`: a pending approval /
+  question / plan-review card disables the composer (hint: "Answer the
+  approval card above first…"), DSH takeover semantics; unlocked on answer.
+- **B7 Google sign-in** — `google_sign_in` ^6.2.1; `signInWithGoogle()`
+  (native picker → `GoogleAuthProvider.credential` → FirebaseAuth);
+  'Continue with Google' button on the auth screen; cancel is silent.
+- **B10 `browser_resize`** — logical viewport emulation: `BrowserTab.zoom`
+  derives from the recorded device viewport; CSS `documentElement.zoom` on
+  the live controller; range-validated (240–3840 × 320–2160); unit-test safe
+  (no WebView platform needed to record).
+- **#7 queue strict-steer** — per-row fast-forward pulls a queued message to
+  the queue FRONT so the running turn injects it on the very next request
+  (`steerQueuedMessage`); edit/delete rows already existed.
+- **#46 popupSelect** — `CommandResult.popup`; bare `/model` opens the model
+  picker sheet, bare `/permission` the mode sheet (no more text walls).
+- Tests: PR20 group — 153 → 159 (PR11 /model test updated for popup).
 
 ### PR19 — Session domain: ledger, checkpoints, trajectory, FTS5 (DONE)
 - **Event ledger (full event-sourcing, parallel — zero model-rewrite risk)**
@@ -440,7 +465,7 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 52. Presets / persona (optional — evaluate whether mobile needs preset stacks).
 53. Ralph loop tool (optional, gated on explicit user request like DSH).
 
-**Verification gate after every phase:** `flutter analyze` (0 issues) + `flutter test` (153 tests) + commit + push + CI green on `ci/verified-android-build-20260827`.
+**Verification gate after every phase:** `flutter analyze` (0 issues) + `flutter test` (159 tests) + commit + push + CI green on `ci/verified-android-build-20260827`.
 
 ---
 
