@@ -1398,6 +1398,22 @@ class AgentService extends ChangeNotifier {
   // Dynamic: installed plugins add their own tools.
   static const _repoToolNames = {'repo_sync', 'repo_tree'};
 
+  /// Tool names a plugin contributes when installed+enabled (for honest
+  /// install reporting). Mirrors the `_tools` gate below.
+  List<String> _pluginToolNames(PluginItem p) {
+    if (!p.installed || !p.enabled) return const [];
+    if (p.category == 'MCP') return const ['mcp (proxy)'];
+    return switch (p.name) {
+      'Web Search' => const ['web_search'],
+      'Image Studio' => const ['generate_image'],
+      'File Reader' => const ['file_read'],
+      'Web Fetch & Reader' => const ['fetch_url'],
+      'Code Runner' => const ['run_code'],
+      'RAG Memory' => const ['memory_search', 'memory_save'],
+      _ => const [],
+    };
+  }
+
   List<Map<String, dynamic>> get _tools {
     final tools = <Map<String, dynamic>>[];
     final app = AppState.I;
@@ -2577,18 +2593,31 @@ class AgentService extends ChangeNotifier {
   ];
 
   // ── Plugin tool definitions (added dynamically when installed) ──
+  // DSH parity (dsh-tool-web): 1–4 queries in one call, run concurrently,
+  // sources deduped by URL and merged round-robin, every line a markdown
+  // link the model can cite.
+  static const _webSearchMaxQueries = 4;
+  static const _webSearchMaxResults = 8;
+
   static const _webSearchTool = {
     'type': 'function',
     'function': {
       'name': 'web_search',
       'description':
-          'Search the web. Returns top results with titles and URLs.',
+          'Search the web for current information. Accepts 1–4 non-empty '
+          'search queries; use a one-item array for a single search. Returns '
+          'a list of sources with titles, URLs and snippets. Cite the '
+          'relevant URLs as markdown links in your answer.',
       'parameters': {
         'type': 'object',
         'properties': {
-          'query': {'type': 'string'},
+          'queries': {
+            'type': 'array',
+            'items': {'type': 'string'},
+            'description': '1–4 search queries (exact duplicates run once).',
+          },
         },
-        'required': ['query'],
+        'required': ['queries'],
       },
     },
   };
@@ -4284,12 +4313,31 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
 
       // ─── Plugin tools (dynamic, installed plugins) ────────────────────
       case 'web_search':
-        final q = args['query'] as String;
-        _emit('nav', 'searching: $q');
+        // DSH parity: `queries` is a 1–4 item array; exact duplicates run
+        // once, all searches run concurrently, one failure fails the call.
+        final rawQueries = args['queries'];
+        final queries = (rawQueries is List ? rawQueries : [rawQueries])
+            .map((q) => (q ?? '').toString().trim())
+            .where((q) => q.isNotEmpty)
+            .toList();
+        // Keep first occurrence of each exact query.
+        final distinct = <String>[];
+        for (final q in queries) {
+          if (!distinct.contains(q)) distinct.add(q);
+        }
+        if (distinct.isEmpty) {
+          return 'Error: queries must contain at least one query';
+        }
+        if (distinct.length > _webSearchMaxQueries) {
+          return 'Error: queries must contain at most '
+              '$_webSearchMaxQueries queries';
+        }
+        final label = distinct.length == 1 ? distinct.first : distinct.join(' | ');
+        _emit('nav', 'searching: $label');
         try {
-          return await _webSearch(q);
+          return await _webSearch(distinct);
         } catch (e) {
-          return 'web search failed: $e';
+          return 'Error: $e';
         }
       case 'generate_image':
         final prompt = args['prompt'] as String;
@@ -4466,7 +4514,16 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           app.persistPluginState();
           app.refresh();
           _emit('done', 'installed $pluginName');
-          return 'Plugin "$pluginName" installed and enabled ✓';
+          // Honest post-install report: what tools does the plugin actually
+          // contribute? (A flag flip that silently adds no tool is a lie.)
+          final toolNames = _pluginToolNames(match);
+          if (toolNames.isEmpty) {
+            return 'Plugin "$pluginName" installed and enabled, but it '
+                'contributes no agent tools. It only appears in the Plugins '
+                'screen — there is nothing for the model to call.';
+          }
+          return 'Plugin "$pluginName" installed and enabled ✓ '
+              'Agent tools now available: ${toolNames.join(', ')}.';
         } catch (e) {
           return 'install failed: $e';
         }
@@ -5163,7 +5220,10 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       'run_shell' || 'job_start' => args['command'],
       'run_code' => args['code'] ?? args['program'],
       'fetch_url' || 'browser_open' || 'browser_navigate' => args['url'],
-      'web_search' || 'memory_search' || 'session_search' => args['query'],
+      'web_search' => (args['queries'] is List)
+          ? (args['queries'] as List).join(' | ')
+          : args['query'], // legacy single-query shape
+      'memory_search' || 'session_search' => args['query'],
       'dispatch_agent' => args['prompt'],
       'commit' => args['message'],
       'generate_image' => args['prompt'],
@@ -6847,30 +6907,95 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
 
   /// Free web search via DuckDuckGo HTML — no API key needed.
   /// Scrapes the top result titles + snippets.
-  Future<String> _webSearch(String query) async {
-    final url = Uri.parse(
-      'https://html.duckduckgo.com/html/?q=${Uri.encodeQueryComponent(query)}',
+  /// DSH-parity web search (dsh-tool-web): 1–4 queries run concurrently,
+  /// sources deduped by URL and merged round-robin (one source at each rank
+  /// from every query before advancing), every line a citable markdown link.
+  /// Any failed query fails the whole call — partial results are discarded,
+  /// matching the reference abort-then-settle semantics.
+  Future<String> _webSearch(List<String> queries) async {
+    // Fan out concurrently. A failure rejects the whole call.
+    final perQuery = await Future.wait(
+      queries.map((q) => _ddgSearch(q)),
     );
+
+    // Round-robin merge: rank 1 of query A, rank 1 of B, …, rank 2 of A…
+    final byUrl = <String, _WebSearchSource>{};
+    final ordered = <_WebSearchSource>[];
+    var rank = 0;
+    var added = true;
+    while (added) {
+      added = false;
+      for (final sources in perQuery) {
+        if (rank < sources.length) {
+          added = true;
+          final s = sources[rank];
+          if (!byUrl.containsKey(s.url)) {
+            byUrl[s.url] = s;
+            ordered.add(s);
+          }
+        }
+      }
+      rank++;
+    }
+
+    final capped = ordered.take(_webSearchMaxResults).toList();
+    if (capped.isEmpty) return 'No results found.';
+    final lines = [
+      for (final s in capped)
+        '- [${s.title.isEmpty ? s.url : s.title}](${s.url})'
+        '${s.snippet.isEmpty ? '' : ' — ${s.snippet}'}',
+    ];
+    final truncated = ordered.length > capped.length
+        ? '\n\n(Showing the first ${capped.length} sources. '
+            'Refine the query for more.)'
+        : '';
+    return 'Web search: ${queries.join(' | ')}\n\nSources:\n'
+        '${lines.join('\n')}$truncated\n\n'
+        'Cite the relevant URLs above as markdown links in your answer.';
+  }
+
+  /// One DuckDuckGo HTML search → parsed sources (title/url/snippet).
+  /// Test seam: when set, DuckDuckGo requests go to this base instead of
+  /// the real endpoint (e.g. `http://127.0.0.1:PORT`).
+  @visibleForTesting
+  static String? ddgBaseOverrideForTest;
+
+  Future<List<_WebSearchSource>> _ddgSearch(String query) async {
+    final base =
+        ddgBaseOverrideForTest ?? 'https://html.duckduckgo.com/html/';
+    final url = Uri.parse('$base?q=${Uri.encodeQueryComponent(query)}');
     final r = await HttpShim.get(url, headers: {'User-Agent': 'OvidAgent/1.0'});
-    if (r.status != 200) return 'search failed (${r.status})';
+    if (r.status != 200) {
+      throw 'search failed for "$query" (HTTP ${r.status})';
+    }
     final html = utf8.decode(r.bytes, allowMalformed: true);
-    // Parse result titles + snippets from the HTML (DuckDuckGo layout).
-    final results = <String>[];
+    final results = <_WebSearchSource>[];
     final resultRegex = RegExp(
       r'<a[^>]+class="result__a"[^>]*>(.*?)</a>.*?'
       r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
       dotAll: true,
     );
     for (final m in resultRegex.allMatches(html)) {
-      if (results.length >= 8) break;
+      if (results.length >= _webSearchMaxResults) break;
       final title = _stripHtml(m.group(1) ?? '');
       final snippet = _stripHtml(m.group(2) ?? '');
-      if (title.isNotEmpty) {
-        results.add('• $title\n  $snippet');
+      final urlMatch = RegExp(r'href="([^"]+)"')
+          .firstMatch(m.group(0) ?? '');
+      var href = urlMatch?.group(1) ?? '';
+      // DuckDuckGo wraps links as /l/?uddg=<urlencoded>; unwrap them.
+      final uddg = RegExp(r'[?&]uddg=([^&]+)').firstMatch(href);
+      if (uddg != null) {
+        href = Uri.decodeComponent(uddg.group(1) ?? '');
       }
+      if (title.isEmpty || href.isEmpty) continue;
+      if (!href.startsWith('http')) continue;
+      results.add(_WebSearchSource(
+        url: href,
+        title: title,
+        snippet: snippet,
+      ));
     }
-    if (results.isEmpty) return 'No results found for "$query".';
-    return 'Web search: "$query"\n\n${results.join('\n\n')}';
+    return results;
   }
 
   /// Free image generation via Pollinations.ai — no key, no signup.
@@ -6912,6 +7037,14 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     ).firstMatch(raw);
     return m != null ? raw.substring(0, m.start).trim() : raw;
   }
+}
+
+/// One parsed web-search source (DSH `WebSearchResult` shape, minus dates).
+class _WebSearchSource {
+  final String url;
+  final String title;
+  final String snippet;
+  _WebSearchSource({required this.url, required this.title, this.snippet = ''});
 }
 
 /// IDLE-reset timeout for SSE streams (DSH never-stop parity).

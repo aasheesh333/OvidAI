@@ -3091,4 +3091,170 @@ block</pre>
       expect(res, contains('image content returned'));
     });
   });
+
+  group('PR14: multi-query web search + honest plugin install', () {
+    /// Spin up a local HTTP server that answers any GET with [html],
+    /// and point DuckDuckGo search at it by overriding the query host.
+    Future<Uri> serveDdg(String html) async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        final body = utf8.encode(html);
+        request.response
+          ..statusCode = 200
+          ..contentLength = body.length
+          ..add(body);
+        await request.response.close();
+      });
+      addTearDown(() => server.close(force: true));
+      return Uri.parse('http://${server.address.host}:${server.port}');
+    }
+
+    test('web_search rejects empty and oversized query arrays', () async {
+      final res = await AgentService.I.dispatchForTest(
+        'web_search',
+        {'queries': const []},
+      );
+      expect(res, contains('Error: queries must contain at least one query'));
+
+      final res2 = await AgentService.I.dispatchForTest(
+        'web_search',
+        {
+          'queries': ['a', 'b', 'c', 'd', 'e'],
+        },
+      );
+      expect(res2, contains('at most 4 queries'));
+    });
+
+    test('web_search runs queries concurrently, dedupes URLs, cites links',
+        () async {
+      // Two queries: the second shares one URL with the first (dedup) and
+      // adds its own result (round-robin interleaving across queries).
+      final q1 = [
+        _ddgResult('Alpha result', 'https://ex.com/alpha', 'About alpha'),
+        _ddgResult('Shared result', 'https://ex.com/shared', 'Both'),
+      ].join();
+      final q2 = [
+        _ddgResult('Beta result', 'https://ex.com/beta', 'About beta'),
+        _ddgResult('Shared result dup', 'https://ex.com/shared', 'Dup'),
+      ].join();
+      var hits = 0;
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        hits++;
+        final html = request.uri.queryParameters['q'] == 'one' ? q1 : q2;
+        final body = utf8.encode(html);
+        request.response
+          ..statusCode = 200
+          ..contentLength = body.length
+          ..add(body);
+        await request.response.close();
+      });
+      addTearDown(() => server.close(force: true));
+      AgentService.ddgBaseOverrideForTest =
+          'http://${server.address.host}:${server.port}';
+
+      final res = await AgentService.I.dispatchForTest('web_search', {
+        'queries': ['one', 'two'],
+      });
+      AgentService.ddgBaseOverrideForTest = null;
+
+      expect(hits, 2, reason: 'each query runs once');
+      expect(res, contains('[Alpha result](https://ex.com/alpha)'));
+      expect(res, contains('[Beta result](https://ex.com/beta)'));
+      expect(res, contains('https://ex.com/shared'), reason: 'dup kept once');
+      // Exactly one line for the shared URL — deduped, not repeated.
+      expect('https://ex.com/shared'.allMatches(res).length, 1);
+      expect(res, contains('About alpha'), reason: 'snippets retained');
+      expect(
+        res,
+        contains('Cite the relevant URLs above as markdown links'),
+      );
+      // Round-robin: alpha (q1 rank1) must come before shared-dup (q2 rank2).
+      expect(res.indexOf('ex.com/alpha'), lessThan(res.indexOf('ex.com/beta')));
+    });
+
+    test('web_search unwraps DuckDuckGo redirect links', () async {
+      final html = _ddgResult(
+        'Redirected',
+        '//duckduckgo.com/l/?uddg=https%3A%2F%2Freal.com%2Fpage&rut=abc',
+        'Snippet',
+      ).join();
+      final server = await serveDdg(html);
+      AgentService.ddgBaseOverrideForTest = '$server';
+
+      final res = await AgentService.I.dispatchForTest('web_search', {
+        'queries': ['anything'],
+      });
+      AgentService.ddgBaseOverrideForTest = null;
+
+      expect(res, contains('[Redirected](https://real.com/page)'));
+      expect(res, isNot(contains('duckduckgo.com/l/')));
+    });
+
+    test('web_search failure surfaces as Error, not a silent half-result',
+        () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        request.response.statusCode = 503;
+        await request.response.close();
+      });
+      addTearDown(() => server.close(force: true));
+      AgentService.ddgBaseOverrideForTest =
+          'http://${server.address.host}:${server.port}';
+
+      final res = await AgentService.I.dispatchForTest('web_search', {
+        'queries': ['will fail'],
+      });
+      AgentService.ddgBaseOverrideForTest = null;
+
+      expect(res, startsWith('Error:'));
+      expect(res, contains('HTTP 503'));
+    });
+
+    test('agent_install_plugin reports the tools it actually contributes',
+        () async {
+      final app = AppState.I;
+      // Find (or add) a plugin that maps to no tool — a category:Agent
+      // entry with a name outside the tool map.
+      final noTool = PluginItem(
+        name: 'PR14 NoTool Plugin',
+        author: 't',
+        description: '',
+        version: '1',
+        category: 'Agent',
+        installs: 0,
+      );
+      app.plugins.add(noTool);
+      addTearDown(() => app.plugins.remove(noTool));
+
+      final res = await AgentService.I.dispatchForTest(
+        'agent_install_plugin',
+        {'plugin_name': 'PR14 NoTool Plugin'},
+      );
+      expect(res, contains('installed and enabled'));
+      expect(res, contains('contributes no agent tools'));
+      expect(noTool.installed, isTrue);
+
+      // And a plugin that DOES map to tools names them.
+      final webSearch = app.plugins.firstWhere(
+        (p) => p.name == 'Web Search',
+        orElse: () => throw StateError('Web Search plugin missing'),
+      );
+      final wasInstalled = webSearch.installed;
+      webSearch.installed = false;
+      addTearDown(() => webSearch.installed = wasInstalled);
+      final res2 = await AgentService.I.dispatchForTest(
+        'agent_install_plugin',
+        {'plugin_name': 'Web Search'},
+      );
+      expect(res2, contains('web_search'));
+      expect(res2, isNot(contains('contributes no agent tools')));
+    });
+  });
 }
+
+/// Build one DuckDuckGo-style result block (anchor + snippet pair).
+Iterable<String> _ddgResult(String title, String href, String snippet) => [
+      '<a class="result__a" href="$href">$title</a>',
+      '<a class="result__snippet" href="$href">${snippet}z</a>',
+    ];

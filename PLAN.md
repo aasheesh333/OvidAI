@@ -46,7 +46,7 @@ specs in §2. Findings below are code-level defects, separate from the feature g
 | C7 | `file_write` writes only to RepoCache; `fs_edit create` only to disk | split write paths | `file_write` then `run_shell cat` fails |
 | C8 | No spill store / output retention notices | truncation is inline with a bare `…` | see Phase H |
 | C9 | No checkpoints / `TOOL_OUTCOME_UNKNOWN` | no persistence barrier | a kill mid-tool leaves rows spinning forever |
-| C10 | `web_search` is single-query DuckDuckGo scraping, no URLs | `_webSearch` | DSH does 1-4 concurrent queries with citations |
+| C10 | ~~`web_search` is single-query DuckDuckGo scraping, no URLs~~ **FIXED** — DSH-parity `queries` array (1–4, exact dupes run once), concurrent fan-out, URL-dedup + round-robin merge, `Sources:` lines as `[title](url) — snippet` markdown links, cap notice, cite footer; one failed query fails the call (`Error: …`) | `agent_service.dart` `_webSearch`/`_ddgSearch` | closed (PR14 tests) |
 | C11 | ~~MCP: JSON-RPC errors returned as results; timeout yields `'null'`; no dead-process watcher~~ **FIXED** — full `mcp_service.dart` rewrite: `McpRpcResult` (errors never masquerade as results), 30s timeout with explicit message, process-death watcher + `_lastDeath` diagnostics, `notifications/tools/list_changed` → re-discovery, `isError` honoured, text/resource/image content kept apart, 6000-char head+tail trim; proxy tool gated on server existence | `mcp_service.dart` | reliability gap closed (PR13 tests) |
 | C12 | Dead `MsgKind` branches (`code`, `imageGen`, `turnTail`) never constructed | `chat_screen.dart` | image-gen placeholder (B3) is unreachable |
 
@@ -171,7 +171,7 @@ Every user-visible feature DSH web ships, derived from the installed package set
 | 28 | Locale | MISS — English only | — |
 | 29 | Cross-session search | HALF — sidebar title search + `session_search` tool; no FTS5 content search with snippets | `sidebar.dart:115`, `agent_service.dart` |
 | 30 | LLM session titles | HALF — first-message heuristic `_autoTitle`; no LLM-generated title | `state.dart:1055-1081` |
-| 31 | Web search / fetch | HALF — `web_search` is one DuckDuckGo query capped at 8 results with no URLs (C10 open); **`fetch_url` now renders HTML → markdown** (`_htmlToMarkdown`: headings, links, lists, code fences, bold/italic, nav/footer stripped, 8000-char cap); both are gated behind installed plugins | `agent_service.dart` `_webSearch`, `fetch_url` |
+| 31 | Web search / fetch | DONE — `web_search` is DSH-parity multi-query (1–4 concurrent, URL-dedup round-robin, markdown-link citations, cap notice); `fetch_url` renders HTML → markdown (`_htmlToMarkdown`); both gated behind installed plugins | `agent_service.dart` `_webSearch`, `fetch_url` |
 | 32 | Precise file editor | DONE — `fs_edit` view/create/str_replace/insert, numbered `view`, single-occurrence enforcement, read-before-edit, and workspace path containment | `agent_service.dart` `_handleFsEdit`, `containedPath` |
 | 33 | Glob / grep | DONE — `fs_glob` (mtime-desc, capped, symlink-safe) + `fs_grep` (`include` glob, match-based cap, 2 MB skip, `SEARCH_BAD_PATTERN`); no ripgrep backend, no spill | `agent_service.dart` `_handleFsGlob`/`_handleFsGrep` |
 | 34 | Compaction | DONE — `/compact` + `MsgKind.compact` row | `commands.dart:113-124` |
@@ -300,8 +300,17 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 46. Output retention — head/tail truncation with exact omission notices for glob/grep/shell/web tools.
 47. FS observation CAS — version guard with `FS_STALE_VERSION` retry (read-before-edit already enforced).
 48. Per-tool timeout budgets + repeat-tool reminder; timeouts on approval/question waits.
-49. `web_search` — concurrent queries, dedupe, real citation URLs (C10; `fetch_url` → markdown is DONE).
+49. ~~`web_search`~~ DONE — 1–4 concurrent queries, URL dedup, real citation URLs; `fetch_url` → markdown (C10 closed, PR14).
 50. ~~MCP reliability~~ DONE — errors surface as errors, dead-process watcher, `tools/list_changed` honoured (C11 closed by the `mcp_service.dart` rewrite + PR13 tests).
+
+### PR15 — Marketplace formats + realtime install (in flight)
+- Claude **and** Codex-style marketplace files both parsed (`.claude-plugin/marketplace.json`,
+  `mcpServers` config shape with command/args/env, raw plugin entries with command/args/env).
+- Marketplace fetching hardened: JSDelivr + githack fallbacks when raw.githubusercontent is
+  blocked, per-URL timeout, retry guidance in the failure message.
+- Realtime install parity: `agent_install_mcp`/toggle connect spawns the real server, discovers
+  tools via `tools/list`, and the model sees `mcp__<server>__<tool>` schemas on the NEXT request
+  (no restart). Plugin installs report contributed tools (PR14).
 
 ### Phase I — Polish
 51. Locale support (English + Hindi).
