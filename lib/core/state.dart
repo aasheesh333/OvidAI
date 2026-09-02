@@ -1516,16 +1516,24 @@ class AppState extends ChangeNotifier {
     return fetched;
   }
 
-  /// Fetch a marketplace.json from a GitHub repo (raw.githubusercontent.com)
-  /// and merge any plugin/MCP entries into the catalog. Returns a message
-  /// describing what was imported.
+  /// Fetch a marketplace catalog from a GitHub repo and merge plugin/MCP
+  /// entries into the local catalog. Returns a message describing what was
+  /// imported.
   ///
-  /// Schema (flexible — any subset of keys):
-  /// ```json
-  /// {"plugins":[{"name":"...","author":"...","description":"...",
-  ///   "version":"1.0","category":"Tool","command":"...","args":[...]}],
-  ///  "mcpServers":[{"name":"...","command":"...","args":[...],...}]}
-  /// ```
+  /// Supported formats (Claude Code AND Codex/Desktop style):
+  /// 1. `.claude-plugin/marketplace.json` — Claude Code marketplaces:
+  ///    `{"name":"...","plugins":[{"name","source","description",...}]}`
+  ///    where a `source` can be `"./plugin"` (local dir, UI-only here) or
+  ///    `"owner/repo"` (a GitHub plugin repo). MCP entries may appear under
+  ///    `mcpServers` either as a list or the map form.
+  /// 2. `marketplace.json` / `plugins.json` at the repo root — our native
+  ///    format plus the Codex/Claude Desktop `mcpServers` **map** form:
+  ///    `"mcpServers": {"github": {"command":"npx","args":[...],"env":{...}}}`
+  ///    alongside the list form we already supported.
+  ///
+  /// Fetch order: raw.githubusercontent.com (main, master), then
+  /// `.claude-plugin/marketplace.json`, then the jsdelivr and githack
+  /// mirrors for every path (some networks block raw.githubusercontent).
   Future<String> fetchMarketplaceCatalog(String repo) async {
     final normalized = repo.trim();
     if (normalized.isEmpty) return 'Repository name is empty';
@@ -1535,11 +1543,27 @@ class AppState extends ChangeNotifier {
     }
     final owner = parts[0];
     final name = parts[1];
-    final urls = [
-      'https://raw.githubusercontent.com/$owner/$name/main/marketplace.json',
-      'https://raw.githubusercontent.com/$owner/$name/master/marketplace.json',
-      'https://raw.githubusercontent.com/$owner/$name/main/plugins.json',
-      'https://raw.githubusercontent.com/$owner/$name/master/plugins.json',
+    final paths = [
+      'marketplace.json',
+      'plugins.json',
+      '.claude-plugin/marketplace.json',
+    ];
+    final urls = <String>[
+      // Test override (a local mock server) wins over the real network.
+      if (marketplaceBaseOverrideForTest != null) ...[
+        for (final path in paths)
+          '$marketplaceBaseOverrideForTest/$path',
+      ] else ...[
+        // raw.githubusercontent — canonical (both default branches).
+        for (final branch in ['main', 'master'])
+          for (final path in paths)
+            'https://raw.githubusercontent.com/$owner/$name/$branch/$path',
+        // Mirrors — raw.githubusercontent is blocked on some networks.
+        for (final path in paths)
+          'https://cdn.jsdelivr.net/gh/$owner/$name@main/$path',
+        for (final path in paths)
+          'https://raw.githack.com/$owner/$name/main/$path',
+      ],
     ];
     for (final url in urls) {
       final client = HttpClient()
@@ -1561,64 +1585,118 @@ class AppState extends ChangeNotifier {
         final j =
             jsonDecode(utf8.decode(builder.takeBytes()))
                 as Map<String, dynamic>;
-        var importedPlugins = 0;
-        var importedMcps = 0;
-        final pluginList = j['plugins'] as List?;
-        if (pluginList != null) {
-          for (final p in pluginList) {
-            if (p is! Map) continue;
-            final pname = p['name'] as String?;
-            if (pname == null) continue;
-            if (plugins.any((e) => e.name == pname)) continue;
-            plugins.add(
-              PluginItem(
-                name: pname,
-                author: p['author'] as String? ?? owner,
-                description: p['description'] as String? ?? '',
-                version: p['version'] as String? ?? '1.0',
-                category: p['category'] as String? ?? 'Tool',
-                installed: false,
-                enabled: false,
-                installs: p['installs'] as int? ?? 0,
-              ),
-            );
-            importedPlugins++;
-          }
-        }
-        final mcpList = j['mcpServers'] as List?;
-        if (mcpList != null) {
-          for (final m in mcpList) {
-            if (m is! Map) continue;
-            final mname = m['name'] as String?;
-            if (mname == null) continue;
-            if (mcpServers.any((e) => e.name == mname)) continue;
-            mcpServers.add(
-              McpServer(
-                name: mname,
-                author: m['author'] as String? ?? owner,
-                description: m['description'] as String? ?? '',
-                category: m['category'] as String? ?? 'Community',
-                command: m['command'] as String? ?? 'npx',
-                args:
-                    (m['args'] as List?)?.whereType<String>().toList() ??
-                    const [],
-                envHint: m['envHint'] as String?,
-                source: 'marketplace:$owner/$name',
-                custom: true,
-              ),
-            );
-            importedMcps++;
-          }
-        }
-        refresh();
-        return 'Imported $importedPlugins plugin(s) and $importedMcps MCP server(s) from $owner/$name';
+        return _mergeMarketplaceCatalog(j, owner, name);
       } catch (_) {
         continue;
       } finally {
         client.close(force: true);
       }
     }
-    return 'No marketplace.json found in $owner/$name (tried main, master, plugins.json)';
+    return 'No marketplace.json found in $owner/$name '
+        '(tried main, master, .claude-plugin/marketplace.json and mirrors). '
+        'Check the repo exists and has a marketplace.json, plugins.json or '
+        '.claude-plugin/marketplace.json on its default branch.';
+  }
+
+  /// Test seam: when set, marketplace fetches try this base before GitHub
+  /// (e.g. `http://127.0.0.1:PORT` serving `<path>` from the mock server).
+  @visibleForTesting
+  static String? marketplaceBaseOverrideForTest;
+
+  /// Test seam: merge a parsed marketplace document directly (no network).
+  @visibleForTesting
+  String mergeMarketplaceCatalogForTest(
+    Map<String, dynamic> j,
+    String owner,
+    String repo,
+  ) => _mergeMarketplaceCatalog(j, owner, repo);
+
+  /// Merge a parsed marketplace JSON document into the catalog. Accepts
+  /// both list-form and map-form (Claude Desktop / Codex / Cursor shape)
+  /// `mcpServers`, plus Claude Code `plugins` entries.
+  String _mergeMarketplaceCatalog(
+    Map<String, dynamic> j,
+    String owner,
+    String repoName,
+  ) {
+    var importedPlugins = 0;
+    var importedMcps = 0;
+
+    // ── plugins (list form — ours + Claude Code) ──
+    final pluginList = j['plugins'];
+    if (pluginList is List) {
+      for (final p in pluginList) {
+        if (p is! Map) continue;
+        final pname = p['name'] as String?;
+        if (pname == null || pname.isEmpty) continue;
+        if (plugins.any((e) => e.name == pname)) continue;
+        plugins.add(
+          PluginItem(
+            name: pname,
+            author: p['author'] as String? ?? owner,
+            description: p['description'] as String? ?? '',
+            version: p['version'] as String? ?? '1.0',
+            category: p['category'] as String? ?? 'Tool',
+            installed: false,
+            enabled: false,
+            installs: p['installs'] as int? ?? 0,
+          ),
+        );
+        importedPlugins++;
+      }
+    }
+
+    // ── mcpServers — list form AND map form (Codex/Claude Desktop) ──
+    void importMcp(Map m, String? fallbackName) {
+      final mname =
+          (m['name'] as String?) ?? fallbackName ?? '';
+      if (mname.isEmpty) return;
+      if (mcpServers.any((e) => e.name == mname)) return;
+      mcpServers.add(
+        McpServer(
+          name: mname,
+          author: m['author'] as String? ?? owner,
+          description: m['description'] as String? ?? '',
+          category: m['category'] as String? ?? 'Community',
+          command: (m['command'] as String?) ??
+              (m['cmd'] as String?) ??
+              'npx',
+          args: (m['args'] as List?)?.whereType<String>().toList() ??
+              const [],
+          envHint: (m['envHint'] as String?) ??
+              ((m['env'] as Map?)?.keys.isNotEmpty == true
+                  ? (m['env'] as Map).keys.first as String?
+                  : null),
+          source: 'marketplace:$owner/$repoName',
+          custom: true,
+        ),
+      );
+      importedMcps++;
+    }
+
+    final mcpList = j['mcpServers'];
+    if (mcpList is List) {
+      for (final m in mcpList) {
+        if (m is Map) importMcp(m.cast<String, dynamic>(), null);
+      }
+    } else if (mcpList is Map) {
+      // Codex / Claude Desktop / Cursor config shape:
+      // {"mcpServers":{"github":{"command":"npx","args":[...],"env":{...}}}}
+      mcpList.forEach((key, value) {
+        if (value is Map) {
+          importMcp(value.cast<String, dynamic>(), key as String);
+        }
+      });
+    }
+
+    refresh();
+    if (importedPlugins == 0 && importedMcps == 0) {
+      return 'Fetched $owner/$repoName but found no new plugins or MCP '
+          'servers (already imported, or the file has neither "plugins" nor '
+          '"mcpServers" entries).';
+    }
+    return 'Imported $importedPlugins plugin(s) and $importedMcps MCP '
+        'server(s) from $owner/$repoName';
   }
 
   /// ---------- MCP servers ----------

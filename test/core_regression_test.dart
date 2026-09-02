@@ -3251,6 +3251,149 @@ block</pre>
       expect(res2, isNot(contains('contributes no agent tools')));
     });
   });
+
+  group('PR15: marketplace formats (Claude + Codex) + realtime install', () {
+    test('parses Codex/Claude Desktop mcpServers MAP form', () {
+      final app = AppState.I;
+      final before = app.mcpServers.length;
+      final msg = app.mergeMarketplaceCatalogForTest({
+        'mcpServers': {
+          'PR15 Map Server': {
+            'command': 'npx',
+            'args': ['-y', '@example/pr15-server'],
+            'env': {'API_KEY': 'x'},
+          },
+        },
+      }, 'acme', 'plugins');
+      expect(msg, contains('1 MCP server'));
+      final added = app.mcpServers.length - before == 1
+          ? app.mcpServers.last
+          : null;
+      expect(added, isNotNull, reason: 'map entry imported');
+      expect(added!.name, 'PR15 Map Server');
+      expect(added.command, 'npx');
+      expect(added.args, ['-y', '@example/pr15-server']);
+      expect(added.envHint, 'API_KEY', reason: 'first env key as hint');
+      expect(added.custom, isTrue);
+    });
+
+    test('parses Claude Code .claude-plugin marketplace plugins list', () {
+      final app = AppState.I;
+      final before = app.plugins.length;
+      final msg = app.mergeMarketplaceCatalogForTest({
+        'name': 'PR15 Claude Marketplace',
+        'plugins': [
+          {
+            'name': 'PR15 Claude Plugin',
+            'source': './plugins/pr15',
+            'description': 'From a Claude Code marketplace',
+            'version': '0.2.0',
+            'author': 'claude-dev',
+            'category': 'Agent',
+          },
+        ],
+      }, 'claude-owner', 'claude-market');
+      expect(msg, contains('1 plugin'));
+      expect(app.plugins.length, before + 1);
+      final p = app.plugins.last;
+      expect(p.name, 'PR15 Claude Plugin');
+      expect(p.author, 'claude-dev');
+      expect(p.category, 'Agent');
+      expect(p.installed, isFalse, reason: 'marketplace entries start off');
+    });
+
+    test('parses our list-form mcpServers and never duplicates entries',
+        () {
+      final app = AppState.I;
+      final doc = {
+        'mcpServers': [
+          {
+            'name': 'PR15 List Server',
+            'command': 'uvx',
+            'args': ['pr15-tool'],
+          },
+        ],
+      };
+      final first = app.mergeMarketplaceCatalogForTest(doc, 'o', 'r');
+      expect(first, contains('1 MCP server'));
+      // Same doc again — dedupe, not a duplicate row.
+      final again = app.mergeMarketplaceCatalogForTest(doc, 'o', 'r');
+      expect(again, contains('no new plugins'));
+      expect(
+        app.mcpServers.where((s) => s.name == 'PR15 List Server').length,
+        1,
+      );
+    });
+
+    test('fetch falls through paths and reports actionable failure',
+        () async {
+      // Local server with NO marketplace files → every URL misses → the
+      // error must tell the user which files were tried.
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        request.response.statusCode = 404;
+        await request.response.close();
+      });
+      addTearDown(() => server.close(force: true));
+      AppState.marketplaceBaseOverrideForTest =
+          'http://${server.address.host}:${server.port}';
+
+      final msg = await AppState.I.fetchMarketplaceCatalog('ghost/repo');
+      AppState.marketplaceBaseOverrideForTest = null;
+
+      expect(msg, contains('No marketplace.json'));
+      expect(msg, contains('.claude-plugin/marketplace.json'));
+    });
+
+    test('fetch imports from a live marketplace URL', () async {
+      // Serve marketplace.json on the first path of the fetch order.
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        if (!request.uri.path.endsWith('marketplace.json')) {
+          request.response.statusCode = 404;
+          await request.response.close();
+          return;
+        }
+        final body = utf8.encode(jsonEncode({
+          'plugins': [
+            {
+              'name': 'PR15 Live Plugin',
+              'description': 'fetched over HTTP',
+              'author': 'live',
+              'category': 'Tool',
+            },
+          ],
+          'mcpServers': {
+            'PR15 Live MCP': {
+              'command': 'npx',
+              'args': ['-y', '@live/pr15-mcp'],
+            },
+          },
+        }));
+        request.response
+          ..statusCode = 200
+          ..contentLength = body.length
+          ..add(body);
+        await request.response.close();
+      });
+      addTearDown(() => server.close(force: true));
+      AppState.marketplaceBaseOverrideForTest =
+          'http://${server.address.host}:${server.port}';
+
+      final msg = await AppState.I.fetchMarketplaceCatalog('live/repo');
+      AppState.marketplaceBaseOverrideForTest = null;
+
+      expect(msg, contains('1 plugin(s) and 1 MCP server(s)'));
+      expect(
+        AppState.I.plugins.any((p) => p.name == 'PR15 Live Plugin'),
+        isTrue,
+      );
+      expect(
+        AppState.I.mcpServers.any((s) => s.name == 'PR15 Live MCP'),
+        isTrue,
+      );
+    });
+  });
 }
 
 /// Build one DuckDuckGo-style result block (anchor + snippet pair).

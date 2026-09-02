@@ -56,7 +56,7 @@ specs in §2. Findings below are code-level defects, separate from the feature g
 
 | # | Sev | Issue | Location | Status |
 |---|-----|-------|----------|--------|
-| B1 | P0 | Marketplace catalog never loaded: `fetchMarketplaceCatalog` was only reachable from the agent command, never from the Plugins screen, and `addMarketplace` just appended a name. Now: registry persists (`ovid_marketplaces_v1`), the screen merges catalogs on open, has a refresh action, and the add sheet fetches + reports. | `lib/core/state.dart` marketplaces block · `lib/ui/plugins_screen.dart` | DONE |
+| B1 | P0 | Marketplace catalog never loaded: `fetchMarketplaceCatalog` was only reachable from the agent command, never from the Plugins screen, and `addMarketplace` just appended a name. Now: registry persists (`ovid_marketplaces_v1`), the screen merges catalogs on open, has a refresh action, and the add sheet fetches + reports. **PR15**: Claude Code (`.claude-plugin/marketplace.json`) + Codex/Claude Desktop (map-form `mcpServers`) formats both parse; jsdelivr/githack mirror fallbacks; actionable failure message. | `lib/core/state.dart` marketplaces block · `lib/ui/plugins_screen.dart` | DONE |
 | B2 | P1 | Copy button copied an empty string on tool/turn rows while still showing "Copied to clipboard". | `lib/ui/chat_screen.dart` `_copyText`/`_actionRow` | DONE |
 | B3 | P1 | Image gen renders a dummy gradient placeholder and `_imageGenTool` produces no real image. Also unreachable — nothing constructs `MsgKind.imageGen`. | `chat_screen.dart` `_imageGen` · `agent_service.dart` `_imageGenTool` | BROKEN |
 | B4 | P2 | Markdown tables overflowed (no horizontal scroll). Now `IntrinsicColumnWidth` + styled borders. | `chat_screen.dart` `_DshMarkdown` | DONE |
@@ -303,14 +303,25 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 49. ~~`web_search`~~ DONE — 1–4 concurrent queries, URL dedup, real citation URLs; `fetch_url` → markdown (C10 closed, PR14).
 50. ~~MCP reliability~~ DONE — errors surface as errors, dead-process watcher, `tools/list_changed` honoured (C11 closed by the `mcp_service.dart` rewrite + PR13 tests).
 
-### PR15 — Marketplace formats + realtime install (in flight)
-- Claude **and** Codex-style marketplace files both parsed (`.claude-plugin/marketplace.json`,
-  `mcpServers` config shape with command/args/env, raw plugin entries with command/args/env).
-- Marketplace fetching hardened: JSDelivr + githack fallbacks when raw.githubusercontent is
-  blocked, per-URL timeout, retry guidance in the failure message.
-- Realtime install parity: `agent_install_mcp`/toggle connect spawns the real server, discovers
-  tools via `tools/list`, and the model sees `mcp__<server>__<tool>` schemas on the NEXT request
-  (no restart). Plugin installs report contributed tools (PR14).
+### PR15 — Marketplace formats + realtime install (DONE)
+- **Claude AND Codex formats both parse** — `.claude-plugin/marketplace.json`
+  (Claude Code marketplace shape, `plugins` entries with `source`), our native
+  list-form `plugins`/`mcpServers`, and the Codex / Claude Desktop / Cursor
+  **map form** `"mcpServers": {"name": {"command","args","env"}}` (map key = server
+  name, first `env` key surfaces as `envHint`).
+- **Marketplace fetching hardened** — fetch order: raw.githubusercontent (main,
+  master) → `.claude-plugin/marketplace.json` → jsdelivr + githack mirrors
+  (raw.githubusercontent is blocked on some networks); actionable failure
+  message lists every path tried; 2 MB bounded read kept.
+- **Realtime install (DSH parity)** — Install button on MCP-category plugins
+  connects the real server immediately (spawn + handshake + tools/list) and
+  reports the discovered tool count; non-MCP installs report the agent tools
+  the model gains (via `_toolGainsFor`); `agent_install_mcp` and discovered
+  `mcp__<server>__<tool>` schemas reach the model on the very next request
+  (`_tools` is built per request), and `notifications/tools/list_changed`
+  re-discovers live.
+- Tests: PR15 group (map-form mcpServers, Claude marketplace plugins, list
+  dedupe, 404 fall-through message, live-URL import) — 124 → 129.
 
 ### Phase I — Polish
 51. Locale support (English + Hindi).

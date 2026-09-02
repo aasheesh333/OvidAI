@@ -2,8 +2,26 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import '../core/mcp_service.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
+
+/// Agent tools a plugin contributes when installed+enabled — mirrors the
+/// `_tools` gate in AgentService so the install snackbar can report what
+/// the model actually gained (DSH honest-install parity).
+String? _toolGainsFor(PluginItem p) {
+  return switch (p.name) {
+    'Web Search' => 'web_search',
+    'Image Studio' => 'generate_image',
+    'File Reader' => 'file_read',
+    'Web Fetch & Reader' => 'fetch_url',
+    'Code Runner' => 'run_code',
+    'RAG Memory' => 'memory_search, memory_save',
+    'DeepThink Reasoning' => 'reasoning display',
+    'Sandbox Runtime' => 'run_shell, fs tools',
+    _ => null,
+  };
+}
 
 /// Plugins library — Claude-Code-extensions style: trending banner carousel,
 /// search, category chips, thousands of community plugins, detail pages.
@@ -227,8 +245,9 @@ class _PluginsScreenState extends State<PluginsScreen> {
               ),
               const SizedBox(height: 6),
               Text(
-                'Paste any GitHub repo that contains a marketplace.json — '
-                'works exactly like Claude Code plugin marketplaces.',
+                'Paste any GitHub repo with a marketplace.json — Claude Code '
+                '(.claude-plugin/marketplace.json) and Codex/Claude Desktop '
+                '(mcpServers map) formats both work.',
                 style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
               ),
               const SizedBox(height: 14),
@@ -548,11 +567,56 @@ class PluginDetailScreen extends StatelessWidget {
                       'Install',
                       style: TextStyle(fontSize: 13.5),
                     ),
-                    onPressed: () {
+                    onPressed: () async {
                       plugin.installed = true;
                       plugin.enabled = true;
                       app.persistPluginState();
                       app.refresh();
+                      // Realtime install (DSH parity): an MCP-category
+                      // plugin connects its server right away, and the
+                      // snackbar reports the tools the model gains —
+                      // no restart, no dead flag flips.
+                      final messenger =
+                          ScaffoldMessenger.of(context);
+                      if (plugin.category == 'MCP') {
+                        final server = app.mcpServers
+                            .where((s) => s.name == plugin.name)
+                            .firstOrNull;
+                        if (server != null) {
+                          messenger.showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                'Connecting ${server.name}…',
+                              ),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                          final msg =
+                              await McpService.I.connect(server);
+                          server.connected =
+                              McpService.I.isConnected(server.name);
+                          app.refresh();
+                          messenger.showSnackBar(
+                            SnackBar(
+                              content: Text(msg),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        }
+                      } else {
+                        final gained = _toolGainsFor(plugin);
+                        messenger.showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              gained == null
+                                  ? 'Installed ${plugin.name}'
+                                  : 'Installed ${plugin.name} · agent tools: '
+                                      '$gained',
+                            ),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      }
                     },
                   ),
           ),
