@@ -19,6 +19,7 @@ import 'mcp_service.dart';
 import 'session_ledger.dart';
 import 'session_search.dart';
 import 'presets.dart';
+import 'hook_service.dart';
 import 'skills.dart';
 import 'commands.dart';
 
@@ -513,6 +514,17 @@ class AgentService extends ChangeNotifier {
     AppState.I.onSessionsLoaded = () {
       restoreSubagentHandles();
       _recoverInterruptedRuns();
+      // PR24: on_session_start — boot-time hooks for the restored ACTIVE
+      // session (loaders, environment probes). Fire-and-forget.
+      final active = AppState.I.activeSession;
+      if (active != null &&
+          HookService.I.hasHookListeners('on_session_start')) {
+        unawaited(
+          HookService.I.fire('on_session_start', active.id, payload: {
+            'restored': AppState.I.sessions.length,
+          }),
+        );
+      }
     };
     // Composer commands + skills catalog.
     CommandService.I.registerBuiltins();
@@ -3904,6 +3916,32 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
             'msgs': msgs.length,
           }),
         );
+        // PR24 plugin hooks. on_turn_start: fire-and-forget (no stdout
+        // injection). on_pre_request: stdout (≤2 KB) joins THIS request
+        // as a system note — a plugin can inject live context (DSH
+        // agent/pre-step message-injection parity, shell flavor).
+        if (HookService.I.hasHookListeners('on_turn_start')) {
+          unawaited(
+            HookService.I.fire('on_turn_start', s.id, payload: {
+              'turn': turn,
+              'prompt': cleanTruncate(originalPrompt, 400),
+            }),
+          );
+        }
+        if (HookService.I.hasHookListeners('on_pre_request')) {
+          final hookCtx = await HookService.I.fire(
+            'on_pre_request',
+            s.id,
+            payload: {'turn': turn},
+          );
+          if (hookCtx.isNotEmpty) {
+            msgs.insert(0, {
+              'role': 'system',
+              'content':
+                  '[plugin hook context — on_pre_request]\n$hookCtx',
+            });
+          }
+        }
         var msg = await _callLlm(p, msgs, s);
         if (msg == null && _looksLikeContextOverflow(lastError)) {
           // DSH context-overflow recovery (C1 fixed): the provider rejected
@@ -4237,6 +4275,16 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           'llmMs': pinned.llmMs,
         }),
       );
+      // PR24: on_turn_end fire-and-forget — post-run bookkeeping plugins
+      // (indexers, notifiers, cleanup) never block the UI.
+      if (HookService.I.hasHookListeners('on_turn_end')) {
+        unawaited(
+          HookService.I.fire('on_turn_end', pinnedSessionId, payload: {
+            'steps': pinned.steps,
+            'turns': pinned.turns,
+          }),
+        );
+      }
       // LLM session title (DSH parity): one cheap background call after
       // the first real exchange — fire-and-forget, heuristic stays on fail.
       unawaited(maybeGenerateSessionTitle(ctx.session));
@@ -4805,6 +4853,18 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
             'tool': name,
             'ms': sw.elapsedMilliseconds,
             'ok': !res.startsWith('DENIED') && !_looksLikeToolError(res),
+          }),
+        );
+      }
+      // PR24: on_post_tool — fire-and-forget after every tool completes
+      // (indexers, loggers). Never blocks the loop.
+      if (HookService.I.hasHookListeners('on_post_tool')) {
+        unawaited(
+          HookService.I.fire('on_post_tool', ledgerSid ?? '', payload: {
+            'tool': name,
+            'ms': sw.elapsedMilliseconds,
+            'ok': !res.startsWith('DENIED'),
+            'result': cleanTruncate(res, 400),
           }),
         );
       }

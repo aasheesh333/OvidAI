@@ -136,6 +136,15 @@ class PluginItem {
   bool enabled;
   final int installs;
 
+  /// PR24: plugin hooks — event name → shell command. Declared in the
+  /// plugin manifest (`"hooks": {"on_turn_start": "make snapshot"}`) and
+  /// fired by HookService at the matching agent lifecycle point. The
+  /// command runs inside the sandbox with OVID_HOOK_EVENT/OVID_HOOK_
+  /// PAYLOAD env vars; stdout ≤2 KB can be injected as request context.
+  /// (DSH hooks are in-process JS callbacks — on mobile, sandbox shell
+  /// commands are the honest equivalent.)
+  Map<String, String> hooks;
+
   PluginItem({
     required this.name,
     required this.author,
@@ -145,7 +154,17 @@ class PluginItem {
     this.installed = false,
     this.enabled = false,
     required this.installs,
+    this.hooks = const {},
   });
+
+  /// Valid hook event names (mirrors the wired points in AgentService).
+  static const hookEvents = [
+    'on_session_start',
+    'on_turn_start',
+    'on_turn_end',
+    'on_pre_request',
+    'on_post_tool',
+  ];
 }
 
 /// MCP server entry — separate from plugins because lifecycle is different
@@ -1738,6 +1757,30 @@ class AppState extends ChangeNotifier {
 
   /// Merge a parsed marketplace JSON document into the catalog. Accepts
   /// both list-form and map-form (Claude Desktop / Codex / Cursor shape)
+  /// Parse a plugin manifest `hooks` map — event → shell command. Only
+  /// known event names are kept (typos die silently at import, not at
+  /// fire time). Map AND list-of-{event,command} forms are accepted.
+  Map<String, String> _parsePluginHooks(dynamic raw) {
+    final out = <String, String>{};
+    if (raw is Map) {
+      raw.forEach((k, v) {
+        final ev = (k as String).trim();
+        final cmd = v as String?;
+        if (cmd == null || cmd.trim().isEmpty) return;
+        if (PluginItem.hookEvents.contains(ev)) out[ev] = cmd.trim();
+      });
+    } else if (raw is List) {
+      for (final e in raw) {
+        if (e is! Map) continue;
+        final ev = (e['event'] as String?)?.trim();
+        final cmd = e['command'] as String?;
+        if (ev == null || cmd == null || cmd.trim().isEmpty) continue;
+        if (PluginItem.hookEvents.contains(ev)) out[ev] = cmd.trim();
+      }
+    }
+    return out;
+  }
+
   /// `mcpServers`, plus Claude Code `plugins` entries.
   String _mergeMarketplaceCatalog(
     Map<String, dynamic> j,
@@ -1765,6 +1808,8 @@ class AppState extends ChangeNotifier {
             installed: false,
             enabled: false,
             installs: p['installs'] as int? ?? 0,
+            // PR24: hook declarations survive the marketplace import.
+            hooks: _parsePluginHooks(p['hooks']),
           ),
         );
         importedPlugins++;
@@ -2016,6 +2061,7 @@ class AppState extends ChangeNotifier {
               'category': p.category,
               'installed': p.installed,
               'enabled': p.enabled,
+              if (p.hooks.isNotEmpty) 'hooks': p.hooks,
             }),
           )
           .toList();
@@ -2043,6 +2089,10 @@ class AppState extends ChangeNotifier {
             installed: m['installed'] as bool? ?? true,
             enabled: m['enabled'] as bool? ?? true,
             installs: 1,
+            hooks: (m['hooks'] as Map?)?.map(
+                  (k, v) => MapEntry(k as String, v as String),
+                ) ??
+                const {},
           ),
         );
       }
@@ -2058,6 +2108,7 @@ class AppState extends ChangeNotifier {
         state[p.name] = jsonEncode({
           'installed': p.installed,
           'enabled': p.enabled,
+          if (p.hooks.isNotEmpty) 'hooks': p.hooks,
         });
       }
       await prefs.setString(_kPluginState, jsonEncode(state));
@@ -2076,6 +2127,10 @@ class AppState extends ChangeNotifier {
         final ps = jsonDecode(v as String) as Map<String, dynamic>;
         p.installed = ps['installed'] as bool? ?? p.installed;
         p.enabled = ps['enabled'] as bool? ?? p.enabled;
+        final hk = ps['hooks'];
+        if (hk is Map) {
+          p.hooks = hk.map((k, v) => MapEntry(k as String, v as String));
+        }
       }
       refresh();
     } catch (_) {}

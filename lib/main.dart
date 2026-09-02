@@ -5,6 +5,7 @@ import 'core/agent_service.dart';
 import 'core/agent_notification_service.dart';
 import 'core/firebase_service.dart';
 import 'core/github_service.dart';
+import 'core/hook_service.dart';
 import 'core/mcp_service.dart';
 import 'core/sandbox_service.dart';
 import 'core/state.dart';
@@ -16,6 +17,8 @@ import 'ui/sandbox_setup.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await AppState.I.initialize();
+  // PR24: plugin-hook kill-switch restore (Settings toggle).
+  await HookService.I.loadEnabled();
   // Apply persisted theme BEFORE first frame (no dark flash on light).
   Aether.dark = !AppState.I.lightTheme;
   // Firebase is optional: if google-services.json isn't injected (local debug),

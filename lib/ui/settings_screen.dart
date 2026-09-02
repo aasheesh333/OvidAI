@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import '../core/agent_service.dart';
 import '../core/firebase_service.dart';
+import '../core/hook_service.dart';
 import '../core/skills.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
@@ -207,6 +208,15 @@ class SettingsScreen extends StatelessWidget {
             getter: _getAutoRunSafe,
             setter: _setAutoRunSafe,
           ),
+          const _SettingsSwitchTile(
+            icon: Icons.handyman_outlined,
+            title: 'Plugin hooks',
+            subtitleOn:
+                'ON — installed plugins run their hook commands at agent events',
+            subtitleOff: 'OFF — no plugin hook ever executes (kill-switch)',
+            getter: _getHooksEnabled,
+            setter: _setHooksEnabled,
+          ),
           _settingTile(
             Icons.security_outlined,
             'Sandbox',
@@ -404,6 +414,9 @@ bool _getGithubSync() => AppState.I.githubSync;
 Future<void> _setGithubSync(bool v) => AppState.I.setGithubSync(v);
 bool _getAutoRunSafe() => AppState.I.autoRunSafeCommands;
 Future<void> _setAutoRunSafe(bool v) => AppState.I.setAutoRunSafeCommands(v);
+
+bool _getHooksEnabled() => HookService.I.enabled;
+Future<void> _setHooksEnabled(bool v) => HookService.I.setEnabled(v);
 
 /// Live on-device storage usage (replaces the hardcoded "214 MB" string).
 class _StorageTile extends StatefulWidget {

@@ -443,6 +443,13 @@ class PluginCard extends StatelessWidget {
                       ),
                       const SizedBox(width: 8),
                       Tag(plugin.category.toUpperCase(), filled: true),
+                      // PR24: hook chips — a plugin with hooks shows which
+                      // events it fires (e.g. ON_TURN_START).
+                      for (final ev in plugin.hooks.keys)
+                        Padding(
+                          padding: const EdgeInsets.only(left: 4),
+                          child: Tag(ev.toUpperCase(), filled: false),
+                        ),
                     ],
                   ),
                   const SizedBox(height: 3),

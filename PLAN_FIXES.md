@@ -123,14 +123,14 @@ events…). Ovid has NO hook field on `PluginItem` at all.
 
 | ID | Item | Files | STATUS |
 |---|---|---|---|
-| H1 | `PluginItem.hooks` field: `Map<String, String>` event → shell command (declared in plugin manifest `hooks: {on_request: "...", on_turn_start: "..."}`) | `state.dart` `PluginItem` + `_persistCustomPlugins`/`_persistPluginState` | — |
-| H2 | Marketplace parse: read `hooks` map from plugin entries in `_mergeMarketplaceCatalog` | `state.dart:1724-1807` | — |
-| H3 | HookService (new `lib/core/hook_service.dart`): fire(event, payload) → for each installed+enabled plugin with hooks[event], run its shell command via sandbox with env `OVID_HOOK_EVENT`, `OVID_HOOK_PAYLOAD` (JSON, 8KB cap), timeout 30s, capture stdout; failures logged to tool detail, never break the run | new file | — |
-| H4 | Wire events: `turn_start`, `turn_end`, `pre_request` (inject stdout as system note ≤2KB), `post_tool` (append context), `session_start` | `agent_service.dart` `_runTaskBody` + `_dispatch` + session load | — |
-| H5 | Ledger: `hook/invoked` + `hook/result` records in SessionLedger (DSH session-event parity) | `session_ledger.dart` + hook service | — |
-| H6 | Plugins screen: show hook chips on plugin card (event names) | `plugins_screen.dart` | — |
-| H7 | Settings toggle: master `hooksEnabled` (default ON) to kill-switch all hook execution | `state.dart` + `settings_screen.dart` | — |
-| H8 | Tests: parse hooks from manifest; HookService fires command (fake shell via test seam); kill-switch blocks; ledger records | `test` | — |
+| H1 | `PluginItem.hooks` field: `Map<String, String>` event → shell command (declared in plugin manifest `hooks: {on_request: "...", on_turn_start: "..."}`) | `state.dart` `PluginItem` + `_persistCustomPlugins`/`_persistPluginState` | DONE |
+| H2 | Marketplace parse: read `hooks` map from plugin entries in `_mergeMarketplaceCatalog` | `state.dart:1724-1807` | DONE |
+| H3 | HookService (new `lib/core/hook_service.dart`): fire(event, payload) → for each installed+enabled plugin with hooks[event], run its shell command via sandbox with env `OVID_HOOK_EVENT`, `OVID_HOOK_PAYLOAD` (JSON, 8KB cap), timeout 30s, capture stdout; failures logged to tool detail, never break the run | new file | DONE |
+| H4 | Wire events: `turn_start`, `turn_end`, `pre_request` (inject stdout as system note ≤2KB), `post_tool` (append context), `session_start` | `agent_service.dart` `_runTaskBody` + `_dispatch` + session load | DONE |
+| H5 | Ledger: `hook/invoked` + `hook/result` records in SessionLedger (DSH session-event parity) | `session_ledger.dart` + hook service | DONE |
+| H6 | Plugins screen: show hook chips on plugin card (event names) | `plugins_screen.dart` | DONE |
+| H7 | Settings toggle: master `hooksEnabled` (default ON) to kill-switch all hook execution | `state.dart` + `settings_screen.dart` | DONE |
+| H8 | Tests: parse hooks from manifest; HookService fires command (fake shell via test seam); kill-switch blocks; ledger records | `test` | DONE |
 
 ---
 
@@ -302,3 +302,13 @@ upgrades webview_flutter or a platform channel is added.
   switch can't change the in-flight run), Q3 bucket-level test + boundary
   contract test. `_AgentRun`→`AgentRun`, `_BgJob`→`BgJob` made public for
   the test seam. Tests 174 → 178.
+- 2026-09-02 PR24 DONE (code+tests, CI pending): H1 `PluginItem.hooks`
+  (+hookEvents const, persisted in custom+state), H2 marketplace parse
+  (`_parsePluginHooks`: map + list forms, unknown events/empty commands
+  dropped), H3 `lib/core/hook_service.dart` (sandbox exec, env vars
+  OVID_HOOK_*, 30s timeout, ≤2KB stdout, executorForTest seam), H4 wired
+  on_session_start (boot), on_turn_start + on_pre_request (per request —
+  pre_request stdout injected as system note), on_turn_end (finally),
+  on_post_tool (after tool_end), H5 `hook/invoked`+`hook/result` ledger
+  records, H6 hook chips on plugin cards, H7 Settings kill-switch
+  (persisted, boot-loaded), H8 5 tests. Tests 178 → 183.

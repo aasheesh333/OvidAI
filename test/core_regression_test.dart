@@ -11,6 +11,7 @@ import 'package:http/testing.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/commands.dart';
 import 'package:ovid_ai/core/github_service.dart';
+import 'package:ovid_ai/core/hook_service.dart';
 import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
@@ -4525,6 +4526,216 @@ block</pre>
       }
       // Emails (x@y) still never trigger: @ after a word char.
       expect(openers.contains('o'), isFalse, reason: 'hello@world');
+    });
+  });
+
+  group('PR24: plugin hooks', () {
+    test('marketplace hooks parse (map + list forms, unknown events die)',
+        () async {
+      final app = AppState.I;
+      // Map form via merge — drive the private parse path through a
+      // plugin insert using the same _parsePluginHooks rules: valid
+      // events kept, unknown dropped, empty commands dropped.
+      final p = PluginItem(
+        name: 'hooked',
+        author: 'you',
+        description: 'hooks plugin',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        // Constructor stores as given (the _parsePluginHooks filter runs
+        // at MARKETPLACE import time — see the merge contract below).
+        hooks: {
+          'on_turn_start': 'echo start',
+          'on_bogus_event': 'echo never',
+        },
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+
+      expect(p.hooks['on_turn_start'], 'echo start');
+      // Unknown events are never FIRED: fire() iterates only listeners
+      // whose event matches, and the agent only calls the 5 known names.
+      expect(PluginItem.hookEvents.contains('on_bogus_event'), isFalse);
+      // The marketplace parse contract: unknown + empty dropped, valid kept.
+      // (Drive _parsePluginHooks through a merge shape.)
+      final merged = app.mergeMarketplaceCatalogForTest(
+        {
+          'plugins': [
+            {
+              'name': 'hooked-market',
+              'hooks': {
+                'on_turn_end': 'echo end',
+                'on_bogus_event': 'echo never',
+                'on_pre_request': '   ',
+              },
+            },
+          ],
+        },
+        'testowner',
+        'testrepo',
+      );
+      expect(merged, contains('Imported 1 plugin'));
+      final imported = app.plugins.firstWhere(
+        (x) => x.name == 'hooked-market',
+      );
+      expect(imported.hooks['on_turn_end'], 'echo end');
+      expect(imported.hooks.containsKey('on_bogus_event'), isFalse);
+      expect(imported.hooks.containsKey('on_pre_request'), isFalse);
+      app.plugins.remove(imported);
+      expect(PluginItem.hookEvents, contains('on_session_start'));
+      expect(PluginItem.hookEvents, contains('on_turn_end'));
+      expect(PluginItem.hookEvents, contains('on_post_tool'));
+    });
+
+    test('HookService fires the command with env vars and returns stdout',
+        () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'hook-runner',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_request': 'date'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+
+      final svc = HookService.I;
+      svc.enabled = true;
+      addTearDown(() => svc.enabled = true);
+      String? gotCmd;
+      Map<String, String>? gotEnv;
+      svc.executorForTest = (cmd, env) async {
+        gotCmd = cmd;
+        gotEnv = env;
+        return 'hook says hi';
+      };
+      addTearDown(() => svc.executorForTest = null);
+
+      final out = await svc.fire('on_pre_request', 'hook-sess-1');
+      expect(gotCmd, 'date');
+      final env = gotEnv!;
+      expect(env['OVID_HOOK_EVENT'], 'on_pre_request');
+      expect(env['OVID_HOOK_PLUGIN'], 'hook-runner');
+      expect(env['OVID_HOOK_SESSION'], 'hook-sess-1');
+      expect(env['OVID_HOOK_PAYLOAD'], contains('hook-sess-1'));
+      expect(out, 'hook says hi');
+      expect(svc.fired, greaterThan(0));
+    });
+
+    test('kill-switch blocks every hook execution', () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'hook-killed',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_turn_start': 'echo nope'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+
+      final svc = HookService.I;
+      svc.enabled = false;
+      addTearDown(() => svc.enabled = true);
+      var called = false;
+      svc.executorForTest = (cmd, env) async {
+        called = true;
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
+
+      expect(svc.hasHookListeners('on_turn_start'), isFalse);
+      final out = await svc.fire('on_turn_start', 'hook-sess-2');
+      expect(out, isEmpty);
+      expect(called, isFalse, reason: 'disabled hooks never execute');
+    });
+
+    test('hook stdout over 2 KB is truncated for context injection',
+        () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'hook-big',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_request': 'yes'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      svc.executorForTest = (cmd, env) async => 'x' * 5000;
+      addTearDown(() => svc.executorForTest = null);
+
+      final out = await svc.fire('on_pre_request', 'hook-sess-4');
+      expect(out.length, lessThan(2100));
+      expect(out, endsWith('[hook output truncated]'));
+    });
+
+    test('hook ledger events record invoked + result', () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'hook-ledger',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_turn_end': 'true'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      svc.executorForTest = (cmd, env) async => 'done';
+      addTearDown(() => svc.executorForTest = null);
+
+      final root = await Directory.systemTemp.createTemp('ovid-hook-led-');
+      SessionLedger.rootOverrideForTest = root;
+      addTearDown(() {
+        SessionLedger.rootOverrideForTest = null;
+        root.deleteSync(recursive: true);
+      });
+
+      await svc.fire('on_turn_end', 'hook-sess-3');
+      // The ledger writes through a buffered sink — flush before reading.
+      await SessionLedger.I.flush('hook-sess-3');
+      final file = File(
+        '${root.path}/${'hook-sess-3'.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_')}.jsonl',
+      );
+      expect(file.existsSync(), isTrue, reason: 'ledger file written');
+      final lines = file
+          .readAsStringSync()
+          .split('\n')
+          .where((l) => l.trim().isNotEmpty)
+          .map(jsonDecode)
+          .toList();
+      expect(
+        lines.any((e) => e['kind'] == 'hook/invoked'),
+        isTrue,
+        reason: 'invoked record present',
+      );
+      expect(
+        lines.any((e) => e['kind'] == 'hook/result' && e['ok'] == true),
+        isTrue,
+        reason: 'successful result record present',
+      );
     });
   });
 
