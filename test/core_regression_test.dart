@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/commands.dart';
 import 'package:ovid_ai/core/github_service.dart';
 import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
@@ -685,9 +686,11 @@ void main() {
     });
 
     test('marketplace URL normalization', () {
-      expect(app.addMarketplace('https://github.com/foo/bar'), isTrue);
+      expect(app.addMarketplace('https://github.com/foo/bar'), 'foo/bar');
       expect(app.marketplaces, contains('foo/bar'));
-      expect(app.addMarketplace('foo/bar'), isFalse); // duplicate
+      expect(app.addMarketplace('foo/bar'), isNull); // duplicate
+      expect(app.addMarketplace('   '), isNull); // empty
+      expect(app.addMarketplace('noslash'), isNull); // not owner/repo
       app.removeMarketplace('foo/bar');
       expect(app.marketplaces, isNot(contains('foo/bar')));
     });
@@ -2492,6 +2495,276 @@ Translate the following. This is the skill body.''');
       expect(work.path, pinned.path);
 
       app.sessions.removeWhere((x) => x.id == 'pin-s');
+    });
+  });
+
+  group('PR11: parity audit fixes', () {
+    test('history replay keeps tool output instead of empty assistant turns', () {
+      final s = ChatSession(
+        id: 'replay-s',
+        title: 'R',
+        model: 'm',
+        messages: [
+          Message(role: 'user', content: 'read the config'),
+          Message(
+            role: 'assistant',
+            kind: MsgKind.tool,
+            toolName: 'file_read',
+            content: 'lib/main.dart',
+            toolDetail: 'void main() { runApp(); }',
+            toolState: 'ok',
+          ),
+          Message(role: 'assistant', content: 'It boots the app.'),
+          // Compaction rows are apparatus, never replayed.
+          Message(role: 'assistant', kind: MsgKind.compact, content: 'summary'),
+        ],
+      );
+
+      final replay = AgentService.I.replayHistoryForTest(s);
+      expect(replay.length, 3);
+      expect(replay[0]['role'], 'user');
+      final toolMsg = replay[1]['content'] as String;
+      expect(toolMsg, contains('file_read'));
+      expect(
+        toolMsg,
+        contains('void main()'),
+        reason: 'tool output lives in toolDetail and must survive replay',
+      );
+      expect(replay[2]['content'], 'It boots the app.');
+      expect(
+        replay.any((m) => (m['content'] as String).trim().isEmpty),
+        isFalse,
+        reason: 'empty assistant turns poison the request envelope',
+      );
+    });
+
+    test('failed tool rows replay with their failure marked', () {
+      final s = ChatSession(
+        id: 'replay-err',
+        title: 'R',
+        model: 'm',
+        messages: [
+          Message(
+            role: 'assistant',
+            kind: MsgKind.tool,
+            toolName: 'run_shell',
+            content: 'npm test',
+            toolDetail: 'exit 1',
+            toolState: 'error',
+          ),
+        ],
+      );
+      final replay = AgentService.I.replayHistoryForTest(s);
+      expect(replay.single['content'], contains('(failed)'));
+    });
+
+    test('repo tools appear exactly once when GitHub sync is on', () {
+      final app = AppState.I;
+      final before = app.githubSync;
+      addTearDown(() => app.githubSync = before);
+
+      app.githubSync = true;
+      final withSync = AgentService.I.toolsForTest();
+      int count(String name) => withSync
+          .where((t) => (t['function'] as Map)['name'] == name)
+          .length;
+      expect(count('repo_sync'), 1);
+      expect(count('repo_tree'), 1);
+
+      app.githubSync = false;
+      final withoutSync = AgentService.I.toolsForTest();
+      expect(
+        withoutSync.where(
+          (t) => (t['function'] as Map)['name'] == 'repo_sync',
+        ),
+        isEmpty,
+      );
+    });
+
+    test('containedPath blocks traversal out of the workspace', () {
+      final work = Directory('/data/ws/session-1');
+      expect(
+        AgentService.containedPath(work, 'lib/main.dart'),
+        '/data/ws/session-1/lib/main.dart',
+      );
+      expect(
+        AgentService.containedPath(work, './lib/../lib/main.dart'),
+        '/data/ws/session-1/lib/main.dart',
+      );
+      // Absolute paths are allowed only inside the workspace.
+      expect(
+        AgentService.containedPath(work, '/data/ws/session-1/a.txt'),
+        '/data/ws/session-1/a.txt',
+      );
+      expect(AgentService.containedPath(work, '../session-2/secret'), isNull);
+      expect(AgentService.containedPath(work, '../../etc/passwd'), isNull);
+      expect(AgentService.containedPath(work, '/etc/passwd'), isNull);
+      expect(AgentService.containedPath(work, '   '), isNull);
+    });
+
+    test('cancelRun resolves a pending approval instead of hanging', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final s = ChatSession(id: 'cancel-s', title: 'C', model: 'm');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() {
+        app.sessions.removeWhere((x) => x.id == 'cancel-s');
+        agent.clearQueueForTest();
+      });
+
+      agent.activeRunId = 'run-1';
+      final req = ApprovalRequest(
+        tool: 'run_shell',
+        summary: 'rm -rf build',
+        detail: 'rm -rf build',
+      );
+      agent.pendingApproval = req;
+
+      agent.cancelRun();
+
+      expect(await req.completer.future, isFalse);
+      expect(agent.pendingApproval, isNull);
+      agent.activeRunId = null;
+    });
+
+    test('approve carries a refusal note back to the caller', () async {
+      final agent = AgentService.I;
+      final req = ApprovalRequest(
+        tool: 'exit_plan_mode',
+        summary: 'Approve this plan?',
+        detail: 'framed plan text',
+        planBody: 'step 1\nstep 2',
+      );
+      agent.pendingApproval = req;
+
+      agent.approve(false, note: 'split step 2 in half');
+
+      expect(await req.completer.future, isFalse);
+      expect(req.note, 'split step 2 in half');
+      expect(req.planBody, 'step 1\nstep 2');
+    });
+
+    test('schedule_create rejects a zero delay instead of crashing', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'sched-s', title: 'S', model: 'm');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == 'sched-s'));
+
+      final res = await AgentService.I.dispatchForTest('schedule_create', {
+        'prompt': 'ping me',
+        'after_seconds': 0,
+      });
+      expect(res, contains('after_seconds'));
+      expect(s.schedules, isEmpty);
+    });
+
+    test('schedule_create accepts an ISO timestamp with an offset', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'sched-tz', title: 'S', model: 'm');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == 'sched-tz'));
+
+      final future = DateTime.now().toUtc().add(const Duration(hours: 2));
+      final res = await AgentService.I.dispatchForTest('schedule_create', {
+        'prompt': 'stand up',
+        'at': future.toIso8601String(),
+      });
+      expect(res, isNot(contains('must be')));
+      expect(s.schedules, hasLength(1));
+    });
+
+    test('marketplace add returns the normalized repo and persists it', () async {
+      final app = AppState.I;
+      addTearDown(() => app.removeMarketplace('acme/plugins'));
+
+      expect(
+        app.addMarketplace('https://github.com/acme/plugins.git'),
+        'acme/plugins',
+      );
+      expect(app.marketplaces, contains('acme/plugins'));
+      expect(app.addMarketplace('acme/plugins'), isNull);
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getStringList('ovid_marketplaces_v1'),
+        contains('acme/plugins'),
+      );
+    });
+
+    test('/permission requires an explicit confirm for full access', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'perm-s', title: 'P', model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == 'perm-s'));
+
+      final blocked = await CommandService.I.execute('/permission full-access');
+      expect(blocked?.feedback, contains('confirm'));
+      expect(s.mode, 'auto', reason: 'must not escalate without confirmation');
+
+      final ok = await CommandService.I.execute(
+        '/permission full-access confirm',
+      );
+      expect(ok?.feedback, contains('Full Access'));
+      expect(s.mode, 'drive');
+
+      final back = await CommandService.I.execute('/permission read-only');
+      expect(back?.feedback, contains('Read-Only'));
+      expect(s.mode, 'safe');
+    });
+
+    test('/model lists the current model and switches on a match', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'model-s', title: 'M', model: 'seed-model');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      final p = app.providers.firstWhere((e) => e.isConfigured || e.isFree);
+      final restoreModels = List<String>.from(p.models);
+      final restoreKey = p.apiKey;
+      p.apiKey = p.requiresApiKey ? 'test-key' : p.apiKey;
+      p.models
+        ..clear()
+        ..addAll(['ovid-test-mini', 'ovid-test-max']);
+      addTearDown(() {
+        app.sessions.removeWhere((x) => x.id == 'model-s');
+        p.models
+          ..clear()
+          ..addAll(restoreModels);
+        p.apiKey = restoreKey;
+      });
+
+      final list = await CommandService.I.execute('/model');
+      expect(list?.feedback, contains('seed-model'));
+      expect(list?.feedback, contains('ovid-test-mini'));
+
+      final pick = await CommandService.I.execute('/model ovid-test-max');
+      expect(pick?.feedback, contains('ovid-test-max'));
+      expect(s.model, 'ovid-test-max');
+
+      final miss = await CommandService.I.execute('/model nope-not-real');
+      expect(miss?.feedback, contains('No configured model'));
+    });
+
+    test('statusFor exposes the live run status only while running', () {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final s = ChatSession(id: 'status-s', title: 'S', model: 'm');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() {
+        app.sessions.removeWhere((x) => x.id == 'status-s');
+        agent.activeRunId = null;
+      });
+
+      expect(agent.statusFor(s.id), isNull);
+      agent.activeRunId = 'run-status';
+      agent.emitForTest('think', 'retrying in 9s…');
+      expect(agent.statusFor(s.id), 'retrying in 9s…');
+      agent.emitForTest('done', 'completed');
+      expect(agent.statusFor(s.id), isNull);
     });
   });
 }

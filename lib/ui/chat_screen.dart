@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
+import 'package:url_launcher/url_launcher.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import 'sandbox_setup.dart';
@@ -12,6 +13,7 @@ import 'browser_screen.dart';
 import 'sidebar.dart';
 import '../core/agent_service.dart';
 import '../core/commands.dart';
+import '../core/mcp_service.dart';
 import '../core/skills.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
@@ -208,7 +210,12 @@ class _ShimmerTextState extends State<_ShimmerText>
           Aether.text,
           (0.5 - (t - 0.5).abs()) * 2,
         );
-        return Text(widget.text, style: widget.style.copyWith(color: mix));
+        return Text(
+          widget.text,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: widget.style.copyWith(color: mix),
+        );
       },
     );
   }
@@ -715,9 +722,10 @@ class _ChatScreenState extends State<ChatScreen>
                                       ),
                                       itemCount: count,
                                       itemBuilder: (_, i) {
-                                        // Row 0: subtle paging indicator —
-                                        // auto-scroll handles the actual
-                                        // loading; this is just feedback.
+                                        // Row 0: paging affordance. The
+                                        // spinner shows only while a page is
+                                        // actually loading — it used to spin
+                                        // forever in any long thread.
                                         if (hidden > 0 && i == 0) {
                                           return Center(
                                             child: Padding(
@@ -725,19 +733,33 @@ class _ChatScreenState extends State<ChatScreen>
                                               child: Row(
                                                 mainAxisSize: MainAxisSize.min,
                                                 children: [
-                                                  SizedBox(
-                                                    width: 12,
-                                                    height: 12,
-                                                    child:
-                                                        CircularProgressIndicator(
-                                                          strokeWidth: 1.5,
-                                                          color:
-                                                              Aether.textFaint,
-                                                        ),
-                                                  ),
-                                                  const SizedBox(width: 6),
+                                                  if (_paging) ...[
+                                                    SizedBox(
+                                                      width: 12,
+                                                      height: 12,
+                                                      child:
+                                                          CircularProgressIndicator(
+                                                            strokeWidth: 1.5,
+                                                            color: Aether
+                                                                .textFaint,
+                                                          ),
+                                                    ),
+                                                    const SizedBox(width: 6),
+                                                  ] else ...[
+                                                    Icon(
+                                                      Icons
+                                                          .keyboard_arrow_up_rounded,
+                                                      size: 14,
+                                                      color: Aether.textFaint,
+                                                    ),
+                                                    const SizedBox(width: 4),
+                                                  ],
                                                   Text(
-                                                    'Loading earlier…',
+                                                    _paging
+                                                        ? 'Loading earlier…'
+                                                        : '$hidden earlier '
+                                                              'message${hidden == 1 ? '' : 's'} '
+                                                              '· scroll up',
                                                     style: TextStyle(
                                                       fontSize: 11,
                                                       color: Aether.textFaint,
@@ -1452,12 +1474,17 @@ class _ReasoningCardState extends State<_ReasoningCard> {
               ),
             ),
           ),
-          // Body — only when expanded.
+          // Body — only when expanded. Reasoning is apparatus, not prose:
+          // smaller and dimmer than the answer so it never competes with it.
           if (expanded && widget.m.content.trim().isNotEmpty)
             Container(
               width: double.infinity,
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-              child: _DshMarkdown(content: widget.m.content),
+              child: _DshMarkdown(
+                content: widget.m.content,
+                fontSize: 12.5,
+                color: Aether.textMuted,
+              ),
             ),
         ],
       ),
@@ -1887,16 +1914,149 @@ class _ProducedFilesCard extends StatelessWidget {
   final List<({String path, int size})> files;
   const _ProducedFilesCard({required this.files});
 
+  /// Chips shown inline; the rest collapse into a "+N files" chip that
+  /// expands the full list in a sheet.
+  static const _maxChips = 6;
+
   String _fmtSize(int b) => b >= 1048576
       ? '${(b / 1048576).toStringAsFixed(1)} MB'
       : b >= 1024
       ? '${(b / 1024).toStringAsFixed(1)} KB'
       : '$b B';
 
+  String _base(String path) =>
+      path.contains('/') ? path.split('/').last : path;
+
+  Future<void> _open(BuildContext context, String path) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final ok = await AgentService.I.openWorkspaceFileInStudio(path);
+    if (!context.mounted) return;
+    if (!ok) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Could not open $path'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+    openStudio(context);
+  }
+
+  void _showAll(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
+              child: Text(
+                'Produced ${files.length} file${files.length == 1 ? '' : 's'}',
+                style: const TextStyle(
+                  fontSize: 14.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            for (final f in files)
+              ListTile(
+                dense: true,
+                leading: Icon(
+                  Icons.insert_drive_file_outlined,
+                  size: 17,
+                  color: Aether.accent,
+                ),
+                title: Text(
+                  f.path,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontFamily: Aether.mono,
+                  ),
+                ),
+                trailing: Text(
+                  _fmtSize(f.size),
+                  style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                ),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  _open(context, f.path);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _chip(
+    BuildContext context, {
+    required IconData icon,
+    required String label,
+    String? tooltip,
+    String? trailing,
+    required VoidCallback onTap,
+  }) {
+    final chip = InkWell(
+      borderRadius: BorderRadius.circular(9),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+        decoration: BoxDecoration(
+          color: Aether.surfaceAlt,
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(color: Aether.hairline),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 13, color: Aether.accent),
+            const SizedBox(width: 6),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 150),
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 11.5,
+                  fontFamily: Aether.mono,
+                ),
+              ),
+            ),
+            if (trailing != null) ...[
+              const SizedBox(width: 6),
+              Text(
+                trailing,
+                style: TextStyle(fontSize: 10, color: Aether.textFaint),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+    return tooltip == null
+        ? chip
+        : Tooltip(
+            message: tooltip,
+            waitDuration: const Duration(milliseconds: 500),
+            child: chip,
+          );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final shown = files.take(_maxChips).toList();
+    final rest = files.length - shown.length;
     return Container(
       margin: const EdgeInsets.only(bottom: 8, right: 40),
+      padding: const EdgeInsets.fromLTRB(12, 9, 12, 10),
       decoration: BoxDecoration(
         color: Aether.surface,
         borderRadius: BorderRadius.circular(12),
@@ -1905,66 +2065,50 @@ class _ProducedFilesCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 9, 12, 5),
-            child: Row(
-              children: [
-                const Icon(
-                  Icons.upload_file_outlined,
-                  size: 13,
-                  color: Aether.success,
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  'Produced · ${files.length} file${files.length == 1 ? '' : 's'}',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.4,
-                    color: Aether.textMuted,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          for (final f in files)
-            InkWell(
-              onTap: () => openStudio(context),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.insert_drive_file_outlined,
-                      size: 14,
-                      color: Aether.accent,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        f.path,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontFamily: Aether.mono,
-                          color: Aether.text,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      _fmtSize(f.size),
-                      style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-                    ),
-                  ],
+          Row(
+            children: [
+              const Icon(
+                Icons.upload_file_outlined,
+                size: 13,
+                color: Aether.success,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                'Produced · ${files.length} file${files.length == 1 ? '' : 's'}',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.4,
+                  color: Aether.textMuted,
                 ),
               ),
-            ),
-          const SizedBox(height: 4),
+            ],
+          ),
+          const SizedBox(height: 8),
+          // Chip lane — tapping a chip opens THAT file in Studio (the old
+          // rows opened Studio but dropped the path).
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final f in shown)
+                _chip(
+                  context,
+                  icon: Icons.insert_drive_file_outlined,
+                  label: _base(f.path),
+                  tooltip: f.path,
+                  trailing: _fmtSize(f.size),
+                  onTap: () => _open(context, f.path),
+                ),
+              if (rest > 0)
+                _chip(
+                  context,
+                  icon: Icons.more_horiz,
+                  label: '+$rest file${rest == 1 ? '' : 's'}',
+                  onTap: () => _showAll(context),
+                ),
+            ],
+          ),
         ],
       ),
     );
@@ -2054,32 +2198,58 @@ class _MessageView extends StatelessWidget {
     );
   }
 
+  /// Text the copy button puts on the clipboard.
+  ///
+  /// Tool rows keep their output in `toolDetail` and leave `content` empty,
+  /// so copying off `content` alone silently copied nothing while still
+  /// reporting success — that was the "copy button does nothing" report.
+  String _copyText() {
+    final body = m.content.trim();
+    final detail = (m.toolDetail ?? '').trim();
+    if (m.kind == MsgKind.tool) {
+      final head = m.toolSummary?.trim().isNotEmpty == true
+          ? '${m.toolName ?? 'tool'} · ${m.toolSummary!.trim()}'
+          : (m.toolName ?? 'tool');
+      if (detail.isEmpty) return body.isEmpty ? head : body;
+      return '$head\n$detail';
+    }
+    if (body.isNotEmpty) return body;
+    return detail;
+  }
+
   Widget _actionRow(BuildContext context, bool isUser, bool isLast) {
     final items = <Widget>[];
     void add(IconData icon, String tip, VoidCallback fn) {
       items.add(
-        InkWell(
-          borderRadius: BorderRadius.circular(4),
-          onTap: fn,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
-            child: Icon(icon, size: 13, color: Aether.textFaint),
+        Tooltip(
+          message: tip,
+          waitDuration: const Duration(milliseconds: 500),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(4),
+            onTap: fn,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+              child: Icon(icon, size: 13, color: Aether.textFaint),
+            ),
           ),
         ),
       );
     }
 
-    add(Icons.copy_outlined, 'Copy', () async {
-      await Clipboard.setData(ClipboardData(text: m.content));
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Copied to clipboard'),
-            duration: Duration(milliseconds: 800),
-          ),
-        );
-      }
-    });
+    final copyText = _copyText();
+    if (copyText.isNotEmpty) {
+      add(Icons.copy_outlined, 'Copy', () async {
+        await Clipboard.setData(ClipboardData(text: copyText));
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Copied to clipboard'),
+              duration: Duration(milliseconds: 800),
+            ),
+          );
+        }
+      });
+    }
     if (isUser && isLast) {
       add(Icons.edit_outlined, 'Edit & resend', () {
         input.text = m.content;
@@ -2105,14 +2275,13 @@ class _MessageView extends StatelessWidget {
                 style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
               ),
             ),
-          if (isUser)
-            Padding(
-              padding: const EdgeInsets.only(left: 4),
-              child: Text(
-                _formatTime(m.time),
-                style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-              ),
+          Padding(
+            padding: const EdgeInsets.only(left: 4),
+            child: Text(
+              _formatTime(m.time),
+              style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
             ),
+          ),
         ],
       ),
     );
@@ -2136,7 +2305,7 @@ class _MessageView extends StatelessWidget {
       borderRadius: BorderRadius.circular(18),
     ),
     child: isUser
-        ? Text(
+        ? SelectableText(
             m.content,
             style: TextStyle(fontSize: 14.5, height: 1.5, color: Aether.text),
           )
@@ -2319,17 +2488,30 @@ class _MessageView extends StatelessWidget {
   );
 }
 
-/// One row in the composer slash-suggestion menu (commands + skills).
+/// One row in the composer slash-suggestion menu.
+///
+/// Sources: built-in commands, user skills, connected MCP server tools, and
+/// installed plugins. Commands/skills insert their `/name`; tools and plugins
+/// insert a ready-to-send prompt instead, because they are model tools, not
+/// composer commands.
 class _SlashSuggestion {
   final IconData icon;
-  final String name; // '/help' style, slash included
+  final String name; // '/help' style for commands, tool name otherwise
   final String description;
   final String hint;
+
+  /// Text written into the composer when picked (defaults to `name `).
+  final String? insert;
+
+  /// Group label shown above the first row of each source.
+  final String group;
   const _SlashSuggestion({
     required this.icon,
     required this.name,
     required this.description,
     required this.hint,
+    this.insert,
+    this.group = 'Commands',
   });
 }
 
@@ -2444,63 +2626,154 @@ class _InputBarState extends State<_InputBar> {
   /// distinct from the normal accent send.
   static const _queueColor = Color(0xFF0E9F9F);
 
+  /// True while the composer is in slash mode (text starts with `/` and the
+  /// first token has no space yet). A bare `/` counts — that is the whole
+  /// point of the menu.
+  bool _slashActive = false;
   String _slashQuery = '';
 
-  /// Command/skill suggestions for the current slash input, or empty when
-  /// the composer isn't in slash-command mode (text starts with `/` and
-  /// the first token has no space yet).
-  List<_SlashSuggestion> get _suggestions {
-    final q = _slashQuery;
-    if (q.isEmpty) return const [];
-    final query = q.toLowerCase();
-    final out = <_SlashSuggestion>[];
-    for (final c in CommandService.I.commands) {
-      if (c.name.startsWith(query)) {
-        out.add(
-          _SlashSuggestion(
-            icon: Icons.terminal_rounded,
-            name: '/${c.name}',
-            description: c.description,
-            hint: c.hint,
-          ),
-        );
+  /// Fuzzy score for [candidate] against [query].
+  ///
+  /// Returns null when the query is not a subsequence of the candidate.
+  /// Lower is better: exact prefix wins, then earlier first match, then
+  /// tighter gaps, then shorter candidate.
+  static int? _fuzzyScore(String candidate, String query) {
+    if (query.isEmpty) return candidate.length;
+    final c = candidate.toLowerCase();
+    final q = query.toLowerCase();
+    if (c.startsWith(q)) return c.length - q.length;
+    var score = 1000;
+    var ci = 0;
+    var lastHit = -1;
+    for (var qi = 0; qi < q.length; qi++) {
+      final hit = c.indexOf(q[qi], ci);
+      if (hit < 0) return null;
+      if (qi == 0) {
+        score += hit * 4; // reward matches near the start
+      } else {
+        final gap = hit - lastHit - 1;
+        score += gap * 2; // reward tight, adjacent matches
+        // Matching right after a separator reads like a word start.
+        if (gap == 0 || hit == 0) score -= 1;
       }
+      lastHit = hit;
+      ci = hit + 1;
+    }
+    return score + c.length;
+  }
+
+  /// Command/skill/tool/plugin suggestions for the current slash input.
+  List<_SlashSuggestion> get _suggestions {
+    if (!_slashActive) return const [];
+    final query = _slashQuery.toLowerCase();
+    final scored = <({int score, int order, _SlashSuggestion s})>[];
+    var order = 0;
+    void add(int groupRank, String haystack, _SlashSuggestion s) {
+      final score = _fuzzyScore(haystack, query);
+      if (score == null) return;
+      scored.add((score: groupRank * 10000 + score, order: order++, s: s));
+    }
+
+    for (final c in CommandService.I.commands) {
+      add(
+        0,
+        c.name,
+        _SlashSuggestion(
+          icon: Icons.terminal_rounded,
+          name: '/${c.name}',
+          description: c.description,
+          hint: c.hint,
+        ),
+      );
     }
     for (final s in SkillService.I.userSkills) {
-      if (s.name.toLowerCase().startsWith(query)) {
-        out.add(
+      add(
+        1,
+        s.name,
+        _SlashSuggestion(
+          icon: Icons.auto_fix_high_outlined,
+          name: '/${s.name}',
+          description: s.description.isEmpty ? 'Skill' : s.description,
+          hint: '',
+          group: 'Skills',
+        ),
+      );
+    }
+    // Connected MCP server tools — the model can call these, so the composer
+    // should be able to point at them too.
+    for (final entry in McpService.I.connectedTools.entries) {
+      for (final t in entry.value) {
+        final desc = (t.description ?? '').trim();
+        add(
+          2,
+          '${entry.key} ${t.name}',
           _SlashSuggestion(
-            icon: Icons.auto_fix_high_outlined,
-            name: '/${s.name}',
-            description: s.description.isEmpty ? 'Skill' : s.description,
+            icon: Icons.extension_outlined,
+            name: t.name,
+            description: desc.isEmpty
+                ? 'MCP tool · ${entry.key}'
+                : '${entry.key} · $desc',
             hint: '',
+            insert: 'Use the ${entry.key} MCP tool "${t.name}" to ',
+            group: 'MCP tools',
           ),
         );
       }
     }
-    return out;
+    // Installed + enabled plugins that add agent tools.
+    for (final p in AppState.I.plugins.where((p) => p.installed && p.enabled)) {
+      add(
+        3,
+        p.name,
+        _SlashSuggestion(
+          icon: Icons.widgets_outlined,
+          name: p.name,
+          description: p.description.isEmpty
+              ? '${p.category} plugin'
+              : p.description,
+          hint: '',
+          insert: 'Use the ${p.name} plugin to ',
+          group: 'Plugins',
+        ),
+      );
+    }
+    scored.sort((a, b) {
+      final c = a.score.compareTo(b.score);
+      return c != 0 ? c : a.order.compareTo(b.order);
+    });
+    return [for (final e in scored.take(24)) e.s];
   }
 
   void _onTextChanged() {
     final t = controller.text;
-    String query = '';
+    var active = false;
+    var query = '';
     if (t.startsWith('/')) {
       final body = t.substring(1);
       final space = body.indexOf(' ');
-      query = space < 0 ? body : body.substring(0, space);
-      query = query.toLowerCase();
+      // A space closes slash mode: `/compact now` is an argument, not a query.
+      if (space < 0) {
+        active = true;
+        query = body.toLowerCase();
+      }
     }
-    if (query != _slashQuery) {
-      setState(() => _slashQuery = query);
+    if (active != _slashActive || query != _slashQuery) {
+      setState(() {
+        _slashActive = active;
+        _slashQuery = query;
+      });
     }
   }
 
   void _applySuggestion(_SlashSuggestion s) {
-    controller.text = '${s.name} ';
+    controller.text = s.insert ?? '${s.name} ';
     controller.selection = TextSelection.collapsed(
       offset: controller.text.length,
     );
-    setState(() => _slashQuery = '');
+    setState(() {
+      _slashActive = false;
+      _slashQuery = '';
+    });
   }
 
   void _attachSheet(BuildContext context) {
@@ -2520,27 +2793,10 @@ class _InputBarState extends State<_InputBar> {
             ),
             _attachOption(
               sheetCtx,
-              Icons.camera_alt_outlined,
-              'Camera',
-              'Take a photo',
-              () => _comingSoon(sheetCtx, 'Camera capture'),
-            ),
-            _attachOption(
-              sheetCtx,
               Icons.insert_drive_file_outlined,
               'Document',
               'PDF, code, text, CSV files',
               () => _pickDocument(sheetCtx),
-            ),
-            _attachOption(
-              sheetCtx,
-              Icons.folder_open_outlined,
-              'Pick folder',
-              'Agent works inside this folder only',
-              () {
-                Navigator.pop(sheetCtx);
-                _pickFolder();
-              },
             ),
             _attachOption(
               sheetCtx,
@@ -2555,18 +2811,6 @@ class _InputBarState extends State<_InputBar> {
             const SizedBox(height: 8),
           ],
         ),
-      ),
-    );
-  }
-
-  void _comingSoon(BuildContext ctx, String feature) {
-    Navigator.pop(ctx);
-    ScaffoldMessenger.of(ctx).showSnackBar(
-      SnackBar(
-        content: Text(
-          '$feature is coming soon — ask the AI to fetch or create files for now.',
-        ),
-        behavior: SnackBarBehavior.floating,
       ),
     );
   }
@@ -2616,71 +2860,6 @@ class _InputBarState extends State<_InputBar> {
       withData: false,
     );
     await _stagePicked(result);
-  }
-
-  /// Pin a working folder for the ACTIVE session. The agent then does ALL
-  /// work inside it — shell cwd, file edits, jobs, attachments, skills.
-  Future<void> _pickFolder() async {
-    final dir = await _pickWritableFolder(context);
-    if (dir == null) return;
-    AppState.I.setSessionWorkspaceFolder(dir.path);
-    _toast('Working folder set: ${dir.path.split('/').last} — the agent will work only here.');
-  }
-
-  /// Pick a folder and verify write access (requesting All Files Access
-  /// when Android scoped storage blocks writes). Returns null on cancel or
-  /// when the folder is still read-only.
-  Future<Directory?> _pickWritableFolder(BuildContext ctx) async {
-    String? path;
-    try {
-      path = await FilePicker.platform.getDirectoryPath(
-        dialogTitle: 'Pick working folder',
-      );
-    } catch (_) {
-      path = null;
-    }
-    if (path == null) {
-      _toast('No folder selected.');
-      return null;
-    }
-    final dir = Directory(path);
-    if (!dir.existsSync()) {
-      _toast('That folder is not accessible.');
-      return null;
-    }
-    var writable = false;
-    try {
-      final probe = File('$path/.ovid_probe');
-      await probe.writeAsString('ok');
-      writable = true;
-      await probe.delete();
-    } catch (_) {
-      writable = false;
-    }
-    if (writable) return dir;
-
-    // Android scoped storage: ask for All Files Access once, then retry.
-    final granted = await AgentService.I.requestAllFilesAccess();
-    if (!granted) {
-      _toast(
-        'That folder is read-only for Ovid. Grant All Files Access in '
-        'Android settings, or pick a folder inside app storage.',
-      );
-      return null;
-    }
-    try {
-      final probe = File('$path/.ovid_probe');
-      await probe.writeAsString('ok');
-      writable = true;
-      await probe.delete();
-    } catch (_) {
-      writable = false;
-    }
-    if (!writable) {
-      _toast('Folder is still read-only — pick a different one.');
-      return null;
-    }
-    return dir;
   }
 
   Future<void> _stagePicked(FilePickerResult? result) async {
@@ -2788,6 +2967,9 @@ class _InputBarState extends State<_InputBar> {
   @override
   Widget build(BuildContext context) {
     _ctx = context; // keep a live context for post-picker toasts
+    // Computed once per build — the getter walks commands, skills, MCP tools
+    // and plugins, so calling it three times in the tree was wasteful.
+    final suggestions = _suggestions;
     return SafeArea(
       top: false,
       child: Padding(
@@ -2807,75 +2989,103 @@ class _InputBarState extends State<_InputBar> {
             children: [
               // ── Staged attachment preview chips (dismissible) ──
               const _AttachmentChip(),
-              // ── Slash suggestion menu (shows the moment `/` is typed) ──
-              if (_suggestions.isNotEmpty)
+              // ── Slash menu: opens on a bare `/`, fuzzy-ranked, grouped
+              //    into Commands / Skills / MCP tools / Plugins ──
+              if (suggestions.isNotEmpty)
                 Container(
                   margin: const EdgeInsets.fromLTRB(6, 2, 6, 0),
-                  constraints: const BoxConstraints(maxHeight: 190),
+                  constraints: const BoxConstraints(maxHeight: 220),
                   decoration: BoxDecoration(
                     color: Aether.surface,
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(color: Aether.hairline),
                   ),
-                  child: ListView.separated(
+                  child: ListView.builder(
                     shrinkWrap: true,
                     padding: const EdgeInsets.symmetric(vertical: 4),
-                    itemCount: _suggestions.length,
-                    separatorBuilder: (_, _) => Divider(
-                      height: 1,
-                      thickness: 0.5,
-                      color: Aether.hairline,
-                    ),
+                    itemCount: suggestions.length,
                     itemBuilder: (_, i) {
-                      final s = _suggestions[i];
-                      return InkWell(
-                        onTap: () => _applySuggestion(s),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 8,
-                          ),
-                          child: Row(
-                            children: [
-                              Icon(s.icon, size: 16, color: Aether.accent),
-                              const SizedBox(width: 9),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      s.name,
-                                      style: const TextStyle(
-                                        fontSize: 13.5,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                    if (s.description.isNotEmpty) ...[
-                                      const SizedBox(height: 1),
-                                      Text(
-                                        s.description,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          fontSize: 11,
-                                          color: Aether.textFaint,
-                                        ),
-                                      ),
-                                    ],
-                                  ],
+                      final s = suggestions[i];
+                      final newGroup =
+                          i == 0 || suggestions[i - 1].group != s.group;
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (newGroup)
+                            Padding(
+                              padding: EdgeInsets.fromLTRB(
+                                12,
+                                i == 0 ? 2 : 8,
+                                12,
+                                3,
+                              ),
+                              child: Text(
+                                s.group.toUpperCase(),
+                                style: TextStyle(
+                                  fontSize: 9.5,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 1.1,
+                                  color: Aether.textFaint,
                                 ),
                               ),
-                              if (s.hint.isNotEmpty)
-                                Text(
-                                  s.hint,
-                                  style: TextStyle(
-                                    fontSize: 10.5,
-                                    color: Aether.textFaint,
+                            )
+                          else
+                            Divider(
+                              height: 1,
+                              thickness: 0.5,
+                              color: Aether.hairline,
+                            ),
+                          InkWell(
+                            onTap: () => _applySuggestion(s),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 8,
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(s.icon, size: 16, color: Aether.accent),
+                                  const SizedBox(width: 9),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          s.name,
+                                          style: const TextStyle(
+                                            fontSize: 13.5,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        if (s.description.isNotEmpty) ...[
+                                          const SizedBox(height: 1),
+                                          Text(
+                                            s.description,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              color: Aether.textFaint,
+                                            ),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
                                   ),
-                                ),
-                            ],
+                                  if (s.hint.isNotEmpty)
+                                    Text(
+                                      s.hint,
+                                      style: TextStyle(
+                                        fontSize: 10.5,
+                                        color: Aether.textFaint,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
                           ),
-                        ),
+                        ],
                       );
                     },
                   ),
@@ -2990,24 +3200,37 @@ class _TypingBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // DSH parsing status — an inline shimmer (no bubble/box): a pulsing
-    // accent dot + shimmering status text ("Deep diving…").
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 10),
-      child: Row(
-        children: [
-          const _ChaseDot(Aether.accent),
-          const SizedBox(width: 10),
-          _ShimmerText(
-            'Deep diving…',
-            style: TextStyle(
-              fontSize: 12.5,
-              color: Aether.textMuted,
-              fontWeight: FontWeight.w500,
-            ),
+    // Inline parsing status (no bubble/box): a pulsing accent dot + the live
+    // status line from the run, so retries/backoffs/compaction are visible
+    // instead of a permanent generic label.
+    return AnimatedBuilder(
+      animation: AgentService.I,
+      builder: (_, _) {
+        final sid = AppState.I.activeSessionId;
+        final status = sid == null ? null : AgentService.I.statusFor(sid);
+        final label = (status == null || status.trim().isEmpty)
+            ? 'Working…'
+            : status.trim();
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 10),
+          child: Row(
+            children: [
+              const _ChaseDot(Aether.accent),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _ShimmerText(
+                  label,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: Aether.textMuted,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
@@ -3490,14 +3713,50 @@ class _PlanReviewCard extends StatelessWidget {
   final ApprovalRequest req;
   const _PlanReviewCard(this.req);
 
+  /// "Chat about it" — decline WITH feedback so the model revises instead of
+  /// guessing why the plan was refused.
+  Future<void> _chatAboutIt(BuildContext context) async {
+    final c = TextEditingController();
+    final note = await showDialog<String>(
+      context: context,
+      builder: (d) => AlertDialog(
+        backgroundColor: Aether.surface,
+        title: const Text(
+          'Chat about the plan',
+          style: TextStyle(fontSize: 15.5),
+        ),
+        content: TextField(
+          controller: c,
+          autofocus: true,
+          minLines: 2,
+          maxLines: 5,
+          style: const TextStyle(fontSize: 13.5),
+          decoration: const InputDecoration(
+            hintText: 'What should change? (sent back to the AI)',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Aether.accent),
+            onPressed: () => Navigator.pop(d, c.text),
+            child: const Text('Send'),
+          ),
+        ],
+      ),
+    );
+    if (note == null) return;
+    AgentService.I.approve(false, note: note);
+  }
+
   @override
   Widget build(BuildContext context) {
-    // Strip the framing lines _handleExitPlanMode wrapped the plan in.
-    var plan = req.detail;
-    const prefix = 'AI ka plan:\n\n';
-    if (plan.startsWith(prefix)) plan = plan.substring(prefix.length);
-    final cut = plan.indexOf('\n\nApprove karne par');
-    if (cut > 0) plan = plan.substring(0, cut);
+    // planBody is the raw plan captured when the request was raised — no
+    // fragile re-parsing of the framing prose out of `detail`.
+    final plan = req.planBody ?? req.detail;
 
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
@@ -3536,12 +3795,29 @@ class _PlanReviewCard extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 4),
-          // Buttons.
+          // Decision row: Chat about it · Decline · Approve.
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
+                TextButton(
+                  style: TextButton.styleFrom(
+                    foregroundColor: Aether.textMuted,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  onPressed: () => _chatAboutIt(context),
+                  child: const Text(
+                    'Chat about it',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+                const SizedBox(width: 6),
                 OutlinedButton(
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Aether.dangerC,
@@ -3923,9 +4199,9 @@ class _WorkspaceChip extends StatelessWidget {
               title: const Text('Change folder', style: TextStyle(fontSize: 13.5)),
               onTap: () {
                 Navigator.pop(context);
-                // Reuse the attach-sheet folder picker flow.
-                AppState.I.setSessionWorkspaceFolder(null);
-                // Show the attach sheet again? Simpler: direct pick here.
+                // The old flow cleared the pinned folder BEFORE opening the
+                // picker, so cancelling the picker silently dropped it.
+                // _pickFolderDirect only writes on success.
                 _pickFolderDirect(context);
               },
             ),
@@ -4106,7 +4382,13 @@ class _ModeChip extends StatelessWidget {
 /// Diff lines (+/-) inside code get green/red gutter coloring.
 class _DshMarkdown extends StatelessWidget {
   final String content;
-  const _DshMarkdown({required this.content});
+
+  /// Body text size / colour. Answers use the defaults; apparatus surfaces
+  /// (reasoning, tool detail) pass a smaller, dimmer pair so they read as
+  /// secondary.
+  final double fontSize;
+  final Color? color;
+  const _DshMarkdown({required this.content, this.fontSize = 14, this.color});
 
   static final _fenceRe = RegExp(r'```(\w*)\n([\s\S]*?)```', multiLine: true);
 
@@ -4116,7 +4398,7 @@ class _DshMarkdown extends StatelessWidget {
     var last = 0;
     for (final match in _fenceRe.allMatches(content)) {
       if (match.start > last) {
-        parts.add(_prose(content.substring(last, match.start)));
+        parts.add(_prose(context, content.substring(last, match.start)));
       }
       parts.add(
         _DshCodeBox(
@@ -4127,9 +4409,9 @@ class _DshMarkdown extends StatelessWidget {
       last = match.end;
     }
     if (last < content.length) {
-      parts.add(_prose(content.substring(last)));
+      parts.add(_prose(context, content.substring(last)));
     }
-    if (parts.isEmpty) parts.add(_prose(content));
+    if (parts.isEmpty) parts.add(_prose(context, content));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -4139,37 +4421,42 @@ class _DshMarkdown extends StatelessWidget {
     );
   }
 
-  Widget _prose(String text) {
+  Widget _prose(BuildContext context, String text) {
     if (text.trim().isEmpty) return const SizedBox.shrink();
+    final body = color ?? Aether.text;
     return MarkdownBody(
       data: text,
+      // Prose is selectable (long-press to select/copy) and links open in the
+      // in-app browser, matching a real chat surface.
+      selectable: true,
+      onTapLink: (text, href, title) => _openLink(context, text, href, title),
       builders: {'code': _DshInlineCodeBuilder()},
       styleSheet: MarkdownStyleSheet(
-        p: TextStyle(fontSize: 14, height: 1.55, color: Aether.text),
+        p: TextStyle(fontSize: fontSize, height: 1.55, color: body),
         h1: TextStyle(
-          fontSize: 19,
+          fontSize: fontSize + 5,
           fontWeight: FontWeight.w700,
-          color: Aether.text,
+          color: body,
         ),
         h2: TextStyle(
-          fontSize: 17,
+          fontSize: fontSize + 3,
           fontWeight: FontWeight.w700,
-          color: Aether.text,
+          color: body,
         ),
         h3: TextStyle(
-          fontSize: 15.5,
+          fontSize: fontSize + 1.5,
           fontWeight: FontWeight.w600,
-          color: Aether.text,
+          color: body,
         ),
-        strong: TextStyle(fontWeight: FontWeight.w700, color: Aether.text),
-        em: TextStyle(fontStyle: FontStyle.italic, color: Aether.text),
-        code: const TextStyle(
+        strong: TextStyle(fontWeight: FontWeight.w600, color: body),
+        em: TextStyle(fontStyle: FontStyle.italic, color: body),
+        code: TextStyle(
           fontFamily: Aether.mono,
-          fontSize: 12.5,
+          fontSize: fontSize - 1.5,
           backgroundColor: Colors.transparent,
           color: Aether.accent,
         ),
-        listBullet: TextStyle(fontSize: 14, height: 1.5, color: Aether.text),
+        listBullet: TextStyle(fontSize: fontSize, height: 1.5, color: body),
         listIndent: 18,
         blockquoteDecoration: BoxDecoration(
           border: Border(
@@ -4177,6 +4464,25 @@ class _DshMarkdown extends StatelessWidget {
           ),
         ),
         blockquotePadding: const EdgeInsets.only(left: 10),
+        // Wide tables used to be squeezed into the viewport and clipped.
+        // IntrinsicColumnWidth makes the renderer wrap the table in a
+        // horizontal scroller, so columns keep their natural width.
+        tableColumnWidth: const IntrinsicColumnWidth(),
+        tableCellsPadding: const EdgeInsets.symmetric(
+          horizontal: 10,
+          vertical: 6,
+        ),
+        tableBorder: TableBorder.all(color: Aether.hairline, width: 1),
+        tableHead: TextStyle(
+          fontSize: fontSize - 1,
+          fontWeight: FontWeight.w700,
+          color: body,
+        ),
+        tableBody: TextStyle(
+          fontSize: fontSize - 1,
+          height: 1.4,
+          color: body,
+        ),
         a: const TextStyle(
           color: Aether.accent,
           decoration: TextDecoration.underline,
@@ -4184,6 +4490,28 @@ class _DshMarkdown extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Open a markdown link: http(s) in the in-app browser (so the agent and the
+/// user share one browsing surface), everything else (mailto:, tel:, custom
+/// schemes) through the platform handler.
+Future<void> _openLink(
+  BuildContext context,
+  String text,
+  String? href,
+  String title,
+) async {
+  final raw = href?.trim();
+  if (raw == null || raw.isEmpty) return;
+  final uri = Uri.tryParse(raw);
+  if (uri == null) return;
+  if (uri.scheme == 'http' || uri.scheme == 'https') {
+    await BrowserScreen.open(context, url: raw);
+    return;
+  }
+  try {
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  } catch (_) {}
 }
 
 /// Copyable fenced code box with lang label, copy, and diff coloring.

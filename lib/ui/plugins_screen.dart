@@ -17,6 +17,29 @@ class _PluginsScreenState extends State<PluginsScreen> {
   String _query = '';
   String _cat = 'All';
 
+  /// True while registered marketplace catalogs are being merged.
+  bool _syncing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Registered marketplaces were never fetched anywhere in the UI, so the
+    // catalog stayed at the built-in list and "Add marketplace" appeared to
+    // do nothing. Merge them once when the library opens.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _syncCatalogs());
+  }
+
+  Future<void> _syncCatalogs({bool force = false}) async {
+    if (_syncing) return;
+    setState(() => _syncing = true);
+    try {
+      await AppState.I.syncMarketplaceCatalogs(force: force);
+    } catch (_) {
+      // Offline / bad repo — the built-in catalog still renders.
+    }
+    if (mounted) setState(() => _syncing = false);
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = AppState.I;
@@ -36,6 +59,25 @@ class _PluginsScreenState extends State<PluginsScreen> {
         leading: const BackButton(),
         title: const Text('Plugins'),
         actions: [
+          if (_syncing)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 14),
+              child: SizedBox(
+                width: 15,
+                height: 15,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.6,
+                  color: Aether.accent,
+                ),
+              ),
+            )
+          else
+            IconButton(
+              tooltip: 'Refresh marketplaces',
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.refresh, size: 20),
+              onPressed: () => _syncCatalogs(force: true),
+            ),
           IconButton(
             tooltip: 'Add marketplace',
             visualDensity: VisualDensity.compact,
@@ -280,9 +322,39 @@ class _PluginsScreenState extends State<PluginsScreen> {
                     'Add marketplace',
                     style: TextStyle(fontSize: 13.5),
                   ),
-                  onPressed: () {
-                    final ok = app.addMarketplace(c.text);
-                    if (ok) Navigator.pop(ctx);
+                  onPressed: () async {
+                    final messenger = ScaffoldMessenger.of(context);
+                    final added = app.addMarketplace(c.text);
+                    if (added == null) {
+                      messenger.showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Enter owner/repo (or a GitHub URL) that is not '
+                            'already added.',
+                          ),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                      return;
+                    }
+                    Navigator.pop(ctx);
+                    messenger.showSnackBar(
+                      SnackBar(
+                        content: Text('Importing $added…'),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                    // Registering only records the repo — the catalog has to
+                    // be fetched for its plugins/MCP servers to show up.
+                    final msg = await app.fetchMarketplaceCatalog(added);
+                    if (!mounted) return;
+                    messenger.showSnackBar(
+                      SnackBar(
+                        content: Text(msg),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                    setState(() {});
                   },
                 ),
               ),

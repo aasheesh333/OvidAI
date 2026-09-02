@@ -148,6 +148,108 @@ class CommandService {
 
     register(
       AgentCommand(
+        name: 'model',
+        hint: '[name]',
+        description: 'Show or switch the model for this chat',
+        handler: (args) async {
+          final app = AppState.I;
+          final s = app.activeSession;
+          if (s == null) return const CommandResult(feedback: 'No active session.');
+          final q = args.trim();
+          if (q.isEmpty) {
+            final buf = StringBuffer('**Model** — ${s.model}\n\n');
+            var any = false;
+            for (final p in app.providers.where((p) => p.isConfigured)) {
+              if (p.models.isEmpty) continue;
+              any = true;
+              buf.writeln('${p.name}: ${p.models.join(', ')}');
+            }
+            if (!any) {
+              buf.writeln(
+                'No configured providers yet — add an API key in '
+                'Settings → Providers.',
+              );
+            } else {
+              buf.writeln('\nSwitch with `/model <name>`.');
+            }
+            return CommandResult(feedback: buf.toString());
+          }
+          // Match on the model id, case-insensitively, across configured
+          // providers; a substring match is enough to be useful on mobile.
+          final needle = q.toLowerCase();
+          for (final p in app.providers.where((p) => p.isConfigured)) {
+            for (final m in p.models) {
+              final lower = m.toLowerCase();
+              if (lower == needle || lower.contains(needle)) {
+                app.setModel(p.id, m);
+                return CommandResult(feedback: 'Model → $m (${p.name})');
+              }
+            }
+          }
+          return CommandResult(
+            feedback:
+                'No configured model matches "$q". Run `/model` to list them.',
+          );
+        },
+      ),
+    );
+
+    register(
+      AgentCommand(
+        name: 'permission',
+        hint: '[read-only|general|studio|full-access]',
+        description: 'Show or set what the agent may do in this chat',
+        handler: (args) async {
+          final agent = AgentService.I;
+          final raw = args.trim().toLowerCase().replaceAll('_', '-');
+          // First token is the preset; anything after it is a flag
+          // (currently only `confirm` for full access).
+          final parts = raw.split(RegExp(r'\s+')).where((e) => e.isNotEmpty);
+          final q = parts.isEmpty ? '' : parts.first;
+          final flags = parts.skip(1).toSet();
+          if (q.isEmpty) {
+            final buf = StringBuffer(
+              '**Permission** — ${agent.mode.label}\n\n',
+            );
+            for (final m in AgentMode.values) {
+              buf.writeln(
+                '${_permName(m)}${m == agent.mode ? ' (current)' : ''} — '
+                '${m.hint}',
+              );
+            }
+            buf.writeln('\nSet with `/permission <preset>`.');
+            return CommandResult(feedback: buf.toString());
+          }
+          final target = AgentMode.values.firstWhere(
+            (m) => _permName(m) == q || m.name == q,
+            orElse: () => agent.mode,
+          );
+          if (_permName(target) != q && target.name != q) {
+            return CommandResult(
+              feedback:
+                  'Unknown preset "$q". Options: '
+                  '${AgentMode.values.map(_permName).join(', ')}.',
+            );
+          }
+          if (target == AgentMode.drive && !flags.contains('confirm')) {
+            // Full access removes every confirmation, so it is opt-in with an
+            // explicit acknowledgement rather than a single word.
+            return const CommandResult(
+              feedback:
+                  'Full Access lets the agent run anything with no '
+                  'confirmation, including destructive commands and repo '
+                  'pushes. Re-run `/permission full-access confirm` to '
+                  'accept that risk.',
+            );
+          }
+          agent.mode = target;
+          return CommandResult(feedback: 'Permission → ${target.label}');
+        },
+      ),
+    );
+
+    register(
+      AgentCommand(
         name: 'export',
         description: 'Export all sessions as JSON',
         handler: (args) async {
@@ -185,6 +287,10 @@ class CommandService {
       ),
     );
   }
+
+  /// Kebab-case preset name for `/permission` (Read-Only → read-only).
+  static String _permName(AgentMode m) =>
+      m.label.toLowerCase().replaceAll(' ', '-');
 
   Future<File> _exportSessions() async {
     final app = AppState.I;

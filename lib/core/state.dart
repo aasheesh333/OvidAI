@@ -449,6 +449,7 @@ class AppState extends ChangeNotifier {
     await _loadCustomMcpServers();
     await _loadCustomPlugins();
     await _loadPluginState();
+    await _loadMarketplaces();
     // Check if the sandbox was installed on a previous launch so the
     // user is never asked to re-install the ~200 MB rootfs.
     if (await SandboxService.I.checkExisting()) {
@@ -1289,31 +1290,80 @@ class AppState extends ChangeNotifier {
     return counts.map((c) => (c / max).clamp(0.05, 1.0)).toList();
   }
 
-  /// ---------- Marketplaces (Claude Code style git repos) ----------
+  /// ---------- Marketplaces (git-repo plugin catalogs) ----------
 
   void sandboxReady() {
     sandboxInstalled = SandboxService.I.isInstalled;
     refresh();
   }
 
-  bool addMarketplace(String repo) {
-    final r = repo.trim();
-    if (r.isEmpty) return false;
-    // Normalize: accept full URL or owner/repo
-    String normalized = r
-        .replaceFirst(RegExp(r'^https?://'), '')
-        .replaceFirst(RegExp(r'^www\.'), '')
-        .replaceFirst(RegExp(r'^github\.com/'), '')
-        .replaceFirst(RegExp(r'\.git$'), '');
-    if (marketplaces.contains(normalized)) return false;
+  static const _kMarketplaces = 'ovid_marketplaces_v1';
+
+  /// Marketplace repos whose catalog has already been merged this launch, so
+  /// the Plugins screen can refresh without re-fetching on every rebuild.
+  final Set<String> _fetchedMarketplaces = {};
+
+  /// Normalize a marketplace reference to `owner/repo`.
+  static String normalizeMarketplace(String repo) => repo
+      .trim()
+      .replaceFirst(RegExp(r'^https?://'), '')
+      .replaceFirst(RegExp(r'^www\.'), '')
+      .replaceFirst(RegExp(r'^github\.com/'), '')
+      .replaceFirst(RegExp(r'\.git$'), '')
+      .replaceFirst(RegExp(r'/+$'), '');
+
+  /// Register a marketplace. Returns the normalized `owner/repo` on success,
+  /// or null when the input is empty/invalid/already present. The caller is
+  /// expected to follow up with [fetchMarketplaceCatalog] — registering alone
+  /// imports nothing.
+  String? addMarketplace(String repo) {
+    final normalized = normalizeMarketplace(repo);
+    if (normalized.isEmpty) return null;
+    if (normalized.split('/').length < 2) return null;
+    if (marketplaces.contains(normalized)) return null;
     marketplaces.add(normalized);
+    _persistMarketplaces();
     refresh();
-    return true;
+    return normalized;
   }
 
   void removeMarketplace(String repo) {
     marketplaces.remove(repo);
+    _fetchedMarketplaces.remove(repo);
+    _persistMarketplaces();
     refresh();
+  }
+
+  Future<void> _persistMarketplaces() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(_kMarketplaces, marketplaces);
+    } catch (_) {}
+  }
+
+  Future<void> _loadMarketplaces() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final list = prefs.getStringList(_kMarketplaces);
+      if (list == null || list.isEmpty) return;
+      for (final m in list) {
+        if (!marketplaces.contains(m)) marketplaces.add(m);
+      }
+      refresh();
+    } catch (_) {}
+  }
+
+  /// Merge every registered marketplace catalog that has not been merged yet
+  /// this launch. Returns the number of repos actually fetched.
+  Future<int> syncMarketplaceCatalogs({bool force = false}) async {
+    var fetched = 0;
+    for (final repo in List.of(marketplaces)) {
+      if (!force && _fetchedMarketplaces.contains(repo)) continue;
+      _fetchedMarketplaces.add(repo);
+      await fetchMarketplaceCatalog(repo);
+      fetched++;
+    }
+    return fetched;
   }
 
   /// Fetch a marketplace.json from a GitHub repo (raw.githubusercontent.com)

@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
@@ -58,6 +61,143 @@ class _StudioScreenState extends State<StudioScreen> {
     if (mounted) setState(() => _syncing = false);
   }
 
+  /// After a repo is bound + synced, offer to pin a working folder for this
+  /// chat so edits land in a real project directory instead of only the
+  /// in-memory repo cache. Skipped when the session already has one.
+  Future<void> _offerWorkspaceFolder(String repo) async {
+    final s = AppState.I.activeSession;
+    if (!mounted || s == null) return;
+    final existing = s.workspaceFolder;
+    if (existing != null && existing.isNotEmpty) return;
+    final sandbox = await SandboxService.I.workDirFor(s.sandboxId ?? s.id);
+    if (!mounted) return;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const SizedBox(height: 14),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 18),
+              child: Text(
+                'Where should "$repo" live?',
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
+              child: Text(
+                'The agent runs shell commands and writes files inside this '
+                'folder for this chat.',
+                style: TextStyle(fontSize: 12, color: Aether.textMuted),
+              ),
+            ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.inventory_2_outlined,
+                size: 19,
+                color: Aether.accent,
+              ),
+              title: const Text(
+                'Session sandbox (recommended)',
+                style: TextStyle(fontSize: 13.5),
+              ),
+              subtitle: Text(
+                sandbox.path,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 11, color: Aether.textFaint),
+              ),
+              onTap: () => Navigator.pop(sheetCtx, 'sandbox'),
+            ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.folder_open_outlined,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              title: const Text(
+                'Pick a folder on this device',
+                style: TextStyle(fontSize: 13.5),
+              ),
+              subtitle: Text(
+                'Clone/edit inside a folder you choose',
+                style: TextStyle(fontSize: 11, color: Aether.textFaint),
+              ),
+              onTap: () => Navigator.pop(sheetCtx, 'pick'),
+            ),
+            const SizedBox(height: 10),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || choice == null) return;
+    if (choice == 'sandbox') {
+      AppState.I.setSessionWorkspaceFolder(null);
+      _toast('Working in the session sandbox.');
+      return;
+    }
+    String? path;
+    try {
+      path = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: 'Pick working folder for $repo',
+      );
+    } catch (_) {
+      path = null;
+    }
+    if (!mounted || path == null) return;
+    final dir = Directory(path);
+    if (!dir.existsSync()) {
+      _toast('That folder is not accessible.');
+      return;
+    }
+    var writable = await _probeWritable(path);
+    if (!writable) {
+      final granted = await AgentService.I.requestAllFilesAccess();
+      if (granted) writable = await _probeWritable(path);
+    }
+    if (!mounted) return;
+    if (!writable) {
+      _toast(
+        'That folder is read-only for Ovid — grant All Files Access or pick '
+        'another folder.',
+      );
+      return;
+    }
+    AppState.I.setSessionWorkspaceFolder(path);
+    _toast('Working folder: ${path.split('/').last}');
+  }
+
+  Future<bool> _probeWritable(String path) async {
+    try {
+      final probe = File('$path/.ovid_probe');
+      await probe.writeAsString('ok');
+      await probe.delete();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    );
+  }
+
   Future<void> _pickRepo() async {
     if (!GitHubService.I.isLoggedIn) {
       showGithubLoginSheet(context);
@@ -109,6 +249,9 @@ class _StudioScreenState extends State<StudioScreen> {
       if (picked != null) {
         AgentService.I.sessionRepoFull = picked;
         await _autoSync();
+        // Freshly bound repo → ask where the work should happen (DSH asks
+        // for a workspace directory before it starts editing).
+        await _offerWorkspaceFolder(picked);
       }
     } catch (e) {
       if (mounted) {
