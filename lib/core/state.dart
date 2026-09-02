@@ -354,6 +354,17 @@ class ChatSession {
   /// Final answer the child reported back to its parent.
   String? agentResult;
 
+  /// Durable handle id (`sub-N`) of this subagent — lets the handle
+  /// registry be rebuilt after an app restart (cold resume, DSH parity).
+  String? agentId;
+
+  /// Optional per-child role persona (dispatch_agent `persona` arg).
+  String? agentPersona;
+
+  /// Optional required shape of the child's FINAL message
+  /// (dispatch_agent `output_schema_hint` arg).
+  String? agentOutputHint;
+
   /// When set, the child may only call these tools (parent-imposed filter).
   List<String> agentAllowedTools;
 
@@ -400,6 +411,9 @@ class ChatSession {
     this.agentState,
     this.agentContinuable = false,
     this.agentResult,
+    this.agentId,
+    this.agentPersona,
+    this.agentOutputHint,
     List<String>? agentAllowedTools,
     List<Message>? messages,
     List<Map<String, String>>? todos,
@@ -432,6 +446,9 @@ class ChatSession {
         : j['agentState'] as String?,
     agentContinuable: j['agentContinuable'] as bool? ?? false,
     agentResult: j['agentResult'] as String?,
+    agentId: j['agentId'] as String?,
+    agentPersona: j['agentPersona'] as String?,
+    agentOutputHint: j['agentOutputHint'] as String?,
     agentAllowedTools:
         (j['agentAllowedTools'] as List?)?.whereType<String>().toList() ??
         const [],
@@ -475,6 +492,11 @@ class ChatSession {
     if (agentState != null) 'agentState': agentState,
     if (agentContinuable) 'agentContinuable': agentContinuable,
     if (agentResult != null) 'agentResult': agentResult,
+    if (agentId != null) 'agentId': agentId,
+    if (agentPersona != null && agentPersona!.isNotEmpty)
+      'agentPersona': agentPersona,
+    if (agentOutputHint != null && agentOutputHint!.isNotEmpty)
+      'agentOutputHint': agentOutputHint,
     if (agentAllowedTools.isNotEmpty) 'agentAllowedTools': agentAllowedTools,
     if (goal != null) 'goal': goal,
     'schedules': schedules,
@@ -674,6 +696,10 @@ class AppState extends ChangeNotifier {
         session.providerId ??= _inferProviderId(session.model);
       }
       _restoreSelectedModel();
+      // Cold-resume hook (DSH durable descriptor parity): let the agent
+      // service rebuild its subagent handle registry from the persisted
+      // lineage (agentId / parentId / state) before the UI reads it.
+      onSessionsLoaded?.call();
       notifyListeners();
     } catch (_) {
       _ensureActiveSession();
@@ -982,6 +1008,8 @@ class AppState extends ChangeNotifier {
     required String mode,
     bool continuable = false,
     List<String> allowedTools = const [],
+    String persona = '',
+    String outputSchemaHint = '',
   }) {
     final child = ChatSession(
       id: 'sub-${DateTime.now().microsecondsSinceEpoch}',
@@ -994,6 +1022,8 @@ class AppState extends ChangeNotifier {
       agentState: 'running',
       agentContinuable: continuable,
       agentAllowedTools: allowedTools,
+      agentPersona: persona,
+      agentOutputHint: outputSchemaHint,
       // Children share the parent's working folder so their edits land in
       // the same project; without a pinned folder they get their own
       // sandbox workspace (sandboxId defaults to the child id).
@@ -1166,6 +1196,10 @@ class AppState extends ChangeNotifier {
   /// Set by AgentService at startup — drops the deleted session's run
   /// (avoids a circular import; parallel runs for other sessions live on).
   void Function(String sessionId)? onSessionDeleted;
+
+  /// Called once after sessions load from disk — the agent service
+  /// rebuilds its subagent handle registry from persisted lineage.
+  void Function()? onSessionsLoaded;
 
   /// Remove all messages from [index] onward in the named session
   /// (DSH "Revert"/"Edit & resend" semantics). Clearing from index 0 also

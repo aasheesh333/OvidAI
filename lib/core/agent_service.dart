@@ -270,6 +270,11 @@ class SubagentInfo {  final String id;
   bool interrupted = false;
   bool finished = false;
   String result = '';
+
+  /// True when started via `run_in_background` — such children deliver a
+  /// settlement notice to the parent when they end (DSH parity); foreground
+  /// children return their result as the tool result instead.
+  final bool background;
   final DateTime startedAt = DateTime.now();
   DateTime? finishedAt;
 
@@ -280,6 +285,7 @@ class SubagentInfo {  final String id;
     required this.parentSessionId,
     required this.parentMode,
     required this.prompt,
+    this.background = false,
   });
 
   String get state => finished
@@ -413,6 +419,9 @@ class AgentService extends ChangeNotifier {
     AppState.I.onSessionDeleted = dropSessionRun;
     // Per-session browser tabs: lazy-restore on session switch.
     AppState.I.onSessionSwitched = onSessionSwitched;
+    // Cold resume: rebuild subagent handles from the persisted lineage
+    // after sessions load (DSH durable-descriptor parity).
+    AppState.I.onSessionsLoaded = restoreSubagentHandles;
     // Composer commands + skills catalog.
     CommandService.I.registerBuiltins();
     _refreshSkillRoots();
@@ -484,7 +493,12 @@ class AgentService extends ChangeNotifier {
 
   String? get _pinnedRunId => _runCtx?.session.id;
 
-  ChatSession? get _runSession => _runCtx?.session ?? AppState.I.activeSession;
+  ChatSession? get _runSession =>
+      (_runSessionOverrideForTest != null
+          ? AppState.I.sessionById(_runSessionOverrideForTest!)
+          : null) ??
+      _runCtx?.session ??
+      AppState.I.activeSession;
 
   String _currentRunKey() => AppState.I.activeSession?.id ?? '';
 
@@ -2255,6 +2269,21 @@ class AgentService extends ChangeNotifier {
                   'Keep the child open for follow-up instructions after it '
                   'answers (default: true for background, false otherwise).',
             },
+            'persona': {
+              'type': 'string',
+              'description':
+                  'A short role persona for the child (e.g. "You are a '
+                  ' meticulous code reviewer"). Prepended to its system '
+                  'guidance.',
+            },
+            'output_schema_hint': {
+              'type': 'string',
+              'description':
+                  'Describe the exact shape the child\'s FINAL message must '
+                  'take (e.g. "a JSON object with keys status, findings, '
+                  'files"). The child is instructed to end with exactly '
+                  'that shape.',
+            },
           },
           'required': ['prompt'],
         },
@@ -2350,6 +2379,35 @@ class AgentService extends ChangeNotifier {
             'content': {
               'type': 'string',
               'description': 'The memory to store (a concise fact)',
+            },
+          },
+          'required': ['content'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'report',
+        'description':
+            'SUBAGENTS ONLY: send selected progress or findings from this '
+            'subagent to the parent agent as its next-step context — the '
+            'parent reads it as a message from you. Use for mid-task '
+            'updates that should not wait for the final report (e.g. an '
+            'early finding, a blocker, or a question). Your final answer '
+            'still goes back as the dispatch result.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'content': {
+              'type': 'string',
+              'description': 'The report text for the parent agent',
+            },
+            'quiet': {
+              'type': 'boolean',
+              'description':
+                  'true = deliver without waking the parent (context only); '
+                  'default false = steer the parent with it.',
             },
           },
           'required': ['content'],
@@ -3257,6 +3315,8 @@ ${s.goal != null && s.goal!['status'] == 'active' ? '\nACTIVE GOAL (round ${s.go
 ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a [reminder] message arrives, treat its prompt as a user request and act on it.' : ''}
 ${s.todos.isNotEmpty ? '\nSESSION TODOS (${s.todos.length} item${s.todos.length == 1 ? '' : 's'} — follow this checklist, do not abandon it):\n${s.todos.map((t) => '- [${t['status'] == 'completed' ? 'x' : t['status'] == 'in_progress' ? '~' : ' '}] ${t['content']}').join('\n')}\nWork through the todo list. Mark items in_progress BEFORE doing them and completed AFTER they are done. If all items are completed, say so and give your final answer.' : ''}
 ${s.isSubagent ? '''
+${(s.agentPersona ?? '').isEmpty ? '' : '\nPERSONA: ${s.agentPersona}\n'}
+${(s.agentOutputHint ?? '').isEmpty ? '' : '\nREQUIRED FINAL OUTPUT SHAPE: ${s.agentOutputHint}\nYour FINAL message must match this shape exactly — the parent parses it.\n'}
 
 YOU ARE A SUBAGENT.
 Your parent agent dispatched you with the task below; you do NOT see the
@@ -3265,7 +3325,9 @@ unattended: ask_user_question, exit_plan_mode and request_permission are
 blocked${s.agentAllowedTools.isEmpty ? '' : ', and you may only use these tools: ${s.agentAllowedTools.join(', ')}'}.
 Decide for yourself, finish the task, and end with ONE final message that is
 your report to the parent: what you did, what you found, and any file paths
-or commands that matter. Keep it tight — the parent reads only that message.''' : ''}
+or commands that matter. Keep it tight — the parent reads only that message.
+For mid-task updates that should not wait (an early finding, a blocker), call
+report(content) — it reaches the parent as its next-step context.''' : ''}
 ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock()}'}
 ''';
 
@@ -4906,6 +4968,9 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       case 'send_message':
         return await _handleSendMessage(args);
 
+      case 'report':
+        return _handleReport(args);
+
       case 'interrupt_agent':
         return _handleInterruptAgent(args);
 
@@ -5225,6 +5290,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           : args['query'], // legacy single-query shape
       'memory_search' || 'session_search' => args['query'],
       'dispatch_agent' => args['prompt'],
+      'report' => args['content'],
       'commit' => args['message'],
       'generate_image' => args['prompt'],
       'browser_evaluate' => args['script'] ?? args['expression'],
@@ -5363,6 +5429,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     'session_search' => 'Search session',
     'memory_search' => 'Search memory',
     'memory_save' => 'Save memory',
+    'report' => 'Report to parent',
     'dispatch_agent' => 'Subagent',
     'commit' => 'Commit',
     'repo_sync' => 'Sync repo',
@@ -6334,6 +6401,21 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
   @visibleForTesting
   void emitForTest(String kind, String text) => _emit(kind, text);
 
+  /// Test seam: pin `_runSession` to a session id (simulates being the
+  /// running session, e.g. for child-side report calls). Empty string
+  /// clears the override.
+  @visibleForTesting
+  static void setRunSessionForTest(String sessionId) {
+    _runSessionOverrideForTest =
+        sessionId.isEmpty ? null : sessionId;
+  }
+
+  static String? _runSessionOverrideForTest;
+
+  /// Test seam: the subagent id counter (reseed checks after cold resume).
+  @visibleForTesting
+  int get subagentCounterForTest => _subagentCounter;
+
   /// Test seam: the mode a child would get for [modeName] under the current
   /// parent mode — a child can inherit or downgrade, never escalate.
   @visibleForTesting
@@ -6379,6 +6461,41 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
   /// The handle that owns [sessionId], if that session is a subagent.
   SubagentInfo? subagentForSession(String sessionId) =>
       _subagents.values.where((s) => s.sessionId == sessionId).firstOrNull;
+
+  /// Cold resume (DSH durable-descriptor parity): rebuild the in-memory
+  /// handle registry from persisted session lineage after an app restart.
+  /// Each continuable subagent session carries its durable `agentId`; the
+  /// counter is reseeded from the highest persisted id so new ids never
+  /// collide. A child whose parent died is dropped (its lineage is gone).
+  void restoreSubagentHandles() {
+    for (final s in AppState.I.sessions.where((s) => s.isSubagent)) {
+      final id = s.agentId;
+      if (id == null || _subagents.containsKey(id)) continue;
+      final parent = AppState.I.sessionById(s.parentId!);
+      if (parent == null) continue; // orphaned by parent deletion
+      // Reseed the counter past any persisted id.
+      final n = int.tryParse(id.replaceFirst('sub-', ''));
+      if (n != null && n > _subagentCounter) _subagentCounter = n;
+      if (s.agentState == 'running') {
+        // Was killed by app death — persistSessions already demoted it on
+        // load; the handle records it as stopped, not silently finished.
+        s.agentState = 'stopped';
+      }
+      _subagents[id] = SubagentInfo(
+        id: id,
+        label: s.agentLabel ?? s.title,
+        sessionId: s.id,
+        parentSessionId: parent.id,
+        // Restored handles are bookkeeping only; the parent's live mode is
+        // re-resolved when a follow-up actually starts a run.
+        parentMode: AgentMode.auto,
+        prompt: s.messages.isNotEmpty ? s.messages.first.content : '',
+      )
+        ..finished = true
+        ..finishedAt = DateTime.now()
+        ..result = s.agentResult ?? '';
+    }
+  }
 
   /// UI seam: is this subagent session still accepting follow-ups?
   bool canContinueSubagent(String sessionId) {
@@ -6446,6 +6563,63 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     return await continueSubagent(sub.sessionId, message);
   }
 
+  /// DSH parity (dsh-tool-subagent-report): child → parent delivery. The
+  /// child reports on its own initiative; the parent receives it as one
+  /// ordinary message. Quiet delivery parks the content on the parent's
+  /// transcript as next-step context without waking it; non-quiet steers
+  /// (busy parent → joins its current run queue; idle parent → new turn).
+  String _handleReport(Map<String, dynamic> args) {
+    final content = (args['content'] as String? ?? '').trim();
+    if (content.isEmpty) return 'report content is required';
+    final child = _runSession;
+    if (child == null) return 'no active session';
+    if (!child.isSubagent) {
+      return 'report is only available to subagents — this session is a '
+          'top-level chat. Put your findings in your final answer instead.';
+    }
+    final parent = AppState.I.sessionById(child.parentId!);
+    if (parent == null) return 'parent session is gone — report undelivered';
+    var sub = subagentForSession(child.id);
+    if (sub == null) {
+      // No live handle (e.g. restored session, or direct session use) —
+      // mint one from the durable lineage so the report is attributable.
+      final durableId = child.agentId ?? 'sub-${++_subagentCounter}';
+      sub = SubagentInfo(
+        id: durableId,
+        label: child.agentLabel ?? child.title,
+        sessionId: child.id,
+        parentSessionId: parent.id,
+        parentMode: AgentMode.auto,
+        prompt: '',
+      );
+      _subagents[sub.id] = sub;
+      child.agentId ??= sub.id;
+    }
+    final quiet = args['quiet'] as bool? ?? false;
+    final report =
+        '[report from subagent ${sub.id} — sent mid-task by the child. '
+        'Treat as context from your delegate, not user input:]\n$content';
+    if (quiet) {
+      // Context only — append to the transcript, wake nobody.
+      parent.messages.add(Message(role: 'user', content: report));
+      AppState.I.refresh();
+      AppState.I.persistSessions();
+      _emit('think', 'quiet report ${sub.id} → parent transcript');
+      return 'reported quietly — the parent reads it on its next turn.';
+    }
+    if (busyFor(parent.id)) {
+      _runs[parent.id]?.queue.add(report);
+      _emit('think', 'steered parent with report from ${sub.id}');
+      return 'reported — queued into the parent\'s current run.';
+    }
+    parent.messages.add(Message(role: 'user', content: report));
+    AppState.I.refresh();
+    AppState.I.persistSessions();
+    unawaited(runTask(report, sessionId: parent.id));
+    _emit('think', 'woke parent with report from ${sub.id}');
+    return 'reported — the parent was woken with your message.';
+  }
+
   String _handleInterruptAgent(Map<String, dynamic> args) {
     final id = args['agent_id'] as String;
     final sub = _subagents[id];
@@ -6502,6 +6676,8 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     final allowed =
         (args['allowed_tools'] as List?)?.whereType<String>().toList() ??
         const <String>[];
+    final persona = (args['persona'] as String? ?? '').trim();
+    final outputHint = (args['output_schema_hint'] as String? ?? '').trim();
     final parent = _runSession;
     if (parent == null) return 'No active session to dispatch from.';
 
@@ -6531,6 +6707,8 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       mode: childMode.name,
       continuable: continuable,
       allowedTools: allowed,
+      persona: persona,
+      outputSchemaHint: outputHint,
     );
     // Plan mode is inherited so a child cannot execute mutations while the
     // parent is still planning.
@@ -6544,8 +6722,13 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       parentSessionId: parent.id,
       parentMode: parentMode,
       prompt: prompt,
+      background: background,
     );
     _subagents[id] = sub;
+    // Durable handle id on the session — lets the registry be rebuilt after
+    // an app restart (cold resume). Persisted with the session JSON.
+    child.agentId = id;
+    AppState.I.persistSessions();
     _emit('think', 'dispatched $id → ${cleanTruncate(label, 40)}');
 
     // The parent's tool card mirrors the child's progress live and links to
@@ -6661,6 +6844,44 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       }
       _emit('think', '${sub.id} ${sub.state}');
       notifyListeners();
+      _deliverSettlementNotice(sub);
+    }
+  }
+
+  /// DSH parity (dsh-subagent settlement notice): when a background child
+  /// settles, its durable direct parent is told — in the parent's own turn
+  /// stream — that the child finished and what its closing message was.
+  /// Delivery never blocks settlement and never fails the child.
+  void _deliverSettlementNotice(SubagentInfo sub) {
+    // Only background children deliver notices; a foreground call already
+    // returned the result to the parent as its tool result.
+    if (!sub.background) return;
+    final parent = AppState.I.sessionById(sub.parentSessionId);
+    if (parent == null || parent.messages.isEmpty) return;
+    final outcome = sub.interrupted
+        ? 'was stopped'
+        : sub.state == 'failed'
+        ? 'failed'
+        : 'finished';
+    final closing = sub.result.trim();
+    final notice =
+        'Background subagent ${sub.id} (${sub.label}) $outcome and will do '
+        'no further work unless you send it more.\n'
+        '${closing.isEmpty || closing == '(no answer)' ? 'It left no closing message.' : 'Its closing message:\n$closing'}\n'
+        '(send_message can resume it if it is continuable; its transcript '
+        'holds the full detail.)';
+    if (busyFor(parent.id)) {
+      // Busy — the notice joins the parent's CURRENT run queue, like DSH
+      // steering into the nearest step boundary: it does not open a second
+      // concurrent run.
+      _runs[parent.id]?.queue.add(notice);
+      _emit('think', 'queued settlement notice for ${sub.id} → parent');
+    } else {
+      // Idle — one ordinary later turn.
+      parent.messages.add(Message(role: 'user', content: notice));
+      AppState.I.refresh();
+      AppState.I.persistSessions();
+      unawaited(runTask(notice, sessionId: parent.id));
     }
   }
 

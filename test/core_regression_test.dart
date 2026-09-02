@@ -3394,6 +3394,182 @@ block</pre>
       );
     });
   });
+
+  group('PR16: subagent parity gaps closed', () {
+    setUp(() {
+      AgentService.setRunSessionForTest('');
+    });
+
+    tearDown(() {
+      AgentService.setRunSessionForTest('');
+    });
+
+    ChatSession newParent(String id) {
+      final app = AppState.I;
+      final parent = ChatSession(
+        id: id,
+        title: 'Parent',
+        model: 'm',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, parent);
+      app.activeSessionId = parent.id;
+      addTearDown(() {
+        app.sessions.removeWhere(
+          (x) =>
+              x.id == id || AppState.I.lineageOf(x.id).any((a) => a.id == id),
+        );
+      });
+      return parent;
+    }
+
+    test('background child stores a durable agentId for cold resume',
+        () async {
+      final app = AppState.I;
+      final parent = newParent('sg-p1');
+
+      await AgentService.I.dispatchForTest('dispatch_agent', {
+        'prompt': 'research the schema',
+        'label': 'Research',
+        'run_in_background': true,
+        'persona': 'You are a meticulous researcher',
+        'output_schema_hint':
+            'a JSON object with keys status, findings, files',
+      });
+
+      final child = app.childrenOf(parent.id).single;
+      expect(child.agentId, isNotNull, reason: 'durable handle id stored');
+      expect(child.agentId, startsWith('sub-'));
+      expect(child.agentPersona, 'You are a meticulous researcher');
+      expect(
+        child.agentOutputHint,
+        'a JSON object with keys status, findings, files',
+      );
+    });
+
+    test('restoreSubagentHandles rebuilds the registry after restart',
+        () async {
+      final app = AppState.I;
+      final parent = newParent('sg-p2');
+      // Simulate a persisted settled child: durable id + lineage + state,
+      // but NO live handle (as after an app restart).
+      final child = app.createSubagentSession(
+        parent: parent,
+        label: 'Resumed child',
+        mode: 'auto',
+        continuable: true,
+      );
+      child.agentId = 'sub-77';
+      child.agentState = 'finished';
+      child.agentResult = 'found 3 endpoints';
+
+      AgentService.I.restoreSubagentHandles();
+
+      final sub = AgentService.I.subagentForSession(child.id);
+      expect(sub, isNotNull, reason: 'handle rebuilt from persisted lineage');
+      expect(sub!.id, 'sub-77');
+      expect(sub.finished, isTrue);
+      expect(sub.label, 'Resumed child');
+      // Counter reseeded past the persisted max, so new ids never collide.
+      final res = await AgentService.I.dispatchForTest('dispatch_agent', {
+        'prompt': 'next task',
+        'run_in_background': true,
+      });
+      expect(res, contains('sub-78'));
+    });
+
+    test('settlement notice reaches an idle parent as a new turn', () async {
+      final parent = newParent('sg-p3');
+      parent.messages.add(
+        Message(role: 'user', content: 'kick off the parent transcript'),
+      );
+
+      // Dispatch a background child; its run fails fast (no provider in
+      // tests), which settles it and delivers the notice.
+      await AgentService.I.dispatchForTest('dispatch_agent', {
+        'prompt': 'do a thing',
+        'run_in_background': true,
+      });
+
+      // The parent transcript now holds the settlement notice AFTER the
+      // child settled (fail-fast in tests, so the notice is already there).
+      final notices = parent.messages
+          .where((m) => m.content.contains('Background subagent'))
+          .toList();
+      expect(
+        notices,
+        isNotEmpty,
+        reason: 'background settlement delivers a parent notice',
+      );
+      final n = notices.first.content;
+      expect(n, contains('and will do no further work'));
+      expect(
+        n,
+        anyOf(contains('closing message'), contains('no closing message')),
+      );
+      // Foreground children must NOT deliver a notice — their result IS
+      // the tool result (double-delivery check).
+      final fgBefore = parent.messages.length;
+      await AgentService.I.dispatchForTest('dispatch_agent', {
+        'prompt': 'foreground thing',
+      });
+      final fgNotices = parent.messages
+          .skip(fgBefore)
+          .where((m) => m.content.contains('Background subagent'))
+          .length;
+      expect(
+        fgNotices,
+        0,
+        reason: 'foreground dispatch returns the result, no notice',
+      );
+    });
+
+    test('report tool: child → parent, quiet and waking forms', () async {
+      final app = AppState.I;
+      final parent = newParent('sg-p4');
+      parent.messages.add(Message(role: 'user', content: 'parent transcript'));
+      final child = app.createSubagentSession(
+        parent: parent,
+        label: 'Reporter',
+        mode: 'auto',
+        continuable: true,
+      );
+      // Make the child the RUNNING session so _runSession resolves to it.
+      AgentService.setRunSessionForTest(child.id);
+
+      // Quiet: parked on the parent transcript, no new run, nobody woken.
+      final q = await AgentService.I.dispatchForTest('report', {
+        'content': 'early finding: the auth is broken',
+        'quiet': true,
+      });
+      expect(q, contains('quietly'));
+      final quietRow = parent.messages.last;
+      expect(quietRow.content, contains('[report from subagent'));
+      expect(quietRow.content, contains('the auth is broken'));
+
+      // Waking form from an idle parent: appended + a run starts (it will
+      // fail fast in tests — the appended report row is what matters).
+      final w = await AgentService.I.dispatchForTest('report', {
+        'content': 'blocker: no write access',
+      });
+      expect(w, anyOf(contains('woken'), contains('queued')));
+      expect(
+        parent.messages.any((m) => m.content.contains('blocker: no write access')),
+        isTrue,
+        reason: 'the report row is on the parent transcript (a fail-fast '
+            'error row may follow it)',
+      );
+    });
+
+    test('report from a top-level session is refused', () async {
+      final parent = newParent('sg-p5');
+      AgentService.setRunSessionForTest(parent.id);
+      final res = await AgentService.I.dispatchForTest('report', {
+        'content': 'i am not a subagent',
+      });
+      expect(res, contains('only available to subagents'));
+    });
+  });
 }
 
 /// Build one DuckDuckGo-style result block (anchor + snippet pair).

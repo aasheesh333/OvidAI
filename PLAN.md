@@ -149,7 +149,7 @@ Every user-visible feature DSH web ships, derived from the installed package set
 | 6 | Todo dock | DONE — `todo_write` + mid-run pending-todo nudge | `agent_service.dart:1719-1743,3255-3281` |
 | 7 | Queue dock | DONE — queue + strict steer + drain | `agent_service.dart:236,448-533` |
 | 8 | Plan mode | HALF — `/plan` toggle, `exit_plan_mode` gated on review, and a Chat about it / Decline / Approve card whose refusal note reaches the model; no composer "Plan x" chip, no plan-task placeholder, `planMode` is not persisted across restart | `agent_service.dart` `_handleExitPlanMode` · `chat_screen.dart` `_PlanReviewCard` |
-| 9 | Subagent lineage UI | DONE — child sessions with full transcripts, breadcrumb to the root chat, descendants menu with state/elapsed/rows, read-only one-shot composer, continuable composer with independent Stop, `@` mention of this chat's agents, parent card links into the child; still no keyboard-nav catalog tree and no per-child token totals | `lib/ui/subagent_screen.dart`, `chat_screen.dart` |
+| 9 | Subagent lineage UI | DONE — child sessions with full transcripts, breadcrumb to the root chat, descendants menu with state/elapsed/rows, read-only one-shot composer, continuable composer with independent Stop, `@` mention of this chat's agents, parent card links into the child; PR16 adds settlement notices, the child→parent `report` tool, cold resume from durable `agentId`, and persona/output-shape dispatch args; still no keyboard-nav catalog tree and no per-child token totals | `lib/ui/subagent_screen.dart`, `chat_screen.dart` |
 | 10 | Workflow run tree | MISS — no run/phase/member tree | — |
 | 11 | Ralph loop | MISS | — |
 | 12 | Goal bar | HALF — `get_goal`/`create_goal`/`update_goal` tools; no GoalBar strip with pause/resume/clear | `agent_service.dart` goal cases |
@@ -302,6 +302,29 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 48. Per-tool timeout budgets + repeat-tool reminder; timeouts on approval/question waits.
 49. ~~`web_search`~~ DONE — 1–4 concurrent queries, URL dedup, real citation URLs; `fetch_url` → markdown (C10 closed, PR14).
 50. ~~MCP reliability~~ DONE — errors surface as errors, dead-process watcher, `tools/list_changed` honoured (C11 closed by the `mcp_service.dart` rewrite + PR13 tests).
+
+### PR16 — Subagent parity gaps closed (DONE)
+- **Settlement notice** — when a background child settles, `_deliverSettlementNotice`
+  tells the durable direct parent in its own turn stream (DSH wording: "Background
+  subagent X finished and will do no further work…/Its closing message: …"); busy
+  parent → joins its current run queue; idle parent → one ordinary later turn;
+  foreground children return their result as the tool result instead (no double delivery).
+- **`report` tool (child → parent)** — dsh-tool-subagent-report parity: mid-task
+  findings/blockers reach the parent as next-step context; `quiet: true` parks the
+  content on the parent transcript without waking; non-quiet steers (busy → run
+  queue, idle → new turn); refused on top-level sessions; handle minted from durable
+  lineage when none is live.
+- **Cold resume** — dispatch stores a durable `agentId` on the child session;
+  `onSessionsLoaded` hook → `restoreSubagentHandles()` rebuilds the in-memory
+  registry from persisted lineage (counter reseeded past the persisted max so ids
+  never collide; children persisted as running demote to stopped; orphaned children
+  dropped). `send_message` works on restored continuable children.
+- **Persona + outputSchema hint** — `dispatch_agent` gains `persona` (prepended to
+  the child's system guidance) and `output_schema_hint` (required shape of the
+  child's FINAL message, injected as "REQUIRED FINAL OUTPUT SHAPE"); both persisted
+  on the session.
+- Tests: PR16 group — 129 → 134. Subagent parity now ~95% (remaining DSH-only:
+  ACP out-of-process children, KV-cache accounting, event-sourced trajectory view).
 
 ### PR15 — Marketplace formats + realtime install (DONE)
 - **Claude AND Codex formats both parse** — `.claude-plugin/marketplace.json`
