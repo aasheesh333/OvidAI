@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'agent_service.dart';
+import 'presets.dart';
 import 'session_ledger.dart';
 import 'state.dart';
 
@@ -155,6 +156,49 @@ class CommandService {
               ? 'Plan the next step. Explore first, then call exit_plan_mode with your plan.'
               : args.trim();
           return CommandResult(prompt: msg, feedback: 'Plan mode on.');
+        },
+      ),
+    );
+
+    register(
+      AgentCommand(
+        name: 'preset',
+        hint: '[standard|minimal|studio|code]',
+        description: 'Show or switch this chat\'s agent preset',
+        handler: (args) async {
+          final app = AppState.I;
+          final s = app.activeSession;
+          if (s == null) return const CommandResult(feedback: 'No active session.');
+          final q = args.trim().toLowerCase();
+          if (q.isEmpty) {
+            final buf = StringBuffer('**Presets** (current: ${s.presetId})\n');
+            for (final p in PresetRegistry.all) {
+              buf.writeln('- ${p.id} (${p.label}) — ${p.description}');
+            }
+            return CommandResult(feedback: buf.toString());
+          }
+          final match = PresetRegistry.all
+              .where((p) => p.id == q)
+              .firstOrNull;
+          if (match == null) {
+            return CommandResult(
+              feedback: 'Unknown preset "$q". Options: '
+                  '${PresetRegistry.all.map((p) => p.id).join(', ')}.',
+            );
+          }
+          if (s.messages.isNotEmpty) {
+            return const CommandResult(
+              feedback: 'This chat already has messages — switch presets on '
+                  'a blank session (/new) or use a fresh chat, DSH-style.',
+            );
+          }
+          s.presetId = match.id;
+          app.persistSessions();
+          app.refresh();
+          return CommandResult(
+            feedback: 'Preset → ${match.id} (${match.label}) — '
+                '${match.description}',
+          );
         },
       ),
     );

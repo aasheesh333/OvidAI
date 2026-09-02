@@ -1,0 +1,130 @@
+import 'package:flutter/foundation.dart';
+
+/// One named agent preset (DSH agent-presets parity): a tool-roster
+/// composition plus a persona preamble. A session joins a preset; the
+/// tool gate in AgentService consults the roster on every run so the
+/// model only ever sees (and bills for) the tools the preset allows.
+@immutable
+class AgentPreset {
+  final String id;
+  final String label;
+  final String description;
+
+  /// When non-empty this preset is an ALLOWLIST: only these core tools
+  /// run (workflow/ralph/report stay available — orchestration is the
+  /// harness, not a capability). When empty nothing is denied (standard).
+  final List<String> allowedTools;
+
+  /// When non-empty this preset is a DENYLIST instead.
+  final List<String> deniedTools;
+
+  /// Extra persona preamble injected above the base system prompt.
+  final String persona;
+
+  const AgentPreset({
+    required this.id,
+    required this.label,
+    required this.description,
+    this.allowedTools = const [],
+    this.deniedTools = const [],
+    this.persona = '',
+  });
+}
+
+/// Central registry. IDs are stable (persisted on sessions as
+/// `presetId`); unknown ids fall back to standard.
+class PresetRegistry {
+  static const standard = AgentPreset(
+    id: 'standard',
+    label: 'Standard',
+    description: 'Full tool roster — the default Ovid agent.',
+    allowedTools: [],
+    deniedTools: [],
+    persona: '',
+  );
+
+  /// Lean everyday agent: no browser, no image-gen, no orchestration
+  /// fan-out. File + search + memory + git stay.
+  static const minimal = AgentPreset(
+    id: 'minimal',
+    label: 'Minimal',
+    description: 'Chat + files + search + memory — no browser, images, '
+        'or subagent fan-out.',
+    deniedTools: [
+      'browser_navigate', 'browser_open', 'browser_evaluate',
+      'browser_snapshot', 'browser_read', 'browser_scroll',
+      'browser_type', 'browser_click', 'browser_press_key',
+      'browser_wait_for', 'browser_resize', 'browser_new_tab',
+      'browser_switch_tab', 'browser_list_tabs', 'browser_close_tab',
+      'browser_close', 'browser_tabs',
+      'generate_image', 'image_gen', 'workflow', 'ralph',
+    ],
+    persona: 'You are a lean agent: prefer direct answers and small file '
+        'edits. Do not open browsers or spawn subagents.',
+  );
+
+  /// Studio authoring preset: generation-heavy, wide access, persona
+  /// tuned for long-form deliverables in the workspace.
+  static const studio = AgentPreset(
+    id: 'studio',
+    label: 'Studio',
+    description: 'Authoring preset — images, web research, files, with a '
+        'deliverables-first persona.',
+    allowedTools: [],
+    persona: 'You are a studio author. Always end a turn by writing the '
+        'deliverable (report/image/code) into the shared workspace, then '
+        'summarize what changed and where it lives.',
+  );
+
+  /// Code preset: repo work only — shell, files, git; no browser or
+  /// image generation.
+  static const code = AgentPreset(
+    id: 'code',
+    label: 'Code',
+    description: 'Repo work — shell, file edits, git. No browser or '
+        'image generation.',
+    deniedTools: [
+      'browser_navigate', 'browser_open', 'browser_evaluate',
+      'browser_snapshot', 'browser_read', 'browser_scroll',
+      'browser_type', 'browser_click', 'browser_press_key',
+      'browser_wait_for', 'browser_resize', 'browser_new_tab',
+      'browser_switch_tab', 'browser_list_tabs', 'browser_close_tab',
+      'browser_close', 'browser_tabs',
+      'generate_image', 'image_gen',
+    ],
+    persona: 'You are a coding agent inside the user\'s repository. '
+        'Read before editing, keep changes minimal, and never touch '
+        'files outside the workspace.',
+  );
+
+  static const List<AgentPreset> all = [standard, minimal, studio, code];
+
+  static AgentPreset byId(String id) =>
+      all.firstWhere((p) => p.id == id, orElse: () => standard);
+
+  /// Catalog block for the system prompt so the model knows which
+  /// composition it is running under.
+  static String catalogBlock() => all
+      .map((p) => '- ${p.id} (${p.label}): ${p.description}')
+      .join('\n');
+
+  /// Roster decision: true = tool allowed under this preset.
+  static bool allows(AgentPreset preset, String tool) {
+    if (preset.allowedTools.isNotEmpty) {
+      return preset.allowedTools.contains(tool) ||
+          _alwaysAllowed.contains(tool);
+    }
+    return !preset.deniedTools.contains(tool);
+  }
+
+  /// Orchestration + session bookkeeping stay available in every preset:
+  /// they are the harness itself, not a capability being gated.
+  static const _alwaysAllowed = [
+    'dispatch_agent',
+    'report',
+    'update_goal',
+    'get_goal',
+    'create_goal',
+    'memory_save',
+  ];
+}

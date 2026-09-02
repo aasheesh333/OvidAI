@@ -303,6 +303,40 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 49. ~~`web_search`~~ DONE — 1–4 concurrent queries, URL dedup, real citation URLs; `fetch_url` → markdown (C10 closed, PR14).
 50. ~~MCP reliability~~ DONE — errors surface as errors, dead-process watcher, `tools/list_changed` honoured (C11 closed by the `mcp_service.dart` rewrite + PR13 tests).
 
+### PR21 — Orchestration, presets, context meter, workspace browser (DONE)
+- **Workflow orchestration** — `workflow(name, phases[])`: ordered phases
+  (≤12), each phase's tasks (≤6, `{label, prompt}`) fan out as PARALLEL
+  fresh children (`_spawnChild`); phase results carry forward to the next
+  phase's prompts (sequential phases, parallel tasks); merged per-phase
+  summaries in the result; every child is a real openable session.
+- **Ralph loop** — `ralph(objective[, max_rounds])`: ONE immutable
+  objective, fresh child per round (no conversation seed — objective +
+  round number + previous worker's structured JSON handoff
+  {status, summary, evidence, next_steps, blocker}); `complete`/`blocked`
+  stop the loop; worker reports decide (no independent certification);
+  cap default 10 / ceiling 50.
+- **Agent presets** — `lib/core/presets.dart` PresetRegistry
+  (standard / minimal / studio / code): per-preset allow/deny tool
+  rosters + persona preamble; `ChatSession.presetId` persisted
+  (constructor/fromJson/toJson); children inherit the parent preset;
+  `_tools` gate filters the live roster; persona injected into the
+  system prompt; `/preset [id]` command (blank-session switch, DSH-style);
+  `AppState.workflowEnabled` toggle (Settings) removes workflow/ralph
+  from the roster when off.
+- **Context meter** — tappable context ring → `_showContextMeter` sheet:
+  segmented System/Tools/Messages bars (`_MeterBreakdownBar`) with the
+  cache-read note + compaction hint (DSH context-breakdown parity).
+- **Workspace browser (sidebar)** — sessions grouped by pinned working
+  folder ("(no workspace)" for sandbox chats), headers sorted; matches
+  search across groups.
+- **cwd-relative summaries** — `_tildifyPath`: absolute paths under the
+  active workspace show as `~/…` on tool cards.
+- **Realtime install parity (re-applied)** — `agent_install_plugin` for
+  MCP-category plugins connects the real server + persists the connect
+  intent + reports discovered tool names; `agent_install_mcp` lists the
+  connected tools (`mcp__<server>__<tool>`) and persists the intent.
+- Tests: PR21 groups (presets ×6, workflow/ralph ×4) — 159 → 169.
+
 ### PR20 — References, takeover, sign-in, queue steer, viewport (DONE)
 - **#45 `@file` / `@session`** — composer `@` menu now lists workspace files
   (directory descent via `name/`, hidden dot-entries skipped), this chat's
@@ -465,7 +499,7 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 52. Presets / persona (optional — evaluate whether mobile needs preset stacks).
 53. Ralph loop tool (optional, gated on explicit user request like DSH).
 
-**Verification gate after every phase:** `flutter analyze` (0 issues) + `flutter test` (159 tests) + commit + push + CI green on `ci/verified-android-build-20260827`.
+**Verification gate after every phase:** `flutter analyze` (0 issues) + `flutter test` (169 tests) + commit + push + CI green on `ci/verified-android-build-20260827`.
 
 ---
 

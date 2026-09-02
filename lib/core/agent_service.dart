@@ -18,6 +18,7 @@ import 'repo_cache.dart';
 import 'mcp_service.dart';
 import 'session_ledger.dart';
 import 'session_search.dart';
+import 'presets.dart';
 import 'skills.dart';
 import 'commands.dart';
 
@@ -1789,7 +1790,26 @@ class AgentService extends ChangeNotifier {
         tools.add(t.toOpenAiTool(serverKey));
       }
     }
-    return tools;
+    // ── Workflow orchestration toggle (Settings) ──
+    if (!app.workflowEnabled) {
+      tools.removeWhere((t) {
+        final fn = t['function'];
+        return fn is Map && (fn['name'] == 'workflow' || fn['name'] == 'ralph');
+      });
+    }
+    // ── Preset roster gate ──
+    // The session's preset is an allow/deny composition over the roster
+    // above. Unknown preset ids fall back to standard (deny nothing).
+    final preset = PresetRegistry.byId(_runSession?.presetId ?? 'standard');
+    return preset.allowedTools.isEmpty && preset.deniedTools.isEmpty
+        ? tools
+        : tools
+            .where((t) {
+              final fn = t['function'];
+              final name = fn is Map ? fn['name'] as String? : null;
+              return name != null && PresetRegistry.allows(preset, name);
+            })
+            .toList();
   }
 
   // Core tools — always available to the agent
@@ -2624,6 +2644,67 @@ class AgentService extends ChangeNotifier {
             },
           },
           'required': ['prompt'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'workflow',
+        'description':
+            'Run a multi-agent orchestration: a JSON list of phases; each '
+            'phase has a `name` and a list of `tasks` (each `{label, '
+            'prompt}`) that run as parallel fresh subagents. Use ONLY when '
+            'the user explicitly asks for a workflow or large multi-agent '
+            'orchestration; for one or two delegations use dispatch_agent '
+            'directly. Each child gets only its prompt + the shared '
+            'workspace (durable memory); the final result is the merged '
+            'per-phase summaries.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'name': {
+              'type': 'string',
+              'description': 'Workflow name (shown on the run card)',
+            },
+            'phases': {
+              'type': 'array',
+              'description':
+                  'Ordered phases: [{"name": "...", "tasks": [{"label": '
+                  '"...", "prompt": "..."}]}]',
+              'items': {'type': 'object'},
+            },
+          },
+          'required': ['name', 'phases'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'ralph',
+        'description':
+            'Ralph loop: give ONE immutable objective to a sequence of '
+            'fresh child agents until a worker reports complete or blocked. '
+            'Each round gets a fresh child with no conversation seed — only '
+            'the objective, its round number, and the previous worker\'s '
+            'handoff (status, summary, evidence, next steps). The shared '
+            'workspace is the long-term memory. Use ONLY when the user '
+            'explicitly asks for a Ralph loop / fresh-agent iterative '
+            'execution. Waits for the entire run.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'objective': {
+              'type': 'string',
+              'description': 'The immutable objective every round works on',
+            },
+            'max_rounds': {
+              'type': 'integer',
+              'description': 'Round cap (default 10, ceiling 50)',
+            },
+          },
+          'required': ['objective'],
         },
       },
     },
@@ -3569,6 +3650,13 @@ class AgentService extends ChangeNotifier {
     );
   }
 
+  /// Persona block for the session's preset (empty for standard).
+  String _presetPersona(ChatSession s) {
+    final preset = PresetRegistry.byId(s.presetId);
+    if (preset.persona.isEmpty) return '';
+    return '${preset.persona} (Tool roster: ${preset.description})';
+  }
+
   Future<void> _runTaskBody(
     String originalPrompt,
     _RunCtx ctx, {
@@ -3699,6 +3787,7 @@ your report to the parent: what you did, what you found, and any file paths
 or commands that matter. Keep it tight — the parent reads only that message.
 For mid-task updates that should not wait (an early finding, a blocker), call
 report(content) — it reaches the parent as its next-step context.''' : ''}
+${_presetPersona(s).isEmpty ? '' : '\nAGENT PRESET (${s.presetId}): ${_presetPersona(s)}\n'}
 ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock()}'}
 ''';
 
@@ -5023,6 +5112,12 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       case 'dispatch_agent':
         return await _handleDispatchAgent(args);
 
+      case 'workflow':
+        return await _handleWorkflow(args);
+
+      case 'ralph':
+        return await _handleRalph(args);
+
       case 'memory_save':
         final content = args['content'] as String;
         final item = MemoryItem(
@@ -5130,6 +5225,29 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           app.persistPluginState();
           app.refresh();
           _emit('done', 'installed $pluginName');
+
+          // Realtime install (DSH parity): an MCP-category plugin connects
+          // its real server right away, exactly like the Plugins screen
+          // Install button — a flag flip with no live connection would be
+          // a lie to the model.
+          if (match.category == 'MCP') {
+            final server = app.mcpServers
+                .where((s) => s.name == match.name)
+                .firstOrNull;
+            if (server == null) {
+              return 'Plugin "$pluginName" installed, but no MCP server by '
+                  'that name is configured — add it in Plugins → MCP.';
+            }
+            final msg = await McpService.I.connect(server);
+            server.connected = McpService.I.isConnected(server.name);
+            app.persistMcpIntent();
+            app.refresh();
+            final tools = McpService.I.connectedTools[server.name] ?? [];
+            final names = tools.map((t) => t.name).join(', ');
+            return 'Plugin "$pluginName" installed ✓ $msg'
+                '${tools.isEmpty ? '' : ' — tools: $names'}.';
+          }
+
           // Honest post-install report: what tools does the plugin actually
           // contribute? (A flag flip that silently adds no tool is a lie.)
           final toolNames = _pluginToolNames(match);
@@ -5157,9 +5275,15 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           // the UI said "connected" but nothing actually ran.)
           final res = await McpService.I.connect(match);
           match.connected = McpService.I.isConnected(match.name);
+          app.persistMcpIntent();
           app.refresh();
           _emit('done', res);
-          return res;
+          final tools = McpService.I.connectedTools[match.name] ?? [];
+          final names = tools.map((t) => t.name).join(', ');
+          return res.contains('connected')
+              ? '$res${tools.isEmpty ? '' : ' — tools: $names'}. '
+                  'They are available to you now as mcp__<server>__<tool>.'
+              : res;
         } catch (e) {
           return 'MCP connect failed: $e';
         }
@@ -5879,7 +6003,26 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       'memory_save' => args['content'],
       _ => args['path'] ?? args['pattern'] ?? args['file'],
     };
-    return (pick as String?) ?? '';
+    // cwd-relative display: strip the long workspace prefix, leave a ~/…
+    // form (DSH-style compact card summaries).
+    return _tildifyPath((pick as String?) ?? '');
+  }
+
+  /// Shorten an absolute path under the active workspace to `~/…` for
+  /// compact tool-card summaries. Non-workspace paths pass through.
+  String _tildifyPath(String p) {
+    if (!p.startsWith('/')) return p;
+    final s = _runSession;
+    if (s == null) return p;
+    final String root;
+    try {
+      root = workspaceRootFor(s).path;
+    } catch (_) {
+      return p;
+    }
+    if (root.isEmpty || !p.startsWith(root)) return p;
+    final rel = p.substring(root.length).replaceFirst(RegExp(r'^[/\\]'), '');
+    return rel.isEmpty ? '~/' : '~/$rel';
   }
 
   /// Heuristic: provider error text meaning "this request exceeded the
@@ -5982,6 +6125,8 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       'fetch_url' => 'web',
       'generate_image' => 'sparkle',
       'dispatch_agent' => 'agent',
+      'workflow' => 'workflow',
+      'ralph' => 'loop',
       'commit' || 'repo_sync' || 'repo_tree' => 'git',
       'create_goal' || 'update_goal' || 'get_goal' => 'goal',
       'schedule_create' || 'schedule_list' || 'schedule_delete' => 'schedule',
@@ -6007,6 +6152,8 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     'memory_save' => 'Save memory',
     'report' => 'Report to parent',
     'dispatch_agent' => 'Subagent',
+    'workflow' => 'Workflow',
+    'ralph' => 'Ralph loop',
     'commit' => 'Commit',
     'repo_sync' => 'Sync repo',
     'repo_tree' => 'Repo tree',
@@ -7400,6 +7547,219 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     return answer.isEmpty
         ? 'Subagent $id finished without a final answer.'
         : '[$id ${sub.state} · ${sub.elapsed.inSeconds}s]\n$answer';
+  }
+
+  /// One fresh FOREGROUND child (workflow/ralph rounds reuse this). Depth
+  /// and mode rules mirror dispatch_agent; returns (handle, final answer).
+  Future<(SubagentInfo, String)> _spawnChild(
+    String prompt,
+    String label, {
+    String outputHint = '',
+  }) async {
+    final parent = _runSession;
+    if (parent == null) throw StateError('No active session.');
+    final depth = AppState.I.lineageOf(parent.id).length - 1;
+    if (depth >= _maxSubagentDepth) {
+      throw StateError(
+          'Subagent depth limit ($_maxSubagentDepth) reached.');
+    }
+    final child = AppState.I.createSubagentSession(
+      parent: parent,
+      label: label,
+      mode: mode.name,
+      continuable: false,
+      persona: '',
+      outputSchemaHint: outputHint,
+    );
+    _runFor(child.id).planMode = planMode;
+    final id = 'sub-${++_subagentCounter}';
+    final sub = SubagentInfo(
+      id: id,
+      label: label,
+      sessionId: child.id,
+      parentSessionId: parent.id,
+      parentMode: mode,
+      prompt: prompt,
+    );
+    _subagents[id] = sub;
+    child.agentId = id;
+    AppState.I.persistSessions();
+    _emit('think', 'spawned $id → ${cleanTruncate(label, 40)}');
+    await _runSubagentSession(sub, prompt);
+    return (sub, sub.result.trim());
+  }
+
+  /// DSH workflow parity: ordered phases, each phase's tasks fan out as
+  /// parallel fresh children; phase results feed the NEXT phase's prompts
+  /// as context (sequential phases, parallel tasks). The run card mirrors
+  /// every member, and each child session is openable from the subagent
+  /// catalog like any dispatch_agent child.
+  Future<String> _handleWorkflow(Map<String, dynamic> args) async {
+    final name = (args['name'] as String? ?? '').trim();
+    final rawPhases = args['phases'] as List? ?? [];
+    if (name.isEmpty) return 'workflow name is required';
+    if (rawPhases.isEmpty) return 'workflow needs at least one phase';
+    if (rawPhases.length > 12) {
+      return 'too many phases (${rawPhases.length} > 12) — split the work.';
+    }
+
+    _emit('think', 'workflow "$name": ${rawPhases.length} phase(s)…');
+    final card = _activeToolMsg;
+    card?.toolSummary = 'workflow: $name';
+    var membersStarted = 0;
+    final phaseResults = <String>[];
+    var carried = ''; // previous phase output feeds the next phase's tasks
+
+    for (var p = 0; p < rawPhases.length; p++) {
+      final phase = rawPhases[p] is Map
+          ? (rawPhases[p] as Map).cast<String, dynamic>()
+          : <String, dynamic>{};
+      final phaseName = (phase['name'] as String? ?? 'phase ${p + 1}').trim();
+      final tasks = (phase['tasks'] as List? ?? [])
+          .whereType<Map>()
+          .toList();
+      if (tasks.isEmpty) return 'phase "$phaseName" has no tasks';
+      if (tasks.length > 6) {
+        return 'phase "$phaseName" has too many tasks (>6)';
+      }
+      _emit(
+        'think',
+        'workflow "$name" · phase ${p + 1} "$phaseName" · ${tasks.length} '
+        'task(s)',
+      );
+      card?.toolDetail = '${card.toolDetail ?? ''}'
+          '── phase $phaseName (${tasks.length} tasks) ──\n';
+
+      // Fan out: all tasks of one phase run in parallel.
+      final futures = <Future<({String label, String result, String state})>>[];
+      for (final t in tasks) {
+        final label = (t['label'] as String? ?? 'task').trim();
+        final prompt = (t['prompt'] as String? ?? '').trim();
+        if (prompt.isEmpty) continue;
+        final fullPrompt = carried.isEmpty
+            ? prompt
+            : '$prompt\n\n[Previous phase result — established context]\n'
+                '${cleanTruncate(carried, 4000)}';
+        futures.add(() async {
+          try {
+            final (sub, answer) = await _spawnChild(fullPrompt, label);
+            membersStarted++;
+            return (
+              label: label,
+              result: answer,
+              state: sub.state,
+            );
+          } catch (e) {
+            return (label: label, result: 'member failed: $e', state: 'failed');
+          }
+        }());
+      }
+      final results = await Future.wait(futures);
+      for (final r in results) {
+        card?.toolDetail = '${card.toolDetail ?? ''}'
+            '· ${r.label}: ${r.state}\n';
+      }
+      phaseResults.add(
+        '── $phaseName ──\n'
+        '${results.map((r) => '${r.label}: ${cleanTruncate(r.result, 1200)}').join('\n')}',
+      );
+      carried = results.map((r) => r.result).join('\n\n');
+      AppState.I.refresh();
+    }
+
+    return 'Workflow "$name" complete — $membersStarted agent(s) across '
+        '${rawPhases.length} phase(s):\n\n${phaseResults.join('\n\n')}';
+  }
+
+  /// DSH Ralph parity (dsh-tool-ralph): ONE immutable objective, a
+  /// sequence of FRESH children (no conversation seed — only the objective,
+  /// round number, and the previous worker's handoff). Each child reports
+  /// a structured handoff; `complete`/`blocked` end the loop. The shared
+  /// workspace is the long-term memory. Worker reports, not independent
+  /// certification, decide the outcome.
+  Future<String> _handleRalph(Map<String, dynamic> args) async {
+    final objective = (args['objective'] as String? ?? '').trim();
+    if (objective.isEmpty) return 'objective is required';
+    final maxRounds =
+        ((args['max_rounds'] as num?)?.toInt() ?? 10).clamp(1, 50);
+
+    _emit('think', 'ralph: "${cleanTruncate(objective, 60)}" (cap $maxRounds)');
+    final card = _activeToolMsg;
+    card?.toolSummary = 'ralph loop';
+
+    var handoff = '';
+    var round = 0;
+    String lastSummary = '';
+    while (round < maxRounds) {
+      round++;
+      card?.toolDetail = '${card.toolDetail ?? ''}'
+          '── round $round/$maxRounds ──\n';
+      final prompt = StringBuffer()
+        ..writeln('IMMUTABLE OBJECTIVE: $objective')
+        ..writeln('Ralph round: $round of $maxRounds.')
+        ..writeln(
+          'The shared workspace is your long-term memory — check what '
+          'previous rounds left there before working.',
+        );
+      if (handoff.isNotEmpty) {
+        prompt
+          ..writeln('[Previous worker handoff]')
+          ..writeln(handoff)
+          ..writeln(
+            'Continue from the handoff; do not redo finished work.',
+          );
+      }
+      prompt
+        ..writeln('End with EXACTLY this JSON as your final message:')
+        ..writeln('{"status": "continue|complete|blocked",')
+        ..writeln(' "summary": "<what you did this round>",')
+        ..writeln(' "evidence": "<files/commands/proof>",')
+        ..writeln(' "next_steps": "<what round ${round + 1} should do>",')
+        ..writeln(' "blocker": "<only when status is blocked>"}');
+
+      final (sub, answer) = await _spawnChild(
+        prompt.toString(),
+        'ralph r$round',
+      );
+      card?.toolDetail = '${card.toolDetail ?? ''}'
+          '· ${sub.state}: ${cleanTruncate(answer, 100)}\n';
+      AppState.I.refresh();
+
+      // Parse the handoff JSON from the child's final message (tolerant:
+      // the model may wrap it in prose or fences).
+      final jsonMatch = RegExp(r'\{[\s\S]*\}').firstMatch(answer);
+      Map<String, dynamic>? report;
+      if (jsonMatch != null) {
+        try {
+          report = jsonDecode(jsonMatch.group(0)!) as Map<String, dynamic>;
+        } catch (_) {}
+      }
+      final status = (report?['status'] as String? ??
+              (sub.state == 'failed' ? 'blocked' : 'continue'))
+          .toLowerCase();
+      lastSummary = (report?['summary'] as String? ?? '').isNotEmpty
+          ? report!['summary'] as String
+          : cleanTruncate(answer, 200);
+      handoff = cleanTruncate(answer, 6000);
+
+      if (status == 'complete') {
+        return 'Ralph loop complete — a worker reported completion after '
+            '$round round(s) (worker report, not independent '
+            'certification).\nLast report: $lastSummary';
+      }
+      if (status == 'blocked') {
+        final blocker = report?['blocker'] as String? ?? '';
+        return 'Ralph loop blocked — a worker reported a blocker after '
+            '$round round(s).\nBlocker: ${blocker.isEmpty ? lastSummary : blocker}';
+      }
+      if (sub.state == 'failed') {
+        return 'Ralph round $round failed before a usable handoff — '
+            'the loop stops without retry (DSH semantics). Last known: '
+            '$lastSummary';
+      }
+    }
+    return 'Ralph budget-limited: $maxRounds round(s) started, no worker '
+        'reported complete/blocked. Last report: $lastSummary';
   }
 
   /// Run a subagent's session as a REAL run: its transcript, tool cards and

@@ -176,13 +176,46 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                       ),
                     );
                   }
+                  // Workspace browser (DSH projects parity): group sessions
+                  // by their pinned working folder — "(no workspace)" for
+                  // per-session sandbox chats.
+                  final groups = <String, List<ChatSession>>{};
+                  for (final s in visible) {
+                    final wf = (s.workspaceFolder ?? '').trim();
+                    final key = wf.isEmpty
+                        ? '(no workspace)'
+                        : wf.split(RegExp(r'[/\\]')).where((p) => p.isNotEmpty).last;
+                    groups.putIfAbsent(key, () => []).add(s);
+                  }
+                  final keys = groups.keys.toList()..sort();
                   return ListView.builder(
                     padding: const EdgeInsets.symmetric(horizontal: 8),
-                    itemCount: visible.length,
-                    itemBuilder: (_, i) {
-                      final s = visible[i];
-                      final active = s.id == app.activeSessionId;
-                      return _SessionTile(session: s, active: active);
+                    itemCount: keys.length,
+                    itemBuilder: (_, gi) {
+                      final key = keys[gi];
+                      final list = groups[key]!;
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(8, 10, 8, 4),
+                            child: Text(
+                              key.toUpperCase(),
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 1.4,
+                                color: Aether.textFaint,
+                              ),
+                            ),
+                          ),
+                          for (final s in list)
+                            _SessionTile(
+                              session: s,
+                              active: s.id == app.activeSessionId,
+                            ),
+                        ],
+                      );
                     },
                   );
                 },

@@ -363,42 +363,197 @@ class _StatsLine extends StatelessWidget {
               ),
               const SizedBox(width: 8),
               // Context ring — 12px arc + % label (DSH "% of context used").
+              // Tap → full context meter sheet (segmented breakdown).
               Tooltip(
                 message:
                     '${pct.toStringAsFixed(0)}% of ${_fmtTok(window)} context used · '
                     'breakdown: sys ${_fmtTok(AgentService.I.sessionSystemTokens)} · '
                     'tool ${_fmtTok(AgentService.I.sessionToolTokens)} · '
-                    'msgs ${_fmtTok(AgentService.I.sessionMessageTokens)}',
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    SizedBox(
-                      width: 12,
-                      height: 12,
-                      child: CircularProgressIndicator(
-                        value: frac,
-                        strokeWidth: 2,
-                        backgroundColor: Aether.hairline,
-                        valueColor: AlwaysStoppedAnimation(ringColor),
-                        strokeCap: StrokeCap.round,
+                    'msgs ${_fmtTok(AgentService.I.sessionMessageTokens)} · '
+                    'tap for details',
+                child: GestureDetector(
+                  onTap: () => _showContextMeter(
+                    context,
+                    window: window,
+                    used: used,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                          value: frac,
+                          strokeWidth: 2,
+                          backgroundColor: Aether.hairline,
+                          valueColor: AlwaysStoppedAnimation(ringColor),
+                          strokeCap: StrokeCap.round,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 5),
-                    Text(
-                      '${pct.toStringAsFixed(0)}%',
-                      style: TextStyle(
-                        fontSize: 10.5,
-                        fontFamily: Aether.mono,
-                        color: ringColor,
+                      const SizedBox(width: 5),
+                      Text(
+                        '${pct.toStringAsFixed(0)}%',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontFamily: Aether.mono,
+                          color: ringColor,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ],
           ),
         );
       },
+    );
+  }
+
+  /// Context meter sheet (DSH context-breakdown parity): window usage,
+  /// segmented sys/tools/messages bars with a cache-read overlay and a
+  /// compaction hint.
+  void _showContextMeter(
+    BuildContext context, {
+    required int window,
+    required int used,
+  }) {
+    final agent = AgentService.I;
+    final sys = agent.sessionSystemTokens;
+    final tool = agent.sessionToolTokens;
+    final msgs = agent.sessionMessageTokens;
+    final cache = agent.sessionCacheReadTokens;
+    final frac = (used / window).clamp(0.0, 1.0);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Aether.bg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Text(
+                    'Context',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: Aether.text,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    '${_fmtTok(used)} / ${_fmtTok(window)} · '
+                    '${(frac * 100).toStringAsFixed(0)}%',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontFamily: Aether.mono,
+                      color: frac >= 0.8
+                          ? Aether.dangerC
+                          : frac >= 0.55
+                          ? Aether.warn
+                          : Aether.success,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              _MeterBreakdownBar(
+                label: 'System',
+                value: sys,
+                total: window,
+                color: Aether.accent,
+              ),
+              const SizedBox(height: 10),
+              _MeterBreakdownBar(
+                label: 'Tools',
+                value: tool,
+                total: window,
+                color: Aether.warn,
+              ),
+              const SizedBox(height: 10),
+              _MeterBreakdownBar(
+                label: 'Messages',
+                value: msgs,
+                total: window,
+                color: Aether.success,
+              ),
+              const SizedBox(height: 14),
+              Text(
+                [
+                  if (cache > 0)
+                    'Cache-read: ${_fmtTok(cache)} tok (billed cheaper)',
+                  'Compaction triggers automatically near the window limit.',
+                ].join('\n'),
+                style: TextStyle(fontSize: 11, color: Aether.textFaint),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One segmented row of the context meter: label + value + a bar showing
+/// this bucket's share of the window.
+class _MeterBreakdownBar extends StatelessWidget {
+  final String label;
+  final int value;
+  final int total;
+  final Color color;
+  const _MeterBreakdownBar({
+    required this.label,
+    required this.value,
+    required this.total,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final frac = total <= 0 ? 0.0 : (value / total).clamp(0.0, 1.0);
+    return Row(
+      children: [
+        SizedBox(
+          width: 72,
+          child: Text(
+            label,
+            style: TextStyle(fontSize: 11, color: Aether.textFaint),
+          ),
+        ),
+        Expanded(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: SizedBox(
+              height: 8,
+              child: LinearProgressIndicator(
+                value: frac,
+                minHeight: 8,
+                backgroundColor: Aether.hairline,
+                valueColor: AlwaysStoppedAnimation(color),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          value >= 1000
+              ? '${(value / 1000).toStringAsFixed(1)}K'
+              : '$value',
+          style: TextStyle(
+            fontSize: 10.5,
+            fontFamily: Aether.mono,
+            color: Aether.textFaint,
+          ),
+        ),
+      ],
     );
   }
 }

@@ -359,6 +359,13 @@ class ChatSession {
   /// cross-session mode bleed. Persisted with the session.
   String mode;
 
+  /// Agent preset — a named composition of a tool roster + a persona
+  /// preamble (DSH agent-presets parity: standard / minimal / studio /
+  /// code). Sessions join a preset; a child inherits its parent's.
+  /// Persisted with the session; changing it on a session with no turns
+  /// is allowed (DSH "switch the blank session" semantics).
+  String presetId;
+
   /// User-pinned working folder (picked from the composer). When set and
   /// the directory exists, ALL agent work happens inside it — shell cwd,
   /// file edits, jobs, attachments, skills roots. Null = per-session
@@ -445,6 +452,7 @@ class ChatSession {
     this.sandboxId,
     this.repo,
     this.mode = 'auto',
+    this.presetId = 'standard',
     this.workspaceFolder,
     this.compactedSummary,
     this.goal,
@@ -479,6 +487,7 @@ class ChatSession {
     sandboxId: j['sandboxId'] as String?,
     repo: j['repo'] as String?,
     mode: j['mode'] as String? ?? 'auto',
+    presetId: j['presetId'] as String? ?? 'standard',
     workspaceFolder: j['workspaceFolder'] as String?,
     compactedSummary: j['compactedSummary'] as String?,
     compactedAtCount: (j['compactedAtCount'] as num?)?.toInt() ?? 0,
@@ -528,6 +537,7 @@ class ChatSession {
     'sandboxId': sandboxId ?? id,
     if (repo != null) 'repo': repo,
     'mode': mode,
+    if (presetId != 'standard') 'presetId': presetId,
     if (workspaceFolder != null && workspaceFolder!.isNotEmpty)
       'workspaceFolder': workspaceFolder,
     if (compactedSummary != null) 'compactedSummary': compactedSummary,
@@ -595,6 +605,7 @@ class AppState extends ChangeNotifier {
       memoryEnabled = prefs.getBool(_kMemoryEnabled) ?? true;
       showReasoning = prefs.getBool(_kShowReasoning) ?? true;
       githubSync = prefs.getBool(_kGithubSync) ?? true;
+      workflowEnabled = prefs.getBool(_kWorkflowEnabled) ?? true;
       autoRunSafeCommands = prefs.getBool(_kAutoRunSafe) ?? true;
       chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0).clamp(
         chatFontScaleMin,
@@ -790,6 +801,7 @@ class AppState extends ChangeNotifier {
       memoryEnabled = true;
       showReasoning = true;
       githubSync = true;
+      workflowEnabled = true;
       autoRunSafeCommands = true;
       shareSessionMemory = false;
       lastSelectedModel = '';
@@ -835,6 +847,11 @@ class AppState extends ChangeNotifier {
   /// GitHub sync: agent file edits/commits push to the connected repo.
   static const _kGithubSync = 'ovid_github_sync';
   bool githubSync = true;
+
+  /// Workflow orchestration tools (workflow/ralph): multi-agent fan-out.
+  /// Off = those tools leave the roster entirely.
+  static const _kWorkflowEnabled = 'ovid_workflow_enabled';
+  bool workflowEnabled = true;
 
   /// Auto-run safe commands: read-only shell commands skip confirmation.
   static const _kAutoRunSafe = 'ovid_auto_run_safe';
@@ -896,6 +913,15 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kShowReasoning, v);
+    } catch (_) {}
+  }
+
+  Future<void> setWorkflowEnabled(bool v) async {
+    workflowEnabled = v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kWorkflowEnabled, v);
     } catch (_) {}
   }
 
@@ -1063,6 +1089,7 @@ class AppState extends ChangeNotifier {
       model: parent.model,
       providerId: parent.providerId,
       mode: mode,
+      presetId: parent.presetId,
       parentId: parent.id,
       agentLabel: label,
       agentState: 'running',
@@ -1801,6 +1828,10 @@ class AppState extends ChangeNotifier {
   /// Names of servers the user wants connected. Survives restarts so the
   /// app can respawn them on launch/resume (spawn-on-demand otherwise).
   static const _kMcpConnectedIntent = 'ovid_mcp_connected_v1';
+
+  /// Public wrapper: persist the connected-server intent (agent-tool and
+  /// UI install paths both call it so a restart keeps them connected).
+  Future<void> persistMcpIntent() => _persistMcpConnectedIntent();
 
   Future<void> _persistMcpConnectedIntent() async {
     final names = mcpServers

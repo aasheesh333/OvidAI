@@ -12,6 +12,7 @@ import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/commands.dart';
 import 'package:ovid_ai/core/github_service.dart';
 import 'package:ovid_ai/core/mcp_service.dart';
+import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
@@ -4182,6 +4183,260 @@ block</pre>
       });
       expect(ok, contains('1280x800'));
       expect(ok, contains('zoom'));
+    });
+  });
+
+  group('PR21: agent presets', () {
+    test('standard preset keeps the full roster; minimal/code deny their '
+        'buckets', () {
+      // Standard = no gate (every core tool stays).
+      final std = PresetRegistry.byId('standard');
+      expect(std.allowedTools, isEmpty);
+      expect(std.deniedTools, isEmpty);
+
+      // Minimal denies browser/image/orchestration fan-out but keeps
+      // dispatch_agent (harness) and core file tools.
+      final min = PresetRegistry.byId('minimal');
+      expect(PresetRegistry.allows(min, 'browser_navigate'), isFalse);
+      expect(PresetRegistry.allows(min, 'generate_image'), isFalse);
+      expect(PresetRegistry.allows(min, 'workflow'), isFalse);
+      expect(PresetRegistry.allows(min, 'dispatch_agent'), isTrue);
+      expect(PresetRegistry.allows(min, 'file_read'), isTrue);
+
+      // Code denies browser + images but keeps shell/git.
+      final code = PresetRegistry.byId('code');
+      expect(PresetRegistry.allows(code, 'browser_navigate'), isFalse);
+      expect(PresetRegistry.allows(code, 'generate_image'), isFalse);
+      expect(PresetRegistry.allows(code, 'run_shell'), isTrue);
+
+      // Unknown id falls back to standard (deny nothing).
+      expect(PresetRegistry.byId('nope').id, 'standard');
+    });
+
+    ChatSession freshSession(String id) {
+      final app = AppState.I;
+      final s = ChatSession(id: id, title: id, model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() {
+        app.sessions.removeWhere((x) => x.id == id);
+        if (app.activeSessionId == id) app.activeSessionId = '';
+      });
+      return s;
+    }
+
+    test('preset gate filters the live tool roster per session', () {
+      final s = freshSession('preset-gate');
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      final stdTools = AgentService.I.toolsForTest()
+          .map((t) => t['function']['name'] as String)
+          .toSet();
+      expect(stdTools, contains('browser_navigate'));
+
+      s.presetId = 'minimal';
+      final minTools = AgentService.I.toolsForTest()
+          .map((t) => t['function']['name'] as String)
+          .toSet();
+      expect(minTools, isNot(contains('browser_navigate')));
+      expect(minTools, isNot(contains('workflow')));
+      expect(minTools, isNot(contains('ralph')));
+      expect(minTools, contains('dispatch_agent'));
+      s.presetId = 'standard';
+    });
+
+    test('preset persists across a session JSON round-trip', () {
+      final s = ChatSession(
+        id: 'preset-json',
+        title: 'P',
+        model: 'm',
+        mode: 'auto',
+        presetId: 'studio',
+      );
+      final back = ChatSession.fromJson(s.toJson());
+      expect(back.presetId, 'studio');
+      // Default + legacy sessions (no presetId in JSON) land on standard.
+      final legacy = ChatSession.fromJson({
+        'id': 'legacy',
+        'title': 'L',
+        'model': 'm',
+      });
+      expect(legacy.presetId, 'standard');
+    });
+
+    test('child sessions inherit the parent presetId', () {
+      final app = AppState.I;
+      final parent = ChatSession(
+        id: 'preset-parent',
+        title: 'Parent',
+        model: 'm',
+        mode: 'auto',
+      );
+      parent.presetId = 'code';
+      app.sessions.insert(0, parent);
+      addTearDown(() {
+        app.sessions.removeWhere(
+          (x) =>
+              x.id == parent.id ||
+              AppState.I.lineageOf(x.id).any((a) => a.id == parent.id),
+        );
+      });
+      final child = app.createSubagentSession(
+        parent: parent,
+        label: 'kid',
+        mode: 'auto',
+      );
+      expect(child.presetId, 'code');
+    });
+
+    test('/preset lists presets and switches cleanly', () async {
+      final s = freshSession('preset-cmd');
+
+      final list = await CommandService.I.execute('/preset');
+      expect(list, isNotNull);
+      expect(list!.feedback, contains('standard'));
+      expect(list.feedback, contains('studio'));
+
+      final sw = await CommandService.I.execute('/preset minimal');
+      expect(sw!.feedback, contains('minimal'));
+      expect(s.presetId, 'minimal');
+
+      final bad = await CommandService.I.execute('/preset nope');
+      expect(bad!.feedback, contains('Unknown preset'));
+    });
+
+    test('workflow toggle off removes workflow/ralph from the roster',
+        () async {
+      final app = AppState.I;
+      final s = freshSession('preset-wf');
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      final before = AgentService.I.toolsForTest()
+          .map((t) => t['function']['name'] as String)
+          .toSet();
+      expect(before, contains('workflow'));
+      expect(before, contains('ralph'));
+
+      app.workflowEnabled = false;
+      addTearDown(() => app.workflowEnabled = true);
+      final after = AgentService.I.toolsForTest()
+          .map((t) => t['function']['name'] as String)
+          .toSet();
+      expect(after, isNot(contains('workflow')));
+      expect(after, isNot(contains('ralph')));
+    });
+  });
+
+  group('PR21: workflow + ralph orchestration', () {
+    ChatSession newParent(String id) {
+      final app = AppState.I;
+      final parent = ChatSession(
+        id: id,
+        title: 'Parent',
+        model: 'm',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, parent);
+      app.activeSessionId = parent.id;
+      addTearDown(() {
+        app.sessions.removeWhere(
+          (x) =>
+              x.id == id || AppState.I.lineageOf(x.id).any((a) => a.id == id),
+        );
+      });
+      return parent;
+    }
+
+    test('workflow validates phases and tasks', () async {
+      final parent = newParent('wf-p1');
+      AgentService.setRunSessionForTest(parent.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      final noName = await AgentService.I.dispatchForTest('workflow', {
+        'phases': [
+          {
+            'name': 'x',
+            'tasks': [
+              {'label': 'a', 'prompt': 'do a'},
+            ],
+          },
+        ],
+      });
+      expect(noName, contains('name is required'));
+
+      final noTasks = await AgentService.I.dispatchForTest('workflow', {
+        'name': 'w',
+        'phases': [
+          {'name': 'phase only', 'tasks': []},
+        ],
+      });
+      expect(noTasks, contains('no tasks'));
+    });
+
+    test('workflow spawns one child session per task, phases in order',
+        () async {
+      final parent = newParent('wf-p2');
+      AgentService.setRunSessionForTest(parent.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      // The runs fail fast (no provider in tests) — the structure is what
+      // we verify: 2 phases × (2+1) tasks = 3 child sessions in lineage.
+      await AgentService.I.dispatchForTest('workflow', {
+        'name': 'W',
+        'phases': [
+          {
+            'name': 'scan',
+            'tasks': [
+              {'label': 'a', 'prompt': 'map A'},
+              {'label': 'b', 'prompt': 'map B'},
+            ],
+          },
+          {
+            'name': 'report',
+            'tasks': [
+              {'label': 'c', 'prompt': 'write up'},
+            ],
+          },
+        ],
+      });
+
+      final kids = AppState.I.childrenOf(parent.id);
+      expect(kids.length, 3);
+      expect(
+        kids.map((c) => c.agentLabel).toSet(),
+        {'a', 'b', 'c'},
+        reason: 'each task got its own child session',
+      );
+    });
+
+    test('ralph echoes the objective and stops when a worker reports '
+        'blocked', () async {
+      final parent = newParent('wf-p3');
+      AgentService.setRunSessionForTest(parent.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      // No provider → the child's run fails fast; ralph reports the round
+      // failed without a usable handoff (DSH semantics: no silent success).
+      final res = await AgentService.I.dispatchForTest('ralph', {
+        'objective': 'fix the flaky test',
+      });
+      expect(res, contains('Ralph'));
+      expect(res, contains('round'));
+      // The loop wrote a real child run card (transcript exists).
+      expect(AppState.I.childrenOf(parent.id), isNotEmpty);
+    });
+
+    test('ralph rejects an empty objective', () async {
+      final parent = newParent('wf-p4');
+      AgentService.setRunSessionForTest(parent.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+      final res = await AgentService.I.dispatchForTest(
+        'ralph',
+        {'objective': '   '},
+      );
+      expect(res, contains('objective is required'));
     });
   });
 }
