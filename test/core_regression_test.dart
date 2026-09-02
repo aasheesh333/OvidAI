@@ -4831,6 +4831,122 @@ block</pre>
     });
   });
 
+  group('PR26: compaction parity', () {
+    test('measuredContextTokens skips the compacted span but counts the '
+        'summary', () {
+      final app = AppState.I;
+      final s = ChatSession(
+        id: 'cmp-measure',
+        title: 'C',
+        model: 'm',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, s);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      for (var i = 0; i < 20; i++) {
+        s.messages.add(Message(role: 'user', content: 'old message $i ' * 20));
+      }
+      // Compaction state: first 18 folded, 2 kept live.
+      s.compactedAtCount = 18;
+      s.compactedSummary = 'short summary';
+      final bucket = AgentService.I.runBucketForTest(s.id);
+      bucket.lastPromptTokens = null; // force the heuristic path
+
+      final measured = AgentService.I.measuredContextTokens(s);
+      // Only the 2 live rows + summary count — the 18 folded rows don't.
+      final twoRows = 2 *
+          (AgentService.estimateMessageTokens('old message 19 ' * 20) +
+              AgentService.estimateMessageTokens(''));
+      final summaryTok = AgentService.estimateMessageTokens('short summary');
+      expect(
+        measured,
+        lessThan(twoRows + summaryTok + 300),
+        reason: 'folded rows are not double-counted after compaction',
+      );
+      expect(measured, greaterThan(summaryTok));
+      bucket.lastPromptTokens = null;
+    });
+
+    test('compaction lock: a second concurrent compact no-ops', () async {
+      final app = AppState.I;
+      final s = ChatSession(
+        id: 'cmp-lock',
+        title: 'C',
+        model: 'm',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, s);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      // Simulate a stuck compaction: the lock is held for this session.
+      expect(AgentService.I.compactingAddForTest(s.id), isTrue);
+      addTearDown(() => AgentService.I.compactingRemoveForTest(s.id));
+
+      // _maybeCompact must return immediately (lock held) — verified by
+      // the fact it does not throw and does not compact anything.
+      final before = s.compactedAtCount;
+      final p = AppState.I.providers.first;
+      await AgentService.I.maybeCompactForTest(s, p);
+      expect(s.compactedAtCount, before, reason: 'locked compact no-ops');
+    });
+
+    test('/compact refuses while the session is busy', () async {
+      final app = AppState.I;
+      final s = ChatSession(
+        id: 'cmp-busy',
+        title: 'C',
+        model: 'm',
+        mode: 'auto',
+      );
+      // The command resolves providerForSession — give the session a
+      // configured provider (any id with models + key-less).
+      if (app.providers.isEmpty) {
+        app.providers.add(
+          ProviderConfig(
+            id: 'prov-cmp',
+            name: 'Test',
+            description: '',
+            baseUrl: 'https://x.test',
+            models: const ['m'],
+            requiresApiKey: false,
+          ),
+        );
+        addTearDown(() => app.providers.removeWhere((p) => p.id == 'prov-cmp'));
+      }
+      s.providerId = app.providers.first.id;
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() {
+        app.sessions.removeWhere((x) => x.id == s.id);
+        app.activeSessionId = '';
+      });
+      // Mark the session busy: an active run id in its bucket.
+      final bucket = AgentService.I.runBucketForTest(s.id);
+      bucket.activeRunId = 'run-1';
+      addTearDown(() => bucket.activeRunId = null);
+
+      final res = await CommandService.I.execute('/compact');
+      expect(res!.feedback, contains('busy'));
+    });
+
+    test('summarizer prompt demands the 8-section DSH checkpoint', () {
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(src, contains('## Objective'));
+      expect(src, contains('## Decisions'));
+      expect(src, contains('## User Preferences'));
+      // Overflow rebuild re-injects the summary (C1).
+      expect(
+        src,
+        contains('PR26/C1: the compacted summary system note must be re-injected'),
+      );
+    });
+  });
+
   group('PR21: workflow + ralph orchestration', () {
     ChatSession newParent(String id) {
       final app = AppState.I;

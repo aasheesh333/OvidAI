@@ -134,6 +134,15 @@ class CommandService {
               feedback: 'Select a provider and model first.',
             );
           }
+          // PR26/C5: DSH /compact is idle-only (busy|changed error codes)
+          // — compacting under a live run would race the loop's own
+          // compaction + rewrite history it is iterating.
+          if (AgentService.I.busyFor(s.id)) {
+            return const CommandResult(
+              feedback: 'Session is busy — /compact runs on an idle chat '
+                  '(queue it as a message instead).',
+            );
+          }
           await AgentService.I.forceCompact(s, p);
           return CommandResult(feedback: 'Session compacted.');
         },

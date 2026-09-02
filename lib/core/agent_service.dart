@@ -3494,7 +3494,15 @@ class AgentService extends ChangeNotifier {
     if (billed != null && billed > 0) return billed;
     var t =
         estimateMessageTokens(systemPrompt) + 256; // + tools header ballpark
-    for (final m in s.messages) {
+    // PR26/C2: skip the compacted span — those rows are already folded
+    // into s.compactedSummary; counting them kept the pressure ring high
+    // (and re-triggered compaction) after a successful compact. The
+    // summary's own tokens are approximated by its char length.
+    final start = s.compactedAtCount.clamp(0, s.messages.length);
+    if (s.compactedSummary != null) {
+      t += estimateMessageTokens(s.compactedSummary!);
+    }
+    for (final m in s.messages.skip(start)) {
       t +=
           estimateMessageTokens(m.content) +
           estimateMessageTokens(m.toolDetail ?? '');
@@ -3568,7 +3576,22 @@ class AgentService extends ChangeNotifier {
   /// verbatim.  Re-compacts when the pressure crosses again (the
   /// span-distance guard is token-based, not message-based, so large
   /// 256K/1M models compact rarely and small ones early).
+  /// PR26/C3: compaction lock per session (DSH serializes compaction via
+  /// a logged lock). Workflow fan-out + parallel children could interleave
+  /// two compactions on the SAME session — the second would summarize a
+  /// span the first already folded (double-fold corruption).
+  final Set<String> _compacting = <String>{};
+
   Future<void> _maybeCompact(ChatSession s, ProviderConfig p) async {
+    if (!_compacting.add(s.id)) return; // already compacting this session
+    try {
+      await _maybeCompactLocked(s, p);
+    } finally {
+      _compacting.remove(s.id);
+    }
+  }
+
+  Future<void> _maybeCompactLocked(ChatSession s, ProviderConfig p) async {
     final window = contextWindowForSession(s);
     final threshold = (window * _compactThresholdRatio).floor();
     final measured = measuredContextTokens(s, systemPrompt: 'x' * 4000);
@@ -3615,12 +3638,22 @@ class AgentService extends ChangeNotifier {
           {
             'role': 'system',
             'content':
-                'You are a conversation summarizer. Compress the following '
-                'conversation into a dense summary (max 500 words). '
-                'Preserve: all facts, decisions made, file paths '
-                'mentioned, code snippets, pending tasks, user '
-                'preferences. Write in the same language as the '
-                'conversation.',
+                'You are a conversation summarizer producing a DSH-style '
+                'checkpoint. Compress the conversation into a dense summary '
+                '(max 500 words) with EXACTLY this 8-section structure, '
+                'each section as "## <name>" followed by its content '
+                '(omit nothing that exists; write "none" for empty):\n'
+                '## Objective — the user\'s overall goal\n'
+                '## Status — where the work currently stands\n'
+                '## Decisions — choices made and why\n'
+                '## Files — paths touched, with their state\n'
+                '## Tasks — pending todos and next actions\n'
+                '## Learnings — constraints, gotchas, environment facts\n'
+                '## Context Notes — key snippets/values worth verbatim\n'
+                '## User Preferences — language, style, approvals\n'
+                'Preserve ALL facts, decisions, file paths, code snippets, '
+                'pending tasks, and preferences. Write in the same language '
+                'as the conversation.',
           },
           {
             'role': 'user',
@@ -3678,6 +3711,15 @@ class AgentService extends ChangeNotifier {
   /// as too long.  Force a compaction with a MINIMAL retained tail (one
   /// quarter of the usual retain budget) and let the caller retry once.
   Future<void> forceCompact(ChatSession s, ProviderConfig p) async {
+    if (!_compacting.add(s.id)) return; // PR26/C3: one compaction at a time
+    try {
+      await _forceCompactLocked(s, p);
+    } finally {
+      _compacting.remove(s.id);
+    }
+  }
+
+  Future<void> _forceCompactLocked(ChatSession s, ProviderConfig p) async {
     final window = contextWindowForSession(s);
     final retain = (window * _compactRetainRatio / 4).floor();
     var tail = 0;
@@ -4078,10 +4120,23 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
             // message, so the retry was LARGER than the rejected request.
             // _replayHistory now skips the compacted span, so this rebuild
             // is genuinely smaller: sys + summary + post-cutoff window.
-            msgs
-              ..clear()
-              ..add({'role': 'system', 'content': sys})
-              ..addAll(_replayHistory(s));
+            // PR26/C1: the compacted summary system note must be re-injected
+            // EXACTLY like the initial assembly (the old rebuild dropped
+            // it — the retry lost everything compaction had folded).
+            msgs..clear()..add({'role': 'system', 'content': sys});
+            // PR26/C1: the compacted summary system note must be re-injected
+            // EXACTLY like the initial assembly (the old rebuild dropped
+            // it — the retry lost everything compaction had folded).
+            if (s.compactedSummary != null &&
+                s.compactedSummary!.isNotEmpty) {
+              msgs.add({
+                'role': 'system',
+                'content':
+                    '[Earlier conversation summary — treat as established '
+                    'context]\n${s.compactedSummary}',
+              });
+            }
+            msgs.addAll(_replayHistory(s));
             _emit(
               'think',
               'context overflow — request rebuilt from compacted history '
@@ -7397,6 +7452,17 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     final m = _toolStart(toolName, 'test');
     _activeToolMsg = m; // _toolStart already sets it; keep explicit.
   }
+
+  /// PR26 test seams: compaction lock + direct _maybeCompact access.
+  @visibleForTesting
+  bool compactingAddForTest(String id) => _compacting.add(id);
+
+  @visibleForTesting
+  void compactingRemoveForTest(String id) => _compacting.remove(id);
+
+  @visibleForTesting
+  Future<void> maybeCompactForTest(ChatSession s, ProviderConfig p) =>
+      _maybeCompact(s, p);
 
   /// Test seam: the request-message array this session's history replays to.
   @visibleForTesting
