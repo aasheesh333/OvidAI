@@ -148,9 +148,13 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                 animation: app,
                 builder: (_, _) {
                   final q = _query.toLowerCase();
+                  // Subagent sessions are apparatus, not chats — they are
+                  // reached from the parent's subagent card / catalog, never
+                  // from the sidebar.
+                  final roots = app.rootSessions;
                   final visible = q.isEmpty
-                      ? app.sessions
-                      : app.sessions
+                      ? roots
+                      : roots
                             .where(
                               (s) =>
                                   s.title.toLowerCase().contains(q) ||

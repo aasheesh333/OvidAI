@@ -212,6 +212,12 @@ class Message {
   /// running | ok | error | stopped — drives the row's state dot + sweep.
   String toolState;
 
+  /// For a `dispatch_agent` card: the child session this call created, so the
+  /// row can open the subagent's full transcript. Persisted, so an old chat's
+  /// subagent card still opens its child after a restart. Assigned once the
+  /// child session exists (the card is created before the dispatch runs).
+  String? toolSessionId;
+
   Message({
     required this.role,
     this.kind = MsgKind.text,
@@ -224,6 +230,7 @@ class Message {
     this.toolSummary,
     this.toolDetail,
     this.toolState = 'running',
+    this.toolSessionId,
     this.attachments = const [],
     DateTime? time,
   }) : time = time ?? DateTime.now();
@@ -243,6 +250,7 @@ class Message {
     toolSummary: j['toolSummary'] as String?,
     toolDetail: j['toolDetail'] as String?,
     toolState: j['toolState'] as String? ?? 'ok',
+    toolSessionId: j['toolSessionId'] as String?,
     attachments: [
       for (final a in (j['attachments'] as List? ?? []))
         if (a is Map<String, dynamic>)
@@ -263,6 +271,7 @@ class Message {
     if (toolSummary != null) 'toolSummary': toolSummary,
     if (toolDetail != null) 'toolDetail': toolDetail,
     if (toolState != 'ok') 'toolState': toolState,
+    if (toolSessionId != null) 'toolSessionId': toolSessionId,
     if (attachments.isNotEmpty)
       'attachments': [for (final a in attachments) a.toJson()],
     'time': time.toIso8601String(),
@@ -322,6 +331,34 @@ class ChatSession {
   /// connected repo).  Persisted with the session.
   String? repo;
 
+  // ── Subagent lineage ────────────────────────────────────────────────────
+  // A subagent is a REAL session with its own transcript, tool cards and
+  // workspace, parented to the session that dispatched it. Child sessions
+  // are hidden from the sidebar; you reach them from the parent's subagent
+  // card, the descendants menu, or a breadcrumb.
+
+  /// Id of the session that dispatched this one. Null for user chats.
+  String? parentId;
+
+  /// Short task label for a subagent session (shown in cards and menus).
+  String? agentLabel;
+
+  /// running | finished | stopped | failed — lifecycle of a subagent run.
+  /// Null for user chats.
+  String? agentState;
+
+  /// True when the parent may keep feeding this child new instructions
+  /// (`send_message`). One-shot children are a completed execution record.
+  bool agentContinuable;
+
+  /// Final answer the child reported back to its parent.
+  String? agentResult;
+
+  /// When set, the child may only call these tools (parent-imposed filter).
+  List<String> agentAllowedTools;
+
+  bool get isSubagent => parentId != null;
+
   /// Session todo/task list — written by todo_write tool, rendered as a
   /// live checklist above the chat input.  Persisted with the session.
   final List<Map<String, String>> todos;
@@ -358,11 +395,18 @@ class ChatSession {
     this.compactedSummary,
     this.goal,
     this.compactedAtCount = 0,
+    this.parentId,
+    this.agentLabel,
+    this.agentState,
+    this.agentContinuable = false,
+    this.agentResult,
+    List<String>? agentAllowedTools,
     List<Message>? messages,
     List<Map<String, String>>? todos,
     List<Map<String, dynamic>>? schedules,
     DateTime? createdAt,
-  }) : messages = messages ?? [],
+  }) : agentAllowedTools = agentAllowedTools ?? [],
+       messages = messages ?? [],
        todos = todos ?? [],
        schedules = schedules ?? [],
        createdAt = createdAt ?? DateTime.now() {
@@ -380,6 +424,17 @@ class ChatSession {
     workspaceFolder: j['workspaceFolder'] as String?,
     compactedSummary: j['compactedSummary'] as String?,
     compactedAtCount: (j['compactedAtCount'] as num?)?.toInt() ?? 0,
+    parentId: j['parentId'] as String?,
+    agentLabel: j['agentLabel'] as String?,
+    // A child persisted while still running was killed by app death.
+    agentState: j['agentState'] == 'running'
+        ? 'stopped'
+        : j['agentState'] as String?,
+    agentContinuable: j['agentContinuable'] as bool? ?? false,
+    agentResult: j['agentResult'] as String?,
+    agentAllowedTools:
+        (j['agentAllowedTools'] as List?)?.whereType<String>().toList() ??
+        const [],
     goal: j['goal'] == null
         ? null
         : Map<String, dynamic>.from(j['goal'] as Map),
@@ -415,6 +470,12 @@ class ChatSession {
       'workspaceFolder': workspaceFolder,
     if (compactedSummary != null) 'compactedSummary': compactedSummary,
     if (compactedAtCount > 0) 'compactedAtCount': compactedAtCount,
+    if (parentId != null) 'parentId': parentId,
+    if (agentLabel != null) 'agentLabel': agentLabel,
+    if (agentState != null) 'agentState': agentState,
+    if (agentContinuable) 'agentContinuable': agentContinuable,
+    if (agentResult != null) 'agentResult': agentResult,
+    if (agentAllowedTools.isNotEmpty) 'agentAllowedTools': agentAllowedTools,
     if (goal != null) 'goal': goal,
     'schedules': schedules,
     'todos': todos,
@@ -604,8 +665,10 @@ class AppState extends ChangeNotifier {
           ..addAll(loaded);
       }
       activeSessionId = prefs.getString(_kActive);
-      if (!sessions.any((s) => s.id == activeSessionId)) {
-        activeSessionId = sessions.isEmpty ? null : sessions.first.id;
+      // Never restore INTO a subagent session — the app opens on a user chat.
+      final active = sessionById(activeSessionId);
+      if (active == null || active.isSubagent) {
+        activeSessionId = rootSessions.isEmpty ? null : rootSessions.first.id;
       }
       for (final session in sessions) {
         session.providerId ??= _inferProviderId(session.model);
@@ -876,6 +939,83 @@ class AppState extends ChangeNotifier {
   ChatSession? sessionById(String? id) =>
       id == null ? null : sessions.where((s) => s.id == id).firstOrNull;
 
+  // ── Subagent lineage helpers ───────────────────────────────────────────
+  /// User-facing chats only — subagent sessions never appear in the sidebar.
+  List<ChatSession> get rootSessions =>
+      sessions.where((s) => !s.isSubagent).toList();
+
+  /// Direct children of [sessionId], oldest first.
+  List<ChatSession> childrenOf(String sessionId) =>
+      sessions.where((s) => s.parentId == sessionId).toList().reversed.toList();
+
+  /// Every descendant of [sessionId] (children, grandchildren, …).
+  List<ChatSession> descendantsOf(String sessionId) {
+    final out = <ChatSession>[];
+    final queue = <String>[sessionId];
+    while (queue.isNotEmpty) {
+      final id = queue.removeAt(0);
+      for (final child in childrenOf(id)) {
+        out.add(child);
+        queue.add(child.id);
+      }
+    }
+    return out;
+  }
+
+  /// Path from the root chat down to [sessionId] (inclusive).
+  List<ChatSession> lineageOf(String sessionId) {
+    final chain = <ChatSession>[];
+    var current = sessionById(sessionId);
+    final seen = <String>{};
+    while (current != null && seen.add(current.id)) {
+      chain.insert(0, current);
+      current = sessionById(current.parentId);
+    }
+    return chain;
+  }
+
+  /// Register a subagent session parented to [parent] and return it. The
+  /// child inherits the parent's provider/model so it can run immediately.
+  ChatSession createSubagentSession({
+    required ChatSession parent,
+    required String label,
+    required String mode,
+    bool continuable = false,
+    List<String> allowedTools = const [],
+  }) {
+    final child = ChatSession(
+      id: 'sub-${DateTime.now().microsecondsSinceEpoch}',
+      title: label.isEmpty ? 'Subagent' : label,
+      model: parent.model,
+      providerId: parent.providerId,
+      mode: mode,
+      parentId: parent.id,
+      agentLabel: label,
+      agentState: 'running',
+      agentContinuable: continuable,
+      agentAllowedTools: allowedTools,
+      // Children share the parent's working folder so their edits land in
+      // the same project; without a pinned folder they get their own
+      // sandbox workspace (sandboxId defaults to the child id).
+      workspaceFolder: parent.workspaceFolder,
+      repo: parent.repo,
+    );
+    sessions.insert(0, child);
+    notifyListeners();
+    persistSessions();
+    return child;
+  }
+
+  /// Update a subagent's lifecycle state (and optionally its final answer).
+  void setAgentState(String sessionId, String state, {String? result}) {
+    final s = sessionById(sessionId);
+    if (s == null) return;
+    s.agentState = state;
+    if (result != null) s.agentResult = result;
+    notifyListeners();
+    persistSessions();
+  }
+
   ProviderConfig get defaultProvider => providers.first;
 
   ProviderConfig? providerById(String? id) {
@@ -909,7 +1049,13 @@ class AppState extends ChangeNotifier {
 
   ChatSession _ensureActiveSession() {
     final existing = activeSession;
-    if (existing != null) return existing;
+    // A subagent session is never the implicit target for user input.
+    if (existing != null && !existing.isSubagent) return existing;
+    final reuse = rootSessions.firstOrNull;
+    if (reuse != null) {
+      activeSessionId = reuse.id;
+      return reuse;
+    }
     final session = ChatSession(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       title: 'New chat',
@@ -997,16 +1143,20 @@ class AppState extends ChangeNotifier {
 
   void deleteSession(String id) {
     final s = sessions.where((x) => x.id == id).firstOrNull;
-    sessions.removeWhere((x) => x.id == id);
-    if (activeSessionId == id) {
-      activeSessionId = sessions.isEmpty ? null : sessions.first.id;
+    // A chat owns its subagents: deleting it deletes their transcripts and
+    // workspaces too, otherwise orphan children linger invisibly forever.
+    final doomed = <ChatSession>[?s, ...descendantsOf(id)];
+    sessions.removeWhere((x) => doomed.any((d) => d.id == x.id));
+    if (activeSessionId == null ||
+        doomed.any((d) => d.id == activeSessionId)) {
+      activeSessionId = rootSessions.isEmpty ? null : rootSessions.first.id;
     }
-    // The deleted session's run dies with it (its jobs, queue, stream).
-    onSessionDeleted?.call(id);
-    // Its workspace dies with it too — files dir was never cleaned
-    // before, so deleted sessions leaked their ws_<id> dirs forever.
-    if (s != null) {
-      final sid = s.sandboxId;
+    for (final dead in doomed) {
+      // The deleted session's run dies with it (its jobs, queue, stream).
+      onSessionDeleted?.call(dead.id);
+      // Its workspace dies with it too — files dir was never cleaned
+      // before, so deleted sessions leaked their ws_<id> dirs forever.
+      final sid = dead.sandboxId;
       if (sid != null) unawaited(SandboxService.I.deleteWorkspace(sid));
     }
     notifyListeners();

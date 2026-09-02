@@ -34,15 +34,13 @@ specs in §2. Findings below are code-level defects, separate from the feature g
 | A14 | "Change folder" lost the pinned folder on cancel | it cleared the folder BEFORE opening the picker | picker writes only on success |
 | A15 | A permanent fake "Loading earlier…" spinner | the row rendered whenever `hidden > 0`, never consulting `_paging` | spinner only while paging; otherwise a scroll-up affordance with the hidden count |
 | A16 | Retries/backoff were invisible | `AgentService.events` is rendered by no UI file, so "retrying in 9s" never reached the user | `_AgentRun.statusLine` + `statusFor(sessionId)` feed the typing row |
+| A17 | Subagents were opaque and half-broken | a child ran on a second `AgentService` with its own throwaway message list: no transcript to open, `interrupt_agent` was a no-op (child `activeRunId` never set), follow-ups restarted from scratch, and children inherited the parent's run Zone so they could raise approvals in the parent's composer | rewritten: a subagent is a REAL `ChatSession` (own transcript/tool cards/streaming/workspace) run through `runTask`, `cancelRunFor(sessionId)` stops it, follow-ups continue the same transcript, and children auto-approve while user-facing tools are refused |
 
 ### Known, not yet fixed (tracked)
 
 | # | Defect | Where | Note |
 |---|---|---|---|
 | C1 | Compaction cannot shrink the in-flight request | `msgs` built once; `forceCompact` only inserts a summary | overflow recovery grows the request; auto-compaction only helps the NEXT run |
-| C2 | `interrupt_agent` is a no-op | child's `activeRunId` never set; `_cancelRequested` resolves through the parent's Zone bucket | subagents cannot be stopped |
-| C3 | Subagents are not continuable | `_BgSubagent.run` rebuilds `msgs` from scratch | no child history |
-| C4 | Subagent can raise a user-facing approval | `_runCtx` is a Zone value inherited by children | contradicts "subagents auto-approve" |
 | C5 | Session todos never clear at turn start | `_runTaskBody` resets nudge/produced, not `s.todos` | stale checklist persists |
 | C6 | No cache-read/cache-write token buckets, no tok/s, TTFT is first-turn only | `_runTaskBody` metering | Usage/stats parity gap |
 | C7 | `file_write` writes only to RepoCache; `fs_edit create` only to disk | split write paths | `file_write` then `run_shell cat` fails |
@@ -65,7 +63,7 @@ specs in §2. Findings below are code-level defects, separate from the feature g
 | B5 | P2 | Reasoning text too large/heavy vs DSH. Now 12.5px muted body via `_DshMarkdown(fontSize:, color:)`. | `chat_screen.dart` `_ReasoningCard` | DONE |
 | B6 | P1 | Links not clickable, text not selectable. Now `selectable: true` + `onTapLink` (http(s) → in-app browser, others → `url_launcher`), user bubbles use `SelectableText`. | `pubspec.yaml` · `chat_screen.dart` | DONE |
 | B7 | P2 | No Google sign-in (email/password only, no `google_sign_in` dep). | `lib/ui/auth_screen.dart` | MISS |
-| B8 | P1 | No subagents screen; only a count inside the folded turn strip. | `chat_screen.dart` `_TurnProcessStrip` | MISS |
+| B8 | P1 | No subagent UI: a child's work was invisible (one count in the folded turn strip). Now every subagent is a real session with its own screen — transcript, lineage breadcrumb, descendants menu, status strip, read-only one-shot vs continuable composer with an independent Stop — reachable from the card's Open link, the AppBar Agents badge, or `@` in the composer. | `lib/ui/subagent_screen.dart` · `chat_screen.dart` `ChatTranscript`/`_ToolCard` | DONE |
 | B9 | P2 | Browser cookies/localStorage shared across sessions (tabs are per-session, the WebView profile is global). | `agent_service.dart` browser block | HALF |
 | B10 | P2 | No browser viewport-resize tool. | `lib/ui/browser_screen.dart` | MISS |
 | B11 | P1 | Attach sheet: removed 'Camera' (dead stub) and 'Pick folder'; kept Photos & videos / Document / Generate image. Folder pinning stays on the working-folder chip. | `chat_screen.dart` `_attachSheet` | DONE |
@@ -150,7 +148,7 @@ Every user-visible feature DSH web ships, derived from the installed package set
 | 6 | Todo dock | DONE — `todo_write` + mid-run pending-todo nudge | `agent_service.dart:1719-1743,3255-3281` |
 | 7 | Queue dock | DONE — queue + strict steer + drain | `agent_service.dart:236,448-533` |
 | 8 | Plan mode | HALF — `/plan` toggle, `exit_plan_mode` gated on review, and a Chat about it / Decline / Approve card whose refusal note reaches the model; no composer "Plan x" chip, no plan-task placeholder, `planMode` is not persisted across restart | `agent_service.dart` `_handleExitPlanMode` · `chat_screen.dart` `_PlanReviewCard` |
-| 9 | Subagent lineage UI | MISS — inline count only (dispatch/send_message/interrupt/list tools exist) | `chat_screen.dart:362-374` |
+| 9 | Subagent lineage UI | DONE — child sessions with full transcripts, breadcrumb to the root chat, descendants menu with state/elapsed/rows, read-only one-shot composer, continuable composer with independent Stop, `@` mention of this chat's agents, parent card links into the child; still no keyboard-nav catalog tree and no per-child token totals | `lib/ui/subagent_screen.dart`, `chat_screen.dart` |
 | 10 | Workflow run tree | MISS — no run/phase/member tree | — |
 | 11 | Ralph loop | MISS | — |
 | 12 | Goal bar | HALF — `get_goal`/`create_goal`/`update_goal` tools; no GoalBar strip with pause/resume/clear | `agent_service.dart` goal cases |

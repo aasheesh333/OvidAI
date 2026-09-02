@@ -181,48 +181,43 @@ class _BgJob {
   _BgJob({required this.id, required this.name, required this.command});
 }
 
-/// A background subagent spawned via dispatch_agent with
-/// `run_in_background: true`. Runs on its own AgentService instance and
-/// accepts queued follow-up messages until finished or interrupted.
-class _BgSubagent {
-  final String id;
+/// A dispatched subagent, tracked by the parent that spawned it.
+///
+/// The child is a REAL `ChatSession` (its own transcript, tool cards, live
+/// streaming and workspace), so opening it shows exactly what the child did
+/// instead of an opaque "subagent finished" line. This object is just the
+/// parent-side handle: lifecycle, follow-up inbox, and the reported result.
+class SubagentInfo {  final String id;
   final String label;
-  final AgentService child;
+  final String sessionId;
+  final String parentSessionId;
   final AgentMode parentMode;
   final String prompt;
+
+  /// Follow-up instructions queued by `send_message` (FIFO inbox).
   final List<String> messages = [];
   bool interrupted = false;
   bool finished = false;
   String result = '';
+  final DateTime startedAt = DateTime.now();
+  DateTime? finishedAt;
 
-  _BgSubagent({
+  SubagentInfo({
     required this.id,
     required this.label,
-    required this.child,
+    required this.sessionId,
+    required this.parentSessionId,
     required this.parentMode,
     required this.prompt,
   });
 
-  Future<void> run() async {
-    try {
-      final answer = await child.runSubagent(prompt);
-      result = answer;
-      // Drain queued follow-ups.
-      while (!interrupted && messages.isNotEmpty) {
-        final next = messages.removeAt(0);
-        final follow = await child.runSubagent(
-          'Continue the previous task. New instruction: $next',
-        );
-        result = follow;
-      }
-    } catch (e) {
-      result = 'Subagent failed: $e';
-    } finally {
-      finished = true;
-      child.dispose();
-    }
-  }
+  String get state => finished
+      ? (interrupted ? 'stopped' : 'finished')
+      : (interrupted ? 'stopping' : 'running');
+
+  Duration get elapsed => (finishedAt ?? DateTime.now()).difference(startedAt);
 }
+
 
 /// Per-session agent run state — one per ChatSession so many sessions run
 /// in parallel without interfering (DSH multi-session parity).  Switching
@@ -339,16 +334,7 @@ class _SessionStudio {
 
 ///                  ← tool results loop back to model till final answer
 class AgentService extends ChangeNotifier {
-  AgentService._({bool child = false}) {
-    if (child) {
-      // Subagent children are ephemeral workers. They must NOT touch any
-      // global singleton state: registering AppState hooks here made every
-      // dispatch re-point onSessionDeleted/onSessionSwitched at a child
-      // that is disposed the moment its task ends, and each child also
-      // leaked a 1s reminder timer that outlived it.
-      _detachMode();
-      return;
-    }
+  AgentService._() {
     // Session-local reminder engine (DSH schedule delivery) — ticks
     // every second, no-ops when no schedules exist.
     _startScheduleTimer();
@@ -361,11 +347,6 @@ class AgentService extends ChangeNotifier {
     _refreshSkillRoots();
   }
 
-  /// Named private constructor for subagent children. Detached so their
-  /// mode access never touches a real session (parallel-run mode-bleed fix)
-  /// and so they never own global hooks or timers.
-  factory AgentService._internal() => AgentService._(child: true);
-
   @override
   void dispose() {
     _scheduleTimer?.cancel();
@@ -375,17 +356,13 @@ class AgentService extends ChangeNotifier {
 
   static final AgentService I = AgentService._();
 
-  AgentMode _detachedMode = AgentMode.auto;
-  bool _detached = false;
-
   /// The agent mode that applies to the current execution context.
   ///
   /// Per-session (DSH per-conversation parity): inside a run this resolves
   /// to the RUNNING session's persisted mode; outside a run it resolves to
-  /// the ACTIVE session's mode. Subagent children are detached — they use
-  /// an explicit [_detachedMode] instead of mutating a real session.
+  /// the ACTIVE session's mode. Subagents are real sessions, so their mode
+  /// resolves through the same path — no detached special case.
   AgentMode get mode {
-    if (_detached) return _detachedMode;
     final s = _runCtx?.session ?? AppState.I.activeSession;
     return AgentMode.values.firstWhere(
       (m) => m.name == s?.mode,
@@ -394,22 +371,10 @@ class AgentService extends ChangeNotifier {
   }
 
   set mode(AgentMode m) {
-    if (_detached) {
-      _detachedMode = m;
-      return;
-    }
     final s = _runCtx?.session ?? AppState.I.activeSession;
     if (s == null) return;
     s.mode = m.name;
     AppState.I.persistSessions();
-  }
-
-  /// Detached-mode flag for subagent children — their `mode` access must
-  /// never read or write the parent session's persisted mode (parallel-run
-  /// mode-bleed fix).
-  void _detachMode() {
-    _detached = true;
-    _detachedMode = AgentMode.auto;
   }
 
   final List<AgentEvent> events = [];
@@ -520,8 +485,17 @@ class AgentService extends ChangeNotifier {
 
   /// Stop the current session's run: aborts the in-flight HTTP request
   /// and flags every loop turn to exit at the next checkpoint.
-  void cancelRun() {
-    final r = _run;
+  void cancelRun() => _cancelBucket(_run);
+
+  /// Stop the run that belongs to [sessionId] — used for subagent sessions
+  /// (their Stop button and `interrupt_agent`), which are never the bucket
+  /// the caller's Zone resolves to.
+  void cancelRunFor(String sessionId) {
+    final r = _runs[sessionId];
+    if (r != null) _cancelBucket(r);
+  }
+
+  void _cancelBucket(_AgentRun r) {
     if (r.activeRunId == null) return;
     r.cancelRequested = true;
     // Abort the in-flight request — works while connecting AND while
@@ -1301,18 +1275,6 @@ class AgentService extends ChangeNotifier {
   }
 
   // ── Provider / endpoint resolution ────────────────────────────────────
-  /// Resolve the configured provider for [session]. Never mutates the
-  /// provider — session.model is the single source of truth for which
-  /// model a run uses.
-  ProviderConfig? _providerFor(ChatSession session) {
-    final provider = AppState.I.providerForSession(session);
-    if (provider == null || !provider.isConfigured) return null;
-    if (session.model.isEmpty || session.model == 'Select a provider') {
-      return null;
-    }
-    return provider;
-  }
-
   Uri _endpoint(ProviderConfig p) {
     var b = p.baseUrl;
     if (!b.endsWith('/')) b += '/';
@@ -2118,13 +2080,14 @@ class AgentService extends ChangeNotifier {
       'function': {
         'name': 'dispatch_agent',
         'description':
-            'Launch a subagent — a fresh AI agent instance with its own '
-            'context window and tool access.  Use for complex subtasks '
-            'that need focused exploration (e.g. "search the codebase '
-            'for all API endpoints and summarize their auth patterns"). '
-            'The subagent runs to completion and returns its final '
-            'answer.  The subagent does NOT see this chat\'s history — '
-            'pass everything it needs in the prompt.',
+            'Dispatch a subagent — a child chat session with its own '
+            'transcript, workspace and tool access. The user can open it '
+            'and watch every step. Use it for focused subtasks (e.g. '
+            '"map every API endpoint and summarise its auth"). The child '
+            'does NOT see this chat\'s history, so pass everything it needs '
+            'in the prompt. Foreground: waits and returns the answer. '
+            'Background: returns immediately with an id — manage it with '
+            'send_message / interrupt_agent / list_agents.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -2132,19 +2095,37 @@ class AgentService extends ChangeNotifier {
               'type': 'string',
               'description': 'Detailed task description for the subagent',
             },
+            'label': {
+              'type': 'string',
+              'description':
+                  'Short title for the subagent session (shown to the user)',
+            },
             'mode': {
               'type': 'string',
               'description':
-                  'Agent mode: "studio" (full sandbox) or '
-                  '"quick" (phone terminal). Default: current mode.',
-              'enum': ['studio', 'quick'],
+                  'Access mode for the child. Can only match or LOWER your '
+                  'own privilege: safe (read-only) < auto < studio < drive. '
+                  'Default: your current mode.',
+              'enum': ['safe', 'auto', 'studio', 'drive'],
+            },
+            'allowed_tools': {
+              'type': 'array',
+              'items': {'type': 'string'},
+              'description':
+                  'Restrict the child to these tool names (default: all of '
+                  'yours). Use it to keep a research agent read-only.',
             },
             'run_in_background': {
               'type': 'boolean',
               'description':
-                  'Run the subagent in the background and return an id '
-                  'immediately. Use send_message / interrupt_agent / '
-                  'list_agents to manage it.',
+                  'Return an id immediately instead of waiting for the '
+                  'child to finish.',
+            },
+            'continuable': {
+              'type': 'boolean',
+              'description':
+                  'Keep the child open for follow-up instructions after it '
+                  'answers (default: true for background, false otherwise).',
             },
           },
           'required': ['prompt'],
@@ -2177,8 +2158,10 @@ class AgentService extends ChangeNotifier {
       'function': {
         'name': 'send_message',
         'description':
-            'Send a message to a running background subagent. The message '
-            'is queued as its next turn.',
+            'Send a follow-up instruction to a subagent. If it is still '
+            'working the message is queued as its next turn; if it already '
+            'answered and is continuable, it starts a new turn on the same '
+            'transcript.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -2193,7 +2176,9 @@ class AgentService extends ChangeNotifier {
       'type': 'function',
       'function': {
         'name': 'interrupt_agent',
-        'description': 'Interrupt a running background subagent.',
+        'description':
+            'Stop a running subagent. Its transcript is kept so you (and '
+            'the user) can still read what it did.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -2208,8 +2193,9 @@ class AgentService extends ChangeNotifier {
       'function': {
         'name': 'list_agents',
         'description':
-            'List background subagents. scope: children (direct) or '
-            'descendants (all).',
+            'List subagents with state, elapsed time, transcript size and '
+            'queued follow-ups. scope: children (this session) or '
+            'descendants (the whole tree below it).',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -2961,77 +2947,34 @@ class AgentService extends ChangeNotifier {
     }
   }
 
-  /// Compact subagent loop (no UI events, no session message storage,
-  /// no approval prompts).  Runs the model with tool calls and returns
-  /// the final assistant text.  Used by dispatch_agent.
-  Future<String> runSubagent(String prompt) async {
-    final session = _runSession;
-    if (session == null) return 'No active session for subagent.';
-    final sel = _providerFor(session);
-    if (sel == null) return 'No provider configured for subagent.';
-    return await _runSubagentLoop(sel, prompt);
-  }
+  /// Subagent tool policy.
+  ///
+  /// A child runs the same loop as its parent, so the gates that exist for a
+  /// human chat have to be re-decided for an autonomous one:
+  ///   • approvals are auto-granted (there is no user watching a child),
+  ///   • user-facing tools are refused (a child must not hijack the parent's
+  ///     composer with questions or plan reviews),
+  ///   • a parent-supplied `allowed_tools` filter is enforced,
+  ///   • children cannot dispatch grandchildren past the depth cap (that is
+  ///     enforced in _handleDispatchAgent via the session lineage).
+  static const _childDeniedTools = {
+    'ask_user_question',
+    'exit_plan_mode',
+    'request_permission',
+  };
 
-  Future<String> _runSubagentLoop(ProviderConfig p, String prompt) async {
-    final session = _runSession;
-    if (session == null) return 'No active session for subagent.';
-    final sys =
-        'You are a focused subagent. Do the task and give a final answer. '
-        'You have the same tools as the parent agent. Be concise. Match '
-        'the task language. Do not call exit_plan_mode (subagents execute).';
-    final msgs = <Map<String, dynamic>>[
-      {'role': 'system', 'content': sys},
-      {'role': 'user', 'content': prompt},
-    ];
-    for (var turn = 0; turn < 8; turn++) {
-      final msg = await _callLlm(p, msgs, session);
-      if (msg == null) {
-        return 'Subagent model error: ${lastError ?? "unknown"}';
-      }
-      final toolCalls = msg['tool_calls'] as List?;
-      if (toolCalls == null || toolCalls.isEmpty) {
-        return (msg['content'] as String?) ?? '(no answer)';
-      }
-      msgs.add({
-        'role': 'assistant',
-        'content': msg['content'] ?? '',
-        'tool_calls': toolCalls,
-      });
-      for (final tc in toolCalls) {
-        final fn = tc['function'];
-        final name = fn['name'];
-        final args =
-            jsonDecode(fn['arguments'] ?? '{}') as Map<String, dynamic>;
-        // Subagents auto-approve all tools (no UI).
-        final result = await _dispatchSubagent(name, args);
-        msgs.add({
-          'role': 'tool',
-          'tool_call_id': tc['id'] ?? name,
-          'name': name,
-          'content': result,
-        });
-      }
+  String? _subagentToolBlock(ChatSession child, String name) {
+    if (_childDeniedTools.contains(name)) {
+      return 'SUBAGENT: "$name" is not available to a subagent (no user is '
+          'watching this session). Decide yourself, or report back to the '
+          'parent agent with what you need.';
     }
-    return 'Subagent reached turn limit without final answer.';
-  }
-
-  /// Subagent dispatch — auto-approves (no user UI for child agents).
-  /// Child INHERITS parent's planMode so it cannot bypass plan
-  /// restrictions via dispatch_agent (read-only tools only while
-  /// the parent is planning).
-  Future<String> _dispatchSubagent(
-    String name,
-    Map<String, dynamic> args,
-  ) async {
-    final req = pendingApproval;
-    final parentPlanMode = planMode;
-    pendingApproval = null;
-    try {
-      return await _dispatch(name, args);
-    } finally {
-      pendingApproval = req;
-      planMode = parentPlanMode;
+    final allowed = child.agentAllowedTools;
+    if (allowed.isNotEmpty && !allowed.contains(name)) {
+      return 'SUBAGENT: "$name" is outside the tool set your parent granted '
+          '(${allowed.join(', ')}). Use only those tools.';
     }
+    return null;
   }
 
   Future<void> runTask(String originalPrompt, {String? sessionId}) async {
@@ -3166,6 +3109,16 @@ Execution tiers: run_shell picks the best tier automatically.
 ${s.goal != null && s.goal!['status'] == 'active' ? '\nACTIVE GOAL (round ${s.goal!['round']}): "${s.goal!['objective']}". This user message is a goal round — work toward the objective, then update_goal with progress. Do not restate the goal; just advance it.' : ''}
 ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a [reminder] message arrives, treat its prompt as a user request and act on it.' : ''}
 ${s.todos.isNotEmpty ? '\nSESSION TODOS (${s.todos.length} item${s.todos.length == 1 ? '' : 's'} — follow this checklist, do not abandon it):\n${s.todos.map((t) => '- [${t['status'] == 'completed' ? 'x' : t['status'] == 'in_progress' ? '~' : ' '}] ${t['content']}').join('\n')}\nWork through the todo list. Mark items in_progress BEFORE doing them and completed AFTER they are done. If all items are completed, say so and give your final answer.' : ''}
+${s.isSubagent ? '''
+
+YOU ARE A SUBAGENT.
+Your parent agent dispatched you with the task below; you do NOT see the
+parent chat's history, so work only from what you were given. You are
+unattended: ask_user_question, exit_plan_mode and request_permission are
+blocked${s.agentAllowedTools.isEmpty ? '' : ', and you may only use these tools: ${s.agentAllowedTools.join(', ')}'}.
+Decide for yourself, finish the task, and end with ONE final message that is
+your report to the parent: what you did, what you found, and any file paths
+or commands that matter. Keep it tight — the parent reads only that message.''' : ''}
 ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock()}'}
 ''';
 
@@ -3980,6 +3933,15 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     // still run when auto-run-safe is on (or ask otherwise).
     final roBlock = _readOnlyBlock(name, args);
     if (roBlock != null) return roBlock;
+    // ── Subagent policy gate ──
+    // A child session runs autonomously: no user is watching it, so
+    // user-facing tools are refused and a parent-imposed tool filter is
+    // enforced here (approvals auto-grant in _maybeApprove).
+    final runningSession = _runSession;
+    if (runningSession != null && runningSession.isSubagent) {
+      final childBlock = _subagentToolBlock(runningSession, name);
+      if (childBlock != null) return childBlock;
+    }
     switch (name) {
       case 'run_shell':
         final cmd = args['command'] as String;
@@ -4979,6 +4941,12 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
   }
 
   Future<bool> _maybeApprove(String tool, String summary, String detail) async {
+    // Subagent sessions run unattended — nobody is looking at their
+    // composer, so an approval prompt there would deadlock the child.
+    // Their privileges are already bounded by the inherited mode, the
+    // read-only gate and the parent's allowed_tools filter.
+    final running = _runSession;
+    if (running != null && running.isSubagent) return true;
     // Destructive commands always confirm — no mode skips this gate.
     // `summary` carries the raw command for run_shell/job_start/run_code.
     if ((tool == 'run_shell' || tool == 'job_start' || tool == 'run_code') &&
@@ -6133,11 +6101,10 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     }
   }
 
-  // ── Subagent (DSH dispatch_agent equivalent) ──
-  // A fresh AgentService child instance with its own context window runs
-  // the task to completion and returns its final answer as the tool
-  // result.  The child never touches the parent chat's session.
-  int _subagentDepth = 0;
+  // ── Subagents ─────────────────────────────────────────────────────────
+  // A subagent is a REAL session (own transcript, tool cards, streaming,
+  // workspace) parented to the dispatching chat. Depth is tracked per run
+  // so a child cannot spawn an unbounded tower of grandchildren.
   static const _maxSubagentDepth = 2;
 
   // ── Skills (reusable instruction bundles) ─────────────────────────────
@@ -6201,20 +6168,20 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
   @visibleForTesting
   void emitForTest(String kind, String text) => _emit(kind, text);
 
-  /// Test seam: create a detached subagent child and optionally request a
-  /// mode — verifies inheritance/clamping without spawning a run.
-  AgentService childForTest({String? modeName}) {
-    final child = AgentService._internal();
+  /// Test seam: the mode a child would get for [modeName] under the current
+  /// parent mode — a child can inherit or downgrade, never escalate.
+  @visibleForTesting
+  AgentMode childModeForTest({String? modeName}) {
     final parentMode = mode;
-    child.mode = parentMode;
+    var childMode = parentMode;
     if (modeName != null) {
       for (final m in AgentMode.values) {
         if (m.name == modeName && _modeRank(m) <= _modeRank(parentMode)) {
-          child.mode = m;
+          childMode = m;
         }
       }
     }
-    return child;
+    return childMode;
   }
 
   Future<String> _handleSkill(Map<String, dynamic> args) async {
@@ -6231,19 +6198,86 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     return '<skill_content>\n${skill.content}\n</skill_content>';
   }
 
-  // ── Background subagents ──────────────────────────────────────────────
-  final Map<String, _BgSubagent> _subagents = {};
+  // ── Subagents ─────────────────────────────────────────────────────────
+  /// Dispatched subagents by id. Each one owns a real child session.
+  final Map<String, SubagentInfo> _subagents = {};
   int _subagentCounter = 0;
+
+  /// Subagent handles whose parent is [sessionId] (newest first).
+  List<SubagentInfo> subagentsOf(String sessionId) => _subagents.values
+      .where((s) => s.parentSessionId == sessionId)
+      .toList()
+      .reversed
+      .toList();
+
+  /// The handle that owns [sessionId], if that session is a subagent.
+  SubagentInfo? subagentForSession(String sessionId) =>
+      _subagents.values.where((s) => s.sessionId == sessionId).firstOrNull;
+
+  /// UI seam: is this subagent session still accepting follow-ups?
+  bool canContinueSubagent(String sessionId) {
+    final s = AppState.I.sessionById(sessionId);
+    if (s == null || !s.isSubagent) return false;
+    return s.agentContinuable;
+  }
+
+  /// Feed a follow-up instruction to a subagent session (parent tool call or
+  /// the child's own composer). Returns a status line for the caller.
+  Future<String> continueSubagent(String sessionId, String message) async {
+    final text = message.trim();
+    if (text.isEmpty) return 'message is empty';
+    final child = AppState.I.sessionById(sessionId);
+    if (child == null || !child.isSubagent) return 'not a subagent session';
+    final sub = subagentForSession(sessionId);
+    if (!child.agentContinuable) {
+      return 'This subagent is a completed one-shot record — dispatch a new '
+          'agent instead.';
+    }
+    if (sub != null && !sub.finished) {
+      // Still working: FIFO inbox, picked up at the end of the current turn.
+      sub.messages.add(text);
+      _emit('think', 'queued follow-up for ${sub.id}');
+      notifyListeners();
+      return 'queued as the next turn for ${sub.id}';
+    }
+    // Settled but continuable → start a fresh turn on the same transcript.
+    final handle =
+        sub ??
+        SubagentInfo(
+          id: 'sub-${++_subagentCounter}',
+          label: child.agentLabel ?? child.title,
+          sessionId: child.id,
+          parentSessionId: child.parentId ?? child.id,
+          parentMode: mode,
+          prompt: text,
+        );
+    handle
+      ..finished = false
+      ..interrupted = false
+      ..finishedAt = null;
+    _subagents[handle.id] = handle;
+    AppState.I.setAgentState(child.id, 'running');
+    unawaited(_runSubagentSession(handle, text));
+    return 'resumed ${handle.id}';
+  }
+
+  /// Stop a subagent's run (its own Stop button or `interrupt_agent`).
+  void interruptSubagent(String sessionId) {
+    final sub = subagentForSession(sessionId);
+    if (sub != null) sub.interrupted = true;
+    cancelRunFor(sessionId);
+    AppState.I.setAgentState(sessionId, 'stopped');
+    notifyListeners();
+  }
 
   Future<String> _handleSendMessage(Map<String, dynamic> args) async {
     final id = args['subagent_id'] as String;
     final message = args['message'] as String;
     final sub = _subagents[id];
-    if (sub == null) return 'Subagent $id not found (list_agents shows active ids).';
-    if (sub.finished) return 'Subagent $id already finished.';
-    sub.messages.add(message);
-    _emit('think', 'queued message for subagent $id');
-    return 'message queued as the next turn for subagent $id';
+    if (sub == null) {
+      return 'Subagent $id not found (list_agents shows active ids).';
+    }
+    return await continueSubagent(sub.sessionId, message);
   }
 
   String _handleInterruptAgent(Map<String, dynamic> args) {
@@ -6251,22 +6285,33 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     final sub = _subagents[id];
     if (sub == null) return 'Subagent $id not found.';
     if (sub.finished) return 'Subagent $id already finished.';
-    sub.interrupted = true;
-    try {
-      sub.child.cancelRun();
-    } catch (_) {}
+    interruptSubagent(sub.sessionId);
     _emit('think', 'interrupted subagent $id');
-    return 'interrupted subagent $id';
+    return 'interrupted subagent $id — its transcript is kept.';
   }
 
   String _handleListAgents(Map<String, dynamic> args) {
     final scope = args['scope'] as String? ?? 'children';
-    if (_subagents.isEmpty) return 'No background subagents.';
-    final lines = _subagents.values.map((s) {
-      final status = s.finished ? 'finished' : s.interrupted ? 'stopped' : 'running';
-      return '${s.id} [$status] — ${cleanTruncate(s.label, 60)}';
+    final parent = _runSession;
+    if (parent == null) return 'No active session.';
+    final ids = scope == 'descendants'
+        ? {
+            parent.id,
+            ...AppState.I.descendantsOf(parent.id).map((s) => s.id),
+          }
+        : {parent.id};
+    final mine = _subagents.values
+        .where((s) => ids.contains(s.parentSessionId))
+        .toList();
+    if (mine.isEmpty) return 'No subagents dispatched ($scope).';
+    final lines = mine.map((s) {
+      final child = AppState.I.sessionById(s.sessionId);
+      final turns = child?.messages.length ?? 0;
+      return '${s.id} [${s.state}] ${s.elapsed.inSeconds}s · $turns rows · '
+          '${s.messages.isEmpty ? 'inbox empty' : '${s.messages.length} queued'}'
+          ' — ${cleanTruncate(s.label, 60)}';
     }).join('\n');
-    return 'Background subagents ($scope, ${_subagents.length} total):\n$lines';
+    return 'Subagents ($scope, ${mine.length}):\n$lines';
   }
 
   // ── Mode privilege ranking (restriction order) ──────────────────────
@@ -6280,63 +6325,189 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
   };
 
   Future<String> _handleDispatchAgent(Map<String, dynamic> args) async {
-    final prompt = args['prompt'] as String;
+    final prompt = (args['prompt'] as String).trim();
+    if (prompt.isEmpty) return 'prompt is required';
     final modeName = args['mode'] as String?;
     final background = args['run_in_background'] as bool? ?? false;
-    _emit('think', 'dispatching subagent…');
-    if (_subagentDepth >= _maxSubagentDepth) {
+    final continuable = args['continuable'] as bool? ?? background;
+    final label = ((args['label'] as String?)?.trim().isNotEmpty ?? false)
+        ? (args['label'] as String).trim()
+        : cleanTruncate(prompt, 60);
+    final allowed =
+        (args['allowed_tools'] as List?)?.whereType<String>().toList() ??
+        const <String>[];
+    final parent = _runSession;
+    if (parent == null) return 'No active session to dispatch from.';
+
+    // Depth comes from the real session lineage, so a grandchild cannot
+    // escape the cap by starting from a fresh service instance.
+    final depth = AppState.I.lineageOf(parent.id).length - 1;
+    if (depth >= _maxSubagentDepth) {
       return 'Subagent depth limit ($_maxSubagentDepth) reached — '
           'do the task yourself with the tools you have.';
     }
+
+    // The child inherits the parent's mode; an explicit `mode` can only
+    // DOWNGRADE privilege (a Read-Only parent never spawns Full Access).
     final parentMode = mode;
-    final child = AgentService._internal();
-    child._subagentDepth = _subagentDepth + 1;
-    // Child inherits planMode → mutating tools stay blocked while the
-    // parent agent is planning (no plan-mode escape via subagent).
-    child.planMode = planMode;
-    // Child inherits the parent's mode by default. An explicit `mode` arg
-    // can only DOWNGRADE privilege (a Read-Only parent can never spawn a
-    // Full-Access child) — mode restrictions are never escapable.
-    child.mode = parentMode;
+    var childMode = parentMode;
     if (modeName != null) {
       for (final m in AgentMode.values) {
         if (m.name == modeName && _modeRank(m) <= _modeRank(parentMode)) {
-          child.mode = m;
+          childMode = m;
         }
       }
     }
-    // Pipe the child's internal events into the parent's live subagent
-    // tool card so the user sees what the subagent is doing.
-    child.addListener(() {
-      if (_activeToolMsg != null && child.events.isNotEmpty) {
-        final e = child.events.last;
-        _toolStream('${e.kind}: ${e.text}\n');
-      }
-    });
-    child._emit('think', 'subagent task: ${cleanTruncate(prompt, 80)}');
+
+    final child = AppState.I.createSubagentSession(
+      parent: parent,
+      label: label,
+      mode: childMode.name,
+      continuable: continuable,
+      allowedTools: allowed,
+    );
+    // Plan mode is inherited so a child cannot execute mutations while the
+    // parent is still planning.
+    _runFor(child.id).planMode = planMode;
+
+    final id = 'sub-${++_subagentCounter}';
+    final sub = SubagentInfo(
+      id: id,
+      label: label,
+      sessionId: child.id,
+      parentSessionId: parent.id,
+      parentMode: parentMode,
+      prompt: prompt,
+    );
+    _subagents[id] = sub;
+    _emit('think', 'dispatched $id → ${cleanTruncate(label, 40)}');
+
+    // The parent's tool card mirrors the child's progress live and links to
+    // the full child transcript.
+    final card = _activeToolMsg;
+    if (card != null) {
+      card.toolSessionId = child.id;
+      card.toolSummary = cleanTruncate('$id · $label', 140);
+      card.toolDetail =
+          'subagent $id · mode ${childMode.label}\n'
+          'session ${child.id}\n'
+          'task: $prompt\n'
+          '${allowed.isEmpty ? '' : 'tools: ${allowed.join(', ')}\n'}'
+          '\n';
+      AppState.I.refresh();
+    }
+
     if (background) {
-      final id = 'sub-${++_subagentCounter}';
-      final sub = _BgSubagent(
-        id: id,
-        label: cleanTruncate(prompt, 80),
-        child: child,
-        parentMode: parentMode,
-        prompt: prompt,
-      );
-      _subagents[id] = sub;
-      _emit('think', 'started background subagent $id');
-      unawaited(sub.run());
-      return 'started background subagent $id';
+      unawaited(_runSubagentSession(sub, prompt, card: card));
+      return 'Started background subagent $id (session ${child.id}). '
+          'Open it from the subagent card to watch it work. Use '
+          'send_message / interrupt_agent / list_agents to manage it.';
+    }
+    await _runSubagentSession(sub, prompt, card: card);
+    final answer = sub.result.trim();
+    return answer.isEmpty
+        ? 'Subagent $id finished without a final answer.'
+        : '[$id ${sub.state} · ${sub.elapsed.inSeconds}s]\n$answer';
+  }
+
+  /// Run a subagent's session as a REAL run: its transcript, tool cards and
+  /// streaming all land in the child session, so the user can open it and
+  /// see exactly what happened.
+  Future<void> _runSubagentSession(
+    SubagentInfo sub,
+    String firstPrompt, {
+    Message? card,
+  }) async {
+    final child = AppState.I.sessionById(sub.sessionId);
+    if (child == null) {
+      sub
+        ..finished = true
+        ..finishedAt = DateTime.now()
+        ..result = 'subagent session missing';
+      return;
+    }
+    // Mirror the child's newest activity into the parent's card while it
+    // works (the card is the parent-side view of the child's progress).
+    Timer? mirror;
+    if (card != null) {
+      var lastSeen = child.messages.length;
+      mirror = Timer.periodic(const Duration(milliseconds: 900), (_) {
+        if (child.messages.length <= lastSeen) return;
+        for (final m in child.messages.skip(lastSeen)) {
+          final line = switch (m.kind) {
+            MsgKind.tool =>
+              '· ${m.toolTitle ?? m.toolName ?? 'tool'}'
+                  '${(m.toolSummary ?? '').isEmpty ? '' : ' — ${m.toolSummary}'}',
+            MsgKind.reasoning => '· thinking…',
+            _ => m.role == 'user'
+                ? '> ${cleanTruncate(m.content, 100)}'
+                : '· ${cleanTruncate(m.content, 100)}',
+          };
+          card.toolDetail = '${card.toolDetail ?? ''}$line\n';
+        }
+        lastSeen = child.messages.length;
+        card.toolSummary = cleanTruncate(
+          '${sub.id} · ${sub.state} · ${child.messages.length} rows',
+          140,
+        );
+        AppState.I.refresh();
+      });
     }
     try {
-      final answer = await child.runSubagent(prompt);
-      _emit('think', 'subagent finished (${answer.length} chars)');
-      return answer;
+      var next = firstPrompt;
+      while (true) {
+        child.messages.add(Message(role: 'user', content: next));
+        AppState.I.refresh();
+        AppState.I.persistSessions();
+        // A full run: streaming bubbles, tool cards, compaction, jobs — all
+        // inside the child's own session and workspace.
+        await runTask(next, sessionId: child.id);
+        sub.result = _lastAssistantText(child);
+        if (sub.interrupted) break;
+        if (sub.messages.isEmpty) break;
+        next = sub.messages.removeAt(0);
+      }
+      sub
+        ..finished = true
+        ..finishedAt = DateTime.now();
+      AppState.I.setAgentState(
+        child.id,
+        sub.interrupted ? 'stopped' : 'finished',
+        result: sub.result,
+      );
     } catch (e) {
-      return 'Subagent failed: $e';
+      sub
+        ..finished = true
+        ..finishedAt = DateTime.now()
+        ..result = 'Subagent failed: $e';
+      AppState.I.setAgentState(child.id, 'failed', result: sub.result);
     } finally {
-      child.dispose();
+      mirror?.cancel();
+      if (card != null) {
+        card.toolSummary = cleanTruncate(
+          '${sub.id} · ${sub.state} · ${sub.elapsed.inSeconds}s',
+          140,
+        );
+        card.toolDetail =
+            '${card.toolDetail ?? ''}\n'
+            '── ${sub.state} in ${sub.elapsed.inSeconds}s ──\n'
+            '${cleanTruncate(sub.result, 2000)}\n';
+      }
+      _emit('think', '${sub.id} ${sub.state}');
+      notifyListeners();
     }
+  }
+
+  /// The child's last real answer — what the parent gets back as the tool
+  /// result (tool cards and reasoning rows are apparatus, not the answer).
+  String _lastAssistantText(ChatSession s) {
+    for (final m in s.messages.reversed) {
+      if (m.role != 'assistant') continue;
+      if (m.kind != MsgKind.text) continue;
+      final text = m.content.trim();
+      if (text.isNotEmpty) return text;
+    }
+    return '(no answer)';
   }
 
   // ── Background jobs (DSH ctx.jobs equivalent) — state lives on _run ──

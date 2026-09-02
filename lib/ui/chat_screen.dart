@@ -11,6 +11,7 @@ import '../core/state.dart';
 import 'sandbox_setup.dart';
 import 'browser_screen.dart';
 import 'sidebar.dart';
+import 'subagent_screen.dart';
 import '../core/agent_service.dart';
 import '../core/commands.dart';
 import '../core/mcp_service.dart';
@@ -84,6 +85,55 @@ List<_ChatItem> _foldMessages(List<Message> messages) {
     }
   }
   return out;
+}
+
+/// Read/write transcript for ONE session — the same rendering the main chat
+/// uses (folded tool/reasoning strips, streaming bubbles, tool cards).
+///
+/// The subagent view renders a child session with this, so a subagent's work
+/// is shown in full instead of being summarised into one line.
+class ChatTranscript extends StatelessWidget {
+  final ChatSession session;
+  final ScrollController? scrollController;
+
+  /// Show the live status row at the tail (the child is mid-turn).
+  final bool typing;
+  const ChatTranscript({
+    super.key,
+    required this.session,
+    this.scrollController,
+    this.typing = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([AppState.I, AgentService.I]),
+      builder: (_, _) {
+        final items = _foldMessages(session.messages);
+        final count = items.length + (typing ? 1 : 0);
+        return MediaQuery(
+          data: MediaQuery.of(context).copyWith(
+            textScaler: TextScaler.linear(AppState.I.chatFontScale),
+          ),
+          child: ListView.builder(
+            controller: scrollController,
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            itemCount: count,
+            itemBuilder: (_, i) {
+              if (i == items.length) return const _TypingBubble();
+              return _buildItem(
+                items[i],
+                session,
+                onAction: () {},
+                input: TextEditingController(),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
 }
 
 /// DSH `row-in` / `wide-in` entrance — fade + 8px slide-up, plays ONCE
@@ -592,6 +642,54 @@ class _ChatScreenState extends State<ChatScreen>
               ),
             ),
             actions: [
+              // Agents — subagent catalog for this chat (state, elapsed,
+              // transcript size; tap to open a child's own session).
+              AnimatedBuilder(
+                animation: Listenable.merge([app, AgentService.I]),
+                builder: (_, _) {
+                  final kids = s == null ? 0 : app.childrenOf(s.id).length;
+                  if (kids == 0) return const SizedBox.shrink();
+                  final live = s == null
+                      ? 0
+                      : app
+                            .childrenOf(s.id)
+                            .where((c) => AgentService.I.busyFor(c.id))
+                            .length;
+                  return Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      IconButton(
+                        tooltip: 'Subagents',
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(Icons.account_tree_outlined, size: 19),
+                        onPressed: () => showSubagentCatalog(context, s!.id),
+                      ),
+                      Positioned(
+                        top: 8,
+                        right: 6,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 4,
+                            vertical: 1,
+                          ),
+                          decoration: BoxDecoration(
+                            color: live > 0 ? Aether.accent : Aether.textFaint,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            '$kids',
+                            style: const TextStyle(
+                              fontSize: 8.5,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
               IconButton(
                 tooltip: 'Studio — code & terminal',
                 visualDensity: VisualDensity.compact,
@@ -1556,6 +1654,9 @@ class _ToolCardState extends State<_ToolCard>
     final stopped = m.toolState == 'stopped';
     final iconKind = AgentService.toolIcon(m.toolName ?? '');
     final hasDetail = (m.toolDetail ?? '').trim().isNotEmpty;
+    // dispatch_agent rows own a real child session — the row becomes a link
+    // into that transcript (and the child may still be running).
+    final childSessionId = m.toolSessionId;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 4),
@@ -1629,6 +1730,34 @@ class _ToolCardState extends State<_ToolCard>
                           : Icons.keyboard_arrow_right,
                       size: 16,
                       color: Aether.textFaint,
+                    ),
+                  // A subagent card links to the child's OWN session, so the
+                  // user can read its full transcript instead of the summary.
+                  if (childSessionId != null)
+                    InkWell(
+                      borderRadius: BorderRadius.circular(6),
+                      onTap: () => SubagentScreen.open(context, childSessionId),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'Open',
+                              style: TextStyle(
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.w600,
+                                color: Aether.accent,
+                              ),
+                            ),
+                            Icon(
+                              Icons.open_in_new,
+                              size: 12,
+                              color: Aether.accent,
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   const SizedBox(width: 8),
                 ],
@@ -2632,6 +2761,13 @@ class _InputBarState extends State<_InputBar> {
   bool _slashActive = false;
   String _slashQuery = '';
 
+  /// `@` reference mode: the token under the caret starts with `@`, so the
+  /// menu offers this chat's subagents (the model addresses them by id in
+  /// send_message / interrupt_agent).
+  bool _mentionActive = false;
+  String _mentionQuery = '';
+  int _mentionStart = -1;
+
   /// Fuzzy score for [candidate] against [query].
   ///
   /// Returns null when the query is not a subsequence of the candidate.
@@ -2662,8 +2798,10 @@ class _InputBarState extends State<_InputBar> {
     return score + c.length;
   }
 
-  /// Command/skill/tool/plugin suggestions for the current slash input.
+  /// Command/skill/tool/plugin suggestions for the current slash input, or
+  /// subagent references while in `@` mode.
   List<_SlashSuggestion> get _suggestions {
+    if (_mentionActive) return _mentionSuggestions;
     if (!_slashActive) return const [];
     final query = _slashQuery.toLowerCase();
     final scored = <({int score, int order, _SlashSuggestion s})>[];
@@ -2744,6 +2882,45 @@ class _InputBarState extends State<_InputBar> {
     return [for (final e in scored.take(24)) e.s];
   }
 
+  /// `@` menu: this chat's subagents, so the user can point the parent agent
+  /// at a specific child ("@sub-2 stop and summarise").
+  List<_SlashSuggestion> get _mentionSuggestions {
+    final app = AppState.I;
+    final parent = app.activeSession;
+    if (parent == null) return const [];
+    final agent = AgentService.I;
+    final query = _mentionQuery.toLowerCase();
+    final scored = <({int score, int order, _SlashSuggestion s})>[];
+    var order = 0;
+    for (final sub in agent.subagentsOf(parent.id)) {
+      final child = app.sessionById(sub.sessionId);
+      final label = child?.agentLabel ?? sub.label;
+      final live = agent.busyFor(sub.sessionId);
+      final state = live ? 'running' : sub.state;
+      final score = _fuzzyScore('${sub.id} $label', query);
+      if (score == null) continue;
+      scored.add((
+        score: score,
+        order: order++,
+        s: _SlashSuggestion(
+          icon: Icons.smart_toy_outlined,
+          name: sub.id,
+          description:
+              '$state · ${child?.messages.length ?? 0} rows — '
+              '${cleanTruncate(label, 60)}',
+          hint: '',
+          insert: '@${sub.id} ',
+          group: 'Subagents',
+        ),
+      ));
+    }
+    scored.sort((a, b) {
+      final c = a.score.compareTo(b.score);
+      return c != 0 ? c : a.order.compareTo(b.order);
+    });
+    return [for (final e in scored.take(12)) e.s];
+  }
+
   void _onTextChanged() {
     final t = controller.text;
     var active = false;
@@ -2757,15 +2934,59 @@ class _InputBarState extends State<_InputBar> {
         query = body.toLowerCase();
       }
     }
-    if (active != _slashActive || query != _slashQuery) {
+    // `@` reference: look back from the caret to the token start.
+    var mention = false;
+    var mentionQuery = '';
+    var mentionStart = -1;
+    final sel = controller.selection;
+    final caret = sel.isValid ? sel.baseOffset : t.length;
+    if (caret > 0 && caret <= t.length) {
+      final head = t.substring(0, caret);
+      final at = head.lastIndexOf('@');
+      if (at >= 0) {
+        final token = head.substring(at + 1);
+        final boundaryOk = at == 0 || ' \n\t'.contains(head[at - 1]);
+        if (boundaryOk && !token.contains(RegExp(r'\s'))) {
+          mention = true;
+          mentionQuery = token.toLowerCase();
+          mentionStart = at;
+        }
+      }
+    }
+    if (active != _slashActive ||
+        query != _slashQuery ||
+        mention != _mentionActive ||
+        mentionQuery != _mentionQuery) {
       setState(() {
         _slashActive = active;
         _slashQuery = query;
+        _mentionActive = mention;
+        _mentionQuery = mentionQuery;
+        _mentionStart = mentionStart;
       });
     }
   }
 
   void _applySuggestion(_SlashSuggestion s) {
+    if (_mentionActive && _mentionStart >= 0) {
+      // Replace just the `@token` under the caret, keeping the rest intact.
+      final text = controller.text;
+      final sel = controller.selection;
+      final caret = sel.isValid ? sel.baseOffset : text.length;
+      final insert = s.insert ?? '@${s.name} ';
+      final next =
+          text.substring(0, _mentionStart) + insert + text.substring(caret);
+      controller.text = next;
+      controller.selection = TextSelection.collapsed(
+        offset: _mentionStart + insert.length,
+      );
+      setState(() {
+        _mentionActive = false;
+        _mentionQuery = '';
+        _mentionStart = -1;
+      });
+      return;
+    }
     controller.text = s.insert ?? '${s.name} ';
     controller.selection = TextSelection.collapsed(
       offset: controller.text.length,
@@ -3098,7 +3319,8 @@ class _InputBarState extends State<_InputBar> {
                 // DSH composer: 16px input, 24px line-height.
                 style: const TextStyle(fontSize: 16, height: 24 / 16),
                 decoration: const InputDecoration(
-                  hintText: 'Describe what you want to build…  / for commands',
+                  hintText:
+                      'Describe what you want to build…  / commands  @ agents',
                   hintStyle: TextStyle(fontSize: 16, height: 24 / 16),
                   filled: false,
                   border: InputBorder.none,

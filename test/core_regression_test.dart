@@ -2420,17 +2420,19 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       final agent = AgentService.I;
 
       // Safe parent + no mode arg → child stays safe.
-      final child1 = agent.childForTest();
-      expect(child1.mode, AgentMode.safe);
+      expect(agent.childModeForTest(), AgentMode.safe);
 
       // Safe parent + explicit drive → still clamped to safe.
-      final child2 = agent.childForTest(modeName: 'drive');
-      expect(child2.mode, AgentMode.safe);
+      expect(agent.childModeForTest(modeName: 'drive'), AgentMode.safe);
 
-      // Safe parent + explicit auto → auto is less privileged than safe?
       // safe rank 0 < auto rank 1 → auto is MORE privilege, so clamped.
-      final child3 = agent.childForTest(modeName: 'auto');
-      expect(child3.mode, AgentMode.safe);
+      expect(agent.childModeForTest(modeName: 'auto'), AgentMode.safe);
+
+      // A Studio parent may downgrade a child to read-only.
+      s.mode = 'studio';
+      expect(agent.childModeForTest(), AgentMode.studio);
+      expect(agent.childModeForTest(modeName: 'safe'), AgentMode.safe);
+      expect(agent.childModeForTest(modeName: 'drive'), AgentMode.studio);
 
       app.sessions.removeWhere((x) => x.id == 'sub-s');
     });
@@ -2765,6 +2767,236 @@ Translate the following. This is the skill body.''');
       expect(agent.statusFor(s.id), 'retrying in 9s…');
       agent.emitForTest('done', 'completed');
       expect(agent.statusFor(s.id), isNull);
+    });
+  });
+
+  group('PR12: subagents as real sessions', () {
+    ChatSession newParent(String id) {
+      final app = AppState.I;
+      final parent = ChatSession(
+        id: id,
+        title: 'Parent',
+        model: 'm',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, parent);
+      app.activeSessionId = parent.id;
+      addTearDown(() {
+        app.sessions.removeWhere(
+          (x) => x.id == id || AppState.I.lineageOf(x.id).any((a) => a.id == id),
+        );
+      });
+      return parent;
+    }
+
+    test('dispatch_agent creates a real child session with lineage', () async {
+      final app = AppState.I;
+      final parent = newParent('sa-p1');
+
+      // No provider is configured in tests, so the child's run fails fast —
+      // the point here is the session/lineage wiring, not the model call.
+      final res = await AgentService.I.dispatchForTest('dispatch_agent', {
+        'prompt': 'map the api surface',
+        'label': 'API map',
+      });
+
+      final kids = app.childrenOf(parent.id);
+      expect(kids, hasLength(1));
+      final child = kids.single;
+      expect(child.isSubagent, isTrue);
+      expect(child.parentId, parent.id);
+      expect(child.agentLabel, 'API map');
+      expect(child.mode, 'auto', reason: 'child inherits the parent mode');
+      expect(child.model, parent.model);
+      // The child's transcript starts with the task it was given, so opening
+      // it shows real content instead of an opaque summary.
+      expect(child.messages.first.role, 'user');
+      expect(child.messages.first.content, 'map the api surface');
+      expect(child.messages.length, greaterThan(1));
+      // Lineage + sidebar visibility.
+      expect(app.lineageOf(child.id).map((s) => s.id).toList(), [
+        parent.id,
+        child.id,
+      ]);
+      expect(app.rootSessions.any((s) => s.id == child.id), isFalse);
+      expect(app.descendantsOf(parent.id).map((s) => s.id), [child.id]);
+      expect(child.agentState, isNotNull);
+      expect(res, isNotEmpty);
+    });
+
+    test('a subagent session cannot use user-facing tools', () async {
+      final app = AppState.I;
+      final parent = newParent('sa-p2');
+      final child = app.createSubagentSession(
+        parent: parent,
+        label: 'worker',
+        mode: 'auto',
+      );
+      app.activeSessionId = child.id;
+
+      final res = await AgentService.I.dispatchForTest('ask_user_question', {
+        'questions': <Map<String, dynamic>>[],
+      });
+      expect(res, contains('SUBAGENT'));
+      expect(AgentService.I.pendingApproval, isNull);
+    });
+
+    test('allowed_tools restricts what a child may call', () async {
+      final app = AppState.I;
+      final parent = newParent('sa-p3');
+      final child = app.createSubagentSession(
+        parent: parent,
+        label: 'reader',
+        mode: 'auto',
+        allowedTools: const ['file_read'],
+      );
+      app.activeSessionId = child.id;
+
+      final blocked = await AgentService.I.dispatchForTest('run_shell', {
+        'command': 'ls',
+      });
+      expect(blocked, contains('outside the tool set'));
+      expect(blocked, contains('file_read'));
+    });
+
+    test('depth cap counts the real session lineage', () async {
+      final app = AppState.I;
+      final parent = newParent('sa-p4');
+      final child = app.createSubagentSession(
+        parent: parent,
+        label: 'depth-1',
+        mode: 'auto',
+      );
+      final grandchild = app.createSubagentSession(
+        parent: child,
+        label: 'depth-2',
+        mode: 'auto',
+      );
+      app.activeSessionId = grandchild.id;
+
+      final res = await AgentService.I.dispatchForTest('dispatch_agent', {
+        'prompt': 'go deeper',
+      });
+      expect(res, contains('depth limit'));
+      expect(app.childrenOf(grandchild.id), isEmpty);
+    });
+
+    test('a one-shot child refuses follow-ups; interrupt marks it stopped', () async {
+      final app = AppState.I;
+      final parent = newParent('sa-p5');
+      final oneShot = app.createSubagentSession(
+        parent: parent,
+        label: 'one-shot',
+        mode: 'auto',
+      );
+      expect(oneShot.agentContinuable, isFalse);
+      expect(AgentService.I.canContinueSubagent(oneShot.id), isFalse);
+
+      final res = await AgentService.I.continueSubagent(oneShot.id, 'more work');
+      expect(res, contains('one-shot'));
+      expect(
+        oneShot.messages,
+        isEmpty,
+        reason: 'a refused follow-up must not enter the transcript',
+      );
+
+      AgentService.I.interruptSubagent(oneShot.id);
+      expect(oneShot.agentState, 'stopped');
+    });
+
+    test('deleting a chat deletes its subagents', () {
+      final app = AppState.I;
+      final parent = newParent('sa-p6');
+      final child = app.createSubagentSession(
+        parent: parent,
+        label: 'c',
+        mode: 'auto',
+      );
+      final grandchild = app.createSubagentSession(
+        parent: child,
+        label: 'gc',
+        mode: 'auto',
+      );
+
+      app.deleteSession(parent.id);
+
+      expect(app.sessionById(parent.id), isNull);
+      expect(app.sessionById(child.id), isNull);
+      expect(app.sessionById(grandchild.id), isNull);
+      expect(
+        app.activeSessionId,
+        isNot(child.id),
+        reason: 'never leave the app pointing at a deleted child',
+      );
+    });
+
+    test('subagent fields round-trip; a killed running child loads stopped', () {
+      final s = ChatSession(
+        id: 'sa-json',
+        title: 'worker',
+        model: 'm',
+        parentId: 'root-1',
+        agentLabel: 'worker',
+        agentState: 'running',
+        agentContinuable: true,
+        agentResult: 'done',
+        agentAllowedTools: const ['file_read', 'fs_grep'],
+      );
+      final back = ChatSession.fromJson(s.toJson());
+      expect(back.parentId, 'root-1');
+      expect(back.isSubagent, isTrue);
+      expect(back.agentLabel, 'worker');
+      expect(back.agentContinuable, isTrue);
+      expect(back.agentResult, 'done');
+      expect(back.agentAllowedTools, ['file_read', 'fs_grep']);
+      // The app died mid-run: nothing is running after a restart.
+      expect(back.agentState, 'stopped');
+
+      final finished = ChatSession.fromJson(
+        ChatSession(
+          id: 'sa-json2',
+          title: 'w',
+          model: 'm',
+          parentId: 'root-1',
+          agentState: 'finished',
+        ).toJson(),
+      );
+      expect(finished.agentState, 'finished');
+    });
+
+    test('a subagent card keeps a link to its child session', () {
+      final m = Message(
+        role: 'assistant',
+        kind: MsgKind.tool,
+        toolName: 'dispatch_agent',
+        toolTitle: 'Subagent',
+        content: '',
+        toolDetail: 'subagent sub-1',
+        toolState: 'ok',
+        toolSessionId: 'sub-123',
+      );
+      expect(Message.fromJson(m.toJson()).toolSessionId, 'sub-123');
+    });
+
+    test('user input never targets a subagent session', () {
+      final app = AppState.I;
+      final parent = newParent('sa-p7');
+      final child = app.createSubagentSession(
+        parent: parent,
+        label: 'c',
+        mode: 'auto',
+      );
+      app.activeSessionId = child.id;
+
+      app.sendMessage('hello');
+
+      expect(
+        child.messages,
+        isEmpty,
+        reason: 'the composer must not write into a child transcript',
+      );
+      expect(app.activeSessionId, parent.id);
+      expect(parent.messages.last.content, 'hello');
     });
   });
 }
