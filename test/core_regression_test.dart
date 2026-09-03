@@ -5218,6 +5218,66 @@ block</pre>
     });
   });
 
+  group('PR30: apt mirror rotation', () {
+    test('the reported on-device error phrasing triggers a rotation',
+        () {
+      // The EXACT wording from the device log: apt exits 100 with
+      // "does not have a Release file" — the old matcher never matched
+      // this phrase (it only knew "no release file"), so every retry
+      // burned on the same dead mirror.
+      final svc = SandboxService.I;
+      const deviceError = "E: The repository "
+          "'https://packages-cf.termux.dev/apt/termux-main stable Release' "
+          "does not have a Release file.";
+      final before = svc.currentMirrorIndexForTest;
+      final rotated = svc.rotateMirrorForTest(deviceError);
+      expect(rotated, isTrue,
+          reason: '"does not have a Release file" must rotate');
+      expect(svc.currentMirrorIndexForTest,
+          (before + 1) % SandboxService.mirrorCountForTest);
+      // Rotate back to leave state clean.
+      svc.rotateMirrorForTest('connection timed out');
+    });
+
+    test('connection / InRelease / signature failures also rotate', () {
+      final svc = SandboxService.I;
+      for (final err in [
+        'Could not connect to packages-cf.termux.dev:444 - connection refused',
+        'E: The repository ... does not have an InRelease file',
+        'W: GPG error: repository is not signed',
+        'Err:3 http://x stable InRelease connection timed out',
+      ]) {
+        expect(svc.rotateMirrorForTest(err), isTrue, reason: err);
+      }
+      // Benign output must NOT rotate.
+      final before = svc.currentMirrorIndexForTest;
+      expect(
+        svc.rotateMirrorForTest('Reading package lists... Done'),
+        isFalse,
+      );
+      expect(svc.currentMirrorIndexForTest, before);
+    });
+
+    test('mirror pool includes the stable alternates (7 mirrors)', () {
+      // PR30: packages-cf proved flaky on-device — tsinghua + nju joined.
+      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+      expect(src, contains('mirrors.tuna.tsinghua.edu.cn/termux'));
+      expect(src, contains('mirror.nju.edu.cn/termux'));
+      expect(SandboxService.mirrorCountForTest, greaterThanOrEqualTo(7));
+    });
+
+    test('runtime lists carry zlib (deb) and make/binutils (apt)', () {
+      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+      // apt list (PR22+PR30).
+      expect(src, contains("'nodejs npm python python-pip uv git curl zlib "
+          'make binutils\''));
+      // deb fallback wanted list (PR30).
+      expect(src, contains("'curl',\n          'zlib',"));
+      // Force-rotate after each failed update attempt.
+      expect(src, contains('[apt] rotated to'));
+    });
+  });
+
   group('PR21: workflow + ralph orchestration', () {
     ChatSession newParent(String id) {
       final app = AppState.I;

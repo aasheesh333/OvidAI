@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -438,8 +439,11 @@ class SandboxService {
     // zlib: node's dynamic-link dependency — the bootstrap ships the lib
     // but npm/apt-installed node overlays may reference it fresh; keeping
     // the package asserted also guarantees libz.so.1 so-version links.
+    // PR30: make + binutils — node-gyp native builds (the reported
+    // "node-gyp: Permission denied" class also needs the toolchain
+    // present once exec bits are right).
     const pkgs =
-        'nodejs npm python python-pip uv git curl zlib';
+        'nodejs npm python python-pip uv git curl zlib make binutils';
     var installed = false;
     for (var attempt = 1; attempt <= 3 && !installed; attempt++) {
       final tag = attempt == 1
@@ -458,6 +462,20 @@ class SandboxService {
             7,
             0.05,
             'apt update failed ($uCode): ${tail.isEmpty ? "no output" : tail.last}',
+          );
+          // PR30: a failed update means THIS mirror is unusable from
+          // this device — rotate NOW so the next attempt (of 3) tries a
+          // different mirror instead of burning every retry on the same
+          // dead host (the reported 3× "no Release file" on packages-cf).
+          _mirrorIdx = (_mirrorIdx + 1) % _aptMirrors.length;
+          final prefix0 = _prefix;
+          if (prefix0 != null) {
+            _writeSourcesList(prefix0, _aptMirrors[_mirrorIdx]);
+          }
+          onPhase(
+            7,
+            0.05,
+            '[apt] rotated to ${_aptMirrors[_mirrorIdx].split('/')[2]}',
           );
           continue;
         }
@@ -514,6 +532,7 @@ class SandboxService {
           'uv',
           'git',
           'curl',
+          'zlib', // PR30: node's link-time dependency (libz.so.1)
         ]);
       } catch (e) {
         onPhase(
@@ -921,9 +940,13 @@ audit=false
   /// Known-good Termux main-repo mirrors, tried in order.  A dead or stale
   /// mirror manifest causes "E: Unable to locate package git" even when
   /// `apt update` exits 0 — the retry loop rotates to the next mirror.
+  /// PR30: +tsinghua/nju (stable, fast in ASIA) — packages-cf proved flaky
+  /// on-device ("does not have a Release file" for 3 straight retries).
   static const _aptMirrors = [
     'https://packages-cf.termux.dev/apt/termux-main',
     'https://packages.termux.dev/apt/termux-main',
+    'https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main',
+    'https://mirror.nju.edu.cn/termux/apt/termux-main',
     'https://termux.librehat.com/apt/termux-main',
     'https://termux.cdn.lumito.net/apt/termux-main',
     'https://termux.astra.in.ua/apt/termux-main',
@@ -1265,16 +1288,35 @@ audit=false
   void _ensureSourcesList(Directory prefix) =>
       _writeSourcesList(prefix, _aptMirrors[_mirrorIdx]);
 
-  /// Rotate to the next mirror when apt reports fetch/lookup failures
-  /// ("Unable to locate package", "Failed to fetch", 404, ...).
+  /// Rotate to the next mirror when apt reports fetch/lookup failures.
+  /// PR30: apt's REAL wording is "does not have a Release file" /
+  /// "is not (yet) valid" / "InRelease" — the old matcher only knew the
+  /// lowercase phrase "no release file" and NEVER matched, so all 3
+  /// retries burned on the same dead mirror (reported on-device).
+  /// PR30 test seams: mirror state + rotation matcher.
+  @visibleForTesting
+  int get currentMirrorIndexForTest => _mirrorIdx;
+
+  @visibleForTesting
+  static int get mirrorCountForTest => _aptMirrors.length;
+
+  @visibleForTesting
+  bool rotateMirrorForTest(String aptOut) => _rotateMirror(aptOut);
+
   bool _rotateMirror(String aptOut) {
     final l = aptOut.toLowerCase();
-    if (!l.contains('unable to locate package') &&
-        !l.contains('failed to fetch') &&
-        !l.contains('no release file') &&
-        !l.contains('404')) {
-      return false;
-    }
+    final dead = l.contains('unable to locate package') ||
+        l.contains('failed to fetch') ||
+        l.contains('does not have a release file') ||
+        l.contains('no release file') ||
+        l.contains('inrelease') ||
+        l.contains('is not signed') ||
+        l.contains('is not (yet) valid') ||
+        l.contains('404') ||
+        l.contains('connection timed out') ||
+        l.contains('could not connect') ||
+        l.contains('connection refused');
+    if (!dead) return false;
     _mirrorIdx = (_mirrorIdx + 1) % _aptMirrors.length;
     final prefix = _prefix;
     if (prefix != null) _writeSourcesList(prefix, _aptMirrors[_mirrorIdx]);
