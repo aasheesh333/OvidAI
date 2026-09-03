@@ -34,6 +34,60 @@ import 'package:path_provider/path_provider.dart';
 /// Termux.  On API 23 (Android 6) the phone-terminal tier (toybox) is
 /// used — it needs no install.  A lazy proot-Ubuntu fallback exists ONLY
 /// for glibc-only commands that fail natively (logged, on-demand).
+
+/// Thrown when the DEVICE cannot run the native sandbox (Android < 7,
+/// exec-blocked ROM, no payload for the process ABI). Permanent — retrying
+/// cannot help, so the setup UI offers "continue without the sandbox"
+/// instead of a Retry loop.
+class SandboxUnsupportedException implements Exception {
+  final String message;
+  const SandboxUnsupportedException(this.message);
+  @override
+  String toString() => message;
+}
+
+/// Pure preflight decision — device facts in, permanent-blocker out.
+/// sdkInt <= 0 means "unknown" (host tests / channel unavailable): no gate,
+/// so host-executed tests never trip a device gate by accident.
+@visibleForTesting
+SandboxUnsupportedException? sandboxPreflightGate({
+  required int sdkInt,
+  required bool dataExecAllowed,
+}) {
+  if (sdkInt > 0 && sdkInt < 24) {
+    return SandboxUnsupportedException(
+      'This device runs Android 6.x or older (API $sdkInt). The native '
+      'sandbox needs Android 7+ (API 24) — its toolchain is built against '
+      'the newer bionic. Ovid itself works: chat, providers and the '
+      'browser run fine; only the on-device terminal / Studio needs the '
+      'sandbox. Continue without it and retry anytime from Studio.',
+    );
+  }
+  if (!dataExecAllowed) {
+    return const SandboxUnsupportedException(
+      'This ROM blocks running programs from app storage (SELinux exec '
+      'policy). Ovid itself works: chat, providers and the browser run '
+      'fine; only the on-device terminal / Studio needs the sandbox. '
+      'Continue without it and retry anytime from Studio.',
+    );
+  }
+  return null;
+}
+
+/// apt repo arch for the SANDBOX payload's ABI — the payload, not the
+/// device's capability list, decides which package arch runs inside it.
+@visibleForTesting
+String aptArchFor(String? payloadAbi, String fallbackDeviceArch) {
+  final mapped = switch (payloadAbi) {
+    'arm64-v8a' => 'aarch64',
+    'armeabi-v7a' => 'arm',
+    'x86_64' => 'x86_64',
+    _ => null,
+  };
+  return mapped ??
+      (fallbackDeviceArch == 'arm64' ? 'aarch64' : fallbackDeviceArch);
+}
+
 class SandboxService {
   SandboxService._();
   static final SandboxService I = SandboxService._();
@@ -59,6 +113,11 @@ class SandboxService {
   List<Map<String, String>> get fallbackLog => List.unmodifiable(_fallbackLog);
 
   static const _nativeChannel = MethodChannel('ovid/native');
+
+  /// ABI of the extracted bootstrap payload + the channel's read error
+  /// detail (MISSING carries process-vs-available ABI info).
+  String? _payloadAbi;
+  String? _payloadReadError;
 
   /// Jail working path inside the sandbox (matches our own /work layout).
   static const jailWorkPath = '/work';
@@ -274,33 +333,53 @@ class SandboxService {
       defaultValue: 'local-dev',
     );
     onPhase(0, 0.05, 'ovid build ........ $buildStamp');
-    final arch = _deviceArch;
-    onPhase(0, 0.1, 'device ............ $arch ✓ (native bionic, no proot)');
-    if (Platform.version.toLowerCase().contains('android')) {
-      // API 24+ required for the native payload (same as current Termux).
+    final facts = await _deviceFacts();
+    onPhase(
+      0,
+      0.1,
+      'device ............ ${facts.abi} · API '
+      '${facts.sdkInt > 0 ? '${facts.sdkInt}' : '?'} '
+      '(native bionic, no proot)',
+    );
+    // Honest device gates BEFORE the multi-minute install: permanent
+    // blockers surface as an actionable "continue without sandbox",
+    // not a cryptic EACCES at the end of a full extraction.
+    final blocker = sandboxPreflightGate(
+      sdkInt: facts.sdkInt,
+      dataExecAllowed: facts.dataExecAllowed,
+    );
+    if (blocker != null) throw blocker;
+    if (Platform.isAndroid) {
       onPhase(0, 0.15, 'runtime ........... native sandbox (API 24+)');
     }
 
     // ── Locate the bundled bootstrap payload ──
     onPhase(1, 0.0, r'$ read bundled bootstrap (libovid_bootstrap.so)');
-    final payloadBytes = await _readBootstrapPayload();
-    if (payloadBytes == null) {
+    final payload = await _readBootstrapPayload();
+    if (payload == null) {
+      // The channel's MISSING detail (process ABI vs payloads in the APK)
+      // is far more actionable than the generic line.
+      final readErr = _payloadReadError;
+      if (readErr != null) throw SandboxUnsupportedException(readErr);
       throw Exception(
         'Sandbox payload not found. Reinstall the app — the ABI split '
         'for this device was not included in the install.',
       );
     }
+    _payloadAbi = payload.abi;
     onPhase(
       1,
       1.0,
-      'payload ........... ${(payloadBytes.length / 1024 / 1024).toStringAsFixed(1)} MB ✓',
+      'payload ........... '
+      '${(payload.bytes.length / 1024 / 1024).toStringAsFixed(1)} MB · '
+      '${payload.abi} ✓',
     );
 
     // ── Extract zip into staging ──
     onPhase(2, 0.0, 'extracting sandbox payload');
     if (staging.existsSync()) staging.deleteSync(recursive: true);
     staging.createSync(recursive: true);
-    final archive = ZipDecoder().decodeBytes(payloadBytes, verify: false);
+    final archive = ZipDecoder().decodeBytes(payload.bytes, verify: false);
     final symlinks = parseSymlinks(archive);
     final count = extractArchive(archive, staging);
     onPhase(2, 1.0, 'extracted ......... $count files ✓');
@@ -410,9 +489,16 @@ class SandboxService {
         'native exec ....... ✓ ${firstLine.substring(0, firstLine.length.clamp(0, 50))}',
       );
     } catch (e) {
+      // Self-explaining diagnostics instead of "report your device model":
+      // EACCES on exec is almost always a wrong-ISA payload (process vs
+      // payload ABI) or an exec-blocking ROM — both visible right here.
       throw Exception(
-        'Sandbox installed but native exec failed: $e. '
-        'Report this with your device model.',
+        'Sandbox installed but native exec failed: $e\n'
+        '  process ABI: ${facts.abi} · payload ABI: ${_payloadAbi ?? '?'}\n'
+        '  bash: ${_bashStatLine(prefix)}\n'
+        'If the ABIs differ, this APK build does not match the device — '
+        'install the build for ${facts.abi}. If they match, this ROM is '
+        'likely blocking exec from app storage.',
       );
     }
 
@@ -983,7 +1069,9 @@ audit=false
     final prefix = _prefix;
     if (prefix == null) return false;
     final p = prefix.path;
-    final arch = _deviceArch == 'arm64' ? 'aarch64' : _deviceArch;
+    // The apt repo arch must match the PAYLOAD's ABI (what actually runs
+    // inside the sandbox), not the device's capability list.
+    final arch = aptArchFor(_payloadAbi, _deviceArch);
     // ── 1. Fetch + decompress the binary index (mirrors cycled) ──
     File? indexFile;
     String? mirrorUsed;
@@ -1444,20 +1532,71 @@ audit=false
   /// nativeLibraryDir — so we read the zip entry straight out of the
   /// installed APK via the platform channel (no double storage).
   /// Falls back to the extracted file for dev/test environments.
-  Future<Uint8List?> _readBootstrapPayload() async {
-    // Primary: zip entry inside the installed APK.
+  /// Process-truth device facts for the preflight gate. Channel misses
+  /// (host tests) fall back to safe defaults so no gate ever fires there.
+  Future<({String abi, int sdkInt, bool dataExecAllowed})> _deviceFacts() async {
+    var abi = _deviceArch;
+    var sdkInt = -1;
+    var dataExecAllowed = true;
     try {
-      final bytes = await _nativeChannel.invokeMethod<Uint8List>(
+      final v = await _nativeChannel.invokeMethod<String>('getProcessAbi');
+      if (v != null && v.isNotEmpty) abi = v;
+    } catch (_) {}
+    try {
+      final v = await _nativeChannel.invokeMethod<int>('getSdkInt');
+      if (v != null) sdkInt = v;
+    } catch (_) {}
+    if (Platform.isAndroid) {
+      // The probe spawns a shell — only worth it when actually installing.
+      try {
+        final v = await _nativeChannel.invokeMethod<bool>('isDataExecAllowed');
+        if (v != null) dataExecAllowed = v;
+      } catch (_) {}
+    }
+    return (abi: abi, sdkInt: sdkInt, dataExecAllowed: dataExecAllowed);
+  }
+
+  /// One-line bash file stat for the sanity-failure diagnostics.
+  String _bashStatLine(Directory prefix) {
+    try {
+      final f = File('${prefix.path}/bin/bash');
+      if (!f.existsSync()) return 'missing';
+      final st = f.statSync();
+      return 'mode ${st.modeString()}, ${(st.size / 1024).toStringAsFixed(0)} KB';
+    } catch (_) {
+      return 'stat failed';
+    }
+  }
+
+  Future<({Uint8List bytes, String abi})?> _readBootstrapPayload() async {
+    // Primary: zip entry inside the installed APK, ABI-matched to the
+    // RUNNING PROCESS (not the device's capability list).
+    try {
+      final res = await _nativeChannel.invokeMethod<dynamic>(
         'readBootstrapPayload',
       );
-      if (bytes != null && bytes.isNotEmpty) return bytes;
+      if (res is Map) {
+        final bytes = res['bytes'] as Uint8List?;
+        final abi = (res['abi'] as String?) ?? 'unknown';
+        if (bytes != null && bytes.isNotEmpty) {
+          return (bytes: bytes, abi: abi);
+        }
+      } else if (res is Uint8List && res.isNotEmpty) {
+        // Older builds returned bare bytes — still usable, ABI unknown.
+        return (bytes: res, abi: 'unknown');
+      }
+    } on PlatformException catch (e) {
+      // MISSING carries "process ABI X has no payload (APK has: …)".
+      _payloadReadError = e.message;
     } catch (_) {}
     // Fallback: already-extracted copy (older builds / tests).
     try {
       final libDir = await _nativeLibraryDir;
       if (libDir != null) {
         final f = File('$libDir/libovid_bootstrap.so');
-        if (f.existsSync()) return f.readAsBytes();
+        if (f.existsSync()) {
+          return (bytes: await f.readAsBytes(), abi: 'unknown');
+        }
       }
     } catch (_) {}
     return null;

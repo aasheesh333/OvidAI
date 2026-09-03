@@ -5625,6 +5625,52 @@ block</pre>
       await tester.pump(const Duration(seconds: 5));
     });
   });
+
+  group('PR34: sandbox installs on the right ABI, fails honestly, never traps', () {
+    test('preflight gate blocks Android 6 with an actionable message', () {
+      final e = sandboxPreflightGate(sdkInt: 23, dataExecAllowed: true);
+      expect(e, isA<SandboxUnsupportedException>());
+      expect(e!.message, contains('API 23'));
+      expect(e.message, contains('Android 7+'));
+      expect(e.message, contains('Continue without it'));
+      expect(sandboxPreflightGate(sdkInt: 22, dataExecAllowed: true),
+          isA<SandboxUnsupportedException>());
+    });
+
+    test('preflight gate allows Android 7+ and unknown (host) SDK levels',
+        () {
+      expect(sandboxPreflightGate(sdkInt: 24, dataExecAllowed: true), isNull);
+      expect(sandboxPreflightGate(sdkInt: 35, dataExecAllowed: true), isNull);
+      // Unknown SDK (channel unavailable in host tests) must never gate.
+      expect(sandboxPreflightGate(sdkInt: -1, dataExecAllowed: true), isNull);
+    });
+
+    test('preflight gate blocks exec-denying ROMs', () {
+      final e = sandboxPreflightGate(sdkInt: 33, dataExecAllowed: false);
+      expect(e, isA<SandboxUnsupportedException>());
+      expect(e!.message, contains('app storage'));
+    });
+
+    test('apt arch follows the payload ABI, not device capability', () {
+      expect(aptArchFor('arm64-v8a', 'arm'), 'aarch64');
+      expect(aptArchFor('armeabi-v7a', 'arm64'), 'arm');
+      expect(aptArchFor('x86_64', 'arm64'), 'x86_64');
+      // Unknown payload (older builds) falls back to the device arch.
+      expect(aptArchFor(null, 'arm64'), 'aarch64');
+      expect(aptArchFor('unknown', 'arm'), 'arm');
+    });
+
+    test('sandbox skip flag persists and clears', () async {
+      await app.setSandboxSkipped(true);
+      expect(app.sandboxSkipped, isTrue);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('ovid_sandbox_skipped'), isTrue);
+
+      await app.setSandboxSkipped(false);
+      expect(app.sandboxSkipped, isFalse);
+      expect(prefs.getBool('ovid_sandbox_skipped'), isNull);
+    });
+  });
 }
 
 /// Build one DuckDuckGo-style result block (anchor + snippet pair).

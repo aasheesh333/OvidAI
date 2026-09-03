@@ -627,6 +627,7 @@ class AppState extends ChangeNotifier {
       workflowEnabled = prefs.getBool(_kWorkflowEnabled) ?? true;
       browserDesktopMode = prefs.getBool(_kBrowserDesktopMode) ?? false;
       autoRunSafeCommands = prefs.getBool(_kAutoRunSafe) ?? true;
+      sandboxSkipped = prefs.getBool(_kSandboxSkipped) ?? false;
       chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0).clamp(
         chatFontScaleMin,
         chatFontScaleMax,
@@ -840,6 +841,25 @@ class AppState extends ChangeNotifier {
 
   int navIndex = 0; // 0 Chat, 1 Studio, 2 Browser, 3 Plugins, 4 Settings
   bool sandboxInstalled = false; // native bionic sandbox on-device
+
+  /// User chose to run WITHOUT the sandbox (device can't support it) —
+  /// the first-launch gate must not trap them out of the app. Cleared
+  /// automatically when an install later succeeds.
+  bool sandboxSkipped = false;
+  static const _kSandboxSkipped = 'ovid_sandbox_skipped';
+
+  Future<void> setSandboxSkipped(bool v) async {
+    sandboxSkipped = v;
+    refresh();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (v) {
+        await prefs.setBool(_kSandboxSkipped, true);
+      } else {
+        await prefs.remove(_kSandboxSkipped);
+      }
+    } catch (_) {}
+  }
 
   /// Share memory across sessions (persisted, default OFF).
   ///
@@ -1606,6 +1626,11 @@ class AppState extends ChangeNotifier {
 
   void sandboxReady() {
     sandboxInstalled = SandboxService.I.isInstalled;
+    // A successful install revokes any earlier "continue without sandbox".
+    if (sandboxInstalled && sandboxSkipped) {
+      sandboxSkipped = false;
+      unawaited(setSandboxSkipped(false));
+    }
     refresh();
   }
 

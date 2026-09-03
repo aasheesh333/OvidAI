@@ -12,6 +12,39 @@ import java.util.zip.ZipFile
 class MainActivity : FlutterActivity() {
     private val channelName = "ovid/native"
 
+    /// The ABI the PackageManager chose for THIS install — the last path
+    /// segment of nativeLibraryDir (…/lib/arm64, …/lib/arm, …). This is
+    /// the ISA of the running process; Build.SUPPORTED_ABIS is only the
+    /// device's capability list and can disagree (wrong-split sideload).
+    private fun processAbi(): String? {
+        val dir = applicationInfo.nativeLibraryDir ?: return null
+        return when (dir.trimEnd('/').substringAfterLast('/')) {
+            "arm64" -> "arm64-v8a"
+            "arm" -> "armeabi-v7a"
+            "x86_64" -> "x86_64"
+            "x86" -> "x86"
+            else -> null
+        }
+    }
+
+    /// Payload entry name for a process ABI.
+    private fun payloadNameFor(abi: String?): String? = when (abi) {
+        "arm64-v8a" -> "arm64-v8a"
+        "armeabi-v7a", "armeabi" -> "armeabi-v7a"
+        "x86_64" -> "x86_64"
+        "x86" -> "x86"
+        else -> null
+    }
+
+    /// ISA family — payload fallback never crosses families.
+    private fun abiFamily(abi: String): String = when {
+        abi.startsWith("arm64") -> "arm64"
+        abi.startsWith("armeabi") || abi.startsWith("armv7") || abi == "arm" -> "arm32"
+        abi.startsWith("x86_64") -> "x64"
+        abi.startsWith("x86") -> "x32"
+        else -> "unknown"
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
@@ -100,28 +133,64 @@ class MainActivity : FlutterActivity() {
                         // payload IS a plain zip, readable straight out of
                         // the installed APK.  This avoids doubling storage
                         // (no extracted copy alongside the APK copy).
+                        //
+                        // ABI selection: the RUNNING PROCESS's ABI is the
+                        // only truth — the last segment of
+                        // nativeLibraryDir (…/lib/arm64) is the ABI the
+                        // PackageManager chose for THIS install.
+                        // Build.SUPPORTED_ABIS lists device CAPABILITY
+                        // (arm64 first on every modern phone), so picking
+                        // by it hands a 32-bit process (wrong-split
+                        // sideload) an arm64 payload → the kernel refuses
+                        // the exec with EACCES and the sanity check dies
+                        // with "Permission denied" AFTER a full extraction.
                         try {
                             val apkPath = applicationInfo.sourceDir
                             val zip = ZipFile(apkPath)
-                            // Pick the payload matching the device's REAL ABI
-                            // (first entry in SUPPORTED_ABIS). Falling back to
-                            // arm64 on an x86_64 device must never happen —
-                            // that was the 'Permission denied' exec fault.
-                            var entry = Build.SUPPORTED_ABIS
-                                .map { zip.getEntry("lib/$it/libovid_bootstrap.so") }
-                                .firstOrNull { it != null }
-                            if (entry == null) entry = zip.getEntry("lib/arm64-v8a/libovid_bootstrap.so")
+                            val processAbi = processAbi()
+                            // Exact match for the process ABI first…
+                            var entry = payloadNameFor(processAbi)
+                                ?.let { zip.getEntry("lib/$it/libovid_bootstrap.so") }
+                            // …then same-ISA-family fallback ONLY. Never
+                            // cross families: a 32-bit process cannot run
+                            // an arm64 payload and vice versa.
                             if (entry == null) {
+                                entry = Build.SUPPORTED_ABIS
+                                    .filter { abiFamily(it) == abiFamily(processAbi ?: "") }
+                                    .map { zip.getEntry("lib/$it/libovid_bootstrap.so") }
+                                    .firstOrNull { it != null }
+                            }
+                            if (entry == null) {
+                                val available = zip.entries().asSequence()
+                                    .filter { it.name.startsWith("lib/") && it.name.endsWith("/libovid_bootstrap.so") }
+                                    .map { it.name.split('/')[1] }
+                                    .toList()
+                                    .joinToString()
                                 zip.close()
-                                result.error("MISSING", "no libovid_bootstrap.so in APK", null)
+                                result.error(
+                                    "MISSING",
+                                    "No sandbox payload for this install's ABI " +
+                                        "(process: ${processAbi ?: "unknown"}; " +
+                                        "APK has payloads for: $available). " +
+                                        "Install the APK build that matches this device.",
+                                    null
+                                )
                             } else {
                                 val bytes = zip.getInputStream(entry).readBytes()
+                                val abi = entry.name.split('/')[1]
                                 zip.close()
-                                result.success(bytes)
+                                result.success(mapOf("bytes" to bytes, "abi" to abi))
                             }
                         } catch (e: Exception) {
                             result.error("READ_FAIL", "bootstrap read failed: ${e.message}", null)
                         }
+                    }
+                    "getProcessAbi" -> {
+                        // The ABI this app process is actually running as.
+                        result.success(processAbi() ?: Build.SUPPORTED_ABIS.firstOrNull())
+                    }
+                    "getSdkInt" -> {
+                        result.success(Build.VERSION.SDK_INT)
                     }
                     "isDataExecAllowed" -> {
                         // Probe: write a tiny script in app data and try to

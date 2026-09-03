@@ -63,6 +63,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   double _phaseProgress = 0;
   bool _done = false;
   String? _error;
+  bool _unsupported = false;
   DateTime? _start;
   Timer? _ticker;
 
@@ -113,7 +114,12 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
       AppState.I.sandboxReady();
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = '$e');
+      setState(() {
+        _error = '$e';
+        // Permanent device blockers (API level, exec policy, ABI payload)
+        // offer "continue without sandbox" — retrying cannot fix them.
+        _unsupported = e is SandboxUnsupportedException;
+      });
     }
   }
 
@@ -317,9 +323,9 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
           const SizedBox(height: 16),
           const Icon(Icons.error_outline, size: 40, color: Aether.danger),
           const SizedBox(height: 12),
-          const Text(
-            'Install interrupted',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+          Text(
+            _unsupported ? 'This device can\'t run the sandbox' : 'Install interrupted',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 8),
           Container(
@@ -342,28 +348,86 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
           const Spacer(),
           if (_log.isNotEmpty) Expanded(child: _terminal()),
           const SizedBox(height: 12),
-          FilledButton.icon(
-            style: FilledButton.styleFrom(
-              backgroundColor: Aether.accent,
-              padding: const EdgeInsets.symmetric(vertical: 13),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
+          if (_unsupported) ...[
+            // Chat, providers and the browser all work without the
+            // sandbox — only the on-device terminal/Studio needs it.
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Aether.accent,
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                icon: const Icon(Icons.chat_bubble_outline, size: 17),
+                label: const Text(
+                  'Continue without sandbox',
+                  style: TextStyle(fontSize: 14),
+                ),
+                onPressed: () async {
+                  await AppState.I.setSandboxSkipped(true);
+                  if (!mounted) return;
+                  if (widget.gateMode) {
+                    // Same hand-off as a successful gate install.
+                    Navigator.of(
+                      context,
+                      rootNavigator: true,
+                    ).pushAndRemoveUntil(
+                      MaterialPageRoute(builder: (_) => const _ShellHost()),
+                      (_) => false,
+                    );
+                  } else {
+                    Navigator.pop(context);
+                  }
+                },
               ),
             ),
-            icon: const Icon(Icons.refresh, size: 17),
-            label: const Text('Retry install'),
-            onPressed: () {
-              setState(() {
-                _log.clear();
-                _error = null;
-                _phase = 0;
-                _phaseProgress = 0;
-                _done = false;
-                _start = DateTime.now();
-              });
-              _runInstall();
-            },
-          ),
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: () {
+                setState(() {
+                  _log.clear();
+                  _error = null;
+                  _unsupported = false;
+                  _phase = 0;
+                  _phaseProgress = 0;
+                  _done = false;
+                  _start = DateTime.now();
+                });
+                _runInstall();
+              },
+              child: Text(
+                'Retry install anyway',
+                style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
+              ),
+            ),
+          ] else ...[
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: Aether.accent,
+                padding: const EdgeInsets.symmetric(vertical: 13),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              icon: const Icon(Icons.refresh, size: 17),
+              label: const Text('Retry install'),
+              onPressed: () {
+                setState(() {
+                  _log.clear();
+                  _error = null;
+                  _unsupported = false;
+                  _phase = 0;
+                  _phaseProgress = 0;
+                  _done = false;
+                  _start = DateTime.now();
+                });
+                _runInstall();
+              },
+            ),
+          ],
           const SizedBox(height: 8),
           TextButton(
             onPressed: () => Navigator.pop(context),

@@ -28,9 +28,14 @@ Future<void> main() async {
   // no bash). The PR22 self-heal moved OUT of the boot path: awaiting it
   // here kept runApp blocked on multi-minute find+sed passes → the
   // reported "black screen on every app open". It runs post-frame below.
-  final sandboxReady = await SandboxService.I.checkExisting();
-  AppState.I.sandboxInstalled = sandboxReady;
-  runApp(OvidApp(sandboxReady: sandboxReady));
+      final sandboxReady = await SandboxService.I.checkExisting();
+      AppState.I.sandboxInstalled = sandboxReady;
+      // A device that can't run the sandbox (Android 6, exec-blocked ROM)
+      // must not trap the user on the install gate — chat works without
+      // it. Post-frame hooks below still key off the REAL disk state.
+      runApp(
+        OvidApp(sandboxReady: sandboxReady || AppState.I.sandboxSkipped),
+      );
   WidgetsBinding.instance.addPostFrameCallback((_) {
     unawaited(GitHubService.I.initialize());
     // PR32: background self-heal (usr symlink, shebangs, exec bits, libz)

@@ -28,11 +28,12 @@ android {
 
     defaultConfig {
         applicationId = "com.dhanuk.ovidai"
-        // Android 6.0+ (API 23) — Flutter default is 24; we support one
-        // version lower for broad device coverage.  The phone terminal
-        // tier works everywhere; the proot sandbox additionally requires
-        // an arm64 device (checked at runtime with a friendly fallback).
-        minSdk = flutter.minSdkVersion
+        // Android 6.0+ (API 23) — Flutter's default is 24; set explicitly
+        // so 6.x devices can install. The app shell (chat/providers/
+        // browser) runs on 23; the native sandbox additionally needs
+        // Android 7+ (API 24) — checked at runtime with a friendly
+        // "continue without sandbox" fallback (sandbox_service preflight).
+        minSdk = 23
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
