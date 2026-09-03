@@ -5780,6 +5780,162 @@ block</pre>
       expect(src, contains('targetSdkVersion >= 29'));
     });
   });
+
+  group('PR37: run_shell never stalls when sandbox exec is denied', () {
+    // Reproduces the on-device report: the [tool run_shell] card appears
+    // and then NOTHING — no output, no error, session dead. The device
+    // state: sandbox files fully extracted (checkExisting → true) but the
+    // platform denies exec (EACCES). bash exists on disk with no exec bit.
+    test('run completes and the model receives the exec error', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+
+      // Device-like sandbox: files present, exec denied.
+      final tmp = await Directory.systemTemp.createTemp('pr37prefix');
+      await Directory('${tmp.path}/bin').create(recursive: true);
+      await Directory('${tmp.path}/lib').create(recursive: true);
+      // Written with the default 0644 mode: exists, NOT executable →
+      // EACCES on execve — the same denial the device reports.
+      File('${tmp.path}/bin/bash').writeAsStringSync('#!/nope\n');
+      File('${tmp.path}/bin/coreutils').writeAsStringSync('x');
+      File('${tmp.path}/lib/libtermux-exec-direct-ld-preload.so')
+          .writeAsStringSync('x');
+      final svc = SandboxService.I;
+      svc.sandboxPrefixForTest = tmp;
+      addTearDown(() {
+        svc.sandboxPrefixForTest = null;
+        tmp.deleteSync(recursive: true);
+      });
+
+      final server = await HttpServer.bind('127.0.0.1', 0);
+      addTearDown(() => server.close(force: true));
+
+      final provider = app.providerById('ollama-local')!;
+      final originals = {
+        'baseUrl': provider.baseUrl,
+        'models': provider.models,
+        'selectedModel': provider.selectedModel,
+      };
+      addTearDown(() {
+        provider
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+      });
+
+      final session = ChatSession(
+        id: 'pr37run',
+        title: 'Run',
+        providerId: provider.id,
+        model: 'test-model',
+        mode: 'auto', // default mode: run_shell auto-approves
+        messages: [Message(role: 'user', content: 'run it')],
+      );
+      app.sessions.insert(0, session);
+      app.activeSessionId = session.id;
+      addTearDown(() {
+        app.sessions.removeWhere((x) => x.id == session.id);
+      });
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['test-model'];
+
+      var requestCount = 0;
+      final toolResultsSeen = <String>[];
+      final serverTask = () async {
+        await for (final request in server) {
+          final body = await utf8.decoder.bind(request).join();
+          requestCount++;
+          for (final m
+              in (jsonDecode(body) as Map<String, dynamic>)['messages']
+                  as List) {
+            if (m['role'] == 'tool') {
+              toolResultsSeen.add('${m['content']}');
+            }
+          }
+          request.response.headers.chunkedTransferEncoding = true;
+          if (requestCount == 1) {
+            // First round: text + a run_shell tool call.
+            request.response.add(utf8.encode(
+              'data: ${jsonEncode({
+                'choices': [
+                  {
+                    'delta': {
+                      'content': 'running it',
+                      'tool_calls': [
+                        {
+                          'index': 0,
+                          'id': 'call_1',
+                          'function': {
+                            'name': 'run_shell',
+                            'arguments': '{"command":"echo hi"}',
+                          },
+                        },
+                      ],
+                    },
+                    'finish_reason': 'tool_calls',
+                  },
+                ],
+              })}\n\n',
+            ));
+          } else {
+            // Follow-up rounds: final answer.
+            request.response.add(utf8.encode(
+              'data: ${jsonEncode({
+                'choices': [
+                  {
+                    'delta': {'content': 'all done'},
+                    'finish_reason': 'stop',
+                  },
+                ],
+              })}\n\n',
+            ));
+          }
+          await request.response.flush();
+          try {
+            await request.response.close();
+          } catch (_) {}
+        }
+      }();
+      unawaited(serverTask);
+
+      await agent
+          .runTask('run it', sessionId: session.id)
+          .timeout(const Duration(seconds: 30));
+
+      // The run FINISHED — no stuck busy flag (the reported 'conversation
+      // never advances, must create a new session' state).
+      expect(agent.busyFor(session.id), isFalse);
+      // The exec failure reached the model as a tool result.
+      expect(toolResultsSeen, isNotEmpty);
+      expect(
+        toolResultsSeen.first,
+        anyOf(
+          contains('error'),
+          contains('Error'),
+          contains('denied'),
+          contains('Permission'),
+        ),
+        reason: 'exec denial must surface to the model, not vanish',
+      );
+      // And the model's final answer landed in the transcript.
+      expect(
+        session.messages.any((m) => m.content.contains('all done')),
+        isTrue,
+      );
+    });
+
+    test('tool approvals auto-deny after 2 minutes (no silent wedge)', () {
+      // Source contract: a missed approval dock must not park the run
+      // for the tool's full budget. Questions/plan reviews are exempt.
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(src, contains("Timer(const Duration(seconds: 120)"));
+      expect(src, contains("req.questions == null && t != 'exit_plan_mode'"));
+      expect(src, contains('approval unanswered for 120s'));
+      // The timeout never double-completes against a user tap or Stop.
+      expect(src, contains('if (req.completer.isCompleted) return;'));
+    });
+  });
 }
 
 /// Build one DuckDuckGo-style result block (anchor + snippet pair).

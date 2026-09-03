@@ -6897,6 +6897,29 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     );
     pendingApproval = req;
     notifyListeners();
+    // The approval dock is a small non-modal card above the input — easy
+    // to miss while reading the chat stream. A missed approval used to
+    // wedge the run (and lock the composer) for the tool's full budget
+    // (10 minutes for run_shell) with no other visible signal. Surface
+    // it in the chat stream AND auto-deny tool approvals after 2 minutes
+    // so the model can continue and tell the user. Question cards and
+    // plan reviews keep waiting — those ARE the interaction.
+    _emit(
+      'think',
+      'approval needed: $s — the Approve/Deny card is above the input',
+    );
+    final isToolApproval = req.questions == null && t != 'exit_plan_mode';
+    if (isToolApproval) {
+      Timer(const Duration(seconds: 120), () {
+        if (req.completer.isCompleted) return;
+        req.completer.complete(false);
+        if (identical(pendingApproval, req)) {
+          pendingApproval = null;
+          notifyListeners();
+        }
+        _emit('think', 'approval unanswered for 120s — auto-denied');
+      });
+    }
     return req.completer.future;
   }
 
