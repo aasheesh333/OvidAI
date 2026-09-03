@@ -3732,6 +3732,185 @@ class AgentService extends ChangeNotifier {
     }
   }
 
+  /// PR29: the ONE request-assembly used everywhere a request is built
+  /// from session state (initial assembly, overflow rebuild, budget
+  /// boundary). DSH framing parity:
+  ///   • system prompt,
+  ///   • the checkpoint replacement as a USER-role message with the exact
+  ///     DSH checkpoint preamble + `<compacted-summary>` tags,
+  ///   • optional staged-attachments note,
+  ///   • `_replayHistory` (post-checkpoint window).
+  List<Map<String, dynamic>> buildRequestMessages(
+    ChatSession s,
+    String sys, {
+    List<({String name, String path, int size})> atts = const [],
+  }) {
+    return [
+      {'role': 'system', 'content': sys},
+      if (s.compactedSummary != null && s.compactedSummary!.isNotEmpty)
+        {
+          'role': 'user',
+          'content':
+              'This is an automatically generated checkpoint condensing an '
+              'earlier span of the conversation to free up context. Treat '
+              'the captured context as established background and build on '
+              'it without restating it. Continue the task directly from '
+              'the messages that follow, without acknowledging this '
+              'checkpoint.\n\n<compacted-summary>\n${s.compactedSummary}\n'
+              '</compacted-summary>',
+        },
+      // Staged attachments note — the files are in the session workspace.
+      if (atts.isNotEmpty)
+        {
+          'role': 'system',
+          'content':
+              '[User attached ${atts.length} file${atts.length == 1 ? '' : 's'} '
+              'this turn: '
+              '${atts.map((a) => '"${a.name}" (${_fmtSize(a.size)})').join(', ')}. '
+              'They are saved in THIS session workspace. '
+              'Read them with read_attachment or run_shell, then respond to '
+              'the user\'s message.]',
+        },
+      ..._replayHistory(s),
+    ];
+  }
+
+  /// DSH summarization (PR29): the summarizer call REPLAYS the span
+  /// verbatim — same content the model already saw (content + tool
+  /// cards' toolDetail, no lossy truncation) — with the EXACT DSH
+  /// compaction instruction as the final user message. A prior summary
+  /// merges per DSH rules (never copied forward verbatim).
+  Future<String?> _summarizeCompactSpan(
+    ProviderConfig p,
+    ChatSession s,
+    int from,
+    int cutoff,
+  ) async {
+    final custom = compactionSummarizerForTest;
+    if (custom != null) return custom(s, from, cutoff);
+    final span = s.messages.sublist(from, cutoff);
+    final replay = StringBuffer();
+    for (final m in span) {
+      final who = m.role == 'user' ? 'User' : 'Assistant';
+      replay.writeln('$who: ${m.content}');
+      final d = (m.toolDetail ?? '').trim();
+      if (d.isNotEmpty) {
+        replay.writeln('  [tool output] ${cleanTruncate(d, 2000)}');
+      }
+    }
+    final prior = s.compactedSummary;
+    final summary = await _callLlm(
+      p,
+      [
+        {
+          'role': 'system',
+          'content':
+              'You are now acting as a compaction engine for this AI coding '
+              'assistant. Condense the conversation ABOVE into a structured '
+              'checkpoint that lets another model resume the work with no '
+              'loss of essential context.\n'
+              '\n'
+              'Output EXACTLY the Markdown structure below: keep every '
+              'section, in order. Use terse bullets, not prose paragraphs. '
+              'Write "(none)" for an empty section — never drop a section.\n'
+              '\n'
+              '## Primary Request and Intent\n'
+              '- [the user\'s original and evolving goals; quote verbatim '
+              'where the exact wording matters]\n'
+              '\n'
+              '## Key Technical Concepts\n'
+              '- [technologies, frameworks, patterns, and conventions in '
+              'play]\n'
+              '\n'
+              '## Files and Code\n'
+              '- [exact path: why it matters, key changes or snippets]\n'
+              '\n'
+              '## Errors and Fixes\n'
+              '- [error: how it was resolved, plus any related user '
+              'feedback]\n'
+              '\n'
+              '## Pending Jobs\n'
+              '- [explicitly requested work not yet completed]\n'
+              '\n'
+              '## Current Work\n'
+              '- [precisely what was in progress at this checkpoint]\n'
+              '\n'
+              '## Next Step\n'
+              '- [the single next action, directly in line with the most '
+              'recent request, or "(none)"]\n'
+              '\n'
+              '## Critical Context\n'
+              '- [decisions and their rationale, constraints, user '
+              'preferences, open questions, data needed to continue]\n'
+              '\n'
+              'Rules:\n'
+              '- Write concise English engineering prose. Preserve exact '
+              'file paths, commands, error strings, identifiers, numeric '
+              'values, function signatures, and syntax fragments.\n'
+              '- Capture user feedback and explicit instructions '
+              'faithfully, especially corrections.\n'
+              '- Do NOT mention this summarization request or that the '
+              'context was compacted.\n'
+              '- Output only the checkpoint text: do not call any tool or '
+              'take any other action.\n'
+              '- If the conversation already contains a prior checkpoint, '
+              'do not copy it forward verbatim: preserve still-true facts, '
+              'drop stale ones, and merge newer information into a single '
+              'consolidated summary under the same structure.',
+        },
+        {
+          'role': 'user',
+          'content':
+              '${prior == null || prior.isEmpty ? '' : 'A PRIOR CHECKPOINT already exists — merge it with the new span per the rules above.\n\n'}'
+              'Conversation span to condense:\n\n$replay',
+        },
+      ],
+      s,
+      includeTools: false,
+    );
+    if (summary == null || summary['content'] == null) return null;
+    final text = summary['content'] as String;
+    return text.trim().isEmpty ? null : text;
+  }
+
+  /// Apply a successful compaction: fold [from, cutoff) into the summary,
+  /// write the visible "Context compacted" event row. Returns the human
+  /// status line.
+  String _applyCompaction(ChatSession s, int from, int cutoff, String summary,
+      {required bool forced}) {
+    final shadowed = cutoff - from;
+    final shadowedTok = s.messages
+        .sublist(from, cutoff)
+        .fold<int>(
+          0,
+          (a, m) =>
+              a +
+              estimateMessageTokens(m.content) +
+              estimateMessageTokens(m.toolDetail ?? ''),
+        );
+    s.compactedSummary = summary;
+    s.compactedAtCount = cutoff;
+    s.messages.insert(
+      cutoff,
+      Message(
+        role: 'assistant',
+        kind: MsgKind.compact,
+        content: forced
+            ? 'Context force-pruned · $shadowed message${shadowed == 1 ? '' : 's'} '
+                '(overflow recovery)'
+            : 'Context compacted · $shadowed message${shadowed == 1 ? '' : 's'} '
+                '(~${_fmtK(shadowedTok)} tokens)',
+        toolDetail: summary,
+        toolState: 'ok',
+      ),
+    );
+    AppState.I.persistSessions();
+    return forced
+        ? 'force-pruned $shadowed message(s) (~${_fmtK(shadowedTok)} tokens)'
+        : 'compacted $shadowed message(s) (~${_fmtK(shadowedTok)} tokens '
+            'folded into the checkpoint)';
+  }
+
   Future<void> _maybeCompactLocked(ChatSession s, ProviderConfig p) async {
     final window = contextWindowForSession(s);
     final threshold = (window * _compactThresholdRatio).floor();
@@ -3758,14 +3937,6 @@ class AgentService extends ChangeNotifier {
       cutoff--;
     }
     if (cutoff - s.compactedAtCount < 4) return; // nothing worth compacting
-    final toSummarize = s.messages
-        .sublist(s.compactedAtCount, cutoff)
-        .map(
-          (m) =>
-              '${m.role == 'user' ? 'User' : 'Assistant'}: ${cleanTruncate(m.content, 400)}',
-        )
-        .join('\n');
-    if (toSummarize.isEmpty) return;
     _emit(
       'think',
       'context pressure '
@@ -3773,73 +3944,21 @@ class AgentService extends ChangeNotifier {
           '${(window / 1000).toStringAsFixed(0)}K window — compacting…',
     );
     try {
-      final summary = await _callLlm(
+      final summaryText = await _summarizeCompactSpan(
         p,
-        [
-          {
-            'role': 'system',
-            'content':
-                'You are a conversation summarizer producing a DSH-style '
-                'checkpoint. Compress the conversation into a dense summary '
-                '(max 500 words) with EXACTLY this 8-section structure, '
-                'each section as "## <name>" followed by its content '
-                '(omit nothing that exists; write "none" for empty):\n'
-                '## Objective — the user\'s overall goal\n'
-                '## Status — where the work currently stands\n'
-                '## Decisions — choices made and why\n'
-                '## Files — paths touched, with their state\n'
-                '## Tasks — pending todos and next actions\n'
-                '## Learnings — constraints, gotchas, environment facts\n'
-                '## Context Notes — key snippets/values worth verbatim\n'
-                '## User Preferences — language, style, approvals\n'
-                'Preserve ALL facts, decisions, file paths, code snippets, '
-                'pending tasks, and preferences. Write in the same language '
-                'as the conversation.',
-          },
-          {
-            'role': 'user',
-            'content':
-                '${s.compactedSummary != null ? '[Previous summary]\n${s.compactedSummary}\n\n' : ''}'
-                '[New messages to incorporate]\n$toSummarize',
-          },
-        ],
         s,
-        includeTools: false,
+        s.compactedAtCount,
+        cutoff,
       );
-      if (summary != null && summary['content'] != null) {
-        final summaryText = summary['content'] as String;
-        final shadowed = cutoff - s.compactedAtCount;
-        final shadowedTok = s.messages
-            .sublist(s.compactedAtCount, cutoff)
-            .fold<int>(
-              0,
-              (a, m) =>
-                  a +
-                  estimateMessageTokens(m.content) +
-                  estimateMessageTokens(m.toolDetail ?? ''),
-            );
-        s.compactedSummary = summaryText;
-        s.compactedAtCount = cutoff;
-        // DSH transcript parity: an inline "Context compacted" event row
-        // (expandable to the summary) — the user SEES what was folded.
-        s.messages.insert(
+      if (summaryText != null) {
+        final status = _applyCompaction(
+          s,
+          s.compactedAtCount,
           cutoff,
-          Message(
-            role: 'assistant',
-            kind: MsgKind.compact,
-            content:
-                'Context compacted · $shadowed message${shadowed == 1 ? '' : 's'} '
-                '(~${_fmtK(shadowedTok)} tokens)',
-            toolDetail: summaryText,
-            toolState: 'ok',
-          ),
+          summaryText,
+          forced: false,
         );
-        AppState.I.persistSessions();
-        _emit(
-          'think',
-          'context compacted ✓ ($shadowed msgs folded; '
-              '~${(tail / 1000).toStringAsFixed(1)}K tokens kept verbatim)',
-        );
+        _emit('think', 'context compacted ✓ ($status)');
       }
     } catch (e) {
       // Compaction failure is non-fatal — continue with full history.
@@ -3855,6 +3974,72 @@ class AgentService extends ChangeNotifier {
     if (!_compacting.add(s.id)) return; // PR26/C3: one compaction at a time
     try {
       await _forceCompactLocked(s, p);
+    } finally {
+      _compacting.remove(s.id);
+    }
+  }
+
+  /// PR29: manual `/compact` (DSH `compactNow()` parity). Unlike
+  /// [forceCompact] (the EMERGENCY overflow path with minimal retention),
+  /// this uses the STANDARD retention policy and — critically — RETURNS
+  /// an honest human status line instead of letting the command lie
+  /// "Session compacted." when nothing happened (short history, already
+  /// fully compacted, busy lock, or a summarizer failure are all reported).
+  Future<String> compactNow(ChatSession s, ProviderConfig p) async {
+    if (!_compacting.add(s.id)) {
+      return 'Compaction is already running in this chat.';
+    }
+    try {
+      final window = contextWindowForSession(s);
+      // Standard retention policy — same numbers as auto-compaction.
+      final retain = (window * _compactRetainRatio).floor();
+      var tail = 0;
+      var cutoff = s.messages.length;
+      while (cutoff > s.compactedAtCount) {
+        final m = s.messages[cutoff - 1];
+        if (tail >= retain &&
+            s.messages.length - cutoff >= 6 &&
+            cutoff - s.compactedAtCount >= 4) {
+          break;
+        }
+        tail +=
+            estimateMessageTokens(m.content) +
+            estimateMessageTokens(m.toolDetail ?? '');
+        cutoff--;
+      }
+      final foldable = cutoff - s.compactedAtCount;
+      if (foldable < 4) {
+        final left = s.messages.length - s.compactedAtCount;
+        return left <= 0
+            ? 'Nothing to compact — this chat is already fully compacted.'
+            : 'Nothing to compact yet — only $left message(s) after the '
+                'last checkpoint (need ≥4 foldable + retained tail).';
+      }
+      _emit('think', 'manual /compact — folding $foldable message(s)…');
+      try {
+        final summary = await _summarizeCompactSpan(
+          p,
+          s,
+          s.compactedAtCount,
+          cutoff,
+        );
+        if (summary == null) {
+          return 'Compaction failed — the model returned no summary '
+              '(provider error or empty reply). Nothing was changed.';
+        }
+        final status = _applyCompaction(
+          s,
+          s.compactedAtCount,
+          cutoff,
+          summary,
+          forced: false,
+        );
+        return 'Session compacted — $status. View the checkpoint row '
+            'in the transcript.';
+      } catch (e) {
+        return 'Compaction failed: ${e.toString().split('\n').first} '
+            '— history is untouched.';
+      }
     } finally {
       _compacting.remove(s.id);
     }
@@ -3881,52 +4066,17 @@ class AgentService extends ChangeNotifier {
     ProviderConfig p,
     int cutoff,
   ) async {
-    final toSummarize = s.messages
-        .sublist(s.compactedAtCount, cutoff)
-        .map(
-          (m) =>
-              '${m.role == 'user' ? 'User' : 'Assistant'}: ${cleanTruncate(m.content, 300)}',
-        )
-        .join('\n');
-    if (toSummarize.isEmpty) return;
+    if (cutoff - s.compactedAtCount < 2) return;
     try {
-      final summary = await _callLlm(
+      final summaryText = await _summarizeCompactSpan(
         p,
-        [
-          {
-            'role': 'system',
-            'content':
-                'You are a conversation summarizer. Compress into a dense '
-                'summary (max 350 words). Preserve facts, file paths, '
-                'decisions, pending tasks. Same language as conversation.',
-          },
-          {
-            'role': 'user',
-            'content':
-                '${s.compactedSummary != null ? '[Previous summary]\n${s.compactedSummary}\n\n' : ''}$toSummarize',
-          },
-        ],
         s,
-        includeTools: false,
+        s.compactedAtCount,
+        cutoff,
       );
-      if (summary != null && summary['content'] != null) {
-        final shadowed = cutoff - s.compactedAtCount;
-        final summaryText = summary['content'] as String;
-        s.compactedSummary = summaryText;
-        s.compactedAtCount = cutoff;
-        s.messages.insert(
-          cutoff,
-          Message(
-            role: 'assistant',
-            kind: MsgKind.compact,
-            content:
-                'Context force-pruned · $shadowed message${shadowed == 1 ? '' : 's'} '
-                '(overflow recovery)',
-            toolDetail: summaryText,
-            toolState: 'ok',
-          ),
-        );
-        AppState.I.persistSessions();
+      if (summaryText != null) {
+        _applyCompaction(s, s.compactedAtCount, cutoff, summaryText,
+            forced: true);
         _emit('think', 'context force-pruned ✓ — retrying the request');
       }
     } catch (e) {
@@ -4167,38 +4317,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     // every model incl. custom BYOK routes, 256K and 1M windows alike.
     await _maybeCompact(s, p);
 
-    final msgs = <Map<String, dynamic>>[
-      {'role': 'system', 'content': sys},
-      // Compacted summary as system-level context (DSH injection style).
-      if (s.compactedSummary != null && s.compactedSummary!.isNotEmpty)
-        {
-          'role': 'system',
-          'content':
-              '[Earlier conversation summary — treat as established context]\n'
-              '${s.compactedSummary}',
-        },
-      // Staged attachments note — the files are in the session workspace.
-      if (atts.isNotEmpty)
-        {
-          'role': 'system',
-          'content':
-              '[User attached ${atts.length} file${atts.length == 1 ? '' : 's'} '
-              'this turn: '
-              '${atts.map((a) => '"${a.name}" (${_fmtSize(a.size)})').join(', ')}. '
-              'They are saved in THIS session workspace. '
-              'Read them with read_attachment or run_shell, then respond to '
-              'the user\'s message.]',
-        },
-      // Full message history — compaction (_maybeCompact) already ran above
-      // and merges anything that would overflow this model's window into
-      // `compactedSummary`, so we never hard-truncate mid-conversation.
-      //
-      // Tool cards keep their text in `toolDetail`, NOT `content`. Replaying
-      // them off `content` injected a run of empty assistant turns and threw
-      // away every earlier tool result, so the model had no memory of what
-      // it had already read/run in previous turns of this chat.
-      ..._replayHistory(s),
-    ];
+    final msgs = buildRequestMessages(s, sys, atts: atts);
 
     try {
       var overflowRecovered = false;
@@ -4264,28 +4383,13 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           if (!overflowRecovered) {
             overflowRecovered = true;
             await forceCompact(s, p);
-            // C1 fix: REBUILD the request from the compacted history — the
-            // old code only INSERTED the summary while keeping every old
-            // message, so the retry was LARGER than the rejected request.
-            // _replayHistory now skips the compacted span, so this rebuild
-            // is genuinely smaller: sys + summary + post-cutoff window.
-            // PR26/C1: the compacted summary system note must be re-injected
-            // EXACTLY like the initial assembly (the old rebuild dropped
-            // it — the retry lost everything compaction had folded).
-            msgs..clear()..add({'role': 'system', 'content': sys});
-            // PR26/C1: the compacted summary system note must be re-injected
-            // EXACTLY like the initial assembly (the old rebuild dropped
-            // it — the retry lost everything compaction had folded).
-            if (s.compactedSummary != null &&
-                s.compactedSummary!.isNotEmpty) {
-              msgs.add({
-                'role': 'system',
-                'content':
-                    '[Earlier conversation summary — treat as established '
-                    'context]\n${s.compactedSummary}',
-              });
-            }
-            msgs.addAll(_replayHistory(s));
+            // PR29: rebuild from the compacted history using the SAME
+            // assembly as the initial request (DSH checkpoint framing) —
+            // genuinely smaller than the rejected request, and the
+            // checkpoint is never dropped.
+            msgs
+              ..clear()
+              ..addAll(buildRequestMessages(s, sys));
             _emit(
               'think',
               'context overflow — request rebuilt from compacted history '
@@ -4553,7 +4657,23 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         // compact history and nudge the model to keep going. Task completion
         // is still the only real bound.
         if (budgetBoundary) {
+          final preCompact = s.compactedAtCount;
           await _maybeCompact(s, p);
+          // PR29: if the boundary compaction actually folded a span, the
+          // IN-FLIGHT request must be REBUILT from the compacted history —
+          // appending the nudge to the old array would keep sending every
+          // pre-checkpoint row (auto-compaction that never shrinks the
+          // request was the reported "compaction not working" bug).
+          if (s.compactedAtCount > preCompact) {
+            msgs
+              ..clear()
+              ..addAll(buildRequestMessages(s, sys));
+            _emit(
+              'think',
+              'context compacted — request rebuilt '
+              '(${msgs.length} rows)',
+            );
+          }
           msgs.add({
             'role': 'user',
             'content':
@@ -7902,7 +8022,7 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     _activeToolMsg = m; // _toolStart already sets it; keep explicit.
   }
 
-  /// PR26 test seams: compaction lock + direct _maybeCompact access.
+  /// PR29 test seams: compaction lock + direct _maybeCompact access.
   @visibleForTesting
   bool compactingAddForTest(String id) => _compacting.add(id);
 
@@ -7912,6 +8032,13 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
   @visibleForTesting
   Future<void> maybeCompactForTest(ChatSession s, ProviderConfig p) =>
       _maybeCompact(s, p);
+
+  /// PR29 test seam: replace the compaction summarizer (no provider in
+  /// unit tests). Signature: (session, from, cutoff) → summary text
+  /// (null = model failure).
+  @visibleForTesting
+  Future<String?> Function(ChatSession s, int from, int cutoff)?
+      compactionSummarizerForTest;
 
   /// Test seam: the request-message array this session's history replays to.
   @visibleForTesting

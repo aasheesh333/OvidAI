@@ -143,8 +143,11 @@ class CommandService {
                   '(queue it as a message instead).',
             );
           }
-          await AgentService.I.forceCompact(s, p);
-          return CommandResult(feedback: 'Session compacted.');
+          // PR29: compactNow returns an HONEST status line — the old
+          // forceCompact path silently did nothing on short/already-
+          // compacted chats while the command claimed success.
+          final status = await AgentService.I.compactNow(s, p);
+          return CommandResult(feedback: status);
         },
       ),
     );

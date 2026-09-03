@@ -4936,14 +4936,13 @@ block</pre>
 
     test('summarizer prompt demands the 8-section DSH checkpoint', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
-      expect(src, contains('## Objective'));
-      expect(src, contains('## Decisions'));
-      expect(src, contains('## User Preferences'));
-      // Overflow rebuild re-injects the summary (C1).
-      expect(
-        src,
-        contains('PR26/C1: the compacted summary system note must be re-injected'),
-      );
+      // PR29: the exact DSH section names (updated from the older set).
+      expect(src, contains('## Primary Request and Intent'));
+      expect(src, contains('## Critical Context'));
+      expect(src, contains('## Next Step'));
+      // Overflow rebuild + budget-boundary rebuild reuse the shared
+      // assembly (never drop the checkpoint).
+      expect(src, contains('buildRequestMessages(s, sys)'));
     });
   });
 
@@ -5068,6 +5067,154 @@ block</pre>
       expect(src, contains("new DragEvent('dragstart'"));
       expect(src, contains("new MouseEvent('mouseover'"));
       expect(src, contains("new Event('input', {bubbles:true})"));
+    });
+  });
+
+  group('PR29: compaction DSH parity', () {
+    ProviderConfig fakeProvider() => ProviderConfig(
+          id: 'prov-c29',
+          name: 'Test',
+          description: '',
+          baseUrl: 'https://x.test',
+          models: const ['m'],
+          requiresApiKey: false,
+        );
+
+    ChatSession newCompactSession(String id, {int msgs = 0}) {
+      final app = AppState.I;
+      final s = ChatSession(id: id, title: id, model: 'm', mode: 'auto');
+      for (var i = 0; i < msgs; i++) {
+        s.messages.add(
+          Message(role: 'user', content: 'message $i ${'x' * 400}'),
+        );
+      }
+      app.sessions.insert(0, s);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == id));
+      return s;
+    }
+
+    test('/compact on a short chat reports honestly instead of lying',
+        () async {
+      final app = AppState.I;
+      final prov = fakeProvider();
+      app.providers.add(prov);
+      addTearDown(() => app.providers.removeWhere((p) => p.id == 'prov-c29'));
+      final s = newCompactSession('c29-short', msgs: 3);
+      s.providerId = prov.id;
+      app.activeSessionId = s.id;
+      addTearDown(() {
+        app.activeSessionId = '';
+      });
+
+      final res = await CommandService.I.execute('/compact');
+      expect(res!.feedback, contains('Nothing to compact'));
+      expect(res.feedback, isNot(contains('Session compacted —')));
+      // History untouched.
+      expect(s.messages.length, 3);
+      expect(s.compactedSummary, isNull);
+    });
+
+    test('/compact on a fully-compacted chat says so', () async {
+      final app = AppState.I;
+      final prov = fakeProvider();
+      app.providers.add(prov);
+      addTearDown(() => app.providers.removeWhere((p) => p.id == 'prov-c29'));
+      final s = newCompactSession('c29-done', msgs: 2);
+      s.providerId = prov.id;
+      app.activeSessionId = s.id;
+      addTearDown(() => app.activeSessionId = '');
+      // Simulate an already-complete compaction.
+      s.compactedAtCount = s.messages.length;
+      s.compactedSummary = 'old checkpoint';
+
+      final res = await CommandService.I.execute('/compact');
+      expect(res!.feedback, contains('already fully compacted'));
+    });
+
+    test('/compact folds the span and reports honest counts (seam)',
+        () async {
+      final app = AppState.I;
+      final prov = fakeProvider();
+      app.providers.add(prov);
+      addTearDown(() => app.providers.removeWhere((p) => p.id == 'prov-c29'));
+      final s = newCompactSession('c29-ok', msgs: 40);
+      s.providerId = prov.id;
+      app.activeSessionId = s.id;
+      addTearDown(() => app.activeSessionId = '');
+
+      // Small window so the standard retention keeps only a few rows.
+      app.contextWindowOverride = 4000;
+      addTearDown(() => app.contextWindowOverride = 0);
+
+      AgentService.I.compactionSummarizerForTest = (sess, from, cutoff) async {
+        // The span is replayed with real content (not truncated away).
+        return '## Primary Request and Intent\n- test goal';
+      };
+      addTearDown(() => AgentService.I.compactionSummarizerForTest = null);
+
+      final res = await CommandService.I.execute('/compact');
+      expect(res!.feedback, contains('Session compacted'));
+      expect(res.feedback, contains('message(s)'));
+      // The checkpoint landed: state advanced + compact row visible.
+      expect(s.compactedSummary, contains('test goal'));
+      expect(s.compactedAtCount, greaterThan(0));
+      expect(
+        s.messages.where((m) => m.kind == MsgKind.compact).length,
+        1,
+        reason: 'visible checkpoint row',
+      );
+    });
+
+    test('summarizer failure is reported honestly (nothing changes)',
+        () async {
+      final app = AppState.I;
+      final s = newCompactSession('c29-fail', msgs: 40);
+      AgentService.I.compactionSummarizerForTest = (sess, from, cutoff) async {
+        return null; // model failure
+      };
+      addTearDown(() => AgentService.I.compactionSummarizerForTest = null);
+      app.contextWindowOverride = 4000;
+      addTearDown(() => app.contextWindowOverride = 0);
+
+      final prov = fakeProvider();
+      final status = await AgentService.I.compactNow(s, prov);
+      expect(status, contains('failed'));
+      expect(status, contains('no summary'));
+      expect(s.compactedSummary, isNull);
+      expect(s.messages.length, 40, reason: 'history untouched');
+    });
+
+    test('buildRequestMessages uses the DSH checkpoint framing', () {
+      final s = newCompactSession('c29-frame', msgs: 2);
+      s.compactedSummary = 'CHECKPOINT BODY';
+      final msgs = AgentService.I.buildRequestMessages(s, 'SYS');
+      expect(msgs.first['role'], 'system');
+      expect(msgs.first['content'], 'SYS');
+      // The checkpoint is a USER-role message with the DSH preamble +
+      // <compacted-summary> tags (not a bare system note anymore).
+      final ck = msgs[1];
+      expect(ck['role'], 'user');
+      expect(ck['content'], contains('<compacted-summary>'));
+      expect(ck['content'], contains('CHECKPOINT BODY'));
+      expect(ck['content'],
+          contains('without acknowledging this checkpoint'));
+      // History replays AFTER the checkpoint.
+      expect(msgs.length, greaterThan(2));
+    });
+
+    test('summarizer instruction matches the DSH 8-section checkpoint',
+        () {
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(src, contains('## Primary Request and Intent'));
+      expect(src, contains('## Key Technical Concepts'));
+      expect(src, contains('## Files and Code'));
+      expect(src, contains('## Errors and Fixes'));
+      expect(src, contains('## Pending Jobs'));
+      expect(src, contains('## Current Work'));
+      expect(src, contains('## Next Step'));
+      expect(src, contains('## Critical Context'));
+      // Span replay is verbatim, not 400-char truncated blobs.
+      expect(src, isNot(contains('cleanTruncate(m.content, 400)')));
     });
   });
 
