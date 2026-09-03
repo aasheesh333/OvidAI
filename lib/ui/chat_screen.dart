@@ -4116,7 +4116,10 @@ class _InputBarState extends State<_InputBar> {
                           icon: Icon(icon, size: 18, color: Colors.white),
                           onPressed: () {
                             if (runningNow && !hasDraft) {
-                              AgentService.I.cancelRun();
+                              // PR32: red Stop = INSTANT panic stop — every
+                              // run (this chat, subagents, parallel sessions),
+                              // every job, every spawned process dies NOW.
+                              AgentService.I.cancelAllRuns();
                             } else {
                               onSend();
                             }

@@ -5388,6 +5388,79 @@ block</pre>
     });
   });
 
+  group('PR32: instant stop + boot fix + keep-alive', () {
+    test('boot path: checkExisting has NO self-heal await (black-screen fix)',
+        () {
+      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+      final start = src.indexOf('Future<bool> checkExisting()');
+      final body = src.substring(start, src.indexOf('Future<void> selfHealInBackground'));
+      // The boot path must NOT await the multi-minute heal.
+      expect(body, isNot(contains('await _selfHealSandbox')));
+      // ...and the heal must run from the post-frame background instead.
+      expect(src, contains('Future<void> selfHealInBackground'));
+      final main = File('lib/main.dart').readAsStringSync();
+      expect(
+        main,
+        contains('selfHealInBackground'),
+        reason: 'heal runs AFTER runApp (post-frame), never before',
+      );
+    });
+
+    test('killAllProcesses SIGKILLs every tracked process (host-executed)',
+        () async {
+      final svc = SandboxService.I;
+      // _trackedRun is private — drive it through execHost, but that hard
+      // /system/bin/sh paths. On the HOST (unit tests) spawn via the same
+      // tracker by faking the sandbox prefix to /bin (sh exists there).
+      final shPath = File('/system/bin/sh').existsSync()
+          ? '/system/bin/sh'
+          : '/bin/sh';
+      expect(File(shPath).existsSync(), isTrue, reason: 'a shell for the test');
+      // Spawn directly (the tracker's registration path — same API the
+      // sandbox execs use internally) via a tiny tracked sleep.
+      final proc = await Process.start(shPath, ['-c', 'sleep 30']);
+      svc.liveProcessesForTest.add(proc);
+      final done = proc.exitCode.then((_) => 'killed');
+      await Future.delayed(const Duration(milliseconds: 200));
+      // Instant stop: everything dies NOW (SIGKILL).
+      svc.killAllProcesses();
+      final r = await done.timeout(const Duration(seconds: 3));
+      expect(r, 'killed');
+      expect(proc.exitCode, isNot(0),
+          reason: 'SIGKILL exit — not a natural 0');
+      expect(svc.liveProcessesForTest, isEmpty);
+    });
+
+    test('cancelAllRuns kills jobs + spawned processes on every bucket',
+        () {
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(src, contains('void cancelAllRuns()'));
+      expect(src, contains('killAllProcesses'));
+      // Stop kills background jobs too (instant, not 10-min timeout).
+      expect(src, contains('j.process?.kill(ProcessSignal.sigkill)'));
+      // Parent stop cascades to subagent children.
+      expect(src, contains('cancelRunFor(kid.id)'));
+      // Chat red button + notification Stop use the panic stop.
+      final chat = File('lib/ui/chat_screen.dart').readAsStringSync();
+      expect(chat, contains('cancelAllRuns'));
+      final notif = File('lib/core/agent_notification_service.dart')
+          .readAsStringSync();
+      expect(notif, contains('cancelAllRuns'));
+    });
+
+    test('run start immediately raises the foreground service', () {
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      // No debounce window at runTask start.
+      expect(src, contains("agentWorking('starting task…')"));
+      // Lifecycle paused re-asserts the notification while any run is on.
+      final main = File('lib/main.dart').readAsStringSync();
+      expect(main, contains('anyRunActive'));
+      expect(main, contains('working in background…'));
+      final agent = src;
+      expect(agent, contains('bool get anyRunActive'));
+    });
+  });
+
   group('PR21: workflow + ralph orchestration', () {
     ChatSession newParent(String id) {
       final app = AppState.I;

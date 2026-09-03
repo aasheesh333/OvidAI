@@ -726,6 +726,24 @@ class AgentService extends ChangeNotifier {
   /// and flags every loop turn to exit at the next checkpoint.
   void cancelRun() => _cancelBucket(_run);
 
+  /// PR32: stop EVERYTHING (notification Stop button / panic stop) —
+  /// every session's run, every subagent, every job, every spawned
+  /// process. Instant, regardless of which session the UI is on.
+  void cancelAllRuns() {
+    for (final r in _runs.values.toList()) {
+      if (r.activeRunId != null) _cancelBucket(r);
+    }
+    // Buckets outside the map (rare) + processes no run claims.
+    try {
+      SandboxService.I.killAllProcesses();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  /// PR32: is ANY run active across all sessions (lifecycle keep-alive)?
+  bool get anyRunActive =>
+      _runs.values.any((r) => r.activeRunId != null);
+
   /// Stop the run that belongs to [sessionId] — used for subagent sessions
   /// (their Stop button and `interrupt_agent`), which are never the bucket
   /// the caller's Zone resolves to.
@@ -753,7 +771,30 @@ class AgentService extends ChangeNotifier {
         pending.completer.complete(false);
       } catch (_) {}
     }
-    _emit('think', 'stop requested — finishing current turn');
+    // PR32: INSTANT stop — a running build/install (bash/npm/apt) used
+    // to keep the run parked until its full 10-minute timeout. Kill
+    // every process the sandbox spawned (SIGKILL, process-tree-wide)
+    // AND every background job of this run so the Stop button is
+    // immediate in every tier. Subagent children die with the parent
+    // (their sessions' buckets are cancelled below via lineage).
+    try {
+      SandboxService.I.killAllProcesses();
+    } catch (_) {}
+    for (final j in r.jobs.values.toList()) {
+      try {
+        j.killed = true;
+        j.process?.kill(ProcessSignal.sigkill);
+      } catch (_) {}
+    }
+    // Children of this run's session: stop their runs + processes too —
+    // a parent Stop must not leave orphaned subagents spinning.
+    final sid = _runCtx?.session.id;
+    if (sid != null) {
+      for (final kid in AppState.I.childrenOf(sid)) {
+        cancelRunFor(kid.id);
+      }
+    }
+    _emit('think', 'stopped — all commands and jobs killed');
     notifyListeners();
   }
 
@@ -4155,6 +4196,12 @@ class AgentService extends ChangeNotifier {
     // PR23/Q1: snapshot the model at run start — every LLM call of this
     // run uses it; a mid-run picker switch only affects the next run.
     bucket.modelSnapshot = s.model;
+    // PR32: start the foreground service IMMEDIATELY at run start — the
+    // event-driven path (first `think` + 600ms debounce) left a window
+    // where the user could background the app before the service ever
+    // started, and Android froze the Dart isolate mid-run (the reported
+    // "agent stops if I mistakenly open the app again").
+    AgentNotificationService.I.agentWorking('starting task…');
     final ctx = _RunCtx(bucket, s, p);
     return runZoned(
       () => _runTaskBody(prompt, ctx, freshTurn: freshTurn),

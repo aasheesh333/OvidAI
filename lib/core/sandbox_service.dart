@@ -231,17 +231,31 @@ class SandboxService {
         _writeAptConfig(prefix);
         _ensureTlsConfig(prefix);
         _probePythonPath();
-        // Self-heal (PR22): installs made by older builds can be missing
-        // the usr/ compat symlink, unpatched shebangs ($PREFIX/usr/bin/env
-        // → "bad interpreter"), lost exec bits, or broken libz links.
-        // Idempotent, best-effort — never blocks the boot.
-        await _selfHealSandbox(prefix);
+        // Self-heal (PR22, relocated PR32): installs made by older builds
+        // can be missing the usr/ compat symlink, unpatched shebangs,
+        // lost exec bits, or broken libz links. This can run multi-minute
+        // bash passes (find+sed over node_modules) — awaiting it HERE
+        // kept runApp waiting on a BLACK SCREEN for minutes on every
+        // app open (reported on-device). checkExisting must stay FAST
+        // (file-exists + config writes only); the heal runs unawaited in
+        // the background from main()'s post-frame callback.
         return true;
       }
       return false;
     } catch (_) {
       return false;
     }
+  }
+
+  /// Background self-heal (PR32): invoked from main() AFTER runApp —
+  /// idempotent, best-effort, never blocks first paint. Re-run safe.
+  Future<void> selfHealInBackground() async {
+    try {
+      final prefix = _prefix;
+      if (prefix == null) return;
+      if (!Directory('${prefix.path}/bin').existsSync()) return;
+      await _selfHealSandbox(prefix);
+    } catch (_) {}
   }
 
   // ═════════════════════════════════════════════════════════════════
@@ -1612,6 +1626,68 @@ audit=false
     }
   }
 
+  // ── PR32: active-process registry (instant Stop) ──────────────────────
+  // Every process spawned by exec/execChecked/execHost/spawn registers
+  // here; AgentService._cancelBucket → killAllProcesses() SIGKILLs the
+  // whole tree so Stop is INSTANT (a running build/install could keep
+  // the run parked for its full 10-minute timeout otherwise).
+  final List<Process> _liveProcesses = [];
+
+  /// PR32 test seam: access to the tracked-process registry.
+  @visibleForTesting
+  List<Process> get liveProcessesForTest => _liveProcesses;
+
+  /// Kill EVERY process this service spawned (agent Stop / app pause
+  /// cleanup). SIGKILL — cooperative exits are too slow for a Stop.
+  void killAllProcesses() {
+    for (final p in List.of(_liveProcesses)) {
+      try {
+        p.kill(ProcessSignal.sigkill);
+      } catch (_) {}
+    }
+    _liveProcesses.clear();
+  }
+
+  /// Tracked Process.run: registers the process so killAllProcesses()
+  /// can reach it (Process.run exposes no handle — it is built on start
+  /// internally, so we reimplement the two decodes around Process.start).
+  Future<({int exitCode, String stdout, String stderr})> _trackedRun(
+    String executable,
+    List<String> arguments, {
+    String? workingDirectory,
+    Map<String, String>? environment,
+  }) async {
+    final proc = await Process.start(
+      executable,
+      arguments,
+      workingDirectory: workingDirectory,
+      environment: environment,
+    );
+    _liveProcesses.add(proc);
+    try {
+      final outF = proc.stdout
+          .fold<List<int>>(
+            <int>[],
+            (acc, chunk) => acc..addAll(chunk),
+          );
+      final errF = proc.stderr
+          .fold<List<int>>(
+            <int>[],
+            (acc, chunk) => acc..addAll(chunk),
+          );
+      final code = await proc.exitCode;
+      final out = await outF;
+      final err = await errF;
+      return (
+        exitCode: code,
+        stdout: utf8.decode(out, allowMalformed: true),
+        stderr: utf8.decode(err, allowMalformed: true),
+      );
+    } finally {
+      _liveProcesses.remove(proc);
+    }
+  }
+
   Future<String> exec(
     List<String> args, {
     String? cwd,
@@ -1629,18 +1705,13 @@ audit=false
     }
     final merged = {..._sandboxEnv(), ...?env};
     try {
-      final result = await Process.run(
+      final result = await _trackedRun(
         args[0].startsWith('/') ? args[0] : '${_prefix!.path}/bin/${args[0]}',
         args.sublist(1),
         workingDirectory:
             cwd ??
             (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home'),
         environment: merged,
-        // Decode manually with allowMalformed — apt/gpg/node can emit bytes
-        // that aren't valid UTF-8; utf8 directly throws FormatException and
-        // kills the whole command ("Unexpected extension byte").
-        stdoutEncoding: null,
-        stderrEncoding: null,
       );
       final out =
           '${utf8.decode(result.stdout as List<int>, allowMalformed: true)}'
@@ -1711,20 +1782,17 @@ audit=false
       }
     }
     final merged = {..._sandboxEnv(), ...?env};
-    final result = await Process.run(
+    // PR32: tracked start (Process.run exposes no kill handle) — Stop
+    // can SIGKILL this instantly via killAllProcesses().
+    final result = await _trackedRun(
       args[0].startsWith('/') ? args[0] : '${_prefix!.path}/bin/${args[0]}',
       args.sublist(1),
       workingDirectory:
           cwd ??
           (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home'),
       environment: merged,
-      stdoutEncoding: null,
-      stderrEncoding: null,
     );
-    final out =
-        '${utf8.decode(result.stdout as List<int>, allowMalformed: true)}'
-        '${utf8.decode(result.stderr as List<int>, allowMalformed: true)}';
-    return (result.exitCode, out);
+    return (result.exitCode, '${result.stdout}${result.stderr}');
   }
 
   // ═════════════════════════════════════════════════════════════════
@@ -2026,15 +2094,13 @@ audit=false
   // PHONE TERMINAL — device shell, no install needed (Android 6+ incl.)
   // ═════════════════════════════════════════════════════════════════
   Future<String> execHost(String cmd, {Directory? hostWorkDir}) async {
-    final result = await Process.run(
+    // PR32: tracked (Stop can kill it instantly).
+    final result = await _trackedRun(
       '/system/bin/sh',
       ['-c', cmd],
       workingDirectory: hostWorkDir?.path,
-      stdoutEncoding: null,
-      stderrEncoding: null,
     );
-    return '${utf8.decode(result.stdout as List<int>, allowMalformed: true)}'
-        '${utf8.decode(result.stderr as List<int>, allowMalformed: true)}';
+    return '${result.stdout}${result.stderr}';
   }
 
   // ═════════════════════════════════════════════════════════════════

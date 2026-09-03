@@ -24,13 +24,18 @@ Future<void> main() async {
   // Firebase is optional: if google-services.json isn't injected (local debug),
   // FirebaseService degrades to offline no-ops and the app still runs.
   await FirebaseService.I.initialize();
-  // Sandbox installs on FIRST LAUNCH (blocking) — the user never has to
-  // tap Studio to trigger it. Later launches check the disk and skip.
+  // PR32: checkExisting is now FAST (file-exists + config writes only —
+  // no bash). The PR22 self-heal moved OUT of the boot path: awaiting it
+  // here kept runApp blocked on multi-minute find+sed passes → the
+  // reported "black screen on every app open". It runs post-frame below.
   final sandboxReady = await SandboxService.I.checkExisting();
   AppState.I.sandboxInstalled = sandboxReady;
   runApp(OvidApp(sandboxReady: sandboxReady));
   WidgetsBinding.instance.addPostFrameCallback((_) {
     unawaited(GitHubService.I.initialize());
+    // PR32: background self-heal (usr symlink, shebangs, exec bits, libz)
+    // — AFTER first paint, never blocking it.
+    if (sandboxReady) unawaited(SandboxService.I.selfHealInBackground());
     // Pre-warm the browser only after the sandbox gate is satisfied (the
     // setup screen replaces the shell until install completes).
     if (sandboxReady) unawaited(AgentService.I.prewarmBrowser());
@@ -143,21 +148,30 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // ── App lifecycle → MCP lifecycle (DSH tier-2 parity) ──
     // resume  → respawn every server the user wants connected
-    // NOTE: `paused` intentionally does NOTHING now — tearing MCP down on
-    // background KILLED in-flight mcp__ tool calls mid-run (the agent run
-    // survived but got garbage results). The foreground service keeps the
-    // process + Dart alive while backgrounded, so the servers stay up too.
-    // Only a full detach (process teardown) stops them.
+    // NOTE: `paused` intentionally does NOTHING to MCP — tearing MCP down on
+    // background KILLED in-flight mcp__ tool calls mid-run. The foreground
+    // service keeps the process + Dart alive while backgrounded.
     switch (state) {
       case AppLifecycleState.resumed:
         unawaited(AppState.I.reconnectMcpServers());
-        break;
-      case AppLifecycleState.detached:
-        unawaited(McpService.I.disconnectAll());
+        // PR32: a run that survived the background must keep its
+        // notification (some OEMs drop it on pause).
+        if (AgentService.I.anyRunActive) {
+          AgentNotificationService.I.agentWorking('resumed — task running…');
+        }
         break;
       case AppLifecycleState.paused:
       case AppLifecycleState.inactive:
       case AppLifecycleState.hidden:
+        // PR32 keep-alive: while ANY agent run is active, make sure the
+        // foreground service is up BEFORE Android can freeze the isolate.
+        // (It normally starts at runTask; this covers races + OEM killers.)
+        if (AgentService.I.anyRunActive) {
+          AgentNotificationService.I.agentWorking('working in background…');
+        }
+        break;
+      case AppLifecycleState.detached:
+        unawaited(McpService.I.disconnectAll());
         break;
     }
   }

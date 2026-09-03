@@ -279,6 +279,30 @@ upgrades webview_flutter or a platform channel is added.
 
 ## Progress log
 
+- 2026-09-03 **PR32** (user report: "app dubara open karte hi black
+  screen… agent stop… background mein kaam karna chahiye… red button
+  instant stop"): THREE root-cause fixes —
+  **(1) Black screen at every app open**: the PR22 self-heal was
+  `await`ed inside `checkExisting()` BEFORE `runApp` — its multi-minute
+  bash find+sed passes (plus the PR31 verify pass) held first paint
+  hostage. checkExisting is now FAST (file-exists + config writes);
+  `selfHealInBackground()` runs post-frame from main() after runApp.
+  **(2) Agent must survive backgrounding / re-open**: foreground
+  service now starts IMMEDIATELY at runTask (was: first `think` event +
+  600ms debounce — a background press in that window let Android freeze
+  the isolate = "agent stops if I mistakenly open again");
+  lifecycle paused/hidden re-asserts the notification while
+  `anyRunActive`; resumed re-asserts too (OEMs that drop it).
+  **(3) Instant stop**: new `SandboxService._trackedRun` registry —
+  every exec/execChecked/execHost process is tracked and
+  `killAllProcesses()` SIGKILLs them all; `_cancelBucket` now kills all
+  jobs + all spawned processes + cascades to subagent children;
+  `cancelAllRuns()` (panic stop) wired to BOTH the chat red Stop button
+  and the notification's Stop action (previously stop only aborted the
+  HTTP request — a running build kept the run parked for its full
+  10-minute tool timeout). Tests 210 → 214 (boot-path contract,
+  host-executed SIGKILL test, wiring contracts).
+
 - 2026-09-03 **PR29** (DONE, `16c1916`): compaction DSH parity —
   `compactNow()` honest `/compact` (short/already-compacted/failure all
   reported, never a silent no-op + lie); shared `buildRequestMessages()`

@@ -33,7 +33,10 @@ class AgentNotificationService {
   Future<void> init() async {
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'onAgentStop') {
-        AgentService.I.cancelRun();
+        // PR32: the notification has no session context — Stop must kill
+        // EVERY running session (parallel runs, subagents, their jobs
+        // and spawned processes), exactly like a panic button.
+        AgentService.I.cancelAllRuns();
       }
       return null;
     });
