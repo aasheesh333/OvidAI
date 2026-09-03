@@ -7949,6 +7949,18 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     });
   }
 
+  /// Test seam: the boot-time reminder tick runs forever, and widget tests
+  /// fail on any pending timer at teardown — tests pause it and restore it.
+  @visibleForTesting
+  void debugPauseScheduleTimerForTest(bool paused) {
+    if (paused) {
+      _scheduleTimer?.cancel();
+      _scheduleTimer = null;
+    } else {
+      _startScheduleTimer();
+    }
+  }
+
   void _fireDueSchedules() {
     // Reminders are session-scoped: check EVERY session's schedule list,
     // not just the active/running one (idle sessions still fire).

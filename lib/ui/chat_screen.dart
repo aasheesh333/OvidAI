@@ -15,6 +15,7 @@ import 'subagent_screen.dart';
 import '../core/agent_service.dart';
 import '../core/commands.dart';
 import '../core/mcp_service.dart';
+import '../core/presets.dart';
 import '../core/skills.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
@@ -1122,6 +1123,10 @@ class _ChatScreenState extends State<ChatScreen>
                           _showModeSheetFromCommand(context);
                           return;
                         }
+                        if (result.popup == 'preset') {
+                          _showPresetSheetFromCommand(context);
+                          return;
+                        }
                         if (result.feedback != null &&
                             result.feedback!.isNotEmpty &&
                             context.mounted) {
@@ -1214,6 +1219,60 @@ class _ChatScreenState extends State<ChatScreen>
                 onTap: () {
                   Navigator.pop(context);
                   AgentService.I.setMode(m);
+                },
+              ),
+            const SizedBox(height: 10),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// `/preset` popupSelect: the preset sheet (same rows as the registry),
+  /// command-driven. Tapping a row applies it through the same
+  /// `/preset <id>` path, so sheet and command stay one code path.
+  void _showPresetSheetFromCommand(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            const Text(
+              'Agent preset',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            for (final p in PresetRegistry.all)
+              ListTile(
+                dense: true,
+                title: Text(p.label, style: const TextStyle(fontSize: 13.5)),
+                subtitle: Text(
+                  p.description,
+                  style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                ),
+                trailing: AppState.I.activeSession?.presetId == p.id
+                    ? const Icon(Icons.check, size: 16, color: Aether.accent)
+                    : null,
+                onTap: () async {
+                  Navigator.pop(context);
+                  final result =
+                      await CommandService.I.execute('/preset ${p.id}');
+                  if (!context.mounted) return;
+                  final fb = result?.feedback;
+                  if (fb != null && fb.isNotEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(fb),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  }
                 },
               ),
             const SizedBox(height: 10),

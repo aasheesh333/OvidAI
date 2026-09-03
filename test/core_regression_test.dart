@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:ffi' as ffi;
 
 import 'package:archive/archive.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -19,6 +20,7 @@ import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/theme.dart';
+import 'package:ovid_ai/ui/chat_screen.dart';
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
 import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -4291,20 +4293,35 @@ block</pre>
       expect(child.presetId, 'code');
     });
 
-    test('/preset lists presets and switches cleanly', () async {
+    test('/preset opens the picker and switches mid-chat', () async {
       final s = freshSession('preset-cmd');
 
+      // Bare /preset opens the tappable preset sheet (popupSelect) instead
+      // of dumping a text list that nothing can be applied from.
       final list = await CommandService.I.execute('/preset');
       expect(list, isNotNull);
-      expect(list!.feedback, contains('standard'));
-      expect(list.feedback, contains('studio'));
+      expect(list!.popup, 'preset');
 
+      // Switching works on a chat that already has messages — the tool
+      // roster and persona are rebuilt per run, so it applies from the
+      // next message instead of being refused.
+      app.sendMessage('hello there');
       final sw = await CommandService.I.execute('/preset minimal');
       expect(sw!.feedback, contains('minimal'));
+      expect(sw.feedback, contains('next message'));
       expect(s.presetId, 'minimal');
 
       final bad = await CommandService.I.execute('/preset nope');
       expect(bad!.feedback, contains('Unknown preset'));
+      expect(s.presetId, 'minimal');
+    });
+
+    test('switched preset persists across a session reload', () async {
+      final s = freshSession('preset-persist');
+      await CommandService.I.execute('/preset code');
+      final id = s.id;
+      await app.loadSessions();
+      expect(app.sessionById(id)?.presetId, 'code');
     });
 
     test('workflow toggle off removes workflow/ralph from the roster',
@@ -5569,6 +5586,43 @@ block</pre>
         {'objective': '   '},
       );
       expect(res, contains('objective is required'));
+    });
+  });
+
+  group('PR33: /preset popupSelect sheet (composer → picker → apply)', () {
+    setUp(() => AgentService.I.debugPauseScheduleTimerForTest(true));
+    tearDown(() => AgentService.I.debugPauseScheduleTimerForTest(false));
+
+    testWidgets('bare /preset opens the sheet; tapping a row applies it',
+        (tester) async {
+      app.newSession();
+      app.sendMessage('hello there'); // mid-chat — the old refusal case
+      final s = app.activeSession!;
+
+      await tester.pumpWidget(
+        MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Run the command through the real composer, not the service direct.
+      await tester.enterText(find.byType(TextField).first, '/preset');
+      await tester.tap(find.byTooltip('Send'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.text('Agent preset'), findsOneWidget);
+      expect(find.text('Minimal'), findsOneWidget);
+
+      await tester.tap(find.text('Minimal'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(s.presetId, 'minimal');
+      expect(find.textContaining('Preset → minimal'), findsOneWidget);
+
+      // Outlive the snackbar's auto-dismiss timer for a clean teardown.
+      await tester.pump(const Duration(seconds: 5));
     });
   });
 }

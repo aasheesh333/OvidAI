@@ -183,11 +183,10 @@ class CommandService {
           if (s == null) return const CommandResult(feedback: 'No active session.');
           final q = args.trim().toLowerCase();
           if (q.isEmpty) {
-            final buf = StringBuffer('**Presets** (current: ${s.presetId})\n');
-            for (final p in PresetRegistry.all) {
-              buf.writeln('- ${p.id} (${p.label}) — ${p.description}');
-            }
-            return CommandResult(feedback: buf.toString());
+            // popupSelect (DSH parity with /model and /permission): bare
+            // /preset opens the tappable preset sheet instead of a text
+            // dump — the list is right there and picking a row applies it.
+            return const CommandResult(popup: 'preset');
           }
           final match = PresetRegistry.all
               .where((p) => p.id == q)
@@ -198,18 +197,18 @@ class CommandService {
                   '${PresetRegistry.all.map((p) => p.id).join(', ')}.',
             );
           }
-          if (s.messages.isNotEmpty) {
-            return const CommandResult(
-              feedback: 'This chat already has messages — switch presets on '
-                  'a blank session (/new) or use a fresh chat, DSH-style.',
-            );
-          }
+          // Mid-chat switching is safe: the tool gate and the persona block
+          // are both built per run, so the new roster applies from the
+          // next message. Blocking it made /preset a no-op on every real
+          // chat.
+          final hadMessages = s.messages.isNotEmpty;
           s.presetId = match.id;
           app.persistSessions();
           app.refresh();
           return CommandResult(
             feedback: 'Preset → ${match.id} (${match.label}) — '
-                '${match.description}',
+                '${match.description}'
+                '${hadMessages ? ' Applies from your next message.' : ''}',
           );
         },
       ),
