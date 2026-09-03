@@ -1531,17 +1531,60 @@ class AgentService extends ChangeNotifier {
     final blocks = <String>[];
     for (final m in mentions) {
       final token = m.group(1)!;
-      // Session reference: @session:<id>
+      // Session reference: @session:<id> or @session:<title>
       if (token.startsWith('session:')) {
-        final id = token.substring('session:'.length);
-        final other = AppState.I.sessionById(id);
-        if (other == null) continue;
-        final recent = other.messages
-            .take(10)
-            .map((x) => '${x.role}: ${cleanTruncate(x.content, 200)}')
+        final ref = token.substring('session:'.length);
+        final app = AppState.I;
+        var other = app.sessionById(ref);
+        if (other == null && ref.isNotEmpty) {
+          // Title reference — exact match first, then a unique
+          // case-insensitive prefix/contains match.
+          final l = ref.toLowerCase();
+          final roots = app.rootSessions;
+          final exact =
+              roots.where((x) => x.title.toLowerCase() == l).toList();
+          if (exact.length == 1) {
+            other = exact.first;
+          } else if (exact.isEmpty) {
+            final partial = roots
+                .where((x) =>
+                    x.title.toLowerCase().startsWith(l) ||
+                    x.title.toLowerCase().contains(l))
+                .toList();
+            if (partial.length == 1) {
+              other = partial.first;
+            } else if (partial.length > 1) {
+              blocks.add(
+                '── referenced session "$ref" is ambiguous ──\n'
+                'It could be: '
+                '${partial.map((x) => '"${x.title}" (${x.id})').join(', ')}. '
+                'Ask the user to pick one (or use @session:<id>).');
+              continue;
+            }
+          }
+        }
+        if (other == null) {
+          // Never silently drop — a dropped block looks like the AI
+          // "cannot access" the session it was asked to continue.
+          blocks.add(
+            '── referenced session "$ref" not found ──\n'
+            'No chat has that id or title. Tell the user, and suggest '
+            'picking one from the @-menu (Sessions group).');
+          continue;
+        }
+        // The LAST messages carry the work-in-progress context — the old
+        // take(10) handed the model the session's opening lines instead.
+        const kRecent = 12;
+        const kChars = 400;
+        final msgs = other.messages;
+        final tail = msgs.length <= kRecent
+            ? msgs
+            : msgs.sublist(msgs.length - kRecent);
+        final recent = tail
+            .map((x) => '${x.role}: ${cleanTruncate(x.content, kChars)}')
             .join('\n');
         blocks.add(
-          '── referenced session "${other.title}" ($id) ──\n$recent',
+          '── referenced session "${other.title}" (${other.id}) ──\n$recent',
         );
         continue;
       }

@@ -1776,6 +1776,11 @@ audit=false
   @visibleForTesting
   List<Process> get liveProcessesForTest => _liveProcesses;
 
+  /// Points $PREFIX at a host directory so unit tests can drive exec()
+  /// with a real `<prefix>/bin/sh` (the byte-cast regression test).
+  @visibleForTesting
+  set sandboxPrefixForTest(Directory? d) => _prefix = d;
+
   /// Kill EVERY process this service spawned (agent Stop / app pause
   /// cleanup). SIGKILL — cooperative exits are too slow for a Stop.
   void killAllProcesses() {
@@ -1852,9 +1857,9 @@ audit=false
             (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home'),
         environment: merged,
       );
-      final out =
-          '${utf8.decode(result.stdout as List<int>, allowMalformed: true)}'
-          '${utf8.decode(result.stderr as List<int>, allowMalformed: true)}';
+      // PR32's _trackedRun already decodes stdout/stderr to String — the
+      // old `as List<int>` byte cast here threw TypeError on every command.
+      final out = '${result.stdout}${result.stderr}';
       if (onLine != null) {
         for (final l in const LineSplitter().convert(out)) {
           onLine(l);

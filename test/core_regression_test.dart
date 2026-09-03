@@ -5671,6 +5671,95 @@ block</pre>
       expect(prefs.getBool('ovid_sandbox_skipped'), isNull);
     });
   });
+
+  group('PR35: sandbox exec cast + @session reference', () {
+    test('exec() returns real command output (String-cast regression)',
+        () async {
+      final svc = SandboxService.I;
+      // Regression: PR32's _trackedRun decodes stdout/stderr to String;
+      // exec()'s stale `as List<int>` cast threw
+      // "'String' is not a subtype of type 'List<int>' in type cast"
+      // on EVERY sandbox command (run_shell, run_code, jobs).
+      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+      expect(src, isNot(contains('result.stdout as List<int>')));
+      // Behavioral: drive the fixed path with a real <prefix>/bin/sh.
+      final tmp = await Directory.systemTemp.createTemp('pr35prefix');
+      await Directory('${tmp.path}/bin').create(recursive: true);
+      final shTarget = File('/usr/bin/sh').existsSync()
+          ? '/usr/bin/sh'
+          : '/bin/sh';
+      Link('${tmp.path}/bin/sh').createSync(shTarget);
+      addTearDown(() {
+        svc.sandboxPrefixForTest = null;
+        tmp.deleteSync(recursive: true);
+      });
+      svc.sandboxPrefixForTest = tmp;
+      final out = await svc
+          .exec(['sh', '-c', 'echo sandbox-ok'],
+              hostWorkDir: Directory.systemTemp)
+          .timeout(const Duration(seconds: 20));
+      expect(out, contains('sandbox-ok'));
+    });
+
+    test('@session:<id> expands the LAST messages, not the opening lines',
+        () async {
+      final app = AppState.I;
+      final other = ChatSession(id: 'pr35old', title: 'Old work', model: 'm');
+      for (var i = 0; i < 20; i++) {
+        other.messages.add(Message(role: 'user', content: 'early $i'));
+      }
+      other.messages.add(Message(role: 'user', content: 'the latest state'));
+      final cur = ChatSession(id: 'pr35cur', title: 'Cur', model: 'm');
+      final prevActive = app.activeSessionId;
+      app.sessions
+        ..insert(0, other)
+        ..insert(0, cur);
+      app.activeSessionId = cur.id;
+      addTearDown(() {
+        app.sessions.removeWhere((x) => x.id == 'pr35old' || x.id == 'pr35cur');
+        app.activeSessionId = prevActive;
+      });
+      final expanded = await AgentService.I
+          .expandReferencesForTest('continue @session:pr35old', cur);
+      expect(expanded, contains('referenced session "Old work"'));
+      expect(expanded, contains('the latest state'));
+      expect(expanded, isNot(contains('early 0')));
+    });
+
+    test('@session:<title> resolves by title; unknown refs are visible',
+        () async {
+      final app = AppState.I;
+      final other =
+          ChatSession(id: 'pr35t1', title: 'Deploy bug hunt', model: 'm');
+      other.messages.add(Message(role: 'assistant', content: 'found it'));
+      final cur = ChatSession(id: 'pr35cur2', title: 'Cur2', model: 'm');
+      final prevActive = app.activeSessionId;
+      app.sessions
+        ..insert(0, other)
+        ..insert(0, cur);
+      app.activeSessionId = cur.id;
+      addTearDown(() {
+        app.sessions
+            .removeWhere((x) => x.id == 'pr35t1' || x.id == 'pr35cur2');
+        app.activeSessionId = prevActive;
+      });
+      final byTitle = await AgentService.I
+          .expandReferencesForTest('see @session:deploy bug', cur);
+      expect(byTitle, contains('found it'));
+
+      // A dropped block looked like the AI "cannot access" the session —
+      // unresolvable refs must surface to the model instead.
+      final missing = await AgentService.I
+          .expandReferencesForTest('see @session:nope', cur);
+      expect(missing, contains('not found'));
+    });
+
+    test('subagent @-mention menu inserts a resolvable @session:<id> token',
+        () {
+      final src = File('lib/ui/chat_screen.dart').readAsStringSync();
+      expect(src, contains("insert: '@session:\${sub.sessionId} '"));
+    });
+  });
 }
 
 /// Build one DuckDuckGo-style result block (anchor + snippet pair).

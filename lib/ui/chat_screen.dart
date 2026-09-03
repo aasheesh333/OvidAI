@@ -3584,7 +3584,7 @@ class _InputBarState extends State<_InputBar> {
               '$state · ${child?.messages.length ?? 0} rows — '
               '${cleanTruncate(label, 60)}',
           hint: '',
-          insert: '@${sub.id} ',
+          insert: '@session:${sub.sessionId} ',
           group: 'Subagents',
         ),
       ));
