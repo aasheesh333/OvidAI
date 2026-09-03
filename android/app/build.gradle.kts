@@ -34,7 +34,18 @@ android {
         // Android 7+ (API 24) — checked at runtime with a friendly
         // "continue without sandbox" fallback (sandbox_service preflight).
         minSdk = 23
-        targetSdk = flutter.targetSdkVersion
+        // The native sandbox execs bash/python/node from the app's files
+        // dir (Termux-style $PREFIX). Android 10+ blocks execve() AND
+        // exec-mmap of anything under /data/user/<u>/<pkg> for apps
+        // targeting API 29+ (SELinux neverallow on app_data_file) — the
+        // sandbox dies with EACCES no matter the ABI or file mode.
+        // Targeting 28 keeps the legacy exec allowance on Android 7–16
+        // (Termux ships targetSdk 28 for the same reason, which is why
+        // it cannot update on the Play Store). DO NOT bump this without
+        // moving every exec'd binary and dlopen'd lib into packaged
+        // jniLibs (nativeLibraryDir is the only exec-allowed path for
+        // targetSdk 29+).
+        targetSdk = 28
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }

@@ -497,8 +497,11 @@ class SandboxService {
         '  process ABI: ${facts.abi} · payload ABI: ${_payloadAbi ?? '?'}\n'
         '  bash: ${_bashStatLine(prefix)}\n'
         'If the ABIs differ, this APK build does not match the device — '
-        'install the build for ${facts.abi}. If they match, this ROM is '
-        'likely blocking exec from app storage.',
+        'install the build for ${facts.abi}. If they match, exec is being '
+        'blocked at the platform level: Android 10+ denies exec from app '
+        'storage for apps with targetSdkVersion >= 29 (keep targetSdk 28 — '
+        'see android/app/build.gradle.kts), or a locked-down ROM is '
+        'blocking exec.',
       );
     }
 

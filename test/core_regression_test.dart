@@ -5760,6 +5760,26 @@ block</pre>
       expect(src, contains("insert: '@session:\${sub.sessionId} '"));
     });
   });
+
+  group('PR36: targetSdk 28 keeps sandbox exec legal on Android 10+', () {
+    test('build.gradle pins targetSdk 28 (app-data exec allowance)', () {
+      // Android 10+ SELinux-denies execve/exec-mmap of app-data files for
+      // targetSdkVersion >= 29 — the sandbox would die with EACCES on
+      // every Android 10–16 device regardless of ABI or file mode.
+      final gradle = File('android/app/build.gradle.kts').readAsStringSync();
+      expect(gradle, contains('targetSdk = 28'));
+      expect(
+        gradle,
+        isNot(contains('targetSdk = flutter.targetSdkVersion')),
+        reason: 'the Flutter default (34+) silently re-breaks sandbox exec',
+      );
+    });
+
+    test('exec sanity diagnostic names the targetSdk policy', () {
+      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+      expect(src, contains('targetSdkVersion >= 29'));
+    });
+  });
 }
 
 /// Build one DuckDuckGo-style result block (anchor + snippet pair).
