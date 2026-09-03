@@ -545,8 +545,14 @@ class SandboxService {
     // PR30: make + binutils — node-gyp native builds (the reported
     // "node-gyp: Permission denied" class also needs the toolchain
     // present once exec bits are right).
+    // PR38: ripgrep/openssh/rsync/jq/unzip/tmux — real Linux CLI parity.
+    // All six are small (each well under 1 MB installed), so they ride the
+    // eager install; the C/C++ compiler (clang+libllvm, ~60 MB) is NOT
+    // eager — it's installed lazily on first need via ensureCompiler() so
+    // a slow/metered connection isn't forced to download it every time.
     const pkgs =
-        'nodejs npm python python-pip uv git curl zlib make binutils';
+        'nodejs npm python python-pip uv git curl zlib make binutils '
+        'ripgrep openssh rsync jq unzip tmux';
     var installed = false;
     for (var attempt = 1; attempt <= 3 && !installed; attempt++) {
       final tag = attempt == 1
@@ -636,6 +642,12 @@ class SandboxService {
           'git',
           'curl',
           'zlib', // PR30: node's link-time dependency (libz.so.1)
+          'ripgrep', // PR38: real Linux CLI parity
+          'openssh',
+          'rsync',
+          'jq',
+          'unzip',
+          'tmux',
         ]);
       } catch (e) {
         onPhase(
@@ -2102,6 +2114,52 @@ audit=false
     }
   }
 
+  /// PR38: lazy C/C++ compiler install — `clang` (+ its `libllvm`
+  /// dependency) is ~60 MB, far bigger than every other eagerly-installed
+  /// package combined, so it does NOT ride the eager runtime install
+  /// (`_installRuntimesWithRetry`). It installs on first genuine need:
+  /// a `node-gyp`/native-addon build (`npm install` hitting a package with
+  /// a `binding.gyp`) or an explicit agent/user request to compile C/C++.
+  /// Same idempotent shape as [ensureRuntime] — cheap to call repeatedly.
+  bool _compilerEnsured = false;
+
+  Future<bool> ensureCompiler({void Function(String line)? onLine}) async {
+    if (_compilerEnsured) return true;
+    try {
+      final (code, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v clang',
+      ]).timeout(const Duration(seconds: 10));
+      if (code == 0) {
+        _compilerEnsured = true;
+        return true;
+      }
+    } catch (_) {}
+    onLine?.call('[compiler] installing clang (~60 MB, one-time)…');
+    try {
+      await _aptChecked('update 2>&1', timeout: const Duration(minutes: 3));
+      final (code, out) = await _aptChecked(
+        'install -y clang 2>&1',
+        timeout: const Duration(minutes: 10),
+      );
+      final ok = code == 0;
+      if (ok) {
+        _compilerEnsured = true;
+        onLine?.call('[compiler] clang installed ✓');
+      } else {
+        final tail = out.trim().split('\n').where((l) => l.isNotEmpty);
+        onLine?.call(
+          '[compiler] install FAILED: ${tail.isEmpty ? "no output" : tail.last}',
+        );
+      }
+      return ok;
+    } catch (e) {
+      onLine?.call('[compiler] install failed: $e');
+      return false;
+    }
+  }
+
   // ═════════════════════════════════════════════════════════════════
   // HEALTH / RUNTIME REPAIR (Health screen + first-launch gate)
   // ═════════════════════════════════════════════════════════════════
@@ -2126,8 +2184,13 @@ audit=false
 
   /// Which runtime binaries are missing right now (for the Health screen
   /// list).  Returns accurate per-binary statuses via one bash probe.
+  /// PR38: added rg/ssh/rsync/jq/unzip/tmux — the "native Linux 100%"
+  /// CLI-parity set — alongside the original required-for-agent set.
   Future<Map<String, bool>> probeRuntimes() async {
-    const bins = ['bash', 'node', 'npm', 'python', 'git', 'curl'];
+    const bins = [
+      'bash', 'node', 'npm', 'python', 'git', 'curl',
+      'rg', 'ssh', 'rsync', 'jq', 'unzip', 'tmux',
+    ];
     final result = <String, bool>{for (final b in bins) b: false};
     if (!_installed) return result;
     try {

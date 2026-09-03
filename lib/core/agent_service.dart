@@ -5380,6 +5380,37 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         }),
       );
     }
+    // PR39: on_pre_tool — a GATING hook (Claude Code PreToolUse parity).
+    // Awaited (not fire-and-forget like every other hook event) because a
+    // plugin may DENY the call outright; exit code 2 short-circuits the
+    // whole dispatch before _dispatchInner ever runs, same enforcement
+    // point a real security-relevant hook needs.
+    if (HookService.I.hasHookListeners('on_pre_tool')) {
+      final gate = await HookService.I.fireGate(
+        'on_pre_tool',
+        ledgerSid ?? '',
+        payload: {'tool': name},
+      );
+      if (!gate.allowed) {
+        // Reuses the existing "DENIED" prefix contract (same UI 'stopped'
+        // state + ledger 'ok: false' as a user-declined approval) — a
+        // hook deny and a user deny are the same shape of outcome to the
+        // model and to the chat UI.
+        final msg = 'DENIED by hook (${gate.deniedByPlugin}): '
+            '${gate.reason}';
+        if (ledgerSid != null) {
+          unawaited(
+            SessionLedger.I.append(ledgerSid, 'tool_end', {
+              'tool': name,
+              'ms': sw.elapsedMilliseconds,
+              'ok': false,
+              'deniedBy': 'hook',
+            }),
+          );
+        }
+        return msg;
+      }
+    }
     try {
       final res = await _dispatchInner(name, args);
       if (ledgerSid != null) {
@@ -5468,6 +5499,17 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         try {
           final work = await _sessionWorkDir();
           if (useSandbox) {
+            // PR38: a command that can trigger a native npm/node-gyp build
+            // (install/rebuild) needs a C/C++ compiler that is NOT part of
+            // the eager sandbox install (clang is ~60 MB — installed lazily
+            // on exactly this trigger, same pattern as ensureRuntime for
+            // node/python). Best-effort: a failed compiler install doesn't
+            // block the command — most npm installs need no native build.
+            if (_looksLikeNativeBuildCommand(cmd)) {
+              await SandboxService.I.ensureCompiler(
+                onLine: (l) => _emit('shellOut', l),
+              );
+            }
             // Native bionic sandbox (bash/python/node/apt) — full tooling.
             // 10-minute cap: builds/installs/test-suites need real time
             // (60s used to kill them mid-run). Longer work → the model
@@ -7819,6 +7861,18 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
   };
 
   bool _isMutatingTool(String name) => _mutatingTools.contains(name);
+
+  /// PR38: does [cmd] plausibly trigger a native (C/C++) build step?
+  /// Heuristic, not exhaustive — a false negative just means the compiler
+  /// installs lazily on the NEXT matching command instead of this one;
+  /// a false positive costs one harmless `command -v clang` check.
+  static final RegExp _nativeBuildCommandRe = RegExp(
+    r'\b(npm|yarn|pnpm)\s+(i|install|ci|rebuild|add)\b|'
+    r'\bnode-gyp\b|\bmake\b|\bcmake\b|\bcc\b|\bgcc\b|\bclang\b|'
+    r'\bpip3?\s+install\b',
+  );
+  bool _looksLikeNativeBuildCommand(String cmd) =>
+      _nativeBuildCommandRe.hasMatch(cmd);
 
   Future<String> _handleExitPlanMode(Map<String, dynamic> args) async {
     final plan = args['plan'] as String? ?? '';

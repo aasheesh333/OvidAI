@@ -179,6 +179,63 @@ class HealthService extends ChangeNotifier {
           repairable: true,
         ),
       );
+      // PR38: native-Linux-parity CLI tools — same eager-install set as
+      // node/python/git/curl, so a miss means the same "runtime packages
+      // were never installed" story and the same Repair button fixes it.
+      out.add(
+        HealthCheck(
+          name: 'ripgrep (rg)',
+          points: 5,
+          ok: probe['rg'] == true,
+          detail: miss('rg'),
+          repairable: true,
+        ),
+      );
+      out.add(
+        HealthCheck(
+          name: 'openssh (ssh/scp/sftp)',
+          points: 5,
+          ok: probe['ssh'] == true,
+          detail: miss('ssh'),
+          repairable: true,
+        ),
+      );
+      out.add(
+        HealthCheck(
+          name: 'rsync',
+          points: 0,
+          ok: probe['rsync'] == true,
+          detail: miss('rsync'),
+          repairable: true,
+        ),
+      );
+      out.add(
+        HealthCheck(
+          name: 'jq',
+          points: 0,
+          ok: probe['jq'] == true,
+          detail: miss('jq'),
+          repairable: true,
+        ),
+      );
+      out.add(
+        HealthCheck(
+          name: 'unzip',
+          points: 0,
+          ok: probe['unzip'] == true,
+          detail: miss('unzip'),
+          repairable: true,
+        ),
+      );
+      out.add(
+        HealthCheck(
+          name: 'tmux',
+          points: 0,
+          ok: probe['tmux'] == true,
+          detail: miss('tmux'),
+          repairable: true,
+        ),
+      );
       // Workspace writable.
       var wsOk = false;
       var wsDetail = 'Session workspace is readable and writable.';

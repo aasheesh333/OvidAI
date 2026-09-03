@@ -158,9 +158,13 @@ class PluginItem {
   });
 
   /// Valid hook event names (mirrors the wired points in AgentService).
+  /// PR39: `on_pre_tool` is a GATING event (Claude Code PreToolUse
+  /// parity) — its command's exit code can DENY the tool call, not just
+  /// observe it. Every other event is fire-and-observe only.
   static const hookEvents = [
     'on_session_start',
     'on_turn_start',
+    'on_pre_tool',
     'on_turn_end',
     'on_pre_request',
     'on_post_tool',

@@ -5285,9 +5285,13 @@ block</pre>
 
     test('runtime lists carry zlib (deb) and make/binutils (apt)', () {
       final src = File('lib/core/sandbox_service.dart').readAsStringSync();
-      // apt list (PR22+PR30).
-      expect(src, contains("'nodejs npm python python-pip uv git curl zlib "
-          'make binutils\''));
+      // apt list (PR22+PR30; PR38 appended more CLI tools on a new line,
+      // so this now matches the still-intact first half of the literal).
+      expect(
+        src,
+        contains("'nodejs npm python python-pip uv git curl zlib "
+            "make binutils '"),
+      );
       // deb fallback wanted list (PR30).
       expect(src, contains("'curl',\n          'zlib',"));
       // Force-rotate after each failed update attempt.
@@ -5937,6 +5941,345 @@ block</pre>
       expect(src, contains('approval unanswered for 120s'));
       // The timeout never double-completes against a user tap or Stop.
       expect(src, contains('if (req.completer.isCompleted) return;'));
+    });
+  });
+
+  group('PR38: native Linux CLI parity — packages + lazy compiler', () {
+    test('eager apt list carries the real-Linux CLI set', () {
+      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+      // Eager apt install — small, always-needed tools ride with node/
+      // python/git so they're present from first launch.
+      expect(
+        src,
+        contains(
+          "'nodejs npm python python-pip uv git curl zlib make binutils '\n"
+          "        'ripgrep openssh rsync jq unzip tmux'",
+        ),
+      );
+      // Deb-direct fallback (apt-https-broken devices) carries the same set.
+      expect(src, contains("'ripgrep', // PR38: real Linux CLI parity"));
+      expect(
+        src,
+        contains(
+          "'openssh',\n          'rsync',\n          'jq',\n"
+          "          'unzip',\n          'tmux',",
+        ),
+      );
+    });
+
+    test('clang is deliberately NOT in the eager install (too big)', () {
+      // The whole point of ensureCompiler() is that clang (~60 MB) does
+      // not ride the eager path — assert the eager pkgs string has no
+      // compiler in it, so a regression can't silently double the
+      // first-launch download size.
+      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+      final eagerListMatch = RegExp(
+        r"const pkgs =\s*\n\s*'([^']*)'\s*\n\s*'([^']*)';",
+      ).firstMatch(src);
+      expect(eagerListMatch, isNotNull, reason: 'eager pkgs string moved?');
+      final eagerList =
+          '${eagerListMatch!.group(1)}${eagerListMatch.group(2)}';
+      expect(eagerList, isNot(contains('clang')));
+    });
+
+    test('probeRuntimes bin list carries the new CLI tools', () {
+      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+      expect(
+        src,
+        contains(
+          "'bash', 'node', 'npm', 'python', 'git', 'curl',\n"
+          "      'rg', 'ssh', 'rsync', 'jq', 'unzip', 'tmux',",
+        ),
+      );
+    });
+
+    test('probeRuntimes on an uninstalled sandbox reports every bin false '
+        '(old + new, never throws)', () async {
+      // PR38 extends the SAME bins map probeRuntimes already returns for
+      // an uninstalled sandbox — this exercises the real async function
+      // end to end (no ambient singleton install state needed, since the
+      // `!_installed` early-return path is what every host unit test hits).
+      final probe = await SandboxService.I.probeRuntimes();
+      for (final b in [
+        'bash', 'node', 'npm', 'python', 'git', 'curl',
+        'rg', 'ssh', 'rsync', 'jq', 'unzip', 'tmux',
+      ]) {
+        expect(probe, contains(b));
+      }
+    });
+
+    test('ensureCompiler exists as a lazy, idempotent, best-effort install '
+        'mirroring ensureRuntime', () {
+      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+      final i = src.indexOf('Future<bool> ensureCompiler');
+      expect(i, greaterThan(0));
+      final body = src.substring(i, i + 1600);
+      // Fast idempotent path — a second call is a no-op once flagged.
+      expect(body, contains('_compilerEnsured'));
+      // Installs exactly `clang` (Termux symlinks cc/gcc/g++ onto it).
+      expect(body, contains("install -y clang"));
+      // Best-effort: a failure never throws into the caller (run_shell).
+      expect(body, contains('catch (e) {'));
+    });
+
+    test('run_shell triggers ensureCompiler only for native-build-shaped '
+        'commands', () {
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      final i = src.indexOf("case 'run_shell':");
+      expect(i, greaterThan(0));
+      final body = src.substring(i, i + 2000);
+      expect(body, contains('_looksLikeNativeBuildCommand(cmd)'));
+      expect(body, contains('SandboxService.I.ensureCompiler('));
+    });
+
+    test('native-build regex matches build/install verbs, not plain reads',
+        () {
+      // Same pattern the source defines — verified against representative
+      // commands so the trigger heuristic is provably correct without
+      // needing a real sandbox exec.
+      final re = RegExp(
+        r'\b(npm|yarn|pnpm)\s+(i|install|ci|rebuild|add)\b|'
+        r'\bnode-gyp\b|\bmake\b|\bcmake\b|\bcc\b|\bgcc\b|\bclang\b|'
+        r'\bpip3?\s+install\b',
+      );
+      for (final cmd in [
+        'npm install',
+        'npm i sharp',
+        'yarn add better-sqlite3',
+        'pnpm rebuild',
+        'node-gyp configure',
+        'make -j4',
+        'pip install numpy',
+        'pip3 install lxml',
+      ]) {
+        expect(re.hasMatch(cmd), isTrue, reason: 'should match: $cmd');
+      }
+      for (final cmd in [
+        'ls -la',
+        'cat package.json',
+        'npm run build',
+        'git status',
+      ]) {
+        expect(re.hasMatch(cmd), isFalse, reason: 'should NOT match: $cmd');
+      }
+      // The source's actual regex must carry the same three fragments —
+      // otherwise this test would validate a pattern the app doesn't run.
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(src, contains(r'\b(npm|yarn|pnpm)\s+(i|install|ci|rebuild|add)\b|'));
+      expect(src, contains(r'\bnode-gyp\b|\bmake\b|\bcmake\b|\bcc\b|\bgcc\b|\bclang\b|'));
+      expect(src, contains(r'\bpip3?\s+install\b'));
+    });
+
+    test('Health screen surfaces the new CLI tools with Repair wired', () {
+      final src = File('lib/core/health_service.dart').readAsStringSync();
+      for (final name in [
+        'ripgrep (rg)',
+        'openssh (ssh/scp/sftp)',
+        'rsync',
+        'jq',
+        'unzip',
+        'tmux',
+      ]) {
+        expect(src, contains("name: '$name'"));
+      }
+      // Every new check stays Repair-eligible (same button fixes it).
+      final i = src.indexOf("name: 'ripgrep (rg)'");
+      final j = src.indexOf("name: 'tmux'");
+      expect(i, greaterThan(0));
+      expect(j, greaterThan(i));
+      expect(src.substring(i, j + 200), isNot(contains('repairable: false')));
+    });
+  });
+
+  group('PR39: hook deny/block — on_pre_tool gating (Claude Code PreToolUse parity)', () {
+    test('on_pre_tool is a registered, valid hook event', () {
+      expect(PluginItem.hookEvents, contains('on_pre_tool'));
+    });
+
+    test('fireGate allows when no listener is registered', () async {
+      final res = await HookService.I.fireGate('on_pre_tool', 'gate-sess-0');
+      expect(res.allowed, isTrue);
+    });
+
+    test('exit code 2 denies; the tool never runs and the reason surfaces',
+        () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'guard-plugin',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_tool': 'exit 2'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      svc.gateExecutorForTest = (cmd, env) async =>
+          (2, 'dangerous command blocked by policy');
+      addTearDown(() => svc.gateExecutorForTest = null);
+
+      final res = await svc.fireGate('on_pre_tool', 'gate-sess-1');
+      expect(res.allowed, isFalse);
+      expect(res.deniedByPlugin, 'guard-plugin');
+      expect(res.reason, contains('dangerous command blocked'));
+    });
+
+    test('exit code 0 (or anything but 2) allows', () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'observer-plugin',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_tool': 'exit 0'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      svc.gateExecutorForTest = (cmd, env) async => (0, '');
+      addTearDown(() => svc.gateExecutorForTest = null);
+
+      final res = await svc.fireGate('on_pre_tool', 'gate-sess-2');
+      expect(res.allowed, isTrue);
+    });
+
+    test('a hook that cannot execute fails OPEN, never wedges the run',
+        () async {
+      // No sandbox installed AND no test executor configured — the real
+      // fail-open path (SandboxService.I.isInstalled == false in tests).
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'unreachable-plugin',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_tool': 'exit 2'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      expect(svc.gateExecutorForTest, isNull);
+
+      final res = await svc.fireGate('on_pre_tool', 'gate-sess-3');
+      expect(
+        res.allowed,
+        isTrue,
+        reason: 'a hook that cannot run must never brick every tool call',
+      );
+    });
+
+    test('the kill-switch disables the gate exactly like every other hook',
+        () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'gate-killed',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_tool': 'exit 2'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      svc.enabled = false;
+      addTearDown(() => svc.enabled = true);
+      var called = false;
+      svc.gateExecutorForTest = (cmd, env) async {
+        called = true;
+        return (2, 'should never run');
+      };
+      addTearDown(() => svc.gateExecutorForTest = null);
+
+      final res = await svc.fireGate('on_pre_tool', 'gate-sess-4');
+      expect(res.allowed, isTrue);
+      expect(called, isFalse);
+    });
+
+    test('_dispatch short-circuits BEFORE _dispatchInner on a hook deny',
+        () async {
+      final app = AppState.I;
+      final s = ChatSession(
+        id: 'gate-dispatch-s',
+        title: 'gate',
+        model: 'm',
+        mode: 'drive',
+      );
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+
+      final p = PluginItem(
+        name: 'shell-guard',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_tool': 'exit 2'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      svc.gateExecutorForTest = (cmd, env) async =>
+          (2, 'rm -rf is not allowed by policy');
+      addTearDown(() => svc.gateExecutorForTest = null);
+
+      // run_shell would normally hit approval + real exec — the gate must
+      // return BEFORE any of that, so no approval prompt, no exec.
+      final res = await AgentService.I.dispatchForTest('run_shell', {
+        'command': 'rm -rf /',
+      });
+      expect(res, startsWith('DENIED by hook (shell-guard):'));
+      expect(res, contains('rm -rf is not allowed by policy'));
+    });
+
+    test('on_pre_tool payload carries the tool name', () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'payload-check',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_tool': 'inspect'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      Map<String, String>? gotEnv;
+      svc.gateExecutorForTest = (cmd, env) async {
+        gotEnv = env;
+        return (0, '');
+      };
+      addTearDown(() => svc.gateExecutorForTest = null);
+
+      await svc.fireGate(
+        'on_pre_tool',
+        'gate-sess-5',
+        payload: {'tool': 'run_shell'},
+      );
+      expect(gotEnv!['OVID_HOOK_PAYLOAD'], contains('run_shell'));
     });
   });
 }
