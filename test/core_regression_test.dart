@@ -5773,6 +5773,9 @@ block</pre>
         isNot(contains('targetSdk = flutter.targetSdkVersion')),
         reason: 'the Flutter default (34+) silently re-breaks sandbox exec',
       );
+      // And the Play-policy lint that fatally fails lintVitalRelease on
+      // targetSdk < 33 is disabled for the same deliberate reason.
+      expect(gradle, contains('ExpiredTargetSdkVersion'));
     });
 
     test('exec sanity diagnostic names the targetSdk policy', () {

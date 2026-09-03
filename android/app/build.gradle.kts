@@ -46,6 +46,14 @@ android {
         // jniLibs (nativeLibraryDir is the only exec-allowed path for
         // targetSdk 29+).
         targetSdk = 28
+
+        lint {
+            // targetSdk 28 is deliberate (see the comment above — Play's
+            // targetSdk floor is incompatible with app-data exec). This
+            // build is sideloaded, so the Play-policy lint that would
+            // fail lintVitalRelease on targetSdk < 33 does not apply.
+            disable += "ExpiredTargetSdkVersion"
+        }
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
