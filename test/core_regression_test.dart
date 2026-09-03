@@ -5278,6 +5278,116 @@ block</pre>
     });
   });
 
+  group('PR31: shebang patch actually rewrites (host-executed)', () {
+    // The PR22 sed was malformed (the `;` sat INSIDE the first expression)
+    // and silently never rewrote anything — npm/npx kept Termux-app
+    // shebangs → "Permission denied". This test runs the EXACT
+    // production bash through real bash on the host.
+    test('production sed expression rewrites npm/npx shebangs + chmods',
+        () async {
+      final tmp =
+          await Directory.systemTemp.createTemp('ovid-pr31-');
+      addTearDown(() {
+        try {
+          tmp.deleteSync(recursive: true);
+        } catch (_) {}
+      });
+      final p = tmp.path;
+      // Mini sandbox: bin/npm, bin/npx + a nested cli script.
+      Directory('$p/bin').createSync(recursive: true);
+      Directory('$p/lib/node_modules/npm/bin').createSync(recursive: true);
+      File('$p/bin/npx')
+          .writeAsStringSync('#!/data/data/com.termux/files/usr/bin/env node\n');
+      File('$p/bin/npm')
+          .writeAsStringSync('#!/data/data/com.termux/files/usr/bin/env node\n');
+      File('$p/lib/node_modules/npm/bin/npm-cli.js')
+          .writeAsStringSync('#!/data/data/com.termux/files/usr/bin/env node\n');
+      // Exec bit OFF on npx (the reported state).
+      Process.runSync('chmod', ['-x', '$p/bin/npx']);
+
+      final sedExpr =
+          's|/data/data/com.termux/files/usr/|$p/|g; '
+          's|/data/data/com.termux/files|$p|g';
+      final script = 'export PREFIX="$p"; '
+          'for dir in "\$PREFIX/bin" "\$PREFIX/lib/node_modules" '
+          '"\$PREFIX/lib" "\$PREFIX/etc"; do '
+          '[ -d "\$dir" ] || continue; '
+          'find "\$dir" -maxdepth 6 -type f ! -name "*.so*" '
+          '! -name "*.png" ! -name "*.jpg" ! -name "*.a" '
+          '-exec sh -c \'head -c2 "\$1" 2>/dev/null | grep -q "#!" && '
+          'sed -i "$sedExpr" "\$1"\' _ {} \\; '
+          '2>/dev/null; done; '
+          'chmod +x "\$PREFIX"/bin/* 2>/dev/null';
+      final r = await Process.run('bash', ['-c', script]);
+      expect(r.exitCode, 0, reason: r.stderr.toString());
+
+      expect(
+        File('$p/bin/npx').readAsStringSync(),
+        startsWith('#!$p/bin/env node'),
+        reason: 'npx shebang rewritten to OUR prefix',
+      );
+      expect(
+        File('$p/bin/npm').readAsStringSync(),
+        startsWith('#!$p/bin/env node'),
+      );
+      expect(
+        File('$p/lib/node_modules/npm/bin/npm-cli.js').readAsStringSync(),
+        startsWith('#!$p/bin/env node'),
+        reason: 'nested npm cli script rewritten too',
+      );
+      // Exec bit restored by the chmod pass.
+      final ls = await Process.run('bash',
+          ['-c', '[ -x "$p/bin/npx" ] && echo X_OK || echo X_NO']);
+      expect(ls.stdout.toString().trim(), 'X_OK',
+          reason: 'npx executable after the pass');
+    });
+
+    test('the OLD malformed sed shape is rejected by this sed build',
+        () async {
+      // Regression guard: the PR22 form (`s|...|...|g; ` with the `;`
+      // inside the expression followed by a second command) must FAIL
+      // loudly if it ever comes back.
+      final tmp =
+          await Directory.systemTemp.createTemp('ovid-pr31-old-');
+      addTearDown(() {
+        try {
+          tmp.deleteSync(recursive: true);
+        } catch (_) {}
+      });
+      final f = File('${tmp.path}/x.js')
+        ..writeAsStringSync('#!/data/data/com.termux/files/usr/bin/env node\n');
+      final p = tmp.path;
+      final oldShape =
+          's|/data/data/com.termux/files/usr/|$p/|g; sed -i "s|x|y|g" "\$f"';
+      final r = await Process.run(
+        'bash',
+        ['-c', 'sed -i "$oldShape" "${f.path}" 2>&1; echo "rc=\$?"'],
+      );
+      // GNU sed exits 2 (unknown option) or reports the error — never a
+      // silent success. Either way the file must NOT be half-rewritten.
+      expect(r.stdout.toString(), isNot(contains('g; sed')));
+      expect(
+        f.readAsStringSync(),
+        startsWith('#!/data/data/com.termux'),
+        reason: 'malformed sed never rewrites (that was the bug)',
+      );
+    });
+
+    test('self-heal re-runs the patcher when npm exists', () {
+      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+      // The self-heal path invokes the fixed patcher.
+      expect(src, contains('await _patchExtractedShebangs(prefix);'));
+      // Both path forms are covered by the single sed expression.
+      expect(src, contains('com.termux/files/usr/'));
+      expect(src, contains('com.termux/files'));
+      // The PR22 malformed two-command shape (a `sed -i` embedded
+      // after `g;`) is gone for good.
+      expect(src, isNot(contains('g; sed -i')));
+      // Verification step exists.
+      expect(src, contains('SHEBANG_STALE'));
+    });
+  });
+
   group('PR21: workflow + ralph orchestration', () {
     ChatSession newParent(String id) {
       final app = AppState.I;

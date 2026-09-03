@@ -279,6 +279,36 @@ upgrades webview_flutter or a platform channel is added.
 
 ## Progress log
 
+- 2026-09-03 **PR29** (DONE, `16c1916`): compaction DSH parity —
+  `compactNow()` honest `/compact` (short/already-compacted/failure all
+  reported, never a silent no-op + lie); shared `buildRequestMessages()`
+  (DSH checkpoint preamble + `<compacted-summary>` USER-role framing);
+  `_summarizeCompactSpan` with the EXACT DSH 8-section instruction +
+  verbatim span replay (content + toolDetail, no 400-char blobs);
+  budget-boundary + overflow rebuilds reuse the shared assembly (the
+  in-flight request now actually SHRINKS — that was the reported
+  "auto-compaction not working"). Tests 197 → 203 (6 new incl. honest
+  /compact paths + seam).
+- 2026-09-03 **PR30** (DONE, `832dd7f`): apt mirror resilience —
+  `_rotateMirror` matches the REAL error phrasing ("does not have a
+  Release file", InRelease, not-signed, connection timed out/refused);
+  force-rotate after EVERY failed update attempt (3 retries now try 3
+  different mirrors, not the same dead one); mirror pool 5 → 7
+  (+tsinghua, +nju); zlib in the deb fallback wanted list; make+binutils
+  in the apt list (node-gyp class). Tests 203 → 207 (mirror matcher
+  unit tests via seams).
+- 2026-09-03 **PR31** (DONE): ROOT CAUSE of the reported npm/npx
+  "Permission denied" — the PR22 `_patchExtractedShebangs` sed was
+  MALFORMED (the `;` separator sat INSIDE the first sed's quoted
+  expression → sed exit 2 swallowed by 2>/dev/null → the patcher
+  silently never rewrote anything). Fixed with ONE sed carrying both
+  substitutions (`s|…/files/usr/|$p/|g; s|…/files|$p|g` — host-verified
+  exact-syntax test), added a post-patch VERIFICATION pass
+  (SHEBANG_STALE check on bin/* + npm bin/*), and two host-executed
+  regression tests (real bash, real files: rewrite + exec-bit + old-
+  shape-rejected). Tests 207 → 210.
+
+
 - 2026-09-02: file created from research (5 subagent reports + direct
   verification). PR22–PR28 pending.
 - 2026-09-02 PR22 DONE (code+tests, CI pending): S1 shebang rewrite

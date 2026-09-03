@@ -1197,8 +1197,24 @@ audit=false
   /// `files → $PREFIX` rewrite yields `$PREFIX/usr/bin/env`, which never
   /// exists → "bad interpreter: No such file or directory" on every
   /// npm/npx shebang).
+  ///
+  /// PR31: the previous sed line was MALFORMED — the `;` separator landed
+  /// INSIDE the first sed's quoted expression (`"s|…|…|g; `), so sed
+  /// exited 2 ("unknown option to s") which `2>/dev/null` swallowed —
+  /// the patcher silently never rewrote anything (reported on-device:
+  /// npm/npx shebangs still pointing at /data/data/com.termux/.../env →
+  /// "Permission denied"). Now: ONE sed with BOTH substitutions (the
+  /// /usr/ form first so it wins over the bare-prefix form), and a
+  /// VERIFICATION pass that fails loudly when any shebang still
+  /// references the Termux app path.
   Future<void> _patchExtractedShebangs(Directory prefix) async {
     final p = prefix.path;
+    // One sed, two substitutions separated by `;` INSIDE the single
+    // expression (host-verified): /files/usr/ → $p/ first (the payload
+    // root IS the usr), then any bare /files/ prefix (legacy scripts).
+    // Order matters — the bare form would mangle the usr form's tail.
+    final sedExpr = 's|/data/data/com.termux/files/usr/|$p/|g; '
+        's|/data/data/com.termux/files|$p|g';
     await execChecked([
       'bash',
       '-c',
@@ -1209,9 +1225,7 @@ audit=false
           'find "\$dir" -maxdepth 6 -type f ! -name "*.so*" '
           '! -name "*.png" ! -name "*.jpg" ! -name "*.a" '
           '-exec sh -c \'head -c2 "\$1" 2>/dev/null | grep -q "#!" && '
-          '{ sed -i "s|/data/data/com.termux/files/usr/|$p/|g; '
-          'sed -i "s|/data/data/com.termux/files|$p|g" "\$1" 2>/dev/null; } '
-          '\' _ {} \\; '
+          'sed -i "$sedExpr" "\$1"\' _ {} \\; '
           '2>/dev/null; done; '
           // Exec bits: not just bin/* — npm's node_modules/.bin shims and
           // any nested .bin dir must be executable too, else execve EACCES
@@ -1224,6 +1238,25 @@ audit=false
           'find "\$PREFIX/lib/node_modules" -name "*.sh" '
           '-type f -exec chmod +x {} + 2>/dev/null',
     ]).timeout(const Duration(minutes: 2));
+    // Verification (PR31): grep SHEBANG LINES ONLY (head -1) for any
+    // remaining Termux app path. Content-level strings are legitimate
+    // (configs, docs) and must not trip this. A residual shebang means
+    // the patcher failed — report loudly so Health surfaces it (the
+    // next self-heal boot re-runs this whole pass).
+    final (_, verifyOut) = await execChecked(
+      ['bash', '-c', 'cd "\$PREFIX" && '
+          'for f in bin/* lib/node_modules/npm/bin/*; do '
+          '[ -f "\$f" ] || continue; '
+          'head -1 "\$f" 2>/dev/null | grep -q '
+          '"data/data/com.termux" && echo "SHEBANG_STALE: \$f"; done | head -5'],
+    ).timeout(const Duration(seconds: 30));
+    if (verifyOut.contains('SHEBANG_STALE')) {
+      // ignore: avoid_print
+      print(
+        '[ovid-sandbox] PR31 shebang patch left stale interpreters '
+        '(first 5): $verifyOut — run Sandbox self-heal / Repair.',
+      );
+    }
   }
 
   /// Reads one member of an `ar` archive (`.deb` container) in pure Dart.
