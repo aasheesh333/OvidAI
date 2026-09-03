@@ -2,9 +2,11 @@ name: Validate and Build Android
 
 on:
   push:
-    branches: [main, ci/verified-android-build-20260827]
+    # hoplite/** — agent thread branches: push builds a device-testable
+    # APK/AAB before review, so fixes can be tested without merging.
+    branches: [main, ci/verified-android-build-20260827, 'hoplite/**']
   pull_request:
-    branches: [main]
+    branches: [main, ci/verified-android-build-20260827]
   workflow_dispatch:
 
 permissions:
