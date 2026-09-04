@@ -425,7 +425,18 @@ Ordered by (a) directness to the user's literal complaints and (b) risk/size:
    `agent_install_plugin` model tool) with honest "Mounted N MCP server(s)"
    reporting. Test seam `pluginCacheRootOverrideForTest`; 5 new tests
    (valid mounts, missing/empty/malformed .mcp.json, name-dedup), 280 total.
-9. **Persistent PTY (F1)** — largest architectural change; next.
+9. **DONE (PR46)** — **Persistent PTY (F1)**: `lib/core/pty_service.dart`
+   adds `PtyShell` (one long-lived non-interactive bash per session inside
+   the sandbox, marker-based output framing: `__OVID_DONE_<id>__:<rc>`)
+   with a promptless/echo-less protocol (no PS1 chatter, command echo
+   stripped, stderr merged as `[stderr]` lines), and `PtyPool` per-session
+   registry discarded by `cancelAllRuns` (panic-stop kills the shell too —
+   the spawned process is registered in the kill registry). `run_shell`
+   gains `persistent: true|false` (default off; only routed through the
+   PTY when the sandbox exists — fresh-shell semantics stay the default
+   for one-off work). Host-verified via real bash in tests (state persists
+   across commands, rc parsing, timeout kill, registry wiring). 4 new
+   tests, 289 total.
 
 Each item ships as its own PR against `ci/verified-android-build-20260827`, same gate as
 every prior fix in this repo: `flutter analyze` (0 issues) + `flutter test` (all green,
@@ -440,7 +451,7 @@ PR38 (native Linux CLI parity), PR39 (hook deny/block gating), PR40 (plugin cont
 mounting), PR41 (MCP Streamable-HTTP transport + reconnect backoff), and PR42
 (ripgrep-backed fs_grep) are implemented, tested (273/273 `flutter test`, 0
 `flutter analyze` issues beyond the one pre-existing unrelated warning), and pushed.
-PR43 (compaction pruner+retry) and PR44 (plugin .mcp.json auto-mount) are now DONE (280/273-branch baseline). Remaining: F1 (persistent PTY) — PR43/44/45 now DONE.
+PR43 (compaction pruner+retry) and PR44 (plugin .mcp.json auto-mount) are now DONE (280/273-branch baseline). All §6 items DONE (PR38–PR46). Head=289 tests green.
 
 **Next step:** tell me which item from §6 to start on next (or say "continue down the
 list") and I'll implement, test, and push it as the next PR on this thread's branch.

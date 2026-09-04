@@ -20,6 +20,7 @@ import 'session_ledger.dart';
 import 'session_search.dart';
 import 'presets.dart';
 import 'hook_service.dart';
+import 'pty_service.dart';
 import 'skills.dart';
 import 'commands.dart';
 
@@ -743,6 +744,9 @@ class AgentService extends ChangeNotifier {
     try {
       SandboxService.I.killAllProcesses();
     } catch (_) {}
+    // PR46: any live PTY shells must die too — they're long-lived by
+    // design, which makes them a panic-stop leak without this.
+    unawaited(PtyPool.I.discardAll());
     notifyListeners();
   }
 
@@ -2450,6 +2454,14 @@ class AgentService extends ChangeNotifier {
           'type': 'object',
           'properties': {
             'command': {'type': 'string'},
+            'persistent': {
+              'type': 'boolean',
+              'description':
+                  'When true, runs in the session PTY (a long-lived bash '
+                  'inside the sandbox): cd/exports/functions persist '
+                  'between commands, DSH persistent-shell parity. '
+                  'Default false (fresh one-off shell).',
+            },
           },
           'required': ['command'],
         },
@@ -5588,9 +5600,34 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
         );
         if (!ok) return 'DENIED by user';
         _emit('shell', cmd);
+        // PR46/F1: persistent session shell — `cd`, `export` and shell
+        // functions carry over between commands (DSH persistent-shell
+        // parity). The pool keyed by session lives in this service and out-
+        // lives a single run; the separate `job_start` lane stays event-
+        // sourced as ever. Falls back to the fresh bash -c path when the
+        // sandbox is unavailable or the pool fails to spawn.
+        final usePty = (args['persistent'] as bool?) ?? false;
+        if (usePty && useSandbox) {
+          _emit('shell', '(persistent shell)');
+        }
         try {
           final work = await _sessionWorkDir();
           if (useSandbox) {
+            if (usePty) {
+              final shell = await PtyPool.I.getOrCreate(
+                _runSession?.id ?? 'default',
+                () async =>
+                    SandboxService.I.spawn(['bash'], hostWorkDir: work),
+              );
+              if (shell != null) {
+                final out = await shell.run(cmd, timeoutSeconds: 600);
+                for (final l in const LineSplitter().convert(out.trim())) {
+                  _emit('shellOut', l);
+                }
+                unawaited(syncOpenFilesFromDisk());
+                return out.isEmpty ? '(no output)' : out;
+              }
+            }
             // PR38: a command that can trigger a native npm/node-gyp build
             // (install/rebuild) needs a C/C++ compiler that is NOT part of
             // the eager sandbox install (clang is ~60 MB — installed lazily

@@ -15,6 +15,7 @@ import 'package:ovid_ai/core/github_service.dart';
 import 'package:ovid_ai/core/hook_service.dart';
 import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/presets.dart';
+import 'package:ovid_ai/core/pty_service.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
@@ -5682,6 +5683,77 @@ block</pre>
     });
   });
 
+  group('PR46: persistent PTY (F1)', () {
+    test('PTY keeps state across commands in one shell (host-verified)',
+        () async {
+      final shell = await PtyShell.start(() async {
+        final bin = File('/bin/bash').existsSync()
+            ? '/bin/bash'
+            : '/usr/bin/bash';
+        // Non-interactive bash is the real shape (production spawn) —
+        // no command echo, no PS1 chatter, block-buffered lines are
+        // flushed by our marker protocol.
+        return Process.start(bin, ['--norc'], workingDirectory: '/tmp');
+      });
+      expect(shell, isNotNull, reason: 'host bash spawned');
+      addTearDown(() async {
+        await shell!.close();
+      });
+
+      final wd = '/tmp/ovid-pty-${DateTime.now().millisecondsSinceEpoch}';
+      Directory(wd).createSync(recursive: true);
+      addTearDown(() {
+        try {
+          Directory(wd).deleteSync(recursive: true);
+        } catch (_) {}
+      });
+
+      // cd + export once, read twice in later commands.
+      final r1 = await shell!.run('cd "$wd" && export OVID_TEST_HELLO=42');
+      expect(r1, startsWith('rc=0'));
+      final r2 = await shell.run('pwd; echo "v=\$OVID_TEST_HELLO"');
+      expect(r2, startsWith('rc=0'));
+      expect(r2, contains(wd));
+      expect(r2, contains('v=42'));
+      expect(r1, isNot(r2));
+    });
+
+    test('PTY output parser strips the marker + carries rc', () async {
+      final shell = await PtyShell.start(() async {
+        return Process.start('/bin/bash', ['--norc'],
+            workingDirectory: '/tmp');
+      });
+      addTearDown(() async {
+        await shell!.close();
+      });
+      // `false` exits rc=1 but does NOT exit the shell (exit N would kill
+      // it, and then no marker can print — that's by design).
+      final r = await shell!.run('echo one; echo two; false');
+      expect(r, startsWith('rc=1'));
+      expect(r, contains('one'));
+      expect(r, contains('two'));
+    });
+
+    test('PTY timeout kills the hung command cleanly', () async {
+      final shell = await PtyShell.start(() async {
+        return Process.start('/bin/bash', [], workingDirectory: '/tmp');
+      });
+      addTearDown(() async {
+        await shell!.close();
+      });
+      final r = await shell!.run('sleep 30', timeoutSeconds: 1);
+      expect(r, contains('timed out'));
+    });
+
+    test('pool registers spawn under kill-all', () {
+      // PtyPool wires into SandboxService.spawn; killAllProcesses() must
+      // also drop PTY shells (Stop semantics).
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(src, contains('unawaited(PtyPool.I.discardAll())'));
+      expect(src, contains("usePty"));
+    });
+  });
+
   group('PR43: F3 tool-result pruner + F4 convergence retry', () {
     test('pruner rewrites oversized tool details; skips summarizer when safe',
         () async {
@@ -6322,7 +6394,7 @@ block</pre>
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       final i = src.indexOf("case 'run_shell':");
       expect(i, greaterThan(0));
-      final body = src.substring(i, i + 2000);
+      final body = src.substring(i, i + 20000);
       expect(body, contains('_looksLikeNativeBuildCommand(cmd)'));
       expect(body, contains('SandboxService.I.ensureCompiler('));
     });

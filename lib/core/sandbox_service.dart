@@ -2269,7 +2269,7 @@ audit=false
       }
     }
     final merged = {..._sandboxEnv(), ...?env};
-    return Process.start(
+    final proc = await Process.start(
       args[0].startsWith('/') ? args[0] : '${_prefix!.path}/bin/${args[0]}',
       args.sublist(1),
       workingDirectory: hostWorkDir != null
@@ -2278,6 +2278,11 @@ audit=false
       environment: merged,
       mode: ProcessStartMode.normal,
     );
+    // PR32 parity: spawned (long-lived) processes also register — Stop
+    // must reach MCP servers / background jobs / persistent PTYs too.
+    _liveProcesses.add(proc);
+    proc.exitCode.whenComplete(() => _liveProcesses.remove(proc));
+    return proc;
   }
 
   Future<Process> shell({Directory? hostWorkDir}) async {
