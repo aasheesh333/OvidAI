@@ -365,30 +365,46 @@ Ordered by (a) directness to the user's literal complaints and (b) risk/size:
    `/`-menu and the model's skill catalog with zero new plumbing — reusing the existing
    skill-file scanner as-is. Uninstall reverses it (deletes the cache dir, unmounts).
    10 new tests, 255 total.
-4. **MCP HTTP/SSE transport + reconnect backoff (M1+M2, §1.3)** — closes the realtime-parity
-   gap explicitly named by the user ("mcp realtime exactly same to same"). Medium size.
+4. **DONE (PR41)** — **MCP HTTP/SSE transport + reconnect backoff** (M1+M2, §1.3).
+   `McpServer` gains `transport`/`url`/`headers` fields ('stdio' default, so all 37
+   existing seed entries compile unchanged). `McpService.connect()` branches:
+   the http path performs initialize → notifications/initialized → tools/list as
+   one POST per JSON-RPC message to the server URL (both plain-JSON and
+   SSE `data:`-line responses parsed, taking the last event per the spec), with
+   no sandbox needed. A connection-level failure on a previously-connected http
+   server drops it and schedules automatic reconnect with doubling backoff
+   (500ms → 30s, max 10 attempts, reset on a successful handshake) — DSH
+   `dsh-mcp-client` parity; a non-2xx response stays a per-call error (server
+   is up); a user `disconnect()` never triggers reconnect. Reconnect also
+   applies to unexpected stdio process death (the death watcher now schedules
+   it unless the user disconnected). Custom-server persistence round-trips
+   transport/url/headers. UI: the Add-MCP dialog gains a URL field (env-JSON
+   doubles as headers for http servers), and the pasted-config importer
+   (`.mcp.json` / Claude Desktop / Codex TOML) now preserves `url`/`headers`
+   and fixes the audit's §3.3 finding — Codex TOML `env.KEY = "value"` lines
+   were silently dropped before. 13 new tests, 268 total.
 5. **ripgrep-backed fs_grep/fs_glob (§4.3.2)** — "grep 100% same as Linux." Needs the
    sandbox-installed branch to be additive (fallback preserved), so low regression risk.
    Note: `ripgrep` itself now installs eagerly as of PR38 — this item is "wire fs_grep/
    fs_glob to shell out to it," not "get rg onto the device."
-6. **Repeat-tool-reminder (F2)**, **compaction pruner+retry (F3/F4)**, **Codex TOML `env`
-   extraction (§3.3)** — smaller, independent, can land in any order after the above.
+6. **Repeat-tool-reminder (F2)**, **compaction pruner+retry (F3/F4)** — smaller,
+   independent, can land in any order after the above.
 7. **Persistent PTY (F1)** and **plugin hook `.mcp.json` auto-mount (P3)** — largest
    architectural changes; sequence last, each as its own PR with full regression coverage.
 
 Each item ships as its own PR against `ci/verified-android-build-20260827`, same gate as
 every prior fix in this repo: `flutter analyze` (0 issues) + `flutter test` (all green,
-current baseline 255 as of PR40) + new regression tests per change + CI green (Build APK +
+current baseline 268 as of PR41) + new regression tests per change + CI green (Build APK +
 Device Test) before merge, per the pattern already established in `PLAN_FIXES.md`.
 
 ---
 
 ## 7. Status
 
-PR38 (native Linux CLI parity), PR39 (hook deny/block gating), and PR40 (plugin content
-mounting) are implemented, tested (255/255 `flutter test`, 0 `flutter analyze` issues
-beyond the one pre-existing unrelated warning), and pushed. Items 4–7 in §6 remain open
-for the next round.
+PR38 (native Linux CLI parity), PR39 (hook deny/block gating), PR40 (plugin content
+mounting), and PR41 (MCP Streamable-HTTP transport + reconnect backoff) are implemented,
+tested (268/268 `flutter test`, 0 `flutter analyze` issues beyond the one pre-existing
+unrelated warning), and pushed. Items 5–7 in §6 remain open for the next round.
 
 **Next step:** tell me which item from §6 to start on next (or say "continue down the
 list") and I'll implement, test, and push it as the next PR on this thread's branch.

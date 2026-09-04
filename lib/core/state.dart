@@ -196,6 +196,20 @@ class McpServer {
   bool connected;
   bool custom;
 
+  /// PR41: transport — 'stdio' (spawn [command]/[args] in the sandbox,
+  /// speak JSON-RPC over stdin/stdout — the only transport Ovid supported
+  /// before this) or 'http' (Streamable HTTP: POST JSON-RPC to [url], no
+  /// sandbox needed). DSH's `dsh-mcp-client` supports both; a remote MCP
+  /// server (an API a team runs centrally) only ever offers 'http'.
+  String transport;
+
+  /// Streamable-HTTP endpoint — required when [transport] is 'http',
+  /// unused for 'stdio'.
+  final String? url;
+
+  /// Extra HTTP headers (auth tokens etc.) for the 'http' transport.
+  final Map<String, String> headers;
+
   McpServer({
     required this.name,
     required this.author,
@@ -207,6 +221,9 @@ class McpServer {
     this.source = 'registry.modelcontextprotocol.io',
     this.connected = false,
     this.custom = false,
+    this.transport = 'stdio',
+    this.url,
+    this.headers = const {},
   });
 }
 
@@ -2042,6 +2059,11 @@ class AppState extends ChangeNotifier {
           (m['name'] as String?) ?? fallbackName ?? '';
       if (mname.isEmpty) return;
       if (mcpServers.any((e) => e.name == mname)) return;
+      // PR41: an entry with `url` (and no `command`) is a Streamable-HTTP
+      // server — Claude Desktop / Codex / DSH all use this exact shape
+      // for a remote MCP server (`{"url": "https://...", "headers": {…}}`).
+      final urlValue = m['url'] as String?;
+      final isHttp = urlValue != null && urlValue.isNotEmpty;
       mcpServers.add(
         McpServer(
           name: mname,
@@ -2059,6 +2081,12 @@ class AppState extends ChangeNotifier {
                   : null),
           source: 'marketplace:$owner/$repoName',
           custom: true,
+          transport: isHttp ? 'http' : 'stdio',
+          url: isHttp ? urlValue : null,
+          headers: (m['headers'] as Map?)?.map(
+                (k, v) => MapEntry(k.toString(), v.toString()),
+              ) ??
+              const {},
         ),
       );
       importedMcps++;
@@ -2153,18 +2181,29 @@ class AppState extends ChangeNotifier {
     required String command,
     List<String> args = const [],
     String? envHint,
+    // PR41: an explicit http/https url makes this an HTTP-transport
+    // server instead of a spawned stdio process; command/args are then
+    // ignored by McpService.connect.
+    String? url,
+    Map<String, String> headers = const {},
   }) {
+    final isHttp = url != null && url.isNotEmpty;
     mcpServers.add(
       McpServer(
         name: name.trim(),
         author: 'you',
-        description: 'Custom MCP server — connects on demand.',
+        description: isHttp
+            ? 'Custom MCP server (HTTP) — connects on demand.'
+            : 'Custom MCP server — connects on demand.',
         category: 'Custom',
         command: command.trim(),
         args: args,
         envHint: envHint,
         source: 'custom',
         custom: true,
+        transport: isHttp ? 'http' : 'stdio',
+        url: isHttp ? url : null,
+        headers: headers,
       ),
     );
     _persistCustomMcpServers();
@@ -2201,12 +2240,22 @@ class AppState extends ChangeNotifier {
               'command': s.command,
               'args': s.args,
               'envHint': s.envHint,
+              // PR41: transport/url/headers — without these a custom
+              // HTTP server reloads as a broken stdio ('npx') entry.
+              'transport': s.transport,
+              if (s.url != null) 'url': s.url,
+              if (s.headers.isNotEmpty) 'headers': s.headers,
             }),
           )
           .toList();
       await prefs.setStringList(_kCustomMcpServers, customs);
     } catch (_) {}
   }
+
+  /// Test seam: re-run the persisted-custom-MCP-servers load (simulates a
+  /// restart without tearing down the whole AppState singleton).
+  @visibleForTesting
+  Future<void> reloadCustomMcpServersForTest() => _loadCustomMcpServers();
 
   Future<void> _loadCustomMcpServers() async {
     try {
@@ -2217,17 +2266,26 @@ class AppState extends ChangeNotifier {
         final m = jsonDecode(j) as Map<String, dynamic>;
         final name = m['name'] as String;
         if (mcpServers.any((s) => s.name == name)) continue;
+        final transport = m['transport'] as String? ?? 'stdio';
         mcpServers.add(
           McpServer(
             name: name,
             author: 'you',
-            description: 'Custom MCP server — connects on demand.',
+            description: transport == 'http'
+                ? 'Custom MCP server (HTTP) — connects on demand.'
+                : 'Custom MCP server — connects on demand.',
             category: 'Custom',
             command: m['command'] as String? ?? 'npx',
             args: (m['args'] as List?)?.cast<String>() ?? const [],
             envHint: m['envHint'] as String?,
             source: 'custom',
             custom: true,
+            transport: transport,
+            url: m['url'] as String?,
+            headers: (m['headers'] as Map?)?.map(
+                  (k, v) => MapEntry(k.toString(), v.toString()),
+                ) ??
+                const {},
           ),
         );
       }

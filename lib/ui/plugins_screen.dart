@@ -845,6 +845,9 @@ class _McpSection extends StatelessWidget {
     final cmdC = TextEditingController(text: 'npx');
     final argsC = TextEditingController();
     final envC = TextEditingController();
+    // PR41: a remote (Streamable-HTTP) server has no local command to
+    // spawn — filling this in switches the save button to the http path.
+    final urlC = TextEditingController();
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -897,7 +900,9 @@ class _McpSection extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              'Runs as a local process. Config matches standard mcp.json format.',
+              'Runs as a local process (or leave Command blank and set a '
+              'URL for a remote Streamable-HTTP server). Config matches '
+              'standard mcp.json format.',
               style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
             ),
             const SizedBox(height: 8),
@@ -927,10 +932,20 @@ class _McpSection extends StatelessWidget {
             ),
             const SizedBox(height: 10),
             TextField(
+              controller: urlC,
+              style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
+              decoration: const InputDecoration(
+                hintText:
+                    'Remote server URL (Streamable HTTP) — leave blank for '
+                    'a local command below',
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
               controller: cmdC,
               style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
               decoration: const InputDecoration(
-                hintText: 'Command (npx / uvx / node …)',
+                hintText: 'Command (npx / uvx / node …) — ignored if URL is set',
               ),
             ),
             const SizedBox(height: 10),
@@ -947,7 +962,8 @@ class _McpSection extends StatelessWidget {
               style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
               decoration: const InputDecoration(
                 hintText:
-                    'Env vars, JSON ({"GITHUB_TOKEN":"ghp_…"}) — optional',
+                    'Env vars (stdio) or headers (http), JSON '
+                    '({"Authorization":"Bearer …"}) — optional',
               ),
             ),
             const SizedBox(height: 14),
@@ -968,9 +984,13 @@ class _McpSection extends StatelessWidget {
                 ),
                 onPressed: () {
                   if (nameC.text.trim().isEmpty) return;
+                  final url = urlC.text.trim();
+                  final isHttp = url.isNotEmpty;
                   // Env can be raw var names (envHint) or a JSON object
                   // with values — the latter is stored in secure storage
-                  // and passed to the spawned server process.
+                  // and passed to the spawned server process (stdio), or
+                  // sent as HTTP headers (http transport — e.g. an
+                  // Authorization bearer token for a remote server).
                   Map<String, String>? envMap;
                   String? envHint;
                   final envTxt = envC.text.trim();
@@ -986,7 +1006,7 @@ class _McpSection extends StatelessWidget {
                       );
                       return;
                     }
-                  } else if (envTxt.isNotEmpty) {
+                  } else if (envTxt.isNotEmpty && !isHttp) {
                     envHint = envTxt;
                   }
                   app.addCustomMcpServer(
@@ -996,8 +1016,10 @@ class _McpSection extends StatelessWidget {
                         ? []
                         : argsC.text.trim().split(RegExp(r'\s+')),
                     envHint: envHint,
+                    url: isHttp ? url : null,
+                    headers: isHttp ? (envMap ?? const {}) : const {},
                   );
-                  if (envMap != null) {
+                  if (envMap != null && !isHttp) {
                     unawaited(app.setMcpEnv(nameC.text.trim(), envMap));
                   }
                   Navigator.pop(ctx);
@@ -1059,8 +1081,10 @@ void _importMcpConfig(BuildContext context) {
                 name: s.name,
                 command: s.command,
                 args: s.args,
+                url: s.url,
+                headers: s.headers,
               );
-              if (s.env.isNotEmpty) {
+              if (s.env.isNotEmpty && s.url == null) {
                 unawaited(app.setMcpEnv(s.name, s.env));
               }
             }
@@ -1099,12 +1123,26 @@ List<_ImportedMcp> _parseMcpConfig(String raw) {
               env[kv.key.toString()] = kv.value.toString();
             }
           }
+          // PR41: a `url` (with no `command`) is a Streamable-HTTP server
+          // — Claude Desktop / Codex / DSH all use this exact shape for a
+          // remote MCP server; its `headers` carry the auth token.
+          final url = (v['url'] as String?)?.trim();
+          final isHttp = url != null && url.isNotEmpty;
+          final headers = <String, String>{};
+          final headersRaw = v['headers'];
+          if (isHttp && headersRaw is Map) {
+            for (final kv in headersRaw.entries) {
+              headers[kv.key.toString()] = kv.value.toString();
+            }
+          }
           out.add(
             _ImportedMcp(
               name: e.key,
               command: (v['command'] as String?) ?? 'npx',
               args: (v['args'] as List?)?.cast<String>() ?? [],
               env: env,
+              url: isHttp ? url : null,
+              headers: headers,
             ),
           );
         }
@@ -1117,11 +1155,14 @@ List<_ImportedMcp> _parseMcpConfig(String raw) {
   for (final m in sectionRe.allMatches(trimmed)) {
     final body = m.group(2) ?? '';
     String? cmd;
+    String? url;
     List<String> args = [];
     for (final line in body.split('\n')) {
       final kv = line.trim();
       final cmdM = RegExp(r'^command\s*=\s*"([^"]*)"').firstMatch(kv);
       if (cmdM != null) cmd = cmdM.group(1);
+      final urlM = RegExp(r'^url\s*=\s*"([^"]*)"').firstMatch(kv);
+      if (urlM != null) url = urlM.group(1);
       final argsM = RegExp(r'^args\s*=\s*\[(.*)\]').firstMatch(kv);
       if (argsM != null) {
         args = RegExp(
@@ -1129,7 +1170,25 @@ List<_ImportedMcp> _parseMcpConfig(String raw) {
         ).allMatches(argsM.group(1)!).map((g) => g.group(1)!).toList();
       }
     }
-    out.add(_ImportedMcp(name: m.group(1)!, command: cmd ?? 'npx', args: args));
+    // PR41: an env table in TOML (`env.KEY = "value"`) was silently
+    // dropped before — the JSON path extracted env but this branch never
+    // did (the audit's §3.3 finding).
+    final env = <String, String>{};
+    final envM = RegExp(r'^env\.([A-Za-z0-9_]+)\s*=\s*"([^"]*)"');
+    for (final line in body.split('\n')) {
+      final m2 = envM.firstMatch(line.trim());
+      if (m2 != null) env[m2.group(1)!] = m2.group(2)!;
+    }
+    final isHttp = url != null && url.isNotEmpty;
+    out.add(
+      _ImportedMcp(
+        name: m.group(1)!,
+        command: cmd ?? 'npx',
+        args: args,
+        env: isHttp ? const {} : env,
+        url: isHttp ? url : null,
+      ),
+    );
   }
   return out;
 }
@@ -1139,13 +1198,44 @@ class _ImportedMcp {
   final String command;
   final List<String> args;
   final Map<String, String> env;
+
+  /// PR41: non-null → this entry is a Streamable-HTTP (remote) server.
+  final String? url;
+  final Map<String, String> headers;
+
   _ImportedMcp({
     required this.name,
     required this.command,
     required this.args,
     this.env = const {},
+    this.url,
+    this.headers = const {},
   });
 }
+
+/// Public test seam for the private [_parseMcpConfig] — same parser, no
+/// dialog. Returns a record list (public shape) instead of the private
+/// class so no private type leaks into a public API.
+@visibleForTesting
+List<({
+  String name,
+  String command,
+  List<String> args,
+  Map<String, String> env,
+  String? url,
+  Map<String, String> headers,
+})>
+parseMcpConfigForTest(String raw) => [
+      for (final e in _parseMcpConfig(raw))
+        (
+          name: e.name,
+          command: e.command,
+          args: e.args,
+          env: e.env,
+          url: e.url,
+          headers: e.headers,
+        ),
+    ];
 
 /// Compact horizontal card for an MCP server.
 class McpCard extends StatelessWidget {

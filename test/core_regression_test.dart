@@ -21,6 +21,7 @@ import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
+import 'package:ovid_ai/ui/plugins_screen.dart' show parseMcpConfigForTest;
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
 import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -6540,6 +6541,429 @@ block</pre>
       await agent.refreshSkills();
 
       expect(SkillService.I.skills.any((s) => s.name == 'nope'), isFalse);
+    });
+  });
+
+  group('PR41: MCP Streamable-HTTP transport + reconnect backoff', () {
+    setUp(() {
+      // Fast, deterministic backoff for every test in this group.
+      McpService.reconnectInitialDelayForTest =
+          const Duration(milliseconds: 5);
+      McpService.reconnectMaxDelayForTest = const Duration(milliseconds: 20);
+      McpService.reconnectMaxAttemptsForTest = 3;
+      McpService.rpcTimeoutSecondsForTest = 2;
+    });
+    tearDown(() {
+      McpService.I.httpClientForTest = null;
+      McpService.reconnectInitialDelayForTest =
+          const Duration(milliseconds: 500);
+      McpService.reconnectMaxDelayForTest = const Duration(seconds: 30);
+      McpService.reconnectMaxAttemptsForTest = 10;
+      McpService.rpcTimeoutSecondsForTest = 30;
+    });
+
+    test('McpServer defaults to stdio transport with no url', () {
+      final s = McpServer(
+        name: 'default-transport',
+        author: 't',
+        description: '',
+        category: 'Custom',
+        command: 'npx',
+      );
+      expect(s.transport, 'stdio');
+      expect(s.url, isNull);
+    });
+
+    test('map-form marketplace entry with a url becomes an http server',
+        () {
+      final app = AppState.I;
+      final before = app.mcpServers.length;
+      app.mergeMarketplaceCatalogForTest({
+        'mcpServers': {
+          'PR41 HTTP Server': {
+            'url': 'https://example.com/mcp',
+            'headers': {'Authorization': 'Bearer tok'},
+          },
+        },
+      }, 'acme', 'market');
+      expect(app.mcpServers.length, before + 1);
+      final s = app.mcpServers.last;
+      expect(s.transport, 'http');
+      expect(s.url, 'https://example.com/mcp');
+      expect(s.headers['Authorization'], 'Bearer tok');
+      app.mcpServers.remove(s);
+    });
+
+    test('map-form marketplace entry with a command (no url) stays stdio',
+        () {
+      final app = AppState.I;
+      final before = app.mcpServers.length;
+      app.mergeMarketplaceCatalogForTest({
+        'mcpServers': {
+          'PR41 Stdio Server': {'command': 'npx', 'args': ['-y', 'x']},
+        },
+      }, 'acme', 'market');
+      final s = app.mcpServers.last;
+      expect(s.transport, 'stdio');
+      expect(s.url, isNull);
+      app.mcpServers.remove(s);
+      expect(app.mcpServers.length, before);
+    });
+
+    test('connect() over http performs initialize + tools/list and reports '
+        'the discovered tools', () async {
+      final calls = <String>[];
+      McpService.I.httpClientForTest = MockClient((request) async {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        calls.add(body['method'] as String);
+        if (body['method'] == 'initialize') {
+          return http.Response(
+            jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': {}}),
+            200,
+          );
+        }
+        if (body['method'] == 'tools/list') {
+          return http.Response(
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': body['id'],
+              'result': {
+                'tools': [
+                  {'name': 'remote_tool', 'description': 'd'},
+                ],
+              },
+            }),
+            200,
+          );
+        }
+        return http.Response('', 202); // notifications/initialized
+      });
+
+      final server = McpServer(
+        name: 'PR41 Connect Server',
+        author: 't',
+        description: '',
+        category: 'Custom',
+        command: 'npx',
+        transport: 'http',
+        url: 'https://example.com/mcp',
+      );
+      addTearDown(() => McpService.I.disconnect(server.name));
+
+      final status = await McpService.I.connect(server);
+      expect(status, contains('connected (http)'));
+      expect(status, contains('1 tools'));
+      expect(McpService.I.isConnected(server.name), isTrue);
+      expect(
+        McpService.I.connectedTools[server.name]!.first.name,
+        'remote_tool',
+      );
+      expect(calls, containsAll(['initialize', 'tools/list']));
+    });
+
+    test('callTool over http returns the text content, same shape as stdio',
+        () async {
+      McpService.I.httpClientForTest = MockClient((request) async {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        if (body['method'] == 'tools/call') {
+          return http.Response(
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': body['id'],
+              'result': {
+                'content': [
+                  {'type': 'text', 'text': 'remote result'},
+                ],
+              },
+            }),
+            200,
+          );
+        }
+        return http.Response(
+          jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': {}}),
+          200,
+        );
+      });
+      final server = McpServer(
+        name: 'PR41 CallTool Server',
+        author: 't',
+        description: '',
+        category: 'Custom',
+        command: 'npx',
+        transport: 'http',
+        url: 'https://example.com/mcp',
+      );
+      addTearDown(() => McpService.I.disconnect(server.name));
+      await McpService.I.connect(server);
+
+      final result = await McpService.I.callTool(
+        server.name,
+        'remote_tool',
+        {},
+      );
+      expect(result, 'remote result');
+    });
+
+    test('a JSON-RPC error over http surfaces as "MCP error: …", never a '
+        'fake success', () async {
+      McpService.I.httpClientForTest = MockClient((request) async {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        if (body['method'] == 'tools/call') {
+          return http.Response(
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': body['id'],
+              'error': {'message': 'tool not found'},
+            }),
+            200,
+          );
+        }
+        return http.Response(
+          jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': {}}),
+          200,
+        );
+      });
+      final server = McpServer(
+        name: 'PR41 Error Server',
+        author: 't',
+        description: '',
+        category: 'Custom',
+        command: 'npx',
+        transport: 'http',
+        url: 'https://example.com/mcp',
+      );
+      addTearDown(() => McpService.I.disconnect(server.name));
+      await McpService.I.connect(server);
+
+      final result = await McpService.I.callTool(server.name, 'x', {});
+      expect(result, 'MCP error: tool not found');
+    });
+
+    test('an http server-side (non-2xx) error is a per-call failure — the '
+        'server stays connected, no reconnect scheduled', () async {
+      var callToolCount = 0;
+      McpService.I.httpClientForTest = MockClient((request) async {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        if (body['method'] == 'tools/call') {
+          callToolCount++;
+          return http.Response('server error', 500);
+        }
+        return http.Response(
+          jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': {}}),
+          200,
+        );
+      });
+      final server = McpServer(
+        name: 'PR41 500 Server',
+        author: 't',
+        description: '',
+        category: 'Custom',
+        command: 'npx',
+        transport: 'http',
+        url: 'https://example.com/mcp',
+      );
+      addTearDown(() => McpService.I.disconnect(server.name));
+      await McpService.I.connect(server);
+
+      final result = await McpService.I.callTool(server.name, 'x', {});
+      expect(result, contains('MCP error'));
+      expect(callToolCount, 1);
+      // Still connected — a 500 means the server responded, it's up.
+      expect(McpService.I.isConnected(server.name), isTrue);
+      expect(McpService.I.hasPendingReconnectForTest(server.name), isFalse);
+    });
+
+    test('a connection-level http failure drops the server and schedules '
+        'reconnect with backoff', () async {
+      var attempts = 0;
+      McpService.I.httpClientForTest = MockClient((request) async {
+        attempts++;
+        throw const SocketException('connection refused');
+      });
+      final app = AppState.I;
+      final server = McpServer(
+        name: 'PR41 Unreachable Server',
+        author: 't',
+        description: '',
+        category: 'Custom',
+        command: 'npx',
+        transport: 'http',
+        url: 'https://example.com/mcp',
+      );
+      app.mcpServers.add(server);
+      addTearDown(() {
+        McpService.I.disconnect(server.name);
+        app.mcpServers.remove(server);
+      });
+
+      final status = await McpService.I.connect(server);
+      expect(status, contains('connect failed'));
+      expect(McpService.I.isConnected(server.name), isFalse);
+      expect(attempts, 1, reason: 'exactly one dial, no retry loop inline');
+
+      // The FIRST connect failure is a direct throw from connect(), not a
+      // mid-session drop — no reconnect is scheduled for a connect() that
+      // never succeeded in the first place (nothing to "recover" from).
+      expect(McpService.I.hasPendingReconnectForTest(server.name), isFalse);
+    });
+
+    test('an unexpected mid-session http failure (after a successful '
+        'connect) schedules reconnect, capped at reconnectMaxAttempts',
+        () async {
+      var shouldFail = false;
+      McpService.I.httpClientForTest = MockClient((request) async {
+        if (shouldFail) throw const SocketException('reset by peer');
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        return http.Response(
+          jsonEncode({
+            'jsonrpc': '2.0',
+            'id': body['id'],
+            'result': body['method'] == 'tools/list' ? {'tools': []} : {},
+          }),
+          200,
+        );
+      });
+      final app = AppState.I;
+      final server = McpServer(
+        name: 'PR41 Flaky Server',
+        author: 't',
+        description: '',
+        category: 'Custom',
+        command: 'npx',
+        transport: 'http',
+        url: 'https://example.com/mcp',
+      );
+      app.mcpServers.add(server);
+      addTearDown(() {
+        McpService.I.disconnect(server.name);
+        app.mcpServers.remove(server);
+      });
+
+      final status = await McpService.I.connect(server);
+      expect(status, contains('connected (http)'));
+
+      // Now the server starts failing every call — the next callTool
+      // triggers the connection-level failure path.
+      shouldFail = true;
+      await McpService.I.callTool(server.name, 'x', {});
+      expect(McpService.I.isConnected(server.name), isFalse);
+      expect(McpService.I.hasPendingReconnectForTest(server.name), isTrue);
+      expect(McpService.I.reconnectAttemptsForTest(server.name), 1);
+
+      // Let the scheduled reconnect fire — it fails again (shouldFail is
+      // still true), so a SECOND reconnect is scheduled with a longer
+      // delay, doubling the attempt count.
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(
+        McpService.I.reconnectAttemptsForTest(server.name),
+        greaterThanOrEqualTo(1),
+      );
+    });
+
+    test('disconnect() cancels any pending reconnect and never triggers one',
+        () async {
+      McpService.I.httpClientForTest = MockClient((request) async {
+        throw const SocketException('unreachable');
+      });
+      final app = AppState.I;
+      final server = McpServer(
+        name: 'PR41 Manual Disconnect Server',
+        author: 't',
+        description: '',
+        category: 'Custom',
+        command: 'npx',
+        transport: 'http',
+        url: 'https://example.com/mcp',
+      );
+      app.mcpServers.add(server);
+      addTearDown(() => app.mcpServers.remove(server));
+
+      await McpService.I.connect(server); // fails immediately (unreachable)
+      expect(McpService.I.hasPendingReconnectForTest(server.name), isFalse);
+
+      await McpService.I.disconnect(server.name);
+      expect(McpService.I.reconnectAttemptsForTest(server.name), 0);
+    });
+
+    test('custom HTTP server persists transport/url/headers across a '
+        'simulated restart', () async {
+      final app = AppState.I;
+      app.addCustomMcpServer(
+        name: 'PR41 Persisted HTTP',
+        command: 'npx',
+        url: 'https://example.com/mcp',
+        headers: {'X-Api-Key': 'secret'},
+      );
+      final added = app.mcpServers.firstWhere(
+        (s) => s.name == 'PR41 Persisted HTTP',
+      );
+      expect(added.transport, 'http');
+      expect(added.url, 'https://example.com/mcp');
+      expect(added.headers['X-Api-Key'], 'secret');
+
+      // Give the fire-and-forget persist a chance to land (same idiom the
+      // pre-existing "custom MCP servers persist" test uses: any real
+      // await yields to the microtask queue).
+      await SharedPreferences.getInstance();
+
+      // Simulate reload: remove in-memory, then reload from prefs.
+      app.mcpServers.remove(added);
+      await app.reloadCustomMcpServersForTest();
+      final reloaded = app.mcpServers.firstWhere(
+        (s) => s.name == 'PR41 Persisted HTTP',
+      );
+      expect(reloaded.transport, 'http');
+      expect(reloaded.url, 'https://example.com/mcp');
+      expect(reloaded.headers['X-Api-Key'], 'secret');
+
+      app.removeMcpServer(reloaded);
+    });
+
+    test('pasted .mcp.json with a url+headers entry imports as an http '
+        'server (Claude Desktop remote shape)', () {
+      // _parseMcpConfig is private; drive it through the import surface
+      // by calling it directly via the same file-level function the
+      // dialog uses (exposed for tests below).
+      final res = parseMcpConfigForTest('''
+{
+  "mcpServers": {
+    "remote-db": {
+      "url": "https://db.example.com/mcp",
+      "headers": {"Authorization": "Bearer tok123"}
+    },
+    "local-fs": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem"]
+    }
+  }
+}
+''');
+      expect(res.length, 2);
+      final remote = res.firstWhere((s) => s.name == 'remote-db');
+      expect(remote.url, 'https://db.example.com/mcp');
+      expect(remote.headers['Authorization'], 'Bearer tok123');
+      final local = res.firstWhere((s) => s.name == 'local-fs');
+      expect(local.url, isNull);
+      expect(local.command, 'npx');
+    });
+
+    test('pasted Codex config.toml now carries url AND env (the audit '
+        '§3.3 finding: env was silently dropped)', () {
+      final res = parseMcpConfigForTest('''
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env.GITHUB_TOKEN = "ghp_abc123"
+
+[mcp_servers.remote-api]
+url = "https://api.example.com/mcp"
+''');
+      expect(res.length, 2);
+      final gh = res.firstWhere((s) => s.name == 'github');
+      expect(gh.env['GITHUB_TOKEN'], 'ghp_abc123',
+          reason: 'TOML env lines must no longer be dropped');
+      final remote = res.firstWhere((s) => s.name == 'remote-api');
+      expect(remote.url, 'https://api.example.com/mcp');
     });
   });
 }

@@ -3,17 +3,21 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 
 import 'sandbox_service.dart';
 import 'state.dart';
 
-/// Real MCP client — spawns each server as a process inside the on-device
-/// sandbox, speaks JSON-RPC 2.0 over stdin/stdout, discovers tools via
-/// `tools/list`, and bridges `tools/call` for the agent.
+/// Real MCP client — connects to each server over its configured
+/// transport (stdio: spawn inside the sandbox and speak JSON-RPC over
+/// stdin/stdout; http: POST JSON-RPC to a Streamable-HTTP endpoint, no
+/// sandbox needed), discovers tools via `tools/list`, and bridges
+/// `tools/call` for the agent.
 ///
-/// Process model: one Process per connected server, started via
+/// Process model (stdio): one Process per connected server, started via
 /// SandboxService.spawn — servers run inside the native sandbox env.
-/// Lifecycle is lazy — `connect()` spawns + handshakes, `disconnect()` kills.
+/// Lifecycle is lazy — `connect()` spawns/dials + handshakes, `disconnect()`
+/// kills/drops.
 ///
 /// Reliability contract (matches the reference MCP client behavior):
 ///   • a JSON-RPC error response surfaces as a thrown/returned error, never
@@ -21,8 +25,15 @@ import 'state.dart';
 ///   • a timeout surfaces as an explicit error string, never the text "null";
 ///   • a server that dies drops out of the connected map immediately, so
 ///     nothing stays "connected" with a dead pipe;
-///   • `notifications/tools/list_changed` triggers a silent re-discovery;
-///   • tool results are capped so a chatty server can't flood the context.
+///   • `notifications/tools/list_changed` triggers a silent re-discovery
+///     (stdio only — an HTTP server has no persistent notification channel
+///     in the Streamable-HTTP request/response model Ovid uses);
+///   • tool results are capped so a chatty server can't flood the context;
+///   • PR41: an UNEXPECTED disconnect (stdio process death, or an HTTP call
+///     failing with a connection-level error) schedules automatic
+///     reconnection with exponential backoff — DSH `dsh-mcp-client` parity
+///     (500ms → 30s, giving up after 10 consecutive failures). A
+///     user-initiated `disconnect()` never triggers this.
 class McpService {
   McpService._();
   static final McpService I = McpService._();
@@ -54,7 +65,22 @@ class McpService {
         'narrower query to see the middle…]\n\n$tail';
   }
 
-  /// Spawn the server process and perform the MCP handshake
+  /// Test seam: replace the HTTP client used by the 'http' transport.
+  @visibleForTesting
+  http.Client? httpClientForTest;
+
+  /// Test seam: reconnect backoff timing, shortened so tests run in
+  /// milliseconds instead of real seconds.
+  @visibleForTesting
+  static Duration reconnectInitialDelayForTest = const Duration(
+    milliseconds: 500,
+  );
+  @visibleForTesting
+  static Duration reconnectMaxDelayForTest = const Duration(seconds: 30);
+  @visibleForTesting
+  static int reconnectMaxAttemptsForTest = 10;
+
+  /// Spawn/dial the server and perform the MCP handshake
   /// (initialize → initialized → tools/list).
   ///
   /// Returns a human-readable status string for the UI.
@@ -69,6 +95,54 @@ class McpService {
     // Reserve the slot BEFORE spawning so a rapid second connect sees it.
     final rs = _RunningServer(server: server);
     _running[server.name] = rs;
+    if (server.transport == 'http') {
+      return _connectHttp(server, rs);
+    }
+    return _connectStdio(server, rs);
+  }
+
+  /// PR41: Streamable-HTTP transport — no process, no sandbox. Every
+  /// JSON-RPC call is its own HTTP POST to [McpServer.url]; the handshake
+  /// is the same three calls (initialize/initialized/tools/list) as stdio,
+  /// just carried over HTTP instead of stdin/stdout.
+  Future<String> _connectHttp(McpServer server, _RunningServer rs) async {
+    try {
+      final url = server.url;
+      if (url == null || url.isEmpty) {
+        throw Exception('no url configured for HTTP transport');
+      }
+      final initResult = await _rpcHttp(rs, 'initialize', {
+        'protocolVersion': '2024-11-05',
+        'capabilities': {},
+        'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
+      });
+      if (initResult.isError) {
+        throw Exception('initialize failed: ${initResult.error}');
+      }
+      await _sendNotificationHttp(rs, 'notifications/initialized', {});
+      final toolsResult = await _rpcHttp(rs, 'tools/list', {});
+      if (toolsResult.isError) {
+        throw Exception('tools/list failed: ${toolsResult.error}');
+      }
+      final payload = toolsResult.value;
+      if (payload is Map<String, dynamic>) {
+        rs.tools =
+            (payload['tools'] as List?)
+                ?.whereType<Map>()
+                .map((t) => McpToolDef.fromJson(t.cast<String, dynamic>()))
+                .toList() ??
+            <McpToolDef>[];
+      }
+      rs.handshakeDone = true;
+      _reconnectAttempts.remove(server.name);
+      return '"${server.name}" connected (http) · ${rs.tools.length} tools';
+    } catch (e) {
+      if (identical(_running[server.name], rs)) _running.remove(server.name);
+      return 'connect failed: $e';
+    }
+  }
+
+  Future<String> _connectStdio(McpServer server, _RunningServer rs) async {
     try {
       // Spawn inside the native sandbox — servers are trusted code the
       // user explicitly connected, same trust level as DSH MCP defaults.
@@ -122,6 +196,9 @@ class McpService {
       // Server-death watcher: the moment the process exits, drop it from
       // the connected map. Without this, a crashed server stayed
       // "connected" until the next write to its dead stdin threw.
+      // PR41: a death the user didn't ask for (disconnect() sets
+      // rs.userDisconnected first) schedules automatic reconnection with
+      // backoff instead of just vanishing — DSH dsh-mcp-client parity.
       unawaited(
         proc.exitCode.then((code) {
           if (identical(_running[server.name], rs)) {
@@ -131,6 +208,7 @@ class McpService {
               code: code,
               at: DateTime.now(),
             );
+            if (!rs.userDisconnected) _scheduleReconnect(server);
           }
         }),
       );
@@ -177,6 +255,7 @@ class McpService {
             <McpToolDef>[];
       }
       rs.handshakeDone = true;
+      _reconnectAttempts.remove(server.name);
       return '"${server.name}" connected · ${rs.tools.length} tools';
     } catch (e) {
       if (identical(_running[server.name], rs)) _running.remove(server.name);
@@ -185,6 +264,63 @@ class McpService {
       } catch (_) {}
       return 'connect failed: $e';
     }
+  }
+
+  /// PR41: reconnect backoff timers, one per server name so a repeated
+  /// crash doesn't stack multiple pending retries.
+  final Map<String, Timer> _reconnectTimers = {};
+
+  /// Consecutive failed reconnect attempts per server name. Lives on the
+  /// service (not on the per-connect `_RunningServer`, which is recreated
+  /// fresh every `connect()` call) so backoff keeps doubling across
+  /// repeated failures instead of resetting to attempt 1 each time. Reset
+  /// to 0 on any successful handshake.
+  final Map<String, int> _reconnectAttempts = {};
+
+  /// Schedule an automatic reconnect for [server] after an UNEXPECTED
+  /// disconnect (never called after a user-initiated `disconnect()`).
+  /// Delay doubles from [reconnectInitialDelayForTest] up to
+  /// [reconnectMaxDelayForTest]; gives up silently after
+  /// [reconnectMaxAttemptsForTest] consecutive failures (the server stays
+  /// listed but disconnected — the user can retry manually, same as
+  /// today's behavior before this feature existed).
+  void _scheduleReconnect(McpServer server) {
+    _reconnectTimers.remove(server.name)?.cancel();
+    final attempt = (_reconnectAttempts[server.name] ?? 0) + 1;
+    if (attempt > reconnectMaxAttemptsForTest) return;
+    final initialMs = reconnectInitialDelayForTest.inMilliseconds;
+    final maxMs = reconnectMaxDelayForTest.inMilliseconds;
+    final delayMs = (initialMs * (1 << (attempt - 1))).clamp(initialMs, maxMs);
+    _reconnectAttempts[server.name] = attempt;
+    _reconnectTimers[server.name] = Timer(
+      Duration(milliseconds: delayMs),
+      () {
+        _reconnectTimers.remove(server.name);
+        // The user may have manually reconnected (or removed the server)
+        // while this timer was pending — never race a live connection.
+        if (_running.containsKey(server.name)) return;
+        if (!AppState.I.mcpServers.contains(server)) return;
+        unawaited(connect(server));
+      },
+    );
+  }
+
+  /// Test seam: how many reconnect attempts have been recorded for
+  /// [serverName] (0 if none).
+  @visibleForTesting
+  int reconnectAttemptsForTest(String serverName) =>
+      _reconnectAttempts[serverName] ?? 0;
+
+  /// Test seam: is a reconnect currently scheduled for [serverName]?
+  @visibleForTesting
+  bool hasPendingReconnectForTest(String serverName) =>
+      _reconnectTimers.containsKey(serverName);
+
+  /// Cancel any pending reconnect for [serverName] (used by [disconnect]
+  /// and available to tests for teardown).
+  void _cancelReconnect(String serverName) {
+    _reconnectTimers.remove(serverName)?.cancel();
+    _reconnectAttempts.remove(serverName);
   }
 
   /// Re-run tools/list after a server says its catalog changed.
@@ -207,7 +343,9 @@ class McpService {
   /// Kill a server process. Safe to call when not connected.
   Future<void> disconnect(String serverName) async {
     final rs = _running.remove(serverName);
+    _cancelReconnect(serverName);
     if (rs == null) return;
+    rs.userDisconnected = true;
     try {
       rs.process?.kill();
     } catch (_) {}
@@ -229,10 +367,15 @@ class McpService {
       return 'MCP error: server "$serverName" is not connected'
           '${_lastDeathOf(serverName)}';
     }
-    final res = await _rpc(rs, 'tools/call', {
-      'name': toolName,
-      'arguments': args,
-    });
+    final res = rs.server.transport == 'http'
+        ? await _rpcHttp(rs, 'tools/call', {
+            'name': toolName,
+            'arguments': args,
+          })
+        : await _rpc(rs, 'tools/call', {
+            'name': toolName,
+            'arguments': args,
+          });
     if (res.isTimeout) {
       return 'MCP error: "$toolName" on "$serverName" timed out after '
           '$_rpcTimeoutSeconds s (server may be busy or dead).';
@@ -347,6 +490,146 @@ class McpService {
     proc.stdin.writeln(
       jsonEncode({'jsonrpc': '2.0', 'method': method, 'params': params}),
     );
+  }
+
+  /// PR41: Streamable-HTTP JSON-RPC notification — a POST that carries no
+  /// `id`. Best-effort: a server may legitimately respond 202/204 with no
+  /// body, or ignore the initialized notification entirely (optional per
+  /// the MCP spec).
+  Future<void> _sendNotificationHttp(
+    _RunningServer rs,
+    String method,
+    Map<String, dynamic> params,
+  ) async {
+    final url = rs.server.url;
+    if (url == null) return;
+    try {
+      final client = httpClientForTest ?? http.Client();
+      await client
+          .post(
+            Uri.parse(url),
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json, text/event-stream',
+              ...rs.server.headers,
+            },
+            body: jsonEncode({
+              'jsonrpc': '2.0',
+              'method': method,
+              'params': params,
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+    } catch (_) {
+      // Notifications are fire-and-forget by design.
+    }
+  }
+
+  /// PR41: Streamable-HTTP JSON-RPC request/response — one POST per call,
+  /// same [McpRpcResult] contract as the stdio [_rpc] so every downstream
+  /// consumer (callTool's content parsing, timeout/error surfacing) is
+  /// transport-agnostic. A connection-level failure (can't reach the
+  /// server at all — DNS, refused, timeout) is treated exactly like a
+  /// stdio process death: the server drops out of `_running` and an
+  /// automatic reconnect is scheduled (unless the user disconnected).
+  Future<McpRpcResult> _rpcHttp(
+    _RunningServer rs,
+    String method,
+    Map<String, dynamic> params,
+  ) async {
+    final url = rs.server.url;
+    if (url == null) {
+      return McpRpcResult._error('no url configured');
+    }
+    final id = _nextId++;
+    try {
+      final client = httpClientForTest ?? http.Client();
+      final res = await client
+          .post(
+            Uri.parse(url),
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json, text/event-stream',
+              ...rs.server.headers,
+            },
+            body: jsonEncode({
+              'jsonrpc': '2.0',
+              'id': id,
+              'method': method,
+              'params': params,
+            }),
+          )
+          .timeout(Duration(seconds: _rpcTimeoutSeconds));
+      // A single-object JSON response is the common case; a
+      // "text/event-stream" response carries one or more `data: {...}`
+      // lines — take the LAST one, which per the spec is the final
+      // response for this request (earlier lines are notifications).
+      final contentType = res.headers['content-type'] ?? '';
+      Map<String, dynamic>? j;
+      if (contentType.contains('text/event-stream')) {
+        final dataLines = res.body
+            .split('\n')
+            .where((l) => l.startsWith('data:'))
+            .map((l) => l.substring(5).trim())
+            .where((l) => l.isNotEmpty)
+            .toList();
+        for (final line in dataLines.reversed) {
+          try {
+            final decoded = jsonDecode(line) as Map<String, dynamic>;
+            if (decoded['id'] == id) {
+              j = decoded;
+              break;
+            }
+          } catch (_) {}
+        }
+      } else if (res.body.trim().isNotEmpty) {
+        try {
+          j = jsonDecode(res.body) as Map<String, dynamic>;
+        } catch (_) {}
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        // The server responded (just not successfully) — it's still up,
+        // so this is a per-call error, not a connection failure. A
+        // non-2xx with a JSON-RPC error body still carries a useful
+        // message; fall back to the raw status when it doesn't.
+        final msg = j?['error'] is Map
+            ? '${(j!['error'] as Map)['message'] ?? res.statusCode}'
+            : 'HTTP ${res.statusCode}';
+        return McpRpcResult._error(msg);
+      }
+      if (j == null) return McpRpcResult._error('empty or unparsable response');
+      if (j.containsKey('error')) {
+        final err = j['error'];
+        return McpRpcResult._error(
+          err is Map ? '${err['message'] ?? err['code'] ?? 'error'}' : '$err',
+        );
+      }
+      return McpRpcResult._ok(j['result']);
+    } on TimeoutException {
+      return const McpRpcResult._timeout();
+    } catch (e) {
+      // Connection-level failure (refused, DNS, socket) — the server is
+      // effectively down; drop it and schedule a reconnect exactly like
+      // an unexpected stdio process death.
+      _markHttpFailure(rs);
+      return McpRpcResult._error('$e');
+    }
+  }
+
+  /// An HTTP server has no process to watch for death, so a connection-
+  /// level failure on any call is this transport's equivalent signal:
+  /// drop it from `_running` and schedule automatic reconnection (unless
+  /// the user explicitly disconnected it). Only fires for a server that
+  /// was actually UP (`handshakeDone`) — a failure during the initial
+  /// handshake is an ordinary failed `connect()`, not something to
+  /// "recover" from; `_connectHttp`'s own catch handles that case.
+  void _markHttpFailure(_RunningServer rs) {
+    if (!rs.handshakeDone) return;
+    final name = rs.server.name;
+    if (!identical(_running[name], rs)) return; // already superseded
+    _running.remove(name);
+    _lastDeath = (server: name, code: -1, at: DateTime.now());
+    if (!rs.userDisconnected) _scheduleReconnect(rs.server);
   }
 
   /// Send a JSON-RPC request and await the matching response (id-correlated).
@@ -465,6 +748,11 @@ class _RunningServer {
   List<McpToolDef> tools = [];
   final stdoutLines = _LineStream();
   final stderrLines = <String>[];
+
+  /// PR41: set by [McpService.disconnect] BEFORE killing the process, so
+  /// the death watcher can tell a user-initiated disconnect apart from an
+  /// unexpected crash — only the latter schedules automatic reconnection.
+  bool userDisconnected = false;
 
   _RunningServer({required this.server});
 }
