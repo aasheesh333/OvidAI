@@ -447,11 +447,16 @@ Device Test) before merge, per the pattern already established in `PLAN_FIXES.md
 
 ## 7. Status
 
-PR38 (native Linux CLI parity), PR39 (hook deny/block gating), PR40 (plugin content
-mounting), PR41 (MCP Streamable-HTTP transport + reconnect backoff), and PR42
-(ripgrep-backed fs_grep) are implemented, tested (273/273 `flutter test`, 0
-`flutter analyze` issues beyond the one pre-existing unrelated warning), and pushed.
-PR43 (compaction pruner+retry) and PR44 (plugin .mcp.json auto-mount) are now DONE (280/273-branch baseline). All §6 items DONE (PR38–PR46). Head=289 tests green.
+**All §6 items are DONE** (PR38–PR46, in order): native Linux CLI parity, hook
+deny/block gating, plugin content mounting, MCP Streamable-HTTP + reconnect,
+ripgrep-backed fs_grep; then PR43 (compaction tool-result pruner +
+shrink-check retry), PR44 (plugin `.mcp.json` auto-mount on install), PR45
+(repeat-tool streak at 3/5/8 with escalating nudges), PR46 (persistent
+per-session PTY behind `run_shell` `persistent: true`).
 
-**Next step:** tell me which item from §6 to start on next (or say "continue down the
-list") and I'll implement, test, and push it as the next PR on this thread's branch.
+Verified: `flutter analyze` 0 issues; `flutter test` 289/289 green; CI Build Ovid
+APK green on the latest two pushes (PR45, PR46; the PR43+PR44 push was cancelled
+mid-flight by the PR45 push but PR45's own run covers the same tree).
+
+Everything from this audit file is shipped. Future new asks belong in a new
+workstream.
