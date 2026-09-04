@@ -5483,6 +5483,195 @@ block</pre>
     });
   });
 
+  group('PR44: plugin .mcp.json auto-mount (P3)', () {
+    Future<Directory> seedCache(String source, {String? mcpJson}) async {
+      final root = await Directory.systemTemp.createTemp('ovid-p3-');
+      AppState.pluginCacheRootOverrideForTest = root;
+      addTearDown(() {
+        AppState.pluginCacheRootOverrideForTest = null;
+        root.deleteSync(recursive: true);
+      });
+      if (mcpJson != null) {
+        final dir = await AppState.I.pluginCacheDirFor(source);
+        dir.createSync(recursive: true);
+        File('${dir.path}/.mcp.json').writeAsStringSync(mcpJson);
+      }
+      return root;
+    }
+
+    test('plugin with .mcp.json mounts its servers on install', () async {
+      final app = AppState.I;
+      final before = app.mcpServers.map((s) => s.name).toSet();
+      await seedCache(
+        'acme/tools',
+        mcpJson: '{"mcpServers":{"acme-fs":{"command":"npx",'
+            '"args":["-y","@acme/fs"],"env":{"API_KEY":"k"}},'
+            '"acme-web":{"command":"uvx","args":["acme-web"]}}}',
+      );
+      addTearDown(() {
+        app.mcpServers.removeWhere(
+          (s) => s.name.startsWith('acme-'),
+        );
+      });
+
+      final n = await app.mountPluginMcpServers('acme/tools');
+      expect(n, 2);
+      final names = app.mcpServers.map((s) => s.name).toSet();
+      expect(names, containsAll(['acme-fs', 'acme-web']));
+      // Existing seeded servers are untouched and still present.
+      expect(before.difference(names), isEmpty);
+      final fs = app.mcpServers.firstWhere((s) => s.name == 'acme-fs');
+      expect(fs.command, 'npx');
+      expect(fs.args, ['-y', '@acme/fs']);
+      expect(fs.envHint, 'API_KEY');
+      expect(fs.source, 'plugin:acme/tools');
+    });
+
+    test('no .mcp.json → 0 mounts, no crash', () async {
+      final app = AppState.I;
+      await seedCache('acme/none');
+      final before = app.mcpServers.length;
+      final n = await app.mountPluginMcpServers('acme/none');
+      expect(n, 0);
+      expect(app.mcpServers.length, before);
+    });
+
+    test('malformed JSON → 0 mounts, no throw', () async {
+      final app = AppState.I;
+      await seedCache('acme/bad', mcpJson: '{not json');
+      final n = await app.mountPluginMcpServers('acme/bad');
+      expect(n, 0);
+    });
+
+    test('servers with no mcpServers map → 0 mounts', () async {
+      final app = AppState.I;
+      await seedCache('acme/empty', mcpJson: '{"name":"x"}');
+      final n = await app.mountPluginMcpServers('acme/empty');
+      expect(n, 0);
+    });
+
+    test('duplicate server names are NOT re-registered', () async {
+      final app = AppState.I;
+      // Existing server collides by name.
+      app.mcpServers.add(
+        McpServer(
+          name: 'dupe-srv',
+          author: 'test',
+          description: '',
+          category: 'Community',
+          command: 'npx',
+          source: 'test',
+          custom: true,
+        ),
+      );
+      addTearDown(
+          () => app.mcpServers.removeWhere((s) => s.name == 'dupe-srv'));
+      await seedCache(
+        'acme/dupe',
+        mcpJson: '{"mcpServers":{"dupe-srv":{"command":"fake"}}}',
+      );
+      final n = await app.mountPluginMcpServers('acme/dupe');
+      expect(n, 0, reason: 'name collision → skip, not re-register');
+      final srv = app.mcpServers.firstWhere((s) => s.name == 'dupe-srv');
+      expect(srv.command, 'npx', reason: 'existing server untouched');
+    });
+  });
+
+  group('PR43: F3 tool-result pruner + F4 convergence retry', () {
+    test('pruner rewrites oversized tool details; skips summarizer when safe',
+        () async {
+      final app = AppState.I;
+      final s = ChatSession(
+        id: 'f3-p1',
+        title: 'F3',
+        model: 'm',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      final prevActive = app.activeSessionId;
+      addTearDown(() {
+        app.sessions.removeWhere((x) => x.id == s.id);
+        app.activeSessionId = prevActive == s.id ? '' : prevActive;
+      });
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      // Tiny window: 800 tokens, threshold at 640. Oversized tool detail
+      // (12K chars ≈ 3002 tokens) alone puts us way over threshold.
+      app.contextWindowOverride = 800;
+      addTearDown(() => app.contextWindowOverride = 0);
+      s.messages.add(Message(
+        role: 'assistant',
+        kind: MsgKind.tool,
+        toolName: 'run_shell',
+        toolDetail: 'line\n' * 3000, // ~15000 chars — clearly oversized
+        toolState: 'ok',
+      ));
+      s.messages.add(Message(role: 'user', content: 'summary?'));
+
+      var called = 0;
+      AgentService.I.compactionSummarizerForTest = (sess, a, b) async {
+        called++;
+        return 'summary';
+      };
+      addTearDown(() => AgentService.I.compactionSummarizerForTest = null);
+
+      final before = AgentService.I.measuredContextTokens(s);
+      await AgentService.I.maybeCompactForTest(
+        s,
+        AppState.I.providers.first,
+      );
+
+      expect(
+        s.compactedSummary,
+        isNull,
+        reason: 'pruning alone brought pressure below threshold; DSH parity: '
+            'no summarization call',
+      );
+      expect(called, 0, reason: 'summarizer skipped after pruning');
+      expect(
+        AgentService.I.measuredContextTokens(s),
+        lessThan(before),
+        reason: 'pressure actually dropped',
+      );
+      // The tool output was rewritten to a spill reference.
+      final card = s.messages.firstWhere((m) => m.kind == MsgKind.tool);
+      expect(card.toolDetail, contains('.spill/'));
+      expect(card.toolDetail, contains('omitted'));
+      expect(card.toolDetail!.length, lessThan(6000));
+    });
+
+    test('F4: compaction state advances only when the summary is used', () {
+      final app = AppState.I;
+      final s = ChatSession(
+        id: 'f4-flow',
+        title: 'F4',
+        model: 'm',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, s);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+
+      for (var i = 0; i < 8; i++) {
+        s.messages.add(Message(role: 'user', content: 'row $i ' * 50));
+      }
+      expect(s.compactedAtCount, 0);
+
+      // Apply a compaction — summary accepted → checkpoint row landed.
+      final status = AgentService.I.applyCompactionForTest(
+        s,
+        0,
+        6,
+        '## Primary Request and Intent\n- demo',
+      );
+      expect(status, contains('6 message'));
+      expect(s.compactedAtCount, 6);
+      expect(s.compactedSummary, contains('Primary'));
+      expect(s.messages.where((m) => m.kind == MsgKind.compact).length, 1);
+    });
+  });
+
   group('PR21: workflow + ralph orchestration', () {
     ChatSession newParent(String id) {
       final app = AppState.I;

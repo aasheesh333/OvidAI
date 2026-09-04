@@ -633,6 +633,25 @@ class PluginDetailScreen extends StatelessWidget {
                           if (fetchedFiles > 0) {
                             await AgentService.I.refreshSkills();
                           }
+                          // P3: an installed plugin can carry a .mcp.json —
+                          // register its declared MCP servers so the agent
+                          // gets them as connected-intent (they then
+                          // respawn on the next launch/persist).
+                          if (fetchedFiles > 0) {
+                            final mounted = await AppState.I
+                                .mountPluginMcpServers(plugin.source!);
+                            if (mounted > 0) {
+                              messenger.showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    'Mounted $mounted MCP server(s) from '
+                                    '${plugin.name}\'s .mcp.json',
+                                  ),
+                                  behavior: SnackBarBehavior.floating,
+                                ),
+                              );
+                            }
+                          }
                         }
                         final gained = _toolGainsFor(plugin);
                         final parts = <String>[

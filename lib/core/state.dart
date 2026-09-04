@@ -1835,11 +1835,18 @@ class AppState extends ChangeNotifier {
   @visibleForTesting
   static String? pluginContentBaseOverrideForTest;
 
+  /// PR44 test seam: override the plugin-content cache root so tests can
+  /// pre-write a `.mcp.json` without touching real documents dir.
+  static Directory? pluginCacheRootOverrideForTest;
+
   /// Local cache root for fetched plugin content — one directory per
   /// `owner_repo`, holding whatever `commands/`/`skills/` it fetched.
   /// Public so the UI (uninstall) and tests can resolve the same path.
   Future<Directory> pluginCacheDirFor(String source) async {
     final safe = source.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_');
+    if (pluginCacheRootOverrideForTest != null) {
+      return Directory('${pluginCacheRootOverrideForTest!.path}/plugin-content/$safe');
+    }
     Directory base;
     try {
       base = await getApplicationDocumentsDirectory();
@@ -1904,7 +1911,8 @@ class AppState extends ChangeNotifier {
               if (entry['type'] == 'blob')
                 if ((entry['path'] as String).startsWith('commands/') ||
                     ((entry['path'] as String).startsWith('skills/') &&
-                        (entry['path'] as String).endsWith('SKILL.md')))
+                        (entry['path'] as String).endsWith('SKILL.md')) ||
+                    entry['path'] == '.mcp.json')
                   entry['path'] as String,
           ];
           if (paths.isNotEmpty) {
@@ -1960,6 +1968,57 @@ class AppState extends ChangeNotifier {
       }
     }
     return fetched;
+  }
+
+  /// P3 (DSH plugin .mcp.json parity): read the plugin's `.mcp.json` from
+  /// its cache dir and register the declared `mcpServers` as connected-
+  /// intent items (so plugins shipping MCP servers auto-mount on install).
+  /// Returns the number of new servers registered. Never throws.
+  Future<int> mountPluginMcpServers(String source) async {
+    try {
+      final cache = await pluginCacheDirFor(source);
+      final f = File('${cache.path}/.mcp.json');
+      if (!f.existsSync()) return 0;
+      final raw = f.readAsStringSync();
+      if (raw.trim().isEmpty) return 0;
+      final j = (jsonDecode(raw) as Map?)?.cast<String, dynamic>();
+      if (j == null) return 0;
+      final servers = j['mcpServers'];
+      if (servers is! Map) return 0;
+      var mounted = 0;
+      servers.forEach((key, value) {
+        if (value is! Map) return;
+        if (mcpServers.any((e) => e.name == key)) return; // dedupe by name
+        final m = value;
+        final args =
+            (m['args'] as List?)?.whereType<String>().toList() ?? const [];
+        mcpServers.add(
+          McpServer(
+            name: key.toString(),
+            author: source,
+            description: (m['description'] as String?) ??
+                'declared by plugin ${source.replaceAll('_', '/')}',
+            category: 'Plugin',
+            command: (m['command'] as String?) ?? 'npx',
+            args: args,
+            envHint: (m['env'] as Map?)?.keys.isNotEmpty == true
+                ? (m['env'] as Map).keys.first as String?
+                : null,
+            source: 'plugin:$source',
+            custom: true,
+          ),
+        );
+        mounted++;
+      });
+      if (mounted > 0) {
+        refresh();
+        _persistCustomMcpServers();
+        _persistMcpConnectedIntent();
+      }
+      return mounted;
+    } catch (_) {
+      return 0;
+    }
   }
 
   /// Remove a plugin's fetched content cache (uninstall).

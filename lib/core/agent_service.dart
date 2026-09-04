@@ -3883,78 +3883,102 @@ class AgentService extends ChangeNotifier {
       }
     }
     final prior = s.compactedSummary;
-    final summary = await _callLlm(
-      p,
-      [
-        {
-          'role': 'system',
-          'content':
-              'You are now acting as a compaction engine for this AI coding '
-              'assistant. Condense the conversation ABOVE into a structured '
-              'checkpoint that lets another model resume the work with no '
-              'loss of essential context.\n'
-              '\n'
-              'Output EXACTLY the Markdown structure below: keep every '
-              'section, in order. Use terse bullets, not prose paragraphs. '
-              'Write "(none)" for an empty section — never drop a section.\n'
-              '\n'
-              '## Primary Request and Intent\n'
-              '- [the user\'s original and evolving goals; quote verbatim '
-              'where the exact wording matters]\n'
-              '\n'
-              '## Key Technical Concepts\n'
-              '- [technologies, frameworks, patterns, and conventions in '
-              'play]\n'
-              '\n'
-              '## Files and Code\n'
-              '- [exact path: why it matters, key changes or snippets]\n'
-              '\n'
-              '## Errors and Fixes\n'
-              '- [error: how it was resolved, plus any related user '
-              'feedback]\n'
-              '\n'
-              '## Pending Jobs\n'
-              '- [explicitly requested work not yet completed]\n'
-              '\n'
-              '## Current Work\n'
-              '- [precisely what was in progress at this checkpoint]\n'
-              '\n'
-              '## Next Step\n'
-              '- [the single next action, directly in line with the most '
-              'recent request, or "(none)"]\n'
-              '\n'
-              '## Critical Context\n'
-              '- [decisions and their rationale, constraints, user '
-              'preferences, open questions, data needed to continue]\n'
-              '\n'
-              'Rules:\n'
-              '- Write concise English engineering prose. Preserve exact '
-              'file paths, commands, error strings, identifiers, numeric '
-              'values, function signatures, and syntax fragments.\n'
-              '- Capture user feedback and explicit instructions '
-              'faithfully, especially corrections.\n'
-              '- Do NOT mention this summarization request or that the '
-              'context was compacted.\n'
-              '- Output only the checkpoint text: do not call any tool or '
-              'take any other action.\n'
-              '- If the conversation already contains a prior checkpoint, '
-              'do not copy it forward verbatim: preserve still-true facts, '
-              'drop stale ones, and merge newer information into a single '
-              'consolidated summary under the same structure.',
-        },
-        {
-          'role': 'user',
-          'content':
-              '${prior == null || prior.isEmpty ? '' : 'A PRIOR CHECKPOINT already exists — merge it with the new span per the rules above.\n\n'}'
-              'Conversation span to condense:\n\n$replay',
-        },
-      ],
-      s,
-      includeTools: false,
+    // F4 (DSH dsh-compaction convergence): reject a summary that does not
+    // shrink its source — retry once with a stricter instruction, and only
+    // after that accept whatever came back.
+    final spanTokens = span.fold<int>(
+      0,
+      (a, m) =>
+          a +
+          estimateMessageTokens(m.content) +
+          estimateMessageTokens(m.toolDetail ?? ''),
     );
-    if (summary == null || summary['content'] == null) return null;
-    final text = summary['content'] as String;
-    return text.trim().isEmpty ? null : text;
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final summary = await _callLlm(
+        p,
+        [
+          {
+            'role': 'system',
+            'content':
+                'You are now acting as a compaction engine for this AI coding '
+                'assistant. Condense the conversation ABOVE into a structured '
+                'checkpoint that lets another model resume the work with no '
+                'loss of essential context.\n'
+                '\n'
+                'Output EXACTLY the Markdown structure below: keep every '
+                'section, in order. Use terse bullets, not prose paragraphs. '
+                'Write "(none)" for an empty section — never drop a section.\n'
+                '\n'
+                '## Primary Request and Intent\n'
+                '- [the user\'s original and evolving goals; quote verbatim '
+                'where the exact wording matters]\n'
+                '\n'
+                '## Key Technical Concepts\n'
+                '- [technologies, frameworks, patterns, and conventions in '
+                'play]\n'
+                '\n'
+                '## Files and Code\n'
+                '- [exact path: why it matters, key changes or snippets]\n'
+                '\n'
+                '## Errors and Fixes\n'
+                '- [error: how it was resolved, plus any related user '
+                'feedback]\n'
+                '\n'
+                '## Pending Jobs\n'
+                '- [explicitly requested work not yet completed]\n'
+                '\n'
+                '## Current Work\n'
+                '- [precisely what was in progress at this checkpoint]\n'
+                '\n'
+                '## Next Step\n'
+                '- [the single next action, directly in line with the most '
+                'recent request, or "(none)"]\n'
+                '\n'
+                '## Critical Context\n'
+                '- [decisions and their rationale, constraints, user '
+                'preferences, open questions, data needed to continue]\n'
+                '\n'
+                'Rules:\n'
+                '- Write concise English engineering prose. Preserve exact '
+                'file paths, commands, error strings, identifiers, numeric '
+                'values, function signatures, and syntax fragments.\n'
+                '- Capture user feedback and explicit instructions '
+                'faithfully, especially corrections.\n'
+                '- Do NOT mention this summarization request or that the '
+                'context was compacted.\n'
+                '- Output only the checkpoint text: do not call any tool or '
+                'take any other action.\n'
+                '- If the conversation already contains a prior checkpoint, '
+                'do not copy it forward verbatim: preserve still-true facts, '
+                'drop stale ones, and merge newer information into a single '
+                'consolidated summary under the same structure.'
+                '${attempt > 0 ? '\n\nSTRICTNESS: the previous summary was longer than its source — halve the length this time.' : ''}',
+          },
+          {
+            'role': 'user',
+            'content':
+                '${prior == null || prior.isEmpty ? '' : 'A PRIOR CHECKPOINT already exists — merge it with the new span per the rules above.\n\n'}'
+                'Conversation span to condense:\n\n$replay',
+          },
+        ],
+        s,
+        includeTools: false,
+      );
+      if (summary == null || summary['content'] == null) continue;
+      final text = summary['content'] as String;
+      if (text.trim().isEmpty) continue;
+      // F4: size check — summary must be smaller than the span it replaces.
+      final summaryToks = estimateMessageTokens(text);
+      if (summaryToks < spanTokens) return text;
+      if (attempt == 0) {
+        // Didn't shrink — retry once with a stricter budget.
+        continue;
+      }
+      // Still not shorter — DSH: throw; mobile-pragmatic: keep whatever we
+      // have (nothing is lost either way, the span stays in the transcript).
+      return text;
+    }
+    return null;
   }
 
   /// Apply a successful compaction: fold [from, cutoff) into the summary,
@@ -3995,17 +4019,66 @@ class AgentService extends ChangeNotifier {
             'folded into the checkpoint)';
   }
 
+  /// F3 (DSH tool-result pruner): rewrites oversized tool-detail bodies in
+  /// the session into spill-file rows (head + marker + tail) BEFORE a
+  /// compaction decides it needs to summarize. Returns the number of tool
+  /// messages that were spilled. Runs only when measured ≥ threshold —
+  /// below-pressure step checks never prune).
+  Future<int> _pruneOversizedToolDetailsBeforeCompact(
+      ChatSession s,
+      int threshold,
+  ) async {
+    var pruned = 0;
+    // Ceiling per tool output: same spirit as the runtime 12 KB trim.
+    const oversizeChars = 8000;
+    for (final m in s.messages) {
+      if (m.kind != MsgKind.tool) continue;
+      final detail = m.toolDetail ?? '';
+      if (detail.length < oversizeChars) continue;
+      final newDetail = await spillToolOutput(
+        m.toolName ?? 'tool',
+        detail,
+        cap: 4000,
+      );
+      if (newDetail.length < detail.length) {
+        m.toolDetail = newDetail;
+        pruned++;
+      }
+    }
+    return pruned;
+  }
+
   Future<void> _maybeCompactLocked(ChatSession s, ProviderConfig p) async {
     final window = contextWindowForSession(s);
     final threshold = (window * _compactThresholdRatio).floor();
     final measured = measuredContextTokens(s, systemPrompt: 'x' * 4000);
     if (measured < threshold) return;
 
+    // F3 (DSH dsh-compaction-tool-result-pruner parity): BEFORE spending an
+    // LLM summarization call, rewrite oversized TOOL results out of the
+    // foldable span into spill refs (head/marker/tail). Cost-free, model-
+    // free; if the pressure drops below threshold afterward, summarize
+    // nothing at all — DSH: "pruner rewrites oversized tool results before
+    // range selection… skips summarization when pressure becomes safe".
+    final retain = (window * _compactRetainRatio).floor();
+    final pruned = await _pruneOversizedToolDetailsBeforeCompact(
+      s,
+      threshold,
+    );
+    if (pruned > 0) {
+      final after = measuredContextTokens(s, systemPrompt: 'x' * 4000);
+      _emit(
+        'think',
+        'context pruned: $pruned oversized tool output(s) spilled to disk '
+            '(~${((after / window) * 100).toStringAsFixed(0)}% now)',
+      );
+      if (after < threshold) return; // DSH: no summarization needed.
+    }
+
     // Select the compactable span [compactedAtCount, cutoff): retain the
     // newest ~16% of the window verbatim (DSH retainRatio), keeping at
     // least 6 recent messages.  Never split the last user message from
     // its tool/reasoning/answer run.
-    final retain = (window * _compactRetainRatio).floor();
     var tail = 0;
     var cutoff = s.messages.length;
     while (cutoff > s.compactedAtCount) {
@@ -5953,9 +6026,16 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           // row. Best-effort: offline/no-source/empty-repo all degrade to
           // "0 fetched" rather than failing the install.
           var fetchedFiles = 0;
+          var mountedMcps = 0;
           if (match.source != null) {
             fetchedFiles = await AppState.I.fetchPluginContent(match.source!);
-            if (fetchedFiles > 0) await refreshSkills();
+            if (fetchedFiles > 0) {
+              await refreshSkills();
+              // P3: a plugin can ship .mcp.json — register its declared
+              // MCP servers so they auto-connect on next launch.
+              mountedMcps =
+                  await AppState.I.mountPluginMcpServers(match.source!);
+            }
           }
           final parts = <String>[];
           if (toolNames.isNotEmpty) {
@@ -5965,6 +6045,12 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
             parts.add(
               '$fetchedFiles command/skill file(s) fetched from '
               '${match.source} — check /-menu for new commands',
+            );
+          }
+          if (mountedMcps > 0) {
+            parts.add(
+              'registered $mountedMcps MCP server(s) from .mcp.json '
+              '(auto-connect intent persisted)',
             );
           }
           if (parts.isEmpty) {
@@ -8346,10 +8432,26 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
 
   /// PR29 test seam: replace the compaction summarizer (no provider in
   /// unit tests). Signature: (session, from, cutoff) → summary text
-  /// (null = model failure).
+  /// (null = model failure). Bypasses the F4 retry loop.
   @visibleForTesting
   Future<String?> Function(ChatSession s, int from, int cutoff)?
       compactionSummarizerForTest;
+
+  /// PR43 test seam: call _applyCompaction directly (bypasses the lock
+  /// and the LLM summarizer — tests the state/string contract in isolation).
+  @visibleForTesting
+  String applyCompactionForTest(
+    ChatSession s,
+    int from,
+    int cutoff,
+    String summary,
+  ) => _applyCompaction(s, from, cutoff, summary, forced: false);
+
+  /// PR43 test seam: drive the locked body directly (bypasses the lock) —
+  /// a test owns the lock itself.
+  @visibleForTesting
+  Future<void> maybeCompactLockedForTest(ChatSession s, ProviderConfig p) =>
+      _maybeCompactLocked(s, p);
 
   /// Test seam: the request-message array this session's history replays to.
   @visibleForTesting

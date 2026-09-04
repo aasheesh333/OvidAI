@@ -399,10 +399,27 @@ Ordered by (a) directness to the user's literal complaints and (b) risk/size:
    silently break skills/`.spill` discoverability, and the flags that disable that
    make rg's traversal equivalent to the existing walk — a tested source-contract,
    not an omission. 5 new tests (fake-prefix stub-rg behavioral tests), 273 total.
-6. **Repeat-tool-reminder (F2)**, **compaction pruner+retry (F3/F4)** — smaller,
-   independent, can land in any order after the above.
-7. **Persistent PTY (F1)** and **plugin hook `.mcp.json` auto-mount (P3)** — largest
-   architectural changes; sequence last, each as its own PR with full regression coverage.
+6. **Repeat-tool-reminder (F2)** — smaller, lands next.
+7. **DONE (PR43)** — **compaction pruner+retry (F3/F4)**: oversized tool
+   results are rewritten into spill refs (head+marker+tail via the existing
+   `spillToolOutput` path) BEFORE the summarizer is ever called, and summarization
+   is skipped entirely when pruning alone drops pressure below threshold
+   (DSH "pruner … before range selection … skips summarization when pressure
+   becomes safe"). F4 adds a 2-attempt convergence loop inside
+   `_summarizeCompactSpan`: a summary that does NOT shrink its source span is
+   rejected once with a STRICTNESS note, then whatever comes back is accepted
+   (history is never lost either way). 2 new tests (pruner-skips-summarizer,
+   applyCompaction state flow), 275 total.
+8. **DONE (PR44)** — **plugin hook `.mcp.json` auto-mount (P3)**:
+   `fetchPluginContent` now also downloads `.mcp.json`; `mountPluginMcpServers`
+   (a new AppState method) parses it, dedupes by server name, registers each
+   server as a Custom MCP row (category `Plugin`, source `plugin:<owner_repo>`),
+   and persists the connected-intent so it reconnects on next boot. Wired
+   into BOTH install paths (Plugins-screen button and the
+   `agent_install_plugin` model tool) with honest "Mounted N MCP server(s)"
+   reporting. Test seam `pluginCacheRootOverrideForTest`; 5 new tests
+   (valid mounts, missing/empty/malformed .mcp.json, name-dedup), 280 total.
+9. **Persistent PTY (F1)** — largest architectural change; next.
 
 Each item ships as its own PR against `ci/verified-android-build-20260827`, same gate as
 every prior fix in this repo: `flutter analyze` (0 issues) + `flutter test` (all green,
@@ -417,7 +434,7 @@ PR38 (native Linux CLI parity), PR39 (hook deny/block gating), PR40 (plugin cont
 mounting), PR41 (MCP Streamable-HTTP transport + reconnect backoff), and PR42
 (ripgrep-backed fs_grep) are implemented, tested (273/273 `flutter test`, 0
 `flutter analyze` issues beyond the one pre-existing unrelated warning), and pushed.
-Items 6–7 in §6 remain open for the next round.
+PR43 (compaction pruner+retry) and PR44 (plugin .mcp.json auto-mount) are now DONE (280/273-branch baseline). Remaining: F2 (repeat-tool-reminder polish) and F1 (persistent PTY).
 
 **Next step:** tell me which item from §6 to start on next (or say "continue down the
 list") and I'll implement, test, and push it as the next PR on this thread's branch.
