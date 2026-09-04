@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import '../core/agent_service.dart';
 import '../core/mcp_service.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
@@ -611,14 +612,42 @@ class PluginDetailScreen extends StatelessWidget {
                           );
                         }
                       } else {
+                        // PR40: fetch the plugin's OWN commands/skills
+                        // content (Claude Code marketplace `source:
+                        // owner/repo`) so install adds real capability —
+                        // not just a catalog-row flag flip. Best-effort:
+                        // offline/no-source degrades to the old message.
+                        var fetchedFiles = 0;
+                        if (plugin.source != null) {
+                          messenger.showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                'Fetching ${plugin.name} content…',
+                              ),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                          fetchedFiles = await AppState.I.fetchPluginContent(
+                            plugin.source!,
+                          );
+                          if (fetchedFiles > 0) {
+                            await AgentService.I.refreshSkills();
+                          }
+                        }
                         final gained = _toolGainsFor(plugin);
+                        final parts = <String>[
+                          if (gained != null) 'agent tools: $gained',
+                          if (fetchedFiles > 0)
+                            '$fetchedFiles command/skill file(s) — see '
+                                'the /-menu',
+                        ];
                         messenger.showSnackBar(
                           SnackBar(
                             content: Text(
-                              gained == null
+                              parts.isEmpty
                                   ? 'Installed ${plugin.name}'
-                                  : 'Installed ${plugin.name} · agent tools: '
-                                      '$gained',
+                                  : 'Installed ${plugin.name} · '
+                                      '${parts.join(' · ')}',
                             ),
                             behavior: SnackBarBehavior.floating,
                           ),
@@ -681,6 +710,16 @@ class PluginDetailScreen extends StatelessWidget {
                       plugin.enabled = false;
                       app.persistPluginState();
                       app.refresh();
+                      // PR40: drop any fetched commands/skills content and
+                      // unmount it — an uninstall reverses exactly what
+                      // install added, same as DSH's plugin removal.
+                      if (plugin.source != null) {
+                        unawaited(
+                          AppState.I
+                              .removePluginContent(plugin.source!)
+                              .then((_) => AgentService.I.refreshSkills()),
+                        );
+                      }
                     },
                   ),
                 ),

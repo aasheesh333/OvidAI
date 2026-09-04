@@ -5947,13 +5947,33 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
           // Honest post-install report: what tools does the plugin actually
           // contribute? (A flag flip that silently adds no tool is a lie.)
           final toolNames = _pluginToolNames(match);
-          if (toolNames.isEmpty) {
+          // PR40: fetch the plugin's OWN commands/skills content (Claude
+          // Code marketplace `source: owner/repo` plugins) and mount it —
+          // an install now genuinely adds capability, not just a catalog
+          // row. Best-effort: offline/no-source/empty-repo all degrade to
+          // "0 fetched" rather than failing the install.
+          var fetchedFiles = 0;
+          if (match.source != null) {
+            fetchedFiles = await AppState.I.fetchPluginContent(match.source!);
+            if (fetchedFiles > 0) await refreshSkills();
+          }
+          final parts = <String>[];
+          if (toolNames.isNotEmpty) {
+            parts.add('agent tools: ${toolNames.join(', ')}');
+          }
+          if (fetchedFiles > 0) {
+            parts.add(
+              '$fetchedFiles command/skill file(s) fetched from '
+              '${match.source} — check /-menu for new commands',
+            );
+          }
+          if (parts.isEmpty) {
             return 'Plugin "$pluginName" installed and enabled, but it '
-                'contributes no agent tools. It only appears in the Plugins '
-                'screen — there is nothing for the model to call.';
+                'contributes no agent tools or fetchable commands/skills. '
+                'It only appears in the Plugins screen.';
           }
           return 'Plugin "$pluginName" installed and enabled ✓ '
-              'Agent tools now available: ${toolNames.join(', ')}.';
+              '${parts.join(' · ')}.';
         } catch (e) {
           return 'install failed: $e';
         }
@@ -8159,6 +8179,21 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       SkillService.I.addRoot('${work.path}/.dsh/skills');
       SkillService.I.addRoot('${work.path}/.agents/skills');
     } catch (_) {}
+    // PR40: installed+enabled plugin content — a plugin's fetched
+    // commands/*.md become real /-menu slash commands + model skills,
+    // exactly like DSH's skill-filesystem provider mounting an
+    // installed Claude Code plugin's directory. A plugin whose fetch
+    // never ran (no source, offline, no commands/skills in its repo)
+    // simply contributes no root here — install still succeeded, it
+    // just has nothing extra to mount.
+    for (final p in AppState.I.plugins) {
+      if (!p.installed || !p.enabled || p.source == null) continue;
+      try {
+        final dir = await AppState.I.pluginCacheDirFor(p.source!);
+        SkillService.I.addRoot('${dir.path}/commands');
+        SkillService.I.addRoot('${dir.path}/skills');
+      } catch (_) {}
+    }
     await SkillService.I.reload();
   }
 

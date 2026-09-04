@@ -353,9 +353,18 @@ Ordered by (a) directness to the user's literal complaints and (b) risk/size:
    into `AgentService._dispatch` as an awaited pre-check; a denial reuses the existing
    `DENIED by …` prefix contract so the chat UI renders it exactly like a user-declined
    approval. 8 new tests, 245 total.
-3. **Plugin content mounting (P1+P4, PR-A/PR-B, §2.4)** — the biggest "same to same" win:
-   makes plugin install genuinely install something (skills/commands), not just flip a flag.
-   Medium-large; reuses existing `SkillService`/marketplace-fetch plumbing, so contained.
+3. **DONE (PR40)** — **Plugin content mounting** (P1+P4, PR-A/PR-B, §2.4). Marketplace
+   plugin entries now keep a normalized `owner/repo` `source` (a local `"./dir"` source
+   is correctly dropped — nothing this client can fetch). `AppState.fetchPluginContent()`
+   uses the unauthenticated GitHub tree API + raw.githubusercontent.com (same
+   no-token shape as `fetchMarketplaceCatalog`) to download a plugin's own
+   `commands/*.md` and `skills/*/SKILL.md` into a per-plugin cache dir. Both install
+   paths (UI button and the `agent_install_plugin` model tool) trigger the fetch and
+   report file counts honestly; `_refreshSkillRoots` mounts an installed+enabled
+   plugin's cache dir into `SkillService` every run, so fetched commands appear in the
+   `/`-menu and the model's skill catalog with zero new plumbing — reusing the existing
+   skill-file scanner as-is. Uninstall reverses it (deletes the cache dir, unmounts).
+   10 new tests, 255 total.
 4. **MCP HTTP/SSE transport + reconnect backoff (M1+M2, §1.3)** — closes the realtime-parity
    gap explicitly named by the user ("mcp realtime exactly same to same"). Medium size.
 5. **ripgrep-backed fs_grep/fs_glob (§4.3.2)** — "grep 100% same as Linux." Needs the
@@ -369,16 +378,17 @@ Ordered by (a) directness to the user's literal complaints and (b) risk/size:
 
 Each item ships as its own PR against `ci/verified-android-build-20260827`, same gate as
 every prior fix in this repo: `flutter analyze` (0 issues) + `flutter test` (all green,
-current baseline 245 as of PR39) + new regression tests per change + CI green (Build APK +
+current baseline 255 as of PR40) + new regression tests per change + CI green (Build APK +
 Device Test) before merge, per the pattern already established in `PLAN_FIXES.md`.
 
 ---
 
 ## 7. Status
 
-PR38 (native Linux CLI parity) and PR39 (hook deny/block gating) are implemented, tested
-(245/245 `flutter test`, 0 `flutter analyze` issues beyond the one pre-existing unrelated
-warning), and pushed. Items 3–7 in §6 remain open for the next round.
+PR38 (native Linux CLI parity), PR39 (hook deny/block gating), and PR40 (plugin content
+mounting) are implemented, tested (255/255 `flutter test`, 0 `flutter analyze` issues
+beyond the one pre-existing unrelated warning), and pushed. Items 4–7 in §6 remain open
+for the next round.
 
 **Next step:** tell me which item from §6 to start on next (or say "continue down the
 list") and I'll implement, test, and push it as the next PR on this thread's branch.

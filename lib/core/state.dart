@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'mcp_service.dart';
 import 'theme.dart';
@@ -136,6 +137,15 @@ class PluginItem {
   bool enabled;
   final int installs;
 
+  /// PR40: marketplace `source` for a Claude-Code-shaped plugin —
+  /// `"owner/repo"` (a GitHub plugin repo) or `"./local-dir"` (a path
+  /// inside the marketplace's own repo, UI-only — no separate fetch).
+  /// Only an `owner/repo` source is ever dereferenced by
+  /// [AppState.fetchPluginContent]; null means this plugin has no
+  /// separate content to mount (our native seeded catalog rows, or a
+  /// marketplace entry that never declared one).
+  final String? source;
+
   /// PR24: plugin hooks — event name → shell command. Declared in the
   /// plugin manifest (`"hooks": {"on_turn_start": "make snapshot"}`) and
   /// fired by HookService at the matching agent lifecycle point. The
@@ -155,6 +165,7 @@ class PluginItem {
     this.enabled = false,
     required this.installs,
     this.hooks = const {},
+    this.source,
   });
 
   /// Valid hook event names (mirrors the wired points in AgentService).
@@ -1802,6 +1813,146 @@ class AppState extends ChangeNotifier {
     String repo,
   ) => _mergeMarketplaceCatalog(j, owner, repo);
 
+  /// Test seam: when set, plugin-content fetches try this base (a local
+  /// mock server) instead of GitHub's tree/raw APIs.
+  @visibleForTesting
+  static String? pluginContentBaseOverrideForTest;
+
+  /// Local cache root for fetched plugin content — one directory per
+  /// `owner_repo`, holding whatever `commands/`/`skills/` it fetched.
+  /// Public so the UI (uninstall) and tests can resolve the same path.
+  Future<Directory> pluginCacheDirFor(String source) async {
+    final safe = source.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_');
+    Directory base;
+    try {
+      base = await getApplicationDocumentsDirectory();
+    } catch (_) {
+      base = Directory.systemTemp;
+    }
+    return Directory('${base.path}/plugin-content/$safe');
+  }
+
+  /// PR40: fetch [source]'s (`owner/repo`) OWN `commands/*.md` and
+  /// `skills/*/SKILL.md` — the actual capability a Claude-Code-shaped
+  /// plugin contributes, as opposed to the one-line description the
+  /// marketplace listing carries. Cached under [pluginCacheDirFor]; a
+  /// plugin with neither directory fetches nothing and mounts nothing
+  /// (not every plugin has model-visible content — some are MCP-only or
+  /// hook-only, which already work through their own paths).
+  ///
+  /// Uses the unauthenticated GitHub REST tree API (works for public
+  /// repos without the user's GitHub login) to discover file paths, then
+  /// raw.githubusercontent.com to fetch each one — same unauthenticated,
+  /// no-token shape as [fetchMarketplaceCatalog] already uses.
+  /// Returns the number of files fetched (0 on any failure — best-effort,
+  /// install must never hard-fail because a plugin repo is unreachable).
+  Future<int> fetchPluginContent(String source) async {
+    final parts = source.split('/');
+    if (parts.length != 2) return 0;
+    final owner = parts[0];
+    final repo = parts[1];
+    final cacheDir = await pluginCacheDirFor(source);
+
+    List<String>? paths;
+    for (final branch in ['main', 'master']) {
+      final treeUrl = pluginContentBaseOverrideForTest != null
+          ? '$pluginContentBaseOverrideForTest/tree/$branch'
+          : 'https://api.github.com/repos/$owner/$repo/git/trees/$branch'
+                '?recursive=1';
+      try {
+        final client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 15);
+        try {
+          final req = await client
+              .getUrl(Uri.parse(treeUrl))
+              .timeout(const Duration(seconds: 15));
+          req.headers.set('Accept', 'application/vnd.github+json');
+          req.headers.set('User-Agent', 'ovid-ai');
+          final res = await req.close().timeout(const Duration(seconds: 15));
+          if (res.statusCode != 200) continue;
+          final builder = BytesBuilder();
+          await for (final chunk in res) {
+            builder.add(chunk);
+            if (builder.length > 4 * 1024 * 1024) {
+              throw Exception('repo tree too large');
+            }
+          }
+          final j =
+              jsonDecode(utf8.decode(builder.takeBytes()))
+                  as Map<String, dynamic>;
+          final tree = (j['tree'] as List?)?.cast<Map<String, dynamic>>();
+          if (tree == null) continue;
+          paths = [
+            for (final entry in tree)
+              if (entry['type'] == 'blob')
+                if ((entry['path'] as String).startsWith('commands/') ||
+                    ((entry['path'] as String).startsWith('skills/') &&
+                        (entry['path'] as String).endsWith('SKILL.md')))
+                  entry['path'] as String,
+          ];
+          if (paths.isNotEmpty) {
+            // Remember the working branch for the raw-fetch loop below.
+            paths = [branch, ...paths];
+          }
+          break;
+        } finally {
+          client.close(force: true);
+        }
+      } catch (_) {
+        continue;
+      }
+    }
+    if (paths == null || paths.isEmpty) return 0;
+    final branch = paths.first;
+    final filePaths = paths.skip(1).toList();
+
+    var fetched = 0;
+    for (final path in filePaths) {
+      final rawUrl = pluginContentBaseOverrideForTest != null
+          ? '$pluginContentBaseOverrideForTest/raw/$path'
+          : 'https://raw.githubusercontent.com/$owner/$repo/$branch/$path';
+      try {
+        final client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 15);
+        try {
+          final req = await client
+              .getUrl(Uri.parse(rawUrl))
+              .timeout(const Duration(seconds: 15));
+          final res = await req.close().timeout(const Duration(seconds: 15));
+          if (res.statusCode != 200) continue;
+          final builder = BytesBuilder();
+          await for (final chunk in res) {
+            builder.add(chunk);
+            if (builder.length > 1024 * 1024) {
+              throw Exception('plugin file too large');
+            }
+          }
+          final content = utf8.decode(
+            builder.takeBytes(),
+            allowMalformed: true,
+          );
+          final target = File('${cacheDir.path}/$path');
+          target.parent.createSync(recursive: true);
+          target.writeAsStringSync(content);
+          fetched++;
+        } finally {
+          client.close(force: true);
+        }
+      } catch (_) {
+        continue;
+      }
+    }
+    return fetched;
+  }
+
+  /// Remove a plugin's fetched content cache (uninstall).
+  Future<void> removePluginContent(String source) async {
+    try {
+      final dir = await pluginCacheDirFor(source);
+      if (dir.existsSync()) dir.deleteSync(recursive: true);
+    } catch (_) {}
+  }
+
   /// Merge a parsed marketplace JSON document into the catalog. Accepts
   /// both list-form and map-form (Claude Desktop / Codex / Cursor shape)
   /// Parse a plugin manifest `hooks` map — event → shell command. Only
@@ -1826,6 +1977,22 @@ class AppState extends ChangeNotifier {
       }
     }
     return out;
+  }
+
+  /// PR40: normalize a marketplace plugin-entry `source` to a fetchable
+  /// `owner/repo`, or null when it can't be fetched by this client.
+  /// Claude Code marketplaces use two source shapes: `"owner/repo"` (a
+  /// standalone GitHub plugin repo — fetchable) and `"./local-dir"` (a
+  /// path INSIDE the marketplace's own repo — would need the marketplace
+  /// repo + subpath, which the current one-file `marketplace.json` fetch
+  /// has no way to express; dropped rather than mis-fetched).
+  static String? _githubPluginSource(String? raw) {
+    if (raw == null) return null;
+    final s = raw.trim();
+    if (s.isEmpty || s.startsWith('.') || s.startsWith('/')) return null;
+    final normalized = normalizeMarketplace(s);
+    if (normalized.split('/').length != 2) return null;
+    return normalized;
   }
 
   /// `mcpServers`, plus Claude Code `plugins` entries.
@@ -1857,6 +2024,12 @@ class AppState extends ChangeNotifier {
             installs: p['installs'] as int? ?? 0,
             // PR24: hook declarations survive the marketplace import.
             hooks: _parsePluginHooks(p['hooks']),
+            // PR40: an `owner/repo` source lets install fetch the
+            // plugin's own commands/*.md + skills/*/SKILL.md; a local
+            // "./dir" source (Claude Code convention) has nothing this
+            // client can fetch, so it is dropped rather than kept as a
+            // GitHub-shaped string that would 404.
+            source: _githubPluginSource(p['source'] as String?),
           ),
         );
         importedPlugins++;
@@ -2156,6 +2329,11 @@ class AppState extends ChangeNotifier {
           'installed': p.installed,
           'enabled': p.enabled,
           if (p.hooks.isNotEmpty) 'hooks': p.hooks,
+          // PR40: persist source too — without it, a marketplace plugin's
+          // fetched commands/skills root can no longer be resolved after
+          // a restart (the seed list has no source; only a live
+          // marketplace re-sync would have recreated it in memory).
+          if (p.source != null) 'source': p.source,
         });
       }
       await prefs.setString(_kPluginState, jsonEncode(state));

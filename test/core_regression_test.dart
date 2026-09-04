@@ -6282,6 +6282,266 @@ block</pre>
       expect(gotEnv!['OVID_HOOK_PAYLOAD'], contains('run_shell'));
     });
   });
+
+  group('PR40: plugin content mounting — install fetches real capability', () {
+    test('marketplace plugin entry with owner/repo source keeps it', () {
+      final app = AppState.I;
+      final before = app.plugins.length;
+      app.mergeMarketplaceCatalogForTest({
+        'plugins': [
+          {
+            'name': 'PR40 Source Plugin',
+            'source': 'someorg/some-plugin',
+            'description': 'has a fetchable source',
+            'category': 'Tool',
+          },
+        ],
+      }, 'owner', 'market');
+      expect(app.plugins.length, before + 1);
+      final p = app.plugins.last;
+      expect(p.name, 'PR40 Source Plugin');
+      expect(p.source, 'someorg/some-plugin');
+      app.plugins.remove(p);
+    });
+
+    test('a local "./dir" source is dropped (nothing this client can fetch)',
+        () {
+      final app = AppState.I;
+      final before = app.plugins.length;
+      app.mergeMarketplaceCatalogForTest({
+        'plugins': [
+          {
+            'name': 'PR40 Local Plugin',
+            'source': './plugins/local-one',
+            'description': 'local dir, not fetchable',
+            'category': 'Tool',
+          },
+        ],
+      }, 'owner', 'market');
+      expect(app.plugins.length, before + 1);
+      final p = app.plugins.last;
+      expect(p.source, isNull);
+      app.plugins.remove(p);
+    });
+
+    test('a plugin with no source declared has a null source', () {
+      final app = AppState.I;
+      final before = app.plugins.length;
+      app.mergeMarketplaceCatalogForTest({
+        'plugins': [
+          {'name': 'PR40 No Source Plugin', 'description': 'x'},
+        ],
+      }, 'owner', 'market');
+      final p = app.plugins.last;
+      expect(p.source, isNull);
+      app.plugins.remove(p);
+      expect(app.plugins.length, before);
+    });
+
+    test('fetchPluginContent downloads commands/ and skills/*/SKILL.md, '
+        'skips everything else', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        final path = request.uri.path;
+        if (path == '/tree/main') {
+          final body = utf8.encode(jsonEncode({
+            'tree': [
+              {'path': 'commands/hello.md', 'type': 'blob'},
+              {'path': 'skills/reviewer/SKILL.md', 'type': 'blob'},
+              // Not fetched: wrong dir, wrong filename, or a tree entry.
+              {'path': 'README.md', 'type': 'blob'},
+              {'path': 'skills/reviewer/notes.txt', 'type': 'blob'},
+              {'path': 'commands', 'type': 'tree'},
+            ],
+          }));
+          request.response
+            ..statusCode = 200
+            ..contentLength = body.length
+            ..add(body);
+          await request.response.close();
+          return;
+        }
+        if (path == '/raw/commands/hello.md') {
+          final body = utf8.encode('---\nname: hello\n---\nSay hi.');
+          request.response
+            ..statusCode = 200
+            ..contentLength = body.length
+            ..add(body);
+          await request.response.close();
+          return;
+        }
+        if (path == '/raw/skills/reviewer/SKILL.md') {
+          final body = utf8.encode('---\nname: reviewer\n---\nReview code.');
+          request.response
+            ..statusCode = 200
+            ..contentLength = body.length
+            ..add(body);
+          await request.response.close();
+          return;
+        }
+        request.response.statusCode = 404;
+        await request.response.close();
+      });
+      addTearDown(() => server.close(force: true));
+      AppState.pluginContentBaseOverrideForTest =
+          'http://${server.address.host}:${server.port}';
+      addTearDown(() => AppState.pluginContentBaseOverrideForTest = null);
+
+      final fetched = await AppState.I.fetchPluginContent('acme/some-plugin');
+      expect(fetched, 2, reason: 'exactly commands/hello.md + SKILL.md');
+
+      final dir = await AppState.I.pluginCacheDirFor('acme/some-plugin');
+      addTearDown(() {
+        if (dir.existsSync()) dir.deleteSync(recursive: true);
+      });
+      expect(File('${dir.path}/commands/hello.md').existsSync(), isTrue);
+      expect(
+        File('${dir.path}/skills/reviewer/SKILL.md').existsSync(),
+        isTrue,
+      );
+      expect(File('${dir.path}/README.md').existsSync(), isFalse);
+      expect(
+        File('${dir.path}/skills/reviewer/notes.txt').existsSync(),
+        isFalse,
+      );
+    });
+
+    test('fetchPluginContent degrades to 0 on a repo with neither directory',
+        () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        if (request.uri.path == '/tree/main') {
+          final body = utf8.encode(jsonEncode({
+            'tree': [
+              {'path': 'src/index.ts', 'type': 'blob'},
+            ],
+          }));
+          request.response
+            ..statusCode = 200
+            ..contentLength = body.length
+            ..add(body);
+          await request.response.close();
+          return;
+        }
+        request.response.statusCode = 404;
+        await request.response.close();
+      });
+      addTearDown(() => server.close(force: true));
+      AppState.pluginContentBaseOverrideForTest =
+          'http://${server.address.host}:${server.port}';
+      addTearDown(() => AppState.pluginContentBaseOverrideForTest = null);
+
+      final fetched = await AppState.I.fetchPluginContent('acme/empty');
+      expect(fetched, 0);
+    });
+
+    test('fetchPluginContent never throws when the network is unreachable',
+        () async {
+      AppState.pluginContentBaseOverrideForTest =
+          'http://127.0.0.1:1'; // nothing listens here
+      addTearDown(() => AppState.pluginContentBaseOverrideForTest = null);
+      final fetched = await AppState.I.fetchPluginContent('acme/offline');
+      expect(fetched, 0);
+    });
+
+    test('fetchPluginContent rejects a malformed source (no owner/repo)',
+        () async {
+      expect(await AppState.I.fetchPluginContent('not-a-repo'), 0);
+      expect(await AppState.I.fetchPluginContent(''), 0);
+    });
+
+    test('removePluginContent deletes the cache dir', () async {
+      final dir = await AppState.I.pluginCacheDirFor('acme/to-remove');
+      dir.createSync(recursive: true);
+      File('${dir.path}/marker.txt').writeAsStringSync('x');
+      expect(dir.existsSync(), isTrue);
+
+      await AppState.I.removePluginContent('acme/to-remove');
+      expect(dir.existsSync(), isFalse);
+    });
+
+    test('_refreshSkillRoots mounts an installed+enabled plugin\'s '
+        'commands/skills dirs, and reload() picks up the fetched skill',
+        () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+
+      // Simulate a fetched plugin: write directly into its cache dir
+      // (equivalent to fetchPluginContent having already run).
+      final dir = await app.pluginCacheDirFor('acme/mounted-plugin');
+      addTearDown(() {
+        if (dir.existsSync()) dir.deleteSync(recursive: true);
+      });
+      Directory('${dir.path}/commands').createSync(recursive: true);
+      File('${dir.path}/commands/greet.md').writeAsStringSync(
+        '---\nname: greet\nuser-invocable: true\n---\nSay hello.',
+      );
+
+      final p = PluginItem(
+        name: 'mounted-plugin',
+        author: 'acme',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 0,
+        source: 'acme/mounted-plugin',
+      );
+      app.plugins.add(p);
+      addTearDown(() {
+        app.plugins.remove(p);
+        SkillService.I.clearRoots();
+      });
+
+      await agent.refreshSkills();
+
+      expect(
+        SkillService.I.skills.any((s) => s.name == 'greet'),
+        isTrue,
+        reason: 'the plugin\'s fetched command becomes a real skill',
+      );
+      expect(
+        SkillService.I.userSkills.any((s) => s.name == 'greet'),
+        isTrue,
+        reason: 'user-invocable → shows in the /-menu',
+      );
+    });
+
+    test('a DISABLED plugin\'s content is not mounted', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final dir = await app.pluginCacheDirFor('acme/disabled-plugin');
+      addTearDown(() {
+        if (dir.existsSync()) dir.deleteSync(recursive: true);
+      });
+      Directory('${dir.path}/commands').createSync(recursive: true);
+      File('${dir.path}/commands/nope.md').writeAsStringSync(
+        '---\nname: nope\nuser-invocable: true\n---\nShould not mount.',
+      );
+
+      final p = PluginItem(
+        name: 'disabled-plugin',
+        author: 'acme',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: false, // ← the point of this test
+        installs: 0,
+        source: 'acme/disabled-plugin',
+      );
+      app.plugins.add(p);
+      addTearDown(() {
+        app.plugins.remove(p);
+        SkillService.I.clearRoots();
+      });
+
+      await agent.refreshSkills();
+
+      expect(SkillService.I.skills.any((s) => s.name == 'nope'), isFalse);
+    });
+  });
 }
 
 /// Build one DuckDuckGo-style result block (anchor + snippet pair).
