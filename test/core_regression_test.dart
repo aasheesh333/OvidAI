@@ -5577,6 +5577,111 @@ block</pre>
     });
   });
 
+  group('PR45: repeat-tool reminder (F2)', () {
+    AgentRun newBucket() {
+      final s = ChatSession(
+        id: 'f2-${DateTime.now().microsecondsSinceEpoch}',
+        title: 'F2',
+        model: 'm',
+        mode: 'auto',
+      );
+      return AgentService.I.runBucketForTest(s.id);
+    }
+
+    test('same tool + same args streak reaches 3/5/8; changing either resets',
+        () {
+      final bucket = newBucket();
+      final calls = <String>[];
+      for (var i = 0; i < 8; i++) {
+        const name = 'run_shell';
+        const argsMap = {'command': 'ls -la'};
+        final canon = jsonEncode(argsMap);
+        if (bucket.repeatKey?.name == name &&
+            bucket.repeatKey!.canonArgs == canon) {
+          bucket.repeatStreak++;
+        } else {
+          bucket.repeatKey = (name: name, canonArgs: canon);
+          bucket.repeatStreak = 1;
+        }
+        calls.add('${bucket.repeatStreak}');
+      }
+      expect(calls, ['1', '2', '3', '4', '5', '6', '7', '8']);
+    });
+
+    test('different args reset the streak', () {
+      final bucket = newBucket();
+      void call(String name, String args) {
+        final canon = jsonEncode(args);
+        if (bucket.repeatKey?.name == name &&
+            bucket.repeatKey!.canonArgs == canon) {
+          bucket.repeatStreak++;
+        } else {
+          bucket.repeatKey = (name: name, canonArgs: canon);
+          bucket.repeatStreak = 1;
+        }
+      }
+      call('run_shell', 'ls');
+      call('run_shell', 'ls');
+      call('run_shell', 'ls');
+      expect(bucket.repeatStreak, 3);
+      call('run_shell', 'pwd'); // changed args
+      expect(bucket.repeatStreak, 1);
+      call('fs_read', 'path'); // different tool entirely
+      expect(bucket.repeatStreak, 1);
+      expect(bucket.repeatKey!.name, 'fs_read');
+    });
+
+    test('different tool with same args also resets', () {
+      final bucket = newBucket();
+      void call(String name) {
+        final canon = jsonEncode(const {});
+        if (bucket.repeatKey?.name == name &&
+            bucket.repeatKey!.canonArgs == canon) {
+          bucket.repeatStreak++;
+        } else {
+          bucket.repeatKey = (name: name, canonArgs: canon);
+          bucket.repeatStreak = 1;
+        }
+      }
+      call('browser_click');
+      call('browser_click');
+      expect(bucket.repeatStreak, 2);
+      call('browser_hover');
+      expect(bucket.repeatStreak, 1);
+    });
+
+    test('streak lives on the run bucket, not globally across sessions', () {
+      final b1 = newBucket();
+      final b2 = newBucket();
+      void bump(AgentRun b) {
+        const canon = '{"cmd":"ls"}';
+        if (b.repeatKey?.name == 'run_shell' &&
+            b.repeatKey!.canonArgs == canon) {
+          b.repeatStreak++;
+        } else {
+          b.repeatKey = (name: 'run_shell', canonArgs: canon);
+          b.repeatStreak = 1;
+        }
+      }
+      bump(b1);
+      bump(b1);
+      bump(b1);
+      bump(b2); // different bucket — own streak
+      expect(b1.repeatStreak, 3);
+      expect(b2.repeatStreak, 1);
+    });
+
+    test('agent service wiring: reminder texts exist at the 3/5/8 streaks',
+        () {
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(src, contains('repeatStreak'));
+      expect(src, contains('Same tool + identical args repeated'));
+      expect(src, contains('now repeated 5 times'));
+      expect(src, contains('repeated 8 times'));
+      expect(src, contains('STOP looping'));
+    });
+  });
+
   group('PR43: F3 tool-result pruner + F4 convergence retry', () {
     test('pruner rewrites oversized tool details; skips summarizer when safe',
         () async {

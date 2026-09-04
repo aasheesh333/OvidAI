@@ -399,7 +399,13 @@ Ordered by (a) directness to the user's literal complaints and (b) risk/size:
    silently break skills/`.spill` discoverability, and the flags that disable that
    make rg's traversal equivalent to the existing walk — a tested source-contract,
    not an omission. 5 new tests (fake-prefix stub-rg behavioral tests), 273 total.
-6. **Repeat-tool-reminder (F2)** — smaller, lands next.
+6. **DONE (PR45)** — **Repeat-tool-reminder (F2)**: `run.repeatKey` +
+   `run.repeatStreak` on the run bucket track the STREAK of identical
+   (tool, canonicalized-args) pairs — an actual loop, not "the same tool
+   within the run". Reminders escalate per DSH thresholds: streak 3 ≈
+   "looks looped", 5 ≈ "still repeating", 8 ≈ "hard stop" — matching
+   remote control semantics (canonicalized args, per-run isolation, no
+   cross-session bleed). 5 new tests, 285 total.
 7. **DONE (PR43)** — **compaction pruner+retry (F3/F4)**: oversized tool
    results are rewritten into spill refs (head+marker+tail via the existing
    `spillToolOutput` path) BEFORE the summarizer is ever called, and summarization
@@ -434,7 +440,7 @@ PR38 (native Linux CLI parity), PR39 (hook deny/block gating), PR40 (plugin cont
 mounting), PR41 (MCP Streamable-HTTP transport + reconnect backoff), and PR42
 (ripgrep-backed fs_grep) are implemented, tested (273/273 `flutter test`, 0
 `flutter analyze` issues beyond the one pre-existing unrelated warning), and pushed.
-PR43 (compaction pruner+retry) and PR44 (plugin .mcp.json auto-mount) are now DONE (280/273-branch baseline). Remaining: F2 (repeat-tool-reminder polish) and F1 (persistent PTY).
+PR43 (compaction pruner+retry) and PR44 (plugin .mcp.json auto-mount) are now DONE (280/273-branch baseline). Remaining: F1 (persistent PTY) — PR43/44/45 now DONE.
 
 **Next step:** tell me which item from §6 to start on next (or say "continue down the
 list") and I'll implement, test, and push it as the next PR on this thread's branch.

@@ -388,6 +388,12 @@ class AgentRun {
   int jobCounter = 0;
   /// Per-tool call counts within THIS run (repeat-tool reminder, PR18).
   final Map<String, int> toolCallCounts = {};
+
+  /// PR45/F2 (DSH repeat-tool-reminder parity): streak of the CURRENTLY
+  /// REPEATING tool call — reset whenever the (tool, args) pair changes.
+  /// Lives on the run bucket: parallel sessions can't cross-pollute it.
+  ({String name, String canonArgs})? repeatKey;
+  int repeatStreak = 0;
   Message? activeToolMsg;
   DateTime? runStart;
   int? lastRunElapsedMs;
@@ -4792,17 +4798,30 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
             result = 'tool error: $e';
             if (toolMsg != null) _toolFinish(state: 'error', detail: result);
           }
-          // Repeat-tool reminder (PR18, DSH repeat-tool-reminder): the
-          // same tool called many times in one run gets a reminder that
-          // it is looping.
-          _runResolved.toolCallCounts[name] =
-              (_runResolved.toolCallCounts[name] ?? 0) + 1;
-          final repeats = _runResolved.toolCallCounts[name]!;
-          if (repeats == 6) {
-            result =
-                '$result\n\n[reminder] you have called "$name" $repeats '
-                'times this turn — if it keeps failing, explain the '
-                'problem to the user instead of repeating the same call.';
+          // Repeat-tool reminder (PR18 baseline; PR45/F2 DSH parity): the
+          // same tool with IDENTICAL args called 3+/5+/8+ times in a row is
+          // the real loop signal — an escalating nudge, in the SAME tool
+          // result, to keep the model from burning turns in cycles.
+          final run = _runResolved;
+          final canonArgs = jsonEncode(args, toEncodable: (o) => '$o');
+          if (run.repeatKey?.name == name &&
+              run.repeatKey!.canonArgs == canonArgs) {
+            run.repeatStreak++;
+          } else {
+            run.repeatKey = (name: name, canonArgs: canonArgs);
+            run.repeatStreak = 1;
+          }
+          final streak = run.repeatStreak;
+          if (streak == 3) {
+            result = '$result\n\n[note] Same tool + identical args repeated '
+                '3 times — re-read the tool output or change approach.';
+          } else if (streak == 5) {
+            result = '$result\n\n[note] Same call now repeated 5 times — '
+                'stop, reconsider the goal, or ask/notify the user.';
+          } else if (streak == 8) {
+            result = '$result\n\n[note] Same call repeated 8 times — '
+                'STOP looping. Explain the blockage to the user and try '
+                'a different approach.';
           }
           msgs.add({
             'role': 'tool',
