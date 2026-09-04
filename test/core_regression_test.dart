@@ -6966,6 +6966,203 @@ url = "https://api.example.com/mcp"
       expect(remote.url, 'https://api.example.com/mcp');
     });
   });
+
+  group('PR42: fs_grep ripgrep-backed fast path (real Linux grep)', () {
+    /// Build a fake sandbox prefix whose `bin/rg` is a stub script.
+    /// [scriptBody] runs with cwd = the session workspace; `"$@"` is rg's
+    /// argv. Also links bin/sh so any `bash -c` fallback path resolves.
+    Future<Directory> fakeRgPrefix(String scriptBody) async {
+      final tmp = await Directory.systemTemp.createTemp('pr42prefix');
+      await Directory('${tmp.path}/bin').create(recursive: true);
+      final shTarget = File('/usr/bin/sh').existsSync()
+          ? '/usr/bin/sh'
+          : '/bin/sh';
+      Link('${tmp.path}/bin/sh').createSync(shTarget);
+      final rg = File('${tmp.path}/bin/rg')
+        ..writeAsStringSync('#!/bin/sh\n$scriptBody\n');
+      Process.runSync('chmod', ['+x', rg.path]);
+      return tmp;
+    }
+
+    test('fs_grep runs the real rg with parity flags when the sandbox has '
+        'it — and its answer replaces the Dart walk', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final svc = SandboxService.I;
+      // Stub rg: record argv into the workspace, print one match line.
+      final tmp = await fakeRgPrefix(
+        'printf \'%s\\n\' "\$@" > .rg_args_probe\n'
+        'echo "FAKERG/notes.md:9: [rg-ran] milk"',
+      );
+      addTearDown(() {
+        svc.sandboxPrefixForTest = null;
+        tmp.deleteSync(recursive: true);
+      });
+      svc.sandboxPrefixForTest = tmp;
+
+      final s = ChatSession(
+        id: 'pr42-rg-1',
+        title: 'rg',
+        model: 'm',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+
+      // A REAL workspace file that also matches — proves the Dart walk
+      // did not run (only the rg line may appear in the output).
+      final work = await agent.sessionWorkDirForTest();
+      File('${work.path}/real.txt').writeAsStringSync('milk in real file\n');
+
+      final out = await agent.dispatchForTest('fs_grep', {
+        'pattern': 'milk',
+      });
+      expect(out, contains('[rg-ran] milk'));
+      expect(
+        out,
+        isNot(contains('real.txt')),
+        reason: 'rg answered → the Dart walk must not also run',
+      );
+
+      // The stub recorded its argv — assert the semantic-parity flags.
+      final probe = File('${work.path}/.rg_args_probe');
+      expect(probe.existsSync(), isTrue, reason: 'stub rg actually ran');
+      final argv = probe.readAsStringSync();
+      for (final flag in [
+        '-i',
+        '--no-heading',
+        '--hidden',
+        '--no-ignore',
+        '--max-filesize',
+        '2M',
+        '--max-count-total',
+        '-e',
+        'milk',
+      ]) {
+        expect(argv, contains(flag), reason: 'rg must receive $flag');
+      }
+    });
+
+    test('rg exit 2 (rust-regex rejects the pattern, e.g. lookarounds) '
+        'falls back to the Dart walk — output discarded', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final svc = SandboxService.I;
+      final tmp = await fakeRgPrefix(
+        'echo "FAKERG/x.md:1: [rg-ran] milk"\n'
+        'exit 2',
+      );
+      addTearDown(() {
+        svc.sandboxPrefixForTest = null;
+        tmp.deleteSync(recursive: true);
+      });
+      svc.sandboxPrefixForTest = tmp;
+
+      final s = ChatSession(
+        id: 'pr42-rg-2',
+        title: 'rg',
+        model: 'm',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+
+      final work = await agent.sessionWorkDirForTest();
+      File('${work.path}/real.txt').writeAsStringSync('lookaround milk\n');
+
+      final out = await agent.dispatchForTest('fs_grep', {
+        'pattern': 'milk',
+      });
+      expect(out, contains('real.txt'), reason: 'Dart walk found it');
+      expect(
+        out,
+        isNot(contains('[rg-ran]')),
+        reason: 'exit-2 output must be discarded, not merged',
+      );
+    });
+
+    test('rg exit 1 (no matches) is a legitimate verdict — the Dart walk '
+        'is NOT run to second-guess it', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final svc = SandboxService.I;
+      final tmp = await fakeRgPrefix('exit 1');
+      addTearDown(() {
+        svc.sandboxPrefixForTest = null;
+        tmp.deleteSync(recursive: true);
+      });
+      svc.sandboxPrefixForTest = tmp;
+
+      final s = ChatSession(
+        id: 'pr42-rg-3',
+        title: 'rg',
+        model: 'm',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+
+      // A real matching file exists — rg said "no matches", so the tool
+      // must report none rather than re-running the Dart walk.
+      final work = await agent.sessionWorkDirForTest();
+      File('${work.path}/real.txt').writeAsStringSync('milk hidden from rg\n');
+
+      final out = await agent.dispatchForTest('fs_grep', {
+        'pattern': 'milk',
+      });
+      expect(out, contains('no matches'));
+      expect(out, isNot(contains('real.txt')));
+    });
+
+    test('no sandbox at all → unchanged pure-Dart behavior (gate check)',
+        () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final svc = SandboxService.I;
+      expect(svc.prefixPath, isNull, reason: 'no fake prefix in this test');
+
+      final s = ChatSession(
+        id: 'pr42-rg-4',
+        title: 'rg',
+        model: 'm',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+
+      final work = await agent.sessionWorkDirForTest();
+      File('${work.path}/plain.txt').writeAsStringSync('milk dart path\n');
+
+      final out = await agent.dispatchForTest('fs_grep', {
+        'pattern': 'milk',
+      });
+      expect(out, contains('plain.txt'));
+      expect(out, contains('milk dart path'));
+    });
+
+    test('fs_glob deliberately stays on the Dart walk — rg traversal '
+        'defaults would hide the workspace dot-dirs (.dsh/.agents/.spill)',
+        () {
+      // Source contract: the glob handler must not shell out to rg.
+      // This is a DECISION, not an omission: rg --files skips hidden
+      // files and respects .gitignore by default, which would silently
+      // break skills (.dsh/skills) and spill (.spill/) discoverability;
+      // the flags that disable that (--hidden --no-ignore) make rg's
+      // traversal equivalent to the existing Dart walk, leaving no value.
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      final i = src.indexOf('Future<String> _handleFsGlob');
+      final j = src.indexOf('Future<String> _handleFsGrep');
+      expect(i, greaterThan(0));
+      expect(j, greaterThan(i));
+      final body = src.substring(i, j);
+      expect(body, isNot(contains("'rg'")));
+      expect(body, isNot(contains('_tryRgGrep')));
+    });
+  });
 }
 
 /// Build one DuckDuckGo-style result block (anchor + snippet pair).

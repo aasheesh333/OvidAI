@@ -7685,35 +7685,72 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
     }
     final searchRoot = Directory(rootPath);
     if (searchRoot.existsSync() && matches < maxMatches) {
-      await for (final entity in searchRoot.list(
-        recursive: true,
-        followLinks: false,
-      )) {
-        if (matches >= maxMatches) break;
-        if (entity is! File) continue;
-        if (!entity.path.startsWith('${work.path}/')) continue;
-        final rel = entity.path.substring(work.path.length + 1);
-        if (includeRe != null && !includeRe.hasMatch(rel)) continue;
-        try {
-          if (await entity.length() > maxFileBytes) {
-            skippedLarge++;
+      // PR42: ripgrep fast path — the REAL rg binary (eagerly installed
+      // by PR38) with the same semantics as the Dart walk below: real
+      // Linux grep behavior ("same as DSH's rg-backed tool-fs-search").
+      // _tryRgGrep returns null whenever rg can't be used (no sandbox,
+      // binary missing, timeout, exit 2 = pattern invalid in rust-regex —
+      // e.g. lookarounds, which Dart RegExp supports) — then the Dart
+      // walk runs instead, so a dialect difference can never lose
+      // results; it only changes WHICH engine found them.
+      final relRoot = rootPath == work.path
+          ? '.'
+          : rootPath.substring(work.path.length + 1);
+      final rgOut = await _tryRgGrep(
+        pattern: pattern,
+        relRoot: relRoot,
+        remaining: maxMatches - matches,
+        ctxLines: ctxLines,
+        include: include,
+        work: work,
+      );
+      if (rgOut != null) {
+        for (final line in rgOut.split('\n')) {
+          final t = line.trim();
+          if (t.isEmpty) continue;
+          if (t == '--') {
+            results.add('--');
             continue;
           }
-        } catch (_) {
-          continue;
-        }
-        // Skip binary files (heuristic: no valid UTF-8 decode).
-        String content;
-        try {
-          content = await entity.readAsString();
-        } catch (_) {
-          continue;
-        }
-        final lines = content.split('\n');
-        for (var i = 0; i < lines.length && matches < maxMatches; i++) {
-          if (re.hasMatch(lines[i])) {
+          // Match lines are `path:NUM:content`; context lines use dashes
+          // (`path-NUM-content`). Only matches consume the cap.
+          if (RegExp(r'^[^:\n]+:\d+:').hasMatch(line)) {
+            if (matches >= maxMatches) break;
             matches++;
-            _appendGrepMatch(results, rel, lines, i, ctxLines);
+          }
+          results.add(line.startsWith('./') ? line.substring(2) : line);
+        }
+      } else {
+        await for (final entity in searchRoot.list(
+          recursive: true,
+          followLinks: false,
+        )) {
+          if (matches >= maxMatches) break;
+          if (entity is! File) continue;
+          if (!entity.path.startsWith('${work.path}/')) continue;
+          final rel = entity.path.substring(work.path.length + 1);
+          if (includeRe != null && !includeRe.hasMatch(rel)) continue;
+          try {
+            if (await entity.length() > maxFileBytes) {
+              skippedLarge++;
+              continue;
+            }
+          } catch (_) {
+            continue;
+          }
+          // Skip binary files (heuristic: no valid UTF-8 decode).
+          String content;
+          try {
+            content = await entity.readAsString();
+          } catch (_) {
+            continue;
+          }
+          final lines = content.split('\n');
+          for (var i = 0; i < lines.length && matches < maxMatches; i++) {
+            if (re.hasMatch(lines[i])) {
+              matches++;
+              _appendGrepMatch(results, rel, lines, i, ctxLines);
+            }
           }
         }
       }
@@ -7742,6 +7779,66 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       c++
     ) {
       results.add('$file:${c + 1}: ${lines[c]}');
+    }
+  }
+
+  /// PR42: run the workspace's REAL ripgrep for the host-filesystem part
+  /// of fs_grep. Returns rg's raw `path:line:content` output on success —
+  /// exit 0 (matches) or exit 1 (no matches → empty output, a legitimate
+  /// answer that the caller must NOT re-verify with the Dart walk) — or
+  /// null whenever rg can't be used, in which case the caller falls back
+  /// to the pure-Dart walk:
+  ///   • sandbox not installed / rg binary missing / exec threw / timeout
+  ///   • exit 2 — the pattern is valid Dart RegExp but invalid
+  ///     rust-regex (lookarounds etc.); the Dart engine still handles it.
+  /// Flags mirror the Dart walk's exact semantics: -i (case-insensitive,
+  /// same as RegExp(caseSensitive: false)), --hidden --no-ignore (the
+  /// workspace's .dsh/.agents/.spill dot-dirs are searchable — rg's
+  /// narrower defaults would silently hide them), --max-filesize 2M (the
+  /// same 2 MB skip), --max-count-total (the same 50-match budget), -C
+  /// context, --glob include filter.
+  Future<String?> _tryRgGrep({
+    required String pattern,
+    required String relRoot,
+    required int remaining,
+    required int ctxLines,
+    required String? include,
+    required Directory work,
+  }) async {
+    if (SandboxService.I.prefixPath == null) return null;
+    try {
+      final (code, out) = await SandboxService.I
+          .execChecked([
+            'rg',
+            '-i',
+            '-n',
+            '--no-heading',
+            '--color', 'never',
+            '--hidden',
+            '--no-ignore',
+            '--max-filesize', '2M',
+            '--max-count-total', '$remaining',
+            if (ctxLines > 0) ...['-C', '$ctxLines'],
+            if (include != null && include.isNotEmpty) ...['--glob', include],
+            '-e', pattern,
+            relRoot,
+          ], hostWorkDir: work)
+          .timeout(const Duration(seconds: 45));
+      if (code == 0 || code == 1) {
+        // execChecked merges stderr into the returned output. On devices
+        // where the LD_PRELOAD termux-exec shim is SELinux-blocked (the
+        // documented PR22 condition), every sandbox process's stderr
+        // carries an "ERROR: ld.so: … cannot be preloaded" warning —
+        // strip that known loader noise so it can never pollute grep
+        // results. rg's own errors ride exit 2, handled below.
+        return out
+            .split('\n')
+            .where((l) => !l.startsWith('ERROR: ld.so:'))
+            .join('\n');
+      }
+      return null; // exit 2 = error (pattern/path) → Dart fallback
+    } catch (_) {
+      return null;
     }
   }
 

@@ -383,10 +383,22 @@ Ordered by (a) directness to the user's literal complaints and (b) risk/size:
    (`.mcp.json` / Claude Desktop / Codex TOML) now preserves `url`/`headers`
    and fixes the audit's §3.3 finding — Codex TOML `env.KEY = "value"` lines
    were silently dropped before. 13 new tests, 268 total.
-5. **ripgrep-backed fs_grep/fs_glob (§4.3.2)** — "grep 100% same as Linux." Needs the
-   sandbox-installed branch to be additive (fallback preserved), so low regression risk.
-   Note: `ripgrep` itself now installs eagerly as of PR38 — this item is "wire fs_grep/
-   fs_glob to shell out to it," not "get rg onto the device."
+5. **DONE (PR42)** — **ripgrep-backed fs_grep** (§4.3.2). The host-filesystem half of
+   `fs_grep` now runs the REAL `rg` binary (eagerly installed by PR38) whenever the
+   sandbox is present — DSH `tool-fs-search` parity ("grep 100% same as Linux"):
+   real rust-regex engine, real performance, real binary detection, with flags that
+   mirror the Dart walk's exact semantics (`-i`, `--hidden --no-ignore` so the
+   workspace's `.dsh`/`.agents`/`.spill` dot-dirs stay searchable, `--max-filesize 2M`,
+   `--max-count-total`, `-C`, `--glob`). Automatic fallback to the pure-Dart walk on
+   any rg failure — including exit 2 (pattern valid in Dart RegExp but not
+   rust-regex, e.g. lookarounds), so a dialect difference can never lose results.
+   rg's "no matches" (exit 1) is a trusted verdict, not re-verified. Also strips the
+   `ERROR: ld.so:` LD_PRELOAD loader warning from output — a real pollution source on
+   the SELinux-blocked-shim devices PR22 documented. `fs_glob` deliberately stays on
+   the Dart walk: rg's traversal defaults (hidden-file/gitignore skipping) would
+   silently break skills/`.spill` discoverability, and the flags that disable that
+   make rg's traversal equivalent to the existing walk — a tested source-contract,
+   not an omission. 5 new tests (fake-prefix stub-rg behavioral tests), 273 total.
 6. **Repeat-tool-reminder (F2)**, **compaction pruner+retry (F3/F4)** — smaller,
    independent, can land in any order after the above.
 7. **Persistent PTY (F1)** and **plugin hook `.mcp.json` auto-mount (P3)** — largest
@@ -394,7 +406,7 @@ Ordered by (a) directness to the user's literal complaints and (b) risk/size:
 
 Each item ships as its own PR against `ci/verified-android-build-20260827`, same gate as
 every prior fix in this repo: `flutter analyze` (0 issues) + `flutter test` (all green,
-current baseline 268 as of PR41) + new regression tests per change + CI green (Build APK +
+current baseline 273 as of PR42) + new regression tests per change + CI green (Build APK +
 Device Test) before merge, per the pattern already established in `PLAN_FIXES.md`.
 
 ---
@@ -402,9 +414,10 @@ Device Test) before merge, per the pattern already established in `PLAN_FIXES.md
 ## 7. Status
 
 PR38 (native Linux CLI parity), PR39 (hook deny/block gating), PR40 (plugin content
-mounting), and PR41 (MCP Streamable-HTTP transport + reconnect backoff) are implemented,
-tested (268/268 `flutter test`, 0 `flutter analyze` issues beyond the one pre-existing
-unrelated warning), and pushed. Items 5–7 in §6 remain open for the next round.
+mounting), PR41 (MCP Streamable-HTTP transport + reconnect backoff), and PR42
+(ripgrep-backed fs_grep) are implemented, tested (273/273 `flutter test`, 0
+`flutter analyze` issues beyond the one pre-existing unrelated warning), and pushed.
+Items 6–7 in §6 remain open for the next round.
 
 **Next step:** tell me which item from §6 to start on next (or say "continue down the
 list") and I'll implement, test, and push it as the next PR on this thread's branch.
