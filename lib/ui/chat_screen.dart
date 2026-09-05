@@ -20,11 +20,11 @@ import '../core/skills.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
-/// DSH turn-process folding: consecutive assistant tool/reasoning
+/// turn-process folding: consecutive assistant tool/reasoning
 /// messages collapse into a single expandable strip ("N tool calls ·
 /// Thought for a while") that sits right before the final answer.
 /// The LAST tool/reasoning run (no text after it yet, or the last tool
-/// in a run still in progress) stays unfolded — same as DSH Compact.
+/// in a run still in progress) stays unfolded — same as Compact.
 sealed class _ChatItem {}
 
 class _SingleItem extends _ChatItem {
@@ -137,7 +137,7 @@ class ChatTranscript extends StatelessWidget {
   }
 }
 
-/// DSH `row-in` / `wide-in` entrance — fade + 8px slide-up, plays ONCE
+/// `row-in` / `wide-in` entrance — fade + 8px slide-up, plays ONCE
 /// when the widget is inserted (streaming rebuilds don't re-trigger it
 /// because the State persists in the ListView element).
 class _RowIn extends StatefulWidget {
@@ -181,7 +181,7 @@ class _RowInState extends State<_RowIn> with SingleTickerProviderStateMixin {
   }
 }
 
-/// DSH `dsh-state-dot-chase` — pulsing accent dot used on running tool
+/// `ovid-state-dot-chase` — pulsing accent dot used on running tool
 /// and reasoning rows instead of a spinner.
 class _ChaseDot extends StatefulWidget {
   final Color color;
@@ -227,7 +227,7 @@ class _ChaseDotState extends State<_ChaseDot>
   }
 }
 
-/// DSH `dsh-turn-status-shimmer` — shimmering status text (e.g. the
+/// `ovid-turn-status-shimmer` — shimmering status text (e.g. the
 /// "Thinking…" label on a live reasoning row).
 class _ShimmerText extends StatefulWidget {
   final String text;
@@ -293,7 +293,7 @@ Widget _buildItem(
   return _RowIn(child: _TurnProcessStrip(group: g.msgs));
 }
 
-/// DSH StatsLine parity — pipe-separated line docked above the composer:
+/// StatsLine parity — pipe-separated line docked above the composer:
 /// "3 turns · LLM 12.4s · Input 8.2K tok · Output 1.4K tok".  Hidden
 /// when the session has no usage yet (empty-state stays clean).
 class _StatsLine extends StatelessWidget {
@@ -319,7 +319,7 @@ class _StatsLine extends StatelessWidget {
         }).toList();
         final input = usage.fold<int>(0, (a, e) => a + e.promptTokens);
         final output = usage.fold<int>(0, (a, e) => a + e.completionTokens);
-        // DSH footer ring — % of THIS model's context window in use,
+        // footer ring — % of THIS model's context window in use,
         // measured from the last billed promptTokens (exact) or the
         // chars/4 heuristic fallback.
         final window = AgentService.contextWindowForSession(s);
@@ -362,7 +362,7 @@ class _StatsLine extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              // Context ring — 12px arc + % label (DSH "% of context used").
+              // Context ring — 12px arc + % label (the reference "% of context used").
               // Tap → full context meter sheet (segmented breakdown).
               Tooltip(
                 message:
@@ -411,7 +411,7 @@ class _StatsLine extends StatelessWidget {
     );
   }
 
-  /// Context meter sheet (DSH context-breakdown parity): window usage,
+  /// Context meter sheet (the reference context-breakdown parity): window usage,
   /// segmented sys/tools/messages bars with a cache-read overlay and a
   /// compaction hint.
   void _showContextMeter(
@@ -558,9 +558,9 @@ class _MeterBreakdownBar extends StatelessWidget {
   }
 }
 
-/// DSH turn-process strip — "N tool calls · Thought for a while" with a
+/// turn-process strip — "N tool calls · Thought for a while" with a
 /// chevron; expands to show every folded tool card + reasoning card.
-/// Default collapsed (DSH Compact mode).
+/// Default collapsed (the reference Compact mode).
 class _TurnProcessStrip extends StatefulWidget {
   final List<Message> group;
   const _TurnProcessStrip({required this.group});
@@ -584,7 +584,7 @@ class _TurnProcessStripState extends State<_TurnProcessStrip> {
         .length;
     final label = [
       if (subagents > 0)
-        // DSH presentation: "{count} subagents (running)".
+        // presentation: "{count} subagents (running)".
         '$subagents subagent${subagents == 1 ? '' : 's'}'
             '${runningSubagents > 0 ? ' running' : ''}',
       if (toolCount - subagents > 0)
@@ -651,7 +651,7 @@ class _ChatScreenState extends State<ChatScreen>
   final _input = TextEditingController();
   final _scroll = ScrollController();
 
-  /// DSH-web auto-scroll: when the user is at the bottom, we follow the
+  /// web-IDE auto-scroll: when the user is at the bottom, we follow the
   /// stream; as soon as they scroll up we stop moving; when they return to
   /// the bottom we resume following.
   bool _atBottom = true;
@@ -806,7 +806,7 @@ class _ChatScreenState extends State<ChatScreen>
               // header (user ask) — subagents live on the subagent screen
               // (chat "Open" links + the catalog sheet from a chat row),
               // trajectory in the sidebar footer next to Settings.
-              // Background jobs badge (DSH jobs header trigger): shows the
+              // Background jobs badge (the reference jobs header trigger): shows the
               // live job count of THIS session, popover lists producer/label/
               // state/per-second elapsed, with a Kill action per row.
               AnimatedBuilder(
@@ -945,7 +945,7 @@ class _ChatScreenState extends State<ChatScreen>
                                   builder: (_, _) {
                                     final typing = AgentService.I.busyFor(s.id);
                                     _maybeJumpToBottom();
-                                    // DSH turn-process folding: consecutive
+                                    // turn-process folding: consecutive
                                     // tool/reasoning items collapse into a
                                     // single strip before the final answer.
                                     final allItems = _foldMessages(s.messages);
@@ -963,7 +963,7 @@ class _ChatScreenState extends State<ChatScreen>
                                             allItems.length - _visibleCount,
                                           )
                                         : allItems;
-                                    // DSH "Produced" card — files written by
+                                    // "Produced" card — files written by
                                     // this run surface as a card under the
                                     // final answer (tap → Studio).
                                     final produced =
@@ -1055,7 +1055,7 @@ class _ChatScreenState extends State<ChatScreen>
                                 ),
                               ),
                             ),
-                            // DSH-web "jump to latest" pill — only when the
+                            // web-IDE "jump to latest" pill — only when the
                             // user scrolled up while content keeps streaming.
                             if (_showJumpFab)
                               Positioned(
@@ -1101,7 +1101,7 @@ class _ChatScreenState extends State<ChatScreen>
                 _InputBar(
                   controller: _input,
                   running: s == null ? false : AgentService.I.busyFor(s.id),
-                  // DSH approval takeover parity: a pending approval LOCKS
+                  // approval takeover parity: a pending approval LOCKS
                   // the composer — the user answers the card, not the box.
                   locked: AgentService.I.pendingApproval != null,
                   onSend: () async {
@@ -1113,7 +1113,7 @@ class _ChatScreenState extends State<ChatScreen>
                       final result = await CommandService.I.execute(t);
                       if (result != null) {
                         _input.clear();
-                        // popupSelect (DSH parity): open the overlay picker.
+                        // popupSelect (the reference parity): open the overlay picker.
                         if (!context.mounted) return;
                         if (result.popup == 'model') {
                           _modelPicker(context);
@@ -1166,7 +1166,7 @@ class _ChatScreenState extends State<ChatScreen>
                       // Unknown /command falls through to the agent.
                     }
 
-                    // ── DSH-web busy behavior: typing while running queues
+                    // ── web-IDE busy behavior: typing while running queues
                     // the message to auto-run after the current turn. ──
                     if (s != null && AgentService.I.busyFor(s.id)) {
                       AgentService.I.enqueueMessage(t);
@@ -1330,11 +1330,11 @@ class _ChatScreenState extends State<ChatScreen>
       }
     });
     // @file/@session references expand into model-visible context blocks
-    // (DSH file-reference parity) before the run starts.
+    // (the reference file-reference parity) before the run starts.
     AgentService.I.runTask(t, expandRefsFor: session);
   }
 
-  /// Background jobs popover (DSH ui-jobs): one row per job with label,
+  /// Background jobs popover (the reference ui-jobs): one row per job with label,
   /// state dot, per-second elapsed, output size, and a Kill action.
   void _showJobsPopover(BuildContext context, String sessionId) {
     showModalBottomSheet<void>(
@@ -1796,8 +1796,8 @@ class _ModelTile extends StatelessWidget {
   }
 }
 
-/// DSH-web home parity (Ovid branding): centered logo, big greeting with
-/// a mono pill beside it, then open space down to the composer.  DSH has
+/// web-IDE home parity (Ovid branding): centered logo, big greeting with
+/// a mono pill beside it, then open space down to the composer.  The reference has
 /// NO suggestion rows on the home screen — the surface is intentionally
 /// empty so the composer is the whole focus.  Entrance: `wide-in` fade+rise.
 class _EmptyState extends StatelessWidget {
@@ -1835,9 +1835,9 @@ class _EmptyState extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 22),
-                  // Greeting + mono pill (DSH "What do you want to build? ·
+                  // Greeting + mono pill (the reference "What do you want to build? ·
                   // Preview" pattern) in one row so the pill sits beside the
-                  // title like DSH, not under it.
+                  // title like the reference, not under it.
                   Wrap(
                     crossAxisAlignment: WrapCrossAlignment.center,
                     spacing: 10,
@@ -1983,7 +1983,7 @@ class _ReasoningCardState extends State<_ReasoningCard> {
             Container(
               width: double.infinity,
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-              child: _DshMarkdown(
+              child: _OvidMarkdown(
                 content: widget.m.content,
                 fontSize: 12.5,
                 color: Aether.textMuted,
@@ -1996,13 +1996,13 @@ class _ReasoningCardState extends State<_ReasoningCard> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// DSH ToolRow parity — live tool-call cards in the chat transcript.
+// ToolRow parity — live tool-call cards in the chat transcript.
 // Collapsed: 24px row  [14px icon]  Title  ·  summary  [state dot]
 //   running → glare-sweep shimmer across the row
 //   error   → red state dot replaces the icon
 // Expanded: detail body — TerminalBlock (terminal icon tools),
 //   DiffBlock (edit/write tools), or a plain IN/OUT body otherwise.
-// Icons mirror the DSH web icon set (think/search/browse/edit/terminal/
+// Icons mirror the web icon set (think/search/browse/edit/terminal/
 // globe/sparkle/checklist/question/bolt).
 // ═══════════════════════════════════════════════════════════════════════
 class _ToolCard extends StatefulWidget {
@@ -2020,7 +2020,7 @@ class _ToolCardState extends State<_ToolCard>
   @override
   void initState() {
     super.initState();
-    // DSH "running" affordance: continuous glare sweep (2.6s linear).
+    // "running" affordance: continuous glare sweep (2.6s linear).
     _sweep = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2600),
@@ -2145,7 +2145,7 @@ class _ToolCardState extends State<_ToolCard>
                       ),
                     ),
                     // PR25/D3: edit cards show a +N/−M line-count chip
-                    // (DSH diff-row parity) computed from the real diff.
+                    // (the reference diff-row parity) computed from the real diff.
                     if (diffCounts != null) ...[
                       const SizedBox(width: 6),
                       Text(
@@ -2200,7 +2200,7 @@ class _ToolCardState extends State<_ToolCard>
               ),
             ),
           ),
-          // Glare sweep while running — DSH `dsh-tool-row-sweep` parity:
+          // Glare sweep while running — `ovid-tool-row-sweep` parity:
           // a soft highlight band sweeping the FULL row left→right
           // (lifted over the row above via a paint-only translation).
           if (running)
@@ -2239,7 +2239,7 @@ class _ToolCardState extends State<_ToolCard>
   }
 }
 
-/// 8px state dot (DSH StateDot) — replaces the icon on error/stopped.
+/// 8px state dot (the reference StateDot) — replaces the icon on error/stopped.
 class _StateDot extends StatelessWidget {
   final Color color;
   const _StateDot(this.color);
@@ -2253,7 +2253,7 @@ class _StateDot extends StatelessWidget {
 
 /// Expanded tool body: terminal-style for shell/code/jobs, diff-style for
 /// edits/writes, plain mono body otherwise.  16-line cap with a
-/// "N more lines" fold toggle (DSH TerminalBlock behavior).
+/// "N more lines" fold toggle (the reference TerminalBlock behavior).
 class _DetailBody extends StatefulWidget {
   final Message m;
   const _DetailBody({required this.m});
@@ -2385,7 +2385,7 @@ class _DetailBodyState extends State<_DetailBody> {
   }
 }
 
-/// One diff line — green + / red − like DSH DiffBlock.
+/// One diff line — green + / red − like the reference DiffBlock.
 class _DiffLine extends StatelessWidget {
   final String line;
   const _DiffLine(this.line);
@@ -2419,7 +2419,7 @@ class _DiffLine extends StatelessWidget {
   }
 }
 
-/// PR25/D5: full-screen diff viewer — the details surface DSH gives its
+/// PR25/D5: full-screen diff viewer — the details surface gives its
 /// diff cards (chat rows cap at 8/16 lines; this shows every hunk with
 /// copy).
 class _DiffViewerScreen extends StatelessWidget {
@@ -2467,9 +2467,9 @@ class _DiffViewerScreen extends StatelessWidget {
   }
 }
 
-/// DSH compaction row — a faint inline event row, collapsed by default:
+/// compaction row — a faint inline event row, collapsed by default:
 /// "↻ Context compacted — N messages (~X tokens)"; tap to view the
-/// compacted summary (DSH "View compaction summary").
+/// compacted summary (the reference "View compaction summary").
 class _CompactionRow extends StatefulWidget {
   final Message m;
   const _CompactionRow(this.m);
@@ -2553,7 +2553,7 @@ class _CompactionRowState extends State<_CompactionRow> {
   }
 }
 
-/// DSH "Produced" parity — card under the final answer listing files the
+/// "Produced" parity — card under the final answer listing files the
 /// agent created/edited this run.  Tap a file to open it in Studio.
 class _ProducedFilesCard extends StatelessWidget {
   final List<({String path, int size})> files;
@@ -2795,7 +2795,7 @@ class _ProducedFilesCard extends StatelessWidget {
   }
 }
 
-/// DSH turn-tail row — faint footer under the final assistant answer of a
+/// turn-tail row — faint footer under the final assistant answer of a
 /// turn: elapsed time (+ token stats when available).
 class _TurnTailRow extends StatelessWidget {
   final Message m;
@@ -2867,7 +2867,7 @@ class _MessageView extends StatelessWidget {
               ],
             ),
           ),
-          // DSH-web message meta + action row: copy / edit / revert / time.
+          // web-IDE message meta + action row: copy / edit / revert / time.
           // (Suppressed on compaction event rows — they are apparatus, not
           // conversation turns.)
           if (!m.thinking && m.kind != MsgKind.compact)
@@ -2940,7 +2940,7 @@ class _MessageView extends StatelessWidget {
         onAction();
       });
     }
-    // DSH message feedback: like/dislike + note on final assistant rows.
+    // message feedback: like/dislike + note on final assistant rows.
     // Re-clicking the same value retracts. A down-vote offers a note.
     if (!isUser && m.kind == MsgKind.text && !m.thinking) {
       items.add(
@@ -3028,7 +3028,7 @@ class _MessageView extends StatelessWidget {
   String _formatTime(DateTime t) =>
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
-  /// Optional note attached to a down-vote (DSH feedback note popover).
+  /// Optional note attached to a down-vote (the reference feedback note popover).
   void _askFeedbackNote(BuildContext context) {
     final c = TextEditingController();
     showModalBottomSheet<void>(
@@ -3093,7 +3093,7 @@ class _MessageView extends StatelessWidget {
       vertical: isUser ? 10 : 4,
     ),
     decoration: BoxDecoration(
-      // DSH-web user bubble: a SOFT accent-tinted fill, fully rounded,
+      // web-IDE user bubble: a SOFT accent-tinted fill, fully rounded,
       // NO hard border (the bordered "wireframe box" was the visual
       // mismatch the user flagged). Assistant stays borderless prose.
       color: isUser
@@ -3106,7 +3106,7 @@ class _MessageView extends StatelessWidget {
             m.content,
             style: TextStyle(fontSize: 14.5, height: 1.5, color: Aether.text),
           )
-        : _DshMarkdown(content: m.content),
+        : _OvidMarkdown(content: m.content),
   );
 
   Widget _reasoning() => _ReasoningCard(m);
@@ -3176,11 +3176,11 @@ class _MessageView extends StatelessWidget {
       ? '${(b / 1024).toStringAsFixed(0)} KB'
       : '$b B';
 
-  /// DSH ToolRow parity — collapsed 24px row (icon + title · summary)
+  /// ToolRow parity — collapsed 24px row (icon + title · summary)
   /// expanding to a Terminal/Diff/plain detail block.
   Widget _toolCard() => _ToolCard(m);
 
-  /// DSH turn-tail parity — faint footer row (elapsed · stats).
+  /// turn-tail parity — faint footer row (elapsed · stats).
   Widget _turnTail() => _TurnTailRow(m);
 
   Widget _imageGen(BuildContext context) {
@@ -3405,7 +3405,7 @@ class _InputBar extends StatefulWidget {
   final bool running;
 
   /// Approval takeover: when an approval/question card is pending, the
-  /// composer is disabled until the user answers it (DSH parity).
+  /// composer is disabled until the user answers it (the reference parity).
   final bool locked;
   final VoidCallback onSend;
   const _InputBar({
@@ -3425,7 +3425,7 @@ class _InputBarState extends State<_InputBar> {
   bool get locked => widget.locked;
   VoidCallback get onSend => widget.onSend;
 
-  /// DSH-web rule: running + empty draft = Stop; running + draft = Send
+  /// web-IDE rule: running + empty draft = Stop; running + draft = Send
   /// (queue). The queue color (teal) signals "this goes to the queue",
   /// distinct from the normal accent send.
   static const _queueColor = Color(0xFF0E9F9F);
@@ -3589,7 +3589,7 @@ class _InputBarState extends State<_InputBar> {
         ),
       ));
     }
-    // ── @file: workspace files (DSH file-reference parity) ──
+    // ── @file: workspace files (the reference file-reference parity) ──
     // Files under the active session's workspace; directory descent via
     // the query (type `@src/` to descend into a folder, `@src/ma` to
     // fuzzy-match INSIDE it). The model receives the chip expanded with
@@ -3658,7 +3658,7 @@ class _InputBarState extends State<_InputBar> {
         ),
       ));
     }
-    // ── @session: this chat's sessions (DSH session-reference parity) ──
+    // ── @session: this chat's sessions (the reference session-reference parity) ──
     for (final s in app.rootSessions.take(30)) {
       if (s.id == parent.id) continue;
       final score = _fuzzyScore('${s.title} ${s.id}', query);
@@ -3965,7 +3965,7 @@ class _InputBarState extends State<_InputBar> {
       child: Padding(
         padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
         child: Container(
-          // DSH composer card: text fills the FULL width on top; the
+          // composer card: text fills the FULL width on top; the
           // toolbar (attach / mode chip / mic / send-stop) sits on its own
           // row below — the text never shares a row with the mode icon.
           padding: const EdgeInsets.fromLTRB(6, 4, 6, 4),
@@ -4087,7 +4087,7 @@ class _InputBarState extends State<_InputBar> {
                 maxLines: 5,
                 // Approval takeover: locked while a card awaits an answer.
                 enabled: !locked,
-                // DSH composer: 16px input, 24px line-height.
+                // composer: 16px input, 24px line-height.
                 style: const TextStyle(fontSize: 16, height: 24 / 16),
                 decoration: InputDecoration(
                   hintText: locked
@@ -4118,12 +4118,12 @@ class _InputBarState extends State<_InputBar> {
                     ),
                     onPressed: () => _attachSheet(context),
                   ),
-                  // DSH-web workspace chip — current workspace/repo name.
+                  // web-IDE workspace chip — current workspace/repo name.
                   const _WorkspaceChip(),
                   const SizedBox(width: 6),
-                  // DSH-web plan chip — amber, only while plan mode is on.
+                  // web-IDE plan chip — amber, only while plan mode is on.
                   const _PlanChip(),
-                  // DSH-web mode selector — icon + text chip, opens the mode sheet.
+                  // web-IDE mode selector — icon + text chip, opens the mode sheet.
                   const _ModeChip(),
                   // Model selector lives in the header AppBar — not duplicated here.
                   const Spacer(),
@@ -4136,7 +4136,7 @@ class _InputBarState extends State<_InputBar> {
                     ),
                     onPressed: () {},
                   ),
-                  // ── Stateful primary button (DSH-web InputBar pattern) ──
+                  // ── Stateful primary button (web-IDE InputBar pattern) ──
                   AnimatedBuilder(
                     animation: Listenable.merge([AgentService.I, controller]),
                     builder: (_, _) {
@@ -4237,10 +4237,10 @@ class _TypingBubble extends StatelessWidget {
   }
 }
 
-/// DSH-web QueueDock — a strip above the input bar showing queued messages
+/// web-IDE QueueDock — a strip above the input bar showing queued messages
 /// with edit/remove actions. Shown only when [AgentService.queuedMessages]
 /// is non-empty.
-/// DSH-web GoalBar — the session goal as a strip above the composer dock:
+/// web-IDE GoalBar — the session goal as a strip above the composer dock:
 /// objective, round chip, status; edit / pause / resume / clear actions.
 /// Renders only while a goal exists. Pause/resume flips the goal status
 /// directly; clear marks it complete (the strip then disappears).
@@ -4407,7 +4407,7 @@ class _GoalBar extends StatelessWidget {
   }
 }
 
-/// DSH-web TodoDock — live checklist written by todo_write tool.
+/// web-IDE TodoDock — live checklist written by todo_write tool.
 /// Shows above the chat input; each item shows status icon + text.
 /// Collapsed by default; tap header to expand full list.
 class _TodoDock extends StatefulWidget {
@@ -4718,7 +4718,7 @@ class _QueueRowState extends State<_QueueRow> {
               style: TextStyle(fontSize: 12.5, color: Aether.text),
             ),
           ),
-          // Strict-steer (DSH parity): pull this row to the front so the
+          // Strict-steer (the reference parity): pull this row to the front so the
           // running turn injects it on the very next request.
           GestureDetector(
             onTap: () {
@@ -4814,7 +4814,7 @@ class _CopyButtonState extends State<_CopyButton> {
 
 /// Approval dock — replaces the old _AgentActivityBar under the AppBar.
 /// Shown only when a tool needs user confirmation. Live agent log stays in
-/// the chat stream itself; approvals float above the input (DSH-web style).
+/// the chat stream itself; approvals float above the input (web-IDE style).
 class _ApprovalDock extends StatelessWidget {
   const _ApprovalDock();
 
@@ -4829,7 +4829,7 @@ class _ApprovalDock extends StatelessWidget {
         if (req.questions != null && req.questions!.isNotEmpty) {
           return _QuestionsCard(req);
         }
-        // ── Plan review (exit_plan_mode) — DSH PlanReviewPanel style ──
+        // ── Plan review (exit_plan_mode) — PlanReviewPanel style ──
         if (req.tool == 'exit_plan_mode') {
           return _PlanReviewCard(req);
         }
@@ -4892,7 +4892,7 @@ class _ApprovalDock extends StatelessWidget {
   }
 }
 
-/// DSH PlanReviewPanel parity — shows the actual plan markdown with
+/// PlanReviewPanel parity — shows the actual plan markdown with
 /// Decline / Approve buttons (fixes: the plan was never rendered before).
 class _PlanReviewCard extends StatelessWidget {
   final ApprovalRequest req;
@@ -4976,7 +4976,7 @@ class _PlanReviewCard extends StatelessWidget {
             constraints: const BoxConstraints(maxHeight: 260),
             child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
-              child: _DshMarkdown(content: plan),
+              child: _OvidMarkdown(content: plan),
             ),
           ),
           const SizedBox(height: 4),
@@ -5271,8 +5271,8 @@ class _QuestionsCardState extends State<_QuestionsCard> {
 }
 
 /// Permission mode chip (Read-Only / General / Full Access / Studio) —
-/// DSH-web dropdown under the input. Tapping cycles; long-press opens sheet.
-/// DSH-web workspace chip — shows the active workspace (repo name, or
+/// web-IDE dropdown under the input. Tapping cycles; long-press opens sheet.
+/// web-IDE workspace chip — shows the active workspace (repo name, or
 /// "sandbox" when working in the local sandbox).  Tapping opens Studio.
 class _WorkspaceChip extends StatelessWidget {
   const _WorkspaceChip();
@@ -5476,7 +5476,7 @@ class _WorkspaceChip extends StatelessWidget {
   }
 }
 
-/// DSH-web plan chip — amber "Plan" indicator in the composer, visible only
+/// web-IDE plan chip — amber "Plan" indicator in the composer, visible only
 /// while plan mode is on for the active session. Tap exits plan mode.
 class _PlanChip extends StatelessWidget {
   const _PlanChip();
@@ -5609,10 +5609,10 @@ class _ModeChip extends StatelessWidget {
   }
 }
 
-/// ═══════════════ DSH-web style markdown renderer ═══════════════
+/// ═══════════════ web-IDE style markdown renderer ═══════════════
 /// Fenced code blocks → copyable boxes with lang label + copy btn.
 /// Diff lines (+/-) inside code get green/red gutter coloring.
-class _DshMarkdown extends StatelessWidget {
+class _OvidMarkdown extends StatelessWidget {
   final String content;
 
   /// Body text size / colour. Answers use the defaults; apparatus surfaces
@@ -5620,7 +5620,7 @@ class _DshMarkdown extends StatelessWidget {
   /// secondary.
   final double fontSize;
   final Color? color;
-  const _DshMarkdown({required this.content, this.fontSize = 14, this.color});
+  const _OvidMarkdown({required this.content, this.fontSize = 14, this.color});
 
   static final _fenceRe = RegExp(r'```(\w*)\n([\s\S]*?)```', multiLine: true);
 
@@ -5633,7 +5633,7 @@ class _DshMarkdown extends StatelessWidget {
         parts.add(_prose(context, content.substring(last, match.start)));
       }
       parts.add(
-        _DshCodeBox(
+        _OvidCodeBox(
           lang: match.group(1)?.isEmpty ?? true ? 'code' : match.group(1)!,
           code: match.group(2) ?? '',
         ),
@@ -5662,7 +5662,7 @@ class _DshMarkdown extends StatelessWidget {
       // in-app browser, matching a real chat surface.
       selectable: true,
       onTapLink: (text, href, title) => _openLink(context, text, href, title),
-      builders: {'code': _DshInlineCodeBuilder()},
+      builders: {'code': _OvidInlineCodeBuilder()},
       styleSheet: MarkdownStyleSheet(
         p: TextStyle(fontSize: fontSize, height: 1.55, color: body),
         h1: TextStyle(
@@ -5785,10 +5785,10 @@ Future<void> _openLink(
 }
 
 /// Copyable fenced code box with lang label, copy, and diff coloring.
-class _DshCodeBox extends StatelessWidget {
+class _OvidCodeBox extends StatelessWidget {
   final String lang;
   final String code;
-  const _DshCodeBox({required this.lang, required this.code});
+  const _OvidCodeBox({required this.lang, required this.code});
 
   bool get _isDiff =>
       lang == 'diff' ||
@@ -5855,7 +5855,7 @@ class _DshCodeBox extends StatelessWidget {
   }
 }
 
-/// Diff renderer: +/- lines green/red like DSH-web edits.
+/// Diff renderer: +/- lines green/red like web-IDE edits.
 class _DiffLines extends StatelessWidget {
   final String code;
   const _DiffLines({required this.code});
@@ -5895,7 +5895,7 @@ class _DiffLines extends StatelessWidget {
 }
 
 /// Inline `code` — mono, accent-colored chip.
-class _DshInlineCodeBuilder extends MarkdownElementBuilder {
+class _OvidInlineCodeBuilder extends MarkdownElementBuilder {
   @override
   Widget? visitElementAfterWithContext(
     BuildContext context,
