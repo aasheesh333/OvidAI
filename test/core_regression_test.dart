@@ -2454,6 +2454,21 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(ro, contains('READ-ONLY MODE'));
     });
 
+    test('SEC2: spawn tools blocked in plan + read-only', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'sec2', title: 'S', model: 'm', mode: 'safe');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((x) => x.id == 'sec2');
+      });
+      expect(await AgentService.I.dispatchForTest('dispatch_agent', {'prompt': 'hi'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('workflow', {'goal': 'hi'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('ralph', {'goal': 'hi'}), contains('READ-ONLY MODE'));
+    });
+
     test('subagent child inherits parent mode and cannot escalate', () async {
       final app = AppState.I;
       final s = ChatSession(id: 'sub-s', title: 'S', model: 'm', mode: 'safe');
