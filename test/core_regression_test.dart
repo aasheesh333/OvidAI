@@ -8236,6 +8236,35 @@ url = "https://api.example.com/mcp"
       expect(finishedBody, contains('_applyTabZoom'),
           reason: 'onPageFinished must re-apply tab.zoom after every load/reload');
     });
+
+    test('SHELL_LOOP1: sanitizeShellCommand fixes missing delimiters and pipe-to-head issues', () {
+      expect(
+        AgentService.sanitizeShellCommand('ls 2>&1 ls -la'),
+        'ls 2>&1; ls -la',
+      );
+      expect(
+        AgentService.sanitizeShellCommand('ls | head -5 pwd'),
+        'ls | head -5; pwd',
+      );
+    });
+
+    test('SHELL_EXEC1: exec with non-zero exit code and empty output does not throw Exception', () async {
+      final svc = SandboxService.I;
+      final tmp = await Directory.systemTemp.createTemp('shellexec');
+      await Directory('${tmp.path}/bin').create(recursive: true);
+      await Directory('${tmp.path}/lib').create(recursive: true);
+      File('${tmp.path}/lib/libtermux-exec-direct-ld-preload.so').writeAsStringSync('');
+      final shTarget = File('/usr/bin/sh').existsSync() ? '/usr/bin/sh' : '/bin/sh';
+      Link('${tmp.path}/bin/sh').createSync(shTarget);
+      addTearDown(() {
+        svc.sandboxPrefixForTest = null;
+        tmp.deleteSync(recursive: true);
+      });
+      svc.sandboxPrefixForTest = tmp;
+      // 'false' command has exitCode 1 and empty output.
+      final out = await svc.exec(['sh', '-c', 'false'], hostWorkDir: Directory.systemTemp);
+      expect(out, contains('exit code 1'));
+    });
   });
 }
 

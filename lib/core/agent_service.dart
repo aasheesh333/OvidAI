@@ -408,6 +408,7 @@ class AgentRun {
   /// Lives on the run bucket: parallel sessions can't cross-pollute it.
   ({String name, String canonArgs})? repeatKey;
   int repeatStreak = 0;
+  int consecutiveErrors = 0;
   Message? activeToolMsg;
   DateTime? runStart;
   int? lastRunElapsedMs;
@@ -4844,6 +4845,10 @@ instead of describing them. Prefer many small steps. Verify results before finis
 NEVER fake work: do not emit placeholder echo commands (e.g. `echo "Command N executed"`)
 and claim tasks ran. If a sandbox command fails, show its ACTUAL error + fix it
 (or report it to the user honestly) instead of simulating the work.
+SHELL COMMAND HYGIENE:
+• Always use valid bash syntax. If executing multiple commands, ALWAYS separate them with `;` or `&&` (never concatenate without a delimiter, e.g. never `2>&1 ls`).
+• When using pipelines with `head` or `tail` (e.g. `| head -5`), do NOT append trailing command names directly without a semicolon.
+• The native sandbox runs on Android bionic ARM64. Precompiled Linux glibc binary Node addons (.node) cannot be loaded directly. If an npm package fails to load a native module, explain this to the user instead of searching for phantom files.
 If the user asks to install a plugin or MCP, use agent_install_plugin or agent_install_mcp.
 Catalog management: you can list/add/remove providers (catalog_list_providers,
 catalog_add_provider, catalog_remove_provider), list plugins/MCP servers
@@ -5234,6 +5239,16 @@ ${await _agentsMdBlock()}
             result = '$result\n\n[note] Same call repeated 8 times — '
                 'STOP looping. Explain the blockage to the user and try '
                 'a different approach.';
+          }
+          final isErr = _looksLikeToolError(result) || result.startsWith('tool error');
+          if (isErr) {
+            run.consecutiveErrors++;
+          } else {
+            run.consecutiveErrors = 0;
+          }
+          if (run.consecutiveErrors >= 3) {
+            result = '$result\n\n[CRITICAL ESCALATION] Tool calls have failed ${run.consecutiveErrors} times consecutively. '
+                'DO NOT continue repeating similar commands or querying missing files. Stop probing and clearly explain the exact problem to the user.';
           }
           msgs.add({
             'role': 'tool',
@@ -5975,7 +5990,8 @@ ${await _agentsMdBlock()}
     }
     switch (name) {
       case 'run_shell':
-        final cmd = args['command'] as String;
+        final rawCmd = args['command'] as String;
+        final cmd = sanitizeShellCommand(rawCmd);
         final isSubagent = _runSession?.isSubagent ?? false;
         if (!isSubagent) {
           final work = await _sessionWorkDir();
@@ -6064,7 +6080,13 @@ ${await _agentsMdBlock()}
             }
             // Live file follow: shell may have edited open studio tabs.
             unawaited(syncOpenFilesFromDisk());
-            return out.isEmpty ? '(no output)' : out;
+            var finalOut = out.isEmpty ? '(no output)' : out;
+            if (_looksLikeNativeModuleError(finalOut)) {
+              finalOut += '\n\n[sandbox notice: this command failed to load a native compiled Node module (glibc/x86_64 or mismatched ABI). '
+                  'The native sandbox runs on Android bionic ARM64; precompiled Linux glibc binary addons (.node) cannot be loaded directly. '
+                  'Use pure JS packages or compile them with npm rebuild / node-gyp if sources are available.]';
+            }
+            return finalOut;
           }
           // Phone terminal tier — device shell, no install needed.
           final out = await SandboxService.I
@@ -7489,6 +7511,25 @@ ${await _agentsMdBlock()}
 
   bool _isDestructiveCommand(String cmd) => isDestructiveCommand(cmd);
 
+  /// Sanitize common model syntax errors in shell commands (missing delimiters
+  /// after redirections, piping directly to head followed by another command, etc.).
+  static String sanitizeShellCommand(String cmd) {
+    var c = cmd.trim();
+    // Fix missing delimiter between redirection and next command:
+    // e.g. "2>&1 ls" -> "2>&1; ls"
+    c = c.replaceAllMapped(
+      RegExp(r'(2>&1|>+&1|>+\s*\S+)\s+(?=(ls|cd|pwd|cat|head|tail|grep|find|rm|mkdir|echo|node|npm|python|python3)\b)'),
+      (m) => '${m.group(1)}; ',
+    );
+    // Fix piping to head/tail followed immediately by another command:
+    // e.g. "| head -5 pwd" -> "| head -5; pwd"
+    c = c.replaceAllMapped(
+      RegExp(r'(\|\s*(?:head|tail)\s+-[0-9]+)\s+(?=(ls|cd|pwd|cat|grep|find|rm|mkdir|echo|node|npm|python|python3)\b)'),
+      (m) => '${m.group(1)}; ',
+    );
+    return c;
+  }
+
   /// Public (testable) form of the destructive-command detector.
   static bool isDestructiveCommand(String cmd) {
     for (final pat in _destructivePatterns) {
@@ -7831,6 +7872,14 @@ ${await _agentsMdBlock()}
 
   bool _looksTransientProviderError(String err) =>
       isTransientProviderError(err);
+
+  bool _looksLikeNativeModuleError(String text) {
+    final l = text.toLowerCase();
+    return l.contains('failed to load native module') ||
+        l.contains('mismatched native koffi') ||
+        l.contains('could not load the "sharp" module') ||
+        (l.contains('node_modules') && l.contains('.node'));
+  }
 
   /// Heuristic: tool result text that reads as a failure → error state dot.
   bool _looksLikeToolError(String result) {

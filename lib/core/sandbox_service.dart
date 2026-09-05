@@ -2024,8 +2024,11 @@ audit=false
         );
         if (retried != null) return retried;
       }
-      if (result.exitCode != 0 && out.trim().isEmpty) {
-        throw Exception('command exited ${result.exitCode} (no output)');
+      if (result.exitCode != 0) {
+        if (out.trim().isEmpty) {
+          return '(command exited with exit code ${result.exitCode} and produced no output)';
+        }
+        return '$out\n(exit code ${result.exitCode})';
       }
       return out;
     } catch (e) {
