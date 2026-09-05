@@ -7627,6 +7627,94 @@ url = "https://api.example.com/mcp"
       expect(src, contains('_terminal()'));
     });
   });
+
+  // ── PR48: DSH prompt-context bundle — file_read windowing, read_image,
+  // AGENTS.md, time-context, locale, welcome (RED first, TDD) ──
+  group('PR48: file_read windowing + read_image (DSH tool-fs parity)', () {
+    Map<String, dynamic> fileReadSchema() {
+      final tools = AgentService.I.toolsForTest();
+      return tools.firstWhere(
+        (t) => (t['function'] as Map)['name'] == 'file_read',
+      )['function'] as Map<String, dynamic>;
+    }
+
+    test('P1: file_read schema carries offset/limit (DSH read windowing)', () {
+      final props =
+          (fileReadSchema()['parameters'] as Map)['properties'] as Map;
+      expect(props.containsKey('offset'), isTrue,
+          reason: 'DSH read has offset (1-based start line)');
+      expect(props.containsKey('limit'), isTrue,
+          reason: 'DSH read has limit (max lines, cap 2000)');
+    });
+
+    test('P2: file_read honors offset/limit with totalLines + capped footer',
+        () async {
+      final agent = AgentService.I;
+      final lines = List.generate(500, (i) => 'line ${i + 1}');
+      RepoCache.I.files['big.txt'] = '${lines.join('\n')}\n';
+      addTearDown(() => RepoCache.I.files.remove('big.txt'));
+
+      final out = await agent.dispatchForTest('file_read', {
+        'path': 'big.txt',
+        'offset': 101,
+        'limit': 50,
+      });
+      expect(out, contains('line 101'));
+      expect(out, contains('line 150'));
+      expect(out, isNot(contains('line 100\n')),
+          reason: 'window must start at offset');
+      expect(out, isNot(contains('line 151\n')),
+          reason: 'window must end at offset+limit-1');
+      // Fixture has a trailing newline → split yields 501 rows; the
+      // header must report the true totalLines so the model can page.
+      expect(out, contains('totalLines: 501'),
+          reason: 'DSH read reports totalLines so the model can page');
+      expect(out, contains('offset=151'),
+          reason: 'capped footer must tell the model how to continue');
+    });
+
+    test('P3: read_image tool exists and returns image metadata', () async {
+      final tools = AgentService.I.toolsForTest();
+      final names = tools
+          .map((t) => ((t['function'] as Map)['name'] as String))
+          .toSet();
+      expect(names, contains('read_image'),
+          reason: 'DSH dsh-tool-fs ships read_image alongside read');
+
+      final out = await AgentService.I.dispatchForTest('read_image', {
+        'path': 'nope.png',
+      });
+      expect(out, contains('nope.png'),
+          reason: 'missing file must name the path, not "unknown tool"');
+    });
+  });
+
+  group('PR48: AGENTS.md + time-context + locale + welcome', () {
+    test('P4: agent loads AGENTS.md workspace instructions into the prompt',
+        () {
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(src, contains('AGENTS.md'),
+          reason: 'workspace instruction chain (DSH skills/AGENTS parity)');
+    });
+
+    test('P5: system prompt carries the current time (DSH time-context)', () {
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(src, contains('Current time:'),
+          reason: 'model needs a clock for unqualified dates/times');
+    });
+
+    test('P6: locale preference is persisted (DSH client-locale)', () {
+      final src = File('lib/core/state.dart').readAsStringSync();
+      expect(src, contains('ovid_locale'),
+          reason: 'zh/en reply-language pref, DSH locale.preference parity');
+    });
+
+    test('P7: first-run welcome notice is versioned (DSH ui-onboarding)', () {
+      final src = File('lib/core/state.dart').readAsStringSync();
+      expect(src, contains('ovid_welcome'),
+          reason: 'welcomeNoticeVersion parity — show once per version');
+    });
+  });
 }
 
 /// Build one DuckDuckGo-style result block (anchor + snippet pair).

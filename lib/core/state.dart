@@ -660,6 +660,8 @@ class AppState extends ChangeNotifier {
       browserDesktopMode = prefs.getBool(_kBrowserDesktopMode) ?? false;
       autoRunSafeCommands = prefs.getBool(_kAutoRunSafe) ?? true;
       sandboxSkipped = prefs.getBool(_kSandboxSkipped) ?? false;
+      localePref = prefs.getString(_kLocale) ?? 'system';
+      seenWelcomeVersion = prefs.getString(_kWelcome) ?? '';
       chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0).clamp(
         chatFontScaleMin,
         chatFontScaleMax,
@@ -936,6 +938,49 @@ class AppState extends ChangeNotifier {
   /// Auto-run safe commands: read-only shell commands skip confirmation.
   static const _kAutoRunSafe = 'ovid_auto_run_safe';
   bool autoRunSafeCommands = true;
+
+  // ── Locale preference (DSH client-locale parity: zh/en reply language) ──
+  // 'system' follows the device language; 'en'/'zh' pin the reply hint.
+  static const _kLocale = 'ovid_locale';
+  String localePref = 'system';
+
+  Future<void> setLocalePref(String v) async {
+    if (v != 'system' && v != 'en' && v != 'zh') return;
+    localePref = v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kLocale, v);
+    } catch (_) {}
+  }
+
+  /// System-prompt line for the locale pref (empty = default English).
+  String replyLanguageHint() {
+    switch (localePref) {
+      case 'zh':
+        return 'REPLY LANGUAGE: reply in Chinese (简体中文) unless the user writes in another language.';
+      case 'en':
+        return 'REPLY LANGUAGE: reply in English unless the user writes in another language.';
+      default:
+        return '';
+    }
+  }
+
+  // ── First-run welcome notice (DSH ui-onboarding welcomeNoticeVersion) ──
+  static const _kWelcome = 'ovid_welcome';
+  static const welcomeVersion = '2026-09-05.1';
+  String seenWelcomeVersion = '';
+
+  bool get welcomeSeen => seenWelcomeVersion == welcomeVersion;
+
+  Future<void> markWelcomeSeen() async {
+    seenWelcomeVersion = welcomeVersion;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kWelcome, welcomeVersion);
+    } catch (_) {}
+  }
 
   // ── Chat font scale (pinch-to-zoom on the message list) ──
   // Scales ONLY the message content text — the header/AppBar and the

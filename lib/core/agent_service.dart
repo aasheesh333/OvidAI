@@ -2554,7 +2554,38 @@ class AgentService extends ChangeNotifier {
       'type': 'function',
       'function': {
         'name': 'file_read',
-        'description': 'Read a file from the synced workspace.',
+        'description':
+            'Read a file from the synced workspace with line-numbered '
+            'windowing (DSH read parity). Use offset/limit to page large '
+            'files; the result reports totalLines so you can continue. '
+            'Host workspace files fall back when the repo copy is absent.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'path': {'type': 'string'},
+            'offset': {
+              'type': 'integer',
+              'description': '1-based first line of the window (default 1).',
+            },
+            'limit': {
+              'type': 'integer',
+              'description':
+                  'Max lines to return (default 200, hard cap 2000).',
+            },
+          },
+          'required': ['path'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'read_image',
+        'description':
+            'Read a raster image (png/jpg/webp/gif/bmp) from the synced '
+            'workspace or the session workspace. Returns image metadata '
+            '(path, bytes, dimensions when decodable). Use it to inspect '
+            'screenshots, diagrams or photos before describing them.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -4350,6 +4381,48 @@ class AgentService extends ChangeNotifier {
     return '${preset.persona} (Tool roster: ${preset.description})';
   }
 
+  /// DSH time-context parity (dsh-time-context): one clock line so the
+  /// model can interpret otherwise-unqualified dates and times.
+  String _nowLine() {
+    final now = DateTime.now();
+    final zone = now.timeZoneName;
+    final off = now.timeZoneOffset;
+    final sign = off.isNegative ? '-' : '+';
+    final hh = off.inHours.abs().toString().padLeft(2, '0');
+    final mm = (off.inMinutes.abs() % 60).toString().padLeft(2, '0');
+    return '${now.toIso8601String()} $zone (UTC$sign$hh:$mm)';
+  }
+
+  /// Workspace instruction chain (DSH skills/AGENTS parity): root-level
+  /// AGENTS.md from the pinned folder, the session workspace, or the
+  /// synced repo — capped so a huge file can't eat the context window.
+  /// v1 is root-level only (no nested-chain walk — follow-up).
+  Future<String> _agentsMdBlock() async {
+    const cap = 6000;
+    String? readRoot(String dir) {
+      try {
+        final f = File('$dir/AGENTS.md');
+        if (f.existsSync()) return f.readAsStringSync();
+      } catch (_) {}
+      return null;
+    }
+    var text = null as String?;
+    final s = _runSession;
+    final pinned = s?.workspaceFolder;
+    if (pinned != null && pinned.trim().isNotEmpty) {
+      text ??= readRoot(pinned);
+    }
+    if (text == null) {
+      try {
+        text ??= readRoot((await _sessionWorkDir()).path);
+      } catch (_) {}
+    }
+    text ??= RepoCache.I.read('AGENTS.md');
+    if (text == null || text.trim().isEmpty) return '';
+    final body = text.length > cap ? '${text.substring(0, cap)}…\n' : text;
+    return 'WORKSPACE INSTRUCTIONS (AGENTS.md — follow unless the user overrides):\n$body';
+  }
+
   Future<void> _runTaskBody(
     String originalPrompt,
     _RunCtx ctx, {
@@ -4493,6 +4566,9 @@ For mid-task updates that should not wait (an early finding, a blocker), call
 report(content) — it reaches the parent as its next-step context.''' : ''}
 ${_presetPersona(s).isEmpty ? '' : '\nAGENT PRESET (${s.presetId}): ${_presetPersona(s)}\n'}
 ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock()}'}
+Current time: ${_nowLine()} (DSH time-context: interpret unqualified dates/times in the user's zone).
+${AppState.I.replyLanguageHint().isEmpty ? '' : '${AppState.I.replyLanguageHint()}\n'}
+${await _agentsMdBlock()}
 ''';
 
     // ── Context compaction (DSH dsh-compaction-basic parity) ──
@@ -6797,14 +6873,35 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
 
       case 'file_read':
         final path = args['path'] as String;
-        final c = RepoCache.I.read(path);
+        // DSH read windowing (dsh-tool-fs): offset is 1-based, limit
+        // defaults to 200 lines, hard-capped at 2000 lines.
+        var offset = (args['offset'] as num?)?.toInt() ?? 1;
+        var limit = (args['limit'] as num?)?.toInt() ?? 200;
+        if (offset < 1) offset = 1;
+        if (limit < 1) limit = 1;
+        if (limit > 2000) limit = 2000;
+        final c = RepoCache.I.read(path) ??
+            await () async {
+              // Host workspace fallback: sandbox files are readable even
+              // when no GitHub repo is synced (mirrors fs_edit view).
+              final host = await _resolveFsPath(path);
+              if (host == null || host.startsWith('repo:')) return null;
+              try {
+                return await File(host).readAsString();
+              } catch (_) {
+                return null;
+              }
+            }();
         if (c == null) return 'file not found: $path';
         final rs = _runSession;
         final sid = rs?.sandboxId ?? rs?.id ?? 'default';
         _readPathsFor(sid).add(path);
         openStudioFile(path, c);
         _emit('file', 'read $path');
-        return await spillToolOutput(name, c, cap: 6000);
+        return _windowedLines(path, c, offset: offset, limit: limit);
+
+      case 'read_image':
+        return await _handleReadImage(args);
 
       case 'fs_edit':
         return await _handleFsEdit(args);
@@ -7677,6 +7774,73 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
       default:
         return 'unknown fs_edit command: $cmd';
     }
+  }
+
+  /// DSH read windowing (dsh-tool-fs parity): 1-based [offset] window of
+  /// at most [limit] lines with a header (path/offset/totalLines) and a
+  /// capped footer naming how many lines remain, so the model pages with
+  /// offset=offset+limit instead of re-reading. Byte-capped at 51200
+  /// chars per window (DSH readMaxBytes).
+  String _windowedLines(
+    String path,
+    String content, {
+    required int offset,
+    required int limit,
+  }) {
+    const maxBytes = 51200;
+    final lines = content.split('\n');
+    final total = lines.length;
+    final start = (offset - 1).clamp(0, total);
+    final end = (start + limit).clamp(0, total);
+    final buf = StringBuffer()
+      ..writeln('$path — lines $offset..$end of $total (totalLines: $total)');
+    for (var i = start; i < end; i++) {
+      buf.writeln('${(i + 1).toString().padLeft(4)}: ${lines[i]}');
+      if (buf.length > maxBytes) {
+        buf.writeln('… [capped at 51200 bytes — ${total - i - 1} more lines; '
+            're-read with offset=${i + 2}]');
+        break;
+      }
+    }
+    if (end < total) {
+      buf.writeln('… (${total - end} more lines — re-read with '
+          'offset=${end + 1}, limit=$limit)');
+    }
+    return buf.toString();
+  }
+
+  /// DSH read_image parity (dsh-tool-fs): resolve repo → host workspace,
+  /// validate a raster extension, and return durable image metadata. v1
+  /// reports metadata + byte size; raw-pixel injection into the LLM
+  /// request envelope is a follow-up and is stated honestly here.
+  Future<String> _handleReadImage(Map<String, dynamic> args) async {
+    final path = (args['path'] as String? ?? '').trim();
+    if (path.isEmpty) return 'read_image: path is required';
+    const raster = {'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'};
+    final ext = path.split('.').last.toLowerCase();
+    if (!raster.contains(ext)) {
+      return 'read_image: "$path" is not a raster image '
+          '(supported: png/jpg/webp/gif/bmp)';
+    }
+    final repoBytes = RepoCache.I.read(path);
+    List<int>? bytes =
+        repoBytes != null ? utf8.encode(repoBytes) : null;
+    var source = 'repo';
+    if (bytes == null) {
+      final host = await _resolveFsPath(path);
+      if (host == null || host.startsWith('repo:')) {
+        return 'file not found: $path';
+      }
+      try {
+        bytes = await File(host).readAsBytes();
+        source = 'workspace';
+      } catch (_) {
+        return 'file not found: $path';
+      }
+    }
+    _emit('file', 'read image $path');
+    return 'IMAGE $path ($source): ${bytes.length} bytes, .$ext raster. '
+        '(v1 reports metadata; pixel-level vision blocks are a follow-up.)';
   }
 
   String _numberedLines(String content, int max) {

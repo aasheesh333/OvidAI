@@ -256,6 +256,7 @@ class SettingsScreen extends StatelessWidget {
 
           const SectionHeader('General'),
           const _ThemeToggle(),
+          const _LocaleTile(),
           _settingTile(Icons.notifications_outlined, 'Notifications', 'On'),
           _settingTile(Icons.info_outline, 'About', 'Ovid AI 0.1.0-demo'),
         ],
@@ -562,6 +563,50 @@ class _ThemeToggle extends StatelessWidget {
         value: app.lightTheme,
         activeTrackColor: Aether.accent,
         onChanged: (v) => app.setLightTheme(v),
+      ),
+    );
+  }
+}
+
+/// Reply-language preference (DSH client-locale parity: system/en/zh).
+/// Drives the REPLY LANGUAGE system-prompt hint — no UI strings change.
+class _LocaleTile extends StatelessWidget {
+  const _LocaleTile();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    return AnimatedBuilder(
+      animation: app,
+      builder: (_, _) => ListTile(
+        dense: true,
+        leading: Icon(
+          Icons.translate_outlined,
+          size: 19,
+          color: Aether.textMuted,
+        ),
+        title: const Text('Reply language', style: TextStyle(fontSize: 14)),
+        subtitle: Text(
+          switch (app.localePref) {
+            'zh' => 'Chinese (简体中文)',
+            'en' => 'English',
+            _ => 'System language (default)',
+          },
+          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        ),
+        trailing: DropdownButton<String>(
+          value: ['system', 'en', 'zh'].contains(app.localePref)
+              ? app.localePref
+              : 'system',
+          items: const [
+            DropdownMenuItem(value: 'system', child: Text('System')),
+            DropdownMenuItem(value: 'en', child: Text('English')),
+            DropdownMenuItem(value: 'zh', child: Text('中文')),
+          ],
+          onChanged: (v) {
+            if (v != null) app.setLocalePref(v);
+          },
+        ),
       ),
     );
   }
