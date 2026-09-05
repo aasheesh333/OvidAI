@@ -4447,6 +4447,9 @@ explanations, step-by-step
 reasoning, or extra detail when the user explicitly asks for it or the task truly
 requires it. When a task needs commands, pages or file changes, CALL THE TOOLS
 instead of describing them. Prefer many small steps. Verify results before finishing.
+NEVER fake work: do not emit placeholder echo commands (e.g. `echo "Command N executed"`)
+and claim tasks ran. If a sandbox command fails, show its ACTUAL error + fix it
+(or report it to the user honestly) instead of simulating the work.
 If the user asks to install a plugin or MCP, use agent_install_plugin or agent_install_mcp.
 Catalog management: you can list/add/remove providers (catalog_list_providers,
 catalog_add_provider, catalog_remove_provider), list plugins/MCP servers
@@ -5627,6 +5630,17 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
                 unawaited(syncOpenFilesFromDisk());
                 return out.isEmpty ? '(no output)' : out;
               }
+            }
+            // PR47/K5: an echo-only placeholder is fake work — warn the
+            // agent (AND the model, via tool output) that the sandbox
+            // reported the command did nothing real.
+            if (_isEchoPlaceholder(cmd)) {
+              _emit('shell', 'placeholder detected — avoiding fake work');
+              return 'note: the command was a bare echo placeholder '
+                  '(_echo/fake-work); no real sandbox work was done. If the '
+                  'shell ran command strings, that\'s a sandbox/runtime '
+                  'failure on this device. Check Settings → Device health '
+                  '→ Repair sandbox.';
             }
             // PR38: a command that can trigger a native npm/node-gyp build
             // (install/rebuild) needs a C/C++ compiler that is NOT part of
@@ -8132,6 +8146,30 @@ ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock(
   );
   bool _looksLikeNativeBuildCommand(String cmd) =>
       _nativeBuildCommandRe.hasMatch(cmd);
+
+  /// PR47/K5: is [cmd] a bare echo/printf placeholder (fake work)? True only
+  /// when EVERY shell segment is an echo/printf (or a `true`/`:` no-op) with
+  /// no redirections — `echo x > file` writes a real file and is NOT a
+  /// placeholder. One real segment anywhere → not a placeholder.
+  bool _isEchoPlaceholder(String cmd) {
+    final parts = cmd.split(RegExp(r'&&|\|\||;|\n|\|'));
+    var sawEcho = false;
+    for (final p in parts) {
+      final t = p.trim();
+      if (t.isEmpty) continue;
+      if (t.contains('>')) return false; // real file write
+      if (RegExp(r'^(echo|printf)\b').hasMatch(t)) {
+        sawEcho = true;
+        continue;
+      }
+      if (RegExp(r'^(true|:)\s*$').hasMatch(t)) continue;
+      return false;
+    }
+    return sawEcho;
+  }
+
+  @visibleForTesting
+  bool isEchoPlaceholderForTest(String cmd) => _isEchoPlaceholder(cmd);
 
   Future<String> _handleExitPlanMode(Map<String, dynamic> args) async {
     final plan = args['plan'] as String? ?? '';

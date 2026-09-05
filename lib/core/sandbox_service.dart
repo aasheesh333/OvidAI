@@ -6,6 +6,7 @@ import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'sandbox_pkg.dart';
 
 /// ═══════════════════════════════════════════════════════════════════
 /// NATIVE BIONIC SANDBOX — Termux-style architecture, NO proot.
@@ -664,6 +665,11 @@ class SandboxService {
       _ensureTlsConfig(prefix);
       _ensurePipConfig(prefix);
       _probePythonPath();
+      // PR47: after install (or deb fallback), always write our runtime
+      // wrappers — npm/npx (no Termux-env dependency), ovid-pkg + apt/pkg
+      // wrappers. Without this a fresh install on a broken device can't
+      // ever get started whatever path got the bits in place.
+      OvidPkgInstaller.writeAll(prefix);
     }
 
     // Verify node + npm/npx.
@@ -1775,6 +1781,12 @@ audit=false
           File('$p/bin/npx').existsSync()) {
         await _patchExtractedShebangs(prefix);
       }
+
+      // 4. PR47: direct-write npm/npx wrappers — bypasses the entire
+      // Termux-shebang chain permanently. Runs on every boot (cheap).
+      // Plus ovi-pkg + apt/pkg wrappers living on disk so shell work in
+      // the sandbox never needs apt's broken https transport.
+      OvidPkgInstaller.writeAll(prefix);
     } catch (_) {
       // Self-heal must never break the boot.
     }

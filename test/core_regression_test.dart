@@ -24,6 +24,7 @@ import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
 import 'package:ovid_ai/ui/plugins_screen.dart' show parseMcpConfigForTest;
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
+import 'package:ovid_ai/core/sandbox_pkg.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -7527,6 +7528,103 @@ url = "https://api.example.com/mcp"
       final body = src.substring(i, j);
       expect(body, isNot(contains("'rg'")));
       expect(body, isNot(contains('_tryRgGrep')));
+    });
+  });
+
+  group('PR47: apt/pkg parity wall + npm/npx direct wrappers (K1-K8)', () {
+    test('K1: OvidPkgInstaller writes direct npm and npx wrappers without Termux env', () {
+      final tmp = Directory.systemTemp.createTempSync('ovid-pr47-k1');
+      addTearDown(() => tmp.deleteSync(recursive: true));
+
+      OvidPkgInstaller.writeAll(tmp);
+
+      final npmFile = File('${tmp.path}/bin/npm');
+      expect(npmFile.existsSync(), isTrue);
+      final npmContent = npmFile.readAsStringSync();
+      expect(npmContent, startsWith('#!${tmp.path}/bin/sh\n'));
+      expect(npmContent, contains('exec "${tmp.path}/bin/node" "${tmp.path}/lib/node_modules/npm/bin/npm-cli.js" "\$@"'));
+      expect(npmContent, isNot(contains('com.termux')));
+      expect(npmContent, isNot(contains('/data/data/')));
+      expect(npmContent, isNot(contains('/usr/bin/env')));
+
+      final npxFile = File('${tmp.path}/bin/npx');
+      expect(npxFile.existsSync(), isTrue);
+      final npxContent = npxFile.readAsStringSync();
+      expect(npxContent, startsWith('#!${tmp.path}/bin/sh\n'));
+      expect(npxContent, contains('exec "${tmp.path}/bin/node" "${tmp.path}/lib/node_modules/npm/bin/npx-cli.js" "\$@"'));
+      expect(npxContent, isNot(contains('com.termux')));
+      expect(npxContent, isNot(contains('/data/data/')));
+      expect(npxContent, isNot(contains('/usr/bin/env')));
+    });
+
+    test('K2 & K3: OvidPkgInstaller writes ovid-pkg and apt/apt-get/pkg forward wrappers', () {
+      final tmp = Directory.systemTemp.createTempSync('ovid-pr47-k2');
+      addTearDown(() => tmp.deleteSync(recursive: true));
+
+      OvidPkgInstaller.writeAll(tmp);
+
+      final ovidPkg = File('${tmp.path}/bin/ovid-pkg');
+      expect(ovidPkg.existsSync(), isTrue);
+      final ovidPkgContent = ovidPkg.readAsStringSync();
+      expect(ovidPkgContent, startsWith('#!${tmp.path}/bin/sh\n'));
+      expect(ovidPkgContent, contains('curl -fsSL'));
+      expect(ovidPkgContent, contains('dpkg --root='));
+      expect(ovidPkgContent, contains('update)'));
+      expect(ovidPkgContent, contains('install)'));
+      expect(ovidPkgContent, contains('search)'));
+
+      for (final tool in ['apt', 'apt-get', 'pkg']) {
+        final wrapper = File('${tmp.path}/bin/$tool');
+        expect(wrapper.existsSync(), isTrue, reason: '$tool wrapper must exist');
+        final content = wrapper.readAsStringSync();
+        expect(content, startsWith('#!${tmp.path}/bin/sh\n'));
+        expect(content, contains('exec "${tmp.path}/bin/ovid-pkg" "\$@"'));
+      }
+    });
+
+    test('K4: SandboxService hooks OvidPkgInstaller.writeAll in selfHeal and install', () {
+      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+      expect(src, contains('OvidPkgInstaller.writeAll(prefix)'));
+      // Appears in both _installRuntime and _selfHeal
+      final count = RegExp(r'OvidPkgInstaller\.writeAll\(prefix\)').allMatches(src).length;
+      expect(count, greaterThanOrEqualTo(2));
+    });
+
+    test('K5: AgentService._isEchoPlaceholder identifies bare echo fake-work', () {
+      final agent = AgentService.I;
+
+      // Positive cases: echo / printf placeholders
+      expect(agent.isEchoPlaceholderForTest('echo "Command 1 executed"'), isTrue);
+      expect(agent.isEchoPlaceholderForTest("echo 'Done'"), isTrue);
+      expect(agent.isEchoPlaceholderForTest('printf "all done\\n"'), isTrue);
+      expect(agent.isEchoPlaceholderForTest('echo "step 1" && echo "step 2"'), isTrue);
+      expect(agent.isEchoPlaceholderForTest('true && echo "finished"'), isTrue);
+      expect(agent.isEchoPlaceholderForTest(': ; echo "nothing"'), isTrue);
+
+      // Negative cases: real commands or file writes
+      expect(agent.isEchoPlaceholderForTest('echo "hello" > output.txt'), isFalse);
+      expect(agent.isEchoPlaceholderForTest('echo "world" >> append.log'), isFalse);
+      expect(agent.isEchoPlaceholderForTest('npm test'), isFalse);
+      expect(agent.isEchoPlaceholderForTest('npm test && echo "done"'), isFalse);
+      expect(agent.isEchoPlaceholderForTest('node server.js'), isFalse);
+      expect(agent.isEchoPlaceholderForTest('python3 main.py'), isFalse);
+      expect(agent.isEchoPlaceholderForTest('cat README.md | grep title'), isFalse);
+      expect(agent.isEchoPlaceholderForTest('mkdir -p build && touch build/app'), isFalse);
+    });
+
+    test('K6: HealthScreen offers hard reset sandbox action', () {
+      final src = File('lib/ui/health_screen.dart').readAsStringSync();
+      expect(src, contains('Future<void> _hardResetSandbox()'));
+      expect(src, contains('SandboxService.I.uninstall()'));
+      expect(src, contains('SandboxSetupScreen(gateMode: true)'));
+      expect(src, contains('Hard reset the sandbox (deletes + reinstalls)'));
+    });
+
+    test('K7: SandboxSetupScreen has error view with retry and terminal', () {
+      final src = File('lib/ui/sandbox_setup.dart').readAsStringSync();
+      expect(src, contains('Widget _errorView()'));
+      expect(src, contains('Retry install'));
+      expect(src, contains('_terminal()'));
     });
   });
 }

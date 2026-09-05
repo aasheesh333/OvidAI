@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../core/health_service.dart';
+import '../core/sandbox_service.dart';
 import '../core/theme.dart';
+import 'sandbox_setup.dart';
 
 /// Device health — a 0–100 capability score with a per-item breakdown of
 /// exactly what's missing and why. Repair re-runs the sandbox runtime
@@ -14,6 +16,7 @@ class HealthScreen extends StatefulWidget {
 class _HealthScreenState extends State<HealthScreen> {
   final List<String> _repairLog = [];
   bool _repairing = false;
+  bool _resetting = false;
 
   @override
   void initState() {
@@ -21,6 +24,34 @@ class _HealthScreenState extends State<HealthScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       HealthService.I.runChecks();
     });
+  }
+
+  /// PR47/K6: hard reset — delete the whole sandbox prefix + reinstall from
+  /// the bundled bootstrap in the SHELL (SandboxSetupScreen drives its own
+  /// progress). Points the user at a healthy state even when self-heal
+  /// saturates on older/corrupt installs.
+  Future<void> _hardResetSandbox() async {
+    setState(() => _resetting = true);
+    _repairLog.add('ovid: deleting sandbox prefix…');
+    setState(() {});
+    try {
+      await SandboxService.I.uninstall();
+      _repairLog.add('ovid: deleted — reopening setup gate…');
+      setState(() {});
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => const SandboxSetupScreen(gateMode: true),
+        ),
+      );
+      // Back from the gate — the sandbox should be installed again.
+      await HealthService.I.runChecks();
+    } catch (e) {
+      _repairLog.add('ovid: reset failed: $e');
+      setState(() {});
+    } finally {
+      if (mounted) setState(() => _resetting = false);
+    }
   }
 
   Color _scoreColor(int s) => s >= 90
@@ -297,6 +328,28 @@ class _HealthScreenState extends State<HealthScreen> {
                   ),
                 ),
               const SizedBox(height: 10),
+              // PR47/K6: Hard reset — a broken sandbox (bad clone, stuck
+              // stale state, orphaned apt processes) wants a full wipe and
+              // re-extraction. Deleting the whole prefix and re-running the
+              // setup gate is the only honest way to prove the ground.
+              Center(
+                child: TextButton.icon(
+                  onPressed: _resetting ? null : _hardResetSandbox,
+                  icon: Icon(
+                    _resetting
+                        ? Icons.hourglass_top_outlined
+                        : Icons.delete_sweep_outlined,
+                    size: 15,
+                    color: Aether.dangerC,
+                  ),
+                  label: Text(
+                    _resetting
+                        ? 'Resetting sandbox…'
+                        : 'Hard reset the sandbox (deletes + reinstalls)',
+                    style: TextStyle(fontSize: 12.5, color: Aether.dangerC),
+                  ),
+                ),
+              ),
               Center(
                 child: TextButton.icon(
                   onPressed: HealthService.I.runChecks,

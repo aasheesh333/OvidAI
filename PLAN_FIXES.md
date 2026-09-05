@@ -1,4 +1,58 @@
-# PLAN_FIXES.md — User-Reported Fixes + Real-Linux Sandbox (PR22–PR28)
+# PLAN_FIXES.md — User-Reported Fixes + Real-Linux Sandbox (PR22–PR47)
+
+> Tracking file for the fix batch reported on-device. Update the STATUS
+> column after every PR. Verification gate per PR:
+> `flutter analyze` (0 issues) + `flutter test` (all green) + commit +
+> push + CI green (Build APK + Device Test) on
+> `hoplite/gortyn-77773150`.
+> Baseline at start: 273 tests at PR42 (`35e9992`), PR43→PR46 done
+> (289 tests), head = `152a12d`.
+
+---
+
+## PR47 — apt/pkg parity wall + npm/npx direct wrappers (IN PROGRESS)
+
+**Device report (user paste, 2026-09-04):** setup log shows apt `update`
+failing at every mirror with `does not have a Release file`, retries
+properly rotate mirrors and fall to the direct .deb pool — but npm/npx
+later fail with `Permission denied` on the compiled-in Termux paths
+(`bin/node` works directly). The agent platform-facing message
+`[tool run_shell] echo "User last msg"` confirms models still see phantom
+echo placeholders when the sandbox is broken.
+
+**Root causes (read-only research, verified):**
+- apt's own HTTPS fetch method is broken on-device (mirror list already
+  rotates thanks to PR30, but every mirror certs/returns the same
+  "no Release" error from apt's transport layer — NOT from the network).
+- npm/npx = Termux-compiled scripts whose `#!/data/data/com.termux/...`
+  shebangs never got exec'd (cross-app permission blocked for any
+  cross-UID path). The `node` and `npm-cli.js` files themselves are fine.
+- `_patchExtractedShebangs` handles the shell-script rewrite, but the
+  dangling path `#!/data/user/0/com.dhanuk.ovidai/files/sandbox/usr/bin/env`
+  needed a self-symlink (PR22 brought the self-symlink `usr -> .`); that
+  fixes only `$PREFIX/usr/bin/env`-pointing scripts — the npm/npx
+  scripts have the literal Termux path with no $PREFIX prefix at all.
+
+**Fix plan:**
+
+| ID | Item | STATUS |
+|---|---|---|
+| K1 | Direct-write npm/npx wrapper scripts at `$PREFIX/bin/{npm,npx}`: shebang `$PREFIX/bin/sh` (no env chain, no Termux path), exec `node <npm-cli>/npx-cli.js "$@"` — written during runtime install and by self-heal, then chmod +x | — |
+| K2 | `ovid-pkg` — pure-Dart/sh mix installer at `$PREFIX/bin/pkgsession`: `update` uses curl to fetch `Packages(.gz)` from the active mirror (the CURRENT mirror's real index file) and repose it locally; `install` resolves the closure via the same index, downloads each .deb via `curl`, extracts via `dpkg --root=$PREFIX --admindir=$PREFIX/var/lib/dpkg -i` (so control scripts run in the right root) — makes the sandbox's package manager work regardless of apt's broken https transport | — |
+| K3 | apt wrappers: `$PREFIX/bin/apt|apt-get|pkg` forward to `ovid-pkg`, so agent habits (`apt install python`) work out-of-the-box without needing to know the sandbox diverges | — |
+| K4 | Self-heal: every boot, REWRITE the npm/npx wrappers (not just rely on the one-time install patch) and REWRITE the wrappers on apt fallback too | — |
+| K5 | run_shell anti-placeholder: a `echo "…"` tool result tells the model the command was a no-op placeholder and a hint: run the REAL work or a verification probe — NOT a `.echo command` too strict for adults (human + AI). Add a system-prompt note: "never fake output with echo placeholder commands; if a shell tool is expected, the real output comes back". This strangles the "echo Command 1 executed" confusion class at its root | — |
+| K6 | Health screen: NEW "Hard reset sandbox" (destructive) button — deletes the whole prefix and re-provisions from the bundled bootstrap via the same setup flow. (User requested a panic reset point.) | — |
+| K7 | Setup screen for install failures: show the last N lines + a Retry button; never hang silently | — |
+| K8 | Tests: K1-K3-K4 contracts (wrapper contents, one rule for nm-wrappers' json; ovid-pkg shell-op contracts via text write), K5/K6/K7 (source level) | — |
+
+**Note on vendor packages:** DSH's OWN sandbox packages (`sharp`, `node-pty` via node-gyp,
+`koffi`) cross `ar` ELF borders we can solve locally (relocatable binaries + clang). Those stay on the
+plans as-is, but WITHOUT any fake `[tool ...] interlock` the model still fails them.
+
+---
+
+<sub>(Prior PRs 22-46 live in the archived sections below — unchanged.)</sub>
 
 > Tracking file for the fix batch reported on-device. Update the STATUS
 > column after every PR. Verification gate per PR:
