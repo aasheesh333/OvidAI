@@ -2261,6 +2261,53 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     {
       'type': 'function',
       'function': {
+        'name': 'browser_download',
+        'description':
+            'Download a file via HTTP(S) from url into the session workspace. '
+            'Optional filename; defaults to URL filename or download-<timestamp>. '
+            'Files can be read with read_attachment.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'url': {
+              'type': 'string',
+              'description': 'HTTP or HTTPS URL to download',
+            },
+            'filename': {
+              'type': 'string',
+              'description': 'Workspace-relative filename to save as',
+            },
+          },
+          'required': ['url'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_upload',
+        'description':
+            'Stage a file from the session workspace into a file input element '
+            'matching selector on the current page.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'selector': {
+              'type': 'string',
+              'description': 'CSS selector for the input[type=file] element',
+            },
+            'path': {
+              'type': 'string',
+              'description': 'Workspace-relative path to the file to upload',
+            },
+          },
+          'required': ['selector', 'path'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
         'name': 'browser_resize',
         'description':
             'Set the browser viewport for responsive testing. width/height '
@@ -2542,12 +2589,25 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'browser_cookies',
         'description':
-            'Read the page\'s cookies (document.cookie — session-visible '
-            'ones). Args: {get: "name"} for one cookie.',
+            'Read or modify cookies for the active page. Args: {get: "name"} '
+            'to read one, {set: "name=val; path=/"} to set, {delete: "name"} '
+            'to expire, {clear: true} to clear all WebView cookies.',
         'parameters': {
           'type': 'object',
           'properties': {
             'get': {'type': 'string', 'description': 'single cookie name'},
+            'set': {
+              'type': 'string',
+              'description': 'cookie string to set, e.g. name=val; path=/',
+            },
+            'delete': {
+              'type': 'string',
+              'description': 'cookie name to delete',
+            },
+            'clear': {
+              'type': 'boolean',
+              'description': 'clear all WebView cookies when true',
+            },
           },
         },
       },
@@ -6534,6 +6594,10 @@ ${await _agentsMdBlock()}
         return _handleBrowserConsole(args);
       case 'browser_network':
         return _handleBrowserNetwork(args);
+      case 'browser_download':
+        return await _handleBrowserDownload(args);
+      case 'browser_upload':
+        return await _handleBrowserUpload(args);
       case 'browser_evaluate':
         final expr = args['expression'] as String;
         final tab = _activeTab;
@@ -6880,6 +6944,37 @@ ${await _agentsMdBlock()}
       case 'browser_cookies':
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
+        final set = args['set'] as String?;
+        if (set != null && set.trim().isNotEmpty) {
+          final js =
+              'document.cookie = ${jsonEncode(set)}; document.cookie || "(no cookies)"';
+          try {
+            final r = await tab.controller!.runJavaScriptReturningResult(js);
+            _emit('shell', 'cookie set');
+            return 'cookies: ${r.toString()}';
+          } catch (e) {
+            return 'cookies failed: $e';
+          }
+        }
+        if (args['delete'] != null) {
+          final name = (args['delete'] as String).split('=').first.trim();
+          final js =
+              "document.cookie = ${jsonEncode('$name=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/')}; 'cleared $name'";
+          try {
+            final r = await tab.controller!.runJavaScriptReturningResult(js);
+            return r.toString();
+          } catch (e) {
+            return 'cookies failed: $e';
+          }
+        }
+        if (args['clear'] == true) {
+          try {
+            await WebViewCookieManager().clearCookies();
+            return 'cookies cleared';
+          } catch (e) {
+            return 'cookies failed: $e';
+          }
+        }
         final get = args['get'] as String?;
         final js = get == null
             ? 'document.cookie || "(no cookies)"'
@@ -7346,6 +7441,8 @@ ${await _agentsMdBlock()}
       case 'browser_popups':
       case 'browser_console':
       case 'browser_network':
+      case 'browser_download':
+      case 'browser_upload':
       case 'browser_fill':
       case 'browser_drag':
       case 'browser_select':
@@ -7356,6 +7453,13 @@ ${await _agentsMdBlock()}
       case 'schedule_delete':
         // Page interactions can submit forms/press buy buttons — blocked.
         return roDenied;
+      case 'browser_cookies':
+        if (args['set'] != null ||
+            args['delete'] != null ||
+            args['clear'] == true) {
+          return roDenied;
+        }
+        return null;
       default:
         return null;
     }
@@ -7431,12 +7535,15 @@ ${await _agentsMdBlock()}
       'browser_press_key' => args['key'],
       'browser_wait_for' => args['text'],
       // PR28 tools
+      'browser_download' => args['filename'] ?? args['url'],
+      'browser_upload' => args['path'],
       'browser_hover' || 'browser_select' => args['selector'],
       'browser_drag' =>
           '${args['from']} → ${args['to']}',
       'browser_fill' => '${(args['fields'] as Map?)?.length ?? 0} fields',
       'browser_find' => args['text'],
-      'browser_cookies' => args['get'] ?? 'all',
+      'browser_cookies' =>
+          args['set'] ?? args['delete'] ?? (args['clear'] == true ? 'clear' : (args['get'] ?? 'all')),
       'create_goal' => args['objective'],
       'schedule_create' => args['prompt'],
       'memory_save' => args['content'],
@@ -7619,6 +7726,8 @@ ${await _agentsMdBlock()}
     'browser_popups' => 'Popups',
     'browser_console' => 'Console',
     'browser_network' => 'Network',
+    'browser_download' => 'Download',
+    'browser_upload' => 'Upload',
     'browser_new_tab' => 'New tab',
     'browser_switch_tab' => 'Switch tab',
     'browser_list_tabs' => 'List tabs',
@@ -7848,6 +7957,89 @@ ${await _agentsMdBlock()}
             orElse: () => _activeTab,
           )
           .consoleLog;
+
+  Future<String> _handleBrowserDownload(Map<String, dynamic> args) async {
+    final url = (args['url'] as String? ?? '').trim();
+    if (url.isEmpty) return 'url is required';
+    if (!url.startsWith('http')) return 'only http(s) urls can be downloaded';
+    var name = (args['filename'] as String? ?? '').trim();
+    if (name.isEmpty) {
+      name = Uri.tryParse(url)?.pathSegments.lastOrNull ?? '';
+      if (name.isEmpty) name = 'download-${DateTime.now().millisecondsSinceEpoch}';
+    }
+    final work = await _sessionWorkDir();
+    final safe = containedPath(work, name);
+    if (safe == null) {
+      return 'path escapes the session workspace: $name — use a path inside the workspace.';
+    }
+    _emit('nav', 'downloading: $name');
+    try {
+      final r = await HttpShim.get(
+        Uri.parse(url),
+        headers: {'User-Agent': 'OvidAgent/1.0'},
+        maxResponseBytes: 20 * 1024 * 1024,
+      );
+      if (r.status != 200) return 'download failed (HTTP ${r.status})';
+      if (r.bytes.length > 20 * 1024 * 1024) {
+        return 'file too large (${r.bytes.length} bytes, cap 20MB)';
+      }
+      final f = File(safe);
+      f.parent.createSync(recursive: true);
+      await f.writeAsBytes(r.bytes);
+      _recordProduced(safe, r.bytes.length);
+      return 'downloaded ✓ · $name · ${r.bytes.length} bytes (workspace — read with read_attachment)';
+    } catch (e) {
+      if ((e is HttpException && e.message.contains('Response exceeds')) ||
+          e.toString().contains('Response exceeds')) {
+        return 'file too large (cap 20MB)';
+      }
+      return 'download failed: $e';
+    }
+  }
+
+  Future<String> _handleBrowserUpload(Map<String, dynamic> args) async {
+    final sel = (args['selector'] as String? ?? '').trim();
+    final rel = (args['path'] as String? ?? '').trim();
+    if (sel.isEmpty || rel.isEmpty) return 'selector and path are required';
+    final work = await _sessionWorkDir();
+    final safe = containedPath(work, rel);
+    if (safe == null) {
+      return 'path escapes the session workspace: $rel — use a path inside the workspace.';
+    }
+    final f = File(safe);
+    if (!f.existsSync()) return 'No file "$rel" in the session workspace.';
+    if (f.lengthSync() > 10 * 1024 * 1024) {
+      return 'file too large for upload (cap 10MB)';
+    }
+    final tab = _activeTab;
+    tab.controller ??= controllerForTab(tab);
+    try {
+      final bytes = await f.readAsBytes();
+      final b64 = base64Encode(bytes);
+      final fname = safe.split('/').last.replaceAll("'", '');
+      final js = '''
+(() => {
+  const el = document.querySelector(${jsonEncode(sel)});
+  if (!el) return 'no element: $sel';
+  if (el.tagName.toLowerCase() !== 'input' || el.type !== 'file') return 'not a file input: $sel';
+  const bin = atob(${jsonEncode(b64)});
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  const file = new File([arr], ${jsonEncode(fname)});
+  const dt = new DataTransfer();
+  dt.items.add(file);
+  el.files = dt.files;
+  el.dispatchEvent(new Event('input', {bubbles:true}));
+  el.dispatchEvent(new Event('change', {bubbles:true}));
+  return 'staged ' + ${jsonEncode(fname)};
+})()''';
+      final r = await tab.controller!.runJavaScriptReturningResult(js);
+      _emit('shell', 'upload $rel → $sel');
+      return r.toString();
+    } catch (e) {
+      return 'upload failed: $e';
+    }
+  }
 
   Future<String> _handleFsEdit(Map<String, dynamic> args) async {
     final cmd = args['command'] as String;
@@ -8550,6 +8742,8 @@ ${await _agentsMdBlock()}
     'browser_popups',
     'browser_console',
     'browser_network',
+    'browser_download',
+    'browser_upload',
     'browser_press_key',
     'browser_fill',
     'browser_drag',

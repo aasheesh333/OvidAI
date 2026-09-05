@@ -2572,6 +2572,21 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(await AgentService.I.dispatchForTest('browser_network', {'action': 'list'}), contains('READ-ONLY MODE'));
     });
 
+    test('BR3: download/upload/cookie-write denied read-only; download escapes refused', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'br3', title: 'S', model: 'm', mode: 'safe');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((x) => x.id == 'br3');
+      });
+      expect(await AgentService.I.dispatchForTest('browser_download', {'url': 'https://example.com/a.pdf'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('browser_upload', {'selector': 'input', 'path': 'a.txt'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('browser_cookies', {'set': 'a=b'}), contains('READ-ONLY MODE'));
+    });
+
     test('subagent child inherits parent mode and cannot escalate', () async {
       final app = AppState.I;
       final s = ChatSession(id: 'sub-s', title: 'S', model: 'm', mode: 'safe');
