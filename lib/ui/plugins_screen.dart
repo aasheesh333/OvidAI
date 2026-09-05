@@ -455,7 +455,9 @@ class PluginCard extends StatelessWidget {
                   ),
                   const SizedBox(height: 3),
                   Text(
-                    '${plugin.author} · v${plugin.version} · ${app.fmtInstalls(plugin.installs)} installs',
+                    plugin.installsKnown && plugin.installs > 0
+                        ? '${plugin.author} · v${plugin.version} · ${app.fmtInstalls(plugin.installs)} installs'
+                        : '${plugin.author} · v${plugin.version}',
                     style: TextStyle(fontSize: 11, color: Aether.textFaint),
                   ),
                   const SizedBox(height: 6),
@@ -524,7 +526,9 @@ class PluginDetailScreen extends StatelessWidget {
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      '${plugin.author} · v${plugin.version} · ${app.fmtInstalls(plugin.installs)} installs',
+                      plugin.installsKnown && plugin.installs > 0
+                          ? '${plugin.author} · v${plugin.version} · ${app.fmtInstalls(plugin.installs)} installs'
+                          : '${plugin.author} · v${plugin.version}',
                       style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
                     ),
                   ],
@@ -556,10 +560,12 @@ class PluginDetailScreen extends StatelessWidget {
                       plugin.enabled ? 'Disable' : 'Enable',
                       style: const TextStyle(fontSize: 13.5),
                     ),
-                    onPressed: () {
-                      plugin.enabled = !plugin.enabled;
-                      app.persistPluginState();
-                      app.refresh();
+                    onPressed: () async {
+                      if (plugin.enabled) {
+                        await app.disablePlugin(plugin);
+                      } else {
+                        await app.enablePlugin(plugin);
+                      }
                     },
                   )
                 : FilledButton.icon(
@@ -724,21 +730,8 @@ class PluginDetailScreen extends StatelessWidget {
                       'Uninstall',
                       style: TextStyle(fontSize: 12.5),
                     ),
-                    onPressed: () {
-                      plugin.installed = false;
-                      plugin.enabled = false;
-                      app.persistPluginState();
-                      app.refresh();
-                      // PR40: drop any fetched commands/skills content and
-                      // unmount it — an uninstall reverses exactly what
-                      // install added, same as the plugin manager plugin removal.
-                      if (plugin.source != null) {
-                        unawaited(
-                          AppState.I
-                              .removePluginContent(plugin.source!)
-                              .then((_) => AgentService.I.refreshSkills()),
-                        );
-                      }
+                    onPressed: () async {
+                      await app.uninstallPlugin(plugin);
                     },
                   ),
                 ),
@@ -755,14 +748,15 @@ class PluginDetailScreen extends StatelessWidget {
             ),
           ),
           const SectionHeader('Permissions'),
-          const _Perm('Runs commands inside the isolated sandbox'),
-          const _Perm('Reads files only from folders you share'),
-          const _Perm('Network access: ask each time'),
+          if (plugin.hooks.isNotEmpty)
+            _Perm('Declared hooks: ${plugin.hooks.keys.join(', ')}')
+          else
+            const _Perm('Declared by plugin manifest'),
           const SectionHeader('Changelog'),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20),
             child: Text(
-              'v${plugin.version} — stability fixes and 20% faster startup.\nEarlier releases available on the plugin registry.',
+              'v${plugin.version} — declared by plugin manifest.',
               style: TextStyle(
                 fontSize: 12.5,
                 height: 1.6,

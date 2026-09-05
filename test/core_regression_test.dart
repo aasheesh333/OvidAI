@@ -8266,6 +8266,204 @@ url = "https://api.example.com/mcp"
       expect(out, contains('exit code 1'));
     });
   });
+
+  group('Task 1: Marketplace persistence + honest catalog', () {
+    Future<AppState> freshAppStateForTest() async {
+      final app = AppState.createForTest();
+      await app.initialize();
+      return app;
+    }
+
+    test('marketplace install survives restart resync', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        final body = utf8.encode(jsonEncode({
+          'name': 'test-marketplace',
+          'plugins': [
+            {
+              'name': 'real-plugin',
+              'source': 'owner/real-plugin',
+              'description': 'A real marketplace plugin',
+              'version': '1.0.0',
+            }
+          ],
+        }));
+        request.response
+          ..statusCode = 200
+          ..contentLength = body.length
+          ..add(body);
+        await request.response.close();
+      });
+      addTearDown(() async {
+        AppState.marketplaceBaseOverrideForTest = null;
+        AppState.resetTestInstance();
+        await server.close(force: true);
+      });
+      AppState.marketplaceBaseOverrideForTest =
+          'http://${server.address.host}:${server.port}';
+
+      final a = await freshAppStateForTest();
+      await a.syncMarketplaceCatalogs();
+      await a.setPluginInstalled('real-plugin', true);
+      final b = await freshAppStateForTest();
+      await b.syncMarketplaceCatalogs();
+      expect(b.isPluginInstalled('real-plugin'), isTrue);
+      expect(b.pluginSource('real-plugin'), isNotNull);
+    });
+
+    test('removeMarketplace prunes merged plugins, MCP servers, and prefs', () async {
+      final app = await freshAppStateForTest();
+      addTearDown(() => AppState.resetTestInstance());
+
+      app.addMarketplace('testorg/testmkt');
+      app.mergeMarketplaceCatalogForTest({
+        'plugins': [
+          {
+            'name': 'mkt-plugin-1',
+            'source': 'testorg/testmkt',
+            'description': 'Plugin from testmkt',
+          }
+        ],
+        'mcpServers': [
+          {
+            'name': 'mkt-mcp-1',
+            'command': 'npx',
+            'args': ['-y', 'mkt-mcp-1'],
+          }
+        ],
+      }, 'testorg', 'testmkt');
+
+      expect(app.plugins.any((p) => p.name == 'mkt-plugin-1'), isTrue);
+      expect(app.mcpServers.any((s) => s.name == 'mkt-mcp-1'), isTrue);
+
+      await app.setPluginInstalled('mkt-plugin-1', true);
+      await app.removeMarketplace('testorg/testmkt');
+
+      expect(app.plugins.any((p) => p.name == 'mkt-plugin-1'), isFalse);
+      expect(app.mcpServers.any((s) => s.name == 'mkt-mcp-1'), isFalse);
+
+      final prefs = await SharedPreferences.getInstance();
+      final rawPlugins = prefs.getString('ovid_marketplace_merged_v1') ?? '[]';
+      expect(rawPlugins, isNot(contains('mkt-plugin-1')));
+      final rawPluginState = prefs.getString('ovid_plugin_state_v1') ?? '{}';
+      expect(rawPluginState, isNot(contains('mkt-plugin-1')));
+      final rawMcps = prefs.getStringList('ovid_custom_mcp_servers_v1') ?? [];
+      expect(rawMcps.any((j) => j.contains('mkt-mcp-1')), isFalse);
+    });
+
+    test('uninstallPlugin removes cache dir, unmounts owned MCP servers, and refreshes skills', () async {
+      final app = await freshAppStateForTest();
+      addTearDown(() => AppState.resetTestInstance());
+
+      final tmp = Directory.systemTemp.createTempSync('plugin-test-cache');
+      AppState.pluginCacheRootOverrideForTest = tmp;
+      addTearDown(() {
+        AppState.pluginCacheRootOverrideForTest = null;
+        try {
+          tmp.deleteSync(recursive: true);
+        } catch (_) {}
+      });
+
+      final plugin = PluginItem(
+        name: 'test-plugin-uninstall',
+        author: 'testorg',
+        description: 'Testing uninstall cleanup',
+        version: '1.0.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'testorg/uninstall-repo',
+      );
+      app.plugins.add(plugin);
+
+      final cacheDir = await app.pluginCacheDirFor('testorg/uninstall-repo');
+      cacheDir.createSync(recursive: true);
+      File('${cacheDir.path}/test.txt').writeAsStringSync('hello');
+      expect(cacheDir.existsSync(), isTrue);
+
+      final ownedMcp = McpServer(
+        name: 'test-plugin-owned-mcp',
+        author: 'testorg',
+        description: 'Owned MCP',
+        category: 'Plugin',
+        command: 'npx',
+        source: 'plugin:test-plugin-uninstall',
+        custom: true,
+        connected: false,
+      );
+      app.mcpServers.add(ownedMcp);
+
+      var skillsRefreshed = false;
+      final prevRefresh = AppState.onRefreshSkills;
+      AppState.onRefreshSkills = () async {
+        skillsRefreshed = true;
+      };
+      addTearDown(() => AppState.onRefreshSkills = prevRefresh);
+
+      await app.uninstallPlugin(plugin);
+
+      expect(plugin.installed, isFalse);
+      expect(plugin.enabled, isFalse);
+      expect(cacheDir.existsSync(), isFalse);
+      expect(app.mcpServers.any((s) => s.name == 'test-plugin-owned-mcp'), isFalse);
+      expect(skillsRefreshed, isTrue);
+    });
+
+    test('disablePlugin disconnects owned MCP servers and refreshes skills', () async {
+      final app = await freshAppStateForTest();
+      addTearDown(() => AppState.resetTestInstance());
+
+      final plugin = PluginItem(
+        name: 'test-plugin-disable',
+        author: 'testorg',
+        description: 'Testing disable',
+        version: '1.0.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'testorg/disable-repo',
+      );
+      app.plugins.add(plugin);
+
+      final ownedMcp = McpServer(
+        name: 'test-plugin-disable-mcp',
+        author: 'testorg',
+        description: 'Owned MCP',
+        category: 'Plugin',
+        command: 'npx',
+        source: 'plugin:test-plugin-disable',
+        custom: true,
+        connected: true,
+      );
+      app.mcpServers.add(ownedMcp);
+
+      var skillsRefreshed = false;
+      final prevRefresh = AppState.onRefreshSkills;
+      AppState.onRefreshSkills = () async {
+        skillsRefreshed = true;
+      };
+      addTearDown(() => AppState.onRefreshSkills = prevRefresh);
+
+      await app.disablePlugin(plugin);
+
+      expect(plugin.enabled, isFalse);
+      expect(app.mcpServers.any((s) => s.name == 'test-plugin-disable-mcp'), isTrue);
+      expect(ownedMcp.connected, isFalse);
+      expect(skillsRefreshed, isTrue);
+    });
+
+    test('seed plugins have zero fake install counts and installsKnown false', () async {
+      final app = await freshAppStateForTest();
+      addTearDown(() => AppState.resetTestInstance());
+
+      final builtins = app.plugins.where((p) => p.author != 'you');
+      expect(builtins.isNotEmpty, isTrue);
+      for (final p in builtins) {
+        expect(p.installs, 0, reason: '${p.name} has non-zero installs');
+        expect(p.installsKnown, isFalse, reason: '${p.name} has installsKnown true');
+      }
+    });
+  });
 }
 
 class _FakeHttpClient implements HttpClient {

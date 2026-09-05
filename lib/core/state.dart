@@ -137,6 +137,7 @@ class PluginItem {
   bool installed;
   bool enabled;
   final int installs;
+  final bool installsKnown;
 
   /// PR40: marketplace `source` for a Claude-Code-shaped plugin —
   /// `"owner/repo"` (a GitHub plugin repo) or `"./local-dir"` (a path
@@ -145,7 +146,10 @@ class PluginItem {
   /// [AppState.fetchPluginContent]; null means this plugin has no
   /// separate content to mount (our native seeded catalog rows, or a
   /// marketplace entry that never declared one).
-  final String? source;
+  String? source;
+
+  /// Marketplace origin repo (`owner/repo`), if imported from one.
+  final String? marketplace;
 
   /// PR24: plugin hooks — event name → shell command. Declared in the
   /// plugin manifest (`"hooks": {"on_turn_start": "make snapshot"}`) and
@@ -164,10 +168,42 @@ class PluginItem {
     required this.category,
     this.installed = false,
     this.enabled = false,
-    required this.installs,
+    this.installs = 0,
+    this.installsKnown = false,
     this.hooks = const {},
     this.source,
+    this.marketplace,
   });
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'author': author,
+    'description': description,
+    'version': version,
+    'category': category,
+    'installed': installed,
+    'enabled': enabled,
+    'installs': installs,
+    'installsKnown': installsKnown,
+    if (source != null) 'source': source,
+    if (marketplace != null) 'marketplace': marketplace,
+    if (hooks.isNotEmpty) 'hooks': hooks,
+  };
+
+  factory PluginItem.fromJson(Map<String, dynamic> j) => PluginItem(
+    name: j['name'] as String? ?? '',
+    author: j['author'] as String? ?? '',
+    description: j['description'] as String? ?? '',
+    version: j['version'] as String? ?? '1.0',
+    category: j['category'] as String? ?? 'Tool',
+    installed: j['installed'] as bool? ?? false,
+    enabled: j['enabled'] as bool? ?? false,
+    installs: (j['installs'] as num?)?.toInt() ?? 0,
+    installsKnown: j['installsKnown'] as bool? ?? false,
+    source: j['source'] as String?,
+    marketplace: j['marketplace'] as String?,
+    hooks: (j['hooks'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())) ?? const {},
+  );
 
   /// Valid hook event names (mirrors the wired points in AgentService).
   /// PR39: `on_pre_tool` is a GATING event (Claude Code PreToolUse
@@ -618,10 +654,138 @@ class ChatSession {
 
 class AppState extends ChangeNotifier {
   /// Singleton — everything is user-side / on-device.
-  static final AppState I = AppState._();
+  static AppState? _testInstance;
+  static AppState get I => _testInstance ?? _singleton;
+  static final AppState _singleton = AppState._();
+
+  @visibleForTesting
+  factory AppState.createForTest() {
+    final instance = AppState._();
+    _testInstance = instance;
+    return instance;
+  }
+
+  @visibleForTesting
+  static void resetTestInstance() {
+    _testInstance = null;
+  }
+
   AppState._() {
     _seed();
     _ensureActiveSession();
+  }
+
+  Future<void> setPluginInstalled(String name, bool installed, {bool? enabled}) async {
+    final p = plugins.where((x) => x.name == name).firstOrNull;
+    if (p == null) return;
+    if (!installed) {
+      await uninstallPlugin(p);
+    } else {
+      p.installed = true;
+      p.enabled = enabled ?? true;
+      await persistPluginState();
+      refresh();
+    }
+  }
+
+  Future<void> setPluginEnabled(String name, bool enabled) async {
+    final p = plugins.where((x) => x.name == name).firstOrNull;
+    if (p == null) return;
+    if (!enabled) {
+      await disablePlugin(p);
+    } else {
+      await enablePlugin(p);
+    }
+  }
+
+  bool isPluginInstalled(String name) =>
+      plugins.where((x) => x.name == name).firstOrNull?.installed ?? false;
+
+  String? pluginSource(String name) =>
+      plugins.where((x) => x.name == name).firstOrNull?.source;
+
+  /// Hook for AgentService to refresh skills on plugin install/uninstall/toggle
+  /// without a circular import.
+  static Future<void> Function()? onRefreshSkills;
+
+  Future<void> uninstallPlugin(PluginItem plugin) async {
+    plugin.installed = false;
+    plugin.enabled = false;
+    await persistPluginState();
+
+    if (plugin.source != null) {
+      await removePluginContent(plugin.source!);
+    }
+
+    final owned = mcpServers.where((s) {
+      if (s.source == 'plugin:${plugin.name}') return true;
+      if (plugin.source != null &&
+          (s.source == 'plugin:${plugin.source}' ||
+           s.source == 'plugin:${plugin.source!.replaceAll('/', '_')}')) {
+        return true;
+      }
+      return false;
+    }).toList();
+
+    for (final s in owned) {
+      s.connected = false;
+      try {
+        await McpService.I.disconnect(s.name);
+      } catch (_) {}
+      mcpServers.remove(s);
+    }
+
+    if (owned.isNotEmpty) {
+      await _persistCustomMcpServers();
+      await _persistMcpConnectedIntent();
+    }
+
+    try {
+      await onRefreshSkills?.call();
+    } catch (_) {}
+
+    refresh();
+  }
+
+  Future<void> disablePlugin(PluginItem plugin) async {
+    plugin.enabled = false;
+    await persistPluginState();
+
+    final owned = mcpServers.where((s) {
+      if (s.source == 'plugin:${plugin.name}') return true;
+      if (plugin.source != null &&
+          (s.source == 'plugin:${plugin.source}' ||
+           s.source == 'plugin:${plugin.source!.replaceAll('/', '_')}')) {
+        return true;
+      }
+      return false;
+    }).toList();
+
+    for (final s in owned) {
+      s.connected = false;
+      try {
+        await McpService.I.disconnect(s.name);
+      } catch (_) {}
+    }
+
+    if (owned.isNotEmpty) {
+      await _persistMcpConnectedIntent();
+    }
+
+    try {
+      await onRefreshSkills?.call();
+    } catch (_) {}
+
+    refresh();
+  }
+
+  Future<void> enablePlugin(PluginItem plugin) async {
+    plugin.enabled = true;
+    await persistPluginState();
+    try {
+      await onRefreshSkills?.call();
+    } catch (_) {}
+    refresh();
   }
 
   static const _secureStorage = FlutterSecureStorage();
@@ -640,8 +804,11 @@ class AppState extends ChangeNotifier {
     await _loadCustomMcpServers();
     await _loadCustomPlugins();
     await _loadCustomPresets();
-    await _loadPluginState();
     await _loadMarketplaces();
+    await restoreMergedMarketplaceCatalog();
+    await _loadPluginState();
+    await syncMarketplaceCatalogs();
+    await _applyPluginState();
     // Check if the sandbox was installed on a previous launch so the
     // user is never asked to re-install the ~200 MB rootfs.
     if (await SandboxService.I.checkExisting()) {
@@ -1744,10 +1911,56 @@ class AppState extends ChangeNotifier {
     return normalized;
   }
 
-  void removeMarketplace(String repo) {
+  Future<void> removeMarketplace(String repo) async {
+    final normalized = normalizeMarketplace(repo);
     marketplaces.remove(repo);
+    marketplaces.remove(normalized);
     _fetchedMarketplaces.remove(repo);
-    _persistMarketplaces();
+    _fetchedMarketplaces.remove(normalized);
+    await _persistMarketplaces();
+
+    // Prune merged plugins belonging to this marketplace
+    final toRemovePlugins = plugins.where((p) =>
+      p.marketplace == repo ||
+      p.marketplace == normalized ||
+      p.source == repo ||
+      p.source == normalized
+    ).toList();
+    for (final p in toRemovePlugins) {
+      if (p.installed) {
+        await uninstallPlugin(p);
+      }
+      plugins.remove(p);
+    }
+
+    // Prune merged MCP servers belonging to this marketplace
+    final toRemoveMcps = mcpServers.where((s) =>
+      s.source == 'marketplace:$repo' ||
+      s.source == 'marketplace:$normalized'
+    ).toList();
+    for (final s in toRemoveMcps) {
+      if (s.connected) {
+        try {
+          await McpService.I.disconnect(s.name);
+        } catch (_) {}
+      }
+      mcpServers.remove(s);
+    }
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kPluginState);
+      if (raw != null) {
+        final m = jsonDecode(raw) as Map<String, dynamic>;
+        for (final p in toRemovePlugins) {
+          m.remove(p.name);
+        }
+        await prefs.setString(_kPluginState, jsonEncode(m));
+      }
+    } catch (_) {}
+
+    await persistMergedMarketplaceCatalog();
+    await _persistCustomMcpServers();
     refresh();
   }
 
@@ -1755,6 +1968,43 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(_kMarketplaces, marketplaces);
+    } catch (_) {}
+  }
+
+  static const _kMarketplaceMerged = 'ovid_marketplace_merged_v1';
+
+  Future<void> persistMergedMarketplaceCatalog() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final rows = plugins.where((p) => p.source != null || p.marketplace != null).toList();
+      await prefs.setString(
+        _kMarketplaceMerged,
+        jsonEncode(rows.map((e) => e.toJson()).toList()),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> restoreMergedMarketplaceCatalog() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kMarketplaceMerged);
+      if (raw == null || raw.isEmpty) return;
+      final list = jsonDecode(raw);
+      if (list is List) {
+        for (final item in list) {
+          if (item is! Map) continue;
+          final p = PluginItem.fromJson(item.cast<String, dynamic>());
+          final idx = plugins.indexWhere((e) => e.name == p.name);
+          if (idx < 0) {
+            plugins.add(p);
+          } else {
+            if (plugins[idx].source == null && p.source != null) {
+              plugins[idx].source = p.source;
+            }
+          }
+        }
+      }
+      refresh();
     } catch (_) {}
   }
 
@@ -2135,7 +2385,13 @@ class AppState extends ChangeNotifier {
         if (p is! Map) continue;
         final pname = p['name'] as String?;
         if (pname == null || pname.isEmpty) continue;
-        if (plugins.any((e) => e.name == pname)) continue;
+        if (plugins.any((e) => e.name == pname)) {
+          final existing = plugins.firstWhere((e) => e.name == pname);
+          if (existing.source == null && p['source'] != null) {
+            existing.source = _githubPluginSource(p['source'] as String?);
+          }
+          continue;
+        }
         plugins.add(
           PluginItem(
             name: pname,
@@ -2146,6 +2402,7 @@ class AppState extends ChangeNotifier {
             installed: false,
             enabled: false,
             installs: p['installs'] as int? ?? 0,
+            installsKnown: (p['installs'] is int && (p['installs'] as int) > 0),
             // PR24: hook declarations survive the marketplace import.
             hooks: _parsePluginHooks(p['hooks']),
             // PR40: an `owner/repo` source lets install fetch the
@@ -2154,6 +2411,7 @@ class AppState extends ChangeNotifier {
             // client can fetch, so it is dropped rather than kept as a
             // GitHub-shaped string that would 404.
             source: _githubPluginSource(p['source'] as String?),
+            marketplace: '$owner/$repoName',
           ),
         );
         importedPlugins++;
@@ -2214,6 +2472,12 @@ class AppState extends ChangeNotifier {
       });
     }
 
+    if (importedPlugins > 0) {
+      unawaited(persistMergedMarketplaceCatalog());
+    }
+    if (importedMcps > 0) {
+      unawaited(_persistCustomMcpServers());
+    }
     refresh();
     if (importedPlugins == 0 && importedMcps == 0) {
       return 'Fetched $owner/$repoName but found no new plugins or MCP '
@@ -2344,9 +2608,13 @@ class AppState extends ChangeNotifier {
           .map(
             (s) => jsonEncode({
               'name': s.name,
+              'author': s.author,
+              'description': s.description,
+              'category': s.category,
               'command': s.command,
               'args': s.args,
               'envHint': s.envHint,
+              'source': s.source,
               // PR41: transport/url/headers — without these a custom
               // HTTP server reloads as a broken stdio ('npx') entry.
               'transport': s.transport,
@@ -2374,18 +2642,20 @@ class AppState extends ChangeNotifier {
         final name = m['name'] as String;
         if (mcpServers.any((s) => s.name == name)) continue;
         final transport = m['transport'] as String? ?? 'stdio';
+        final source = m['source'] as String? ?? 'custom';
         mcpServers.add(
           McpServer(
             name: name,
-            author: 'you',
-            description: transport == 'http'
-                ? 'Custom MCP server (HTTP) — connects on demand.'
-                : 'Custom MCP server — connects on demand.',
-            category: 'Custom',
+            author: m['author'] as String? ?? 'you',
+            description: (m['description'] as String?) ??
+                (transport == 'http'
+                    ? 'Custom MCP server (HTTP) — connects on demand.'
+                    : 'Custom MCP server — connects on demand.'),
+            category: m['category'] as String? ?? 'Custom',
             command: m['command'] as String? ?? 'npx',
             args: (m['args'] as List?)?.cast<String>() ?? const [],
             envHint: m['envHint'] as String?,
-            source: 'custom',
+            source: source,
             custom: true,
             transport: transport,
             url: m['url'] as String?,
@@ -2425,7 +2695,8 @@ class AppState extends ChangeNotifier {
         category: category,
         installed: true,
         enabled: true,
-        installs: 1,
+        installs: 0,
+        installsKnown: false,
       ),
     );
     _persistCustomPlugins();
@@ -2473,7 +2744,8 @@ class AppState extends ChangeNotifier {
             category: m['category'] as String? ?? 'Custom',
             installed: m['installed'] as bool? ?? true,
             enabled: m['enabled'] as bool? ?? true,
-            installs: 1,
+            installs: 0,
+            installsKnown: false,
             hooks: (m['hooks'] as Map?)?.map(
                   (k, v) => MapEntry(k as String, v as String),
                 ) ??
@@ -2521,10 +2793,18 @@ class AppState extends ChangeNotifier {
         if (hk is Map) {
           p.hooks = hk.map((k, v) => MapEntry(k as String, v as String));
         }
+        if (ps.containsKey('source')) {
+          final s = ps['source'] as String?;
+          if (s != null && s.isNotEmpty) {
+            p.source = s;
+          }
+        }
       }
       refresh();
     } catch (_) {}
   }
+
+  Future<void> _applyPluginState() => _loadPluginState();
 
   // ── Custom Presets ──────────────────────────────────────────────────
   Future<void> _persistCustomPresets() async {
@@ -2749,7 +3029,6 @@ class AppState extends ChangeNotifier {
         category: 'Tool',
         installed: true,
         enabled: true,
-        installs: 482000,
       ),
       PluginItem(
         name: 'DeepThink Reasoning',
@@ -2760,7 +3039,6 @@ class AppState extends ChangeNotifier {
         category: 'Tool',
         installed: true,
         enabled: true,
-        installs: 368000,
       ),
       PluginItem(
         name: 'Image Studio',
@@ -2771,7 +3049,6 @@ class AppState extends ChangeNotifier {
         category: 'Tool',
         installed: true,
         enabled: true,
-        installs: 419000,
       ),
       PluginItem(
         name: 'File Reader',
@@ -2782,7 +3059,6 @@ class AppState extends ChangeNotifier {
         category: 'Tool',
         installed: true,
         enabled: true,
-        installs: 301000,
       ),
       PluginItem(
         name: 'Sandbox Runtime',
@@ -2793,7 +3069,6 @@ class AppState extends ChangeNotifier {
         category: 'Runtime',
         installed: true,
         enabled: true,
-        installs: 90300,
       ),
       PluginItem(
         name: 'MCP Server Hub',
@@ -2802,7 +3077,6 @@ class AppState extends ChangeNotifier {
             'Connect any Model Context Protocol server: filesystem, github, postgres, puppeteer…',
         version: '2.1.0',
         category: 'MCP',
-        installs: 345000,
       ),
       PluginItem(
         name: 'Web Fetch & Reader',
@@ -2812,7 +3086,6 @@ class AppState extends ChangeNotifier {
         version: '1.0.6',
         category: 'Tool',
         installed: true,
-        installs: 517000,
       ),
       PluginItem(
         name: 'Voice Input',
@@ -2821,7 +3094,6 @@ class AppState extends ChangeNotifier {
             'Dictate prompts hands-free, on-device speech recognition.',
         version: '0.9.8',
         category: 'Tool',
-        installs: 66000,
       ),
       PluginItem(
         name: 'Multi-Model Compare',
@@ -2830,7 +3102,6 @@ class AppState extends ChangeNotifier {
             'Send one prompt to up to 3 models side-by-side, pick the best answer.',
         version: '0.7.2',
         category: 'Tool',
-        installs: 128000,
       ),
       PluginItem(
         name: 'RAG Memory',
@@ -2839,7 +3110,6 @@ class AppState extends ChangeNotifier {
             'Long-term vector memory — the agent remembers your projects and prefs.',
         version: '1.3.0',
         category: 'Tool',
-        installs: 228000,
       ),
       PluginItem(
         name: 'Code Runner',
@@ -2848,7 +3118,6 @@ class AppState extends ChangeNotifier {
             'Run python/js snippets in chat with output preview — powered by sandbox.',
         version: '1.1.4',
         category: 'Runtime',
-        installs: 154000,
       ),
       PluginItem(
         name: 'Git Workbench',
@@ -2856,7 +3125,6 @@ class AppState extends ChangeNotifier {
         description: 'Clone, branch, commit and push from the Studio IDE.',
         version: '0.8.3',
         category: 'Tool',
-        installs: 93000,
       ),
       PluginItem(
         name: 'PR Reviewer',
@@ -2864,7 +3132,6 @@ class AppState extends ChangeNotifier {
         description: 'Auto-review GitHub PRs with inline fix suggestions.',
         version: '1.0.2',
         category: 'Agent',
-        installs: 151000,
       ),
       PluginItem(
         name: 'Web Clipper',
@@ -2873,7 +3140,6 @@ class AppState extends ChangeNotifier {
             'Save pages, snippets and notes to a searchable knowledge base.',
         version: '1.1.0',
         category: 'Tool',
-        installs: 87000,
       ),
       PluginItem(
         name: 'Translate Pro',
@@ -2882,7 +3148,6 @@ class AppState extends ChangeNotifier {
             'Document translation with layout preserved, 100+ languages.',
         version: '2.0.1',
         category: 'Tool',
-        installs: 264000,
       ),
       PluginItem(
         name: 'PDF Tools',
@@ -2890,7 +3155,6 @@ class AppState extends ChangeNotifier {
         description: 'Merge, split, compress, summarize PDFs right in chat.',
         version: '1.5.2',
         category: 'Tool',
-        installs: 198000,
       ),
       PluginItem(
         name: 'Data Analyst',
@@ -2899,7 +3163,6 @@ class AppState extends ChangeNotifier {
             'Upload CSV/Excel, get charts, trends and insights automatically.',
         version: '1.2.8',
         category: 'Tool',
-        installs: 176000,
       ),
       PluginItem(
         name: 'Study Mode',
@@ -2908,7 +3171,6 @@ class AppState extends ChangeNotifier {
             'Turn any chat into flashcards, quizzes and spaced-repetition decks.',
         version: '0.9.1',
         category: 'Tool',
-        installs: 143000,
       ),
       PluginItem(
         name: 'Meeting Notes',
@@ -2917,7 +3179,6 @@ class AppState extends ChangeNotifier {
             'Record or upload audio, get clean minutes and action items.',
         version: '1.1.6',
         category: 'Tool',
-        installs: 118000,
       ),
       PluginItem(
         name: 'Prompt Library',
@@ -2925,7 +3186,6 @@ class AppState extends ChangeNotifier {
         description: 'Community prompts with one-tap use — sorted by task.',
         version: '1.6.0',
         category: 'Tool',
-        installs: 231000,
       ),
       PluginItem(
         name: 'Screen Awareness',
@@ -2934,7 +3194,6 @@ class AppState extends ChangeNotifier {
             'Ask about anything on your screen — share a screenshot into chat.',
         version: '0.8.5',
         category: 'Tool',
-        installs: 74000,
       ),
       PluginItem(
         name: 'Calendar & Tasks',
@@ -2943,7 +3202,6 @@ class AppState extends ChangeNotifier {
             'Plan, schedule and get reminders from plain-language chat.',
         version: '1.0.7',
         category: 'Tool',
-        installs: 102000,
       ),
     ]);
 
@@ -3521,7 +3779,8 @@ class AppState extends ChangeNotifier {
           description: d,
           version: '1.${(i % 9) + 0}.${i % 7}',
           category: c,
-          installs: i,
+          installs: 0,
+          installsKnown: false,
         ),
     ]);
 

@@ -530,6 +530,7 @@ class AgentService extends ChangeNotifier {
     AppState.I.onSessionDeleted = dropSessionRun;
     // Per-session browser tabs: lazy-restore on session switch.
     AppState.I.onSessionSwitched = onSessionSwitched;
+    AppState.onRefreshSkills = refreshSkills;
     // Cold resume: rebuild subagent handles from the persisted lineage
     // after sessions load (the durable descriptor parity).
     AppState.I.onSessionsLoaded = () {
