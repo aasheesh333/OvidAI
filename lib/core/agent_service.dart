@@ -7205,6 +7205,14 @@ ${await _agentsMdBlock()}
       case 'browser_press_key':
       case 'browser_click':
       case 'browser_evaluate':
+      case 'browser_fill':
+      case 'browser_drag':
+      case 'browser_select':
+      case 'memory_save':
+      case 'create_goal':
+      case 'update_goal':
+      case 'schedule_create':
+      case 'schedule_delete':
         // Page interactions can submit forms/press buy buttons — blocked.
         return roDenied;
       default:
@@ -8308,6 +8316,18 @@ ${await _agentsMdBlock()}
     'todo_write',
     'job_start',
     'job_kill',
+    'browser_click',
+    'browser_type',
+    'browser_evaluate',
+    'browser_press_key',
+    'browser_fill',
+    'browser_drag',
+    'browser_select',
+    'memory_save',
+    'create_goal',
+    'update_goal',
+    'schedule_create',
+    'schedule_delete',
   };
 
   bool _isMutatingTool(String name) => _mutatingTools.contains(name);

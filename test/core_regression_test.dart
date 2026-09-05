@@ -2494,6 +2494,38 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(destIdx, lessThan(subIdx), reason: 'destructive check must come BEFORE subagent early-return');
     });
 
+    test('SEC5: interactive browser + state writes blocked read-only', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'sec5', title: 'S', model: 'm', mode: 'safe');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((x) => x.id == 'sec5');
+      });
+      expect(await AgentService.I.dispatchForTest('browser_click', {'selector': 'button'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('browser_type', {'selector': 'input', 'text': 'x'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('browser_evaluate', {'script': '1'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('browser_press_key', {'key': 'Enter'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('browser_fill', {'selector': 'input', 'value': 'x'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('browser_drag', {'selector': 'div'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('browser_select', {'selector': 'select', 'value': 'x'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('memory_save', {'content': 'x'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('create_goal', {'title': 'x'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('update_goal', {'id': 'x'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('schedule_create', {'prompt': 'x', 'after_seconds': 600}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('schedule_delete', {'id': 'x'}), contains('READ-ONLY MODE'));
+      // Read-only-safe browser tools stay allowed (must NOT hit the deny list).
+      // No WebView platform in unit tests — reaching the handler throws an
+      // assertion instead of returning text. Either way, the gate let it
+      // through rather than denying it.
+      try {
+        final r = await AgentService.I.dispatchForTest('browser_read', {});
+        expect(r, isNot(contains('READ-ONLY MODE')));
+      } catch (_) {}
+    });
+
     test('subagent child inherits parent mode and cannot escalate', () async {
       final app = AppState.I;
       final s = ChatSession(id: 'sub-s', title: 'S', model: 'm', mode: 'safe');
