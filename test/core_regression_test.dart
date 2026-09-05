@@ -2523,6 +2523,8 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       try {
         final r = await AgentService.I.dispatchForTest('browser_read', {});
         expect(r, isNot(contains('READ-ONLY MODE')));
+      } on TestFailure {
+        rethrow;
       } catch (_) {}
     });
 
