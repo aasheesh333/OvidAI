@@ -8,7 +8,7 @@ import 'sandbox_service.dart';
 import 'session_ledger.dart';
 import 'state.dart';
 
-/// PR24: plugin hooks — the mobile analogue of DSH's in-process JS hook
+/// PR24: plugin hooks — the mobile analogue of the reference in-process JS hook
 /// listeners. A plugin declares `hooks: {event: "<shell command>"}` in its
 /// marketplace manifest; HookService fires the command inside the sandbox
 /// at the matching agent-lifecycle point, with:
@@ -19,11 +19,11 @@ import 'state.dart';
 ///   • cwd = the session workspace
 /// A `on_pre_request` hook's stdout (first 2 KB) is returned so the run
 /// can inject it as model context; every invocation + outcome is written
-/// to the session ledger (`hook/invoked` / `hook/result`, DSH session-event
+/// to the session ledger (`hook/invoked` / `hook/result`, session-event
 /// parity). Failures NEVER break the agent run — they surface in the
 /// ledger + status line only.
 ///
-/// PR39: `on_pre_tool` is a GATING event (DSH/Claude-Code PreToolUse
+/// PR39: `on_pre_tool` is a GATING event (Claude-Code PreToolUse
 /// parity) — [fireGate] awaits every listener and can DENY the tool call
 /// before it ever runs. Contract mirrors Claude Code's PreToolUse hooks:
 /// exit code 2 blocks the call and the hook's stderr becomes the reason
@@ -312,7 +312,7 @@ class HookService extends ChangeNotifier {
       gateExecutorForTest;
 }
 
-/// Outcome of [HookService.fireGate] — DSH/Claude-Code PreToolUse parity.
+/// Outcome of [HookService.fireGate] — Claude-Code PreToolUse parity.
 @immutable
 class HookGateResult {
   final bool allowed;

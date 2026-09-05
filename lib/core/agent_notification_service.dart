@@ -5,7 +5,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'agent_service.dart';
 
-/// Foreground-service notification manager (DSH "always-on assistant"
+/// Foreground-service notification manager (the reference "always-on assistant"
 /// parity): while an agent run is active, an ongoing low-importance
 /// notification keeps the process alive (Android won't kill a foreground
 /// service under normal memory pressure), so the agent keeps working

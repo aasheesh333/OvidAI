@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
-/// Append-only session event ledger (PR19, DSH session-persistence parity).
+/// Append-only session event ledger (PR19, session-persistence parity).
 ///
 /// A PARALLEL durable record — the existing message model is untouched and
 /// remains the chat-rendering source. The ledger records STRUCTURED events
@@ -177,7 +177,7 @@ class SessionLedger {
   }
 }
 
-/// Aggregated stats over one session's ledger (DSH session-stats parity).
+/// Aggregated stats over one session's ledger (the reference session-stats parity).
 class SessionProjection {
   final int turns;
   final int steps;

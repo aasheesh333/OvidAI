@@ -31,7 +31,7 @@ import 'state.dart';
 ///   • tool results are capped so a chatty server can't flood the context;
 ///   • PR41: an UNEXPECTED disconnect (stdio process death, or an HTTP call
 ///     failing with a connection-level error) schedules automatic
-///     reconnection with exponential backoff — DSH `dsh-mcp-client` parity
+///     reconnection with exponential backoff — `ovid-mcp-client` parity
 ///     (500ms → 30s, giving up after 10 consecutive failures). A
 ///     user-initiated `disconnect()` never triggers this.
 class McpService {
@@ -145,7 +145,7 @@ class McpService {
   Future<String> _connectStdio(McpServer server, _RunningServer rs) async {
     try {
       // Spawn inside the native sandbox — servers are trusted code the
-      // user explicitly connected, same trust level as DSH MCP defaults.
+      // user explicitly connected, same trust level as MCP defaults.
       final sandbox = SandboxService.I;
       if (!sandbox.isInstalled || sandbox.prefixPath == null) {
         throw Exception(
@@ -198,7 +198,7 @@ class McpService {
       // "connected" until the next write to its dead stdin threw.
       // PR41: a death the user didn't ask for (disconnect() sets
       // rs.userDisconnected first) schedules automatic reconnection with
-      // backoff instead of just vanishing — DSH dsh-mcp-client parity.
+      // backoff instead of just vanishing — ovid-mcp-client parity.
       unawaited(
         proc.exitCode.then((code) {
           if (identical(_running[server.name], rs)) {

@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 
-/// One named agent preset (DSH agent-presets parity): a tool-roster
+/// One named agent preset (the reference agent-presets parity): a tool-roster
 /// composition plus a persona preamble. A session joins a preset; the
 /// tool gate in AgentService consults the roster on every run so the
 /// model only ever sees (and bills for) the tools the preset allows.

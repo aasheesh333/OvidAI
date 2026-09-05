@@ -2,12 +2,12 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqlite3/sqlite3.dart';
 
-/// FTS5 cross-session content search (PR19, DSH session-query-sqlite parity).
+/// FTS5 cross-session content search (PR19, session-query-sqlite parity).
 ///
 /// An on-device SQLite FTS5 index over every session's messages, refreshed
 /// from `AppState.sessions` on demand. The index is DERIVED data — sessions
 /// remain the source of truth, so a dropped index costs nothing but a
-/// rebuild. Features DSH parity:
+/// rebuild. Features parity:
 ///   • literal-phrase search (quoted phrases supported)
 ///   • ranked results (bm25) with snippet excerpts
 ///   • metadata filters (session id / model)
@@ -82,7 +82,7 @@ class SessionSearch {
   }) async {
     final db = await _open();
     // FTS5 treats bare words as implicit AND; quoted phrases match
-    // literally — same literal-phrase semantics as the DSH query service.
+    // literally — same literal-phrase semantics as the query service.
     final q = query.replaceAll("'", "''");
     final where = [
       "msgs MATCH '$q'",

@@ -21,7 +21,7 @@ class CommandResult {
   final String? feedback; // user-visible confirmation/error
   final bool clearInput;
 
-  /// popupSelect (DSH parity): 'model' or 'permission' — the UI opens the
+  /// popupSelect (the reference parity): 'model' or 'permission' — the UI opens the
   /// matching overlay picker instead of showing feedback text.
   final String? popup;
   const CommandResult({
@@ -134,7 +134,7 @@ class CommandService {
               feedback: 'Select a provider and model first.',
             );
           }
-          // PR26/C5: DSH /compact is idle-only (busy|changed error codes)
+          // PR26/C5: /compact is idle-only (busy|changed error codes)
           // — compacting under a live run would race the loop's own
           // compaction + rewrite history it is iterating.
           if (AgentService.I.busyFor(s.id)) {
@@ -183,7 +183,7 @@ class CommandService {
           if (s == null) return const CommandResult(feedback: 'No active session.');
           final q = args.trim().toLowerCase();
           if (q.isEmpty) {
-            // popupSelect (DSH parity with /model and /permission): bare
+            // popupSelect (the reference parity with /model and /permission): bare
             // /preset opens the tappable preset sheet instead of a text
             // dump — the list is right there and picking a row applies it.
             return const CommandResult(popup: 'preset');
@@ -225,7 +225,7 @@ class CommandService {
           if (s == null) return const CommandResult(feedback: 'No active session.');
           final q = args.trim();
           if (q.isEmpty) {
-            // popupSelect: bare /model opens the picker overlay (DSH).
+            // popupSelect: bare /model opens the picker overlay (the reference behavior).
             return const CommandResult(popup: 'model');
           }
           // Match on the model id, case-insensitively, across configured
@@ -262,7 +262,7 @@ class CommandService {
           final q = parts.isEmpty ? '' : parts.first;
           final flags = parts.skip(1).toSet();
           if (q.isEmpty) {
-            // popupSelect: bare /permission opens the mode sheet (DSH).
+            // popupSelect: bare /permission opens the mode sheet (the reference behavior).
             return const CommandResult(popup: 'permission');
           }
           final target = AgentMode.values.firstWhere(
@@ -342,7 +342,7 @@ class CommandService {
   @visibleForTesting
   static String? exportDirOverrideForTest;
 
-  /// DSH session-log-export parity: a streamed ZIP containing
+  /// session-log-export parity: a streamed ZIP containing
   ///   sessions.json          — every session with full messages
   ///   ledgers/`<id>`.jsonl   — the append-only event ledger per session
   /// plus a manifest. Descendants (subagent children) are inside their

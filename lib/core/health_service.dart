@@ -259,7 +259,7 @@ class HealthService extends ChangeNotifier {
         ),
       );
 
-      // ── PR22: DSH-workload probes (the exact on-device failure class) ──
+      // ── PR22: device-workload probes (the exact on-device failure class) ──
       // npx smoke: exercises the env shebang chain end-to-end (usr/bin/env
       // compat symlink + patched shebangs). If this passes, every npm/npx
       // shebang tool works.

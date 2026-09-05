@@ -187,11 +187,11 @@ class SandboxService {
     } catch (_) {}
   }
 
-  /// Storage-quota housekeeping (DSH Part 5 parity):
+  /// Storage-quota housekeeping (storage-quota parity):
   /// 1. Orphan sweep — delete ws_* dirs with no matching session id.
   /// 2. LRU eviction — oldest-accessed workspace dirs go when the
   ///    workspaces root exceeds [maxBytes]; active sessions are spared.
-  ///    DSH runs this per-session at 500MB; we run the same policy over
+  ///    The reference runs this per-session at 500MB; we run the same policy over
   ///    the whole workspaces root on launch.
   Future<void> enforceWorkspaceQuota({
     required Set<String> activeSandboxIds,
@@ -713,13 +713,13 @@ class SandboxService {
           : 'python .............. ⚠ ${pyOk ? "partial (uv missing)" : "not installed"} — will retry on first uvx MCP connect',
     );
 
-    // ── Bootstrap self-test (DSH Part 3) — EXECUTE, never just probe ──
+    // ── Bootstrap self-test (self-test) — EXECUTE, never just probe ──
     // git/curl were previously only `command -v`-probed; a broken exec-path
     // or missing libexec went unnoticed until a real clone failed mid-task.
     await selfTest(onPhase);
   }
 
-  /// DSH Part 3 self-test: run each critical runtime and CHECK its
+  /// runtime self-test: run each critical runtime and CHECK its
   /// behavior, not just its existence. Results stream to the install log;
   /// failures are warnings (health screen + next-connect retry cover them)
   /// except GIT_EXEC_PATH mismatch — the #1 real-device git failure.
@@ -866,7 +866,7 @@ export LD_LIBRARY_PATH="\$PREFIX/lib"
 export LANG="en_US.UTF-8"
 export TERM="xterm-256color"
 export SHELL="\$PREFIX/bin/bash"
-# DSH env-injection parity — interactive shells get the same set the
+# env-injection parity — interactive shells get the same set the
 # spawn-level injection provides (GIT_EXEC_PATH, NODE_PATH, npm/python).
 export GIT_EXEC_PATH="\$PREFIX/libexec/git-core"
 export GIT_CONFIG_NOSYSTEM=1
@@ -1007,7 +1007,7 @@ Acquire::https::CRLFile "$p/etc/tls/cert.pem";
     _ensureTlsConfig(prefix);
   }
 
-  /// Generate `$prefix/etc/tls/openssl.cnf` (DSH Part 3 parity) — TLSv1.2
+  /// Generate `$prefix/etc/tls/openssl.cnf` (TLS bootstrap parity) — TLSv1.2
   /// + SECLEVEL=1 so node/npm/pip TLS handshakes work on old Android
   /// OpenSSL builds that default to stricter/weaker-mixed configs.
   void _ensureTlsConfig(Directory prefix) {
@@ -1658,7 +1658,7 @@ audit=false
       'CURL_CA_BUNDLE': '$p/etc/tls/cert.pem',
       'SSL_CERT_FILE': '$p/etc/tls/cert.pem',
       'GIT_SSL_CAINFO': '$p/etc/tls/cert.pem',
-      // ── DSH-web env-injection parity (spawn-level, never profiles) ──
+      // ── web-IDE env-injection parity (spawn-level, never profiles) ──
       // The golden rule: agents run `bash -c` non-interactive, which never
       // reads .bashrc — every runtime var must be in the process env.
       // git: exec-path points at OUR libexec (compiled-in prefix would
