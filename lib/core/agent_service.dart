@@ -2340,8 +2340,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'browser_scroll',
         'description':
-            'Scroll the page like a real user. direction: up|down|top|bottom; '
-            'amount in px (default 600). Use to reveal off-screen content.',
+            'Scroll the page or an element like a real user. direction: up|down|top|bottom; '
+            'amount in px (default 600); optional selector to scroll a specific element. '
+            'Use to reveal off-screen content.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -2350,6 +2351,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
               'enum': ['up', 'down', 'top', 'bottom'],
             },
             'amount': {'type': 'integer'},
+            'selector': {'type': 'string'},
           },
           'required': ['direction'],
         },
@@ -2395,16 +2397,21 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'browser_wait_for',
         'description':
-            'Wait until text appears on the page (or a timeout ms elapses). '
+            'Wait until text appears on the page or an element matches a state '
+            '(visible|hidden|text, or timeout ms elapses). '
             'Use after an action that loads content asynchronously. '
-            'Returns the matched text or "timeout".',
+            'Returns the matched condition or "timeout".',
         'parameters': {
           'type': 'object',
           'properties': {
             'text': {'type': 'string'},
+            'selector': {'type': 'string'},
+            'state': {
+              'type': 'string',
+              'enum': ['visible', 'hidden', 'text'],
+            },
             'timeoutMs': {'type': 'integer'},
           },
-          'required': ['text'],
         },
       },
     },
@@ -2414,8 +2421,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         'name': 'browser_snapshot',
         'description':
             'Return an accessibility-style outline of the page: interactive '
-            'elements (links, buttons, inputs) with their text and a CSS '
-            'selector you can pass to browser_click/browser_type. '
+            'elements (links, buttons, inputs) with their text, CSS selector, '
+            'role, and state (disabled, checked, selected). '
             'Use this to decide WHAT to click instead of guessing selectors.',
         'parameters': {'type': 'object', 'properties': {}},
       },
@@ -2522,12 +2529,14 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         'name': 'browser_drag',
         'description':
             'Drag element `from` (CSS selector) onto element `to` via a '
-            'pointerdown/move/up sequence (HTML5 drag + mouse events).',
+            'pointerdown/move/up sequence (HTML5 drag + mouse events). '
+            'Optional steps (default 5) sets interpolated pointermove frames.',
         'parameters': {
           'type': 'object',
           'properties': {
             'from': {'type': 'string'},
             'to': {'type': 'string'},
+            'steps': {'type': 'integer'},
           },
           'required': ['from', 'to'],
         },
@@ -6661,16 +6670,26 @@ ${await _agentsMdBlock()}
         tab.controller ??= controllerForTab(tab);
         final dir = args['direction'] as String;
         final amount = (args['amount'] as num?)?.toInt() ?? 600;
-        final js = switch (dir) {
-          'up' =>
-            'window.scrollBy({top:-$amount,behavior:"smooth"});"scrolled up"',
-          'down' =>
-            'window.scrollBy({top:$amount,behavior:"smooth"});"scrolled down"',
-          'top' => 'window.scrollTo({top:0,behavior:"smooth"});"top"',
-          'bottom' =>
-            'window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"});"bottom"',
-          _ => '"unknown direction"',
-        };
+        final target = args['selector'] as String?;
+        final js = target == null || target.trim().isEmpty
+            ? switch (dir) {
+                'up' =>
+                  'window.scrollBy({top:-$amount,behavior:"smooth"});"scrolled up"',
+                'down' =>
+                  'window.scrollBy({top:$amount,behavior:"smooth"});"scrolled down"',
+                'top' => 'window.scrollTo({top:0,behavior:"smooth"});"top"',
+                'bottom' =>
+                  'window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"});"bottom"',
+                _ => '"unknown direction"',
+              }
+            : '''
+(() => {
+  const el = document.querySelector(${jsonEncode(target)});
+  if (!el) return 'no element: $target';
+  el.scrollIntoView({block:'center', behavior:'instant'});
+  el.scrollBy({top:${dir == 'up' ? '-$amount' : dir == 'down' ? '$amount' : '0'}, behavior:'smooth'});
+  return 'scrolled element $target $dir';
+})()''';
         try {
           final r = await tab.controller!.runJavaScriptReturningResult(js);
           _emit('shell', 'scroll $dir');
@@ -6715,7 +6734,7 @@ ${await _agentsMdBlock()}
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
         final key = args['key'] as String;
-        final code = {'Enter': 13, 'Tab': 9, 'Escape': 27}[key] ?? 0;
+        final code = keyCodeFor(key);
         final js =
             '''
 (() => {
@@ -6736,7 +6755,9 @@ ${await _agentsMdBlock()}
       case 'browser_wait_for':
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
-        final text = args['text'] as String;
+        final text = args['text'] as String?;
+        final sel = args['selector'] as String?;
+        final state = (args['state'] as String? ?? 'text').toLowerCase();
         final timeoutMs = (args['timeoutMs'] as num?)?.toInt() ?? 10000;
         // Poll from Dart — runJavaScriptReturningResult doesn't await JS
         // promises reliably on all webview versions.
@@ -6744,9 +6765,22 @@ ${await _agentsMdBlock()}
         var found = false;
         while (sw.elapsedMilliseconds < timeoutMs) {
           try {
-            final r = await tab.controller!.runJavaScriptReturningResult(
-              'document.body ? document.body.innerText.includes(${jsonEncode(text)}) : false',
-            );
+            final String checkJs;
+            if (sel != null && sel.trim().isNotEmpty) {
+              final encSel = jsonEncode(sel);
+              checkJs = switch (state) {
+                'visible' =>
+                  '(() => { const el = document.querySelector($encSel); if (!el) return false; const r = el.getBoundingClientRect(); const s = window.getComputedStyle(el); return s.display !== "none" && s.visibility !== "hidden" && r.width > 0 && r.height > 0; })()',
+                'hidden' =>
+                  '(() => { const el = document.querySelector($encSel); if (!el) return true; const r = el.getBoundingClientRect(); const s = window.getComputedStyle(el); return s.display === "none" || s.visibility === "hidden" || (r.width === 0 && r.height === 0); })()',
+                _ =>
+                  '(() => { const el = document.querySelector($encSel); return el ? el.innerText.includes(${jsonEncode(text ?? '')}) : false; })()',
+              };
+            } else {
+              checkJs =
+                  'document.body ? document.body.innerText.includes(${jsonEncode(text ?? '')}) : false';
+            }
+            final r = await tab.controller!.runJavaScriptReturningResult(checkJs);
             if (r.toString() == 'true') {
               found = true;
               break;
@@ -6754,10 +6788,15 @@ ${await _agentsMdBlock()}
           } catch (_) {}
           await Future.delayed(const Duration(milliseconds: 300));
         }
-        _emit('shell', found ? 'wait ✓ $text' : 'wait ⏱ timeout $text');
+        final targetDesc = (sel != null && sel.trim().isNotEmpty)
+            ? (state == 'text' && text != null && text.isNotEmpty
+                ? '$sel contains "$text"'
+                : '$sel ($state)')
+            : (text ?? '');
+        _emit('shell', found ? 'wait ✓ $targetDesc' : 'wait ⏱ timeout $targetDesc');
         return found
-            ? 'found: $text (after ${sw.elapsedMilliseconds}ms)'
-            : 'timeout: "$text" did not appear within ${timeoutMs}ms';
+            ? 'found: $targetDesc (after ${sw.elapsedMilliseconds}ms)'
+            : 'timeout: "$targetDesc" did not appear within ${timeoutMs}ms';
 
       // ── PR28: real-user browser control (chrome-devtools-mcp parity) ──
       case 'browser_back':
@@ -6825,6 +6864,7 @@ ${await _agentsMdBlock()}
         tab.controller ??= controllerForTab(tab);
         final fromSel = args['from'] as String;
         final toSel = args['to'] as String;
+        final steps = (args['steps'] as num?)?.toInt() ?? 5;
         final js = '''
 (() => {
   const from = document.querySelector(${jsonEncode(fromSel)});
@@ -6841,8 +6881,14 @@ ${await _agentsMdBlock()}
     isPrimary:true, button:0, buttons:1, clientX:x, clientY:y});
   from.dispatchEvent(mk('pointerdown', fx, fy));
   from.dispatchEvent(new MouseEvent('mousedown', {bubbles:true,cancelable:true,clientX:fx,clientY:fy,button:0}));
-  to.dispatchEvent(mk('pointermove', tx, ty));
-  to.dispatchEvent(new MouseEvent('mousemove', {bubbles:true,cancelable:true,clientX:tx,clientY:ty}));
+  const totalSteps = Math.max(1, $steps);
+  for (let s = 1; s <= totalSteps; s++) {
+    const curX = fx + (tx - fx) * (s / totalSteps);
+    const curY = fy + (ty - fy) * (s / totalSteps);
+    const targetEl = (s === totalSteps) ? to : ((document.elementFromPoint ? document.elementFromPoint(curX, curY) : null) || to);
+    targetEl.dispatchEvent(mk('pointermove', curX, curY));
+    targetEl.dispatchEvent(new MouseEvent('mousemove', {bubbles:true,cancelable:true,clientX:curX,clientY:curY,button:0,buttons:1}));
+  }
   to.dispatchEvent(mk('pointerup', tx, ty));
   to.dispatchEvent(new MouseEvent('mouseup', {bubbles:true,cancelable:true,clientX:tx,clientY:ty,button:0}));
   // HTML5 DnD chain too — frameworks listen to either.
@@ -7065,7 +7111,13 @@ ${await _agentsMdBlock()}
       const c = el.className.trim().split(/\s+/)[0];
       if (c) cs = tag + '.' + c;
     }
-    out.push(tag + ' | ' + text + ' | ' + cs);
+    const role = el.getAttribute('role') || tag;
+    const states = [];
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') states.push('disabled');
+    if (el.checked || el.getAttribute('aria-checked') === 'true') states.push('checked');
+    if (el.selected || el.getAttribute('aria-selected') === 'true') states.push('selected');
+    const stateStr = states.join(',') || 'normal';
+    out.push(tag + ' | ' + text + ' | ' + cs + ' | ' + role + ' | ' + stateStr);
     i++;
   }
   return out.join('\n') || '(no interactive elements)';
@@ -9192,6 +9244,34 @@ ${await _agentsMdBlock()}
   }
 
   static String? _runSessionOverrideForTest;
+
+  /// PR28 / chrome-devtools parity: keycode lookup for browser_press_key.
+  static int keyCodeFor(String key) {
+    const m = {
+      'Enter': 13,
+      'Tab': 9,
+      'Escape': 27,
+      ' ': 32,
+      'ArrowLeft': 37,
+      'ArrowUp': 38,
+      'ArrowRight': 39,
+      'ArrowDown': 40,
+      'Backspace': 8,
+      'Delete': 46,
+      'Home': 36,
+      'End': 35,
+      'Shift': 16,
+      'Control': 17,
+      'Alt': 18,
+      'Meta': 91,
+    };
+    if (m.containsKey(key)) return m[key]!;
+    if (key.length == 1) return key.toUpperCase().codeUnitAt(0);
+    return 0;
+  }
+
+  @visibleForTesting
+  static int keyCodeForTest(String key) => keyCodeFor(key);
 
   /// Test seam: the subagent id counter (reseed checks after cold resume).
   @visibleForTesting

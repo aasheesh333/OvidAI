@@ -2587,6 +2587,41 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(await AgentService.I.dispatchForTest('browser_cookies', {'set': 'a=b'}), contains('READ-ONLY MODE'));
     });
 
+    test('BR4: keycode map covers arrows + modifiers (pure helper)', () {
+      expect(AgentService.keyCodeForTest('ArrowLeft'), 37);
+      expect(AgentService.keyCodeForTest('ArrowRight'), 39);
+      expect(AgentService.keyCodeForTest('Enter'), 13);
+      expect(AgentService.keyCodeForTest('a'), 65);
+      expect(AgentService.keyCodeForTest('Shift'), 16);
+      expect(AgentService.keyCodeForTest('Control'), 17);
+      expect(AgentService.keyCodeForTest('Alt'), 18);
+      expect(AgentService.keyCodeForTest('Meta'), 91);
+      expect(AgentService.keyCodeForTest('Tab'), 9);
+      expect(AgentService.keyCodeForTest('Escape'), 27);
+      expect(AgentService.keyCodeForTest(' '), 32);
+
+      final tools = AgentService.I.toolsForTest();
+      final toolMap = {
+        for (final t in tools)
+          t['function']['name'] as String: t['function'] as Map<String, dynamic>
+      };
+
+      final scrollParams = toolMap['browser_scroll']!['parameters']['properties'] as Map;
+      expect(scrollParams.containsKey('selector'), isTrue);
+
+      final waitParams = toolMap['browser_wait_for']!['parameters']['properties'] as Map;
+      expect(waitParams.containsKey('selector'), isTrue);
+      expect(waitParams.containsKey('state'), isTrue);
+
+      final dragParams = toolMap['browser_drag']!['parameters']['properties'] as Map;
+      expect(dragParams.containsKey('steps'), isTrue);
+
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(src, contains('el.scrollBy({top:'));
+      expect(src, contains('totalSteps'));
+      expect(src, contains("tag + ' | ' + text + ' | ' + cs + ' | ' + role + ' | ' + stateStr"));
+    });
+
     test('subagent child inherits parent mode and cannot escalate', () async {
       final app = AppState.I;
       final s = ChatSession(id: 'sub-s', title: 'S', model: 'm', mode: 'safe');
