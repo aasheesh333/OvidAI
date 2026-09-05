@@ -160,6 +160,12 @@ class PluginItem {
   /// commands are the honest equivalent.)
   Map<String, String> hooks;
 
+  /// Task 3: optional per-hook matcher regex (event name → regex pattern).
+  /// When present, the hook fires only when the tool name (payload `tool`)
+  /// matches the pattern. Populated from `hooks/hooks.json`; empty means the
+  /// hook fires for every tool.
+  Map<String, String> hookMatchers;
+
   PluginItem({
     required this.name,
     required this.author,
@@ -171,6 +177,7 @@ class PluginItem {
     this.installs = 0,
     this.installsKnown = false,
     this.hooks = const {},
+    this.hookMatchers = const {},
     this.source,
     this.marketplace,
   });
@@ -188,6 +195,7 @@ class PluginItem {
     if (source != null) 'source': source,
     if (marketplace != null) 'marketplace': marketplace,
     if (hooks.isNotEmpty) 'hooks': hooks,
+    if (hookMatchers.isNotEmpty) 'hookMatchers': hookMatchers,
   };
 
   factory PluginItem.fromJson(Map<String, dynamic> j) => PluginItem(
@@ -203,6 +211,7 @@ class PluginItem {
     source: j['source'] as String?,
     marketplace: j['marketplace'] as String?,
     hooks: (j['hooks'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())) ?? const {},
+    hookMatchers: (j['hookMatchers'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())) ?? const {},
   );
 
   /// Valid hook event names (mirrors the wired points in AgentService).
@@ -2379,6 +2388,80 @@ class AppState extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// Task 3: read the plugin's `hooks/hooks.json` from its installed content
+  /// cache and register the declared hooks onto the plugin — including the
+  /// optional per-hook `matcher` regex (event → pattern). Accepts the
+  /// Claude-Code map form (`event → command` string, or `event →
+  /// {command, matcher}`) and the list form (`[{event, command, matcher}]`).
+  /// Returns the number of hooks registered. Never throws.
+  Future<int> registerPluginHooks(PluginItem plugin) async {
+    try {
+      final source = plugin.source;
+      if (source == null) return 0;
+      final cache = await pluginCacheDirFor(source);
+      final f = File('${cache.path}/hooks/hooks.json');
+      if (!f.existsSync()) return 0;
+      final raw = f.readAsStringSync();
+      if (raw.trim().isEmpty) return 0;
+      final j = (jsonDecode(raw) as Map?)?.cast<String, dynamic>();
+      if (j == null) return 0;
+      final collected = _collectHookDefs(j['hooks']);
+      plugin.hooks = Map<String, String>.from(plugin.hooks)
+        ..addAll(collected.hooks);
+      plugin.hookMatchers = Map<String, String>.from(plugin.hookMatchers)
+        ..addAll(collected.matchers);
+      if (collected.hooks.isNotEmpty) {
+        await _persistPluginState();
+        refresh();
+      }
+      return collected.hooks.length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Parse a `hooks` document into event → command + event → matcher maps.
+  /// Accepts map form (value is a bare command string or {command, matcher})
+  /// and list form ({event, command, matcher}). Only known event names are
+  /// kept; empty commands are skipped.
+  ({Map<String, String> hooks, Map<String, String> matchers}) _collectHookDefs(
+    dynamic raw,
+  ) {
+    final hooks = <String, String>{};
+    final matchers = <String, String>{};
+    if (raw is Map) {
+      raw.forEach((k, v) {
+        final ev = (k as String).trim();
+        if (!PluginItem.hookEvents.contains(ev)) return;
+        String? cmd;
+        String? matcher;
+        if (v is String) {
+          cmd = v;
+        } else if (v is Map) {
+          cmd = v['command'] as String?;
+          matcher = v['matcher'] as String?;
+        }
+        if (cmd == null || cmd.trim().isEmpty) return;
+        hooks[ev] = cmd.trim();
+        if (matcher != null && matcher.trim().isNotEmpty) {
+          matchers[ev] = matcher.trim();
+        }
+      });
+    } else if (raw is List) {
+      for (final e in raw) {
+        if (e is! Map) continue;
+        final ev = (e['event'] as String?)?.trim();
+        final cmd = e['command'] as String?;
+        if (ev == null || !PluginItem.hookEvents.contains(ev)) continue;
+        if (cmd == null || cmd.trim().isEmpty) continue;
+        hooks[ev] = cmd.trim();
+        final m = e['matcher'] as String?;
+        if (m != null && m.trim().isNotEmpty) matchers[ev] = m.trim();
+      }
+    }
+    return (hooks: hooks, matchers: matchers);
+  }
+
   /// Merge a parsed marketplace JSON document into the catalog. Accepts
   /// both list-form and map-form (Claude Desktop / Codex / Cursor shape)
   /// Parse a plugin manifest `hooks` map — event → shell command. Only
@@ -2851,6 +2934,7 @@ class AppState extends ChangeNotifier {
           'installed': p.installed,
           'enabled': p.enabled,
           if (p.hooks.isNotEmpty) 'hooks': p.hooks,
+          if (p.hookMatchers.isNotEmpty) 'hookMatchers': p.hookMatchers,
           // PR40: persist source too — without it, a marketplace plugin's
           // fetched commands/skills root can no longer be resolved after
           // a restart (the seed list has no source; only a live
@@ -2877,6 +2961,10 @@ class AppState extends ChangeNotifier {
         final hk = ps['hooks'];
         if (hk is Map) {
           p.hooks = hk.map((k, v) => MapEntry(k as String, v as String));
+        }
+        final hm = ps['hookMatchers'];
+        if (hm is Map) {
+          p.hookMatchers = hm.map((k, v) => MapEntry(k as String, v as String));
         }
         if (ps.containsKey('source')) {
           final s = ps['source'] as String?;

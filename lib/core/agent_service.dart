@@ -5987,7 +5987,7 @@ ${await _agentsMdBlock()}
       final gate = await HookService.I.fireGate(
         'on_pre_tool',
         ledgerSid ?? '',
-        payload: {'tool': name},
+        payload: {'tool': name, 'args': args},
       );
       if (!gate.allowed) {
         // Reuses the existing "DENIED" prefix contract (same UI 'stopped'
@@ -6648,6 +6648,9 @@ ${await _agentsMdBlock()}
               // MCP servers so they auto-connect on next launch.
               mountedMcps =
                   await AppState.I.mountPluginMcpServers(match.source!);
+              // Task 3: register hooks/hooks.json (matcher + JSON decision
+              // hooks) from the fetched plugin content.
+              await AppState.I.registerPluginHooks(match);
             }
           }
           final parts = <String>[];

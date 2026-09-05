@@ -99,6 +99,7 @@ class HookService extends ChangeNotifier {
     final collected = <String>[];
 
     for (final p in listeners) {
+      if (!_hookMatches(p, event, payload)) continue;
       final cmd = p.hooks[event]!;
       final env = <String, String>{
         'OVID_HOOK_EVENT': event,
@@ -190,6 +191,43 @@ class HookService extends ChangeNotifier {
     return compact;
   }
 
+  /// Task 3: whether plugin [p]'s hook for [event] should fire for [payload].
+  /// A hook with a `matcher` regex fires only when the payload's `tool` name
+  /// matches; no matcher means "fire for anything". An unparseable regex can
+  /// never match, so the hook is skipped — fail-open, like every other broken
+  /// hook shape (a matcher typo must not brick tool dispatch).
+  bool _hookMatches(PluginItem p, String event, Map<String, dynamic> payload) {
+    final matcher = p.hookMatchers[event];
+    if (matcher == null || matcher.isEmpty) return true;
+    final tool = payload['tool']?.toString() ?? '';
+    try {
+      return RegExp(matcher).hasMatch(tool);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Task 3: parse a hook's stdout for a JSON block decision
+  /// (`{"decision":"block","reason":"…"}`). Returns the reason string when
+  /// stdout is such a block, null otherwise (including malformed/non-JSON
+  /// output — those fall through to the existing exit-code contract).
+  static String? jsonBlockReason(String out) {
+    final t = out.trim();
+    if (!t.startsWith('{') || !t.endsWith('}')) return null;
+    dynamic j;
+    try {
+      j = jsonDecode(t);
+    } catch (_) {
+      return null;
+    }
+    if (j is! Map) return null;
+    if (j['decision'] != 'block') return null;
+    final reason = j['reason'];
+    return (reason is String && reason.trim().isNotEmpty)
+        ? reason.trim()
+        : null;
+  }
+
   /// PR39: fire the GATING event [event] (`on_pre_tool`) for [sessionId]
   /// and return whether the tool call is allowed. Exit code 2 from ANY
   /// listener denies — matching Claude Code's PreToolUse contract, where
@@ -220,6 +258,7 @@ class HookService extends ChangeNotifier {
     final cwd = await AgentService.I.sessionWorkDirForTest();
 
     for (final p in listeners) {
+      if (!_hookMatches(p, event, payload)) continue;
       final cmd = p.hooks[event]!;
       final env = <String, String>{
         'OVID_HOOK_EVENT': event,
@@ -265,17 +304,20 @@ class HookService extends ChangeNotifier {
           } catch (_) {}
           continue;
         }
-        if (code == 2) {
+        final blockReason = jsonBlockReason(out);
+        if (code == 2 || blockReason != null) {
           failed++;
-          final reason = out.trim().isEmpty
-              ? '${p.name} denied this action'
-              : cleanHookJson(out.trim());
+          final reason = blockReason ??
+              (out.trim().isEmpty
+                  ? '${p.name} denied this action'
+                  : cleanHookJson(out.trim()));
           try {
             await SessionLedger.I.append(sessionId, 'hook/result', {
               ...record,
               'ok': false,
-              'exit': 2,
+              'exit': code,
               'decision': 'deny',
+              'blockReason': ?blockReason,
               'reason': reason,
             });
           } catch (_) {}

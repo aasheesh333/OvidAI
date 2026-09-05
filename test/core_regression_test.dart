@@ -6911,6 +6911,266 @@ block</pre>
     });
   });
 
+  group('Task 3: hook args + matchers + JSON decision', () {
+    test('on_pre_tool matcher skips a non-matching tool (fails open)', () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'matcher-skip',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_tool': 'exit 2'},
+        hookMatchers: {'on_pre_tool': 'run_shell'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      var called = false;
+      svc.gateExecutorForTest = (cmd, env) async {
+        called = true;
+        return (2, 'blocked');
+      };
+      addTearDown(() => svc.gateExecutorForTest = null);
+
+      final res = await svc.fireGate(
+        'on_pre_tool',
+        'task3-sess-1',
+        payload: {'tool': 'file_read', 'args': {'path': '/etc/hosts'}},
+      );
+      expect(res.allowed, isTrue);
+      expect(called, isFalse, reason: 'matcher must skip the non-matching hook');
+    });
+
+    test('on_pre_tool matcher blocks a matching tool', () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'matcher-block',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_tool': 'exit 2'},
+        hookMatchers: {'on_pre_tool': 'run_shell'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      svc.gateExecutorForTest = (cmd, env) async => (2, 'denied by guard');
+      addTearDown(() => svc.gateExecutorForTest = null);
+
+      final res = await svc.fireGate(
+        'on_pre_tool',
+        'task3-sess-2',
+        payload: {'tool': 'run_shell', 'args': {'command': 'rm -rf /'}},
+      );
+      expect(res.allowed, isFalse);
+      expect(res.deniedByPlugin, 'matcher-block');
+    });
+
+    test('on_pre_tool matcher is a regex (run_.* matches run_shell)', () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'matcher-regex',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_tool': 'exit 2'},
+        hookMatchers: {'on_pre_tool': 'run_.*'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      svc.gateExecutorForTest = (cmd, env) async => (2, 'regex block');
+      addTearDown(() => svc.gateExecutorForTest = null);
+
+      final res = await svc.fireGate(
+        'on_pre_tool',
+        'task3-sess-3',
+        payload: {'tool': 'run_shell', 'args': {}},
+      );
+      expect(res.allowed, isFalse);
+    });
+
+    test('JSON stdout decision block denies even on exit code 0', () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'json-block',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_tool': 'decide'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      svc.gateExecutorForTest = (cmd, env) async => (
+        0,
+        '{"decision":"block","reason":"policy forbids this"}',
+      );
+      addTearDown(() => svc.gateExecutorForTest = null);
+
+      final res = await svc.fireGate(
+        'on_pre_tool',
+        'task3-sess-4',
+        payload: {'tool': 'run_shell', 'args': {'command': 'rm'}},
+      );
+      expect(res.allowed, isFalse);
+      expect(res.reason, contains('policy forbids this'));
+    });
+
+    test('JSON stdout without a block decision (exit 0) allows', () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'json-allow',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_tool': 'report'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      svc.gateExecutorForTest = (cmd, env) async => (
+        0,
+        '{"decision":"allow","note":"looks fine"}',
+      );
+      addTearDown(() => svc.gateExecutorForTest = null);
+
+      final res = await svc.fireGate(
+        'on_pre_tool',
+        'task3-sess-5',
+        payload: {'tool': 'run_shell', 'args': {}},
+      );
+      expect(res.allowed, isTrue);
+    });
+
+    test('on_pre_tool payload carries full args (not just tool name)', () async {
+      final app = AppState.I;
+      final p = PluginItem(
+        name: 'args-payload',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        installs: 1,
+        hooks: {'on_pre_tool': 'inspect'},
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+      final svc = HookService.I;
+      Map<String, String>? gotEnv;
+      svc.gateExecutorForTest = (cmd, env) async {
+        gotEnv = env;
+        return (0, '');
+      };
+      addTearDown(() => svc.gateExecutorForTest = null);
+
+      await svc.fireGate(
+        'on_pre_tool',
+        'task3-sess-6',
+        payload: {'tool': 'run_shell', 'args': {'command': 'rm -rf /'}},
+      );
+      final payload = gotEnv!['OVID_HOOK_PAYLOAD']!;
+      expect(payload, contains('args'));
+      expect(payload, contains('rm -rf /'));
+    });
+
+    test('registerPluginHooks parses hooks.json map form with matcher', () async {
+      final app = AppState.I;
+      final tempDir = Directory.systemTemp.createTempSync('ovid_hooks_map_');
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+      AppState.pluginCacheRootOverrideForTest = tempDir;
+      addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+
+      final p = PluginItem(
+        name: 'hooked-map',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'acme/hooked',
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+
+      final cacheDir = Directory('${tempDir.path}/plugin-content/acme_hooked');
+      cacheDir.createSync(recursive: true);
+      Directory('${cacheDir.path}/hooks').createSync(recursive: true);
+      File('${cacheDir.path}/hooks/hooks.json').writeAsStringSync(jsonEncode({
+        'hooks': {
+          'on_pre_tool': 'exit 2',
+          'on_turn_start': {'command': 'echo start', 'matcher': 'run_*'},
+        },
+      }));
+
+      final n = await app.registerPluginHooks(p);
+      expect(n, 2);
+      expect(p.hooks['on_pre_tool'], 'exit 2');
+      expect(p.hooks['on_turn_start'], 'echo start');
+      expect(p.hookMatchers['on_turn_start'], 'run_*');
+    });
+
+    test('registerPluginHooks parses hooks.json list form', () async {
+      final app = AppState.I;
+      final tempDir = Directory.systemTemp.createTempSync('ovid_hooks_list_');
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+      AppState.pluginCacheRootOverrideForTest = tempDir;
+      addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+
+      final p = PluginItem(
+        name: 'hooked-list',
+        author: 'you',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'acme/hooked-list',
+      );
+      app.plugins.add(p);
+      addTearDown(() => app.plugins.remove(p));
+
+      final cacheDir = Directory('${tempDir.path}/plugin-content/acme_hooked-list');
+      cacheDir.createSync(recursive: true);
+      Directory('${cacheDir.path}/hooks').createSync(recursive: true);
+      File('${cacheDir.path}/hooks/hooks.json').writeAsStringSync(jsonEncode({
+        'hooks': [
+          {'event': 'on_pre_tool', 'command': 'exit 2', 'matcher': 'run_*'},
+          {'event': 'on_turn_end', 'command': 'echo done'},
+        ],
+      }));
+
+      final n = await app.registerPluginHooks(p);
+      expect(n, 2);
+      expect(p.hooks['on_pre_tool'], 'exit 2');
+      expect(p.hookMatchers['on_pre_tool'], 'run_*');
+      expect(p.hooks['on_turn_end'], 'echo done');
+    });
+  });
+
   group('PR40: plugin content mounting — install fetches real capability', () {
     test('marketplace plugin entry with owner/repo source keeps it', () {
       final app = AppState.I;

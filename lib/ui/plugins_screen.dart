@@ -656,6 +656,7 @@ class PluginDetailScreen extends StatelessWidget {
                           if (fetchedFiles > 0) {
                             final mounted = await AppState.I
                                 .mountPluginMcpServers(plugin.source!);
+                            await AppState.I.registerPluginHooks(plugin);
                             if (mounted > 0) {
                               messenger.showSnackBar(
                                 SnackBar(
