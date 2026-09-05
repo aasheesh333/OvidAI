@@ -8211,6 +8211,31 @@ url = "https://api.example.com/mcp"
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       expect(src, isNot(contains('turn budget exhausted — task paused')));
     });
+
+    test('BRD2: desktop mode applies zoom JS live + persists across page loads', () {
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      // The zoom helper must inject the zoom into the live page
+      // (browser_resize parity — setting tab.zoom alone renders nothing).
+      final helper = src.indexOf('Future<void> _applyTabZoom');
+      expect(helper, isNot(-1), reason: '_applyTabZoom helper exists');
+      expect(src.substring(helper, (helper + 600).clamp(0, src.length)),
+          contains('style.zoom'));
+      // setTabDesktopMode must call the helper on the live controller.
+      final idx = src.indexOf('Future<void> setTabDesktopMode');
+      expect(idx, isNot(-1), reason: 'setTabDesktopMode exists');
+      final end = src.indexOf('consoleBucketFor', idx);
+      final body = src.substring(idx, end == -1 ? src.length : end);
+      expect(body, contains('_applyTabZoom'),
+          reason: 'setTabDesktopMode must apply zoom JS on the live controller');
+      // onPageFinished must re-apply the tab zoom (reload wipes it).
+      final finished = src.indexOf('onPageFinished: (url)');
+      expect(finished, isNot(-1));
+      final finishedEnd = src.indexOf('onWebResourceError', finished);
+      final finishedBody = src.substring(
+          finished, finishedEnd == -1 ? src.length : finishedEnd);
+      expect(finishedBody, contains('_applyTabZoom'),
+          reason: 'onPageFinished must re-apply tab.zoom after every load/reload');
+    });
   });
 }
 

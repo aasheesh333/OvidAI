@@ -1264,6 +1264,20 @@ class AgentService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Inject the tab's logical zoom into the live page (browser_resize
+  /// parity). Zoom is a per-document CSS property — setting [tab.zoom]
+  /// alone changes nothing on screen, and every navigation/reload wipes
+  /// it, so every mode switch AND every page-finished must re-apply it.
+  Future<void> _applyTabZoom(BrowserTab tab) async {
+    final c = tab.controller;
+    if (c == null) return;
+    try {
+      await c.runJavaScript(
+        'document.documentElement.style.zoom = "${tab.zoom}";',
+      );
+    } catch (_) {}
+  }
+
   Future<void> setTabDesktopMode(BrowserTab tab, bool desktop, {bool reload = true}) async {
     tab.desktopMode = desktop;
     if (desktop) {
@@ -1272,6 +1286,7 @@ class AgentService extends ChangeNotifier {
       }
       if (tab.controller != null) {
         await tab.controller!.setUserAgent(BrowserTab.desktopUserAgent);
+        await _applyTabZoom(tab);
         if (reload && tab.loadedOnce) {
           await tab.controller!.reload();
         }
@@ -1280,6 +1295,7 @@ class AgentService extends ChangeNotifier {
       tab.zoom = 1.0;
       if (tab.controller != null) {
         await tab.controller!.setUserAgent(null);
+        await _applyTabZoom(tab);
         if (reload && tab.loadedOnce) {
           await tab.controller!.reload();
         }
@@ -1340,6 +1356,10 @@ class AgentService extends ChangeNotifier {
             browserUrl = url;
             notifyListeners();
             _persistBrowserTabs();
+            // Re-apply logical zoom: every navigation/reload resets the
+            // document's CSS zoom, so desktop-mode (and browser_resize)
+            // sizing must be re-injected on every page load.
+            unawaited(_applyTabZoom(tab));
             // Dialog/popup capture: webview_flutter has no onJsAlert API,
             // so shim alert/confirm/prompt + window.open once per page.
             try {
