@@ -765,8 +765,8 @@ void main() {
     });
   });
 
-  // ── PR6: DSH-web parity (scroll/meta/modes/studio) ────────────────────
-  group('PR6: DSH-web parity', () {
+  // ── PR6: web-IDE parity (scroll/meta/modes/studio) ────────────────────
+  group('PR6: web-IDE parity', () {
     test('Message.elapsedMs persists through JSON', () {
       final m = Message(role: 'assistant', content: 'ok', elapsedMs: 1234);
       final back = Message.fromJson(m.toJson());
@@ -798,7 +798,7 @@ void main() {
     });
 
     test(
-      'AgentMode labels match DSH (Read-Only/General/Full Access/Studio)',
+      'AgentMode labels match (Read-Only/General/Full Access/Studio)',
       () {
         expect(AgentMode.safe.label, 'Read-Only');
         expect(AgentMode.auto.label, 'General');
@@ -947,7 +947,7 @@ void main() {
     });
   });
 
-  group('PR8: DSH parity — goals, schedules, memory, theme', () {
+  group('PR8: parity — goals, schedules, memory, theme', () {
     test('sandbox arch detection handles all Platform.version shapes', () {
       // The bug this guards: "android_arm64" (the ACTUAL Android engine
       // string) must be detected as arm64. The old check looked for
@@ -1006,7 +1006,7 @@ void main() {
       expect(Message.fromJson(tail.toJson()).kind, MsgKind.turnTail);
     });
 
-    test('MsgKind.compact row round-trips through JSON (DSH transcript)', () {
+    test('MsgKind.compact row round-trips through JSON (the reference transcript)', () {
       final c = Message(
         role: 'assistant',
         kind: MsgKind.compact,
@@ -1019,7 +1019,7 @@ void main() {
       expect(r.toolDetail, contains('Summary'));
     });
 
-    test('tool icon + title mapping (DSH ToolRow parity)', () {
+    test('tool icon + title mapping (the reference ToolRow parity)', () {
       expect(AgentService.toolIcon('run_shell'), 'terminal');
       expect(AgentService.toolIcon('fs_edit'), 'edit');
       expect(AgentService.toolIcon('file_read'), 'read');
@@ -1032,7 +1032,7 @@ void main() {
     });
 
     test(
-      'per-model context windows (DSH compaction parity, all providers)',
+      'per-model context windows (the reference compaction parity, all providers)',
       () {
         // Known families → their declared windows.
         expect(AgentService.contextWindowFor('deepseek-chat'), 128000);
@@ -1049,14 +1049,14 @@ void main() {
         );
         // Variant suffixes (· Medium) fall back to the base model window.
         expect(AgentService.contextWindowFor('deepseek-chat · High'), 128000);
-        // Custom-provider / unknown models get the DSH 1M default.
+        // Custom-provider / unknown models get the 1M default.
         expect(AgentService.contextWindowFor('my-custom-model-x1'), 1000000);
         expect(AgentService.contextWindowFor(''), 1000000);
       },
     );
 
     test(
-      'token estimate heuristic (DSH token-meter: 4 chars/token + overhead)',
+      'token estimate heuristic (the reference token-meter: 4 chars/token + overhead)',
       () {
         expect(AgentService.estimateMessageTokens(''), 4);
         expect(AgentService.estimateMessageTokens('a' * 100), 29);
@@ -3855,7 +3855,7 @@ block</pre>
       AgentService.setRunSessionForTest('');
     });
 
-    test('message feedback persists and retracts (DSH message-feedback)',
+    test('message feedback persists and retracts (the reference message-feedback)',
         () {
       final s = newSession('qw-t5');
       final m = Message(role: 'assistant', content: 'answer');
@@ -5042,9 +5042,9 @@ block</pre>
       expect(res!.feedback, contains('busy'));
     });
 
-    test('summarizer prompt demands the 8-section DSH checkpoint', () {
+    test('summarizer prompt demands the 8-section checkpoint', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
-      // PR29: the exact DSH section names (updated from the older set).
+      // PR29: the exact section names (updated from the older set).
       expect(src, contains('## Primary Request and Intent'));
       expect(src, contains('## Critical Context'));
       expect(src, contains('## Next Step'));
@@ -5178,7 +5178,7 @@ block</pre>
     });
   });
 
-  group('PR29: compaction DSH parity', () {
+  group('PR29: compaction parity', () {
     ProviderConfig fakeProvider() => ProviderConfig(
           id: 'prov-c29',
           name: 'Test',
@@ -5292,13 +5292,13 @@ block</pre>
       expect(s.messages.length, 40, reason: 'history untouched');
     });
 
-    test('buildRequestMessages uses the DSH checkpoint framing', () {
+    test('buildRequestMessages uses the checkpoint framing', () {
       final s = newCompactSession('c29-frame', msgs: 2);
       s.compactedSummary = 'CHECKPOINT BODY';
       final msgs = AgentService.I.buildRequestMessages(s, 'SYS');
       expect(msgs.first['role'], 'system');
       expect(msgs.first['content'], 'SYS');
-      // The checkpoint is a USER-role message with the DSH preamble +
+      // The checkpoint is a USER-role message with the preamble +
       // <compacted-summary> tags (not a bare system note anymore).
       final ck = msgs[1];
       expect(ck['role'], 'user');
@@ -5310,7 +5310,7 @@ block</pre>
       expect(msgs.length, greaterThan(2));
     });
 
-    test('summarizer instruction matches the DSH 8-section checkpoint',
+    test('summarizer instruction matches the 8-section checkpoint',
         () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       expect(src, contains('## Primary Request and Intent'));
@@ -5892,7 +5892,7 @@ block</pre>
       expect(
         s.compactedSummary,
         isNull,
-        reason: 'pruning alone brought pressure below threshold; DSH parity: '
+        reason: 'pruning alone brought pressure below threshold; parity: '
             'no summarization call',
       );
       expect(called, 0, reason: 'summarizer skipped after pruning');
@@ -6027,7 +6027,7 @@ block</pre>
       addTearDown(() => AgentService.setRunSessionForTest(''));
 
       // No provider → the child's run fails fast; ralph reports the round
-      // failed without a usable handoff (DSH semantics: no silent success).
+      // failed without a usable handoff (the reference semantics: no silent success).
       final res = await AgentService.I.dispatchForTest('ralph', {
         'objective': 'fix the flaky test',
       });
@@ -7716,9 +7716,9 @@ url = "https://api.example.com/mcp"
     });
   });
 
-  // ── PR48: DSH prompt-context bundle — file_read windowing, read_image,
+  // ── PR48: prompt-context bundle — file_read windowing, read_image,
   // AGENTS.md, time-context, locale, welcome (RED first, TDD) ──
-  group('PR48: file_read windowing + read_image (DSH tool-fs parity)', () {
+  group('PR48: file_read windowing + read_image (the reference tool-fs parity)', () {
     Map<String, dynamic> fileReadSchema() {
       final tools = AgentService.I.toolsForTest();
       return tools.firstWhere(
@@ -7726,13 +7726,13 @@ url = "https://api.example.com/mcp"
       )['function'] as Map<String, dynamic>;
     }
 
-    test('P1: file_read schema carries offset/limit (DSH read windowing)', () {
+    test('P1: file_read schema carries offset/limit (the reference read windowing)', () {
       final props =
           (fileReadSchema()['parameters'] as Map)['properties'] as Map;
       expect(props.containsKey('offset'), isTrue,
-          reason: 'DSH read has offset (1-based start line)');
+          reason: 'read has offset (1-based start line)');
       expect(props.containsKey('limit'), isTrue,
-          reason: 'DSH read has limit (max lines, cap 2000)');
+          reason: 'read has limit (max lines, cap 2000)');
     });
 
     test('P2: file_read honors offset/limit with totalLines + capped footer',
@@ -7756,7 +7756,7 @@ url = "https://api.example.com/mcp"
       // Fixture has a trailing newline → split yields 501 rows; the
       // header must report the true totalLines so the model can page.
       expect(out, contains('totalLines: 501'),
-          reason: 'DSH read reports totalLines so the model can page');
+          reason: 'read reports totalLines so the model can page');
       expect(out, contains('offset=151'),
           reason: 'capped footer must tell the model how to continue');
     });
@@ -7767,7 +7767,7 @@ url = "https://api.example.com/mcp"
           .map((t) => ((t['function'] as Map)['name'] as String))
           .toSet();
       expect(names, contains('read_image'),
-          reason: 'DSH dsh-tool-fs ships read_image alongside read');
+          reason: 'ovid-tool-fs ships read_image alongside read');
 
       final out = await AgentService.I.dispatchForTest('read_image', {
         'path': 'nope.png',
@@ -7782,22 +7782,22 @@ url = "https://api.example.com/mcp"
         () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       expect(src, contains('AGENTS.md'),
-          reason: 'workspace instruction chain (DSH skills/AGENTS parity)');
+          reason: 'workspace instruction chain (the reference skills/AGENTS parity)');
     });
 
-    test('P5: system prompt carries the current time (DSH time-context)', () {
+    test('P5: system prompt carries the current time (the reference time-context)', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       expect(src, contains('Current time:'),
           reason: 'model needs a clock for unqualified dates/times');
     });
 
-    test('P6: locale preference is persisted (DSH client-locale)', () {
+    test('P6: locale preference is persisted (the reference client-locale)', () {
       final src = File('lib/core/state.dart').readAsStringSync();
       expect(src, contains('ovid_locale'),
-          reason: 'zh/en reply-language pref, DSH locale.preference parity');
+          reason: 'zh/en reply-language pref, locale.preference parity');
     });
 
-    test('P7: first-run welcome notice is versioned (DSH ui-onboarding)', () {
+    test('P7: first-run welcome notice is versioned (the reference ui-onboarding)', () {
       final src = File('lib/core/state.dart').readAsStringSync();
       expect(src, contains('ovid_welcome'),
           reason: 'welcomeNoticeVersion parity — show once per version');
