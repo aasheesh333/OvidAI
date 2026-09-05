@@ -2663,6 +2663,43 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(src, contains("tag + ' | ' + text + ' | ' + cs + ' | ' + role + ' | ' + stateStr"));
     });
 
+    test('BRD: browser_desktop denied read-only and plan mode; setTabDesktopMode updates zoom and UA state', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'brd', title: 'S', model: 'm', mode: 'safe');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((x) => x.id == 'brd');
+      });
+
+      // 1. Read-only gate
+      expect(await AgentService.I.dispatchForTest('browser_desktop', {'mode': 'desktop'}), contains('READ-ONLY MODE'));
+
+      // 2. Plan mode gate
+      s.mode = AgentMode.auto.name;
+      s.planMode = true;
+      expect(await AgentService.I.dispatchForTest('browser_desktop', {'mode': 'desktop'}), contains('PLAN MODE'));
+      s.planMode = false;
+
+      // 3. Tab default and setTabDesktopMode logic
+      final tab = BrowserTab(url: 'https://example.com');
+      expect(tab.desktopMode, app.browserDesktopMode);
+
+      await AgentService.I.setTabDesktopMode(tab, true, reload: false);
+      expect(tab.desktopMode, isTrue);
+      expect(tab.zoom, closeTo(BrowserTab.devW / 1280, 0.01));
+
+      await AgentService.I.setTabDesktopMode(tab, false, reload: false);
+      expect(tab.desktopMode, isFalse);
+      expect(tab.zoom, 1.0);
+
+      // 4. Tool exists in roster
+      final tools = AgentService.I.toolsForTest();
+      expect(tools.any((t) => (t['function'] as Map)['name'] == 'browser_desktop'), isTrue);
+    });
+
     test('subagent child inherits parent mode and cannot escalate', () async {
       final app = AppState.I;
       final s = ChatSession(id: 'sub-s', title: 'S', model: 'm', mode: 'safe');

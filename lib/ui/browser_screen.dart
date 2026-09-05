@@ -117,6 +117,24 @@ class _BrowserScreenState extends State<BrowserScreen> {
             ),
           ),
           IconButton(
+            tooltip: tab?.desktopMode == true
+                ? 'Switch to mobile view'
+                : 'Switch to desktop view',
+            visualDensity: VisualDensity.compact,
+            icon: Icon(
+              tab?.desktopMode == true
+                  ? Icons.phone_android_outlined
+                  : Icons.desktop_windows_outlined,
+              size: 19,
+            ),
+            onPressed: tab == null
+                ? null
+                : () async {
+                    await agent.setTabDesktopMode(tab, !tab.desktopMode);
+                    setState(() {});
+                  },
+          ),
+          IconButton(
             tooltip: 'New tab',
             visualDensity: VisualDensity.compact,
             icon: const Icon(Icons.add, size: 19),

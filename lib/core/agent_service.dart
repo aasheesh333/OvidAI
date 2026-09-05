@@ -54,7 +54,12 @@ class BrowserTab {
   final List<({DateTime at, String kind, String text})> consoleLog = [];
   final List<({DateTime at, String url, String kind})> networkLog = [];
 
-  BrowserTab({required this.url});
+  static const desktopUserAgent =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
+  bool desktopMode;
+
+  BrowserTab({required this.url, bool? desktopMode})
+      : desktopMode = desktopMode ?? AppState.I.browserDesktopMode;
 }
 
 /// ═══════════════════════════════════════════════════════════════════
@@ -1243,6 +1248,29 @@ class AgentService extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> setTabDesktopMode(BrowserTab tab, bool desktop, {bool reload = true}) async {
+    tab.desktopMode = desktop;
+    if (desktop) {
+      if (BrowserTab.devW > 0) {
+        tab.zoom = (BrowserTab.devW / 1280).clamp(0.25, 3.0);
+      }
+      if (tab.controller != null) {
+        await tab.controller!.setUserAgent(BrowserTab.desktopUserAgent);
+        if (reload && tab.loadedOnce) {
+          await tab.controller!.reload();
+        }
+      }
+    } else {
+      tab.zoom = 1.0;
+      if (tab.controller != null) {
+        await tab.controller!.setUserAgent(null);
+        if (reload && tab.loadedOnce) {
+          await tab.controller!.reload();
+        }
+      }
+    }
+  }
+
   List<({DateTime at, String kind, String text})> consoleBucketFor(
     BrowserTab tab,
   ) =>
@@ -1377,11 +1405,14 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       );
     if (!tab.loadedOnce) {
       tab.loadedOnce = true;
-      // PR27/B5: apply the persisted default viewport mode to NEW tabs —
+      // Apply desktop viewport and user agent to tabs in desktopMode:
       // desktop = 1280px logical width via the same zoom mechanism
       // browser_resize uses; mobile (default) = device viewport (1.0).
-      if (AppState.I.browserDesktopMode && BrowserTab.devW > 0) {
-        tab.zoom = (BrowserTab.devW / 1280).clamp(0.25, 3.0);
+      if (tab.desktopMode) {
+        if (BrowserTab.devW > 0) {
+          tab.zoom = (BrowserTab.devW / 1280).clamp(0.25, 3.0);
+        }
+        tab.controller!.setUserAgent(BrowserTab.desktopUserAgent);
       }
       final previewPath = tab.localPreviewPath;
       if (previewPath != null) {
@@ -2340,6 +2371,27 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             'height': {'type': 'integer'},
           },
           'required': ['width', 'height'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_desktop',
+        'description':
+            'Switch the active tab between desktop and mobile mode. '
+            'mode: desktop|mobile. Desktop sets a 1280px logical viewport '
+            'and desktop User-Agent, then reloads.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'mode': {
+              'type': 'string',
+              'enum': ['desktop', 'mobile'],
+              'description': 'Target mode: "desktop" or "mobile"',
+            },
+          },
+          'required': ['mode'],
         },
       },
     },
@@ -6694,6 +6746,18 @@ ${await _agentsMdBlock()}
             '${tab.zoom.toStringAsFixed(2)}). browser_read/snapshot now see '
             'the page at that size.';
 
+      case 'browser_desktop':
+        final modeArg = (args['mode'] as String? ?? '').toLowerCase();
+        if (modeArg != 'desktop' && modeArg != 'mobile') {
+          return 'invalid mode: "$modeArg" — must be "desktop" or "mobile"';
+        }
+        final isDesktop = modeArg == 'desktop';
+        final tab = _activeTab;
+        tab.controller ??= controllerForTab(tab);
+        await setTabDesktopMode(tab, isDesktop);
+        _emit('nav', 'mode $modeArg');
+        return 'tab switched to $modeArg mode (desktopMode=$isDesktop, zoom=${tab.zoom.toStringAsFixed(2)})';
+
       case 'browser_read':
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
@@ -7563,6 +7627,7 @@ ${await _agentsMdBlock()}
       case 'browser_fill':
       case 'browser_drag':
       case 'browser_select':
+      case 'browser_desktop':
       case 'memory_save':
       case 'create_goal':
       case 'update_goal':
@@ -7654,6 +7719,7 @@ ${await _agentsMdBlock()}
       // PR28 tools
       'browser_download' => args['filename'] ?? args['url'],
       'browser_upload' => args['path'],
+      'browser_desktop' => args['mode'],
       'browser_hover' || 'browser_select' => args['selector'],
       'browser_drag' =>
           '${args['from']} → ${args['to']}',
@@ -7845,6 +7911,7 @@ ${await _agentsMdBlock()}
     'browser_network' => 'Network',
     'browser_download' => 'Download',
     'browser_upload' => 'Upload',
+    'browser_desktop' => 'Desktop Mode',
     'browser_new_tab' => 'New tab',
     'browser_switch_tab' => 'Switch tab',
     'browser_list_tabs' => 'List tabs',
@@ -8865,6 +8932,7 @@ ${await _agentsMdBlock()}
     'browser_fill',
     'browser_drag',
     'browser_select',
+    'browser_desktop',
     'memory_save',
     'create_goal',
     'update_goal',
