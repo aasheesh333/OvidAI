@@ -6166,7 +6166,8 @@ ${await _agentsMdBlock()}
           return 'image generation failed: $e';
         }
       case 'read_attachment':
-        final fname = args['filename'] as String;
+        final fname = (args['filename'] as String? ?? '').trim();
+        if (fname.isEmpty) return 'filename is required';
         _emit('shell', 'reading: $fname');
         // Real check — file must exist in the session workspace.
         try {
@@ -7413,6 +7414,8 @@ ${await _agentsMdBlock()}
     // `summary` carries the raw command for run_shell/job_start/run_code.
     if ((tool == 'run_shell' || tool == 'job_start' || tool == 'run_code') &&
         (_isDestructiveCommand(summary) || _isDestructiveCommand(detail))) {
+      final running = _runSession;
+      if (running != null && running.isSubagent) return false;
       return await _askUser('⚠ $tool', 'Destructive command needs approval',
           '$detail\n\n⚠ This command is destructive — irreversible '
           'filesystem/device changes. Confirm only if you intended it.');
@@ -7453,6 +7456,8 @@ ${await _agentsMdBlock()}
         'start jobs or commit. Explain what you need to change and ask the '
         'user to switch to General or Studio mode.';
 
+    // todo_write is INTENTIONALLY allowed in Read-Only: the checklist is
+    // session-local UI state (never touches disk/repo/network).
     switch (name) {
       // Write-capable tools — always blocked in Read-Only.
       case 'file_write':

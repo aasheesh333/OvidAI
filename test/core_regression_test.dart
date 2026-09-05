@@ -2494,6 +2494,31 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(destIdx, lessThan(subIdx), reason: 'destructive check must come BEFORE subagent early-return');
     });
 
+    test('SEC4b: subagent attempting destructive command is immediately denied without prompt', () async {
+      final app = AppState.I;
+      final parent = ChatSession(id: 'sec4-p', title: 'P', model: 'm', mode: 'auto');
+      app.sessions.insert(0, parent);
+      final child = app.createSubagentSession(
+        parent: parent,
+        label: 'sub',
+        mode: 'auto',
+      );
+      app.sessions.insert(0, child);
+      app.activeSessionId = child.id;
+      AgentService.setRunSessionForTest(child.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        AgentService.I.pendingApproval = null;
+        app.sessions.removeWhere((x) => x.id == 'sec4-p' || x.id == child.id);
+      });
+      // Destructive command in subagent should be denied immediately without popping an approval prompt.
+      // We race with a short timeout so that if it blocks on _askUser, it fails fast.
+      final resFuture = AgentService.I.dispatchForTest('run_shell', {'command': 'rm -rf /'});
+      final res = await resFuture.timeout(const Duration(milliseconds: 500));
+      expect(res, equals('DENIED by user'));
+      expect(AgentService.I.pendingApproval, isNull);
+    });
+
     test('SEC5: interactive browser + state writes blocked read-only', () async {
       final app = AppState.I;
       final s = ChatSession(id: 'sec5', title: 'S', model: 'm', mode: 'safe');
@@ -2542,6 +2567,22 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       });
       expect(await AgentService.I.dispatchForTest('run_code', {'code': '1+1', 'lang': 'python'}), contains('PLAN MODE ACTIVE'));
       expect(await AgentService.I.dispatchForTest('dispatch_agent', {'prompt': 'hi'}), contains('PLAN MODE ACTIVE'));
+    });
+
+    test('SEC7: todo_write stays allowed read-only (documented); attachment missing key is a tool error', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'sec7', title: 'S', model: 'm', mode: 'safe');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((x) => x.id == 'sec7');
+      });
+      final todo = await AgentService.I.dispatchForTest('todo_write', {'todos': []});
+      expect(todo, isNot(contains('READ-ONLY MODE')));
+      final att = await AgentService.I.dispatchForTest('read_attachment', {});
+      expect(att, contains('filename is required'));
     });
 
     test('BR1: dialog + popup tools denied read-only, dialog state machine works', () async {
