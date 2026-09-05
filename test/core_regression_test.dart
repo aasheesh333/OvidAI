@@ -2558,6 +2558,20 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(await AgentService.I.dispatchForTest('browser_popups', {'action': 'list'}), contains('READ-ONLY MODE'));
     });
 
+    test('BR2: console + network tools denied read-only', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'br2', title: 'S', model: 'm', mode: 'safe');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((x) => x.id == 'br2');
+      });
+      expect(await AgentService.I.dispatchForTest('browser_console', {'action': 'read'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('browser_network', {'action': 'list'}), contains('READ-ONLY MODE'));
+    });
+
     test('subagent child inherits parent mode and cannot escalate', () async {
       final app = AppState.I;
       final s = ChatSession(id: 'sub-s', title: 'S', model: 'm', mode: 'safe');

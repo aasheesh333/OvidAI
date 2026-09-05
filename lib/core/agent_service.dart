@@ -1229,6 +1229,11 @@ class AgentService extends ChangeNotifier {
     notifyListeners();
   }
 
+  List<({DateTime at, String kind, String text})> consoleBucketFor(
+    BrowserTab tab,
+  ) =>
+      tab.consoleLog;
+
   /// Agent-facing: get (creating if needed) the controller for a tab.
   WebViewController controllerForTab(BrowserTab tab) {
     // Record the physical viewport baseline once (browser_resize derives
@@ -1246,6 +1251,18 @@ class AgentService extends ChangeNotifier {
     // settings.setAllowFileAccess(true) itself.
     tab.controller ??= WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      // Console bridge: page-side console.* forwards arrive here.
+      // Created exactly once per tab (??=), matching the brief channel.
+      ..addJavaScriptChannel(
+        'OvidConsole',
+        onMessageReceived: (msg) {
+          final bucket = consoleBucketFor(tab);
+          bucket.add((at: DateTime.now(), kind: 'page', text: msg.message));
+          if (bucket.length > 200) {
+            bucket.removeRange(0, bucket.length - 200);
+          }
+        },
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (url) {
@@ -1277,9 +1294,30 @@ const _open = window.open;
 window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window.__ovidPopups.push(String(u)); return null; };
 ''');
             } catch (_) {}
+            tab.networkLog.add((at: DateTime.now(), url: url, kind: 'page-finished'));
+            if (tab.networkLog.length > 200) {
+              tab.networkLog.removeRange(0, tab.networkLog.length - 200);
+            }
+            try {
+              tab.controller?.runJavaScript('''
+(function(){
+  if (window.__ovidConsoleHooked) return;
+  window.__ovidConsoleHooked = true;
+  for (const k of ['log','warn','error']) {
+    const orig = console[k].bind(console);
+    console[k] = (...a) => { try { OvidConsole.postMessage(k + ': ' + a.map(String).join(' ').slice(0,500)); } catch(_){} return orig(...a); };
+  }
+  window.addEventListener('error', (e) => { try { OvidConsole.postMessage('error: ' + String(e.message).slice(0,500)); } catch(_){} });
+})();
+''');
+            } catch (_) {}
           },
           onWebResourceError: (_) {
             tab.loading = false;
+            tab.networkLog.add((at: DateTime.now(), url: tab.url, kind: 'resource-error'));
+            if (tab.networkLog.length > 200) {
+              tab.networkLog.removeRange(0, tab.networkLog.length - 200);
+            }
           },
           // Android pages hand off to other apps via intent:// URLs (Play
           // Store, YouTube, WhatsApp share, …). The WebView cannot load
@@ -2180,6 +2218,42 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
               'enum': ['list', 'open', 'clear'],
             },
             'url': {'type': 'string'},
+          },
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_console',
+        'description':
+            'Read buffered page console messages (console.log/warn/error) '
+            'or clear the buffer. action: read|clear.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'action': {
+              'type': 'string',
+              'enum': ['read', 'clear'],
+            },
+          },
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_network',
+        'description':
+            'List recorded page network events (page loads, resource '
+            'errors) or clear the log. action: list|clear.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'action': {
+              'type': 'string',
+              'enum': ['list', 'clear'],
+            },
           },
         },
       },
@@ -6456,6 +6530,10 @@ ${await _agentsMdBlock()}
         return _handleBrowserDialog(args);
       case 'browser_popups':
         return _handleBrowserPopups(args);
+      case 'browser_console':
+        return _handleBrowserConsole(args);
+      case 'browser_network':
+        return _handleBrowserNetwork(args);
       case 'browser_evaluate':
         final expr = args['expression'] as String;
         final tab = _activeTab;
@@ -7266,6 +7344,8 @@ ${await _agentsMdBlock()}
       case 'browser_evaluate':
       case 'browser_dialog':
       case 'browser_popups':
+      case 'browser_console':
+      case 'browser_network':
       case 'browser_fill':
       case 'browser_drag':
       case 'browser_select':
@@ -7537,6 +7617,8 @@ ${await _agentsMdBlock()}
     'browser_evaluate' => 'Evaluate JS',
     'browser_dialog' => 'Dialog',
     'browser_popups' => 'Popups',
+    'browser_console' => 'Console',
+    'browser_network' => 'Network',
     'browser_new_tab' => 'New tab',
     'browser_switch_tab' => 'Switch tab',
     'browser_list_tabs' => 'List tabs',
@@ -7724,6 +7806,48 @@ ${await _agentsMdBlock()}
     }
     return 'unknown action: $action (read|accept|dismiss / list|open|clear)';
   }
+
+  Future<String> _handleBrowserConsole(Map<String, dynamic> args) async {
+    final tab = _activeTab;
+    final action = (args['action'] as String? ?? 'read').toLowerCase();
+    if (action == 'clear') {
+      tab.consoleLog.clear();
+      return 'console cleared';
+    }
+    if (tab.consoleLog.isEmpty) return 'console: (empty)';
+    final last = tab.consoleLog.length > 50
+        ? tab.consoleLog.sublist(tab.consoleLog.length - 50)
+        : tab.consoleLog;
+    return last
+        .map((e) => '[${e.at.toIso8601String()}] ${e.kind}: ${e.text}')
+        .join('\n');
+  }
+
+  Future<String> _handleBrowserNetwork(Map<String, dynamic> args) async {
+    final tab = _activeTab;
+    final action = (args['action'] as String? ?? 'list').toLowerCase();
+    if (action == 'clear') {
+      tab.networkLog.clear();
+      return 'network log cleared';
+    }
+    if (tab.networkLog.isEmpty) return 'network: (empty)';
+    final last = tab.networkLog.length > 50
+        ? tab.networkLog.sublist(tab.networkLog.length - 50)
+        : tab.networkLog;
+    return last
+        .map((e) => '[${e.at.toIso8601String()}] ${e.kind} ${e.url}')
+        .join('\n');
+  }
+
+  List<({DateTime at, String kind, String text})> consoleLogForTest(
+    String tabKey,
+  ) =>
+      browserTabs
+          .firstWhere(
+            (t) => t.url == tabKey,
+            orElse: () => _activeTab,
+          )
+          .consoleLog;
 
   Future<String> _handleFsEdit(Map<String, dynamic> args) async {
     final cmd = args['command'] as String;
@@ -8424,6 +8548,8 @@ ${await _agentsMdBlock()}
     'browser_evaluate',
     'browser_dialog',
     'browser_popups',
+    'browser_console',
+    'browser_network',
     'browser_press_key',
     'browser_fill',
     'browser_drag',
