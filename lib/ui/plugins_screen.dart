@@ -9,7 +9,7 @@ import '../core/state.dart';
 
 /// Agent tools a plugin contributes when installed+enabled — mirrors the
 /// `_tools` gate in AgentService so the install snackbar can report what
-/// the model actually gained (the reference honest-install parity).
+/// the model actually gained (the plugin registry honest-install parity).
 String? _toolGainsFor(PluginItem p) {
   return switch (p.name) {
     'Web Search' => 'web_search',
@@ -580,7 +580,7 @@ class PluginDetailScreen extends StatelessWidget {
                       plugin.enabled = true;
                       app.persistPluginState();
                       app.refresh();
-                      // Realtime install (the reference parity): an MCP-category
+                      // Realtime install (the plugin manager parity): an MCP-category
                       // plugin connects its server right away, and the
                       // snackbar reports the tools the model gains —
                       // no restart, no dead flag flips.
@@ -731,7 +731,7 @@ class PluginDetailScreen extends StatelessWidget {
                       app.refresh();
                       // PR40: drop any fetched commands/skills content and
                       // unmount it — an uninstall reverses exactly what
-                      // install added, same as the reference plugin removal.
+                      // install added, same as the plugin manager plugin removal.
                       if (plugin.source != null) {
                         unawaited(
                           AppState.I

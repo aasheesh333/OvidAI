@@ -177,7 +177,7 @@ class SessionLedger {
   }
 }
 
-/// Aggregated stats over one session's ledger (the reference session-stats parity).
+/// Aggregated stats over one session's ledger (the session ledger stats parity).
 class SessionProjection {
   final int turns;
   final int steps;

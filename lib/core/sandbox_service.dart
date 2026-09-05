@@ -193,7 +193,7 @@ class SandboxService {
   /// 1. Orphan sweep — delete ws_* dirs with no matching session id.
   /// 2. LRU eviction — oldest-accessed workspace dirs go when the
   ///    workspaces root exceeds [maxBytes]; active sessions are spared.
-  ///    The reference runs this per-session at 500MB; we run the same policy over
+  ///    The sandbox quota manager runs this per-session at 500MB; we run the same policy over
   ///    the whole workspaces root on launch.
   Future<void> enforceWorkspaceQuota({
     required Set<String> activeSandboxIds,

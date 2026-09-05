@@ -333,7 +333,7 @@ class _Composer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // A finished one-shot child is a completed execution record: no composer,
-    // just a note explaining why (matching the reference product's read-only
+    // just a note explaining why (matching the subagent viewer read-only
     // child composer).
     if (!continuable) {
       return Container(

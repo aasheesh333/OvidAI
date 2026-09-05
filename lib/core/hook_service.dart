@@ -8,7 +8,7 @@ import 'sandbox_service.dart';
 import 'session_ledger.dart';
 import 'state.dart';
 
-/// PR24: plugin hooks — the mobile analogue of the reference in-process JS hook
+/// PR24: plugin hooks — the mobile analogue of the plugin host in-process JS hook
 /// listeners. A plugin declares `hooks: {event: "<shell command>"}` in its
 /// marketplace manifest; HookService fires the command inside the sandbox
 /// at the matching agent-lifecycle point, with:

@@ -21,7 +21,7 @@ class CommandResult {
   final String? feedback; // user-visible confirmation/error
   final bool clearInput;
 
-  /// popupSelect (the reference parity): 'model' or 'permission' — the UI opens the
+  /// popupSelect (the command parser parity): 'model' or 'permission' — the UI opens the
   /// matching overlay picker instead of showing feedback text.
   final String? popup;
   const CommandResult({
@@ -183,7 +183,7 @@ class CommandService {
           if (s == null) return const CommandResult(feedback: 'No active session.');
           final q = args.trim().toLowerCase();
           if (q.isEmpty) {
-            // popupSelect (the reference parity with /model and /permission): bare
+            // popupSelect (the command parser parity with /model and /permission): bare
             // /preset opens the tappable preset sheet instead of a text
             // dump — the list is right there and picking a row applies it.
             return const CommandResult(popup: 'preset');
@@ -225,7 +225,7 @@ class CommandService {
           if (s == null) return const CommandResult(feedback: 'No active session.');
           final q = args.trim();
           if (q.isEmpty) {
-            // popupSelect: bare /model opens the picker overlay (the reference behavior).
+            // popupSelect: bare /model opens the picker overlay (the command parser behavior).
             return const CommandResult(popup: 'model');
           }
           // Match on the model id, case-insensitively, across configured
@@ -262,7 +262,7 @@ class CommandService {
           final q = parts.isEmpty ? '' : parts.first;
           final flags = parts.skip(1).toSet();
           if (q.isEmpty) {
-            // popupSelect: bare /permission opens the mode sheet (the reference behavior).
+            // popupSelect: bare /permission opens the mode sheet (the command parser behavior).
             return const CommandResult(popup: 'permission');
           }
           final target = AgentMode.values.firstWhere(

@@ -19,7 +19,7 @@ import 'state.dart';
 /// Lifecycle is lazy — `connect()` spawns/dials + handshakes, `disconnect()`
 /// kills/drops.
 ///
-/// Reliability contract (matches the reference MCP client behavior):
+/// Reliability contract (matches the MCP client gateway behavior):
 ///   • a JSON-RPC error response surfaces as a thrown/returned error, never
 ///     as a successful result;
 ///   • a timeout surfaces as an explicit error string, never the text "null";

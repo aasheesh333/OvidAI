@@ -362,7 +362,7 @@ class _StatsLine extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              // Context ring — 12px arc + % label (the reference "% of context used").
+              // Context ring — 12px arc + % label (the context indicator "% of context used").
               // Tap → full context meter sheet (segmented breakdown).
               Tooltip(
                 message:
@@ -411,7 +411,7 @@ class _StatsLine extends StatelessWidget {
     );
   }
 
-  /// Context meter sheet (the reference context-breakdown parity): window usage,
+  /// Context meter sheet (the context breakdown sheet parity): window usage,
   /// segmented sys/tools/messages bars with a cache-read overlay and a
   /// compaction hint.
   void _showContextMeter(
@@ -560,7 +560,7 @@ class _MeterBreakdownBar extends StatelessWidget {
 
 /// turn-process strip — "N tool calls · Thought for a while" with a
 /// chevron; expands to show every folded tool card + reasoning card.
-/// Default collapsed (the reference Compact mode).
+/// Default collapsed (the process strip Compact mode).
 class _TurnProcessStrip extends StatefulWidget {
   final List<Message> group;
   const _TurnProcessStrip({required this.group});
@@ -806,7 +806,7 @@ class _ChatScreenState extends State<ChatScreen>
               // header (user ask) — subagents live on the subagent screen
               // (chat "Open" links + the catalog sheet from a chat row),
               // trajectory in the sidebar footer next to Settings.
-              // Background jobs badge (the reference jobs header trigger): shows the
+              // Background jobs badge (the job indicator header trigger): shows the
               // live job count of THIS session, popover lists producer/label/
               // state/per-second elapsed, with a Kill action per row.
               AnimatedBuilder(
@@ -1113,7 +1113,7 @@ class _ChatScreenState extends State<ChatScreen>
                       final result = await CommandService.I.execute(t);
                       if (result != null) {
                         _input.clear();
-                        // popupSelect (the reference parity): open the overlay picker.
+                        // popupSelect (the command picker parity): open the overlay picker.
                         if (!context.mounted) return;
                         if (result.popup == 'model') {
                           _modelPicker(context);
@@ -1330,11 +1330,11 @@ class _ChatScreenState extends State<ChatScreen>
       }
     });
     // @file/@session references expand into model-visible context blocks
-    // (the reference file-reference parity) before the run starts.
+    // (the composer mention expander file-reference parity) before the run starts.
     AgentService.I.runTask(t, expandRefsFor: session);
   }
 
-  /// Background jobs popover (the reference ui-jobs): one row per job with label,
+  /// Background jobs popover (the jobs panel ui-jobs): one row per job with label,
   /// state dot, per-second elapsed, output size, and a Kill action.
   void _showJobsPopover(BuildContext context, String sessionId) {
     showModalBottomSheet<void>(
@@ -1797,7 +1797,7 @@ class _ModelTile extends StatelessWidget {
 }
 
 /// web-IDE home parity (Ovid branding): centered logo, big greeting with
-/// a mono pill beside it, then open space down to the composer.  The reference has
+/// a mono pill beside it, then open space down to the composer.  The home layout has
 /// NO suggestion rows on the home screen — the surface is intentionally
 /// empty so the composer is the whole focus.  Entrance: `wide-in` fade+rise.
 class _EmptyState extends StatelessWidget {
@@ -1835,9 +1835,9 @@ class _EmptyState extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 22),
-                  // Greeting + mono pill (the reference "What do you want to build? ·
+                  // Greeting + mono pill (the hero greeting "What do you want to build? ·
                   // Preview" pattern) in one row so the pill sits beside the
-                  // title like the reference, not under it.
+                  // title like the hero layout, not under it.
                   Wrap(
                     crossAxisAlignment: WrapCrossAlignment.center,
                     spacing: 10,
@@ -2145,7 +2145,7 @@ class _ToolCardState extends State<_ToolCard>
                       ),
                     ),
                     // PR25/D3: edit cards show a +N/−M line-count chip
-                    // (the reference diff-row parity) computed from the real diff.
+                    // (the diff badge diff-row parity) computed from the real diff.
                     if (diffCounts != null) ...[
                       const SizedBox(width: 6),
                       Text(
@@ -2239,7 +2239,7 @@ class _ToolCardState extends State<_ToolCard>
   }
 }
 
-/// 8px state dot (the reference StateDot) — replaces the icon on error/stopped.
+/// 8px state dot (the tool status indicator StateDot) — replaces the icon on error/stopped.
 class _StateDot extends StatelessWidget {
   final Color color;
   const _StateDot(this.color);
@@ -2253,7 +2253,7 @@ class _StateDot extends StatelessWidget {
 
 /// Expanded tool body: terminal-style for shell/code/jobs, diff-style for
 /// edits/writes, plain mono body otherwise.  16-line cap with a
-/// "N more lines" fold toggle (the reference TerminalBlock behavior).
+/// "N more lines" fold toggle (the terminal block TerminalBlock behavior).
 class _DetailBody extends StatefulWidget {
   final Message m;
   const _DetailBody({required this.m});
@@ -2385,7 +2385,7 @@ class _DetailBodyState extends State<_DetailBody> {
   }
 }
 
-/// One diff line — green + / red − like the reference DiffBlock.
+/// One diff line — green + / red − like the diff renderer DiffBlock.
 class _DiffLine extends StatelessWidget {
   final String line;
   const _DiffLine(this.line);
@@ -2469,7 +2469,7 @@ class _DiffViewerScreen extends StatelessWidget {
 
 /// compaction row — a faint inline event row, collapsed by default:
 /// "↻ Context compacted — N messages (~X tokens)"; tap to view the
-/// compacted summary (the reference "View compaction summary").
+/// compacted summary (the compaction viewer "View compaction summary").
 class _CompactionRow extends StatefulWidget {
   final Message m;
   const _CompactionRow(this.m);
@@ -3028,7 +3028,7 @@ class _MessageView extends StatelessWidget {
   String _formatTime(DateTime t) =>
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
-  /// Optional note attached to a down-vote (the reference feedback note popover).
+  /// Optional note attached to a down-vote (the feedback collector feedback note popover).
   void _askFeedbackNote(BuildContext context) {
     final c = TextEditingController();
     showModalBottomSheet<void>(
@@ -3405,7 +3405,7 @@ class _InputBar extends StatefulWidget {
   final bool running;
 
   /// Approval takeover: when an approval/question card is pending, the
-  /// composer is disabled until the user answers it (the reference parity).
+  /// composer is disabled until the user answers it (the approval takeover parity).
   final bool locked;
   final VoidCallback onSend;
   const _InputBar({
@@ -3589,7 +3589,7 @@ class _InputBarState extends State<_InputBar> {
         ),
       ));
     }
-    // ── @file: workspace files (the reference file-reference parity) ──
+    // ── @file: workspace files (the file reference provider file-reference parity) ──
     // Files under the active session's workspace; directory descent via
     // the query (type `@src/` to descend into a folder, `@src/ma` to
     // fuzzy-match INSIDE it). The model receives the chip expanded with
@@ -3658,7 +3658,7 @@ class _InputBarState extends State<_InputBar> {
         ),
       ));
     }
-    // ── @session: this chat's sessions (the reference session-reference parity) ──
+    // ── @session: this chat's sessions (the session mention provider session-reference parity) ──
     for (final s in app.rootSessions.take(30)) {
       if (s.id == parent.id) continue;
       final score = _fuzzyScore('${s.title} ${s.id}', query);
@@ -4718,7 +4718,7 @@ class _QueueRowState extends State<_QueueRow> {
               style: TextStyle(fontSize: 12.5, color: Aether.text),
             ),
           ),
-          // Strict-steer (the reference parity): pull this row to the front so the
+          // Strict-steer (the queue steering parity): pull this row to the front so the
           // running turn injects it on the very next request.
           GestureDetector(
             onTap: () {

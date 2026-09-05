@@ -214,7 +214,7 @@ String cleanTruncate(String text, int max) {
   return '$safe…';
 }
 
-/// Spill + output retention (the reference spill-policy parity, C8/PR18).
+/// Spill + output retention (the output retention manager spill-policy parity, C8/PR18).
 ///
 /// Oversized tool output is PERSISTED out-of-context into the session
 /// workspace (`.spill/<id>.txt`) and the model gets a head/tail preview
@@ -245,7 +245,7 @@ Future<String> spillToolOutput(
   final tail = text.substring(text.length - tailLen);
   final omitted = text.length - headLen - tailLen;
 
-  // How to read the middle — pick by tool shape (the reference locator hints).
+  // How to read the middle — pick by tool shape (the spill policy locator hints).
   final locator = toolName == 'run_shell'
       ? 'run_shell: `sed -n "L,LP" $relPath` for a line range, or '
             '`grep -n "<pattern>" $relPath` to find lines'
@@ -265,7 +265,7 @@ class ApprovalRequest {
   final String summary;
   final String detail;
   final Completer<bool> completer = Completer<bool>();
-  // ── ask_user_question extension (the reference user-questions seam) ──
+  // ── ask_user_question extension (the question gate user-questions seam) ──
   /// When non-null, the UI renders structured questions instead of
   /// approve/deny.  The completer resolves true when the user submits
   /// answers; [answers] holds the question-id → answer map.
@@ -310,7 +310,7 @@ class QuestionOption {
   const QuestionOption({required this.label, this.description});
 }
 
-/// Background job (the reference ctx.jobs equivalent) — a running Process with a
+/// Background job (the process manager ctx.jobs equivalent) — a running Process with a
 /// name, output buffer, and lifecycle state.
 class BgJob {
   final int id;
@@ -350,7 +350,7 @@ class SubagentInfo {  final String id;
   String result = '';
 
   /// True when started via `run_in_background` — such children deliver a
-  /// settlement notice to the parent when they end (the reference parity); foreground
+  /// settlement notice to the parent when they end (the subagent coordinator parity); foreground
   /// children return their result as the tool result instead.
   final bool background;
   final DateTime startedAt = DateTime.now();
@@ -375,7 +375,7 @@ class SubagentInfo {  final String id;
 
 
 /// Per-session agent run state — one per ChatSession so many sessions run
-/// in parallel without interfering (the reference multi-session parity).  Switching
+/// in parallel without interfering (the parallel session executor multi-session parity).  Switching
 /// sessions NEVER stops another session's run.
 /// Async execution context for ONE agent run. Stored as a Zone value so
 /// every `await` continuation inside the run (SSE stream handlers, tool
@@ -402,7 +402,7 @@ class AgentRun {
   /// Per-tool call counts within THIS run (repeat-tool reminder, PR18).
   final Map<String, int> toolCallCounts = {};
 
-  /// PR45/F2 (the reference repeat-tool-reminder parity): streak of the CURRENTLY
+  /// PR45/F2 (the loop sentinel repeat-tool-reminder parity): streak of the CURRENTLY
   /// REPEATING tool call — reset whenever the (tool, args) pair changes.
   /// Lives on the run bucket: parallel sessions can't cross-pollute it.
   ({String name, String canonArgs})? repeatKey;
@@ -433,7 +433,7 @@ class AgentRun {
   /// list still has pending items. Resets when todo_write updates the list.
   bool todoNudgeSent = false;
 
-  /// PR23/Q1: the model string snapshotted at RUN START (the reference
+  /// PR23/Q1: the model string snapshotted at RUN START (the prompt builder
   /// prompt-assembly-boundary parity). Every LLM call of THIS run uses
   /// it — a mid-run picker switch changes the NEXT run (a new queued
   /// message), never the in-flight one.
@@ -475,7 +475,7 @@ class AgentRun {
   String? statusLine;
 }
 
-/// Session event (the reference SessionEvent equivalent) — durable facts about what
+/// Session event (the session ledger SessionEvent equivalent) — durable facts about what
 /// happened in a session (tool calls, mode changes, errors, approvals).
 class SessionEvent {
   final String type;
@@ -521,7 +521,7 @@ class _SessionStudio {
 ///                  ← tool results loop back to model till final answer
 class AgentService extends ChangeNotifier {
   AgentService._() {
-    // Session-local reminder engine (the reference schedule delivery) — ticks
+    // Session-local reminder engine (the schedule dispatcher schedule delivery) — ticks
     // every second, no-ops when no schedules exist.
     _startScheduleTimer();
     // Deleted sessions lose their run; all others keep running in parallel.
@@ -529,7 +529,7 @@ class AgentService extends ChangeNotifier {
     // Per-session browser tabs: lazy-restore on session switch.
     AppState.I.onSessionSwitched = onSessionSwitched;
     // Cold resume: rebuild subagent handles from the persisted lineage
-    // after sessions load (the reference durable-descriptor parity).
+    // after sessions load (the durable descriptor parity).
     AppState.I.onSessionsLoaded = () {
       restoreSubagentHandles();
       _recoverInterruptedRuns();
@@ -563,7 +563,7 @@ class AgentService extends ChangeNotifier {
 
   /// The agent mode that applies to the current execution context.
   ///
-  /// Per-session (the reference per-conversation parity): inside a run this resolves
+  /// Per-session (the session mode resolver per-conversation parity): inside a run this resolves
   /// to the RUNNING session's persisted mode; outside a run it resolves to
   /// the ACTIVE session's mode. Subagents are real sessions, so their mode
   /// resolves through the same path — no detached special case.
@@ -645,7 +645,7 @@ class AgentService extends ChangeNotifier {
   set activeRunId(String? v) => _runResolved.activeRunId = v;
   ApprovalRequest? get pendingApproval => _runResolved.pendingApproval;
   set pendingApproval(ApprovalRequest? v) => _runResolved.pendingApproval = v;
-  /// Plan mode, PERSISTED per session (the reference parity): the run bucket reads
+  /// Plan mode, PERSISTED per session (the plan mode coordinator parity): the run bucket reads
   /// through to the session's `planMode` field, so `/plan` survives
   /// restarts and session switches, and the composer chip reads it.
   bool get planMode =>
@@ -728,7 +728,7 @@ class AgentService extends ChangeNotifier {
   int get sessionCacheReadTokens => _run.cacheReadTokens;
   int get sessionCacheWriteTokens => _run.cacheWriteTokens;
 
-  /// Files produced in the active session's current/latest run (the reference
+  /// Files produced in the active session's current/latest run (the workspace output tracker
   /// "Produced" cards). Read-only view for the UI.
   List<({String path, int size})> get producedFiles =>
       List.unmodifiable(_run.produced);
@@ -871,7 +871,7 @@ class AgentService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Strict-steer (the reference parity): pull queued row [index] to the FRONT so the
+  /// Strict-steer (the message queue parity): pull queued row [index] to the FRONT so the
   /// current run injects it on the very next request — an implicit-AND
   /// steering affordance per row.
   void steerQueuedMessage(int index) {
@@ -1631,7 +1631,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   }
 
   /// Expand `@name` / `@session:id` references in a composer message into
-  /// model-visible context blocks (the reference file/session reference parity):
+  /// model-visible context blocks (the mention resolver file/session reference parity):
   /// `@file.txt` → a section heading with the file content; `@session:x` →
   /// a heading with that session's recent messages. Unresolvable mentions
   /// stay literal so the model can still see the intent.
@@ -1744,7 +1744,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     String content, {
     required String toolLabel,
   }) async {
-    // PR25/D1: capture the BEFORE content for the diff card (the reference
+    // PR25/D1: capture the BEFORE content for the diff card (the diff generator
     // replayable diff metadata parity) — a create has no before (whole
     // file shows as + lines).
     final before = _readFileBefore(path);
@@ -2825,7 +2825,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         'name': 'file_read',
         'description':
             'Read a file from the synced workspace with line-numbered '
-            'windowing (the reference read parity). Use offset/limit to page large '
+            'windowing (the filesystem tool read parity). Use offset/limit to page large '
             'files; the result reports totalLines so you can continue. '
             'Host workspace files fall back when the repo copy is absent.',
         'parameters': {
@@ -3921,7 +3921,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
 
   // ── MAIN LOOP ─────────────────────────────────────────────────────────
 
-  /// reference queue behavior: messages queued while a run is active
+  /// Message queue behavior: messages queued while a run is active
   /// join the NEXT LLM request of the CURRENT run — not a separate run
   /// after full completion. Drains the queue into [msgs] as user turns
   /// and records them in the session so the chat bubble shows immediately.
@@ -3956,7 +3956,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   }
 
   /// ── compaction parity (ovid-compaction-basic) ──────────────────────
-  /// Model-aware context windows.  the reference asks each provider adapter for the
+  /// Model-aware context windows.  The model catalog asks each provider adapter for the
   /// model's contextWindow and falls back to 1M when unannounced.  Ovid is
   /// BYOK across many providers, so we keep a keyword map (longest match
   /// wins) with the same 1M default for unknown models.
@@ -4119,7 +4119,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// verbatim.  Re-compacts when the pressure crosses again (the
   /// span-distance guard is token-based, not message-based, so large
   /// 256K/1M models compact rarely and small ones early).
-  /// PR26/C3: compaction lock per session (the reference serializes compaction via
+  /// PR26/C3: compaction lock per session (the compaction coordinator serializes compaction via
   /// a logged lock). Workflow fan-out + parallel children could interleave
   /// two compactions on the SAME session — the second would summarize a
   /// span the first already folded (double-fold corruption).
@@ -4201,7 +4201,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       }
     }
     final prior = s.compactedSummary;
-    // F4 (the reference ovid-compaction convergence): reject a summary that does not
+    // F4 (the compaction summarizer ovid-compaction convergence): reject a summary that does not
     // shrink its source — retry once with a stricter instruction, and only
     // after that accept whatever came back.
     final spanTokens = span.fold<int>(
@@ -4337,7 +4337,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             'folded into the checkpoint)';
   }
 
-  /// F3 (the reference tool-result pruner): rewrites oversized tool-detail bodies in
+  /// F3 (the tool-result pruner): rewrites oversized tool-detail bodies in
   /// the session into spill-file rows (head + marker + tail) BEFORE a
   /// compaction decides it needs to summarize. Returns the number of tool
   /// messages that were spilled. Runs only when measured ≥ threshold —
@@ -4372,7 +4372,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     final measured = measuredContextTokens(s, systemPrompt: 'x' * 4000);
     if (measured < threshold) return;
 
-    // F3 (the reference ovid-compaction-tool-result-pruner parity): BEFORE spending an
+    // F3 (the tool-result pruner ovid-compaction-tool-result-pruner parity): BEFORE spending an
     // LLM summarization call, rewrite oversized TOOL results out of the
     // foldable span into spill refs (head/marker/tail). Cost-free, model-
     // free; if the pressure drops below threshold afterward, summarize
@@ -4394,7 +4394,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     }
 
     // Select the compactable span [compactedAtCount, cutoff): retain the
-    // newest ~16% of the window verbatim (the reference retainRatio), keeping at
+    // newest ~16% of the window verbatim (the compaction policy retainRatio), keeping at
     // least 6 recent messages.  Never split the last user message from
     // its tool/reasoning/answer run.
     var tail = 0;
@@ -4454,7 +4454,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     }
   }
 
-  /// PR29: manual `/compact` (the reference `compactNow()` parity). Unlike
+  /// PR29: manual `/compact` (the compaction command `compactNow()` parity). Unlike
   /// [forceCompact] (the EMERGENCY overflow path with minimal retention),
   /// this uses the STANDARD retention policy and — critically — RETURNS
   /// an honest human status line instead of letting the command lie
@@ -4672,7 +4672,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     return '${now.toIso8601String()} $zone (UTC$sign$hh:$mm)';
   }
 
-  /// Workspace instruction chain (the reference skills/AGENTS parity): root-level
+  /// Workspace instruction chain (the workspace instructions skills/AGENTS parity): root-level
   /// AGENTS.md from the pinned folder, the session workspace, or the
   /// synced repo — capped so a huge file can't eat the context window.
   /// v1 is root-level only (no nested-chain walk — follow-up).
@@ -4851,12 +4851,12 @@ For mid-task updates that should not wait (an early finding, a blocker), call
 report(content) — it reaches the parent as its next-step context.''' : ''}
 ${_presetPersona(s).isEmpty ? '' : '\nAGENT PRESET (${s.presetId}): ${_presetPersona(s)}\n'}
 ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock()}'}
-Current time: ${_nowLine()} (the reference time-context: interpret unqualified dates/times in the user's zone).
+Current time: ${_nowLine()} (the prompt builder time-context: interpret unqualified dates/times in the user's zone).
 ${AppState.I.replyLanguageHint().isEmpty ? '' : '${AppState.I.replyLanguageHint()}\n'}
 ${await _agentsMdBlock()}
 ''';
 
-    // ── Context compaction (the reference ovid-compaction-basic parity) ──
+    // ── Context compaction (the compaction engine ovid-compaction-basic parity) ──
     // Pre-step pressure check: measure the envelope against 80% of THIS
     // model's context window (1M default) — works for every provider and
     // every model incl. custom BYOK routes, 256K and 1M windows alike.
@@ -4866,12 +4866,12 @@ ${await _agentsMdBlock()}
 
     try {
       var overflowRecovered = false;
-      // ── NEVER-STOP LOOP (the reference parity) ─────────────────────────────────
+      // ── NEVER-STOP LOOP (the agent loop parity) ─────────────────────────────────
       // The loop is bounded by TASK COMPLETION, not turn count. A soft
       // turn budget (12) still exists, but hitting it mid-work no longer
       // ends the run: we inject a continuation nudge and keep going —
       // context pressure is managed by _maybeCompact (auto-compaction),
-      // exactly like the reference. Only a final answer, a user cancel, or an
+      // exactly like the agent loop. Only a final answer, a user cancel, or an
       // unrecoverable provider error stops the loop.
       var turnsWithoutProgress = 0;
       for (var turn = 0;; turn++) {
@@ -4894,7 +4894,7 @@ ${await _agentsMdBlock()}
         );
         // PR24 plugin hooks. on_turn_start: fire-and-forget (no stdout
         // injection). on_pre_request: stdout (≤2 KB) joins THIS request
-        // as a system note — a plugin can inject live context (the reference
+        // as a system note — a plugin can inject live context (the plugin hook runner
         // agent/pre-step message-injection parity, shell flavor).
         if (HookService.I.hasHookListeners('on_turn_start')) {
           unawaited(
@@ -4929,7 +4929,7 @@ ${await _agentsMdBlock()}
             overflowRecovered = true;
             await forceCompact(s, p);
             // PR29: rebuild from the compacted history using the SAME
-            // assembly as the initial request (the reference checkpoint framing) —
+            // assembly as the initial request (the checkpoint framer checkpoint framing) —
             // genuinely smaller than the rejected request, and the
             // checkpoint is never dropped.
             msgs
@@ -5289,7 +5289,7 @@ ${await _agentsMdBlock()}
           }),
         );
       }
-      // LLM session title (the reference parity): one cheap background call after
+      // LLM session title (the title generator parity): one cheap background call after
       // the first real exchange — fire-and-forget, heuristic stays on fail.
       unawaited(maybeGenerateSessionTitle(ctx.session));
       // Foreground notification retires with the run (covers error paths
@@ -5373,12 +5373,12 @@ ${await _agentsMdBlock()}
     AppState.I.persistSessions();
   }
 
-  /// LLM call with NEVER-STOP retry semantics (the reference parity):
+  /// LLM call with NEVER-STOP retry semantics (the resilient HTTP transport parity):
   /// transient failures (429/5xx/network/timeout) back off and retry up
   /// to 4 times inside this call; only then does it give up and return
   /// null (the run loop retries a few more times on top). A user cancel
   /// aborts immediately with no retry.
-  /// LLM-generated session title (the reference session-title-llm parity): one cheap
+  /// LLM-generated session title (the title generator session-title-llm parity): one cheap
   /// background call after the first real exchange — thinking disabled,
   /// tight token budget, falls back to the heuristic title on any failure.
   /// Never retried per session (the heuristic stays if this fails).
@@ -5525,7 +5525,7 @@ ${await _agentsMdBlock()}
       // Strip effort suffix (e.g. "gpt-5.2 · High") → real model id + effort.
       // PR23/Q1: the model is snapshotted at RUN START — a mid-run picker
       // switch changes the NEXT run (new queued message), never the
-      // in-flight one (the reference prompt-assembly-boundary parity). Falls back
+      // in-flight one (the prompt builder prompt-assembly-boundary parity). Falls back
       // to the live session model only for runs started before the field
       // existed. Never the shared provider.selectedModel (parallel
       // sessions on the same provider used to cross-wire their models).
@@ -5923,7 +5923,7 @@ ${await _agentsMdBlock()}
   }
 
   Future<String> _dispatchInner(String name, Map<String, dynamic> args) async {
-    // ── Plan mode enforcement (the reference exit_plan_mode flow) ──
+    // ── Plan mode enforcement (the plan mode gate exit_plan_mode flow) ──
     // While planning, only read-only tools are allowed.  The AI must
     // present its plan via exit_plan_mode and get user approval first.
     if (planMode && _isMutatingTool(name)) {
@@ -5932,7 +5932,7 @@ ${await _agentsMdBlock()}
           'and call exit_plan_mode for user approval. After approval, '
           'execution tools unlock.';
     }
-    // ── Read-Only mode hard gate (the reference plan-mode-style block) ──
+    // ── Read-Only mode hard gate (the read-only gate plan-mode-style block) ──
     // In Read-Only mode the agent is RESTRICTED, not merely asked: writes,
     // edits, commits and non-read-only shell commands are refused at the
     // dispatch layer with an instructive message. Read-only shell commands
@@ -5978,7 +5978,7 @@ ${await _agentsMdBlock()}
         if (!ok) return 'DENIED by user';
         _emit('shell', cmd);
         // PR46/F1: persistent session shell — `cd`, `export` and shell
-        // functions carry over between commands (the reference persistent-shell
+        // functions carry over between commands (the persistent shell
         // parity). The pool keyed by session lives in this service and out-
         // lives a single run; the separate `job_start` lane stays event-
         // sourced as ever. Falls back to the fresh bash -c path when the
@@ -6444,7 +6444,7 @@ ${await _agentsMdBlock()}
           app.refresh();
           _emit('done', 'installed $pluginName');
 
-          // Realtime install (the reference parity): an MCP-category plugin connects
+          // Realtime install (the plugin manager parity): an MCP-category plugin connects
           // its real server right away, exactly like the Plugins screen
           // Install button — a flag flip with no live connection would be
           // a lie to the model.
@@ -7439,7 +7439,7 @@ ${await _agentsMdBlock()}
   }
 
   // ── APPROVALS (safe / auto mode) ──────────────────────────────────────
-  /// Destructive-command detector (the reference dangerous-command gate parity).
+  /// Destructive-command detector (the command safety gate dangerous-command gate parity).
   /// These ALWAYS ask the user — even in full/drive mode — because one
   /// bad command can wipe the workspace or brick the sandbox:
   /// • rm -rf on / ~ $HOME or the sandbox prefix itself
@@ -7755,7 +7755,7 @@ ${await _agentsMdBlock()}
   }
 
   /// Heuristic: provider error text meaning "this request exceeded the
-  /// context window" — triggers one force-compaction + retry (the reference
+  /// context window" — triggers one force-compaction + retry (the context manager
   /// CONTEXT_WINDOW_EXCEEDED recovery parity).  Worded broadly to cover
   /// OpenAI/Anthropic/Gemini/DeepSeek/xAI/Mistral/custom proxies.
   bool _looksLikeContextOverflow(String? err) {
@@ -7771,7 +7771,7 @@ ${await _agentsMdBlock()}
         l.contains('reduce the length');
   }
 
-  /// Heuristic: provider failures worth retrying (the reference never-stop parity):
+  /// Heuristic: provider failures worth retrying (the resilient retry loop never-stop parity):
   /// rate limits, server errors, network blips, timeouts. Auth/inputs
   /// (401/403/404/model-not-found) and payload-cap errors are NOT
   /// transient — retrying the same oversized payload just burns time.
@@ -7818,7 +7818,7 @@ ${await _agentsMdBlock()}
         l.contains('exception:');
   }
 
-  // ── Tool-call chat cards (the reference ToolRow parity) ──────────────────────────
+  // ── Tool-call chat cards (the tool card renderer ToolRow parity) ──────────────────────────
   // Every _dispatch call creates a live tool message in the chat stream:
   // it starts as state 'running' (sweep animation) and settles to
   // ok/error/stopped with the final output in toolDetail.  The UI renders
@@ -8400,7 +8400,7 @@ ${await _agentsMdBlock()}
   /// at most [limit] lines with a header (path/offset/totalLines) and a
   /// capped footer naming how many lines remain, so the model pages with
   /// offset=offset+limit instead of re-reading. Byte-capped at 51200
-  /// chars per window (the reference readMaxBytes).
+  /// chars per window (the filesystem read tool readMaxBytes).
   String _windowedLines(
     String path,
     String content, {
@@ -8627,7 +8627,7 @@ ${await _agentsMdBlock()}
     if (searchRoot.existsSync() && matches < maxMatches) {
       // PR42: ripgrep fast path — the REAL rg binary (eagerly installed
       // by PR38) with the same semantics as the Dart walk below: real
-      // Linux grep behavior ("same as the reference rg-backed tool-fs-search").
+      // Linux grep behavior ("same as the filesystem search tool rg-backed tool-fs-search").
       // _tryRgGrep returns null whenever rg can't be used (no sandbox,
       // binary missing, timeout, exit 2 = pattern invalid in rust-regex —
       // e.g. lookarounds, which Dart RegExp supports) — then the Dart
@@ -9016,7 +9016,7 @@ ${await _agentsMdBlock()}
     return 'Plan approved ✓ — now execute it.';
   }
 
-  // ── GOALS (the reference goal-round equivalent) ──
+  // ── GOALS (the goal coordinator goal-round equivalent) ──
   String _handleCreateGoal(Map<String, dynamic> args) {
     final objective = (args['objective'] as String).trim();
     final s = _runSession;
@@ -9086,7 +9086,7 @@ ${await _agentsMdBlock()}
               'report to the user.';
   }
 
-  // ── SCHEDULES (the reference schedule equivalent) ──
+  // ── SCHEDULES (the reminder schedule coordinator schedule equivalent) ──
   String _handleScheduleCreate(Map<String, dynamic> args) {
     final prompt = (args['prompt'] as String).trim();
     final s = _runSession;
@@ -9170,7 +9170,7 @@ ${await _agentsMdBlock()}
   }
 
   // Fires due reminders into the chat as [schedule] user messages while
-  // the session is live (the reference session-local delivery).
+  // the session is live (the schedule delivery engine session-local delivery).
   Timer? _scheduleTimer;
 
   void _startScheduleTimer() {
@@ -9226,7 +9226,7 @@ ${await _agentsMdBlock()}
         // (appending alone left the reminder sitting in the chat, never
         // acted on). A background session is brought to the user first.
         if (busyFor(s.id)) {
-          // Busy — queue joins THIS session's run (the reference queue behavior).
+          // Busy — queue joins THIS session's run (the message queue queue behavior).
           _runs[s.id]?.queue.add(delivery);
           _emit('think', 'queued reminder for running session ${s.title}');
         } else {
@@ -9272,7 +9272,7 @@ ${await _agentsMdBlock()}
     } catch (_) {}
     // PR40: installed+enabled plugin content — a plugin's fetched
     // commands/*.md become real /-menu slash commands + model skills,
-    // exactly like the reference skill-filesystem provider mounting an
+    // exactly like the skill provider skill-filesystem provider mounting an
     // installed Claude Code plugin's directory. A plugin whose fetch
     // never ran (no source, offline, no commands/skills in its repo)
     // simply contributes no root here — install still succeeded, it
@@ -9463,7 +9463,7 @@ ${await _agentsMdBlock()}
   SubagentInfo? subagentForSession(String sessionId) =>
       _subagents.values.where((s) => s.sessionId == sessionId).firstOrNull;
 
-  /// Cold resume (the reference durable-descriptor parity): rebuild the in-memory
+  /// Cold resume (the subagent handle manager durable-descriptor parity): rebuild the in-memory
   /// handle registry from persisted session lineage after an app restart.
   /// Each continuable subagent session carries its durable `agentId`; the
   /// counter is reseeded from the highest persisted id so new ids never
@@ -9554,7 +9554,7 @@ ${await _agentsMdBlock()}
     notifyListeners();
   }
 
-  /// C9 recovery (the reference TOOL_OUTCOME_UNKNOWN parity): after an app death,
+  /// C9 recovery (the run recovery manager TOOL_OUTCOME_UNKNOWN parity): after an app death,
   /// any chat session left with a tool row stuck at state 'running' had no
   /// verdict — it spun forever. On session load, every such row is resolved
   /// as UNKNOWN with an honest note, and the ledger records the recovery.
@@ -9998,7 +9998,7 @@ ${await _agentsMdBlock()}
       }
       if (sub.state == 'failed') {
         return 'Ralph round $round failed before a usable handoff — '
-            'the loop stops without retry (the reference semantics). Last known: '
+            'the loop stops without retry (the orchestration loop semantics). Last known: '
             '$lastSummary';
       }
     }
@@ -10145,7 +10145,7 @@ ${await _agentsMdBlock()}
     return '(no answer)';
   }
 
-  // ── Background jobs (the reference ctx.jobs equivalent) — state lives on _run ──
+  // ── Background jobs (the background job manager ctx.jobs equivalent) — state lives on _run ──
 
   Future<String> _handleJobStart(Map<String, dynamic> args) async {
     final cmd = args['command'] as String;
@@ -10285,7 +10285,7 @@ ${await _agentsMdBlock()}
     }
   }
 
-  // ── Session event log (the reference SessionEvent equivalent) ──
+  // ── Session event log (the event recorder SessionEvent equivalent) ──
   // _emit() mirrors every agent event into _sessionEvents (capped 500),
   // so session_search queries both messages and the event log.
   final List<SessionEvent> _sessionEvents = [];
@@ -10402,7 +10402,7 @@ ${await _agentsMdBlock()}
   /// sources deduped by URL and merged round-robin (one source at each rank
   /// from every query before advancing), every line a citable markdown link.
   /// Any failed query fails the whole call — partial results are discarded,
-  /// matching the reference abort-then-settle semantics.
+  /// matching the web search client abort-then-settle semantics.
   Future<String> _webSearch(List<String> queries) async {
     // Fan out concurrently. A failure rejects the whole call.
     final perQuery = await Future.wait(
@@ -10575,7 +10575,7 @@ ${await _agentsMdBlock()}
   }
 }
 
-/// One parsed web-search source (the reference `WebSearchResult` shape, minus dates).
+/// One parsed web-search source (the web search result `WebSearchResult` shape, minus dates).
 class _WebSearchSource {
   final String url;
   final String title;
@@ -10583,7 +10583,7 @@ class _WebSearchSource {
   _WebSearchSource({required this.url, required this.title, this.snippet = ''});
 }
 
-/// IDLE-reset timeout for SSE streams (the reference never-stop parity).
+/// IDLE-reset timeout for SSE streams (the streaming transformer never-stop parity).
 ///
 /// Unlike `Stream.timeout` (a total deadline), this transformer resets
 /// its countdown on EVERY event: a stream may legally run for hours as

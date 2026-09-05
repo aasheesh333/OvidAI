@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import 'agent_service.dart';
 
-/// App-level connectivity signal (the reference brand/connection parity): a tiny
+/// App-level connectivity signal (the connection monitor brand/connection parity): a tiny
 /// reachability probe that never blocks the UI and drives the sidebar
 /// chip. No new dependency — reuses HttpShim against a fast, public,
 /// CDN-hosted endpoint that answers 204 with no body.

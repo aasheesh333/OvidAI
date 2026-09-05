@@ -2,10 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-/// F1 (the reference persistent-PTY parity): one long-lived bash process per session
+/// F1 (the sandbox persistent-PTY parity): one long-lived bash process per session
 /// inside the sandbox. `run_shell` with `persistent: true` goes through
 /// this, so `cd`, exported vars and exported functions PERSIST between the
-/// agent's commands — exactly the Unix shell semantics the reference
+/// agent's commands — exactly the Unix shell semantics the persistent shell
 /// `ovid-tool-bash-persistent` exposes on desktop.
 ///
 /// Commands are executed by writing to the shell's stdin and watching

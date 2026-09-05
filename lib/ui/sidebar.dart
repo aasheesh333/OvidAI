@@ -108,7 +108,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
             ),
             const SizedBox(height: 14),
 
-            // Search — filters the session list live (the reference parity).
+            // Search — filters the session list live (the session index parity).
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: TextField(
@@ -177,7 +177,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                       ),
                     );
                   }
-                  // Workspace browser (the reference projects parity): group sessions
+                  // Workspace browser (the workspace tree projects parity): group sessions
                   // by their pinned working folder — "(no workspace)" for
                   // per-session sandbox chats.
                   final groups = <String, List<ChatSession>>{};
@@ -469,7 +469,7 @@ class _SessionTile extends StatelessWidget {
   }
 }
 
-/// Live connection-status chip beside the brand row (the reference parity).
+/// Live connection-status chip beside the brand row (the connection chip parity).
 /// Green dot = online, red = offline, grey pulse = checking.
 /// Tap re-probes (also the "reset handling" affordance).
 class _ConnectionChip extends StatelessWidget {

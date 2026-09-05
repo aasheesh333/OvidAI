@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 /// OvidAI design system — restrained monochrome theme with a single
 /// muted indigo accent. Professional, calm, "no color noise".
 /// Light/dark switchable: [Aether.dark] flips the whole palette; UI code
-/// reads the same names either way (the reference light/dark preference parity).
+/// reads the same names either way (the design system light/dark preference parity).
 class Aether {
   Aether._();
 

@@ -576,7 +576,7 @@ class _ThemeToggle extends StatelessWidget {
   }
 }
 
-/// Reply-language preference (the reference client-locale parity: system/en/zh).
+/// Reply-language preference (the settings coordinator client-locale parity: system/en/zh).
 /// Drives the REPLY LANGUAGE system-prompt hint — no UI strings change.
 class _LocaleTile extends StatelessWidget {
   const _LocaleTile();

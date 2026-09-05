@@ -139,7 +139,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     unawaited(AgentNotificationService.I.init());
     // Ask for telemetry consent once (Play policy) after first frame.
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAskConsent());
-    // First-run welcome notice (the reference ui-onboarding welcomeNoticeVersion):
+    // First-run welcome notice (the onboarding flow welcomeNoticeVersion):
     // one dialog per version, after the consent dialog settles.
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeWelcome());
     // MCP auto-reconnect: respawn servers the user had connected.
@@ -154,7 +154,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // ── App lifecycle → MCP lifecycle (the reference tier-2 parity) ──
+    // ── App lifecycle → MCP lifecycle (the lifecycle coordinator tier-2 parity) ──
     // resume  → respawn every server the user wants connected
     // NOTE: `paused` intentionally does NOTHING to MCP — tearing MCP down on
     // background KILLED in-flight mcp__ tool calls mid-run. The foreground
@@ -244,7 +244,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     );
   }
 
-  /// First-run welcome notice (the reference ui-onboarding welcomeNoticeVersion
+  /// First-run welcome notice (the onboarding flow welcomeNoticeVersion
   /// parity): shown once per [AppState.welcomeVersion], skipped while the
   /// telemetry consent dialog is still pending so the two never stack.
   void _maybeWelcome() {

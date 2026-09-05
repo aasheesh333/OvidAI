@@ -364,7 +364,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 }
 
-/// Agent-activity status dot (the reference StateDot semantics):
+/// Agent-activity status dot (the browser status indicator StateDot semantics):
 /// blue = agent actively driving the browser, green = ready.
 class _AgentDot extends StatelessWidget {
   final bool busy;
