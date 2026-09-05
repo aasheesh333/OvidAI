@@ -2528,6 +2528,22 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       } catch (_) {}
     });
 
+    test('SEC6: plan mode blocks mutating tools (PLAN MODE ACTIVE)', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'sec6', title: 'S', model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      s.planMode = true;
+      addTearDown(() {
+        s.planMode = false;
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((x) => x.id == 'sec6');
+      });
+      expect(await AgentService.I.dispatchForTest('run_code', {'code': '1+1', 'lang': 'python'}), contains('PLAN MODE ACTIVE'));
+      expect(await AgentService.I.dispatchForTest('dispatch_agent', {'prompt': 'hi'}), contains('PLAN MODE ACTIVE'));
+    });
+
     test('subagent child inherits parent mode and cannot escalate', () async {
       final app = AppState.I;
       final s = ChatSession(id: 'sub-s', title: 'S', model: 'm', mode: 'safe');
