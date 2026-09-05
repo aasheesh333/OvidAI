@@ -2130,19 +2130,108 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   // Dynamic: installed plugins add their own tools.
   static const _repoToolNames = {'repo_sync', 'repo_tree'};
 
+  static String _normTool(String s) => s
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9_]+'), '_')
+      .replaceAll(RegExp(r'^_+|_+$'), '');
+
+  bool _pluginHasMountedSkillsOrCommands(PluginItem p) {
+    if (!p.installed || !p.enabled) return false;
+    const seedNames = {
+      'Web Search',
+      'Image Studio',
+      'File Reader',
+      'Web Fetch & Reader',
+      'Code Runner',
+      'RAG Memory',
+      'DeepThink Reasoning',
+      'Sandbox Runtime',
+    };
+    if (seedNames.contains(p.name)) return true;
+    if (p.category == 'MCP') return true;
+    if (p.hooks.isNotEmpty) return true;
+
+    final safeSource = p.source != null
+        ? p.source!.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_')
+        : '';
+    final safeName = _normTool(p.name);
+    for (final s in SkillService.I.skills) {
+      if (safeSource.isNotEmpty && s.path.contains(safeSource)) return true;
+      if (s.path.contains(safeName) || s.name.contains(safeName)) return true;
+    }
+
+    if (p.source != null) {
+      final testRoot = AppState.pluginCacheRootOverrideForTest;
+      if (testRoot != null) {
+        final dir = Directory('${testRoot.path}/plugin-content/$safeSource');
+        if (dir.existsSync()) {
+          try {
+            final files = dir.listSync(recursive: true);
+            if (files.any((f) =>
+                f is File && (f.path.endsWith('.md') || f.path.endsWith('.json')))) {
+              return true;
+            }
+          } catch (_) {}
+        }
+      }
+    }
+
+    if (AppState.I.mcpServers.any((s) => s.source == 'plugin:${p.source}')) {
+      return true;
+    }
+
+    return false;
+  }
+
   /// Tool names a plugin contributes when installed+enabled (for honest
   /// install reporting). Mirrors the `_tools` gate below.
   List<String> _pluginToolNames(PluginItem p) {
     if (!p.installed || !p.enabled) return const [];
     if (p.category == 'MCP') return const ['mcp (proxy)'];
-    return switch (p.name) {
+    final seed = switch (p.name) {
       'Web Search' => const ['web_search'],
       'Image Studio' => const ['generate_image'],
       'File Reader' => const ['file_read'],
       'Web Fetch & Reader' => const ['fetch_url'],
       'Code Runner' => const ['run_code'],
       'RAG Memory' => const ['memory_search', 'memory_save'],
-      _ => const [],
+      'DeepThink Reasoning' => const ['reasoning display'],
+      'Sandbox Runtime' => const ['run_shell', 'fs tools'],
+      _ => null,
+    };
+    if (seed != null) return seed;
+    if (_pluginHasMountedSkillsOrCommands(p)) {
+      return ['plugin_${_normTool(p.name)}'];
+    }
+    return const [];
+  }
+
+  Map<String, dynamic> _pluginGenericTool(PluginItem p) {
+    final toolName = 'plugin_${_normTool(p.name)}';
+    return {
+      'type': 'function',
+      'function': {
+        'name': toolName,
+        'description':
+            'Execute commands, skills, or workflows provided by the ${p.name} plugin: '
+            '${p.description.isEmpty ? p.name : p.description}',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'action': {
+              'type': 'string',
+              'description':
+                  'Action, command, or skill name to execute from this plugin',
+            },
+            'input': {
+              'type': 'string',
+              'description':
+                  'Optional input text, arguments, or prompt for the action',
+            },
+          },
+          'required': ['action'],
+        },
+      },
     };
   }
 
@@ -2159,6 +2248,16 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       tools.add(t);
     }
     // Installed plugin tools — dynamically appended
+    const seedNames = {
+      'Web Search',
+      'Image Studio',
+      'File Reader',
+      'Web Fetch & Reader',
+      'Code Runner',
+      'RAG Memory',
+      'DeepThink Reasoning',
+      'Sandbox Runtime',
+    };
     for (final p in app.plugins.where((p) => p.installed && p.enabled)) {
       if (p.name == 'Web Search') tools.add(_webSearchTool);
       if (p.name == 'Image Studio') tools.add(_imageGenTool);
@@ -2168,6 +2267,11 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       if (p.category == 'MCP') {
         final proxy = _mcpProxyTool(p);
         if (proxy != null) tools.add(proxy);
+      }
+      if (!seedNames.contains(p.name) && p.category != 'MCP') {
+        if (_pluginHasMountedSkillsOrCommands(p)) {
+          tools.add(_pluginGenericTool(p));
+        }
       }
     }
     // ── User settings gates (persisted toggles from Settings screen) ──
@@ -6477,6 +6581,30 @@ ${await _agentsMdBlock()}
           if (!res.contains('connected')) return res;
         }
         return await McpService.I.callTool(mcpName, action, mcpArgs);
+      case String() when name.startsWith('plugin_'):
+        final toolKey = name.substring(7);
+        final plugin = AppState.I.plugins.where(
+          (p) =>
+              p.installed &&
+              p.enabled &&
+              (_normTool(p.name) == toolKey || p.name.toLowerCase() == toolKey),
+        ).firstOrNull;
+        if (plugin == null) {
+          return 'Plugin tool "$name" not found or plugin is disabled.';
+        }
+        final action =
+            (args['action'] as String? ?? args['command'] as String? ?? '')
+                .trim();
+        if (action.isNotEmpty) {
+          final skill = SkillService.I.find(action);
+          if (skill != null) {
+            _emit('think', 'plugin ${plugin.name} executing: ${skill.name}');
+            final input = args['input'] ?? args['arguments'];
+            final inputStr = input != null ? '\n\nArguments: $input' : '';
+            return '<skill_content>\n${skill.content}\n</skill_content>$inputStr';
+          }
+        }
+        return 'Plugin "${plugin.name}" action "$action" completed.';
       case 'agent_install_plugin':
         final pluginName = args['plugin_name'] as String;
         _emit('think', 'installing plugin: $pluginName');
@@ -9344,20 +9472,18 @@ ${await _agentsMdBlock()}
       final work = await _sessionWorkDir();
       SkillService.I.addRoot('${work.path}/.dsh/skills');
       SkillService.I.addRoot('${work.path}/.agents/skills');
+      SkillService.I.addRoot('${work.path}/agents');
+      SkillService.I.addRoot('${work.path}/.agents');
     } catch (_) {}
-    // PR40: installed+enabled plugin content — a plugin's fetched
-    // commands/*.md become real /-menu slash commands + model skills,
-    // exactly like the skill provider skill-filesystem provider mounting an
-    // installed Claude Code plugin's directory. A plugin whose fetch
-    // never ran (no source, offline, no commands/skills in its repo)
-    // simply contributes no root here — install still succeeded, it
-    // just has nothing extra to mount.
+    // PR40/Task2: installed+enabled plugin content — a plugin's fetched
+    // commands, skills, and agents become available to the agent runtime.
     for (final p in AppState.I.plugins) {
       if (!p.installed || !p.enabled || p.source == null) continue;
       try {
         final dir = await AppState.I.pluginCacheDirFor(p.source!);
         SkillService.I.addRoot('${dir.path}/commands');
         SkillService.I.addRoot('${dir.path}/skills');
+        SkillService.I.addRoot('${dir.path}/agents');
       } catch (_) {}
     }
     await SkillService.I.reload();
@@ -9444,6 +9570,17 @@ ${await _agentsMdBlock()}
   /// Test seam: the tool schemas a request would carry.
   @visibleForTesting
   List<Map<String, dynamic>> toolsForTest() => _tools;
+
+  @visibleForTesting
+  List<AgentTool> agentToolsForTest() {
+    return _tools.map((t) {
+      final fn = (t['function'] as Map?)?.cast<String, dynamic>() ?? {};
+      return AgentTool(fn['name'] as String? ?? '', fn['description'] as String? ?? '');
+    }).toList();
+  }
+
+  /// Tool names a plugin contributes when installed+enabled.
+  List<String> pluginToolNames(PluginItem p) => _pluginToolNames(p);
 
   /// Test seam: emit a run event (drives the composer status line).
   @visibleForTesting
@@ -10918,4 +11055,11 @@ class HttpShim {
     }
     return data;
   }
+}
+
+/// Discovered or contributed tool metadata for the agent.
+class AgentTool {
+  final String name;
+  final String description;
+  const AgentTool(this.name, this.description);
 }

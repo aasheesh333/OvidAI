@@ -22,7 +22,7 @@ import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
-import 'package:ovid_ai/ui/plugins_screen.dart' show parseMcpConfigForTest;
+import 'package:ovid_ai/ui/plugins_screen.dart' show parseMcpConfigForTest, toolGainsForTest;
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
 import 'package:ovid_ai/core/sandbox_pkg.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
@@ -6932,7 +6932,7 @@ block</pre>
       app.plugins.remove(p);
     });
 
-    test('a local "./dir" source is dropped (nothing this client can fetch)',
+    test('a local "./dir" source resolves against the marketplace repo',
         () {
       final app = AppState.I;
       final before = app.plugins.length;
@@ -6941,14 +6941,14 @@ block</pre>
           {
             'name': 'PR40 Local Plugin',
             'source': './plugins/local-one',
-            'description': 'local dir, not fetchable',
+            'description': 'local dir, now resolved against marketplace',
             'category': 'Tool',
           },
         ],
       }, 'owner', 'market');
       expect(app.plugins.length, before + 1);
       final p = app.plugins.last;
-      expect(p.source, isNull);
+      expect(p.source, 'owner/market/raw/branch/plugins/local-one');
       app.plugins.remove(p);
     });
 
@@ -8462,6 +8462,259 @@ url = "https://api.example.com/mcp"
         expect(p.installs, 0, reason: '${p.name} has non-zero installs');
         expect(p.installsKnown, isFalse, reason: '${p.name} has installsKnown true');
       }
+    });
+  });
+
+  group('Task 2: Plugin runtime capability + manifest parity', () {
+    test('imported enabled plugin contributes tools', () async {
+      final app = AppState.I;
+      final tempDir = Directory.systemTemp.createTempSync('ovid_plugin_tool_test_');
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+      AppState.pluginCacheRootOverrideForTest = tempDir;
+      addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+
+      final plugin = PluginItem(
+        name: 'real-plugin',
+        author: 'acme',
+        description: 'Real Plugin for tests',
+        version: '1.0.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'acme/real-plugin',
+      );
+      app.plugins.add(plugin);
+      addTearDown(() => app.plugins.remove(plugin));
+
+      final skillDir = Directory('${tempDir.path}/plugin-content/acme_real-plugin/skills/real-skill');
+      skillDir.createSync(recursive: true);
+      File('${skillDir.path}/SKILL.md').writeAsStringSync('---\nname: real-skill\ndescription: A real skill\n---\nDo real work.');
+
+      await AgentService.I.refreshSkills();
+
+      final tools = AgentService.I.toolsForTest();
+      expect(tools.any((t) => (t['function'] as Map)['name'].toString().contains('real_plugin')), isTrue);
+      final agentTools = AgentService.I.agentToolsForTest();
+      expect(agentTools.any((t) => t.name.contains('real_plugin')), isTrue);
+      final names = AgentService.I.pluginToolNames(plugin);
+      expect(names.any((n) => n.contains('real_plugin')), isTrue);
+    });
+
+    test('_toolGainsFor derives actual tool gains dynamically', () async {
+      final app = AppState.I;
+      final tempDir = Directory.systemTemp.createTempSync('ovid_toolgains_test_');
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+      AppState.pluginCacheRootOverrideForTest = tempDir;
+      addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+
+      final plugin = PluginItem(
+        name: 'custom-analyzer',
+        author: 'acme',
+        description: 'Custom analyzer plugin',
+        version: '1.0.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'acme/custom-analyzer',
+      );
+      app.plugins.add(plugin);
+      addTearDown(() => app.plugins.remove(plugin));
+
+      // Before skills mounted: null
+      expect(toolGainsForTest(plugin), isNull);
+
+      final cmdDir = Directory('${tempDir.path}/plugin-content/acme_custom-analyzer/commands');
+      cmdDir.createSync(recursive: true);
+      File('${cmdDir.path}/analyze.md').writeAsStringSync('---\nname: analyze\n---\nRun analysis.');
+
+      await AgentService.I.refreshSkills();
+
+      final gains = toolGainsForTest(plugin);
+      expect(gains, isNotNull);
+      expect(gains, contains('custom_analyzer'));
+    });
+
+    test('_githubPluginSource resolves relative ./dir and /dir sources against marketplace', () {
+      final resolvedDot = AppState.githubPluginSourceForTest(
+        './plugins/local-tool',
+        marketplaceRepo: 'myorg/mymarket',
+      );
+      expect(resolvedDot, 'myorg/mymarket/raw/branch/plugins/local-tool');
+
+      final resolvedSlash = AppState.githubPluginSourceForTest(
+        '/plugins/slash-tool',
+        marketplaceRepo: 'myorg/mymarket',
+      );
+      expect(resolvedSlash, 'myorg/mymarket/raw/branch/plugins/slash-tool');
+
+      final noMarket = AppState.githubPluginSourceForTest('./plugins/local-tool');
+      expect(noMarket, isNull);
+
+      final standalone = AppState.githubPluginSourceForTest(
+        'external-org/standalone-repo',
+        marketplaceRepo: 'myorg/mymarket',
+      );
+      expect(standalone, 'external-org/standalone-repo');
+    });
+
+    test('fetchPluginContent downloads agents/*.md, hooks/hooks.json, .claude-plugin/plugin.json, and retains frontmatter', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        final path = request.uri.path;
+        if (path == '/tree/main') {
+          final body = utf8.encode(jsonEncode({
+            'tree': [
+              {'path': 'commands/run.md', 'type': 'blob'},
+              {'path': 'agents/reviewer.md', 'type': 'blob'},
+              {'path': 'hooks/hooks.json', 'type': 'blob'},
+              {'path': '.claude-plugin/plugin.json', 'type': 'blob'},
+              {'path': 'ignored/junk.txt', 'type': 'blob'},
+            ],
+          }));
+          request.response
+            ..statusCode = 200
+            ..contentLength = body.length
+            ..add(body);
+          await request.response.close();
+          return;
+        }
+        if (path == '/raw/commands/run.md') {
+          final body = utf8.encode('---\nname: run\nallowed-tools: [run_shell, file_read]\nargument-hint: <cmd>\nmodel: sonnet\n---\nRun command.');
+          request.response
+            ..statusCode = 200
+            ..contentLength = body.length
+            ..add(body);
+          await request.response.close();
+          return;
+        }
+        if (path == '/raw/agents/reviewer.md') {
+          final body = utf8.encode('---\nname: reviewer\n---\nYou are a reviewer.');
+          request.response
+            ..statusCode = 200
+            ..contentLength = body.length
+            ..add(body);
+          await request.response.close();
+          return;
+        }
+        if (path == '/raw/hooks/hooks.json') {
+          final body = utf8.encode('{"hooks": {"on_turn_start": "echo start"}}');
+          request.response
+            ..statusCode = 200
+            ..contentLength = body.length
+            ..add(body);
+          await request.response.close();
+          return;
+        }
+        if (path == '/raw/.claude-plugin/plugin.json') {
+          final body = utf8.encode('{"name": "test-plugin"}');
+          request.response
+            ..statusCode = 200
+            ..contentLength = body.length
+            ..add(body);
+          await request.response.close();
+          return;
+        }
+        request.response.statusCode = 404;
+        await request.response.close();
+      });
+      addTearDown(() => server.close(force: true));
+
+      AppState.pluginContentBaseOverrideForTest = 'http://${server.address.host}:${server.port}';
+      addTearDown(() => AppState.pluginContentBaseOverrideForTest = null);
+
+      final tempDir = Directory.systemTemp.createTempSync('ovid_fetch_test_');
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+      AppState.pluginCacheRootOverrideForTest = tempDir;
+      addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+
+      final count = await AppState.I.fetchPluginContent('testowner/testrepo');
+      expect(count, 4, reason: 'commands/run.md, agents/reviewer.md, hooks/hooks.json, .claude-plugin/plugin.json');
+
+      final cacheDir = await AppState.I.pluginCacheDirFor('testowner/testrepo');
+      expect(File('${cacheDir.path}/commands/run.md').existsSync(), isTrue);
+      expect(File('${cacheDir.path}/agents/reviewer.md').existsSync(), isTrue);
+      expect(File('${cacheDir.path}/hooks/hooks.json').existsSync(), isTrue);
+      expect(File('${cacheDir.path}/.claude-plugin/plugin.json').existsSync(), isTrue);
+      expect(File('${cacheDir.path}/ignored/junk.txt').existsSync(), isFalse);
+
+      final runContent = File('${cacheDir.path}/commands/run.md').readAsStringSync();
+      expect(runContent, contains('allowed-tools: [run_shell, file_read]'));
+      expect(runContent, contains('argument-hint: <cmd>'));
+      expect(runContent, contains('model: sonnet'));
+    });
+
+    test('skills.dart discovers agents/ personas and parses custom frontmatter', () async {
+      final tempDir = Directory.systemTemp.createTempSync('ovid_agents_discovery_test_');
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+
+      final agentsDir = Directory('${tempDir.path}/agents');
+      agentsDir.createSync(recursive: true);
+
+      final agentFile = File('${agentsDir.path}/security-auditor.md');
+      agentFile.writeAsStringSync('''---
+name: security-auditor
+description: Audits code for vulnerabilities
+allowed-tools: [file_read, run_shell]
+argument-hint: <target-dir>
+model: claude-3-opus
+custom-policy: strict
+---
+You are an expert security auditor reviewing code for vulnerabilities.
+''');
+
+      final service = SkillService.forTest();
+      service.addRoot(tempDir.path);
+      await service.reload();
+
+      final agent = service.find('security-auditor');
+      expect(agent, isNotNull);
+      expect(agent!.name, 'security-auditor');
+      expect(agent.description, 'Audits code for vulnerabilities');
+      expect(agent.isAgent, isTrue);
+      expect(agent.allowedTools, containsAll(['file_read', 'run_shell']));
+      expect(agent.argumentHint, '<target-dir>');
+      expect(agent.model, 'claude-3-opus');
+      expect(agent.frontmatter['custom-policy'], 'strict');
+      expect(agent.content.trim(), 'You are an expert security auditor reviewing code for vulnerabilities.');
+    });
+
+    test('mountPluginMcpServers preserves transport, url, headers, and securely stores env', () async {
+      final app = AppState.I;
+      final tempDir = Directory.systemTemp.createTempSync('ovid_mcp_mount_test_');
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+      AppState.pluginCacheRootOverrideForTest = tempDir;
+      addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+
+      final cacheDir = Directory('${tempDir.path}/plugin-content/acme_remote-mcp');
+      cacheDir.createSync(recursive: true);
+
+      File('${cacheDir.path}/.mcp.json').writeAsStringSync(jsonEncode({
+        'mcpServers': {
+          'remote-server': {
+            'transport': 'http',
+            'url': 'https://api.example.com/mcp',
+            'headers': {
+              'Authorization': 'Bearer test_token',
+            },
+            'env': {
+              'SECRET_KEY': 'very_secret_value',
+            },
+          },
+        },
+      }));
+
+      final mounted = await app.mountPluginMcpServers('acme/remote-mcp');
+      expect(mounted, 1);
+
+      final server = app.mcpServers.firstWhere((s) => s.name == 'remote-server');
+      addTearDown(() => app.mcpServers.remove(server));
+
+      expect(server.transport, 'http');
+      expect(server.url, 'https://api.example.com/mcp');
+      expect(server.headers['Authorization'], 'Bearer test_token');
+
+      final env = await app.getMcpEnv('remote-server');
+      expect(env['SECRET_KEY'], 'very_secret_value');
     });
   });
 }

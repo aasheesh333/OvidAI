@@ -21,6 +21,11 @@ class Skill {
   final String path;
   final bool modelInvocable;
   final bool userInvocable;
+  final List<String> allowedTools;
+  final String? argumentHint;
+  final String? model;
+  final Map<String, String> frontmatter;
+  final bool isAgent;
 
   const Skill({
     required this.name,
@@ -30,6 +35,11 @@ class Skill {
     required this.path,
     required this.modelInvocable,
     required this.userInvocable,
+    this.allowedTools = const [],
+    this.argumentHint,
+    this.model,
+    this.frontmatter = const {},
+    this.isAgent = false,
   });
 
   /// Compact catalog line injected into the agent system context.
@@ -55,6 +65,10 @@ class SkillService {
   /// slash suggestion menu.
   List<Skill> get userSkills =>
       List.unmodifiable(_skills.where((s) => s.userInvocable));
+
+  /// Discovered agent persona definitions.
+  List<Skill> get agents =>
+      List.unmodifiable(_skills.where((s) => s.isAgent));
 
   /// Register a search root (workspace, custom dirs, etc).
   void addRoot(String path) {
@@ -88,16 +102,29 @@ class SkillService {
             if (s != null) _skills.add(s);
             continue;
           }
+          final agentMd = File('${entity.path}/AGENT.md');
+          if (agentMd.existsSync()) {
+            final s = await _parse(agentMd, entity.path, isAgent: true);
+            if (s != null) _skills.add(s);
+            continue;
+          }
+          if (_basename(entity.path) == 'agents') {
+            await _scanDir(entity);
+            continue;
+          }
           // Nested directories with **/SKILL.md are excluded (spec parity).
         } else if (entity is File && entity.path.endsWith('.md')) {
-          final s = await _parse(entity, entity.path);
+          final isAgent = entity.path.contains('/agents/') ||
+              entity.path.contains('\\agents\\') ||
+              _basename(dir.path) == 'agents';
+          final s = await _parse(entity, entity.path, isAgent: isAgent);
           if (s != null) _skills.add(s);
         }
       }
     } catch (_) {}
   }
 
-  Future<Skill?> _parse(File file, String path) async {
+  Future<Skill?> _parse(File file, String path, {bool isAgent = false}) async {
     try {
       final raw = await file.readAsString();
       var name = _basename(path);
@@ -105,6 +132,10 @@ class SkillService {
       var whenToUse = '';
       var modelInvocable = true;
       var userInvocable = true;
+      var allowedTools = <String>[];
+      String? argumentHint;
+      String? model;
+      final frontmatter = <String, String>{};
       var content = raw;
 
       // Minimal YAML frontmatter: between leading --- fences.
@@ -120,7 +151,10 @@ class SkillService {
             var value = line.substring(idx + 1).trim();
             if (value.startsWith('"') && value.endsWith('"')) {
               value = value.substring(1, value.length - 1);
+            } else if (value.startsWith("'") && value.endsWith("'")) {
+              value = value.substring(1, value.length - 1);
             }
+            frontmatter[key] = value;
             switch (key) {
               case 'name':
                 if (value.isNotEmpty) name = value;
@@ -132,12 +166,30 @@ class SkillService {
                 modelInvocable = value.toLowerCase() != 'true';
               case 'user-invocable':
                 userInvocable = value.toLowerCase() == 'true';
+              case 'allowed-tools' || 'allowed_tools' || 'tools':
+                var s = value;
+                if (s.startsWith('[') && s.endsWith(']')) {
+                  s = s.substring(1, s.length - 1);
+                }
+                allowedTools = s
+                    .split(',')
+                    .map((e) => e.trim().replaceAll('"', '').replaceAll("'", ""))
+                    .where((e) => e.isNotEmpty)
+                    .toList();
+              case 'argument-hint' || 'argument_hint':
+                argumentHint = value;
+              case 'model':
+                model = value;
             }
           }
         }
       }
 
       if (content.trim().isEmpty) return null;
+      final resolvedIsAgent = isAgent ||
+          path.contains('/agents/') ||
+          path.contains('\\agents\\') ||
+          _basename(file.parent.path) == 'agents';
       return Skill(
         name: name,
         description: description,
@@ -146,6 +198,11 @@ class SkillService {
         path: path,
         modelInvocable: modelInvocable,
         userInvocable: userInvocable,
+        allowedTools: allowedTools,
+        argumentHint: argumentHint,
+        model: model,
+        frontmatter: frontmatter,
+        isAgent: resolvedIsAgent,
       );
     } catch (_) {
       return null;

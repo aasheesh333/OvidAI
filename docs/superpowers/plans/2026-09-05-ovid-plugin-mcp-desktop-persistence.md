@@ -123,7 +123,7 @@ git commit -m "fix: marketplace persist + honest installs"
 - Consumes: Task 1 persisted `source` + fetched content cache.
 - Produces: generic plugin tool contribution + skill/agent roots for Task 3 hooks/MCP.
 
-- [ ] **Step 1: Write failing non-seed tool test**
+- [x] **Step 1: Write failing non-seed tool test**
 
 ```dart
 test('imported enabled plugin contributes tools', () async {
@@ -133,12 +133,12 @@ test('imported enabled plugin contributes tools', () async {
 });
 ```
 
-- [ ] **Step 2: Run to verify fail**
+- [x] **Step 2: Run to verify fail**
 
 Run: `/home/ubuntu/sdk/flutter/bin/flutter test test/core_regression_test.dart --plain-name "imported enabled plugin contributes tools"`
 Expected: FAIL (`contributes no agent tools`).
 
-- [ ] **Step 3: Generic capability + subdir fetch + manifest**
+- [x] **Step 3: Generic capability + subdir fetch + manifest**
 
 ```dart
 List<AgentTool> _pluginToolNames() {
@@ -161,12 +161,12 @@ Future<String?> _githubPluginSource(PluginItem p) async {
 
 Fetch allowlist adds `agents/*.md`, `hooks/hooks.json`, `.claude-plugin/plugin.json`, command frontmatter `allowed-tools,argument-hint,model`; `skills.dart` scans `agents/` personas + parses new frontmatter; `mountPluginMcpServers` preserves `transport/url/headers/env` (env→secure).
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `/home/ubuntu/sdk/flutter/bin/flutter test test/core_regression_test.dart`
 Expected: PASS; analyze clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/core/state.dart lib/core/agent_service.dart lib/core/skills.dart lib/ui/plugins_screen.dart test/core_regression_test.dart

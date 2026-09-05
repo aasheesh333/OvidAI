@@ -2170,13 +2170,25 @@ class AppState extends ChangeNotifier {
   /// install must never hard-fail because a plugin repo is unreachable).
   Future<int> fetchPluginContent(String source) async {
     final parts = source.split('/');
-    if (parts.length != 2) return 0;
+    if (parts.length < 2) return 0;
     final owner = parts[0];
     final repo = parts[1];
     final cacheDir = await pluginCacheDirFor(source);
 
-    List<String>? paths;
-    for (final branch in ['main', 'master']) {
+    // If source is owner/repo/raw/branch/path, extract subpath
+    String subpathPrefix = '';
+    if (parts.length >= 4 && parts[2] == 'raw') {
+      if (parts.length > 4) {
+        subpathPrefix = '${parts.sublist(4).join('/')}/';
+      }
+    }
+
+    List<Map<String, String>>? targetEntries;
+    final branchesToTry = parts.length >= 4 && parts[2] == 'raw' && parts[3] != 'branch'
+        ? [parts[3], 'main', 'master']
+        : ['main', 'master'];
+
+    for (final branch in branchesToTry) {
       final treeUrl = pluginContentBaseOverrideForTest != null
           ? '$pluginContentBaseOverrideForTest/tree/$branch'
           : 'https://api.github.com/repos/$owner/$repo/git/trees/$branch'
@@ -2204,20 +2216,31 @@ class AppState extends ChangeNotifier {
                   as Map<String, dynamic>;
           final tree = (j['tree'] as List?)?.cast<Map<String, dynamic>>();
           if (tree == null) continue;
-          paths = [
-            for (final entry in tree)
-              if (entry['type'] == 'blob')
-                if ((entry['path'] as String).startsWith('commands/') ||
-                    ((entry['path'] as String).startsWith('skills/') &&
-                        (entry['path'] as String).endsWith('SKILL.md')) ||
-                    entry['path'] == '.mcp.json')
-                  entry['path'] as String,
-          ];
-          if (paths.isNotEmpty) {
-            // Remember the working branch for the raw-fetch loop below.
-            paths = [branch, ...paths];
+
+          final matched = <Map<String, String>>[];
+          for (final entry in tree) {
+            if (entry['type'] != 'blob') continue;
+            final fullPath = entry['path'] as String;
+            String relPath = fullPath;
+            if (subpathPrefix.isNotEmpty) {
+              if (!fullPath.startsWith(subpathPrefix)) continue;
+              relPath = fullPath.substring(subpathPrefix.length);
+            }
+            final isAllowed =
+                relPath.startsWith('commands/') ||
+                (relPath.startsWith('skills/') && relPath.endsWith('SKILL.md')) ||
+                (relPath.startsWith('agents/') && relPath.endsWith('.md')) ||
+                relPath == 'hooks/hooks.json' ||
+                relPath == '.claude-plugin/plugin.json' ||
+                relPath == '.mcp.json';
+            if (isAllowed) {
+              matched.add({'rel': relPath, 'repoPath': fullPath, 'branch': branch});
+            }
           }
-          break;
+          if (matched.isNotEmpty) {
+            targetEntries = matched;
+            break;
+          }
         } finally {
           client.close(force: true);
         }
@@ -2225,44 +2248,53 @@ class AppState extends ChangeNotifier {
         continue;
       }
     }
-    if (paths == null || paths.isEmpty) return 0;
-    final branch = paths.first;
-    final filePaths = paths.skip(1).toList();
+    if (targetEntries == null || targetEntries.isEmpty) return 0;
 
     var fetched = 0;
-    for (final path in filePaths) {
-      final rawUrl = pluginContentBaseOverrideForTest != null
-          ? '$pluginContentBaseOverrideForTest/raw/$path'
-          : 'https://raw.githubusercontent.com/$owner/$repo/$branch/$path';
-      try {
-        final client = HttpClient()
-          ..connectionTimeout = const Duration(seconds: 15);
+    for (final item in targetEntries) {
+      final rel = item['rel']!;
+      final repoPath = item['repoPath']!;
+      final branch = item['branch']!;
+      final urls = <String>[
+        if (pluginContentBaseOverrideForTest != null) ...[
+          '$pluginContentBaseOverrideForTest/raw/$repoPath',
+          if (rel != repoPath) '$pluginContentBaseOverrideForTest/raw/$rel',
+        ] else ...[
+          'https://raw.githubusercontent.com/$owner/$repo/$branch/$repoPath',
+        ],
+      ];
+      for (final rawUrl in urls) {
         try {
-          final req = await client
-              .getUrl(Uri.parse(rawUrl))
-              .timeout(const Duration(seconds: 15));
-          final res = await req.close().timeout(const Duration(seconds: 15));
-          if (res.statusCode != 200) continue;
-          final builder = BytesBuilder();
-          await for (final chunk in res) {
-            builder.add(chunk);
-            if (builder.length > 1024 * 1024) {
-              throw Exception('plugin file too large');
+          final client = HttpClient()
+            ..connectionTimeout = const Duration(seconds: 15);
+          try {
+            final req = await client
+                .getUrl(Uri.parse(rawUrl))
+                .timeout(const Duration(seconds: 15));
+            final res = await req.close().timeout(const Duration(seconds: 15));
+            if (res.statusCode != 200) continue;
+            final builder = BytesBuilder();
+            await for (final chunk in res) {
+              builder.add(chunk);
+              if (builder.length > 1024 * 1024) {
+                throw Exception('plugin file too large');
+              }
             }
+            final content = utf8.decode(
+              builder.takeBytes(),
+              allowMalformed: true,
+            );
+            final target = File('${cacheDir.path}/$rel');
+            target.parent.createSync(recursive: true);
+            target.writeAsStringSync(content);
+            fetched++;
+            break;
+          } finally {
+            client.close(force: true);
           }
-          final content = utf8.decode(
-            builder.takeBytes(),
-            allowMalformed: true,
-          );
-          final target = File('${cacheDir.path}/$path');
-          target.parent.createSync(recursive: true);
-          target.writeAsStringSync(content);
-          fetched++;
-        } finally {
-          client.close(force: true);
+        } catch (_) {
+          continue;
         }
-      } catch (_) {
-        continue;
       }
     }
     return fetched;
@@ -2284,34 +2316,54 @@ class AppState extends ChangeNotifier {
       final servers = j['mcpServers'];
       if (servers is! Map) return 0;
       var mounted = 0;
-      servers.forEach((key, value) {
-        if (value is! Map) return;
-        if (mcpServers.any((e) => e.name == key)) return; // dedupe by name
+      for (final entry in servers.entries) {
+        final key = entry.key.toString();
+        final value = entry.value;
+        if (value is! Map) continue;
+        if (mcpServers.any((e) => e.name == key)) continue; // dedupe by name
         final m = value;
         final args =
             (m['args'] as List?)?.whereType<String>().toList() ?? const [];
+        final url = m['url'] as String?;
+        final transport = (m['transport'] as String?) ??
+            ((url != null && url.isNotEmpty) ? 'http' : 'stdio');
+        final headers = (m['headers'] as Map?)
+                ?.map((k, v) => MapEntry(k.toString(), v.toString())) ??
+            const <String, String>{};
+
+        if (m['env'] is Map) {
+          final envMap = (m['env'] as Map)
+              .map((k, v) => MapEntry(k.toString(), v.toString()));
+          if (envMap.isNotEmpty) {
+            await setMcpEnv(key, envMap);
+          }
+        }
+
         mcpServers.add(
           McpServer(
-            name: key.toString(),
+            name: key,
             author: source,
             description: (m['description'] as String?) ??
                 'declared by plugin ${source.replaceAll('_', '/')}',
             category: 'Plugin',
-            command: (m['command'] as String?) ?? 'npx',
+            command: (m['command'] as String?) ?? (transport == 'http' ? '' : 'npx'),
             args: args,
             envHint: (m['env'] as Map?)?.keys.isNotEmpty == true
                 ? (m['env'] as Map).keys.first as String?
                 : null,
             source: 'plugin:$source',
             custom: true,
+            transport: transport,
+            url: url,
+            headers: headers,
           ),
         );
         mounted++;
-      });
+      }
       if (mounted > 0) {
         refresh();
-        _persistCustomMcpServers();
-        _persistMcpConnectedIntent();
+        await _persistCustomMcpServers();
+        await _persistMcpConnectedIntent();
       }
       return mounted;
     } catch (_) {
@@ -2353,21 +2405,28 @@ class AppState extends ChangeNotifier {
     return out;
   }
 
-  /// PR40: normalize a marketplace plugin-entry `source` to a fetchable
-  /// `owner/repo`, or null when it can't be fetched by this client.
-  /// Claude Code marketplaces use two source shapes: `"owner/repo"` (a
-  /// standalone GitHub plugin repo — fetchable) and `"./local-dir"` (a
-  /// path INSIDE the marketplace's own repo — would need the marketplace
-  /// repo + subpath, which the current one-file `marketplace.json` fetch
-  /// has no way to express; dropped rather than mis-fetched).
-  static String? _githubPluginSource(String? raw) {
+  /// PR40/Task2: normalize a marketplace plugin-entry `source` to a fetchable
+  /// `owner/repo` or resolve relative `./dir` / `/dir` paths against the marketplace
+  /// repository (`owner/repo/raw/branch/path`).
+  static String? _githubPluginSource(String? raw, {String? marketplaceRepo}) {
     if (raw == null) return null;
     final s = raw.trim();
-    if (s.isEmpty || s.startsWith('.') || s.startsWith('/')) return null;
+    if (s.isEmpty) return null;
+    if (s.startsWith('.') || s.startsWith('/')) {
+      if (marketplaceRepo == null || marketplaceRepo.isEmpty) return null;
+      final cleanMarketplace = normalizeMarketplace(marketplaceRepo);
+      if (cleanMarketplace.split('/').length != 2) return null;
+      final cleanPath = s.replaceFirst(RegExp(r'^\.?/+'), '');
+      return '$cleanMarketplace/raw/branch/$cleanPath';
+    }
     final normalized = normalizeMarketplace(s);
     if (normalized.split('/').length != 2) return null;
     return normalized;
   }
+
+  @visibleForTesting
+  static String? githubPluginSourceForTest(String? raw, {String? marketplaceRepo}) =>
+      _githubPluginSource(raw, marketplaceRepo: marketplaceRepo);
 
   /// `mcpServers`, plus Claude Code `plugins` entries.
   String _mergeMarketplaceCatalog(
@@ -2388,7 +2447,10 @@ class AppState extends ChangeNotifier {
         if (plugins.any((e) => e.name == pname)) {
           final existing = plugins.firstWhere((e) => e.name == pname);
           if (existing.source == null && p['source'] != null) {
-            existing.source = _githubPluginSource(p['source'] as String?);
+            existing.source = _githubPluginSource(
+              p['source'] as String?,
+              marketplaceRepo: '$owner/$repoName',
+            );
           }
           continue;
         }
@@ -2405,12 +2467,12 @@ class AppState extends ChangeNotifier {
             installsKnown: (p['installs'] is int && (p['installs'] as int) > 0),
             // PR24: hook declarations survive the marketplace import.
             hooks: _parsePluginHooks(p['hooks']),
-            // PR40: an `owner/repo` source lets install fetch the
-            // plugin's own commands/*.md + skills/*/SKILL.md; a local
-            // "./dir" source (Claude Code convention) has nothing this
-            // client can fetch, so it is dropped rather than kept as a
-            // GitHub-shaped string that would 404.
-            source: _githubPluginSource(p['source'] as String?),
+            // PR40/Task2: an `owner/repo` source or relative `./dir` source
+            // resolved against the marketplace repo allows fetching plugin content.
+            source: _githubPluginSource(
+              p['source'] as String?,
+              marketplaceRepo: '$owner/$repoName',
+            ),
             marketplace: '$owner/$repoName',
           ),
         );

@@ -11,7 +11,7 @@ import '../core/state.dart';
 /// `_tools` gate in AgentService so the install snackbar can report what
 /// the model actually gained (the plugin registry honest-install parity).
 String? _toolGainsFor(PluginItem p) {
-  return switch (p.name) {
+  final seed = switch (p.name) {
     'Web Search' => 'web_search',
     'Image Studio' => 'generate_image',
     'File Reader' => 'file_read',
@@ -22,7 +22,17 @@ String? _toolGainsFor(PluginItem p) {
     'Sandbox Runtime' => 'run_shell, fs tools',
     _ => null,
   };
+  if (seed != null) return seed;
+  if (p.category == 'MCP') return 'mcp (proxy)';
+  final tools = AgentService.I.pluginToolNames(p);
+  if (tools.isNotEmpty) {
+    return tools.join(', ');
+  }
+  return null;
 }
+
+@visibleForTesting
+String? toolGainsForTest(PluginItem p) => _toolGainsFor(p);
 
 /// Plugins library — Claude-Code-extensions style: trending banner carousel,
 /// search, category chips, thousands of community plugins, detail pages.
