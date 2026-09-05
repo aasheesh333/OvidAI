@@ -2469,6 +2469,20 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(await AgentService.I.dispatchForTest('ralph', {'goal': 'hi'}), contains('READ-ONLY MODE'));
     });
 
+    test('SEC3: read_attachment refuses workspace escape', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'sec3', title: 'S', model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((x) => x.id == 'sec3');
+      });
+      final res = await AgentService.I.dispatchForTest('read_attachment', {'filename': '../../etc/passwd'});
+      expect(res, contains('escapes the session workspace'));
+    });
+
     test('subagent child inherits parent mode and cannot escalate', () async {
       final app = AppState.I;
       final s = ChatSession(id: 'sub-s', title: 'S', model: 'm', mode: 'safe');

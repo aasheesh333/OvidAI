@@ -5973,7 +5973,11 @@ ${await _agentsMdBlock()}
         // Real check — file must exist in the session workspace.
         try {
           final work = await _sessionWorkDir();
-          final f = File('${work.path}/$fname');
+          final safe = containedPath(work, fname);
+          if (safe == null) {
+            return 'path escapes the session workspace: $fname — use a path inside the workspace.';
+          }
+          final f = File(safe);
           if (!f.existsSync()) {
             return 'No file "$fname" in the session workspace. Ask the user '
                 'to share the file path, or create it first with run_shell.';
