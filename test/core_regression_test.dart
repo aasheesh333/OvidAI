@@ -2544,6 +2544,20 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(await AgentService.I.dispatchForTest('dispatch_agent', {'prompt': 'hi'}), contains('PLAN MODE ACTIVE'));
     });
 
+    test('BR1: dialog + popup tools denied read-only, dialog state machine works', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'br1', title: 'S', model: 'm', mode: 'safe');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((x) => x.id == 'br1');
+      });
+      expect(await AgentService.I.dispatchForTest('browser_dialog', {'action': 'read'}), contains('READ-ONLY MODE'));
+      expect(await AgentService.I.dispatchForTest('browser_popups', {'action': 'list'}), contains('READ-ONLY MODE'));
+    });
+
     test('subagent child inherits parent mode and cannot escalate', () async {
       final app = AppState.I;
       final s = ChatSession(id: 'sub-s', title: 'S', model: 'm', mode: 'safe');

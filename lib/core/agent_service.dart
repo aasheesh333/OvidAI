@@ -49,6 +49,11 @@ class BrowserTab {
   /// loads this file:// path (agent `preview` tool output) instead.
   String? localPreviewPath;
 
+  ({String kind, String message, String? defaultValue})? pendingDialog;
+  final List<String> popupRequests = [];
+  final List<({DateTime at, String kind, String text})> consoleLog = [];
+  final List<({DateTime at, String url, String kind})> networkLog = [];
+
   BrowserTab({required this.url});
 }
 
@@ -1260,6 +1265,18 @@ class AgentService extends ChangeNotifier {
             browserUrl = url;
             notifyListeners();
             _persistBrowserTabs();
+            // Dialog/popup capture: webview_flutter has no onJsAlert API,
+            // so shim alert/confirm/prompt + window.open once per page.
+            try {
+              tab.controller?.runJavaScript('''
+window.__ovidDialog = null;
+window.alert = (m) => { window.__ovidDialog = {kind:'alert', message:String(m)}; };
+window.confirm = (m) => { window.__ovidDialog = {kind:'confirm', message:String(m)}; return true; };
+window.prompt = (m, d) => { window.__ovidDialog = {kind:'prompt', message:String(m), defaultValue:String(d ?? '')}; return d ?? ''; };
+const _open = window.open;
+window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window.__ovidPopups.push(String(u)); return null; };
+''');
+            } catch (_) {}
           },
           onWebResourceError: (_) {
             tab.loading = false;
@@ -2126,6 +2143,44 @@ class AgentService extends ChangeNotifier {
             'expression': {'type': 'string'},
           },
           'required': ['expression'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_dialog',
+        'description':
+            'Read or dismiss a pending JS dialog (alert/confirm/prompt) on '
+            'the current page. action: read|accept|dismiss.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'action': {
+              'type': 'string',
+              'enum': ['read', 'accept', 'dismiss'],
+            },
+          },
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_popups',
+        'description':
+            'List popup requests (window.open) intercepted on the current '
+            'page, open one in a new tab, or clear the list. '
+            'action: list|open|clear.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'action': {
+              'type': 'string',
+              'enum': ['list', 'open', 'clear'],
+            },
+            'url': {'type': 'string'},
+          },
         },
       },
     },
@@ -6397,6 +6452,10 @@ ${await _agentsMdBlock()}
         await tab.controller!.runJavaScript(js);
         _emit('shell', 'click: $sel');
         return 'Clicked $sel (visible, scrolled into view)';
+      case 'browser_dialog':
+        return _handleBrowserDialog(args);
+      case 'browser_popups':
+        return _handleBrowserPopups(args);
       case 'browser_evaluate':
         final expr = args['expression'] as String;
         final tab = _activeTab;
@@ -7205,6 +7264,8 @@ ${await _agentsMdBlock()}
       case 'browser_press_key':
       case 'browser_click':
       case 'browser_evaluate':
+      case 'browser_dialog':
+      case 'browser_popups':
       case 'browser_fill':
       case 'browser_drag':
       case 'browser_select':
@@ -7474,6 +7535,8 @@ ${await _agentsMdBlock()}
     'browser_snapshot' => 'Snapshot',
     'browser_read' => 'Read page',
     'browser_evaluate' => 'Evaluate JS',
+    'browser_dialog' => 'Dialog',
+    'browser_popups' => 'Popups',
     'browser_new_tab' => 'New tab',
     'browser_switch_tab' => 'Switch tab',
     'browser_list_tabs' => 'List tabs',
@@ -7620,6 +7683,46 @@ ${await _agentsMdBlock()}
     final f = File(safe);
     if (f.existsSync()) return f.path;
     return null;
+  }
+
+  Future<String> _handleBrowserDialog(Map<String, dynamic> args) async {
+    final tab = _activeTab;
+    final action = (args['action'] as String? ?? 'read').toLowerCase();
+    try {
+      final r = await tab.controller!.runJavaScriptReturningResult(
+        'JSON.stringify(window.__ovidDialog || null)');
+      final raw = r.toString();
+      if (action == 'read') return 'dialog: $raw';
+    } catch (_) {}
+    final d = tab.pendingDialog;
+    if (d == null) return 'no pending dialog';
+    if (action == 'dismiss' || action == 'accept') {
+      tab.pendingDialog = null;
+      _emit('nav', 'dialog $action');
+      return 'dialog $action ✓';
+    }
+    return 'dialog: ${d.kind}: ${d.message}';
+  }
+
+  Future<String> _handleBrowserPopups(Map<String, dynamic> args) async {
+    final tab = _activeTab;
+    final action = (args['action'] as String? ?? 'list').toLowerCase();
+    if (action == 'list') {
+      return tab.popupRequests.isEmpty
+          ? 'no popup requests'
+          : tab.popupRequests.map((u) => '- $u').join('\n');
+    }
+    if (action == 'open') {
+      final url = args['url'] as String? ?? tab.popupRequests.lastOrNull ?? '';
+      if (url.isEmpty) return 'no popup url given';
+      newBrowserTab(url);
+      return 'popup opened ✓ — $url';
+    }
+    if (action == 'clear') {
+      tab.popupRequests.clear();
+      return 'popups cleared';
+    }
+    return 'unknown action: $action (read|accept|dismiss / list|open|clear)';
   }
 
   Future<String> _handleFsEdit(Map<String, dynamic> args) async {
@@ -8319,6 +8422,8 @@ ${await _agentsMdBlock()}
     'browser_click',
     'browser_type',
     'browser_evaluate',
+    'browser_dialog',
+    'browser_popups',
     'browser_press_key',
     'browser_fill',
     'browser_drag',
