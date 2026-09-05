@@ -11,14 +11,15 @@ import android.content.Intent
  */
 class AgentStopReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != AgentForegroundService.ACTION_STOP) return
+        val action = intent.action
+        if (action != AgentForegroundService.ACTION_STOP && action != AgentForegroundService.ACTION_EXIT) return
         val handler = AgentNotificationBridge.stopHandler
         val service = context.startService(
             Intent(context, AgentForegroundService::class.java).apply {
-                action = AgentForegroundService.ACTION_STOP
+                this.action = action
             }
         )
-        // Let Dart know the user tapped Stop (cancels the active run).
+        // Let Dart know the user tapped Stop or Exit (cancels the active run).
         handler?.invoke()
     }
 }

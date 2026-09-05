@@ -36,6 +36,7 @@ class AgentForegroundService : Service() {
         const val CHANNEL_ID = "ovid_agent_channel"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "com.dhanuk.ovidai.AGENT_STOP"
+        const val ACTION_EXIT = "com.dhanuk.ovidai.AGENT_EXIT"
         const val EXTRA_TITLE = "title"
         const val EXTRA_TEXT = "text"
     }
@@ -45,7 +46,7 @@ class AgentForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        if (intent?.action == ACTION_STOP || intent?.action == ACTION_EXIT) {
             releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -123,6 +124,13 @@ class AgentForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        // Exit action → stops the foreground service and cancels agent run.
+        val exitPi = PendingIntent.getBroadcast(
+            this, 2,
+            Intent(ACTION_EXIT).setPackage(packageName),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(title)
@@ -131,7 +139,8 @@ class AgentForegroundService : Service() {
             .setOnlyAlertOnce(true)
             .setSilent(true)
             .setContentIntent(contentPi)
-            .addAction(0, "Stop agent", stopPi)
+            .addAction(0, "Stop", stopPi)
+            .addAction(0, "Exit", exitPi)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()

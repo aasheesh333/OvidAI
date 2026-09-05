@@ -8183,7 +8183,45 @@ url = "https://api.example.com/mcp"
       final deniedWorkDir = await sandbox.exec(['echo', 'hi'], hostWorkDir: Directory('/var/log'));
       expect(deniedWorkDir, contains('DENIED by sandbox policy: cwd escapes allowed roots'));
     });
+
+    test('STOP1: cancelRun immediately clears busy and aborts activeClient with force', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'stop1', title: 'S', model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == 'stop1'));
+
+      final agent = AgentService.I;
+      agent.setActiveRunForTest(s.id, 'run-1');
+      final fakeClient = _FakeHttpClient();
+      agent.setActiveClientForTest(s.id, fakeClient);
+
+      expect(agent.busyFor(s.id), isTrue);
+      expect(agent.busy, isTrue);
+
+      agent.cancelRun();
+
+      // Instant UI state flip
+      expect(agent.busyFor(s.id), isFalse, reason: 'busyFor must flip immediately to false');
+      expect(agent.busy, isFalse, reason: 'busy must flip immediately to false');
+      expect(fakeClient.closedWithForce, isTrue, reason: 'activeClient must be closed with force: true');
+    });
+
+    test('PERSIST1: agent does not pause tasks with turn budget exhausted break', () {
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(src, isNot(contains('turn budget exhausted — task paused')));
+    });
   });
+}
+
+class _FakeHttpClient implements HttpClient {
+  bool closedWithForce = false;
+  @override
+  void close({bool force = false}) {
+    closedWithForce = force;
+  }
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// Build one DuckDuckGo-style result block (anchor + snippet pair).

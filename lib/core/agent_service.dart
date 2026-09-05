@@ -394,6 +394,7 @@ class AgentRun {
   String? activeRunId;
   bool cancelRequested = false;
   HttpClientRequest? activeRequest;
+  HttpClient? activeClient;
   final List<String> queue = [];
   ApprovalRequest? pendingApproval;
   bool planMode = false;
@@ -746,14 +747,21 @@ class AgentService extends ChangeNotifier {
 
   /// Stop the current session's run: aborts the in-flight HTTP request
   /// and flags every loop turn to exit at the next checkpoint.
-  void cancelRun() => _cancelBucket(_run);
+  void cancelRun() {
+    _cancelBucket(_runResolved);
+    if (_run != _runResolved) {
+      _cancelBucket(_run);
+    }
+  }
 
   /// PR32: stop EVERYTHING (notification Stop button / panic stop) —
   /// every session's run, every subagent, every job, every spawned
   /// process. Instant, regardless of which session the UI is on.
   void cancelAllRuns() {
     for (final r in _runs.values.toList()) {
-      if (r.activeRunId != null) _cancelBucket(r);
+      if (r.activeRunId != null || r.cancelRequested || r.activeClient != null) {
+        _cancelBucket(r);
+      }
     }
     // Buckets outside the map (rare) + processes no run claims.
     try {
@@ -778,13 +786,18 @@ class AgentService extends ChangeNotifier {
   }
 
   void _cancelBucket(AgentRun r) {
-    if (r.activeRunId == null) return;
+    if (r.activeRunId == null && !r.cancelRequested && r.activeClient == null) return;
     r.cancelRequested = true;
-    // Abort the in-flight request — works while connecting AND while
-    // streaming (abort() errors the socket, which surfaces in the SSE
-    // loop; the per-chunk cancel check then breaks cleanly).
+    r.activeRunId = null;
+    // Abort the in-flight request and forcefully close the active HTTP client
+    // immediately — kills the socket instantly without waiting for chunk/idle timeouts.
+    try {
+      r.activeClient?.close(force: true);
+      r.activeClient = null;
+    } catch (_) {}
     try {
       r.activeRequest?.abort();
+      r.activeRequest = null;
     } catch (_) {}
     // A pending approval / question is a hard block: the tool awaits its
     // completer. Without resolving it here, Stop left the run parked
@@ -809,6 +822,9 @@ class AgentService extends ChangeNotifier {
     if (runKey.isNotEmpty) {
       try {
         SandboxService.I.killRunProcesses(runKey);
+      } catch (_) {}
+      try {
+        PtyPool.I.discardFor(runKey);
       } catch (_) {}
     }
     for (final j in r.jobs.values.toList()) {
@@ -5240,20 +5256,6 @@ ${await _agentsMdBlock()}
                 'then give your final answer.',
           });
           turnsWithoutProgress++;
-          if (turnsWithoutProgress > 5) {
-            // Model keeps looping without a final answer after 5 nudges —
-            // surface to the user instead of burning tokens forever.
-            _emit(
-              'done',
-              'turn budget exhausted — task paused, ask to continue',
-            );
-            _appendAssistant(
-              '⏸ Long task paused after $turn rounds. Reply "continue" and '
-              'I will pick up exactly where I left off.',
-              session: s,
-            );
-            break;
-          }
         }
       }
       _finalizeLive();
@@ -5503,6 +5505,7 @@ ${await _agentsMdBlock()}
     try {
       client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 20);
+      _runResolved.activeClient = client;
       final req = await client
           .postUrl(_endpoint(p))
           .timeout(
@@ -5512,6 +5515,7 @@ ${await _agentsMdBlock()}
       _activeRequest = req;
       if (_cancelRequested) {
         client.close(force: true);
+        _runResolved.activeClient = null;
         _activeRequest = null;
         return null;
       }
@@ -5755,6 +5759,7 @@ ${await _agentsMdBlock()}
       return null;
     } finally {
       _activeRequest = null;
+      _runResolved.activeClient = null;
       client?.close(force: true);
     }
   }
@@ -9384,6 +9389,18 @@ ${await _agentsMdBlock()}
   }
 
   static String? _runSessionOverrideForTest;
+
+  @visibleForTesting
+  void setActiveRunForTest(String sessionId, String? runId) {
+    final r = _runs.putIfAbsent(sessionId, () => AgentRun()..runKey = sessionId);
+    r.activeRunId = runId;
+  }
+
+  @visibleForTesting
+  void setActiveClientForTest(String sessionId, HttpClient? client) {
+    final r = _runs.putIfAbsent(sessionId, () => AgentRun()..runKey = sessionId);
+    r.activeClient = client;
+  }
 
   /// PR28 / chrome-devtools parity: keycode lookup for browser_press_key.
   static int keyCodeFor(String key) {
