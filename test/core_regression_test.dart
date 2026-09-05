@@ -2483,6 +2483,17 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(res, contains('escapes the session workspace'));
     });
 
+    test('SEC4: destructive gate runs before subagent auto-approve', () {
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      final maybeIdx = src.indexOf('Future<bool> _maybeApprove');
+      final subIdx = src.indexOf('running.isSubagent');
+      final destIdx = src.indexOf('_isDestructiveCommand(summary)');
+      expect(maybeIdx, greaterThanOrEqualTo(0));
+      expect(subIdx, greaterThan(maybeIdx));
+      expect(destIdx, greaterThan(maybeIdx));
+      expect(destIdx, lessThan(subIdx), reason: 'destructive check must come BEFORE subagent early-return');
+    });
+
     test('subagent child inherits parent mode and cannot escalate', () async {
       final app = AppState.I;
       final s = ChatSession(id: 'sub-s', title: 'S', model: 'm', mode: 'safe');

@@ -7124,13 +7124,8 @@ ${await _agentsMdBlock()}
   }
 
   Future<bool> _maybeApprove(String tool, String summary, String detail) async {
-    // Subagent sessions run unattended — nobody is looking at their
-    // composer, so an approval prompt there would deadlock the child.
-    // Their privileges are already bounded by the inherited mode, the
-    // read-only gate and the parent's allowed_tools filter.
-    final running = _runSession;
-    if (running != null && running.isSubagent) return true;
-    // Destructive commands always confirm — no mode skips this gate.
+    // Destructive commands always confirm — no mode skips this gate,
+    // including unattended subagent sessions.
     // `summary` carries the raw command for run_shell/job_start/run_code.
     if ((tool == 'run_shell' || tool == 'job_start' || tool == 'run_code') &&
         (_isDestructiveCommand(summary) || _isDestructiveCommand(detail))) {
@@ -7138,6 +7133,12 @@ ${await _agentsMdBlock()}
           '$detail\n\n⚠ This command is destructive — irreversible '
           'filesystem/device changes. Confirm only if you intended it.');
     }
+    // Subagent sessions run unattended — nobody is looking at their
+    // composer, so an approval prompt there would deadlock the child.
+    // Their privileges are already bounded by the inherited mode, the
+    // read-only gate and the parent's allowed_tools filter.
+    final running = _runSession;
+    if (running != null && running.isSubagent) return true;
     switch (mode) {
       case AgentMode.drive:
         return true;
