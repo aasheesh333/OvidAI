@@ -7937,6 +7937,132 @@ url = "https://api.example.com/mcp"
       expect(src, contains('ovid_welcome'),
           reason: 'welcomeNoticeVersion parity — show once per version');
     });
+
+    test('STAB1: runTask with unknown session id errors instead of using active session', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'stab1', title: 'S', model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == 'stab1'));
+      final before = s.messages.length;
+      await AgentService.I.runTask('hello', sessionId: 'no-such-session');
+      expect(s.messages.length, before,
+          reason: 'must not append provider errors to the wrong session');
+    });
+
+    test('STAB2: runTask refuses re-entry if run is already active for this session', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'stab2', title: 'S2', model: 'gpt-4o', mode: 'auto');
+      final p = ProviderConfig(
+        id: 'p-stab2',
+        name: 'OpenAI',
+        description: 'OpenAI',
+        baseUrl: 'https://api.openai.com/v1',
+        apiKey: 'sk-fake',
+        models: ['gpt-4o'],
+      );
+      app.providers.add(p);
+      s.providerId = p.id;
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      addTearDown(() {
+        AgentService.I.runBucketForTest(s.id).activeRunId = null;
+        app.sessions.removeWhere((x) => x.id == 'stab2');
+        app.providers.removeWhere((x) => x.id == 'p-stab2');
+      });
+
+      final bucket = AgentService.I.runBucketForTest(s.id);
+      bucket.activeRunId = 'existing-run-123';
+
+      await AgentService.I.runTask('hello again', sessionId: s.id);
+      expect(bucket.activeRunId, 'existing-run-123',
+          reason: 'activeRunId must not be overwritten or cleared by re-entry');
+      expect(
+        bucket.runEvents.any((e) => e.text.contains('refusing re-entry')),
+        isTrue,
+        reason: 'must emit re-entry refusal event',
+      );
+    });
+
+    test('STAB3: per-run events isolation across sessions', () {
+      final bucket1 = AgentService.I.runBucketForTest('sess-1');
+      final bucket2 = AgentService.I.runBucketForTest('sess-2');
+      bucket1.runEvents.clear();
+      bucket2.runEvents.clear();
+
+      bucket1.runEvents.add(AgentEvent('think', 'sess 1 thinking'));
+      bucket2.runEvents.add(AgentEvent('think', 'sess 2 thinking'));
+
+      expect(bucket1.runEvents.length, 1);
+      expect(bucket1.runEvents.first.text, 'sess 1 thinking');
+      expect(bucket2.runEvents.length, 1);
+      expect(bucket2.runEvents.first.text, 'sess 2 thinking');
+    });
+
+    test('STAB4: SandboxService tagRun and killRunProcesses isolates process cancellation', () async {
+      final sandbox = SandboxService.I;
+      sandbox.tagRun('run-a');
+      final procA = await Process.start('sleep', ['10']);
+      sandbox.liveProcessesForTest.add(procA);
+      sandbox.runProcessesForTest.putIfAbsent('run-a', () => []).add(procA);
+
+      sandbox.tagRun('run-b');
+      final procB = await Process.start('sleep', ['10']);
+      sandbox.liveProcessesForTest.add(procB);
+      sandbox.runProcessesForTest.putIfAbsent('run-b', () => []).add(procB);
+
+      addTearDown(() {
+        try { procA.kill(ProcessSignal.sigkill); } catch (_) {}
+        try { procB.kill(ProcessSignal.sigkill); } catch (_) {}
+        sandbox.liveProcessesForTest.remove(procA);
+        sandbox.liveProcessesForTest.remove(procB);
+        sandbox.runProcessesForTest.clear();
+      });
+
+      sandbox.killRunProcesses('run-a');
+      expect(sandbox.runProcessesForTest.containsKey('run-a'), isFalse);
+      expect(sandbox.runProcessesForTest['run-b'], contains(procB));
+      expect(sandbox.liveProcessesForTest, contains(procB));
+      expect(sandbox.liveProcessesForTest.contains(procA), isFalse);
+
+      sandbox.killAllProcesses();
+      expect(sandbox.liveProcessesForTest, isEmpty);
+      expect(sandbox.runProcessesForTest, isEmpty);
+    });
+
+    test('STAB5: cancelRunFor scoped cancel does not kill processes of other sessions', () async {
+      final app = AppState.I;
+      final s1 = ChatSession(id: 'sess-c1', title: 'C1', model: 'm', mode: 'auto');
+      final s2 = ChatSession(id: 'sess-c2', title: 'C2', model: 'm', mode: 'auto');
+      app.sessions.addAll([s1, s2]);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == 'sess-c1' || x.id == 'sess-c2'));
+
+      final b1 = AgentService.I.runBucketForTest(s1.id);
+      final b2 = AgentService.I.runBucketForTest(s2.id);
+      b1.activeRunId = 'run-c1';
+      b2.activeRunId = 'run-c2';
+      addTearDown(() {
+        b1.activeRunId = null;
+        b2.activeRunId = null;
+      });
+
+      final sandbox = SandboxService.I;
+      final proc2 = await Process.start('sleep', ['10']);
+      sandbox.liveProcessesForTest.add(proc2);
+      sandbox.runProcessesForTest.putIfAbsent(s2.id, () => []).add(proc2);
+      addTearDown(() {
+        try { proc2.kill(ProcessSignal.sigkill); } catch (_) {}
+        sandbox.liveProcessesForTest.remove(proc2);
+        sandbox.runProcessesForTest.remove(s2.id);
+      });
+
+      AgentService.I.cancelRunFor(s1.id);
+
+      // s2's process must still be alive and registered
+      expect(sandbox.liveProcessesForTest, contains(proc2));
+      expect(sandbox.runProcessesForTest[s2.id], contains(proc2));
+      expect(b1.cancelRequested, isTrue);
+    });
   });
 }
 

@@ -384,6 +384,8 @@ class _RunCtx {
 }
 
 class AgentRun {
+  String? runKey;
+  final List<AgentEvent> runEvents = [];
   String? activeRunId;
   bool cancelRequested = false;
   HttpClientRequest? activeRequest;
@@ -575,7 +577,7 @@ class AgentService extends ChangeNotifier {
     AppState.I.persistSessions();
   }
 
-  final List<AgentEvent> events = [];
+  List<AgentEvent> get events => _runResolved.runEvents;
 
   // ── PER-SESSION RUN STATE (parallel sessions, parity) ────────────
   // Every session owns an independent _AgentRun (cancel flag, HTTP
@@ -585,7 +587,10 @@ class AgentService extends ChangeNotifier {
 
   /// The run bound to the current target session.  Subagents (no session)
   /// use a detached run keyed to ''.
-  AgentRun get _run => _runs.putIfAbsent(_currentRunKey(), () => AgentRun());
+  AgentRun get _run {
+    final key = _currentRunKey();
+    return _runs.putIfAbsent(key, () => AgentRun()..runKey = key);
+  }
 
   /// While a run is active, `_run` resolves to THE RUNNING run's bucket —
   /// NOT whatever session is currently active in the UI. This kills the
@@ -625,7 +630,7 @@ class AgentService extends ChangeNotifier {
   /// the currently-active one (e.g. background queue continuation after
   /// the user switched chats).
   AgentRun _runFor(String sessionId) =>
-      _runs.putIfAbsent(sessionId, () => AgentRun());
+      _runs.putIfAbsent(sessionId, () => AgentRun()..runKey = sessionId);
 
   // ── Run-context accessors ─────────────────────────────────────────────
   // All run-internal accessors resolve to _runResolved (the live run in
@@ -788,13 +793,19 @@ class AgentService extends ChangeNotifier {
     }
     // PR32: INSTANT stop — a running build/install (bash/npm/apt) used
     // to keep the run parked until its full 10-minute timeout. Kill
-    // every process the sandbox spawned (SIGKILL, process-tree-wide)
+    // every process the sandbox spawned for THIS run (SIGKILL)
     // AND every background job of this run so the Stop button is
     // immediate in every tier. Subagent children die with the parent
     // (their sessions' buckets are cancelled below via lineage).
-    try {
-      SandboxService.I.killAllProcesses();
-    } catch (_) {}
+    final runKey = r.runKey ??
+        _runs.entries
+            .firstWhere((e) => e.value == r, orElse: () => MapEntry('', r))
+            .key;
+    if (runKey.isNotEmpty) {
+      try {
+        SandboxService.I.killRunProcesses(runKey);
+      } catch (_) {}
+    }
     for (final j in r.jobs.values.toList()) {
       try {
         j.killed = true;
@@ -803,8 +814,8 @@ class AgentService extends ChangeNotifier {
     }
     // Children of this run's session: stop their runs + processes too —
     // a parent Stop must not leave orphaned subagents spinning.
-    final sid = _runCtx?.session.id;
-    if (sid != null) {
+    final sid = runKey.isNotEmpty ? runKey : _runCtx?.session.id;
+    if (sid != null && sid.isNotEmpty) {
       for (final kid in AppState.I.childrenOf(sid)) {
         cancelRunFor(kid.id);
       }
@@ -826,6 +837,9 @@ class AgentService extends ChangeNotifier {
         r.pendingApproval!.completer.complete(false);
       } catch (_) {}
     }
+    try {
+      SandboxService.I.killRunProcesses(sessionId);
+    } catch (_) {}
     for (final job in r.jobs.values) {
       if (!job.finished) {
         try {
@@ -1978,8 +1992,13 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   }
 
   void _emit(String kind, String text) {
-    events.add(AgentEvent(kind, text));
-    if (events.length > 120) events.removeRange(0, events.length - 120);
+    _runResolved.runEvents.add(AgentEvent(kind, text));
+    if (_runResolved.runEvents.length > 120) {
+      _runResolved.runEvents.removeRange(
+        0,
+        _runResolved.runEvents.length - 120,
+      );
+    }
     // Live status line for the composer (retry/backoff/compaction were
     // previously only in this log, which no UI ever read).
     if (kind == 'think' ||
@@ -4524,9 +4543,16 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     bool freshTurn = true,
     ChatSession? expandRefsFor,
   }) async {
-    final s = AppState.I.sessionById(sessionId) ?? AppState.I.activeSession;
+    final s = sessionId == null
+        ? AppState.I.activeSession
+        : AppState.I.sessionById(sessionId);
     if (s == null) {
-      _emit('err', 'No active chat session');
+      _emit(
+        'err',
+        sessionId == null
+            ? 'No active chat session'
+            : 'Unknown session: $sessionId',
+      );
       return;
     }
     // @file/@session expansion: the transcript row keeps the raw text the
@@ -4568,7 +4594,10 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     final ctx = _RunCtx(bucket, s, p);
     return runZoned(
       () => _runTaskBody(prompt, ctx, freshTurn: freshTurn),
-      zoneValues: {_runCtxKey: ctx},
+      zoneValues: {
+        _runCtxKey: ctx,
+        #ovidRunKey: s.id,
+      },
     );
   }
 
@@ -4629,8 +4658,14 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     final s = ctx.session;
     final p = ctx.provider;
     final runId = DateTime.now().millisecondsSinceEpoch.toString();
+    if (ctx.run.activeRunId != null) {
+      _emit('think', 'run already active for this session — refusing re-entry');
+      return;
+    }
     // This run's bucket state — resolve nothing through the active session.
     activeRunId = runId;
+    ctx.run.runKey = s.id;
+    SandboxService.I.tagRun(s.id);
     // Plan mode is persisted on the session — seed the run bucket from it
     // so gate checks inside the run see the user's last /plan state.
     ctx.run.planMode = s.planMode;
@@ -4639,7 +4674,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     todoNudgeSent = false;
     _runResolved.produced.clear(); // "Produced" panel resets per run
     _runResolved.toolCallCounts.clear(); // repeat-tool reminder is per turn
-    events.clear();
+    ctx.run.runEvents.clear();
     // todo dock: the checklist is cleared at the start of each USER
     // turn — a stale list from an earlier task must not steer this one.
     // System continuations (queue drain, reminders, settlement notices)
@@ -5175,6 +5210,7 @@ ${await _agentsMdBlock()}
       _appendAssistant('Agent error: $e', session: s);
     } finally {
       activeRunId = null;
+      SandboxService.I.tagRun(null);
       _cancelRequested = false;
       // The Zone exits with this function — there is nothing to pop.
       // The queue auto-continue continues on THIS run's session, captured

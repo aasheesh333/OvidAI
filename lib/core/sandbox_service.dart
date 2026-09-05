@@ -1798,10 +1798,37 @@ audit=false
   // whole tree so Stop is INSTANT (a running build/install could keep
   // the run parked for its full 10-minute timeout otherwise).
   final List<Process> _liveProcesses = [];
+  final Map<String, List<Process>> _runProcesses = {};
+  String? _activeRunKey;
+  static const _runZoneKey = #ovidRunKey;
 
   /// PR32 test seam: access to the tracked-process registry.
   @visibleForTesting
   List<Process> get liveProcessesForTest => _liveProcesses;
+
+  @visibleForTesting
+  Map<String, List<Process>> get runProcessesForTest => _runProcesses;
+
+  /// Tag spawned processes under [key] so killRunProcesses can stop only this run.
+  void tagRun(String? key) {
+    _activeRunKey = key;
+  }
+
+  String? get _currentRunKey =>
+      (Zone.current[_runZoneKey] as String?) ?? _activeRunKey;
+
+  /// Stop only the processes spawned for [key] without disturbing other runs.
+  void killRunProcesses(String key) {
+    final procs = _runProcesses.remove(key);
+    if (procs != null) {
+      for (final p in List.of(procs)) {
+        try {
+          p.kill(ProcessSignal.sigkill);
+        } catch (_) {}
+        _liveProcesses.remove(p);
+      }
+    }
+  }
 
   /// Points $PREFIX at a host directory so unit tests can drive exec()
   /// with a real `<prefix>/bin/sh` (the byte-cast regression test).
@@ -1817,6 +1844,7 @@ audit=false
       } catch (_) {}
     }
     _liveProcesses.clear();
+    _runProcesses.clear();
   }
 
   /// Tracked Process.run: registers the process so killAllProcesses()
@@ -1835,6 +1863,10 @@ audit=false
       environment: environment,
     );
     _liveProcesses.add(proc);
+    final runKey = _currentRunKey;
+    if (runKey != null && runKey.isNotEmpty) {
+      _runProcesses.putIfAbsent(runKey, () => []).add(proc);
+    }
     try {
       final outF = proc.stdout
           .fold<List<int>>(
@@ -1856,6 +1888,9 @@ audit=false
       );
     } finally {
       _liveProcesses.remove(proc);
+      if (runKey != null && runKey.isNotEmpty) {
+        _runProcesses[runKey]?.remove(proc);
+      }
     }
   }
 
@@ -2293,7 +2328,16 @@ audit=false
     // PR32 parity: spawned (long-lived) processes also register — Stop
     // must reach MCP servers / background jobs / persistent PTYs too.
     _liveProcesses.add(proc);
-    proc.exitCode.whenComplete(() => _liveProcesses.remove(proc));
+    final runKey = _currentRunKey;
+    if (runKey != null && runKey.isNotEmpty) {
+      _runProcesses.putIfAbsent(runKey, () => []).add(proc);
+    }
+    proc.exitCode.whenComplete(() {
+      _liveProcesses.remove(proc);
+      if (runKey != null && runKey.isNotEmpty) {
+        _runProcesses[runKey]?.remove(proc);
+      }
+    });
     return proc;
   }
 
