@@ -2417,11 +2417,34 @@ class AppState extends ChangeNotifier {
       final cleanMarketplace = normalizeMarketplace(marketplaceRepo);
       if (cleanMarketplace.split('/').length != 2) return null;
       final cleanPath = s.replaceFirst(RegExp(r'^\.?/+'), '');
-      return '$cleanMarketplace/raw/branch/$cleanPath';
+      // `^\.?/+` alone leaves `../foo` intact — a `..` segment would end up
+      // spliced into the raw URL and traverse outside the repo. Normalize it
+      // away (rejecting any walk that escapes the marketplace root).
+      final resolved = _resolveRelativePath(cleanPath);
+      if (resolved == null) return null;
+      return '$cleanMarketplace/raw/branch/$resolved';
     }
     final normalized = normalizeMarketplace(s);
     if (normalized.split('/').length != 2) return null;
     return normalized;
+  }
+
+  /// Normalize a relative path, dropping `.` segments and resolving `..`
+  /// against prior segments. Returns null when a `..` escapes the root (so a
+  /// marketplace entry can't craft a raw URL that walks outside its repo).
+  static String? _resolveRelativePath(String raw) {
+    final out = <String>[];
+    for (final seg in raw.split('/')) {
+      if (seg.isEmpty || seg == '.') continue;
+      if (seg == '..') {
+        if (out.isEmpty) return null;
+        out.removeLast();
+      } else {
+        out.add(seg);
+      }
+    }
+    final joined = out.join('/');
+    return joined.isEmpty ? null : joined;
   }
 
   @visibleForTesting

@@ -8557,6 +8557,110 @@ url = "https://api.example.com/mcp"
       expect(standalone, 'external-org/standalone-repo');
     });
 
+    test('_githubPluginSource rejects or resolves ../ traversal', () {
+      // A raw ../ that escapes the marketplace repo root is rejected.
+      expect(
+        AppState.githubPluginSourceForTest(
+          '../escaping',
+          marketplaceRepo: 'myorg/mymarket',
+        ),
+        isNull,
+      );
+      expect(
+        AppState.githubPluginSourceForTest(
+          '/../../etc/passwd',
+          marketplaceRepo: 'myorg/mymarket',
+        ),
+        isNull,
+      );
+      // Interior ../ collapses safely back into the repo path.
+      expect(
+        AppState.githubPluginSourceForTest(
+          './plugins/../secret',
+          marketplaceRepo: 'myorg/mymarket',
+        ),
+        'myorg/mymarket/raw/branch/secret',
+      );
+    });
+
+    test('plugin_* tool returns honest no-op when no skill/command matches', () async {
+      final app = AppState.I;
+      final tempDir = Directory.systemTemp.createTempSync('ovid_plugin_noop_');
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+      AppState.pluginCacheRootOverrideForTest = tempDir;
+      addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+
+      final plugin = PluginItem(
+        name: 'noop-plugin',
+        author: 'acme',
+        description: 'Noop plugin',
+        version: '1.0.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'acme/noop-plugin',
+      );
+      app.plugins.add(plugin);
+      addTearDown(() => app.plugins.remove(plugin));
+
+      final skillDir = Directory(
+        '${tempDir.path}/plugin-content/acme_noop-plugin/skills/real-skill',
+      );
+      skillDir.createSync(recursive: true);
+      File('${skillDir.path}/SKILL.md').writeAsStringSync(
+        '---\nname: real-skill\ndescription: Real\n---\nDo real work.',
+      );
+      await AgentService.I.refreshSkills();
+
+      // Empty action must not claim completion.
+      final emptyRes = await AgentService.I.dispatchForTest(
+        'plugin_noop_plugin',
+        {},
+      );
+      expect(emptyRes, contains('nothing'));
+      expect(emptyRes, isNot(contains('completed')));
+
+      // Non-matching action must not claim completion.
+      final missRes = await AgentService.I.dispatchForTest(
+        'plugin_noop_plugin',
+        {'action': 'does-not-exist'},
+      );
+      expect(missRes, contains('nothing'));
+      expect(missRes, isNot(contains('completed')));
+    });
+
+    test('plugin_* tools are gated in Read-Only and plan mode', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'plug-gate', title: 'G', model: 'm', mode: 'safe');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((x) => x.id == 'plug-gate');
+      });
+
+      expect(
+        await AgentService.I.dispatchForTest(
+          'plugin_whatever',
+          {'action': 'x'},
+        ),
+        contains('READ-ONLY MODE'),
+      );
+
+      // Plan mode blocks plugin_* tools before the read-only gate.
+      s.mode = AgentMode.auto.name;
+      s.planMode = true;
+      addTearDown(() => s.planMode = false);
+      expect(
+        await AgentService.I.dispatchForTest(
+          'plugin_whatever',
+          {'action': 'x'},
+        ),
+        contains('PLAN MODE ACTIVE'),
+      );
+    });
+
     test('fetchPluginContent downloads agents/*.md, hooks/hooks.json, .claude-plugin/plugin.json, and retains frontmatter', () async {
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       server.listen((request) async {

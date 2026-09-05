@@ -2135,19 +2135,29 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       .replaceAll(RegExp(r'[^a-z0-9_]+'), '_')
       .replaceAll(RegExp(r'^_+|_+$'), '');
 
+  /// The built-in seed plugins that gate their own dedicated tools
+  /// (web_search, file_read, …). Shared by the capability check and the
+  /// `_tools` roster so the two can never drift apart.
+  static const _seedPluginNames = {
+    'Web Search',
+    'Image Studio',
+    'File Reader',
+    'Web Fetch & Reader',
+    'Code Runner',
+    'RAG Memory',
+    'DeepThink Reasoning',
+    'Sandbox Runtime',
+  };
+
+  /// True when [p] actually mounts executable agent capability: a dedicated
+  /// seed tool, an MCP proxy, declared hooks, or precomputed mounted
+  /// skills/commands/agents already discovered by [SkillService]. This is a
+  /// pure in-memory lookup — no blocking filesystem scan and no ".json
+  /// exists" overclaim (a bare plugin.json/hooks.json is not an executable
+  /// action, so it must not claim capability).
   bool _pluginHasMountedSkillsOrCommands(PluginItem p) {
     if (!p.installed || !p.enabled) return false;
-    const seedNames = {
-      'Web Search',
-      'Image Studio',
-      'File Reader',
-      'Web Fetch & Reader',
-      'Code Runner',
-      'RAG Memory',
-      'DeepThink Reasoning',
-      'Sandbox Runtime',
-    };
-    if (seedNames.contains(p.name)) return true;
+    if (_seedPluginNames.contains(p.name)) return true;
     if (p.category == 'MCP') return true;
     if (p.hooks.isNotEmpty) return true;
 
@@ -2158,22 +2168,6 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     for (final s in SkillService.I.skills) {
       if (safeSource.isNotEmpty && s.path.contains(safeSource)) return true;
       if (s.path.contains(safeName) || s.name.contains(safeName)) return true;
-    }
-
-    if (p.source != null) {
-      final testRoot = AppState.pluginCacheRootOverrideForTest;
-      if (testRoot != null) {
-        final dir = Directory('${testRoot.path}/plugin-content/$safeSource');
-        if (dir.existsSync()) {
-          try {
-            final files = dir.listSync(recursive: true);
-            if (files.any((f) =>
-                f is File && (f.path.endsWith('.md') || f.path.endsWith('.json')))) {
-              return true;
-            }
-          } catch (_) {}
-        }
-      }
     }
 
     if (AppState.I.mcpServers.any((s) => s.source == 'plugin:${p.source}')) {
@@ -2248,16 +2242,6 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       tools.add(t);
     }
     // Installed plugin tools — dynamically appended
-    const seedNames = {
-      'Web Search',
-      'Image Studio',
-      'File Reader',
-      'Web Fetch & Reader',
-      'Code Runner',
-      'RAG Memory',
-      'DeepThink Reasoning',
-      'Sandbox Runtime',
-    };
     for (final p in app.plugins.where((p) => p.installed && p.enabled)) {
       if (p.name == 'Web Search') tools.add(_webSearchTool);
       if (p.name == 'Image Studio') tools.add(_imageGenTool);
@@ -2268,7 +2252,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         final proxy = _mcpProxyTool(p);
         if (proxy != null) tools.add(proxy);
       }
-      if (!seedNames.contains(p.name) && p.category != 'MCP') {
+      if (!_seedPluginNames.contains(p.name) && p.category != 'MCP') {
         if (_pluginHasMountedSkillsOrCommands(p)) {
           tools.add(_pluginGenericTool(p));
         }
@@ -6595,16 +6579,20 @@ ${await _agentsMdBlock()}
         final action =
             (args['action'] as String? ?? args['command'] as String? ?? '')
                 .trim();
-        if (action.isNotEmpty) {
-          final skill = SkillService.I.find(action);
-          if (skill != null) {
-            _emit('think', 'plugin ${plugin.name} executing: ${skill.name}');
-            final input = args['input'] ?? args['arguments'];
-            final inputStr = input != null ? '\n\nArguments: $input' : '';
-            return '<skill_content>\n${skill.content}\n</skill_content>$inputStr';
-          }
+        if (action.isEmpty) {
+          return 'Plugin "${plugin.name}": no action was specified, so nothing '
+              'was executed. Provide the name of a skill or command this '
+              'plugin mounts.';
         }
-        return 'Plugin "${plugin.name}" action "$action" completed.';
+        final skill = SkillService.I.find(action);
+        if (skill != null) {
+          _emit('think', 'plugin ${plugin.name} executing: ${skill.name}');
+          final input = args['input'] ?? args['arguments'];
+          final inputStr = input != null ? '\n\nArguments: $input' : '';
+          return '<skill_content>\n${skill.content}\n</skill_content>$inputStr';
+        }
+        return 'Plugin "${plugin.name}": no executable skill or command named '
+            '"$action" was found, so nothing was executed.';
       case 'agent_install_plugin':
         final pluginName = args['plugin_name'] as String;
         _emit('think', 'installing plugin: $pluginName');
@@ -7777,6 +7765,9 @@ ${await _agentsMdBlock()}
 
     // todo_write is INTENTIONALLY allowed in Read-Only: the checklist is
     // session-local UI state (never touches disk/repo/network).
+    // Generic plugin_* tools are "Execute commands, skills, or workflows"
+    // tools — mutating by definition, so they're gated like the rest.
+    if (name.startsWith('plugin_')) return roDenied;
     switch (name) {
       // Write-capable tools — always blocked in Read-Only.
       case 'file_write':
@@ -9143,7 +9134,8 @@ ${await _agentsMdBlock()}
     'schedule_delete',
   };
 
-  bool _isMutatingTool(String name) => _mutatingTools.contains(name);
+  bool _isMutatingTool(String name) =>
+      _mutatingTools.contains(name) || name.startsWith('plugin_');
 
   /// PR38: does [cmd] plausibly trigger a native (C/C++) build step?
   /// Heuristic, not exhaustive — a false negative just means the compiler
