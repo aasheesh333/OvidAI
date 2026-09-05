@@ -2440,6 +2440,20 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       app.sessions.removeWhere((x) => x.id == 'ro-s');
     });
 
+    test('SEC1: run_code is blocked in plan mode and Read-Only mode', () async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'sec1', title: 'S', model: 'm', mode: 'safe');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((x) => x.id == 'sec1');
+      });
+      final ro = await AgentService.I.dispatchForTest('run_code', {'code': '1+1', 'lang': 'python'});
+      expect(ro, contains('READ-ONLY MODE'));
+    });
+
     test('subagent child inherits parent mode and cannot escalate', () async {
       final app = AppState.I;
       final s = ChatSession(id: 'sub-s', title: 'S', model: 'm', mode: 'safe');

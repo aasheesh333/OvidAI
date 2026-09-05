@@ -7167,6 +7167,7 @@ ${await _agentsMdBlock()}
     switch (name) {
       // Write-capable tools — always blocked in Read-Only.
       case 'file_write':
+      case 'run_code':
       case 'commit':
       case 'git_clone':
       case 'git_push':
@@ -8280,6 +8281,7 @@ ${await _agentsMdBlock()}
     'file_write',
     'fs_edit',
     'run_shell',
+    'run_code',
     'commit',
     'git_clone',
     'git_push',
