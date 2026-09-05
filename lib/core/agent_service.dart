@@ -34,7 +34,7 @@ class BrowserTab {
   WebViewController? controller;
   bool loadedOnce = false;
 
-  /// Logical viewport emulation (B10, DSH browser-resize parity): zoom
+  /// Logical viewport emulation (B10, browser-resize parity): zoom
   /// factor applied to the tab's WebView — 0.5 renders the page as if the
   /// window were ~2× wider (desktop-style layout), 2.0 = narrow mobile.
   double zoom = 1.0;
@@ -53,11 +53,11 @@ class BrowserTab {
 }
 
 /// ═══════════════════════════════════════════════════════════════════
-/// AGENT ACCESS MODES (DSH-web style)
+/// AGENT ACCESS MODES (web-IDE style)
 /// ───────────────────────────────────────────────────────────────────
 /// READ-ONLY → asks user before every action (shell/write/commit all)
 /// GENERAL   → shell + browser free; asks for file writes & commits
-/// FULL      → sab kuch free, no confirmation (DSH/Codex full-send)
+/// FULL      → sab kuch free, no confirmation (Codex full-send)
 /// STUDIO    → general + full Studio access: files edit, terminal, repo
 ///             sync free; sirf publish/commit confirm karta hai
 /// ═══════════════════════════════════════════════════════════════════
@@ -204,7 +204,7 @@ String cleanTruncate(String text, int max) {
   return '$safe…';
 }
 
-/// Spill + output retention (DSH spill-policy parity, C8/PR18).
+/// Spill + output retention (the reference spill-policy parity, C8/PR18).
 ///
 /// Oversized tool output is PERSISTED out-of-context into the session
 /// workspace (`.spill/<id>.txt`) and the model gets a head/tail preview
@@ -235,7 +235,7 @@ Future<String> spillToolOutput(
   final tail = text.substring(text.length - tailLen);
   final omitted = text.length - headLen - tailLen;
 
-  // How to read the middle — pick by tool shape (DSH locator hints).
+  // How to read the middle — pick by tool shape (the reference locator hints).
   final locator = toolName == 'run_shell'
       ? 'run_shell: `sed -n "L,LP" $relPath` for a line range, or '
             '`grep -n "<pattern>" $relPath` to find lines'
@@ -255,7 +255,7 @@ class ApprovalRequest {
   final String summary;
   final String detail;
   final Completer<bool> completer = Completer<bool>();
-  // ── ask_user_question extension (DSH user-questions seam) ──
+  // ── ask_user_question extension (the reference user-questions seam) ──
   /// When non-null, the UI renders structured questions instead of
   /// approve/deny.  The completer resolves true when the user submits
   /// answers; [answers] holds the question-id → answer map.
@@ -300,7 +300,7 @@ class QuestionOption {
   const QuestionOption({required this.label, this.description});
 }
 
-/// Background job (DSH ctx.jobs equivalent) — a running Process with a
+/// Background job (the reference ctx.jobs equivalent) — a running Process with a
 /// name, output buffer, and lifecycle state.
 class BgJob {
   final int id;
@@ -340,7 +340,7 @@ class SubagentInfo {  final String id;
   String result = '';
 
   /// True when started via `run_in_background` — such children deliver a
-  /// settlement notice to the parent when they end (DSH parity); foreground
+  /// settlement notice to the parent when they end (the reference parity); foreground
   /// children return their result as the tool result instead.
   final bool background;
   final DateTime startedAt = DateTime.now();
@@ -365,7 +365,7 @@ class SubagentInfo {  final String id;
 
 
 /// Per-session agent run state — one per ChatSession so many sessions run
-/// in parallel without interfering (DSH multi-session parity).  Switching
+/// in parallel without interfering (the reference multi-session parity).  Switching
 /// sessions NEVER stops another session's run.
 /// Async execution context for ONE agent run. Stored as a Zone value so
 /// every `await` continuation inside the run (SSE stream handlers, tool
@@ -390,7 +390,7 @@ class AgentRun {
   /// Per-tool call counts within THIS run (repeat-tool reminder, PR18).
   final Map<String, int> toolCallCounts = {};
 
-  /// PR45/F2 (DSH repeat-tool-reminder parity): streak of the CURRENTLY
+  /// PR45/F2 (the reference repeat-tool-reminder parity): streak of the CURRENTLY
   /// REPEATING tool call — reset whenever the (tool, args) pair changes.
   /// Lives on the run bucket: parallel sessions can't cross-pollute it.
   ({String name, String canonArgs})? repeatKey;
@@ -408,7 +408,7 @@ class AgentRun {
   /// context usage (used by the %-of-context UI + compaction trigger).
   int? lastPromptTokens;
 
-  /// DSH "Produced" panel data — files created/modified in this run
+  /// "Produced" panel data — files created/modified in this run
   /// (file_write / fs_edit create / commit), cleared per run.
   final List<({String path, int size})> produced = [];
 
@@ -421,7 +421,7 @@ class AgentRun {
   /// list still has pending items. Resets when todo_write updates the list.
   bool todoNudgeSent = false;
 
-  /// PR23/Q1: the model string snapshotted at RUN START (DSH
+  /// PR23/Q1: the model string snapshotted at RUN START (the reference
   /// prompt-assembly-boundary parity). Every LLM call of THIS run uses
   /// it — a mid-run picker switch changes the NEXT run (a new queued
   /// message), never the in-flight one.
@@ -463,7 +463,7 @@ class AgentRun {
   String? statusLine;
 }
 
-/// Session event (DSH SessionEvent equivalent) — durable facts about what
+/// Session event (the reference SessionEvent equivalent) — durable facts about what
 /// happened in a session (tool calls, mode changes, errors, approvals).
 class SessionEvent {
   final String type;
@@ -480,7 +480,7 @@ class SessionEvent {
 
 /// Per-session Studio state — open tabs, editor buffers, active path.
 /// Keyed by ChatSession.sandboxId inside AgentService so each chat session
-/// has its own Studio view (DSH-style workspace isolation).
+/// has its own Studio view (Ovid-style workspace isolation).
 class _SessionStudio {
   final Map<String, String> fileBuffer = {};
   final List<String> openFiles = [];
@@ -493,7 +493,7 @@ class _SessionStudio {
 }
 
 /// ═════════════════════════════ OpenAI-compatible LLM bridge ═══════════
-/// SSE streaming + tool-calling agent loop — DSH-web harness style.
+/// SSE streaming + tool-calling agent loop — web-IDE harness style.
 ///
 /// Response chunk schema (SSE `data:` lines):
 ///   {"choices":[{"delta":{
@@ -509,7 +509,7 @@ class _SessionStudio {
 ///                  ← tool results loop back to model till final answer
 class AgentService extends ChangeNotifier {
   AgentService._() {
-    // Session-local reminder engine (DSH schedule delivery) — ticks
+    // Session-local reminder engine (the reference schedule delivery) — ticks
     // every second, no-ops when no schedules exist.
     _startScheduleTimer();
     // Deleted sessions lose their run; all others keep running in parallel.
@@ -517,7 +517,7 @@ class AgentService extends ChangeNotifier {
     // Per-session browser tabs: lazy-restore on session switch.
     AppState.I.onSessionSwitched = onSessionSwitched;
     // Cold resume: rebuild subagent handles from the persisted lineage
-    // after sessions load (DSH durable-descriptor parity).
+    // after sessions load (the reference durable-descriptor parity).
     AppState.I.onSessionsLoaded = () {
       restoreSubagentHandles();
       _recoverInterruptedRuns();
@@ -551,7 +551,7 @@ class AgentService extends ChangeNotifier {
 
   /// The agent mode that applies to the current execution context.
   ///
-  /// Per-session (DSH per-conversation parity): inside a run this resolves
+  /// Per-session (the reference per-conversation parity): inside a run this resolves
   /// to the RUNNING session's persisted mode; outside a run it resolves to
   /// the ACTIVE session's mode. Subagents are real sessions, so their mode
   /// resolves through the same path — no detached special case.
@@ -572,7 +572,7 @@ class AgentService extends ChangeNotifier {
 
   final List<AgentEvent> events = [];
 
-  // ── PER-SESSION RUN STATE (parallel sessions, DSH parity) ────────────
+  // ── PER-SESSION RUN STATE (parallel sessions, parity) ────────────
   // Every session owns an independent _AgentRun (cancel flag, HTTP
   // request, queue, approval, jobs, plan mode, live streaming buffers).
   // 10+ sessions can run at once; switching sessions NEVER stops a run.
@@ -630,7 +630,7 @@ class AgentService extends ChangeNotifier {
   set activeRunId(String? v) => _runResolved.activeRunId = v;
   ApprovalRequest? get pendingApproval => _runResolved.pendingApproval;
   set pendingApproval(ApprovalRequest? v) => _runResolved.pendingApproval = v;
-  /// Plan mode, PERSISTED per session (DSH parity): the run bucket reads
+  /// Plan mode, PERSISTED per session (the reference parity): the run bucket reads
   /// through to the session's `planMode` field, so `/plan` survives
   /// restarts and session switches, and the composer chip reads it.
   bool get planMode =>
@@ -713,7 +713,7 @@ class AgentService extends ChangeNotifier {
   int get sessionCacheReadTokens => _run.cacheReadTokens;
   int get sessionCacheWriteTokens => _run.cacheWriteTokens;
 
-  /// Files produced in the active session's current/latest run (DSH
+  /// Files produced in the active session's current/latest run (the reference
   /// "Produced" cards). Read-only view for the UI.
   List<({String path, int size})> get producedFiles =>
       List.unmodifiable(_run.produced);
@@ -847,7 +847,7 @@ class AgentService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Strict-steer (DSH parity): pull queued row [index] to the FRONT so the
+  /// Strict-steer (the reference parity): pull queued row [index] to the FRONT so the
   /// current run injects it on the very next request — an implicit-AND
   /// steering affordance per row.
   void steerQueuedMessage(int index) {
@@ -1531,7 +1531,7 @@ class AgentService extends ChangeNotifier {
   }
 
   /// Expand `@name` / `@session:id` references in a composer message into
-  /// model-visible context blocks (DSH file/session reference parity):
+  /// model-visible context blocks (the reference file/session reference parity):
   /// `@file.txt` → a section heading with the file content; `@session:x` →
   /// a heading with that session's recent messages. Unresolvable mentions
   /// stay literal so the model can still see the intent.
@@ -1644,7 +1644,7 @@ class AgentService extends ChangeNotifier {
     String content, {
     required String toolLabel,
   }) async {
-    // PR25/D1: capture the BEFORE content for the diff card (DSH
+    // PR25/D1: capture the BEFORE content for the diff card (the reference
     // replayable diff metadata parity) — a create has no before (whole
     // file shows as + lines).
     final before = _readFileBefore(path);
@@ -1727,7 +1727,7 @@ class AgentService extends ChangeNotifier {
     } catch (_) {}
   }
 
-  /// DSH diff-card parity (PR25): build a compact unified-style diff for
+  /// diff-card parity (PR25): build a compact unified-style diff for
   /// display on the tool card. Line-based, LCS-free (edit scripts are
   /// small); caps: 400 diff lines, after which `… N more lines` truncates.
   /// Format: `diff <path>\n@@\n` then `+`/`-`/context lines; the card's
@@ -1794,11 +1794,11 @@ class AgentService extends ChangeNotifier {
     return buf.toString();
   }
 
-  // ── fs tools state (read-before-write policy, DSH observation gate) ──
+  // ── fs tools state (read-before-write policy, observation gate) ──
   /// Paths the AI has read via file_read/fs_edit view — str_replace/insert
   /// require an observed path (FS_NOT_OBSERVED gate).
 
-  // ── FS observation CAS (PR18, DSH fs-observation-policy parity) ──
+  // ── FS observation CAS (PR18, fs-observation-policy parity) ──
   /// Last-observed content length + mtime per path. A write whose target
   /// changed since the read is rejected with FS_STALE_VERSION — the model
   /// re-reads and retries, so two sessions never clobber each other
@@ -1949,7 +1949,7 @@ class AgentService extends ChangeNotifier {
     if (_sessionEvents.length > 2000) {
       _sessionEvents.removeRange(0, _sessionEvents.length - 2000);
     }
-    // DSH ToolRow parity: shell output streams into the live tool card.
+    // ToolRow parity: shell output streams into the live tool card.
     if (kind == 'shellOut' && _activeToolMsg != null) {
       _toolStream('$text\n');
     }
@@ -2459,7 +2459,7 @@ class AgentService extends ChangeNotifier {
               'description':
                   'When true, runs in the session PTY (a long-lived bash '
                   'inside the sandbox): cd/exports/functions persist '
-                  'between commands, DSH persistent-shell parity. '
+                  'between commands, persistent-shell parity. '
                   'Default false (fresh one-off shell).',
             },
           },
@@ -2556,7 +2556,7 @@ class AgentService extends ChangeNotifier {
         'name': 'file_read',
         'description':
             'Read a file from the synced workspace with line-numbered '
-            'windowing (DSH read parity). Use offset/limit to page large '
+            'windowing (the reference read parity). Use offset/limit to page large '
             'files; the result reports totalLines so you can continue. '
             'Host workspace files fall back when the repo copy is absent.',
         'parameters': {
@@ -3337,7 +3337,7 @@ class AgentService extends ChangeNotifier {
       },
     },
 
-    // ── DSH-harness catalog management (providers/plugins/MCP/marketplace) ──
+    // ── agent-harness catalog management (providers/plugins/MCP/marketplace) ──
     {
       'type': 'function',
       'function': {
@@ -3511,7 +3511,7 @@ class AgentService extends ChangeNotifier {
   ];
 
   // ── Plugin tool definitions (added dynamically when installed) ──
-  // DSH parity (dsh-tool-web): 1–4 queries in one call, run concurrently,
+  // parity (ovid-tool-web): 1–4 queries in one call, run concurrently,
   // sources deduped by URL and merged round-robin, every line a markdown
   // link the model can cite.
   static const _webSearchMaxQueries = 4;
@@ -3652,7 +3652,7 @@ class AgentService extends ChangeNotifier {
 
   // ── MAIN LOOP ─────────────────────────────────────────────────────────
 
-  /// DSH/opencode queue behavior: messages queued while a run is active
+  /// reference queue behavior: messages queued while a run is active
   /// join the NEXT LLM request of the CURRENT run — not a separate run
   /// after full completion. Drains the queue into [msgs] as user turns
   /// and records them in the session so the chat bubble shows immediately.
@@ -3686,8 +3686,8 @@ class AgentService extends ChangeNotifier {
     _emit('think', 'queued message joined this run');
   }
 
-  /// ── DSH-compaction parity (dsh-compaction-basic) ──────────────────────
-  /// Model-aware context windows.  DSH asks each provider adapter for the
+  /// ── compaction parity (ovid-compaction-basic) ──────────────────────
+  /// Model-aware context windows.  the reference asks each provider adapter for the
   /// model's contextWindow and falls back to 1M when unannounced.  Ovid is
   /// BYOK across many providers, so we keep a keyword map (longest match
   /// wins) with the same 1M default for unknown models.
@@ -3730,7 +3730,7 @@ class AgentService extends ChangeNotifier {
     ('sonar', 127072),
   ];
 
-  /// DSH default when the model doesn't declare a window: 1,000,000 tokens.
+  /// default when the model doesn't declare a window: 1,000,000 tokens.
   static const defaultContextWindow = 1000000;
 
   /// Context window (tokens) for [model] — keyword match, longest first.
@@ -3743,7 +3743,7 @@ class AgentService extends ChangeNotifier {
   }
 
   /// Context window in effect for the ACTIVE session — the user's Settings
-  /// override wins; otherwise the model-keyword table (1M DSH default for
+  /// override wins; otherwise the model-keyword table (1M default for
   /// unknown/custom models).
   static int contextWindowForSession(ChatSession s) {
     final o = AppState.I.contextWindowOverride;
@@ -3751,18 +3751,18 @@ class AgentService extends ChangeNotifier {
     return contextWindowFor(s.model);
   }
 
-  /// DSH default policy: compact when the measured request envelope reaches
+  /// default policy: compact when the measured request envelope reaches
   /// 80% of the model's contextWindow; retain the newest 16% verbatim.
   static const _compactThresholdRatio = 0.8;
   static const _compactRetainRatio = 0.16;
 
-  /// DSH token-meter heuristic: 4 chars ≈ 1 token, +4 tokens of
+  /// token-meter heuristic: 4 chars ≈ 1 token, +4 tokens of
   /// role/framing overhead per message.
   static int estimateMessageTokens(String text) => text.length ~/ 4 + 4;
 
   /// Measured context usage for [s]: the LAST billed promptTokens when we
   /// have one (exact ground truth — the provider counts what we actually
-  /// sent), otherwise the DSH chars/4 heuristic over system+history.
+  /// sent), otherwise the chars/4 heuristic over system+history.
   int measuredContextTokens(ChatSession s, {String systemPrompt = ''}) {
     final billed = lastPromptTokens;
     if (billed != null && billed > 0) return billed;
@@ -3842,7 +3842,7 @@ class AgentService extends ChangeNotifier {
     return out;
   }
 
-  /// Auto-compaction — DSH `agent/pre-step` pressure trigger parity, for
+  /// Auto-compaction — `agent/pre-step` pressure trigger parity, for
   /// EVERY provider/model (built-in AND custom): measure the request
   /// envelope against 80% of the model's context window (1M default when
   /// unknown); when over, summarize the oldest span head-anchored to
@@ -3850,7 +3850,7 @@ class AgentService extends ChangeNotifier {
   /// verbatim.  Re-compacts when the pressure crosses again (the
   /// span-distance guard is token-based, not message-based, so large
   /// 256K/1M models compact rarely and small ones early).
-  /// PR26/C3: compaction lock per session (DSH serializes compaction via
+  /// PR26/C3: compaction lock per session (the reference serializes compaction via
   /// a logged lock). Workflow fan-out + parallel children could interleave
   /// two compactions on the SAME session — the second would summarize a
   /// span the first already folded (double-fold corruption).
@@ -3867,10 +3867,10 @@ class AgentService extends ChangeNotifier {
 
   /// PR29: the ONE request-assembly used everywhere a request is built
   /// from session state (initial assembly, overflow rebuild, budget
-  /// boundary). DSH framing parity:
+  /// boundary). framing parity:
   ///   • system prompt,
   ///   • the checkpoint replacement as a USER-role message with the exact
-  ///     DSH checkpoint preamble + `<compacted-summary>` tags,
+  ///     checkpoint preamble + `<compacted-summary>` tags,
   ///   • optional staged-attachments note,
   ///   • `_replayHistory` (post-checkpoint window).
   List<Map<String, dynamic>> buildRequestMessages(
@@ -3908,11 +3908,11 @@ class AgentService extends ChangeNotifier {
     ];
   }
 
-  /// DSH summarization (PR29): the summarizer call REPLAYS the span
+  /// summarization (PR29): the summarizer call REPLAYS the span
   /// verbatim — same content the model already saw (content + tool
-  /// cards' toolDetail, no lossy truncation) — with the EXACT DSH
+  /// cards' toolDetail, no lossy truncation) — with the EXACT reference
   /// compaction instruction as the final user message. A prior summary
-  /// merges per DSH rules (never copied forward verbatim).
+  /// merges per rules (never copied forward verbatim).
   Future<String?> _summarizeCompactSpan(
     ProviderConfig p,
     ChatSession s,
@@ -3932,7 +3932,7 @@ class AgentService extends ChangeNotifier {
       }
     }
     final prior = s.compactedSummary;
-    // F4 (DSH dsh-compaction convergence): reject a summary that does not
+    // F4 (the reference ovid-compaction convergence): reject a summary that does not
     // shrink its source — retry once with a stricter instruction, and only
     // after that accept whatever came back.
     final spanTokens = span.fold<int>(
@@ -4023,7 +4023,7 @@ class AgentService extends ChangeNotifier {
         // Didn't shrink — retry once with a stricter budget.
         continue;
       }
-      // Still not shorter — DSH: throw; mobile-pragmatic: keep whatever we
+      // Still not shorter — note: throw; mobile-pragmatic: keep whatever we
       // have (nothing is lost either way, the span stays in the transcript).
       return text;
     }
@@ -4068,7 +4068,7 @@ class AgentService extends ChangeNotifier {
             'folded into the checkpoint)';
   }
 
-  /// F3 (DSH tool-result pruner): rewrites oversized tool-detail bodies in
+  /// F3 (the reference tool-result pruner): rewrites oversized tool-detail bodies in
   /// the session into spill-file rows (head + marker + tail) BEFORE a
   /// compaction decides it needs to summarize. Returns the number of tool
   /// messages that were spilled. Runs only when measured ≥ threshold —
@@ -4103,11 +4103,11 @@ class AgentService extends ChangeNotifier {
     final measured = measuredContextTokens(s, systemPrompt: 'x' * 4000);
     if (measured < threshold) return;
 
-    // F3 (DSH dsh-compaction-tool-result-pruner parity): BEFORE spending an
+    // F3 (the reference ovid-compaction-tool-result-pruner parity): BEFORE spending an
     // LLM summarization call, rewrite oversized TOOL results out of the
     // foldable span into spill refs (head/marker/tail). Cost-free, model-
     // free; if the pressure drops below threshold afterward, summarize
-    // nothing at all — DSH: "pruner rewrites oversized tool results before
+    // nothing at all — note: "pruner rewrites oversized tool results before
     // range selection… skips summarization when pressure becomes safe".
     final retain = (window * _compactRetainRatio).floor();
     final pruned = await _pruneOversizedToolDetailsBeforeCompact(
@@ -4121,11 +4121,11 @@ class AgentService extends ChangeNotifier {
         'context pruned: $pruned oversized tool output(s) spilled to disk '
             '(~${((after / window) * 100).toStringAsFixed(0)}% now)',
       );
-      if (after < threshold) return; // DSH: no summarization needed.
+      if (after < threshold) return; // note: no summarization needed.
     }
 
     // Select the compactable span [compactedAtCount, cutoff): retain the
-    // newest ~16% of the window verbatim (DSH retainRatio), keeping at
+    // newest ~16% of the window verbatim (the reference retainRatio), keeping at
     // least 6 recent messages.  Never split the last user message from
     // its tool/reasoning/answer run.
     var tail = 0;
@@ -4172,7 +4172,7 @@ class AgentService extends ChangeNotifier {
     }
   }
 
-  /// Hard context-overflow recovery — DSH `agent/request-error`
+  /// Hard context-overflow recovery — `agent/request-error`
   /// `CONTEXT_WINDOW_EXCEEDED` recovery: the provider rejected the request
   /// as too long.  Force a compaction with a MINIMAL retained tail (one
   /// quarter of the usual retain budget) and let the caller retry once.
@@ -4185,7 +4185,7 @@ class AgentService extends ChangeNotifier {
     }
   }
 
-  /// PR29: manual `/compact` (DSH `compactNow()` parity). Unlike
+  /// PR29: manual `/compact` (the reference `compactNow()` parity). Unlike
   /// [forceCompact] (the EMERGENCY overflow path with minimal retention),
   /// this uses the STANDARD retention policy and — critically — RETURNS
   /// an honest human status line instead of letting the command lie
@@ -4381,7 +4381,7 @@ class AgentService extends ChangeNotifier {
     return '${preset.persona} (Tool roster: ${preset.description})';
   }
 
-  /// DSH time-context parity (dsh-time-context): one clock line so the
+  /// time-context parity (ovid-time-context): one clock line so the
   /// model can interpret otherwise-unqualified dates and times.
   String _nowLine() {
     final now = DateTime.now();
@@ -4393,7 +4393,7 @@ class AgentService extends ChangeNotifier {
     return '${now.toIso8601String()} $zone (UTC$sign$hh:$mm)';
   }
 
-  /// Workspace instruction chain (DSH skills/AGENTS parity): root-level
+  /// Workspace instruction chain (the reference skills/AGENTS parity): root-level
   /// AGENTS.md from the pinned folder, the session workspace, or the
   /// synced repo — capped so a huge file can't eat the context window.
   /// v1 is root-level only (no nested-chain walk — follow-up).
@@ -4439,10 +4439,10 @@ class AgentService extends ChangeNotifier {
     _runStart = DateTime.now();
     lastError = null;
     todoNudgeSent = false;
-    _runResolved.produced.clear(); // DSH "Produced" panel resets per run
+    _runResolved.produced.clear(); // "Produced" panel resets per run
     _runResolved.toolCallCounts.clear(); // repeat-tool reminder is per turn
     events.clear();
-    // DSH todo dock: the checklist is cleared at the start of each USER
+    // todo dock: the checklist is cleared at the start of each USER
     // turn — a stale list from an earlier task must not steer this one.
     // System continuations (queue drain, reminders, settlement notices)
     // pass freshTurn: false and keep the live checklist.
@@ -4566,12 +4566,12 @@ For mid-task updates that should not wait (an early finding, a blocker), call
 report(content) — it reaches the parent as its next-step context.''' : ''}
 ${_presetPersona(s).isEmpty ? '' : '\nAGENT PRESET (${s.presetId}): ${_presetPersona(s)}\n'}
 ${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock()}'}
-Current time: ${_nowLine()} (DSH time-context: interpret unqualified dates/times in the user's zone).
+Current time: ${_nowLine()} (the reference time-context: interpret unqualified dates/times in the user's zone).
 ${AppState.I.replyLanguageHint().isEmpty ? '' : '${AppState.I.replyLanguageHint()}\n'}
 ${await _agentsMdBlock()}
 ''';
 
-    // ── Context compaction (DSH dsh-compaction-basic parity) ──
+    // ── Context compaction (the reference ovid-compaction-basic parity) ──
     // Pre-step pressure check: measure the envelope against 80% of THIS
     // model's context window (1M default) — works for every provider and
     // every model incl. custom BYOK routes, 256K and 1M windows alike.
@@ -4581,12 +4581,12 @@ ${await _agentsMdBlock()}
 
     try {
       var overflowRecovered = false;
-      // ── NEVER-STOP LOOP (DSH parity) ─────────────────────────────────
+      // ── NEVER-STOP LOOP (the reference parity) ─────────────────────────────────
       // The loop is bounded by TASK COMPLETION, not turn count. A soft
       // turn budget (12) still exists, but hitting it mid-work no longer
       // ends the run: we inject a continuation nudge and keep going —
       // context pressure is managed by _maybeCompact (auto-compaction),
-      // exactly like DSH. Only a final answer, a user cancel, or an
+      // exactly like the reference. Only a final answer, a user cancel, or an
       // unrecoverable provider error stops the loop.
       var turnsWithoutProgress = 0;
       for (var turn = 0;; turn++) {
@@ -4609,7 +4609,7 @@ ${await _agentsMdBlock()}
         );
         // PR24 plugin hooks. on_turn_start: fire-and-forget (no stdout
         // injection). on_pre_request: stdout (≤2 KB) joins THIS request
-        // as a system note — a plugin can inject live context (DSH
+        // as a system note — a plugin can inject live context (the reference
         // agent/pre-step message-injection parity, shell flavor).
         if (HookService.I.hasHookListeners('on_turn_start')) {
           unawaited(
@@ -4635,7 +4635,7 @@ ${await _agentsMdBlock()}
         }
         var msg = await _callLlm(p, msgs, s);
         if (msg == null && _looksLikeContextOverflow(lastError)) {
-          // DSH context-overflow recovery (C1 fixed): the provider rejected
+          // context-overflow recovery (C1 fixed): the provider rejected
           // the request as too long → force-prune the oldest span, then
           // REBUILD the in-flight request from the compacted history —
           // the old code only INSERTED the summary while keeping every
@@ -4644,7 +4644,7 @@ ${await _agentsMdBlock()}
             overflowRecovered = true;
             await forceCompact(s, p);
             // PR29: rebuild from the compacted history using the SAME
-            // assembly as the initial request (DSH checkpoint framing) —
+            // assembly as the initial request (the reference checkpoint framing) —
             // genuinely smaller than the rejected request, and the
             // checkpoint is never dropped.
             msgs
@@ -4670,13 +4670,13 @@ ${await _agentsMdBlock()}
         // model's whole reply (tool calls AND a possible final answer) on
         // turns 12/24/36… and orphaned the live bubble as a spinner.
         final budgetBoundary = msg != null && turn >= 12 && turn % 12 == 0;
-        // Meter tokens for the Usage screen (real data, DSH StatsLine style).
+        // Meter tokens for the Usage screen (real data, StatsLine style).
         if (msg != null) {
           final u = msg['usage'] as Map<String, dynamic>?;
           var pt = (u?['prompt_tokens'] as num?)?.toInt() ?? 0;
           var ct = (u?['completion_tokens'] as num?)?.toInt() ?? 0;
           // Fallback metering — provider sent NO usage (e.g. endpoints that
-          // ignore stream_options): estimate with the DSH token-meter
+          // ignore stream_options): estimate with the token-meter
           // heuristic (chars/4 + 4 overhead) so Usage/context-% never zero.
           if (pt <= 0) {
             pt = msgs.fold<int>(0, (a, m) {
@@ -4858,13 +4858,13 @@ ${await _agentsMdBlock()}
           final name = fn['name'];
           final args =
               jsonDecode(fn['arguments'] ?? '{}') as Map<String, dynamic>;
-          // DSH ToolRow parity: live tool card in the chat stream.
+          // ToolRow parity: live tool card in the chat stream.
           final toolMsg = _silentTools.contains(name)
               ? null
               : _toolStart(name, _toolArgSummary(name, args));
           String result;
           try {
-            // Per-tool cooperative timeout budget (PR18, DSH
+            // Per-tool cooperative timeout budget (PR18, reference
             // tool-call-timeout-policy): each tool gets a deadline; slow
             // tools surface a structured timeout error the model can read.
             final budget = _toolTimeoutFor(name);
@@ -4889,7 +4889,7 @@ ${await _agentsMdBlock()}
             result = 'tool error: $e';
             if (toolMsg != null) _toolFinish(state: 'error', detail: result);
           }
-          // Repeat-tool reminder (PR18 baseline; PR45/F2 DSH parity): the
+          // Repeat-tool reminder (PR18 baseline; PR45/F2 parity): the
           // same tool with IDENTICAL args called 3+/5+/8+ times in a row is
           // the real loop signal — an escalating nudge, in the SAME tool
           // result, to keep the model from burning turns in cycles.
@@ -5003,7 +5003,7 @@ ${await _agentsMdBlock()}
           }),
         );
       }
-      // LLM session title (DSH parity): one cheap background call after
+      // LLM session title (the reference parity): one cheap background call after
       // the first real exchange — fire-and-forget, heuristic stays on fail.
       unawaited(maybeGenerateSessionTitle(ctx.session));
       // Foreground notification retires with the run (covers error paths
@@ -5029,8 +5029,8 @@ ${await _agentsMdBlock()}
             AppState.I.refresh();
             AppState.I.persistSessions();
             // Run the continuation in the background — do NOT yank the
-            // user out of the session they're currently reading. DSH web
-            // shows a badge on the busy session instead.
+            // user out of the session they're currently reading. The web
+            // client shows a badge on the busy session instead.
             // PR23/M6: expand @refs in queued continuations too.
             unawaited(
               runTask(
@@ -5087,12 +5087,12 @@ ${await _agentsMdBlock()}
     AppState.I.persistSessions();
   }
 
-  /// LLM call with NEVER-STOP retry semantics (DSH parity):
+  /// LLM call with NEVER-STOP retry semantics (the reference parity):
   /// transient failures (429/5xx/network/timeout) back off and retry up
   /// to 4 times inside this call; only then does it give up and return
   /// null (the run loop retries a few more times on top). A user cancel
   /// aborts immediately with no retry.
-  /// LLM-generated session title (DSH session-title-llm parity): one cheap
+  /// LLM-generated session title (the reference session-title-llm parity): one cheap
   /// background call after the first real exchange — thinking disabled,
   /// tight token budget, falls back to the heuristic title on any failure.
   /// Never retried per session (the heuristic stays if this fails).
@@ -5151,7 +5151,7 @@ ${await _agentsMdBlock()}
     }
   }
 
-  /// Per-tool cooperative timeout budgets (PR18, DSH parity). Network and
+  /// Per-tool cooperative timeout budgets (PR18, parity). Network and
   /// process tools get generous deadlines; local fs reads stay tight; the
   /// catch-all keeps a stuck tool from hanging the run forever.
   Duration _toolTimeoutFor(String name) {
@@ -5239,7 +5239,7 @@ ${await _agentsMdBlock()}
       // Strip effort suffix (e.g. "gpt-5.2 · High") → real model id + effort.
       // PR23/Q1: the model is snapshotted at RUN START — a mid-run picker
       // switch changes the NEXT run (new queued message), never the
-      // in-flight one (DSH prompt-assembly-boundary parity). Falls back
+      // in-flight one (the reference prompt-assembly-boundary parity). Falls back
       // to the live session model only for runs started before the field
       // existed. Never the shared provider.selectedModel (parallel
       // sessions on the same provider used to cross-wire their models).
@@ -5303,7 +5303,7 @@ ${await _agentsMdBlock()}
         // ── Auto-fallback for providers that reject tool schemas ──
         // Many compatible endpoints (older OpenRouter models, some
         // providers' BYOK gateways) return 400/404/422 with
-        // "tools"/"tool_calls"/"function" in the error body. The DSH-web
+        // "tools"/"tool_calls"/"function" in the error body. The web-IDE
         // behaviour is to retry WITHOUT tools so the model still answers.
         final mightBeToolRejection =
             (res.statusCode == 400 ||
@@ -5473,7 +5473,7 @@ ${await _agentsMdBlock()}
     }
   }
 
-  // ── LIVE BUBBLE streaming (DSH-web style) ─────────────────────────────
+  // ── LIVE BUBBLE streaming (web-IDE style) ─────────────────────────────
   // Buffers live on the per-session _AgentRun so parallel sessions keep
   // independent streaming bubbles. During a run they resolve to the
   // PINNED run's buffers — a mid-run session switch must never make
@@ -5637,7 +5637,7 @@ ${await _agentsMdBlock()}
   }
 
   Future<String> _dispatchInner(String name, Map<String, dynamic> args) async {
-    // ── Plan mode enforcement (DSH exit_plan_mode flow) ──
+    // ── Plan mode enforcement (the reference exit_plan_mode flow) ──
     // While planning, only read-only tools are allowed.  The AI must
     // present its plan via exit_plan_mode and get user approval first.
     if (planMode && _isMutatingTool(name)) {
@@ -5646,7 +5646,7 @@ ${await _agentsMdBlock()}
           'and call exit_plan_mode for user approval. After approval, '
           'execution tools unlock.';
     }
-    // ── Read-Only mode hard gate (DSH plan-mode-style block) ──
+    // ── Read-Only mode hard gate (the reference plan-mode-style block) ──
     // In Read-Only mode the agent is RESTRICTED, not merely asked: writes,
     // edits, commits and non-read-only shell commands are refused at the
     // dispatch layer with an instructive message. Read-only shell commands
@@ -5680,7 +5680,7 @@ ${await _agentsMdBlock()}
         if (!ok) return 'DENIED by user';
         _emit('shell', cmd);
         // PR46/F1: persistent session shell — `cd`, `export` and shell
-        // functions carry over between commands (DSH persistent-shell
+        // functions carry over between commands (the reference persistent-shell
         // parity). The pool keyed by session lives in this service and out-
         // lives a single run; the separate `job_start` lane stays event-
         // sourced as ever. Falls back to the fresh bash -c path when the
@@ -5933,7 +5933,7 @@ ${await _agentsMdBlock()}
 
       // ─── Plugin tools (dynamic, installed plugins) ────────────────────
       case 'web_search':
-        // DSH parity: `queries` is a 1–4 item array; exact duplicates run
+        // parity: `queries` is a 1–4 item array; exact duplicates run
         // once, all searches run concurrently, one failure fails the call.
         final rawQueries = args['queries'];
         final queries = (rawQueries is List ? rawQueries : [rawQueries])
@@ -6145,7 +6145,7 @@ ${await _agentsMdBlock()}
           app.refresh();
           _emit('done', 'installed $pluginName');
 
-          // Realtime install (DSH parity): an MCP-category plugin connects
+          // Realtime install (the reference parity): an MCP-category plugin connects
           // its real server right away, exactly like the Plugins screen
           // Install button — a flag flip with no live connection would be
           // a lie to the model.
@@ -6240,7 +6240,7 @@ ${await _agentsMdBlock()}
           return 'MCP connect failed: $e';
         }
 
-      // ─── DSH-harness catalog management (providers/plugins/MCP) ──────
+      // ─── agent-harness catalog management (providers/plugins/MCP) ──────
       case 'catalog_list_providers':
         _emit('think', 'listing providers');
         final app = AppState.I;
@@ -6850,7 +6850,7 @@ ${await _agentsMdBlock()}
           return 'snapshot failed: $e';
         }
 
-      // ─── DSH-grade repo tools ─────────────────────────────────────────
+      // ─── production-grade repo tools ─────────────────────────────────────────
 
       case 'repo_sync':
         if (sessionRepoFull == null) return 'no repo connected';
@@ -6877,7 +6877,7 @@ ${await _agentsMdBlock()}
 
       case 'file_read':
         final path = args['path'] as String;
-        // DSH read windowing (dsh-tool-fs): offset is 1-based, limit
+        // read windowing (ovid-tool-fs): offset is 1-based, limit
         // defaults to 200 lines, hard-capped at 2000 lines.
         var offset = (args['offset'] as num?)?.toInt() ?? 1;
         var limit = (args['limit'] as num?)?.toInt() ?? 200;
@@ -7042,7 +7042,7 @@ ${await _agentsMdBlock()}
   }
 
   // ── APPROVALS (safe / auto mode) ──────────────────────────────────────
-  /// Destructive-command detector (DSH dangerous-command gate parity).
+  /// Destructive-command detector (the reference dangerous-command gate parity).
   /// These ALWAYS ask the user — even in full/drive mode — because one
   /// bad command can wipe the workspace or brick the sandbox:
   /// • rm -rf on / ~ $HOME or the sandbox prefix itself
@@ -7302,7 +7302,7 @@ ${await _agentsMdBlock()}
       _ => args['path'] ?? args['pattern'] ?? args['file'],
     };
     // cwd-relative display: strip the long workspace prefix, leave a ~/…
-    // form (DSH-style compact card summaries).
+    // form (Ovid-style compact card summaries).
     return _tildifyPath((pick as String?) ?? '');
   }
 
@@ -7324,7 +7324,7 @@ ${await _agentsMdBlock()}
   }
 
   /// Heuristic: provider error text meaning "this request exceeded the
-  /// context window" — triggers one force-compaction + retry (DSH
+  /// context window" — triggers one force-compaction + retry (the reference
   /// CONTEXT_WINDOW_EXCEEDED recovery parity).  Worded broadly to cover
   /// OpenAI/Anthropic/Gemini/DeepSeek/xAI/Mistral/custom proxies.
   bool _looksLikeContextOverflow(String? err) {
@@ -7340,7 +7340,7 @@ ${await _agentsMdBlock()}
         l.contains('reduce the length');
   }
 
-  /// Heuristic: provider failures worth retrying (DSH never-stop parity):
+  /// Heuristic: provider failures worth retrying (the reference never-stop parity):
   /// rate limits, server errors, network blips, timeouts. Auth/inputs
   /// (401/403/404/model-not-found) and payload-cap errors are NOT
   /// transient — retrying the same oversized payload just burns time.
@@ -7387,7 +7387,7 @@ ${await _agentsMdBlock()}
         l.contains('exception:');
   }
 
-  // ── Tool-call chat cards (DSH ToolRow parity) ──────────────────────────
+  // ── Tool-call chat cards (the reference ToolRow parity) ──────────────────────────
   // Every _dispatch call creates a live tool message in the chat stream:
   // it starts as state 'running' (sweep animation) and settles to
   // ok/error/stopped with the final output in toolDetail.  The UI renders
@@ -7793,11 +7793,11 @@ ${await _agentsMdBlock()}
     }
   }
 
-  /// DSH read windowing (dsh-tool-fs parity): 1-based [offset] window of
+  /// read windowing (ovid-tool-fs parity): 1-based [offset] window of
   /// at most [limit] lines with a header (path/offset/totalLines) and a
   /// capped footer naming how many lines remain, so the model pages with
   /// offset=offset+limit instead of re-reading. Byte-capped at 51200
-  /// chars per window (DSH readMaxBytes).
+  /// chars per window (the reference readMaxBytes).
   String _windowedLines(
     String path,
     String content, {
@@ -7826,7 +7826,7 @@ ${await _agentsMdBlock()}
     return buf.toString();
   }
 
-  /// DSH read_image parity (dsh-tool-fs): resolve repo → host workspace,
+  /// read_image parity (ovid-tool-fs): resolve repo → host workspace,
   /// validate a raster extension, and return durable image metadata. v1
   /// reports metadata + byte size; raw-pixel injection into the LLM
   /// request envelope is a follow-up and is stated honestly here.
@@ -8024,7 +8024,7 @@ ${await _agentsMdBlock()}
     if (searchRoot.existsSync() && matches < maxMatches) {
       // PR42: ripgrep fast path — the REAL rg binary (eagerly installed
       // by PR38) with the same semantics as the Dart walk below: real
-      // Linux grep behavior ("same as DSH's rg-backed tool-fs-search").
+      // Linux grep behavior ("same as the reference rg-backed tool-fs-search").
       // _tryRgGrep returns null whenever rg can't be used (no sandbox,
       // binary missing, timeout, exit 2 = pattern invalid in rust-regex —
       // e.g. lookarounds, which Dart RegExp supports) — then the Dart
@@ -8399,7 +8399,7 @@ ${await _agentsMdBlock()}
     return 'Plan approved ✓ — now execute it.';
   }
 
-  // ── GOALS (DSH goal-round equivalent) ──
+  // ── GOALS (the reference goal-round equivalent) ──
   String _handleCreateGoal(Map<String, dynamic> args) {
     final objective = (args['objective'] as String).trim();
     final s = _runSession;
@@ -8469,7 +8469,7 @@ ${await _agentsMdBlock()}
               'report to the user.';
   }
 
-  // ── SCHEDULES (DSH schedule equivalent) ──
+  // ── SCHEDULES (the reference schedule equivalent) ──
   String _handleScheduleCreate(Map<String, dynamic> args) {
     final prompt = (args['prompt'] as String).trim();
     final s = _runSession;
@@ -8553,7 +8553,7 @@ ${await _agentsMdBlock()}
   }
 
   // Fires due reminders into the chat as [schedule] user messages while
-  // the session is live (DSH session-local delivery).
+  // the session is live (the reference session-local delivery).
   Timer? _scheduleTimer;
 
   void _startScheduleTimer() {
@@ -8609,7 +8609,7 @@ ${await _agentsMdBlock()}
         // (appending alone left the reminder sitting in the chat, never
         // acted on). A background session is brought to the user first.
         if (busyFor(s.id)) {
-          // Busy — queue joins THIS session's run (DSH queue behavior).
+          // Busy — queue joins THIS session's run (the reference queue behavior).
           _runs[s.id]?.queue.add(delivery);
           _emit('think', 'queued reminder for running session ${s.title}');
         } else {
@@ -8655,7 +8655,7 @@ ${await _agentsMdBlock()}
     } catch (_) {}
     // PR40: installed+enabled plugin content — a plugin's fetched
     // commands/*.md become real /-menu slash commands + model skills,
-    // exactly like DSH's skill-filesystem provider mounting an
+    // exactly like the reference skill-filesystem provider mounting an
     // installed Claude Code plugin's directory. A plugin whose fetch
     // never ran (no source, offline, no commands/skills in its repo)
     // simply contributes no root here — install still succeeded, it
@@ -8818,7 +8818,7 @@ ${await _agentsMdBlock()}
   SubagentInfo? subagentForSession(String sessionId) =>
       _subagents.values.where((s) => s.sessionId == sessionId).firstOrNull;
 
-  /// Cold resume (DSH durable-descriptor parity): rebuild the in-memory
+  /// Cold resume (the reference durable-descriptor parity): rebuild the in-memory
   /// handle registry from persisted session lineage after an app restart.
   /// Each continuable subagent session carries its durable `agentId`; the
   /// counter is reseeded from the highest persisted id so new ids never
@@ -8909,7 +8909,7 @@ ${await _agentsMdBlock()}
     notifyListeners();
   }
 
-  /// C9 recovery (DSH TOOL_OUTCOME_UNKNOWN parity): after an app death,
+  /// C9 recovery (the reference TOOL_OUTCOME_UNKNOWN parity): after an app death,
   /// any chat session left with a tool row stuck at state 'running' had no
   /// verdict — it spun forever. On session load, every such row is resolved
   /// as UNKNOWN with an honest note, and the ledger records the recovery.
@@ -8951,7 +8951,7 @@ ${await _agentsMdBlock()}
     return await continueSubagent(sub.sessionId, message);
   }
 
-  /// DSH parity (dsh-tool-subagent-report): child → parent delivery. The
+  /// parity (ovid-tool-subagent-report): child → parent delivery. The
   /// child reports on its own initiative; the parent receives it as one
   /// ordinary message. Quiet delivery parks the content on the parent's
   /// transcript as next-step context without waking it; non-quiet steers
@@ -9188,7 +9188,7 @@ ${await _agentsMdBlock()}
     return (sub, sub.result.trim());
   }
 
-  /// DSH workflow parity: ordered phases, each phase's tasks fan out as
+  /// workflow parity: ordered phases, each phase's tasks fan out as
   /// parallel fresh children; phase results feed the NEXT phase's prompts
   /// as context (sequential phases, parallel tasks). The run card mirrors
   /// every member, and each child session is openable from the subagent
@@ -9270,7 +9270,7 @@ ${await _agentsMdBlock()}
         '${rawPhases.length} phase(s):\n\n${phaseResults.join('\n\n')}';
   }
 
-  /// DSH Ralph parity (dsh-tool-ralph): ONE immutable objective, a
+  /// Ralph parity (ovid-tool-ralph): ONE immutable objective, a
   /// sequence of FRESH children (no conversation seed — only the objective,
   /// round number, and the previous worker's handoff). Each child reports
   /// a structured handoff; `complete`/`blocked` end the loop. The shared
@@ -9353,7 +9353,7 @@ ${await _agentsMdBlock()}
       }
       if (sub.state == 'failed') {
         return 'Ralph round $round failed before a usable handoff — '
-            'the loop stops without retry (DSH semantics). Last known: '
+            'the loop stops without retry (the reference semantics). Last known: '
             '$lastSummary';
       }
     }
@@ -9450,7 +9450,7 @@ ${await _agentsMdBlock()}
     }
   }
 
-  /// DSH parity (dsh-subagent settlement notice): when a background child
+  /// parity (ovid-subagent settlement notice): when a background child
   /// settles, its durable direct parent is told — in the parent's own turn
   /// stream — that the child finished and what its closing message was.
   /// Delivery never blocks settlement and never fails the child.
@@ -9473,7 +9473,7 @@ ${await _agentsMdBlock()}
         '(send_message can resume it if it is continuable; its transcript '
         'holds the full detail.)';
     if (busyFor(parent.id)) {
-      // Busy — the notice joins the parent's CURRENT run queue, like DSH
+      // Busy — the notice joins the parent's CURRENT run queue
       // steering into the nearest step boundary: it does not open a second
       // concurrent run.
       _runs[parent.id]?.queue.add(notice);
@@ -9500,7 +9500,7 @@ ${await _agentsMdBlock()}
     return '(no answer)';
   }
 
-  // ── Background jobs (DSH ctx.jobs equivalent) — state lives on _run ──
+  // ── Background jobs (the reference ctx.jobs equivalent) — state lives on _run ──
 
   Future<String> _handleJobStart(Map<String, dynamic> args) async {
     final cmd = args['command'] as String;
@@ -9512,7 +9512,7 @@ ${await _agentsMdBlock()}
     _emit('shell', 'job #$id started: $name');
     try {
       if (SandboxService.I.isInstalled) {
-        // Sandbox spawn — _sandboxEnv() provides the full DSH env set
+        // Sandbox spawn — _sandboxEnv() provides the full env set
         // (PATH, GIT_EXEC_PATH, NODE_PATH, npm_config_*, PYTHONPATH, TLS,
         // TMPDIR/HOME — without them Termux-built node/npm fall back to
         // /data/data/com.termux/... cross-app paths → EACCES everywhere).
@@ -9569,7 +9569,7 @@ ${await _agentsMdBlock()}
     }
   }
 
-  /// Live-preview hook (DSH Part 6): scan job output for a dev-server
+  /// Live-preview hook (live preview): scan job output for a dev-server
   /// URL and surface it as a Browser tab the moment it appears.
   static final _devServerRe = RegExp(
     r'https?://(?:localhost|127\.0\.0\.1|\[::1\]):(\d{2,5})[^\s"<>]*',
@@ -9640,7 +9640,7 @@ ${await _agentsMdBlock()}
     }
   }
 
-  // ── Session event log (DSH SessionEvent equivalent) ──
+  // ── Session event log (the reference SessionEvent equivalent) ──
   // _emit() mirrors every agent event into _sessionEvents (capped 500),
   // so session_search queries both messages and the event log.
   final List<SessionEvent> _sessionEvents = [];
@@ -9753,7 +9753,7 @@ ${await _agentsMdBlock()}
 
   /// Free web search via DuckDuckGo HTML — no API key needed.
   /// Scrapes the top result titles + snippets.
-  /// DSH-parity web search (dsh-tool-web): 1–4 queries run concurrently,
+  /// parity web search (ovid-tool-web): 1–4 queries run concurrently,
   /// sources deduped by URL and merged round-robin (one source at each rank
   /// from every query before advancing), every line a citable markdown link.
   /// Any failed query fails the whole call — partial results are discarded,
@@ -9930,7 +9930,7 @@ ${await _agentsMdBlock()}
   }
 }
 
-/// One parsed web-search source (DSH `WebSearchResult` shape, minus dates).
+/// One parsed web-search source (the reference `WebSearchResult` shape, minus dates).
 class _WebSearchSource {
   final String url;
   final String title;
@@ -9938,7 +9938,7 @@ class _WebSearchSource {
   _WebSearchSource({required this.url, required this.title, this.snippet = ''});
 }
 
-/// IDLE-reset timeout for SSE streams (DSH never-stop parity).
+/// IDLE-reset timeout for SSE streams (the reference never-stop parity).
 ///
 /// Unlike `Stream.timeout` (a total deadline), this transformer resets
 /// its countdown on EVERY event: a stream may legally run for hours as
