@@ -5899,6 +5899,18 @@ ${await _agentsMdBlock()}
     switch (name) {
       case 'run_shell':
         final cmd = args['command'] as String;
+        final isSubagent = _runSession?.isSubagent ?? false;
+        if (!isSubagent) {
+          final work = await _sessionWorkDir();
+          final policyCheck = SandboxService.I.checkPolicy(
+            ['bash', '-c', cmd],
+            hostWorkDir: work,
+          );
+          if (policyCheck != null) {
+            _emit('shell', 'command blocked by sandbox policy');
+            return policyCheck;
+          }
+        }
         // Route through the native Linux sandbox whenever it is installed —
         // in EVERY access mode (not just Studio).  The sandbox provides
         // bash/python/node/git via apt; the phone terminal (toybox) is only
@@ -7445,29 +7457,41 @@ ${await _agentsMdBlock()}
   }
 
   Future<bool> _maybeApprove(String tool, String summary, String detail) async {
+    final running = _runSession;
+    final sessionId = running?.id ?? AppState.I.activeSession?.id;
+
+    Future<bool> askAndAudit(String t, String s, String d) async {
+      final ok = await _askUser(t, s, d);
+      if (sessionId != null) {
+        await SessionLedger.I.append(sessionId, 'approval', {'tool': tool, 'ok': ok});
+      }
+      return ok;
+    }
+
     // Destructive commands always confirm — no mode skips this gate,
     // including unattended subagent sessions.
     // `summary` carries the raw command for run_shell/job_start/run_code.
     if ((tool == 'run_shell' || tool == 'job_start' || tool == 'run_code') &&
         (_isDestructiveCommand(summary) || _isDestructiveCommand(detail))) {
-      final running = _runSession;
       if (running != null && running.isSubagent) return false;
-      return await _askUser('⚠ $tool', 'Destructive command needs approval',
-          '$detail\n\n⚠ This command is destructive — irreversible '
-          'filesystem/device changes. Confirm only if you intended it.');
+      return await askAndAudit(
+        '⚠ $tool',
+        'Destructive command needs approval',
+        '$detail\n\n⚠ This command is destructive — irreversible '
+            'filesystem/device changes. Confirm only if you intended it.',
+      );
     }
     // Subagent sessions run unattended — nobody is looking at their
     // composer, so an approval prompt there would deadlock the child.
     // Their privileges are already bounded by the inherited mode, the
     // read-only gate and the parent's allowed_tools filter.
-    final running = _runSession;
     if (running != null && running.isSubagent) return true;
     switch (mode) {
       case AgentMode.drive:
         return true;
       case AgentMode.auto:
       case AgentMode.studio:
-        return tool != 'commit' ? true : await _askUser(tool, summary, detail);
+        return tool != 'commit' ? true : await askAndAudit(tool, summary, detail);
       case AgentMode.safe:
         // "Auto-run safe commands" ON → read-only commands skip confirm.
         if (AppState.I.autoRunSafeCommands &&
@@ -7475,7 +7499,7 @@ ${await _agentsMdBlock()}
             _isReadOnlyCommand(summary)) {
           return true;
         }
-        return await _askUser(tool, summary, detail);
+        return await askAndAudit(tool, summary, detail);
     }
   }
 
@@ -8902,6 +8926,13 @@ ${await _agentsMdBlock()}
     pendingApproval = req;
     notifyListeners();
     final ok = await req.completer.future;
+    final sessionId = _runSession?.id ?? AppState.I.activeSession?.id;
+    if (sessionId != null) {
+      await SessionLedger.I.append(sessionId, 'approval', {
+        'tool': 'exit_plan_mode',
+        'ok': ok,
+      });
+    }
     if (!ok) {
       planMode = true; // stay in plan mode
       final note = req.note?.trim();

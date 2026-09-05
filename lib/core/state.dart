@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'mcp_service.dart';
 import 'theme.dart';
 import 'sandbox_service.dart';
+import 'presets.dart';
 
 /// ---------- Models ----------
 
@@ -638,6 +639,7 @@ class AppState extends ChangeNotifier {
     // Custom MCP servers + plugin install state survive restarts.
     await _loadCustomMcpServers();
     await _loadCustomPlugins();
+    await _loadCustomPresets();
     await _loadPluginState();
     await _loadMarketplaces();
     // Check if the sandbox was installed on a previous launch so the
@@ -903,6 +905,7 @@ class AppState extends ChangeNotifier {
   static const _kShareMemory = 'ovid_share_session_memory';
   static const _kCustomMcpServers = 'ovid_custom_mcp_servers_v1';
   static const _kPluginState = 'ovid_plugin_state_v1';
+  static const _kCustomPresets = 'ovid_custom_presets';
   static const _kMcpEnvPrefix = 'ovid_mcp_env_';
   bool shareSessionMemory = false;
 
@@ -2521,6 +2524,59 @@ class AppState extends ChangeNotifier {
       }
       refresh();
     } catch (_) {}
+  }
+
+  // ── Custom Presets ──────────────────────────────────────────────────
+  Future<void> _persistCustomPresets() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final list = PresetRegistry.customPresets.map((p) => p.toJson()).toList();
+      await prefs.setString(_kCustomPresets, jsonEncode(list));
+    } catch (_) {}
+  }
+
+  Future<void> _loadCustomPresets() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kCustomPresets);
+      if (raw == null || raw.isEmpty) return;
+      final list = jsonDecode(raw);
+      if (list is List) {
+        PresetRegistry.clearCustom();
+        for (final item in list) {
+          if (item is Map<String, dynamic>) {
+            PresetRegistry.saveCustom(AgentPreset.fromJson(item));
+          } else if (item is Map) {
+            PresetRegistry.saveCustom(
+              AgentPreset.fromJson(item.cast<String, dynamic>()),
+            );
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  Future<void> saveCustomPreset(AgentPreset preset) async {
+    PresetRegistry.saveCustom(preset);
+    await _persistCustomPresets();
+    refresh();
+  }
+
+  Future<void> deleteCustomPreset(String id) async {
+    PresetRegistry.deleteCustom(id);
+    await _persistCustomPresets();
+    refresh();
+  }
+
+  void saveCustomPresetForTest(Map<String, dynamic> data) {
+    final p = AgentPreset.fromJson(data);
+    PresetRegistry.saveCustom(p);
+    unawaited(_persistCustomPresets());
+  }
+
+  void deleteCustomPresetForTest(String id) {
+    PresetRegistry.deleteCustom(id);
+    unawaited(_persistCustomPresets());
   }
 
   // ── MCP server env vars (secure storage) ────────────────────────────

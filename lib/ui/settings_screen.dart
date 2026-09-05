@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import '../core/agent_service.dart';
 import '../core/firebase_service.dart';
 import '../core/hook_service.dart';
+import '../core/presets.dart';
 import '../core/skills.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
@@ -180,6 +181,13 @@ class SettingsScreen extends StatelessWidget {
             'Context & output',
             'Context window override (per-model auto by default) and max output tokens. Drives auto-compaction + the % context ring.',
             const _ContextModelScreen(),
+          ),
+          _navTile(
+            context,
+            Icons.tune_outlined,
+            'Agent presets',
+            'Tool rosters & permissions · built-in & custom presets',
+            const _PresetsScreen(),
           ),
           const _ShareMemoryTile(),
           _settingTile(
@@ -1219,6 +1227,275 @@ class _SkillsScreenState extends State<SkillsScreen> {
             icon: const Icon(Icons.upload_file_outlined, size: 18),
             label: const Text('Upload .md skill'),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PresetsScreen extends StatelessWidget {
+  const _PresetsScreen();
+
+  void _duplicate(BuildContext context, AgentPreset preset) async {
+    final nameController = TextEditingController(text: '${preset.label} (Custom)');
+    final idController = TextEditingController(
+      text: '${preset.id}_custom_${DateTime.now().millisecondsSinceEpoch % 1000}',
+    );
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Duplicate as custom preset', style: TextStyle(fontSize: 16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(labelText: 'Preset Label'),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: idController,
+              decoration: const InputDecoration(labelText: 'Preset ID'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Duplicate'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && idController.text.trim().isNotEmpty) {
+      final newPreset = AgentPreset(
+        id: idController.text.trim(),
+        label: nameController.text.trim().isEmpty
+            ? idController.text.trim()
+            : nameController.text.trim(),
+        description: preset.description,
+        allowedTools: List.of(preset.allowedTools),
+        deniedTools: List.of(preset.deniedTools),
+        persona: preset.persona,
+      );
+      await AppState.I.saveCustomPreset(newPreset);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: const Text('Agent Presets'),
+      ),
+      body: AnimatedBuilder(
+        animation: AppState.I,
+        builder: (context, _) {
+          final customIds = PresetRegistry.customPresets.map((e) => e.id).toSet();
+          final allPresets = PresetRegistry.all;
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 40),
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Text(
+                  'Presets control tool permissions and agent personality. '
+                  'Duplicate any preset to customize denied tools.',
+                  style: TextStyle(fontSize: 12, color: Aether.textFaint),
+                ),
+              ),
+              for (final preset in allPresets)
+                _PresetTile(
+                  key: ValueKey(preset.id),
+                  preset: preset,
+                  isCustom: customIds.contains(preset.id),
+                  onDuplicate: () => _duplicate(context, preset),
+                  onDelete: customIds.contains(preset.id)
+                      ? () => AppState.I.deleteCustomPreset(preset.id)
+                      : null,
+                  onUpdate: (updated) => AppState.I.saveCustomPreset(updated),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _PresetTile extends StatefulWidget {
+  final AgentPreset preset;
+  final bool isCustom;
+  final VoidCallback onDuplicate;
+  final VoidCallback? onDelete;
+  final ValueChanged<AgentPreset>? onUpdate;
+
+  const _PresetTile({
+    super.key,
+    required this.preset,
+    required this.isCustom,
+    required this.onDuplicate,
+    this.onDelete,
+    this.onUpdate,
+  });
+
+  @override
+  State<_PresetTile> createState() => _PresetTileState();
+}
+
+class _PresetTileState extends State<_PresetTile> {
+  bool _expanded = false;
+
+  static const _gatedTools = [
+    'browser_open',
+    'browser_navigate',
+    'browser_click',
+    'browser_type',
+    'browser_evaluate',
+    'generate_image',
+    'image_gen',
+    'run_shell',
+    'run_code',
+    'job_start',
+    'file_write',
+    'fs_edit',
+    'dispatch_agent',
+    'workflow',
+    'ralph',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final p = widget.preset;
+    final isCustom = widget.isCustom;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: Aether.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ListTile(
+            title: Row(
+              children: [
+                Text(
+                  p.label,
+                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: isCustom ? Aether.accent.withValues(alpha: 0.15) : Aether.surfaceRaised,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    isCustom ? 'custom' : 'built-in',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: isCustom ? Aether.accent : Aether.textFaint,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (p.description.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    p.description,
+                    style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
+                  ),
+                ],
+                const SizedBox(height: 4),
+                Text(
+                  p.deniedTools.isEmpty
+                      ? 'All tools allowed'
+                      : 'Denied tools: ${p.deniedTools.join(", ")}',
+                  style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                ),
+              ],
+            ),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  tooltip: 'Duplicate as custom',
+                  icon: const Icon(Icons.copy_outlined, size: 18),
+                  onPressed: widget.onDuplicate,
+                ),
+                if (isCustom && widget.onDelete != null)
+                  IconButton(
+                    tooltip: 'Delete custom preset',
+                    icon: Icon(Icons.delete_outline, size: 18, color: Aether.danger),
+                    onPressed: widget.onDelete,
+                  ),
+                if (isCustom)
+                  IconButton(
+                    tooltip: _expanded ? 'Hide tools' : 'Configure denied tools',
+                    icon: Icon(
+                      _expanded ? Icons.expand_less : Icons.tune,
+                      size: 18,
+                      color: Aether.textMuted,
+                    ),
+                    onPressed: () => setState(() => _expanded = !_expanded),
+                  ),
+              ],
+            ),
+          ),
+          if (isCustom && _expanded) ...[
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+              child: Text(
+                'Denied tools (checked = blocked for this preset):',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  color: Aether.textMuted,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  for (final tool in _gatedTools)
+                    FilterChip(
+                      label: Text(tool, style: const TextStyle(fontSize: 11)),
+                      selected: p.deniedTools.contains(tool),
+                      selectedColor: Aether.danger.withValues(alpha: 0.2),
+                      checkmarkColor: Aether.danger,
+                      onSelected: (selected) {
+                        final currentDenied = List<String>.from(p.deniedTools);
+                        if (selected) {
+                          if (!currentDenied.contains(tool)) currentDenied.add(tool);
+                        } else {
+                          currentDenied.remove(tool);
+                        }
+                        final updated = p.copyWith(deniedTools: currentDenied);
+                        widget.onUpdate?.call(updated);
+                      },
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
         ],
       ),
     );

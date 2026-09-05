@@ -8,6 +8,8 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'sandbox_pkg.dart';
 
+typedef SandboxPolicy = ({List<String> allowedRoots, List<String> deniedCommands});
+
 /// ═══════════════════════════════════════════════════════════════════
 /// NATIVE BIONIC SANDBOX — Termux-style architecture, NO proot.
 /// ═══════════════════════════════════════════════════════════════════
@@ -1894,6 +1896,88 @@ audit=false
     }
   }
 
+  static const defaultDeniedCommands = [
+    r'\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+(/[^\s]*|\$HOME|~)([^\w]|$)',
+    r'\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(/|\$HOME|~)',
+    r'\bdd\s+[^|]*if=/dev/(block|zero|random)',
+    r'\bmkfs(\.\w+)?\s',
+    r':\s*\(\s*\)\s*\{.*\}\s*;\s*:',
+    r'\bchmod\s+-R\s+777\s+/',
+    r'\bchown\s+-R\s+\S+\s+/\s*$',
+    r'\b(reboot|shutdown|halt)\b',
+    r'>\s*/dev/sd[a-z]',
+    r'\brm\s+-rf\s+\$PREFIX',
+    r'\bfind\s+/.*-delete\b',
+  ];
+
+  SandboxPolicy policy = (
+    allowedRoots: const <String>[],
+    deniedCommands: defaultDeniedCommands,
+  );
+
+  /// Check a command and cwd against the sandbox policy. Returns a denial
+  /// message if blocked, or null if permitted.
+  String? checkPolicy(
+    List<String> args, {
+    String? cwd,
+    Directory? hostWorkDir,
+  }) {
+    final cmdLine = args.join(' ');
+    for (final pat in policy.deniedCommands) {
+      try {
+        final rx = RegExp(pat, dotAll: true);
+        if (rx.hasMatch(cmdLine)) {
+          return 'DENIED by sandbox policy: command matches denied pattern';
+        }
+        for (final a in args) {
+          if (rx.hasMatch(a)) {
+            return 'DENIED by sandbox policy: command matches denied pattern';
+          }
+        }
+      } catch (_) {}
+    }
+
+    final effectiveCwd = cwd ?? hostWorkDir?.path;
+    final roots = policy.allowedRoots.isNotEmpty
+        ? policy.allowedRoots
+        : (hostWorkDir != null ? [hostWorkDir.path] : const <String>[]);
+    if (effectiveCwd != null && roots.isNotEmpty) {
+      final allowed = roots.any((root) => isPathContained(root, effectiveCwd));
+      if (!allowed) {
+        return 'DENIED by sandbox policy: cwd escapes allowed roots';
+      }
+    }
+    return null;
+  }
+
+  static bool isPathContained(String rootPath, String path) {
+    if (path.trim().isEmpty || rootPath.trim().isEmpty) return false;
+    final root = _normalizeSegments(rootPath.split('/'));
+    final raw = path.startsWith('/')
+        ? _normalizeSegments(path.split('/'))
+        : _normalizeSegments([...(root ?? []), ...path.split('/')]);
+    if (root == null || raw == null) return false;
+    if (raw.length < root.length) return false;
+    for (var i = 0; i < root.length; i++) {
+      if (raw[i] != root[i]) return false;
+    }
+    return true;
+  }
+
+  static List<String>? _normalizeSegments(List<String> parts) {
+    final out = <String>[];
+    for (final part in parts) {
+      if (part.isEmpty || part == '.') continue;
+      if (part == '..') {
+        if (out.isEmpty) return null;
+        out.removeLast();
+        continue;
+      }
+      out.add(part);
+    }
+    return out;
+  }
+
   Future<String> exec(
     List<String> args, {
     String? cwd,
@@ -1901,6 +1985,8 @@ audit=false
     Map<String, String>? env,
     void Function(String line)? onLine,
   }) async {
+    final denial = checkPolicy(args, cwd: cwd, hostWorkDir: hostWorkDir);
+    if (denial != null) return denial;
     if (_prefix == null) {
       final ok = await checkExisting();
       if (!ok) {
@@ -2365,6 +2451,8 @@ audit=false
   // PHONE TERMINAL — device shell, no install needed (Android 6+ incl.)
   // ═════════════════════════════════════════════════════════════════
   Future<String> execHost(String cmd, {Directory? hostWorkDir}) async {
+    final denial = checkPolicy(['sh', '-c', cmd], hostWorkDir: hostWorkDir);
+    if (denial != null) return denial;
     // PR32: tracked (Stop can kill it instantly).
     final result = await _trackedRun(
       '/system/bin/sh',

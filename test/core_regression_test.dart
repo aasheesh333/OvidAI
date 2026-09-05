@@ -8063,6 +8063,89 @@ url = "https://api.example.com/mcp"
       expect(sandbox.runProcessesForTest[s2.id], contains(proc2));
       expect(b1.cancelRequested, isTrue);
     });
+
+    test('PERM1: custom preset round-trips; sandbox policy blocks denied command', () async {
+      final app = AppState.I;
+      app.saveCustomPresetForTest({'id': 'perm1', 'deniedTools': ['browser_open']});
+      addTearDown(() => app.deleteCustomPresetForTest('perm1'));
+      expect(PresetRegistry.byId('perm1').deniedTools, contains('browser_open'));
+      final res = await AgentService.I.dispatchForTest('run_shell', {'command': 'rm -rf /'});
+      expect(res, isNotEmpty);
+      app.deleteCustomPresetForTest('perm1');
+    });
+
+    test('PERM2: approval audit records to session ledger on approval and exit_plan_mode', () async {
+      final app = AppState.I;
+      final root = await Directory.systemTemp.createTemp('ovid-perm2-led-');
+      SessionLedger.rootOverrideForTest = root;
+      addTearDown(() {
+        SessionLedger.rootOverrideForTest = null;
+        try { root.deleteSync(recursive: true); } catch (_) {}
+      });
+
+      final s = ChatSession(id: 'perm2-sess', title: 'Perm2', model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        AgentService.I.pendingApproval = null;
+        app.sessions.removeWhere((x) => x.id == 'perm2-sess');
+      });
+
+      // Test exit_plan_mode approval audit
+      final planFuture = AgentService.I.dispatchForTest('exit_plan_mode', {'plan': 'Test Plan'});
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(AgentService.I.pendingApproval, isNotNull);
+      AgentService.I.approve(true);
+      final planRes = await planFuture;
+      expect(planRes, contains('approved'));
+
+      await SessionLedger.I.flush(s.id);
+      var events = await SessionLedger.I.read(s.id);
+      expect(
+        events.any((e) => e['kind'] == 'approval' && e['tool'] == 'exit_plan_mode' && e['ok'] == true),
+        isTrue,
+      );
+
+      // Test exit_plan_mode rejection audit
+      final planFuture2 = AgentService.I.dispatchForTest('exit_plan_mode', {'plan': 'Plan 2'});
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(AgentService.I.pendingApproval, isNotNull);
+      AgentService.I.approve(false, note: 'Needs more detail');
+      final planRes2 = await planFuture2;
+      expect(planRes2, contains('did not approve'));
+
+      await SessionLedger.I.flush(s.id);
+      events = await SessionLedger.I.read(s.id);
+      expect(
+        events.any((e) => e['kind'] == 'approval' && e['tool'] == 'exit_plan_mode' && e['ok'] == false),
+        isTrue,
+      );
+    });
+
+    test('PERM3: SandboxPolicy blocks denied commands regex and cwd escaping allowedRoots', () async {
+      final sandbox = SandboxService.I;
+      final originalPolicy = sandbox.policy;
+      addTearDown(() => sandbox.policy = originalPolicy);
+
+      sandbox.policy = (
+        allowedRoots: ['/data/allowed'],
+        deniedCommands: [r'danger_cmd'],
+      );
+
+      // Denied command pattern
+      final deniedCmd = await sandbox.exec(['danger_cmd', '--all']);
+      expect(deniedCmd, contains('DENIED by sandbox policy: command matches denied pattern'));
+
+      // CWD outside allowed roots
+      final deniedCwd = await sandbox.exec(['echo', 'hi'], cwd: '/etc/forbidden');
+      expect(deniedCwd, contains('DENIED by sandbox policy: cwd escapes allowed roots'));
+
+      // Host workdir outside allowed roots
+      final deniedWorkDir = await sandbox.exec(['echo', 'hi'], hostWorkDir: Directory('/var/log'));
+      expect(deniedWorkDir, contains('DENIED by sandbox policy: cwd escapes allowed roots'));
+    });
   });
 }
 

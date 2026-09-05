@@ -29,6 +29,44 @@ class AgentPreset {
     this.deniedTools = const [],
     this.persona = '',
   });
+
+  factory AgentPreset.fromJson(Map<String, dynamic> json) {
+    return AgentPreset(
+      id: json['id'] as String? ?? '',
+      label: json['label'] as String? ?? json['id'] as String? ?? '',
+      description: json['description'] as String? ?? '',
+      allowedTools: (json['allowedTools'] as List?)?.map((e) => e.toString()).toList() ?? const [],
+      deniedTools: (json['deniedTools'] as List?)?.map((e) => e.toString()).toList() ?? const [],
+      persona: json['persona'] as String? ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'label': label,
+    'description': description,
+    'allowedTools': allowedTools,
+    'deniedTools': deniedTools,
+    'persona': persona,
+  };
+
+  AgentPreset copyWith({
+    String? id,
+    String? label,
+    String? description,
+    List<String>? allowedTools,
+    List<String>? deniedTools,
+    String? persona,
+  }) {
+    return AgentPreset(
+      id: id ?? this.id,
+      label: label ?? this.label,
+      description: description ?? this.description,
+      allowedTools: allowedTools ?? this.allowedTools,
+      deniedTools: deniedTools ?? this.deniedTools,
+      persona: persona ?? this.persona,
+    );
+  }
 }
 
 /// Central registry. IDs are stable (persisted on sessions as
@@ -97,10 +135,29 @@ class PresetRegistry {
         'files outside the workspace.',
   );
 
-  static const List<AgentPreset> all = [standard, minimal, studio, code];
+  static final List<AgentPreset> _custom = [];
 
-  static AgentPreset byId(String id) =>
-      all.firstWhere((p) => p.id == id, orElse: () => standard);
+  static List<AgentPreset> get customPresets => List.unmodifiable(_custom);
+
+  static void clearCustom() => _custom.clear();
+
+  static void saveCustom(AgentPreset p) {
+    _custom.removeWhere((e) => e.id == p.id);
+    _custom.add(p);
+  }
+
+  static void deleteCustom(String id) => _custom.removeWhere((e) => e.id == id);
+
+  static AgentPreset byId(String id) {
+    for (final c in _custom) {
+      if (c.id == id) return c;
+    }
+    return all.firstWhere((p) => p.id == id, orElse: () => standard);
+  }
+
+  static const List<AgentPreset> _builtIn = [standard, minimal, studio, code];
+
+  static List<AgentPreset> get all => [..._builtIn, ..._custom];
 
   /// Catalog block for the system prompt so the model knows which
   /// composition it is running under.
