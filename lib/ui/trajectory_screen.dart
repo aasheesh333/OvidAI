@@ -4,7 +4,7 @@ import '../core/session_ledger.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 
-/// DSH Trajectory view (PR19) — the event-ledger tab for one session:
+/// Trajectory view (PR19) — the event-ledger tab for one session:
 /// every turn / tool / checkpoint / recovery record from the append-only
 /// ledger, with per-record detail (tokens, duration, data). The summary
 /// strip carries the stats projection (turns, steps, wall time, top tools).

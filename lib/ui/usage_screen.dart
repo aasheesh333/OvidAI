@@ -6,7 +6,7 @@ import '../core/state.dart';
 /// PROVIDER-WISE usage tracking — "kisne kitna khaya" view.
 /// ───────────────────────────────────────────────────────────────────
 /// Aggregated from [AppState.usageLog] — real token counts metered per
-/// model call by the agent loop. DSH-web StatsLine + TurnUsage pattern,
+/// model call by the agent loop. web-IDE StatsLine + TurnUsage pattern,
 /// plus APPROXIMATE USD pricing per known model family (public list
 /// prices; marked "approx" everywhere).
 /// ═══════════════════════════════════════════════════════════════════

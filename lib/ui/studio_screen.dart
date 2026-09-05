@@ -249,7 +249,7 @@ class _StudioScreenState extends State<StudioScreen> {
       if (picked != null) {
         AgentService.I.sessionRepoFull = picked;
         await _autoSync();
-        // Freshly bound repo → ask where the work should happen (DSH asks
+        // Freshly bound repo → ask where the work should happen (the reference asks
         // for a workspace directory before it starts editing).
         await _offerWorkspaceFolder(picked);
       }

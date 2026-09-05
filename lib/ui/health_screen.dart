@@ -6,7 +6,7 @@ import 'sandbox_setup.dart';
 
 /// Device health — a 0–100 capability score with a per-item breakdown of
 /// exactly what's missing and why. Repair re-runs the sandbox runtime
-/// installer (with apt TLS self-heal). Mirrors the DSH "diagnostics" view.
+/// installer (with apt TLS self-heal). Mirrors the "diagnostics" view.
 class HealthScreen extends StatefulWidget {
   const HealthScreen({super.key});
   @override

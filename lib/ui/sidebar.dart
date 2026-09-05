@@ -57,7 +57,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                     style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
                   ),
                   const SizedBox(width: 8),
-                  // DSH brand/connection parity — live connection chip.
+                  // brand/connection parity — live connection chip.
                   const _ConnectionChip(),
                   const Spacer(),
                   IconButton(
@@ -108,7 +108,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
             ),
             const SizedBox(height: 14),
 
-            // Search — filters the session list live (DSH parity).
+            // Search — filters the session list live (the reference parity).
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: TextField(
@@ -177,7 +177,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                       ),
                     );
                   }
-                  // Workspace browser (DSH projects parity): group sessions
+                  // Workspace browser (the reference projects parity): group sessions
                   // by their pinned working folder — "(no workspace)" for
                   // per-session sandbox chats.
                   final groups = <String, List<ChatSession>>{};
@@ -469,7 +469,7 @@ class _SessionTile extends StatelessWidget {
   }
 }
 
-/// Live connection-status chip beside the brand row (DSH parity).
+/// Live connection-status chip beside the brand row (the reference parity).
 /// Green dot = online, red = offline, grey pulse = checking.
 /// Tap re-probes (also the "reset handling" affordance).
 class _ConnectionChip extends StatelessWidget {

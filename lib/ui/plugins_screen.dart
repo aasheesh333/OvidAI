@@ -9,7 +9,7 @@ import '../core/state.dart';
 
 /// Agent tools a plugin contributes when installed+enabled — mirrors the
 /// `_tools` gate in AgentService so the install snackbar can report what
-/// the model actually gained (DSH honest-install parity).
+/// the model actually gained (the reference honest-install parity).
 String? _toolGainsFor(PluginItem p) {
   return switch (p.name) {
     'Web Search' => 'web_search',
@@ -580,7 +580,7 @@ class PluginDetailScreen extends StatelessWidget {
                       plugin.enabled = true;
                       app.persistPluginState();
                       app.refresh();
-                      // Realtime install (DSH parity): an MCP-category
+                      // Realtime install (the reference parity): an MCP-category
                       // plugin connects its server right away, and the
                       // snackbar reports the tools the model gains —
                       // no restart, no dead flag flips.
@@ -731,7 +731,7 @@ class PluginDetailScreen extends StatelessWidget {
                       app.refresh();
                       // PR40: drop any fetched commands/skills content and
                       // unmount it — an uninstall reverses exactly what
-                      // install added, same as DSH's plugin removal.
+                      // install added, same as the reference plugin removal.
                       if (plugin.source != null) {
                         unawaited(
                           AppState.I
@@ -925,7 +925,7 @@ class _McpSection extends StatelessWidget {
               style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
             ),
             const SizedBox(height: 8),
-            // Claude Code / Codex / DSH shared config import — paste a raw
+            // Claude Code / Codex / shared config import — paste a raw
             // .mcp.json, claude_desktop_config.json, or Codex config.toml
             // [mcp_servers] block and every server gets added at once.
             TextButton.icon(
@@ -1120,7 +1120,7 @@ void _importMcpConfig(BuildContext context) {
 }
 
 /// Parse a pasted MCP config into entries — accepts the JSON
-/// `mcpServers` map (Claude Code / claude_desktop / DSH standard shape)
+/// `mcpServers` map (Claude Code / claude_desktop / standard shape)
 /// and Codex's TOML `[mcp_servers.<name>]` blocks.
 List<_ImportedMcp> _parseMcpConfig(String raw) {
   final out = <_ImportedMcp>[];
@@ -1143,7 +1143,7 @@ List<_ImportedMcp> _parseMcpConfig(String raw) {
             }
           }
           // PR41: a `url` (with no `command`) is a Streamable-HTTP server
-          // — Claude Desktop / Codex / DSH all use this exact shape for a
+          // — Claude Desktop / Codex all use this exact shape for a
           // remote MCP server; its `headers` carry the auth token.
           final url = (v['url'] as String?)?.trim();
           final isHttp = url != null && url.isNotEmpty;

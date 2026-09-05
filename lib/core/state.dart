@@ -81,7 +81,7 @@ class UsageEntry {
   final int completionTokens;
   final int totalTokens;
 
-  /// Cache accounting (PR18, DSH token-meter parity): prompt_tokens
+  /// Cache accounting (PR18, token-meter parity): prompt_tokens
   /// decomposed into cache-read (KV reused) and cache-write (new KV).
   final int cacheReadTokens;
   final int cacheWriteTokens;
@@ -151,7 +151,7 @@ class PluginItem {
   /// fired by HookService at the matching agent lifecycle point. The
   /// command runs inside the sandbox with OVID_HOOK_EVENT/OVID_HOOK_
   /// PAYLOAD env vars; stdout ≤2 KB can be injected as request context.
-  /// (DSH hooks are in-process JS callbacks — on mobile, sandbox shell
+  /// (the reference hooks are in-process JS callbacks — on mobile, sandbox shell
   /// commands are the honest equivalent.)
   Map<String, String> hooks;
 
@@ -199,7 +199,7 @@ class McpServer {
   /// PR41: transport — 'stdio' (spawn [command]/[args] in the sandbox,
   /// speak JSON-RPC over stdin/stdout — the only transport Ovid supported
   /// before this) or 'http' (Streamable HTTP: POST JSON-RPC to [url], no
-  /// sandbox needed). DSH's `dsh-mcp-client` supports both; a remote MCP
+  /// sandbox needed). the reference `ovid-mcp-client` supports both; a remote MCP
   /// server (an API a team runs centrally) only ever offers 'http'.
   String transport;
 
@@ -264,7 +264,7 @@ class Message {
   /// chips under the bubble; the agent reads them from the workspace.
   List<MessageAttachment> attachments;
 
-  // ── Tool-card fields (MsgKind.tool) — DSH ToolRow parity ──
+  // ── Tool-card fields (MsgKind.tool) — ToolRow parity ──
   /// Tool name ('run_shell', 'fs_edit', 'dispatch_agent', …).
   final String? toolName;
 
@@ -311,7 +311,7 @@ class Message {
   /// saved into the session workspace (rendered in-chat, tappable to open).
   final String? imagePath;
 
-  /// User feedback on a FINAL assistant message (DSH message-feedback):
+  /// User feedback on a FINAL assistant message (the reference message-feedback):
   /// 'up' | 'down' | null. Re-clicking the same value retracts (null).
   String? feedback;
 
@@ -369,7 +369,7 @@ class Message {
 }
 
 /// A durable memory snippet — saved via memory_save, searchable via
-/// memory_search, persisted across sessions (DSH memory equivalent).
+/// memory_search, persisted across sessions (the reference memory equivalent).
 class MemoryItem {
   final String id;
   final String content;
@@ -404,17 +404,17 @@ class ChatSession {
   /// enables "Share session memory" in Settings.
   String? sandboxId;
 
-  /// Per-session agent access mode (DSH per-conversation mode parity).
+  /// Per-session agent access mode (the reference per-conversation mode parity).
   /// One of 'safe' (Read-Only), 'auto' (General), 'drive' (Full Access),
   /// 'studio' (Studio). Parallel sessions keep INDEPENDENT modes — no
   /// cross-session mode bleed. Persisted with the session.
   String mode;
 
   /// Agent preset — a named composition of a tool roster + a persona
-  /// preamble (DSH agent-presets parity: standard / minimal / studio /
+  /// preamble (the reference agent-presets parity: standard / minimal / studio /
   /// code). Sessions join a preset; a child inherits its parent's.
   /// Persisted with the session; changing it on a session with no turns
-  /// is allowed (DSH "switch the blank session" semantics).
+  /// is allowed (the reference "switch the blank session" semantics).
   String presetId;
 
   /// User-pinned working folder (picked from the composer). When set and
@@ -452,7 +452,7 @@ class ChatSession {
   String? agentResult;
 
   /// Durable handle id (`sub-N`) of this subagent — lets the handle
-  /// registry be rebuilt after an app restart (cold resume, DSH parity).
+  /// registry be rebuilt after an app restart (cold resume, parity).
   String? agentId;
 
   /// Optional per-child role persona (dispatch_agent `persona` arg).
@@ -476,15 +476,15 @@ class ChatSession {
   /// the full history.  Persisted.
   String? compactedSummary;
 
-  /// Active goal (DSH goal-round equivalent) — created by create_goal,
+  /// Active goal (the reference goal-round equivalent) — created by create_goal,
   /// advanced by update_goal.  One goal per session at a time.  Persisted.
   Map<String, dynamic>? goal;
 
-  /// Plan mode (DSH /plan parity) — persisted per session so a restart or
+  /// Plan mode (the reference /plan parity) — persisted per session so a restart or
   /// session switch keeps the amber planning state.
   bool planMode;
 
-  /// Session-local reminders (DSH schedule equivalent) — created by
+  /// Session-local reminders (the reference schedule equivalent) — created by
   /// schedule_create, fired by AgentService's timer.  Persisted.
   List<Map<String, dynamic>> schedules;
 
@@ -670,7 +670,7 @@ class AppState extends ChangeNotifier {
     } catch (_) {}
   }
 
-  /// Last model the user picked — carried into new sessions (DSH-style
+  /// Last model the user picked — carried into new sessions (Ovid-style
   /// default model) and restored across app restarts.
   String lastSelectedModel = '';
   String? lastSelectedProviderId;
@@ -808,7 +808,7 @@ class AppState extends ChangeNotifier {
         session.providerId ??= _inferProviderId(session.model);
       }
       _restoreSelectedModel();
-      // Cold-resume hook (DSH durable descriptor parity): let the agent
+      // Cold-resume hook (the reference durable descriptor parity): let the agent
       // service rebuild its subagent handle registry from the persisted
       // lineage (agentId / parentId / state) before the UI reads it.
       onSessionsLoaded?.call();
@@ -906,7 +906,7 @@ class AppState extends ChangeNotifier {
   static const _kMcpEnvPrefix = 'ovid_mcp_env_';
   bool shareSessionMemory = false;
 
-  // ── Light/dark theme (DSH light/dark preference parity) ──
+  // ── Light/dark theme (the reference light/dark preference parity) ──
   static const _kTheme = 'ovid_light_theme';
   bool lightTheme = false;
 
@@ -939,7 +939,7 @@ class AppState extends ChangeNotifier {
   static const _kAutoRunSafe = 'ovid_auto_run_safe';
   bool autoRunSafeCommands = true;
 
-  // ── Locale preference (DSH client-locale parity: zh/en reply language) ──
+  // ── Locale preference (the reference client-locale parity: zh/en reply language) ──
   // 'system' follows the device language; 'en'/'zh' pin the reply hint.
   static const _kLocale = 'ovid_locale';
   String localePref = 'system';
@@ -966,7 +966,7 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  // ── First-run welcome notice (DSH ui-onboarding welcomeNoticeVersion) ──
+  // ── First-run welcome notice (the reference ui-onboarding welcomeNoticeVersion) ──
   static const _kWelcome = 'ovid_welcome';
   static const welcomeVersion = '2026-09-05.1';
   String seenWelcomeVersion = '';
@@ -1084,7 +1084,7 @@ class AppState extends ChangeNotifier {
   int responseTimeoutSec = 300;
   static const timeoutPresets = [120, 300, 600, 1800, 3600];
 
-  // ── Context window + output caps (user-configurable, DSH settings) ─
+  // ── Context window + output caps (user-configurable, settings) ─
   /// 0 = auto (per-model table, 1M fallback).  Any positive value is the
   /// user's explicit override for the ACTIVE model's context window —
   /// used by compaction pressure and the "% of context" ring.  Never a
@@ -1133,7 +1133,7 @@ class AppState extends ChangeNotifier {
   String? activeSessionId;
 
   /// Durable memories saved via memory_save — survive across sessions
-  /// (DSH memory tool equivalent).  Persisted as JSON in SharedPreferences.
+  /// (the reference memory tool equivalent).  Persisted as JSON in SharedPreferences.
   final List<MemoryItem> memories = [];
   static const _kMemories = 'ovid_memories';
 
@@ -1319,7 +1319,7 @@ class AppState extends ChangeNotifier {
   void selectSession(String id) {
     activeSessionId = id;
     // NOTE: runs are per-session (parallel) — switching NEVER stops a
-    // running session (DSH multi-session behavior).  Lazy-restore the
+    // running session (the reference multi-session behavior).  Lazy-restore the
     // newly-active session's browser tabs (per-session browsers).
     onSessionSwitched?.call(id);
     // PR23/M1: make sure the workspace dir exists for the mention menu.
@@ -1427,7 +1427,7 @@ class AppState extends ChangeNotifier {
   void Function()? onSessionsLoaded;
 
   /// Remove all messages from [index] onward in the named session
-  /// (DSH "Revert"/"Edit & resend" semantics). Clearing from index 0 also
+  /// (the reference "Revert"/"Edit & resend" semantics). Clearing from index 0 also
   /// resets the compacted summary so the agent truly starts fresh.
   void deleteMessagesFrom(String sessionId, int index) {
     final s = sessions.where((x) => x.id == sessionId).firstOrNull;
@@ -1442,7 +1442,7 @@ class AppState extends ChangeNotifier {
     persistSessions();
   }
 
-  /// Replace the content of an existing message (DSH "Edit" of a user turn).
+  /// Replace the content of an existing message (the reference "Edit" of a user turn).
   void editMessage(String sessionId, int index, String newContent) {
     final s = sessions.where((x) => x.id == sessionId).firstOrNull;
     if (s == null || index < 0 || index >= s.messages.length) return;
@@ -2015,7 +2015,7 @@ class AppState extends ChangeNotifier {
     return fetched;
   }
 
-  /// P3 (DSH plugin .mcp.json parity): read the plugin's `.mcp.json` from
+  /// P3 (the reference plugin .mcp.json parity): read the plugin's `.mcp.json` from
   /// its cache dir and register the declared `mcpServers` as connected-
   /// intent items (so plugins shipping MCP servers auto-mount on install).
   /// Returns the number of new servers registered. Never throws.
@@ -2164,7 +2164,7 @@ class AppState extends ChangeNotifier {
       if (mname.isEmpty) return;
       if (mcpServers.any((e) => e.name == mname)) return;
       // PR41: an entry with `url` (and no `command`) is a Streamable-HTTP
-      // server — Claude Desktop / Codex / DSH all use this exact shape
+      // server — Claude Desktop / Codex all use this exact shape
       // for a remote MCP server (`{"url": "https://...", "headers": {…}}`).
       final urlValue = m['url'] as String?;
       final isHttp = urlValue != null && urlValue.isNotEmpty;
@@ -2239,7 +2239,7 @@ class AppState extends ChangeNotifier {
     refresh();
   }
 
-  // ── MCP auto-reconnect (DSH tier-2 lifecycle parity) ──
+  // ── MCP auto-reconnect (the reference tier-2 lifecycle parity) ──
   /// Names of servers the user wants connected. Survives restarts so the
   /// app can respawn them on launch/resume (spawn-on-demand otherwise).
   static const _kMcpConnectedIntent = 'ovid_mcp_connected_v1';
