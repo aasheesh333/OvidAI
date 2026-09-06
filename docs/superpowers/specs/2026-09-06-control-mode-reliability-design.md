@@ -13,12 +13,13 @@ This spec bundles six approved workstreams into one integrated scope. Each secti
 
 | # | Workstream | Section | Depends on | Acceptance signal |
 |---|-----------|---------|-----------|-------------------|
-| W1 | Control mode (Phase A: in-app surface) | §2 | W6 | `AgentMode.control` exists, gated like `drive`+, tools denied in safe/plan |
-| W2 | MCP/plugin re-init + tri-state health | §3 | — | Resume re-inits MCP **and** plugins; UI shows gray/amber/green/red, never stale binary |
-| W3 | Real browser file handling | §4 | — | Downloads stream to disk (no in-memory cap wall); uploads chunk; user page uploads work via file selector |
-| W4 | Queue / Stop / Keep-alive semantics | §5 | — | Stop semantics per spec; keep-alive keeps foreground service with "Ready & Listening" |
-| W5 | Play-safety guardrails | §6 | W1 | No new sensitive permissions; MANAGE_EXTERNAL_STORAGE de-risked; disclosure flows documented |
-| W6 | Accessibility disclosure flow (designed, gated off) | §2.4 | W1, W5 | Sheet exists, wired behind a `const kEnableDeviceControl = false` flag |
+| W1 | Control mode (device-wide, accessibility-backed) | §2 | W5 | `AgentMode.control` exists, confirm-gated; `device_*` tools drive any app; denied in safe/plan |
+| W2 | MCP/plugin re-init + tri-state health | §3 | — | Resume re-inits MCP **and** plugins; UI shows amber/green/red, never stale binary |
+| W3 | Real file handling, no caps | §4 | — | Downloads stream to disk and uploads chunk with no size ceiling; page file inputs work |
+| W4 | Queue / Stop / Keep-alive semantics | §5 | — | Stop semantics per spec; keep-alive keeps foreground service as "Ready & Listening" |
+| W5 | Play-safety guardrails | §6 | W1 | Accessibility disclosure + denylist + password refusal enforced; no silent screen reading |
+| W6 | Screen reading without per-action screenshots | §2.3 | W1 | Node tree primary, dirty-flag cache, delta reads, node-handle taps; screenshot only on the three fallback cases |
+
 
 Constraints carried from prior plans (still binding):
 
@@ -26,6 +27,8 @@ Constraints carried from prior plans (still binding):
 - Read-Only + plan-mode gates stay: every new interactive tool MUST be denied in both gates.
 - Zero reference-web mentions in `lib/` + `test/`.
 - Do not break the green test suite; TDD RED→GREEN per task in the implementation plan.
+- Ovid is the user's personal agent: within Control mode it may do anything the user can do on their own device, subject only to the §6.5 hard limits.
+
 
 ---
 
@@ -44,42 +47,72 @@ enum AgentMode { safe, auto, drive, studio, control }
 - Tool schema `mode` enum (`agent_service.dart:3571`) gains `'control'`.
 - `/permission` in `lib/core/commands.dart:268-279`: switching to `control` requires the same explicit `confirm` flag as `drive`, PLUS a one-time in-chat disclosure card (see §6.4). Session modes stay per-session independent (`state.dart:528-529`).
 
-### 2.2 Phase A — in-app control surface (ships now)
+### 2.2 Device-wide control surface (ships now)
 
-Control mode in Phase A means **the agent drives the app's own WebView and in-app UI** with real input events, not only synthesized JS. No Android system permission is needed.
+Control mode means **Ovid can do anything the user can do on their own device**. It is the user's personal agent: every tap, swipe, keystroke, and system navigation the user can perform, Ovid can perform, in any app.
 
-New tools (all denied in Read-Only + plan gates, all ` _mutatingTools`):
+Implemented via `OvidAccessibilityService` (Kotlin, `android/app/src/main/kotlin/com/dhanuk/ovidai/OvidAccessibilityService.kt`), bridged to Dart over the existing `ovid/native` MethodChannel.
+
+New tools (all denied in Read-Only + plan gates, all in `_mutatingTools`, all require `AgentMode.control`):
 
 | Tool | Args | Mechanism |
 |------|------|-----------|
-| `device_tap` | `selector?`, `x?`, `y?` | CSS selector → `getBoundingClientRect` center, then Android `Input`-less fallback: `runJavaScript` dispatch of `pointerdown/pointerup` with `isTrusted`-ish coordinates on the tab controller; coords-only taps hit the active tab viewport |
-| `device_type` | `selector?`, `text`, `submit?` | Focus element, then `controller.runJavaScript` `dispatchEvent(new InputEvent(...))` per char fallback to existing `browser_type` path; `submit` presses Enter via existing keycode map |
-| `device_swipe` | `from_x,from_y,to_x,to_y`, `steps?` | JS pointer-event interpolation (same pattern as `browser_drag` steps, §fidelity prior work) |
-| `device_snapshot` | — | Thin alias of `browser_snapshot` accessibility-tree text; kept separate so gates/policies can evolve independently. Phase A adds no new capture API |
-
-Final Phase A tool set (four): `device_tap`, `device_type`, `device_swipe`, `device_snapshot`.
+| `device_read` | `mode?` (`delta` default, `full`) | Reads the a11y node tree of the foreground window. This is the agent's PRIMARY eye — see §2.3 |
+| `device_tap` | `node?`, `x?`, `y?` | `node` → `AccessibilityNodeInfo.performAction(ACTION_CLICK)` on the handle (preferred, scroll-safe); coords → `dispatchGesture` a tap at `(x, y)` |
+| `device_type` | `node?`, `text`, `submit?` | `ACTION_SET_TEXT` on the node; falls back to focused editable. `submit` fires `ACTION_IME_ENTER`/Enter keycode |
+| `device_swipe` | `from_x, from_y, to_x, to_y`, `duration_ms?` | `dispatchGesture` with an interpolated `Path` stroke |
+| `device_system_nav` | `action` (`back`\|`home`\|`recents`\|`notifications`\|`quick_settings`) | `performGlobalAction(GLOBAL_ACTION_*)` |
+| `device_screenshot` | — | `AccessibilityService.takeScreenshot()` (API 30+). FALLBACK ONLY — see §2.3 |
 
 Behavior rules:
 
-- All four resolve against `_activeTab` of the run's session (run-Zone resolution, same as A11 fix).
-- When no browser tab is open in that session, tools return `'Control surface not available — open a page first (browser_open).'`.
-- `device_*` tools imply nothing about the OS; they are namespaced for Phase B continuity.
+- Every tool first checks the service is bound. If not: `'Control mode needs the Ovid accessibility service. Enable it in Settings → Accessibility → Ovid AI.'` plus a one-tap deep link.
+- WebView tabs are covered by this same surface — no separate in-app path. The browser is just another window in the tree.
+- `device_screenshot` on API < 30 returns an honest unsupported message; the node tree still works.
 
-### 2.3 Phase B — device-wide control (deferred, pre-designed)
+### 2.3 Seeing the screen without screenshotting every action
 
-Phase B adds an `AccessibilityService` (Kotlin) exposing `performGlobalAction` + node queries over a MethodChannel, guarded by:
+Screenshots are slow, expensive, and vision-model-only. The node tree is text, works on every model, and is ~50× cheaper. So the tree is primary and the screenshot is the exception.
 
-- `const kEnableDeviceControl = false;` in `lib/core/state.dart` — compile-time gate; every Phase B call site checks it.
-- Play policy: accessibility use must be for the user's own agent-assistance purpose; disclosure copy in §6.4 is written for that framing.
-- Phase B is NOT implemented in this scope; only the flag, the disclosure sheet, and the tool-name reservation ship.
+**Node tree as the primary reader.** `device_read` renders `rootInActiveWindow` as flat indexed rows:
 
-### 2.4 Accessibility permission flow (Phase B only, gated off)
+```
+[12] Button   "Send"       id=send_btn  bounds=(880,1520,1010,1600) clickable
+[13] EditText "Message…"   id=composer  bounds=(60,1500,860,1620) editable focused
+[14] TextView "Ravi: hi"                bounds=(60,900,700,960)
+```
 
-When (and only when) `kEnableDeviceControl` is true and the user switches to control mode:
+Each row carries: index handle, class, text, content-description, view-id, bounds, and action flags (clickable / editable / scrollable / checked / focused). Invisible and zero-area nodes are dropped.
 
-1. Disclosure sheet: what device control can do, what it cannot (no passwords typed on behalf of the user, no financial apps — denylist in §6.5), local-only, revocable anytime.
-2. Accept → `Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)` with our service highlighted via `EXTRA_FRAGMENT_ARG_KEY`.
-3. On resume, check `AccessibilityManager.getEnabledAccessibilityServiceList`; if absent, mode falls back to Phase A surface with a persistent inline notice.
+**Three mechanisms keep the agent from re-reading the screen constantly:**
+
+1. **Event-driven dirty flag.** The service subscribes to `TYPE_WINDOW_STATE_CHANGED` and `TYPE_WINDOW_CONTENT_CHANGED` and only sets a `dirty` boolean plus a window signature. It never builds a tree on its own. A tree is built solely when `device_read` is called. If nothing changed since the last read, `device_read` returns `'screen unchanged'` — near-zero tokens.
+
+2. **Delta reads.** Default `mode: delta` returns only rows added, removed, or changed since the last read of the same window, diffed on a stable node key (`viewId + class + text + bounds`):
+   ```
+   + [22] Toast "Message sent"
+   ~ [13] EditText text:"" (was "hi ravi")
+   ```
+   A window signature change (new app / new screen) forces an automatic full read. `mode: full` forces it manually.
+
+3. **Node handles instead of coordinates.** Handles from the last read stay valid until the tree is rebuilt. `device_tap(node: 12)` performs a real accessibility click on that node — correct even if the list scrolled, and immune to density/rotation math. Because the action targets a semantic node rather than a pixel, the agent does not need to re-read to confirm it hit the right thing; it re-reads only when it needs the *result*.
+
+**Screenshot fallback fires in exactly three cases:**
+
+1. `device_read` yields an empty or content-less tree (games, video, canvas, Flutter/Unity surfaces that expose no semantics) — the tool says so and suggests `device_screenshot`.
+2. The agent needs actual pixels: reading a photo, a chart, a captcha, a rendered document.
+3. The agent explicitly calls `device_screenshot`.
+
+If the active model has no image support, case 1 and 3 return: `'This screen exposes no readable structure and the current model cannot read images. Switch to a vision model, or navigate using device_system_nav.'` — an honest limit, never a silent failure.
+
+### 2.4 Accessibility permission flow
+
+Requested only when the user switches to Control mode, never at launch:
+
+1. Disclosure sheet (copy in §6.4): what Ovid can do with it, that it is local-only, that it is revocable, and the denylist in §6.5.
+2. Accept → `Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)` with the service highlighted via `EXTRA_FRAGMENT_ARG_KEY`.
+3. On resume, `AccessibilityManager.getEnabledAccessibilityServiceList` confirms binding. If the user declined, Control mode stays selectable but every `device_*` tool returns the not-bound message with the re-open link; the session is not silently downgraded.
+
 
 ---
 
@@ -123,23 +156,25 @@ class ServiceStatus {
 
 ## 4. Real Browser File Handling
 
-### 4.1 Download path (replace in-memory cap)
+### 4.1 Download path (no size cap)
 
 Current: `HttpShim.get(..., maxResponseBytes: 20MB)` fully buffered (`agent_service.dart` `_handleBrowserDownload`). Design:
 
-- Add streaming variant: Dart `HttpClient` GET with the tab's cookies NOT injected (agent downloads stay server-side plain, matching today's behavior) writing straight to `containedPath(work, name)` in 64KB chunks.
-- New cap: **200MB** per file, checked against `FileSystemEntity` free space first (abort with clear message under 1.2× headroom).
+- Streaming variant: Dart `HttpClient` GET writing straight to `containedPath(work, name)` in 64KB chunks. Nothing is ever fully buffered in memory, so file size is bounded only by storage.
+- **No artificial cap.** The only limit is real free disk space: before starting, if `Content-Length` is known and exceeds free space, abort with `'not enough space: needs X MB, Y MB free'`. If the length is unknown, stream until the device runs out and report the write failure honestly, deleting the partial file.
 - Progress: `_emit('nav', 'downloading: name (x.y MB / total)')` every ~2s max.
-- Result message unchanged shape: `'downloaded ✓ · name · N bytes (workspace — read with read_attachment)'`.
+- Result shape unchanged: `'downloaded ✓ · name · N bytes (workspace — read with read_attachment)'`.
 - Session-workspace containment rule unchanged; never public Downloads (binding constraint).
 
-### 4.2 Upload path (chunked, no base64 wall)
+### 4.2 Upload path (no size cap)
 
 Current: whole-file base64 in one JS string, 10MB cap. Design:
 
-- Stage file to JS in **256KB base64 chunks** via `runJavaScript` appending to `window.__ovidUploadBuf` (array of strings), then finalize: assemble `Uint8Array` → `File` → `DataTransfer` → assign `el.files` + dispatch `input`/`change`. Buffer cleared on success/failure.
-- New cap: **50MB** (chunking removes the string-length wall; memory is chunk-sized on both sides).
+- Stage the file to JS in **256KB base64 chunks** via `runJavaScript` appending to `window.__ovidUploadBuf`, then finalize: assemble `Uint8Array` → `File` → `DataTransfer` → assign `el.files` + dispatch `input`/`change`. Buffer cleared on success and on failure.
+- **No artificial cap.** Chunking removes the string-length wall and keeps peak memory at one chunk on the Dart side. Very large files are read with a streaming `openRead()` so the whole file is never resident in Dart memory either.
+- If the WebView rejects the staged buffer (renderer OOM on genuinely huge files), the tool reports the real error rather than pre-emptively refusing a size the device could have handled.
 - Keeps the existing selector contract (`selector` must be `input[type=file]`).
+
 
 ### 4.3 User-initiated page uploads (file selector)
 
@@ -202,9 +237,10 @@ New rule:
 
 Manifest today (`AndroidManifest.xml`) declares a wide set incl. `MANAGE_EXTERNAL_STORAGE` (:29), `CAMERA`, `RECORD_AUDIO`, contacts, location, phone. Guardrails:
 
-1. No NEW permission in this scope. Phase A adds none; Phase B's accessibility service would add none (user-granted in Settings, not manifest-requestable).
-2. `MANAGE_EXTERNAL_STORAGE` is de-risked: §4.4 SAF export replaces the only flows that leaned on it; if no code path still requires all-files access after this scope lands, a follow-up removes the declaration (tracked in W5, not executed here — removal may break Studio's pinned-folder flows and needs its own audit).
-3. Every runtime permission request happens point-of-use with a purpose string; never at launch (existing pattern; regression-tested via audit note in this spec).
+1. **One new declaration:** `BIND_ACCESSIBILITY_SERVICE` on the `OvidAccessibilityService` component (§2.2). This is a signature-level bind permission — the user grants it manually in system Settings; the app cannot request it at runtime and cannot enable itself. It is declared, never auto-granted.
+2. Play policy for accessibility: the service exists to let the user's own assistant operate their device for them — an explicitly permitted use when disclosed. Ship requirements: prominent in-app disclosure before the settings deep link (§6.4), an accessibility-use declaration in the Play Console submission, and `android:accessibilityFlags` limited to what the tools need (`flagDefault|flagRetrieveInteractiveWindows|flagRequestFilterKeyEvents` omitted — no key filtering).
+3. `MANAGE_EXTERNAL_STORAGE` is de-risked: §4.4 SAF export replaces the only flows that leaned on it; if no code path still requires all-files access after this scope lands, a follow-up removes the declaration (tracked in W5, not executed here — removal may break Studio's pinned-folder flows and needs its own audit).
+4. Every runtime permission request happens point-of-use with a purpose string; never at launch.
 
 ### 6.2 Foreground service justification
 
@@ -212,28 +248,35 @@ Manifest today (`AndroidManifest.xml`) declares a wide set incl. `MANAGE_EXTERNA
 
 ### 6.3 Telemetry / data safety
 
-Telemetry consent dialog (`main.dart` `_maybeAskConsent`) unchanged; any new event types added by §3 (`serviceStatus` churn) stay local — nothing leaves the device in this scope.
+Telemetry consent dialog (`main.dart` `_maybeAskConsent`) unchanged; any new event types added by §3 (`serviceStatus` churn) stay local — nothing leaves the device in this scope. **Screen content never leaves the device except as part of the user's own model request**: node-tree text and screenshots are sent only to the provider the user already chose for that session, exactly like any other tool result, and are never logged to disk or telemetry.
 
 ### 6.4 Control-mode disclosure copy (final)
 
-> **Control mode lets Ovid operate the app on your behalf** — tapping and typing inside pages you opened. It never sees other apps in this version, never autofills passwords, and every action is logged in this chat. You can switch modes any time; switching down takes effect immediately.
+> **Control mode lets Ovid use your device the way you would.** With your permission it can read what is on screen and tap, type, swipe, and use Back / Home / Recents — in this app and in others, so it can finish tasks for you end to end.
+>
+> Ovid reads the screen only while Control mode is on, and only to do what you asked. Screen content is sent to the AI model you chose for this chat and to nowhere else — it is never stored or shared. It will not act on banking or payment screens. Every action appears in this chat.
+>
+> You turn this on yourself in Settings → Accessibility, and you can turn it off there at any time.
 
-(Phase B copy will extend this with device-wide wording + accessibility-policy paragraph; written when `kEnableDeviceControl` turns on.)
 
 ### 6.5 Hard limits enforced in code
 
-- Control-mode tool dispatch refuses when `_activeTab` URL matches a denylist: banking/payments keywords configurable via `presets` (`deniedControlDomains`, default `['paypal.com', 'wise.com']` + bank TLDs list) — refusal message explains and suggests Read-Only.
-- `device_*` tools are double-gated: mode gate (control only) AND safe/plan gate (denied), so a control session entering plan mode loses them.
+- **Sensitive-app denylist.** Before every `device_*` action the service reads the foreground package name (`AccessibilityEvent.getPackageName` / `rootInActiveWindow.packageName`) and the WebView URL when the foreground app is Ovid. If either matches the denylist — banking, payments, and wallet packages/domains in `kDeniedControlPackages` / `kDeniedControlDomains` — the tool refuses with an explanation and suggests the user do it themselves. The check is on the *live* foreground app, so it holds even if the agent navigates there mid-run.
+- **No credential entry.** `device_type` refuses when the target node reports `isPassword`, in any app.
+- **Double gating.** `device_*` tools require `AgentMode.control` AND are denied in the Read-Only and plan gates, so a control session entering plan mode loses them.
+- **Not inheritable.** Subagents never run in control mode (§2.1) — a child dispatched from a control session runs at `drive`.
+- **Bounded blast radius per action.** Every `device_*` call returns what it did in the transcript (`_emit`), so the user has a complete, reviewable log of everything Ovid touched.
 
 ---
 
 ## Out of scope
 
-- Phase B AccessibilityService implementation.
 - MANAGE_EXTERNAL_STORAGE removal (needs separate Studio-folder audit).
 - iOS equivalents (project ships Android).
 - BrowserTab cookie-per-session isolation (tracked as B9, separate).
+- Cross-device / remote control.
 
 ## Verification summary (plan-level)
 
-Every workstream gets RED→GREEN tests in `test/core_regression_test.dart`: mode gate denials (W1), status transitions via `serviceStatusForTest` (W2), streaming download chunk-writes + upload chunk assembly via pure helpers (W3), stop-branch + keep-alive idle via `agentIdleForTest` (W4), denylist refusal (W5). `flutter analyze` clean; full suite green before each commit.
+Every workstream gets RED→GREEN tests in `test/core_regression_test.dart`: mode gate denials + node-tree render/diff pure helpers + denylist refusal (W1/W5), status transitions via `serviceStatusForTest` (W2), streaming download and chunked upload via pure helpers with no cap assertions (W3), stop-branch + keep-alive idle via `agentIdleForTest` (W4). Kotlin service surface is asserted by source-level tests in the existing `readForegroundServiceSourceForTest` style (manifest declaration, flags, global actions present). `flutter analyze` clean; full suite green before each commit.
+
