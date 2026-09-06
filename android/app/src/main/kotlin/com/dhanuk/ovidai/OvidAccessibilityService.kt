@@ -112,6 +112,95 @@ internal class TreeReadGeneration {
     }
 }
 
+internal data class UnavailableTreeRead(
+    val status: String = "unavailable",
+    val packageName: String,
+    val windowId: Int,
+)
+
+internal class TreeReadCache<N>(
+    private val recycleNode: (N) -> Unit = {},
+) {
+    private val generation = TreeReadGeneration()
+    var windowSignature = ""
+        private set
+    var packageName = ""
+        private set
+    var windowId = -1
+        private set
+    val rows = linkedMapOf<String, Map<String, Any?>>()
+    val nodesByHandle = mutableMapOf<Int, N>()
+    val handlesByStableKey = mutableMapOf<String, Int>()
+    var nextHandle = 1
+        private set
+
+    fun markDirty(): Long = generation.markDirty()
+
+    fun beginRead(forceFull: Boolean): Long? = generation.beginRead(forceFull)
+
+    fun abandon(readGeneration: Long) {
+        generation.abandonRead(readGeneration)
+    }
+
+    fun unavailable(readGeneration: Long): UnavailableTreeRead {
+        generation.abandonRead(readGeneration)
+        return UnavailableTreeRead(packageName = packageName, windowId = windowId)
+    }
+
+    fun commit(
+        readGeneration: Long,
+        packageName: String,
+        windowId: Int,
+        rows: LinkedHashMap<String, Map<String, Any?>>,
+        nodes: MutableMap<Int, N>,
+        handles: MutableMap<String, Int>,
+        newNextHandle: Int,
+        forceFull: Boolean,
+    ): NodeDelta {
+        val signature = "$packageName|$windowId"
+        val delta = diffNodeRows(
+            previous = this.rows,
+            current = rows,
+            forceFull = forceFull,
+            windowChanged = signature != windowSignature,
+        )
+
+        recycleNodes()
+        nodesByHandle.putAll(nodes)
+        handlesByStableKey.clear()
+        handlesByStableKey.putAll(handles)
+        this.rows.clear()
+        this.rows.putAll(rows)
+        nextHandle = newNextHandle
+        windowSignature = signature
+        this.packageName = packageName
+        this.windowId = windowId
+        generation.completeRead(readGeneration)
+        return delta
+    }
+
+    fun reset() {
+        recycleNodes()
+        handlesByStableKey.clear()
+        rows.clear()
+        windowSignature = ""
+        packageName = ""
+        windowId = -1
+        generation.markDirty()
+    }
+
+    private fun recycleNodes() {
+        nodesByHandle.values.forEach { node ->
+            try {
+                recycleNode(node)
+            } catch (_: Throwable) {
+                // Continue releasing the remaining retained nodes.
+            }
+        }
+        nodesByHandle.clear()
+    }
+}
+
 @Suppress("DEPRECATION")
 class OvidAccessibilityService : AccessibilityService() {
     companion object {
@@ -123,14 +212,7 @@ class OvidAccessibilityService : AccessibilityService() {
         private const val MAX_DEPTH = 30
     }
 
-    private val treeGeneration = TreeReadGeneration()
-    private var windowSignature = ""
-    private var lastPackage = ""
-    private var lastWindowId = -1
-    private var previousRows = linkedMapOf<String, Map<String, Any?>>()
-    private val nodesByHandle = mutableMapOf<Int, AccessibilityNodeInfo>()
-    private val handlesByStableKey = mutableMapOf<String, Int>()
-    private var nextHandle = 1
+    private val treeCache = TreeReadCache<AccessibilityNodeInfo> { it.recycle() }
     private val screenshotExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "ovid-device-screenshot").apply { isDaemon = true }
     }
@@ -138,14 +220,14 @@ class OvidAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        treeGeneration.markDirty()
+        treeCache.markDirty()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         when (event?.eventType) {
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            -> treeGeneration.markDirty()
+            -> treeCache.markDirty()
         }
     }
 
@@ -166,12 +248,12 @@ class OvidAccessibilityService : AccessibilityService() {
 
     @Synchronized
     fun readScreen(forceFull: Boolean): Map<String, Any?> {
-        val readGeneration = treeGeneration.beginRead(forceFull)
+        val readGeneration = treeCache.beginRead(forceFull)
         if (readGeneration == null) {
             return readResult(
                 status = "unchanged",
-                packageName = lastPackage,
-                windowId = lastWindowId,
+                packageName = treeCache.packageName,
+                windowId = treeCache.windowId,
                 delta = NodeDelta(false, emptyList(), emptyList(), emptyList()),
             )
         }
@@ -179,20 +261,21 @@ class OvidAccessibilityService : AccessibilityService() {
         val root = try {
             rootInActiveWindow
         } catch (error: Throwable) {
-            treeGeneration.abandonRead(readGeneration)
+            treeCache.abandon(readGeneration)
             return readError(error)
         }
         if (root == null) {
-            treeGeneration.abandonRead(readGeneration)
+            val unavailable = treeCache.unavailable(readGeneration)
             return readUnavailable(
                 "The active window is temporarily unavailable. Retry device_read.",
+                unavailable,
             )
         }
 
         val rows = linkedMapOf<String, Map<String, Any?>>()
         val newNodes = mutableMapOf<Int, AccessibilityNodeInfo>()
         val newHandles = mutableMapOf<String, Int>()
-        var candidateNextHandle = nextHandle
+        var candidateNextHandle = treeCache.nextHandle
         val packageName = root.packageName?.toString().orEmpty()
         val windowId = root.windowId
 
@@ -216,7 +299,11 @@ class OvidAccessibilityService : AccessibilityService() {
                 )
                 val rowKey = uniqueRowKey(stableKey, rows)
                 run {
-                    val allocation = allocateStableHandle(handlesByStableKey, rowKey, candidateNextHandle)
+                    val allocation = allocateStableHandle(
+                        treeCache.handlesByStableKey,
+                        rowKey,
+                        candidateNextHandle,
+                    )
                     candidateNextHandle = allocation.nextHandle
                     val row = linkedMapOf<String, Any?>(
                         "handle" to allocation.handle,
@@ -252,19 +339,20 @@ class OvidAccessibilityService : AccessibilityService() {
 
         return try {
             visit(root, 0)
-            commitTree(
+            val delta = treeCache.commit(
+                readGeneration = readGeneration,
                 packageName = packageName,
                 windowId = windowId,
                 rows = rows,
-                newNodes = newNodes,
-                newHandles = newHandles,
+                nodes = newNodes,
+                handles = newHandles,
                 newNextHandle = candidateNextHandle,
                 forceFull = forceFull,
-                readGeneration = readGeneration,
             )
+            readResult("ok", packageName, windowId, delta)
         } catch (error: Throwable) {
             newNodes.values.forEach { it.recycle() }
-            treeGeneration.abandonRead(readGeneration)
+            treeCache.abandon(readGeneration)
             readError(error)
         } finally {
             root.recycle()
@@ -274,7 +362,7 @@ class OvidAccessibilityService : AccessibilityService() {
     @Synchronized
     internal fun tap(handle: Int?, x: Float?, y: Float?): DeviceActionResult {
         if (handle != null) {
-            val node = nodesByHandle[handle]
+            val node = treeCache.nodesByHandle[handle]
                 ?: return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid.")
             return if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
                 DeviceActionResult(true)
@@ -300,7 +388,7 @@ class OvidAccessibilityService : AccessibilityService() {
         var root: AccessibilityNodeInfo? = null
         var focusedNode: AccessibilityNodeInfo? = null
         val node = if (handle != null) {
-            nodesByHandle[handle]
+            treeCache.nodesByHandle[handle]
                 ?: return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid.")
         } else {
             root = rootInActiveWindow
@@ -403,39 +491,6 @@ class OvidAccessibilityService : AccessibilityService() {
         Api30Actions.takeScreenshot(this, result, screenshotExecutor)
     }
 
-    @Synchronized
-    private fun commitTree(
-        packageName: String,
-        windowId: Int,
-        rows: LinkedHashMap<String, Map<String, Any?>>,
-        newNodes: MutableMap<Int, AccessibilityNodeInfo>,
-        newHandles: MutableMap<String, Int>,
-        newNextHandle: Int,
-        forceFull: Boolean,
-        readGeneration: Long,
-    ): Map<String, Any?> {
-        val signature = "$packageName|$windowId"
-        val delta = diffNodeRows(
-            previous = previousRows,
-            current = rows,
-            forceFull = forceFull,
-            windowChanged = signature != windowSignature,
-        )
-
-        clearNodeHandles()
-        nodesByHandle.putAll(newNodes)
-        handlesByStableKey.clear()
-        handlesByStableKey.putAll(newHandles)
-        previousRows = rows
-        nextHandle = newNextHandle
-        windowSignature = signature
-        lastPackage = packageName
-        lastWindowId = windowId
-        // A newer event has a larger generation and therefore remains pending.
-        treeGeneration.completeRead(readGeneration)
-        return readResult("ok", packageName, windowId, delta)
-    }
-
     private fun readResult(
         status: String,
         packageName: String,
@@ -454,19 +509,22 @@ class OvidAccessibilityService : AccessibilityService() {
     private fun readError(error: Throwable): Map<String, Any?> = linkedMapOf(
         "status" to "error",
         "message" to (error.message ?: error.javaClass.simpleName),
-        "package" to lastPackage,
-        "window" to lastWindowId,
+        "package" to treeCache.packageName,
+        "window" to treeCache.windowId,
         "full" to false,
         "added" to emptyList<Map<String, Any?>>(),
         "changed" to emptyList<Map<String, Any?>>(),
         "removed" to emptyList<Int>(),
     )
 
-    private fun readUnavailable(message: String): Map<String, Any?> = linkedMapOf(
+    private fun readUnavailable(
+        message: String,
+        unavailable: UnavailableTreeRead,
+    ): Map<String, Any?> = linkedMapOf(
         "status" to "unavailable",
         "message" to message,
-        "package" to lastPackage,
-        "window" to lastWindowId,
+        "package" to unavailable.packageName,
+        "window" to unavailable.windowId,
         "full" to false,
         "added" to emptyList<Map<String, Any?>>(),
         "changed" to emptyList<Map<String, Any?>>(),
@@ -485,25 +543,7 @@ class OvidAccessibilityService : AccessibilityService() {
 
     @Synchronized
     private fun resetTree() {
-        clearNodeHandles()
-        handlesByStableKey.clear()
-        previousRows.clear()
-        windowSignature = ""
-        lastPackage = ""
-        lastWindowId = -1
-        treeGeneration.markDirty()
-    }
-
-    @Synchronized
-    private fun clearNodeHandles() {
-        nodesByHandle.values.forEach { node ->
-            try {
-                node.recycle()
-            } catch (_: Throwable) {
-                // Continue releasing the remaining retained nodes.
-            }
-        }
-        nodesByHandle.clear()
+        treeCache.reset()
     }
 }
 

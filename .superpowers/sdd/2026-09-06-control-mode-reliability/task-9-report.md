@@ -22,6 +22,22 @@ Complete. The Android accessibility service, cached node-tree reader, action bri
 - Full Flutter: `flutter test test/core_regression_test.dart` passed (399 tests).
 - Analyze: `flutter analyze` passed with no issues.
 - Debug APK: `flutter build apk --debug` passed and produced `build/app/outputs/flutter-apk/app-debug.apk`.
+
+## Round 2 Follow-up
+
+- Extracted `TreeReadCache`, the production-owned cache controller used directly by `readScreen` for generations, rows, handles, retained nodes, commits, unavailable roots, and reset cleanup.
+- Added an executable JVM test that seeds a successful cached tree, runs the same production `unavailable` transition used for a null root, and asserts package/window metadata, cached rows, stable handles, retained nodes, and next-handle allocation remain unchanged while the next read stays pending.
+
+### Round 2 Verification
+
+- TDD RED evidence: focused JVM compilation failed because `TreeReadCache` did not exist before the production extraction.
+- Focused native: `./gradlew :app:testDebugUnitTest --tests com.dhanuk.ovidai.OvidAccessibilityServiceStateTest` passed (9 tests).
+- Full Android JVM: `./gradlew :app:testDebugUnitTest` passed.
+- Focused Flutter CTRL2: `flutter test test/core_regression_test.dart --plain-name "CTRL2"` passed (1 test).
+- Full Flutter: `flutter test test/core_regression_test.dart` passed (399 tests).
+- Analyze: `flutter analyze` passed with no issues.
+- Debug APK: `flutter build apk --debug` passed and produced `build/app/outputs/flutter-apk/app-debug.apk`.
+- Diff check: `git diff --check` passed.
 - Diff check: `git diff --check` passed.
 
 ## Concerns

@@ -2,6 +2,7 @@ package com.dhanuk.ovidai
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -108,5 +109,35 @@ class OvidAccessibilityServiceStateTest {
         generation.completeRead(startedAt)
 
         assertEquals(startedAt, generation.beginRead(forceFull = true))
+    }
+
+    @Test
+    fun unavailableRootTransitionPreservesCachedTreeAndLeavesReadPending() {
+        val cache = TreeReadCache<String>()
+        val initialRead = checkNotNull(cache.beginRead(forceFull = false))
+        val cachedRow = mapOf<String, Any?>("handle" to 17, "text" to "Send")
+        cache.commit(
+            readGeneration = initialRead,
+            packageName = "com.example.notes",
+            windowId = 42,
+            rows = linkedMapOf("send-key" to cachedRow),
+            nodes = mutableMapOf(17 to "retained-node"),
+            handles = mutableMapOf("send-key" to 17),
+            newNextHandle = 18,
+            forceFull = true,
+        )
+        cache.markDirty()
+        val unavailableRead = checkNotNull(cache.beginRead(forceFull = false))
+
+        val unavailable = cache.unavailable(unavailableRead)
+
+        assertEquals("unavailable", unavailable.status)
+        assertEquals("com.example.notes", unavailable.packageName)
+        assertEquals(42, unavailable.windowId)
+        assertEquals(linkedMapOf("send-key" to cachedRow), cache.rows)
+        assertEquals(mapOf(17 to "retained-node"), cache.nodesByHandle)
+        assertEquals(mapOf("send-key" to 17), cache.handlesByStableKey)
+        assertEquals(18, cache.nextHandle)
+        assertNotNull(cache.beginRead(forceFull = false))
     }
 }
