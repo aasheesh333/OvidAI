@@ -3309,11 +3309,10 @@ Translate the following. This is the skill body.''');
       expect(source, contains('override fun onActivityResult'));
       expect(source, contains('startActivityForResult'));
       expect(source, contains('Intent.ACTION_CREATE_DOCUMENT'));
-      expect(source, contains('contentResolver.openOutputStream'));
-      expect(source, contains('sourceFile.inputStream().use'));
-      expect(source, contains('input.copyTo(output)'));
-      expect(source, contains('Thread {'));
-      expect(source, contains('runOnUiThread'));
+      expect(source, contains('OsConstants.O_NOFOLLOW'));
+      expect(source, contains('ParcelFileDescriptor.dup'));
+      expect(source, contains('safExportCoordinator.complete(destination)'));
+      expect(source, contains('safExportCoordinator.cleanup()'));
     });
 
     test('SAF5: page file chooser returns content URIs and safe file URI fallbacks', () {
@@ -3335,6 +3334,25 @@ Translate the following. This is the skill body.''');
       final source = readAgentServiceSourceForTest();
       expect(source, contains('setOnShowFileSelector'));
       expect(source, contains('FileSelectorMode.openMultiple'));
+    });
+
+    test('SAF6: page file chooser maps only representable accept filters', () {
+      final images = AgentService.pageFilePickerFilterForTest(['image/*']);
+      expect(images.type, FileType.image);
+      expect(images.allowedExtensions, isNull);
+
+      final documents = AgentService.pageFilePickerFilterForTest([
+        'application/pdf',
+        '.txt',
+      ]);
+      expect(documents.type, FileType.custom);
+      expect(documents.allowedExtensions, ['pdf', 'txt']);
+
+      final unknown = AgentService.pageFilePickerFilterForTest([
+        'application/x-unknown',
+      ]);
+      expect(unknown.type, FileType.any);
+      expect(unknown.allowedExtensions, isNull);
     });
 
     test('cancelRun resolves a pending approval instead of hanging', () async {

@@ -35,6 +35,7 @@ class BrowserTab {
   bool loading = false;
   int progress = 0;
   WebViewController? controller;
+  Future<void>? fileSelectorRegistration;
   bool loadedOnce = false;
 
   /// Logical viewport emulation (B10, browser-resize parity): zoom
@@ -1553,22 +1554,41 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         ),
       );
     final platformController = tab.controller!.platform;
-    if (platformController is AndroidWebViewController) {
-      unawaited(
-        platformController.setOnShowFileSelector((params) async {
+    if (platformController is AndroidWebViewController &&
+        tab.fileSelectorRegistration == null) {
+      try {
+        final registration = platformController.setOnShowFileSelector((params) async {
+          if (params.isCaptureEnabled) {
+            _emit('shell', 'file chooser: capture requested; existing files only');
+          }
           try {
+            final filter = pageFilePickerFilterForTest(params.acceptTypes);
             final result = await FilePicker.platform.pickFiles(
               allowMultiple: params.mode == FileSelectorMode.openMultiple,
+              type: filter.type,
+              allowedExtensions: filter.allowedExtensions,
             );
-            if (result == null) return const [];
-            final uris = pageFileUrisForTest(result.files);
+            final uris = result == null
+                ? const <String>[]
+                : pageFileUrisForTest(result.files);
             _emit('shell', 'file chooser: ${uris.length} files');
             return uris;
-          } catch (_) {
+          } catch (error) {
+            _emit('err', 'file chooser failed: $error');
+            _emit('shell', 'file chooser: 0 files');
             return const [];
           }
-        }),
-      );
+        });
+        tab.fileSelectorRegistration = registration;
+        unawaited(registration.then<void>((_) {}, onError: (Object error, StackTrace stackTrace) {
+          if (identical(tab.fileSelectorRegistration, registration)) {
+            tab.fileSelectorRegistration = null;
+          }
+          _emit('err', 'file chooser registration failed: $error');
+        }));
+      } catch (error) {
+        _emit('err', 'file chooser registration failed: $error');
+      }
     }
     if (!tab.loadedOnce) {
       tab.loadedOnce = true;
@@ -8499,6 +8519,67 @@ ${await _agentsMdBlock()}
       if (path != null && path.isNotEmpty) uris.add(Uri.file(path).toString());
     }
     return uris;
+  }
+
+  @visibleForTesting
+  static ({FileType type, List<String>? allowedExtensions})
+      pageFilePickerFilterForTest(List<String> acceptTypes) {
+    final accepted = acceptTypes
+        .expand((value) => value.split(','))
+        .map((value) => value.trim().toLowerCase().split(';').first)
+        .where((value) => value.isNotEmpty && value != '*/*')
+        .toSet();
+    if (accepted.isEmpty) {
+      return (type: FileType.any, allowedExtensions: null);
+    }
+    if (accepted.length == 1) {
+      switch (accepted.single) {
+        case 'image/*':
+          return (type: FileType.image, allowedExtensions: null);
+        case 'video/*':
+          return (type: FileType.video, allowedExtensions: null);
+        case 'audio/*':
+          return (type: FileType.audio, allowedExtensions: null);
+      }
+    }
+    if (accepted.length == 2 &&
+        accepted.contains('image/*') &&
+        accepted.contains('video/*')) {
+      return (type: FileType.media, allowedExtensions: null);
+    }
+
+    const mimeExtensions = <String, List<String>>{
+      'application/json': ['json'],
+      'application/msword': ['doc'],
+      'application/pdf': ['pdf'],
+      'application/vnd.ms-excel': ['xls'],
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['xlsx'],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['docx'],
+      'application/zip': ['zip'],
+      'image/gif': ['gif'],
+      'image/heic': ['heic'],
+      'image/heif': ['heif'],
+      'image/jpeg': ['jpg', 'jpeg'],
+      'image/png': ['png'],
+      'image/svg+xml': ['svg'],
+      'image/webp': ['webp'],
+      'text/csv': ['csv'],
+      'text/html': ['html', 'htm'],
+      'text/plain': ['txt'],
+    };
+    final extensions = <String>{};
+    for (final value in accepted) {
+      if (value.startsWith('.') && RegExp(r'^\.[a-z0-9]+$').hasMatch(value)) {
+        extensions.add(value.substring(1));
+        continue;
+      }
+      final mapped = mimeExtensions[value];
+      if (mapped == null) {
+        return (type: FileType.any, allowedExtensions: null);
+      }
+      extensions.addAll(mapped);
+    }
+    return (type: FileType.custom, allowedExtensions: extensions.toList(growable: false));
   }
 
   Future<String> exportFileToSaf(String relPath) async {

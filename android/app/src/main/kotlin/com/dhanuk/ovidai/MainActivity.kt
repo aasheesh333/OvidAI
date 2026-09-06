@@ -5,20 +5,50 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.os.ParcelFileDescriptor
+import android.system.Os
+import android.system.OsConstants
 import java.io.File
+import java.io.FileInputStream
 import java.net.URLConnection
 import java.util.zip.ZipFile
 
 class MainActivity : FlutterActivity() {
     private val channelName = "ovid/native"
     private val safExportRequestCode = 7407
-    private var pendingSafExport: PendingSafExport? = null
+    private val safExportCoordinator = SafExportCoordinator<ParcelFileDescriptor, Uri> { source, destination ->
+        val output = contentResolver.openOutputStream(destination, "w")
+            ?: throw IllegalStateException("Destination could not be opened")
+        output.use {
+            FileInputStream(source.fileDescriptor).copyTo(it)
+            it.flush()
+        }
+    }
 
-    private data class PendingSafExport(
-        val sourceFile: File,
-        val result: MethodChannel.Result,
-    )
+    private fun openPinnedSource(sourcePath: String): ParcelFileDescriptor {
+        val descriptor = Os.open(
+            sourcePath,
+            OsConstants.O_RDONLY or OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW,
+            0,
+        )
+        return try {
+            ParcelFileDescriptor.dup(descriptor)
+        } finally {
+            Os.close(descriptor)
+        }
+    }
+
+    private fun channelResult(result: MethodChannel.Result) = object : SafExportResult {
+        override fun success(exported: Boolean) {
+            runOnUiThread { result.success(exported) }
+        }
+
+        override fun error(code: String, message: String) {
+            runOnUiThread { result.error(code, message, null) }
+        }
+    }
 
     /// The ABI the PackageManager chose for THIS install — the last path
     /// segment of nativeLibraryDir (…/lib/arm64, …/lib/arm, …). This is
@@ -135,13 +165,12 @@ class MainActivity : FlutterActivity() {
                         val requestedName = call.argument<String>("fileName")
                         if (sourcePath.isNullOrBlank() || requestedName.isNullOrBlank()) {
                             result.error("BAD_ARGS", "Missing sourcePath or fileName", null)
-                        } else if (pendingSafExport != null) {
-                            result.error("BUSY", "Another file export is already open", null)
                         } else {
-                            val sourceFile = File(sourcePath)
-                            if (!sourceFile.isFile) {
-                                result.error("NOT_FOUND", "Source file not found", null)
-                            } else {
+                            try {
+                                val source = openPinnedSource(sourcePath)
+                                if (!safExportCoordinator.begin(source, channelResult(result))) {
+                                    return@setMethodCallHandler
+                                }
                                 val fileName = File(requestedName).name
                                 val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                                     addCategory(Intent.CATEGORY_OPENABLE)
@@ -149,13 +178,16 @@ class MainActivity : FlutterActivity() {
                                         ?: "application/octet-stream"
                                     putExtra(Intent.EXTRA_TITLE, fileName)
                                 }
-                                pendingSafExport = PendingSafExport(sourceFile, result)
                                 try {
                                     startActivityForResult(intent, safExportRequestCode)
                                 } catch (e: Exception) {
-                                    pendingSafExport = null
-                                    result.error("LAUNCH_FAILED", "Could not open file destination: ${e.message}", null)
+                                    safExportCoordinator.fail(
+                                        "LAUNCH_FAILED",
+                                        "Could not open file destination: ${e.message}",
+                                    )
                                 }
+                            } catch (e: Exception) {
+                                result.error("NOT_FOUND", "Source file could not be opened: ${e.message}", null)
                             }
                         }
                     }
@@ -290,30 +322,19 @@ class MainActivity : FlutterActivity() {
             return
         }
 
-        val pending = pendingSafExport ?: return
-        pendingSafExport = null
         val destination = data?.data
         if (resultCode != Activity.RESULT_OK || destination == null) {
-            pending.result.success(false)
+            safExportCoordinator.complete(null)
             return
         }
 
         Thread {
-            try {
-                val output = contentResolver.openOutputStream(destination, "w")
-                    ?: throw IllegalStateException("Destination could not be opened")
-                pending.sourceFile.inputStream().use { input ->
-                    output.use {
-                        input.copyTo(output)
-                        output.flush()
-                    }
-                }
-                runOnUiThread { pending.result.success(true) }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    pending.result.error("COPY_FAILED", "File export failed: ${e.message}", null)
-                }
-            }
+            safExportCoordinator.complete(destination)
         }.start()
+    }
+
+    override fun onDestroy() {
+        safExportCoordinator.cleanup()
+        super.onDestroy()
     }
 }

@@ -1,5 +1,7 @@
 import java.util.Properties
 
+val ovidMinSdk = 23
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
@@ -28,8 +30,8 @@ android {
 
     defaultConfig {
         applicationId = "com.dhanuk.ovidai"
-        // Current Flutter Android plugins require Android 7.0+ (API 24).
-        minSdk = flutter.minSdkVersion
+        // Android 6.0 remains supported by the app shell.
+        minSdk = ovidMinSdk
         // The native sandbox execs bash/python/node from the app's files
         // dir (Termux-style $PREFIX). Android 10+ blocks execve() AND
         // exec-mmap of anything under /data/user/<u>/<pkg> for apps
@@ -104,4 +106,8 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    testImplementation("junit:junit:4.13.2")
 }

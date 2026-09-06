@@ -103,11 +103,58 @@ event logging.
 - The file chooser intentionally catches picker failures and returns an empty
   selection, matching WebView's cancel contract; the transcript event is only
   emitted for returned URIs.
-- Current Flutter plugins no longer permit the prior API 23 app minimum, so the
-  debug APK now targets Flutter's API 24 minimum. The existing sandbox
-  preflight's Android 6 diagnostic remains valid for hosts/tests but Android 6
-  can no longer install this build.
+- The initial dependency set no longer permitted API 23. Fix Round 1 below
+  replaces those packages with compatible pins and restores the Android 6
+  application minimum.
 
 ## Commit
 
 `feat: page file chooser integration and SAF export support` (this task commit).
+
+## Fix Round 1
+
+Reviewed and completed the preserved partial worktree:
+
+- Native export now opens the source once with `Os.open(O_NOFOLLOW)` and copies
+  only from the pinned `ParcelFileDescriptor`; no destination-result path
+  reopens the source pathname.
+- `SafExportCoordinator` keeps the operation BUSY through copy, source close,
+  and result delivery. Concurrent complete/cancel/fail/cleanup calls claim the
+  same operation at most once, and all terminal paths close the source.
+- Activity destruction invokes coordinator cleanup so a pending chooser does
+  not leak its descriptor or Dart method result.
+- Page chooser registration is once per tab, reports asynchronous registration
+  failures, logs cancellation/failure, maps supported accept types into
+  `file_picker` filters, and explicitly reports capture requests as
+  existing-file-only behavior.
+- Android remains at minSdk 23 with compatible plugin pins. The direct
+  `webview_flutter_android` pin is `3.16.9`: testing exact `3.16.0` exposed
+  retired `PluginRegistry.Registrar` references that do not compile with the
+  installed Flutter SDK, while `3.16.9` retains Android minSdk 19 and compiles.
+
+### Exact Evidence
+
+- Focused Flutter SAF tests:
+  `/home/ubuntu/sdk/flutter/bin/flutter test test/core_regression_test.dart --plain-name SAF`
+  -> `+6: All tests passed!`
+- Android JVM suite:
+  `./gradlew app:testDebugUnitTest` from `android/` -> `BUILD SUCCESSFUL`.
+  The generated `SafExportCoordinatorTest` XML records `tests="11"`,
+  `failures="0"`, `errors="0"`.
+- Full Flutter suite:
+  `/home/ubuntu/sdk/flutter/bin/flutter test` -> `+397: All tests passed!`
+- Static analysis:
+  `/home/ubuntu/sdk/flutter/bin/flutter analyze` -> `No issues found!`
+- Debug APK:
+  `/home/ubuntu/sdk/flutter/bin/flutter build apk --debug` -> built
+  `build/app/outputs/flutter-apk/app-debug.apk`.
+- Whitespace validation: `git diff --check` -> no output.
+
+### Remaining Concerns
+
+- DocumentsUI and live WebView picker behavior are not emulator-tested; JVM,
+  Flutter contract tests, Android compilation, and APK assembly cover the
+  available automated boundary.
+- The Android build reports existing Gradle/Kotlin deprecation warnings and a
+  future Flutter warning that minSdk 23 support will be dropped. These warnings
+  do not fail the current API 23 build.
