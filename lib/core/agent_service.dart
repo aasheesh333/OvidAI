@@ -2,11 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart' show IconData, Icons, Color;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -1550,6 +1552,24 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
           },
         ),
       );
+    final platformController = tab.controller!.platform;
+    if (platformController is AndroidWebViewController) {
+      unawaited(
+        platformController.setOnShowFileSelector((params) async {
+          try {
+            final result = await FilePicker.platform.pickFiles(
+              allowMultiple: params.mode == FileSelectorMode.openMultiple,
+            );
+            if (result == null) return const [];
+            final uris = pageFileUrisForTest(result.files);
+            _emit('shell', 'file chooser: ${uris.length} files');
+            return uris;
+          } catch (_) {
+            return const [];
+          }
+        }),
+      );
+    }
     if (!tab.loadedOnce) {
       tab.loadedOnce = true;
       // Apply desktop viewport and user agent to tabs in desktopMode:
@@ -8463,6 +8483,51 @@ ${await _agentsMdBlock()}
       return null;
     }
   }
+
+  @visibleForTesting
+  static List<String> pageFileUrisForTest(List<PlatformFile> files) {
+    final uris = <String>[];
+    for (final file in files) {
+      final identifier = file.identifier?.trim();
+      if (identifier != null &&
+          identifier.isNotEmpty &&
+          Uri.tryParse(identifier)?.hasScheme == true) {
+        uris.add(identifier);
+        continue;
+      }
+      final path = file.path;
+      if (path != null && path.isNotEmpty) uris.add(Uri.file(path).toString());
+    }
+    return uris;
+  }
+
+  Future<String> exportFileToSaf(String relPath) async {
+    final work = await _sessionWorkDir();
+    final lexical = containedPath(work, relPath);
+    if (lexical == null) {
+      return 'path escapes the session workspace: $relPath';
+    }
+    final lexicalFile = File(lexical);
+    if (!lexicalFile.existsSync()) return 'file not found: $relPath';
+    final safe = await resolveBrowserUploadPathForTest(work, relPath);
+    if (safe == null) {
+      return 'path escapes the session workspace: $relPath';
+    }
+    final file = File(safe);
+    try {
+      const channel = MethodChannel('ovid/native');
+      final exported = await channel.invokeMethod<bool>('safExportFile', {
+        'sourcePath': safe,
+        'fileName': file.uri.pathSegments.last,
+      });
+      return exported == true ? 'exported ✓' : 'export cancelled';
+    } catch (e) {
+      return 'export failed: $e';
+    }
+  }
+
+  @visibleForTesting
+  Future<String> exportFileToSafForTest(String relPath) => exportFileToSaf(relPath);
 
   /// Resolve a workspace-relative path.  Repo files take precedence; falls
   /// back to the session's sandbox workdir on the host filesystem.

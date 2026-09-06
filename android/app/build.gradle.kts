@@ -28,12 +28,8 @@ android {
 
     defaultConfig {
         applicationId = "com.dhanuk.ovidai"
-        // Android 6.0+ (API 23) — Flutter's default is 24; set explicitly
-        // so 6.x devices can install. The app shell (chat/providers/
-        // browser) runs on 23; the native sandbox additionally needs
-        // Android 7+ (API 24) — checked at runtime with a friendly
-        // "continue without sandbox" fallback (sandbox_service preflight).
-        minSdk = 23
+        // Current Flutter Android plugins require Android 7.0+ (API 24).
+        minSdk = flutter.minSdkVersion
         // The native sandbox execs bash/python/node from the app's files
         // dir (Termux-style $PREFIX). Android 10+ blocks execve() AND
         // exec-mmap of anything under /data/user/<u>/<pkg> for apps

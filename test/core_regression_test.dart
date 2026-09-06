@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:ffi' as ffi;
 
 import 'package:archive/archive.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -3213,6 +3214,127 @@ Translate the following. This is the skill body.''');
       expect(AgentService.containedPath(work, '../../etc/passwd'), isNull);
       expect(AgentService.containedPath(work, '/etc/passwd'), isNull);
       expect(AgentService.containedPath(work, '   '), isNull);
+    });
+
+    test('SAF1: exportFileToSaf validates path containment and surfaces result', () async {
+      final res = await AgentService.I.exportFileToSafForTest('../outside.txt');
+      expect(res, contains('path escapes the session workspace'));
+    });
+
+    test('SAF2: exportFileToSaf rejects symlinks outside the workspace', () async {
+      final tempDir = Directory.systemTemp.createTempSync('saf2_test');
+      final workspace = Directory('${tempDir.path}/workspace')..createSync();
+      final outside = File('${tempDir.path}/outside.txt')..writeAsStringSync('secret');
+      Link('${workspace.path}/escape.txt').createSync(outside.path);
+      final session = ChatSession(
+        id: 'saf2',
+        title: 'SAF2',
+        model: 'm',
+        workspaceFolder: workspace.path,
+      );
+      app.sessions.insert(0, session);
+      app.activeSessionId = session.id;
+      AgentService.setRunSessionForTest(session.id);
+      var channelCalled = false;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(const MethodChannel('ovid/native'), (call) async {
+        channelCalled = true;
+        return true;
+      });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(const MethodChannel('ovid/native'), null);
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((s) => s.id == session.id);
+        tempDir.deleteSync(recursive: true);
+      });
+
+      final res = await AgentService.I.exportFileToSafForTest('escape.txt');
+
+      expect(res, contains('path escapes the session workspace'));
+      expect(channelCalled, isFalse);
+    });
+
+    test('SAF3: exportFileToSaf awaits and surfaces the native export result', () async {
+      final tempDir = Directory.systemTemp.createTempSync('saf3_test');
+      final workspace = Directory('${tempDir.path}/workspace')..createSync();
+      final source = File('${workspace.path}/report.txt')
+        ..writeAsStringSync('report bytes');
+      final session = ChatSession(
+        id: 'saf3',
+        title: 'SAF3',
+        model: 'm',
+        workspaceFolder: workspace.path,
+      );
+      app.sessions.insert(0, session);
+      app.activeSessionId = session.id;
+      AgentService.setRunSessionForTest(session.id);
+      final calls = <MethodCall>[];
+      var nativeResult = true;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(const MethodChannel('ovid/native'), (call) async {
+        calls.add(call);
+        return nativeResult;
+      });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(const MethodChannel('ovid/native'), null);
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((s) => s.id == session.id);
+        tempDir.deleteSync(recursive: true);
+      });
+
+      expect(
+        await AgentService.I.exportFileToSaf('report.txt'),
+        'exported ✓',
+      );
+      expect(calls.single.method, 'safExportFile');
+      expect(calls.single.arguments, {
+        'sourcePath': await source.resolveSymbolicLinks(),
+        'fileName': 'report.txt',
+      });
+
+      nativeResult = false;
+      expect(
+        await AgentService.I.exportFileToSaf('report.txt'),
+        'export cancelled',
+      );
+    });
+
+    test('SAF4: Android export copies bytes only after a document is chosen', () {
+      final source = File(
+        'android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt',
+      ).readAsStringSync();
+
+      expect(source, contains('override fun onActivityResult'));
+      expect(source, contains('startActivityForResult'));
+      expect(source, contains('Intent.ACTION_CREATE_DOCUMENT'));
+      expect(source, contains('contentResolver.openOutputStream'));
+      expect(source, contains('sourceFile.inputStream().use'));
+      expect(source, contains('input.copyTo(output)'));
+      expect(source, contains('Thread {'));
+      expect(source, contains('runOnUiThread'));
+    });
+
+    test('SAF5: page file chooser returns content URIs and safe file URI fallbacks', () {
+      final uris = AgentService.pageFileUrisForTest([
+        PlatformFile(
+          name: 'cloud.pdf',
+          size: 10,
+          path: '/cache/cloud.pdf',
+          identifier: 'content://provider/cloud.pdf',
+        ),
+        PlatformFile(name: 'local.txt', size: 3, path: '/tmp/local.txt'),
+        PlatformFile(name: 'unavailable.bin', size: 1),
+      ]);
+
+      expect(uris, [
+        'content://provider/cloud.pdf',
+        'file:///tmp/local.txt',
+      ]);
+      final source = readAgentServiceSourceForTest();
+      expect(source, contains('setOnShowFileSelector'));
+      expect(source, contains('FileSelectorMode.openMultiple'));
     });
 
     test('cancelRun resolves a pending approval instead of hanging', () async {

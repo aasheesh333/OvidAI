@@ -3,14 +3,22 @@ package com.dhanuk.ovidai
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import android.content.Context
+import android.app.Activity
 import android.content.Intent
 import android.os.Build
 import java.io.File
+import java.net.URLConnection
 import java.util.zip.ZipFile
 
 class MainActivity : FlutterActivity() {
     private val channelName = "ovid/native"
+    private val safExportRequestCode = 7407
+    private var pendingSafExport: PendingSafExport? = null
+
+    private data class PendingSafExport(
+        val sourceFile: File,
+        val result: MethodChannel.Result,
+    )
 
     /// The ABI the PackageManager chose for THIS install — the last path
     /// segment of nativeLibraryDir (…/lib/arm64, …/lib/arm, …). This is
@@ -120,6 +128,35 @@ class MainActivity : FlutterActivity() {
                             result.success(true)
                         } catch (e: Exception) {
                             result.error("STOP_FAIL", "${e.message}", null)
+                        }
+                    }
+                    "safExportFile" -> {
+                        val sourcePath = call.argument<String>("sourcePath")
+                        val requestedName = call.argument<String>("fileName")
+                        if (sourcePath.isNullOrBlank() || requestedName.isNullOrBlank()) {
+                            result.error("BAD_ARGS", "Missing sourcePath or fileName", null)
+                        } else if (pendingSafExport != null) {
+                            result.error("BUSY", "Another file export is already open", null)
+                        } else {
+                            val sourceFile = File(sourcePath)
+                            if (!sourceFile.isFile) {
+                                result.error("NOT_FOUND", "Source file not found", null)
+                            } else {
+                                val fileName = File(requestedName).name
+                                val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                                    addCategory(Intent.CATEGORY_OPENABLE)
+                                    type = URLConnection.guessContentTypeFromName(fileName)
+                                        ?: "application/octet-stream"
+                                    putExtra(Intent.EXTRA_TITLE, fileName)
+                                }
+                                pendingSafExport = PendingSafExport(sourceFile, result)
+                                try {
+                                    startActivityForResult(intent, safExportRequestCode)
+                                } catch (e: Exception) {
+                                    pendingSafExport = null
+                                    result.error("LAUNCH_FAILED", "Could not open file destination: ${e.message}", null)
+                                }
+                            }
                         }
                     }
                     "agentStopHandler" -> {
@@ -245,5 +282,38 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode != safExportRequestCode) {
+            super.onActivityResult(requestCode, resultCode, data)
+            return
+        }
+
+        val pending = pendingSafExport ?: return
+        pendingSafExport = null
+        val destination = data?.data
+        if (resultCode != Activity.RESULT_OK || destination == null) {
+            pending.result.success(false)
+            return
+        }
+
+        Thread {
+            try {
+                val output = contentResolver.openOutputStream(destination, "w")
+                    ?: throw IllegalStateException("Destination could not be opened")
+                pending.sourceFile.inputStream().use { input ->
+                    output.use {
+                        input.copyTo(output)
+                        output.flush()
+                    }
+                }
+                runOnUiThread { pending.result.success(true) }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    pending.result.error("COPY_FAILED", "File export failed: ${e.message}", null)
+                }
+            }
+        }.start()
     }
 }
