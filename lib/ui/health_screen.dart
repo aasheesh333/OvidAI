@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../core/health_service.dart';
 import '../core/sandbox_service.dart';
+import '../core/state.dart';
 import '../core/theme.dart';
 import 'sandbox_setup.dart';
 
@@ -79,7 +80,7 @@ class _HealthScreenState extends State<HealthScreen> {
         title: const Text('Device health'),
       ),
       body: AnimatedBuilder(
-        animation: HealthService.I,
+        animation: Listenable.merge([HealthService.I, AppState.I]),
         builder: (_, _) {
           final report = HealthService.I.lastReport;
           final checking = HealthService.I.checking;
@@ -190,6 +191,112 @@ class _HealthScreenState extends State<HealthScreen> {
                   ],
                 ),
               ),
+
+              // ── Services Health (MCP & Plugins) ──
+              if (AppState.I.serviceStatus.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: Aether.surface,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: Aether.hairline),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            'SERVICES',
+                            style: TextStyle(
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 1.2,
+                              color: Aether.textFaint,
+                            ),
+                          ),
+                          const Spacer(),
+                          Text(
+                            '${AppState.I.serviceStatus.values.where((s) => s.health == ServiceHealth.working).length}/${AppState.I.serviceStatus.length} working',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Aether.textFaint,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      for (final entry in AppState.I.serviceStatus.entries)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Row(
+                            children: [
+                              if (entry.value.health == ServiceHealth.connecting)
+                                const SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Aether.accent,
+                                  ),
+                                )
+                              else if (entry.value.health == ServiceHealth.working)
+                                const Icon(
+                                  Icons.check_circle_outline,
+                                  size: 16,
+                                  color: Aether.success,
+                                )
+                              else
+                                Tooltip(
+                                  message: entry.value.detail,
+                                  child: Icon(
+                                    Icons.error_outline,
+                                    size: 16,
+                                    color: Aether.dangerC,
+                                  ),
+                                ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  entry.key,
+                                  style: const TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                              if (entry.value.detail.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: Text(
+                                    entry.value.detail,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Aether.textMuted,
+                                    ),
+                                  ),
+                                ),
+                              Text(
+                                entry.value.health.name.toUpperCase(),
+                                style: TextStyle(
+                                  fontSize: 10.5,
+                                  fontFamily: Aether.mono,
+                                  fontWeight: FontWeight.w600,
+                                  color: entry.value.health == ServiceHealth.working
+                                      ? Aether.success
+                                      : entry.value.health == ServiceHealth.connecting
+                                          ? Aether.accent
+                                          : Aether.dangerC,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
 
               // ── Repair CTA (when a sandbox item fails) ──
               if (report.anyRepairable) ...[

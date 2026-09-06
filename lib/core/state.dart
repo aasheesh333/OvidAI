@@ -2802,13 +2802,25 @@ class AppState extends ChangeNotifier {
     s.connected = !s.connected;
     if (s.connected) {
       // Spawn the real MCP server process in the sandbox.
+      updateServiceStatus('mcp:${s.name}', ServiceHealth.connecting, detail: 'connecting…');
       unawaited(
         McpService.I.connect(s).then((msg) {
-          s.connected = McpService.I.isConnected(s.name);
+          final isOk = McpService.I.isConnected(s.name);
+          s.connected = isOk;
+          updateServiceStatus(
+            'mcp:${s.name}',
+            isOk ? ServiceHealth.working : ServiceHealth.failed,
+            detail: msg,
+          );
+          refresh();
+        }).catchError((e) {
+          s.connected = false;
+          updateServiceStatus('mcp:${s.name}', ServiceHealth.failed, detail: '$e');
           refresh();
         }),
       );
     } else {
+      serviceStatus.remove('mcp:${s.name}');
       unawaited(McpService.I.disconnect(s.name));
     }
     _persistMcpConnectedIntent();
@@ -2835,26 +2847,48 @@ class AppState extends ChangeNotifier {
     } catch (_) {}
   }
 
-  /// Reconnect every server the user had connected (app resume/launch).
-  /// Failures are silent — servers stay "disconnected" until the user
-  /// retries; lazy connect covers them on tool call.
-  Future<void> reconnectMcpServers() async {
-    List<String> names;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      names = prefs.getStringList(_kMcpConnectedIntent) ?? [];
-    } catch (_) {
-      return;
+  /// Reconnect both MCP servers and enabled plugins on app launch / resume.
+  Future<void> reconnectServices({List<String>? targetServers}) async {
+    List<String> names = targetServers ?? [];
+    if (targetServers == null) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        names = prefs.getStringList(_kMcpConnectedIntent) ?? [];
+      } catch (_) {
+        names = [];
+      }
     }
-    if (names.isEmpty) return;
+
     for (final name in names) {
       final s = mcpServers.where((s) => s.name == name).firstOrNull;
-      if (s == null || McpService.I.isConnected(name)) continue;
-      await McpService.I.connect(s);
-      s.connected = McpService.I.isConnected(name);
+      if (s == null) continue;
+      updateServiceStatus('mcp:$name', ServiceHealth.connecting, detail: 'connecting…');
+      try {
+        final res = await McpService.I.connect(s);
+        final isOk = McpService.I.isConnected(name);
+        s.connected = isOk;
+        updateServiceStatus(
+          'mcp:$name',
+          isOk ? ServiceHealth.working : ServiceHealth.failed,
+          detail: res,
+        );
+      } catch (e) {
+        s.connected = false;
+        updateServiceStatus('mcp:$name', ServiceHealth.failed, detail: '$e');
+      }
+    }
+
+    // Re-verify enabled plugins
+    for (final p in plugins.where((p) => p.installed && p.enabled)) {
+      updateServiceStatus('plugin:${p.name}', ServiceHealth.working, detail: 'enabled');
     }
     refresh();
   }
+
+  /// Reconnect every server the user had connected (app resume/launch).
+  /// Failures are silent — servers stay "disconnected" until the user
+  /// retries; lazy connect covers them on tool call.
+  Future<void> reconnectMcpServers() => reconnectServices();
 
   void addCustomMcpServer({
     required String name,

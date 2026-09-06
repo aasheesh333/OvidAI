@@ -144,8 +144,8 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // First-run welcome notice (the onboarding flow welcomeNoticeVersion):
     // one dialog per version, after the consent dialog settles.
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeWelcome());
-    // MCP auto-reconnect: respawn servers the user had connected.
-    unawaited(AppState.I.reconnectMcpServers());
+    // MCP & plugin auto-reconnect: respawn services the user had connected.
+    unawaited(AppState.I.reconnectServices());
   }
 
   @override
@@ -156,14 +156,14 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // ── App lifecycle → MCP lifecycle (the lifecycle coordinator tier-2 parity) ──
-    // resume  → respawn every server the user wants connected
+    // ── App lifecycle → MCP/plugin lifecycle (the lifecycle coordinator tier-2 parity) ──
+    // resume  → respawn every service the user wants connected
     // NOTE: `paused` intentionally does NOTHING to MCP — tearing MCP down on
     // background KILLED in-flight mcp__ tool calls mid-run. The foreground
     // service keeps the process + Dart alive while backgrounded.
     switch (state) {
       case AppLifecycleState.resumed:
-        unawaited(AppState.I.reconnectMcpServers());
+        unawaited(AppState.I.reconnectServices());
         // PR32: a run that survived the background must keep its
         // notification (some OEMs drop it on pause).
         if (AgentService.I.anyRunActive) {

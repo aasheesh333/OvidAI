@@ -21,10 +21,12 @@ import 'package:ovid_ai/core/pty_service.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
+import 'package:ovid_ai/core/health_service.dart';
 import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
-import 'package:ovid_ai/ui/plugins_screen.dart' show parseMcpConfigForTest, toolGainsForTest;
+import 'package:ovid_ai/ui/health_screen.dart';
+import 'package:ovid_ai/ui/plugins_screen.dart' show McpCard, parseMcpConfigForTest, toolGainsForTest;
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
 import 'package:ovid_ai/core/sandbox_pkg.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
@@ -9607,9 +9609,18 @@ You are an expert security auditor reviewing code for vulnerabilities.
         expect(agent.queuedMessages, contains('follow up prompt'));
       });
 
+    group('ServiceHealth & reconnectServices', () {
+      setUp(() {
+        AppState.I.serviceStatus.clear();
+      });
+      tearDown(() {
+        AppState.I.serviceStatus.clear();
+      });
+
       test('HEALTH1: tri-state ServiceHealth model transitions connecting -> working -> failed', () {
         final app = AppState.I;
         app.updateServiceStatus('mcp:test_srv', ServiceHealth.connecting, detail: 'spawning');
+        addTearDown(() => app.serviceStatus.remove('mcp:test_srv'));
         expect(app.serviceStatusForTest('mcp:test_srv')?.health, ServiceHealth.connecting);
         expect(app.serviceStatusForTest('mcp:test_srv')?.detail, 'spawning');
 
@@ -9620,6 +9631,87 @@ You are an expert security auditor reviewing code for vulnerabilities.
         expect(app.serviceStatusForTest('mcp:test_srv')?.health, ServiceHealth.failed);
         expect(app.serviceStatusForTest('mcp:test_srv')?.detail, 'process exited 1');
       });
+
+      test('HEALTH2: reconnectServices updates health to connecting and then working or failed', () async {
+        final app = AppState.I;
+        final server = McpServer(
+          name: 'health2_srv',
+          author: 'test',
+          description: 'desc',
+          category: 'custom',
+          command: 'echo',
+          custom: true,
+        );
+        app.mcpServers.add(server);
+        addTearDown(() {
+          app.mcpServers.removeWhere((s) => s.name == 'health2_srv');
+          app.serviceStatus.remove('mcp:health2_srv');
+        });
+
+        await app.reconnectServices(targetServers: ['health2_srv']);
+        final st = app.serviceStatusForTest('mcp:health2_srv');
+        expect(st, isNotNull);
+        expect(st!.health, isIn([ServiceHealth.working, ServiceHealth.failed]));
+      });
+
+      testWidgets('HEALTH3: McpCard renders tri-state indicators for connecting, working, failed', (tester) async {
+        final server = McpServer(
+          name: 'health3_srv',
+          author: 'test',
+          description: 'desc',
+          category: 'custom',
+          command: 'echo',
+          custom: true,
+        );
+        addTearDown(() => AppState.I.serviceStatus.remove('mcp:health3_srv'));
+
+        AppState.I.updateServiceStatus('mcp:health3_srv', ServiceHealth.connecting);
+        await tester.pumpWidget(
+          MaterialApp(theme: Aether.theme(), home: Scaffold(body: McpCard(server: server))),
+        );
+        await tester.pump();
+        expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+        AppState.I.updateServiceStatus('mcp:health3_srv', ServiceHealth.working);
+        await tester.pumpWidget(
+          MaterialApp(theme: Aether.theme(), home: Scaffold(body: McpCard(server: server))),
+        );
+        await tester.pump();
+        expect(find.byIcon(Icons.check_circle_outline), findsOneWidget);
+
+        AppState.I.updateServiceStatus('mcp:health3_srv', ServiceHealth.failed, detail: 'crashed');
+        await tester.pumpWidget(
+          MaterialApp(theme: Aether.theme(), home: Scaffold(body: McpCard(server: server))),
+        );
+        await tester.pump();
+        expect(find.byIcon(Icons.error_outline), findsOneWidget);
+      });
+
+      testWidgets('HEALTH4: HealthScreen surfaces services health section', (tester) async {
+        AppState.I.updateServiceStatus('mcp:test_health', ServiceHealth.working, detail: 'connected');
+        final prevReport = HealthService.I.lastReport;
+        final prevChecking = HealthService.I.checking;
+        addTearDown(() {
+          AppState.I.serviceStatus.remove('mcp:test_health');
+          HealthService.I.lastReport = prevReport;
+          HealthService.I.checking = prevChecking;
+        });
+
+        HealthService.I.lastReport = const HealthReport([
+          HealthCheck(name: 'Fake check', points: 100, ok: true, detail: 'all good'),
+        ]);
+        HealthService.I.checking = false;
+
+        await tester.pumpWidget(
+          MaterialApp(theme: Aether.theme(), home: const HealthScreen()),
+        );
+        await tester.pump();
+
+        expect(find.text('SERVICES'), findsOneWidget);
+        expect(find.text('mcp:test_health'), findsOneWidget);
+        expect(find.text('WORKING'), findsOneWidget);
+      });
+    });
     });
   });
 }

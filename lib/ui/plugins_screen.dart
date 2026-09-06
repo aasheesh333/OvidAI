@@ -485,11 +485,48 @@ class PluginCard extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            Icon(
-              plugin.installed ? Icons.check_circle : Icons.download_outlined,
-              size: 18,
-              color: plugin.installed ? Aether.success : Aether.textFaint,
-            ),
+            Builder(builder: (_) {
+              if (!plugin.installed) {
+                return Icon(
+                  Icons.download_outlined,
+                  size: 18,
+                  color: Aether.textFaint,
+                );
+              }
+              final status = app.serviceStatus['plugin:${plugin.name}'];
+              if (status != null) {
+                if (status.health == ServiceHealth.connecting) {
+                  return const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Aether.accent,
+                    ),
+                  );
+                } else if (status.health == ServiceHealth.working) {
+                  return const Icon(
+                    Icons.check_circle_outline,
+                    size: 18,
+                    color: Aether.success,
+                  );
+                } else if (status.health == ServiceHealth.failed) {
+                  return Tooltip(
+                    message: status.detail,
+                    child: Icon(
+                      Icons.error_outline,
+                      size: 18,
+                      color: Aether.dangerC,
+                    ),
+                  );
+                }
+              }
+              return Icon(
+                plugin.enabled ? Icons.check_circle : Icons.check_circle_outline,
+                size: 18,
+                color: plugin.enabled ? Aether.success : Aether.textFaint,
+              );
+            }),
           ],
         ),
       ),
@@ -573,8 +610,10 @@ class PluginDetailScreen extends StatelessWidget {
                     onPressed: () async {
                       if (plugin.enabled) {
                         await app.disablePlugin(plugin);
+                        app.serviceStatus.remove('plugin:${plugin.name}');
                       } else {
                         await app.enablePlugin(plugin);
+                        app.updateServiceStatus('plugin:${plugin.name}', ServiceHealth.working, detail: 'enabled');
                       }
                     },
                   )
@@ -594,6 +633,7 @@ class PluginDetailScreen extends StatelessWidget {
                     onPressed: () async {
                       plugin.installed = true;
                       plugin.enabled = true;
+                      app.updateServiceStatus('plugin:${plugin.name}', ServiceHealth.working, detail: 'enabled');
                       app.persistPluginState();
                       app.refresh();
                       // Realtime install (the plugin manager parity): an MCP-category
@@ -615,10 +655,16 @@ class PluginDetailScreen extends StatelessWidget {
                               behavior: SnackBarBehavior.floating,
                             ),
                           );
+                          app.updateServiceStatus('mcp:${server.name}', ServiceHealth.connecting, detail: 'connecting…');
                           final msg =
                               await McpService.I.connect(server);
-                          server.connected =
-                              McpService.I.isConnected(server.name);
+                          final isOk = McpService.I.isConnected(server.name);
+                          server.connected = isOk;
+                          app.updateServiceStatus(
+                            'mcp:${server.name}',
+                            isOk ? ServiceHealth.working : ServiceHealth.failed,
+                            detail: msg,
+                          );
                           app.refresh();
                           messenger.showSnackBar(
                             SnackBar(
@@ -1533,9 +1579,22 @@ class McpCard extends StatelessWidget {
           color: Aether.surface,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: server.connected
-                ? Aether.accent.withValues(alpha: 0.45)
-                : Aether.hairline,
+            color: () {
+              final status = AppState.I.serviceStatus['mcp:${server.name}'];
+              if (status != null) {
+                switch (status.health) {
+                  case ServiceHealth.working:
+                    return Aether.accent.withValues(alpha: 0.45);
+                  case ServiceHealth.connecting:
+                    return Aether.accent.withValues(alpha: 0.45);
+                  case ServiceHealth.failed:
+                    return Aether.dangerC.withValues(alpha: 0.45);
+                }
+              }
+              return server.connected
+                  ? Aether.accent.withValues(alpha: 0.45)
+                  : Aether.hairline;
+            }(),
           ),
         ),
         child: Column(
@@ -1557,14 +1616,44 @@ class McpCard extends StatelessWidget {
                   ),
                 ),
                 const Spacer(),
-                Container(
-                  width: 7,
-                  height: 7,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: server.connected ? Aether.success : Aether.textFaint,
-                  ),
-                ),
+                Builder(builder: (_) {
+                  final status = AppState.I.serviceStatus['mcp:${server.name}'];
+                  if (status != null) {
+                    if (status.health == ServiceHealth.connecting) {
+                      return const SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Aether.accent,
+                        ),
+                      );
+                    } else if (status.health == ServiceHealth.working) {
+                      return const Icon(
+                        Icons.check_circle_outline,
+                        size: 14,
+                        color: Aether.success,
+                      );
+                    } else if (status.health == ServiceHealth.failed) {
+                      return Tooltip(
+                        message: status.detail,
+                        child: Icon(
+                          Icons.error_outline,
+                          size: 14,
+                          color: Aether.dangerC,
+                        ),
+                      );
+                    }
+                  }
+                  return Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: server.connected ? Aether.success : Aether.textFaint,
+                    ),
+                  );
+                }),
               ],
             ),
             const Spacer(),
@@ -1578,13 +1667,49 @@ class McpCard extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 2),
-            Text(
-              server.connected ? 'Connected' : 'Not connected',
-              style: TextStyle(
-                fontSize: 10.5,
-                color: server.connected ? Aether.success : Aether.textFaint,
-              ),
-            ),
+            Builder(builder: (_) {
+              final status = AppState.I.serviceStatus['mcp:${server.name}'];
+              if (status != null) {
+                switch (status.health) {
+                  case ServiceHealth.connecting:
+                    return const Text(
+                      'Connecting…',
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        color: Aether.accent,
+                      ),
+                    );
+                  case ServiceHealth.working:
+                    return const Text(
+                      'Connected',
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        color: Aether.success,
+                      ),
+                    );
+                  case ServiceHealth.failed:
+                    return Tooltip(
+                      message: status.detail,
+                      child: Text(
+                        status.detail.isNotEmpty ? status.detail : 'Error',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          color: Aether.dangerC,
+                        ),
+                      ),
+                    );
+                }
+              }
+              return Text(
+                server.connected ? 'Connected' : 'Not connected',
+                style: TextStyle(
+                  fontSize: 10.5,
+                  color: server.connected ? Aether.success : Aether.textFaint,
+                ),
+              );
+            }),
           ],
         ),
       ),
