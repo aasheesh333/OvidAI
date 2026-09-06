@@ -2,6 +2,7 @@ package com.dhanuk.ovidai
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -65,5 +66,47 @@ class OvidAccessibilityServiceStateTest {
             assertTrue(delta.changed.isEmpty())
             assertTrue(delta.removed.isEmpty())
         }
+    }
+
+    @Test
+    fun successfulReadWithoutALaterEventBecomesClean() {
+        val generation = TreeReadGeneration()
+        val startedAt = generation.beginRead(forceFull = false)
+
+        generation.completeRead(checkNotNull(startedAt))
+
+        assertNull(generation.beginRead(forceFull = false))
+    }
+
+    @Test
+    fun eventDuringReadStillForcesTheNextRead() {
+        val generation = TreeReadGeneration()
+        val startedAt = checkNotNull(generation.beginRead(forceFull = false))
+
+        val laterEvent = generation.markDirty()
+        generation.completeRead(startedAt)
+
+        assertTrue(laterEvent > startedAt)
+        assertEquals(laterEvent, generation.beginRead(forceFull = false))
+    }
+
+    @Test
+    fun unavailableRootPreservesDirtyGenerationForRetry() {
+        val generation = TreeReadGeneration()
+        val startedAt = checkNotNull(generation.beginRead(forceFull = false))
+
+        generation.abandonRead(startedAt)
+
+        val retryGeneration = checkNotNull(generation.beginRead(forceFull = false))
+        assertTrue(retryGeneration > startedAt)
+    }
+
+    @Test
+    fun forcedReadStartsEvenWhenGenerationIsClean() {
+        val generation = TreeReadGeneration()
+        val startedAt = checkNotNull(generation.beginRead(forceFull = false))
+        generation.completeRead(startedAt)
+
+        assertEquals(startedAt, generation.beginRead(forceFull = true))
     }
 }

@@ -15,6 +15,9 @@ import android.view.accessibility.AccessibilityNodeInfo
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 
 internal data class HandleAllocation(val handle: Int, val nextHandle: Int)
 
@@ -83,6 +86,32 @@ internal data class DeviceActionResult(
     val value: Any? = true,
 )
 
+internal class TreeReadGeneration {
+    private val eventGeneration = AtomicLong(1)
+    private val builtGeneration = AtomicLong(0)
+
+    fun markDirty(): Long = eventGeneration.incrementAndGet()
+
+    fun beginRead(forceFull: Boolean): Long? {
+        val currentGeneration = eventGeneration.get()
+        return currentGeneration.takeIf {
+            forceFull || currentGeneration != builtGeneration.get()
+        }
+    }
+
+    fun completeRead(readGeneration: Long) {
+        builtGeneration.set(readGeneration)
+    }
+
+    fun abandonRead(readGeneration: Long) {
+        while (true) {
+            val currentGeneration = eventGeneration.get()
+            if (currentGeneration > readGeneration) return
+            if (eventGeneration.compareAndSet(currentGeneration, currentGeneration + 1)) return
+        }
+    }
+}
+
 @Suppress("DEPRECATION")
 class OvidAccessibilityService : AccessibilityService() {
     companion object {
@@ -94,8 +123,7 @@ class OvidAccessibilityService : AccessibilityService() {
         private const val MAX_DEPTH = 30
     }
 
-    @Volatile
-    private var dirty = true
+    private val treeGeneration = TreeReadGeneration()
     private var windowSignature = ""
     private var lastPackage = ""
     private var lastWindowId = -1
@@ -103,18 +131,21 @@ class OvidAccessibilityService : AccessibilityService() {
     private val nodesByHandle = mutableMapOf<Int, AccessibilityNodeInfo>()
     private val handlesByStableKey = mutableMapOf<String, Int>()
     private var nextHandle = 1
+    private val screenshotExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "ovid-device-screenshot").apply { isDaemon = true }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        dirty = true
+        treeGeneration.markDirty()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         when (event?.eventType) {
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            -> dirty = true
+            -> treeGeneration.markDirty()
         }
     }
 
@@ -128,13 +159,15 @@ class OvidAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         resetTree()
+        screenshotExecutor.shutdown()
         if (instance === this) instance = null
         super.onDestroy()
     }
 
     @Synchronized
     fun readScreen(forceFull: Boolean): Map<String, Any?> {
-        if (!dirty && !forceFull) {
+        val readGeneration = treeGeneration.beginRead(forceFull)
+        if (readGeneration == null) {
             return readResult(
                 status = "unchanged",
                 packageName = lastPackage,
@@ -146,17 +179,13 @@ class OvidAccessibilityService : AccessibilityService() {
         val root = try {
             rootInActiveWindow
         } catch (error: Throwable) {
+            treeGeneration.abandonRead(readGeneration)
             return readError(error)
         }
         if (root == null) {
-            return commitTree(
-                packageName = "",
-                windowId = -1,
-                rows = linkedMapOf(),
-                newNodes = mutableMapOf(),
-                newHandles = mutableMapOf(),
-                newNextHandle = nextHandle,
-                forceFull = forceFull,
+            treeGeneration.abandonRead(readGeneration)
+            return readUnavailable(
+                "The active window is temporarily unavailable. Retry device_read.",
             )
         }
 
@@ -231,9 +260,11 @@ class OvidAccessibilityService : AccessibilityService() {
                 newHandles = newHandles,
                 newNextHandle = candidateNextHandle,
                 forceFull = forceFull,
+                readGeneration = readGeneration,
             )
         } catch (error: Throwable) {
             newNodes.values.forEach { it.recycle() }
+            treeGeneration.abandonRead(readGeneration)
             readError(error)
         } finally {
             root.recycle()
@@ -369,7 +400,7 @@ class OvidAccessibilityService : AccessibilityService() {
             result.error("UNSUPPORTED", "Screenshots require Android 11 or newer.", null)
             return
         }
-        Api30Actions.takeScreenshot(this, result)
+        Api30Actions.takeScreenshot(this, result, screenshotExecutor)
     }
 
     @Synchronized
@@ -381,6 +412,7 @@ class OvidAccessibilityService : AccessibilityService() {
         newHandles: MutableMap<String, Int>,
         newNextHandle: Int,
         forceFull: Boolean,
+        readGeneration: Long,
     ): Map<String, Any?> {
         val signature = "$packageName|$windowId"
         val delta = diffNodeRows(
@@ -399,7 +431,8 @@ class OvidAccessibilityService : AccessibilityService() {
         windowSignature = signature
         lastPackage = packageName
         lastWindowId = windowId
-        dirty = false
+        // A newer event has a larger generation and therefore remains pending.
+        treeGeneration.completeRead(readGeneration)
         return readResult("ok", packageName, windowId, delta)
     }
 
@@ -429,6 +462,17 @@ class OvidAccessibilityService : AccessibilityService() {
         "removed" to emptyList<Int>(),
     )
 
+    private fun readUnavailable(message: String): Map<String, Any?> = linkedMapOf(
+        "status" to "unavailable",
+        "message" to message,
+        "package" to lastPackage,
+        "window" to lastWindowId,
+        "full" to false,
+        "added" to emptyList<Map<String, Any?>>(),
+        "changed" to emptyList<Map<String, Any?>>(),
+        "removed" to emptyList<Int>(),
+    )
+
     private fun uniqueRowKey(
         stableKey: String,
         rows: Map<String, Map<String, Any?>>,
@@ -447,7 +491,7 @@ class OvidAccessibilityService : AccessibilityService() {
         windowSignature = ""
         lastPackage = ""
         lastWindowId = -1
-        dirty = true
+        treeGeneration.markDirty()
     }
 
     @Synchronized
@@ -497,7 +541,11 @@ private object Api30Actions {
     fun submit(node: AccessibilityNodeInfo): Boolean =
         node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
 
-    fun takeScreenshot(service: OvidAccessibilityService, result: MethodChannel.Result) {
+    fun takeScreenshot(
+        service: OvidAccessibilityService,
+        result: MethodChannel.Result,
+        screenshotExecutor: Executor,
+    ) {
         try {
             service.takeScreenshot(
                 Display.DEFAULT_DISPLAY,
@@ -512,27 +560,37 @@ private object Api30Actions {
                                 ?: throw IllegalStateException("Screenshot bitmap was unavailable")
                             writableBitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false)
                                 ?: throw IllegalStateException("Screenshot bitmap could not be copied")
-                            val directory = File(service.cacheDir, "device-captures")
-                            if (!directory.exists() && !directory.mkdirs()) {
-                                throw IllegalStateException("Could not create screenshot cache")
-                            }
-                            val file = File(directory, "screen-${System.currentTimeMillis()}.png")
-                            FileOutputStream(file).use { output ->
-                                if (!writableBitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
-                                    throw IllegalStateException("Could not encode screenshot")
-                                }
-                            }
-                            result.success(file.absolutePath)
                         } catch (error: Throwable) {
-                            result.error(
-                                "SCREENSHOT_FAILED",
-                                error.message ?: "Screenshot could not be saved.",
-                                null,
-                            )
+                            postScreenshotError(service, result, error)
                         } finally {
-                            writableBitmap?.recycle()
                             hardwareBitmap?.recycle()
                             buffer.close()
+                        }
+
+                        val bitmap = writableBitmap ?: return
+                        try {
+                            screenshotExecutor.execute {
+                                try {
+                                    val directory = File(service.cacheDir, "device-captures")
+                                    if (!directory.exists() && !directory.mkdirs()) {
+                                        throw IllegalStateException("Could not create screenshot cache")
+                                    }
+                                    val file = File(directory, "screen-${System.currentTimeMillis()}.png")
+                                    FileOutputStream(file).use { output ->
+                                        if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                                            throw IllegalStateException("Could not encode screenshot")
+                                        }
+                                    }
+                                    service.mainExecutor.execute { result.success(file.absolutePath) }
+                                } catch (error: Throwable) {
+                                    postScreenshotError(service, result, error)
+                                } finally {
+                                    bitmap.recycle()
+                                }
+                            }
+                        } catch (error: Throwable) {
+                            bitmap.recycle()
+                            postScreenshotError(service, result, error)
                         }
                     }
 
@@ -549,6 +607,20 @@ private object Api30Actions {
             result.error(
                 "SCREENSHOT_FAILED",
                 error.message ?: "Screenshot could not be started.",
+                null,
+            )
+        }
+    }
+
+    private fun postScreenshotError(
+        service: OvidAccessibilityService,
+        result: MethodChannel.Result,
+        error: Throwable,
+    ) {
+        service.mainExecutor.execute {
+            result.error(
+                "SCREENSHOT_FAILED",
+                error.message ?: "Screenshot could not be saved.",
                 null,
             )
         }

@@ -30,3 +30,20 @@ Complete. The Android accessibility service, cached node-tree reader, action bri
 - IME Enter is attempted only on API 30+, where `ACTION_IME_ENTER` exists. Older devices still enter text and return an explicit message that submit was not performed.
 - Screenshots remain explicit-only and return `UNSUPPORTED` below API 30; no action captures a screenshot automatically.
 - The build retains pre-existing warnings about Flutter's future API 23 support and plugins using the legacy Kotlin Gradle plugin. They do not fail this build.
+
+## Review Follow-up
+
+- Replaced the racy dirty boolean with atomic event and built generations. A read acknowledges only the generation captured before traversal, so an accessibility event arriving during traversal remains pending for the next `deviceRead`.
+- A null `rootInActiveWindow` now returns `status=unavailable`, preserves the prior tree and retained handles, and leaves a newer generation pending for retry instead of committing an empty clean tree.
+- Expanded executable Android JVM coverage for clean reads, events racing a read, null-root retry state, and forced reads from a clean generation.
+- The API 30 screenshot callback now copies the hardware-backed bitmap and closes the hardware resources promptly on `mainExecutor`; PNG compression and file I/O run on a dedicated background executor before the channel result returns on the main executor.
+
+### Review Verification
+
+- TDD RED evidence: Android JVM compilation failed on missing `TreeReadGeneration`; CTRL2 failed on the missing generation/screenshot executor contract before implementation.
+- Focused Android JVM: `./gradlew :app:testDebugUnitTest --tests com.dhanuk.ovidai.OvidAccessibilityServiceStateTest` passed (8 tests).
+- Focused Flutter: `flutter test test/core_regression_test.dart --plain-name "CTRL2"` passed (1 test).
+- Full Android JVM: `./gradlew :app:testDebugUnitTest` passed.
+- Full Flutter: `flutter test test/core_regression_test.dart` passed (399 tests).
+- Analyze: `flutter analyze` passed with no issues.
+- Debug APK: `flutter build apk --debug` passed and produced `build/app/outputs/flutter-apk/app-debug.apk`.

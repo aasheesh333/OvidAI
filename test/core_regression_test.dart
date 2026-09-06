@@ -3119,13 +3119,16 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         );
         expect(src, contains('TYPE_WINDOW_CONTENT_CHANGED'));
         expect(src, contains('TYPE_WINDOW_STATE_CHANGED'));
-        expect(src, contains('dirty = true'));
+        expect(src, contains('eventGeneration.incrementAndGet()'));
+        expect(src, contains('completeRead(readGeneration)'));
+        expect(src, contains('"status" to "unavailable"'));
         expect(src, contains('rootInActiveWindow'));
         expect(src, contains('GLOBAL_ACTION_BACK'));
         expect(src, contains('GLOBAL_ACTION_HOME'));
         expect(src, contains('GLOBAL_ACTION_RECENTS'));
         expect(src, contains('dispatchGesture'));
         expect(src, contains('takeScreenshot'));
+        expect(src, contains('screenshotExecutor.execute'));
         expect(src, contains('isPassword'));
         expect(src, contains('AccessibilityAction.ACTION_IME_ENTER'));
 
