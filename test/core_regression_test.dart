@@ -9606,6 +9606,20 @@ You are an expert security auditor reviewing code for vulnerabilities.
         expect(didQueueResume2, isTrue);
         expect(agent.queuedMessages, contains('follow up prompt'));
       });
+
+      test('HEALTH1: tri-state ServiceHealth model transitions connecting -> working -> failed', () {
+        final app = AppState.I;
+        app.updateServiceStatus('mcp:test_srv', ServiceHealth.connecting, detail: 'spawning');
+        expect(app.serviceStatusForTest('mcp:test_srv')?.health, ServiceHealth.connecting);
+        expect(app.serviceStatusForTest('mcp:test_srv')?.detail, 'spawning');
+
+        app.updateServiceStatus('mcp:test_srv', ServiceHealth.working, detail: '4 tools ready');
+        expect(app.serviceStatusForTest('mcp:test_srv')?.health, ServiceHealth.working);
+
+        app.updateServiceStatus('mcp:test_srv', ServiceHealth.failed, detail: 'process exited 1');
+        expect(app.serviceStatusForTest('mcp:test_srv')?.health, ServiceHealth.failed);
+        expect(app.serviceStatusForTest('mcp:test_srv')?.detail, 'process exited 1');
+      });
     });
   });
 }

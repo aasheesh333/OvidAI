@@ -292,6 +292,20 @@ class McpServer {
   set type(String? v) => transport = v ?? 'stdio';
 }
 
+enum ServiceHealth { connecting, working, failed }
+
+class ServiceStatus {
+  final ServiceHealth health;
+  final String detail;
+  final DateTime updatedAt;
+
+  const ServiceStatus({
+    required this.health,
+    this.detail = '',
+    required this.updatedAt,
+  });
+}
+
 /// Split a shell-style argument string into tokens, preserving single and
 /// double quotes plus simple backslash escapes. Used to accept a raw
 /// `command`/`args` string from a pasted MCP config instead of requiring a
@@ -1402,6 +1416,24 @@ class AppState extends ChangeNotifier {
   final List<ProviderConfig> providers = [];
   final List<PluginItem> plugins = [];
   final List<McpServer> mcpServers = [];
+  final Map<String, ServiceStatus> serviceStatus = {};
+
+  void updateServiceStatus(
+    String key,
+    ServiceHealth health, {
+    String detail = '',
+  }) {
+    serviceStatus[key] = ServiceStatus(
+      health: health,
+      detail: detail,
+      updatedAt: DateTime.now(),
+    );
+    notifyListeners();
+  }
+
+  @visibleForTesting
+  ServiceStatus? serviceStatusForTest(String key) => serviceStatus[key];
+
   final List<String> marketplaces =
       []; // user-added git marketplaces (Claude Code style)
   final List<ChatSession> sessions = [];
