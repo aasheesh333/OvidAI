@@ -5,6 +5,7 @@ import 'dart:ffi' as ffi;
 
 import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -2694,6 +2695,34 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(kotlinHandler, contains('useWideViewPort'));
       expect(kotlinHandler, contains('loadWithOverviewMode'));
       expect(kotlinHandler, contains('setSupportMultipleWindows'));
+    });
+
+    test('applyDesktopViewport dispatches setDesktopViewport with enabled flag over ovid/webview', () async {
+      final calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('ovid/webview'),
+        (call) async {
+          calls.add(call);
+          if (call.method == 'setDesktopViewport') {
+            return {'applied': true, 'enabled': call.arguments['enabled']};
+          }
+          return null;
+        },
+      );
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('ovid/webview'),
+          null,
+        );
+      });
+
+      final resDesktop = await AgentService.applyDesktopViewport(true);
+      expect(resDesktop, isTrue);
+      expect(calls.last.arguments, {'enabled': true});
+
+      final resMobile = await AgentService.applyDesktopViewport(false);
+      expect(resMobile, isTrue);
+      expect(calls.last.arguments, {'enabled': false});
     });
 
     test('BRD: browser_desktop denied read-only and plan mode; setTabDesktopMode updates zoom and UA state', () async {

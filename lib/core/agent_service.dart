@@ -1309,13 +1309,15 @@ class AgentService extends ChangeNotifier {
     tab.controller = null;
     tab.loadedOnce = false;
     notifyListeners();
-    if (reload && tab.url.isNotEmpty && !tab.url.startsWith('ovid://')) {
-      final c = controllerForTab(tab);
+    if (reload) {
       if (tab.localPreviewPath != null) {
+        final c = controllerForTab(tab);
         c.loadFile(tab.localPreviewPath!);
+      } else if (tab.url.isNotEmpty && !tab.url.startsWith('ovid://')) {
+        controllerForTab(tab);
+        // Note: if tab.url starts with http, controllerForTab(tab) already invokes
+        // loadRequest(Uri.parse(tab.url)) when tab.loadedOnce was reset to false.
       }
-      // Note: if tab.url starts with http, controllerForTab(tab) already invokes
-      // loadRequest(Uri.parse(tab.url)) when tab.loadedOnce was reset to false.
     }
   }
 
@@ -1328,6 +1330,7 @@ class AgentService extends ChangeNotifier {
     } else {
       tab.zoom = 1.0;
     }
+    unawaited(applyDesktopViewport(desktop));
     // WebSettings.setUseWideViewPort takes effect at initialization / load time.
     // Recreate controller fresh with new viewport settings and UA, dropping
     // wasted pre-reload zoom while keeping zoom fallback on onPageFinished.
@@ -1480,10 +1483,10 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         if (BrowserTab.devW > 0) {
           tab.zoom = (BrowserTab.devW / 1280).clamp(0.25, 3.0);
         }
-        // Platform wide viewport setting before initial load.
-        unawaited(applyDesktopViewport(true));
         tab.controller!.setUserAgent(desktopUA);
       }
+      // Platform wide viewport setting before initial load (desktop or mobile reset).
+      unawaited(applyDesktopViewport(tab.desktopMode));
       final previewPath = tab.localPreviewPath;
       if (previewPath != null) {
         tab.controller!.loadFile(previewPath);
