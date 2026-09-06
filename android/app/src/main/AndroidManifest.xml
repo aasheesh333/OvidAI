@@ -72,6 +72,17 @@
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="dataSync"/>
+        <service
+            android:name=".OvidAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/ovid_accessibility_service" />
+        </service>
         <!-- Receiver for the notification's Stop button. -->
         <receiver
             android:name=".AgentStopReceiver"

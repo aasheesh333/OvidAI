@@ -4,10 +4,12 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import android.app.Activity
+import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.provider.Settings
 import android.system.Os
 import android.system.OsConstants
 import java.io.File
@@ -47,6 +49,29 @@ class MainActivity : FlutterActivity() {
 
         override fun error(code: String, message: String) {
             runOnUiThread { result.error(code, message, null) }
+        }
+    }
+
+    private fun deviceService(result: MethodChannel.Result): OvidAccessibilityService? {
+        val service = OvidAccessibilityService.instance
+        if (service == null) {
+            result.error(
+                "SERVICE_DISABLED",
+                "Control mode needs the Ovid accessibility service. Enable it in Settings > Accessibility > Ovid.",
+                null,
+            )
+        }
+        return service
+    }
+
+    private fun completeDeviceAction(
+        result: MethodChannel.Result,
+        action: DeviceActionResult,
+    ) {
+        if (action.ok) {
+            result.success(action.value)
+        } else {
+            result.error(action.code, action.message, null)
         }
     }
 
@@ -159,6 +184,89 @@ class MainActivity : FlutterActivity() {
                         } catch (e: Exception) {
                             result.error("STOP_FAIL", "${e.message}", null)
                         }
+                    }
+                    "deviceServiceEnabled" -> {
+                        result.success(OvidAccessibilityService.instance != null)
+                    }
+                    "deviceOpenAccessibilitySettings" -> {
+                        try {
+                            val component = ComponentName(this, OvidAccessibilityService::class.java)
+                            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                    putExtra(":settings:fragment_args_key", component.flattenToString())
+                                }
+                            }
+                            startActivity(intent)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("SETTINGS_FAILED", "Could not open Accessibility settings: ${e.message}", null)
+                        }
+                    }
+                    "deviceRead" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        val forceFull = call.argument<Boolean>("full") == true ||
+                            call.argument<String>("mode") == "full"
+                        result.success(service.readScreen(forceFull))
+                    }
+                    "deviceTap" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        val handle = call.argument<Number>("node")?.toInt()
+                            ?: call.argument<Number>("handle")?.toInt()
+                        val x = call.argument<Number>("x")?.toFloat()
+                        val y = call.argument<Number>("y")?.toFloat()
+                        completeDeviceAction(result, service.tap(handle, x, y))
+                    }
+                    "deviceType" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        val text = call.argument<String>("text")
+                        if (text == null) {
+                            result.error("BAD_ARGS", "deviceType requires text.", null)
+                        } else {
+                            val handle = call.argument<Number>("node")?.toInt()
+                                ?: call.argument<Number>("handle")?.toInt()
+                            completeDeviceAction(
+                                result,
+                                service.type(
+                                    handle = handle,
+                                    text = text,
+                                    submit = call.argument<Boolean>("submit") == true,
+                                ),
+                            )
+                        }
+                    }
+                    "deviceSwipe" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        val fromX = call.argument<Number>("from_x")?.toFloat()
+                        val fromY = call.argument<Number>("from_y")?.toFloat()
+                        val toX = call.argument<Number>("to_x")?.toFloat()
+                        val toY = call.argument<Number>("to_y")?.toFloat()
+                        if (fromX == null || fromY == null || toX == null || toY == null) {
+                            result.error("BAD_ARGS", "deviceSwipe requires from_x, from_y, to_x, and to_y.", null)
+                        } else {
+                            completeDeviceAction(
+                                result,
+                                service.swipe(
+                                    fromX,
+                                    fromY,
+                                    toX,
+                                    toY,
+                                    call.argument<Number>("duration_ms")?.toLong() ?: 500L,
+                                ),
+                            )
+                        }
+                    }
+                    "deviceSystemNav" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        val action = call.argument<String>("action")
+                        if (action == null) {
+                            result.error("BAD_ARGS", "deviceSystemNav requires an action.", null)
+                        } else {
+                            completeDeviceAction(result, service.systemNav(action))
+                        }
+                    }
+                    "deviceScreenshot" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        service.takeScreen(result)
                     }
                     "safExportFile" -> {
                         val sourcePath = call.argument<String>("sourcePath")

@@ -3105,6 +3105,76 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       },
     );
 
+    test(
+      'CTRL2: native accessibility service supports cached reads, global nav, gestures, and screenshots',
+      () {
+        final service = File(
+          'android/app/src/main/kotlin/com/dhanuk/ovidai/OvidAccessibilityService.kt',
+        );
+        expect(service.existsSync(), isTrue);
+        final src = service.readAsStringSync();
+        expect(
+          src,
+          contains('class OvidAccessibilityService : AccessibilityService()'),
+        );
+        expect(src, contains('TYPE_WINDOW_CONTENT_CHANGED'));
+        expect(src, contains('TYPE_WINDOW_STATE_CHANGED'));
+        expect(src, contains('dirty = true'));
+        expect(src, contains('rootInActiveWindow'));
+        expect(src, contains('GLOBAL_ACTION_BACK'));
+        expect(src, contains('GLOBAL_ACTION_HOME'));
+        expect(src, contains('GLOBAL_ACTION_RECENTS'));
+        expect(src, contains('dispatchGesture'));
+        expect(src, contains('takeScreenshot'));
+        expect(src, contains('isPassword'));
+        expect(src, contains('AccessibilityAction.ACTION_IME_ENTER'));
+
+        final mainActivity = File(
+          'android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt',
+        ).readAsStringSync();
+        for (final method in <String>[
+          'deviceServiceEnabled',
+          'deviceOpenAccessibilitySettings',
+          'deviceRead',
+          'deviceTap',
+          'deviceType',
+          'deviceSwipe',
+          'deviceSystemNav',
+          'deviceScreenshot',
+        ]) {
+          expect(mainActivity, contains('"$method"'));
+        }
+
+        final manifest = File(
+          'android/app/src/main/AndroidManifest.xml',
+        ).readAsStringSync();
+        expect(manifest, contains('.OvidAccessibilityService'));
+        expect(
+          manifest,
+          contains('android.permission.BIND_ACCESSIBILITY_SERVICE'),
+        );
+        expect(
+          manifest,
+          contains('android.accessibilityservice.AccessibilityService'),
+        );
+
+        final config = File(
+          'android/app/src/main/res/xml/ovid_accessibility_service.xml',
+        ).readAsStringSync();
+        expect(
+          config,
+          contains('typeWindowStateChanged|typeWindowContentChanged'),
+        );
+        expect(config, contains('canRetrieveWindowContent="true"'));
+        expect(config, contains('canPerformGestures="true"'));
+
+        final api30Config = File(
+          'android/app/src/main/res/xml-v30/ovid_accessibility_service.xml',
+        ).readAsStringSync();
+        expect(api30Config, contains('canTakeScreenshot="true"'));
+      },
+    );
+
     test('SkillService parses frontmatter name correctly', () async {
       final dir = Directory.systemTemp.createTempSync('ovid-skills-test');
       addTearDown(() => dir.deleteSync(recursive: true));

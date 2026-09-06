@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="ovid_accessibility_description">Allows Ovid Control mode to read and operate the current screen when you ask it to.</string>
+</resources>
