@@ -2288,6 +2288,39 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         tools.add(t.toOpenAiTool(serverKey));
       }
     }
+    // ── Disconnected but configured servers → connect stubs ──
+    // A custom/plugin server the user has configured (but isn't connected
+    // yet) still deserves a tool so the model can request a connect: the
+    // stub's dispatch path reuses the mcp_* proxy, which auto-connects on
+    // first call. Built-in seed servers are skipped (there are dozens; the
+    // model finds them via catalog_list_mcp / agent_install_mcp).
+    for (final s in app.mcpServers) {
+      if (!s.custom || McpService.I.isConnected(s.name)) continue;
+      final safe = _normTool(s.name);
+      final already = tools.any((t) {
+        final fn = t['function'];
+        return fn is Map && fn['name'] == 'mcp_$safe';
+      });
+      if (already) continue;
+      tools.add({
+        'type': 'function',
+        'function': {
+          'name': 'mcp_$safe',
+          'description':
+              'The "${s.name}" MCP server (transport: ${s.transport}'
+              '${s.url != null ? ', url: ${s.url}' : ''}) is configured but '
+              'not connected. Calling this connects it and runs an action.',
+          'parameters': {
+            'type': 'object',
+            'properties': {
+              'action': {'type': 'string'},
+              'args': {'type': 'object'},
+            },
+            'required': ['action'],
+          },
+        },
+      });
+    }
     // ── Workflow orchestration toggle (Settings) ──
     if (!app.workflowEnabled) {
       tools.removeWhere((t) {
@@ -3812,15 +3845,16 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'catalog_add_mcp',
         'description':
-            'Add a custom MCP server (command + args). Use when the user asks '
-            'to add an MCP server not in the catalog.',
+            'Add a custom MCP server. Use when the user asks '
+            'to add an MCP server not in the catalog. Provide either a '
+            'stdio command + args, or a Streamable-HTTP url (+ headers).',
         'parameters': {
           'type': 'object',
           'properties': {
             'name': {'type': 'string'},
             'command': {
               'type': 'string',
-              'description': 'e.g. npx, uvx, python3',
+              'description': 'e.g. npx, uvx, python3 (stdio only)',
             },
             'args': {
               'type': 'array',
@@ -3828,8 +3862,20 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
               'description':
                   'e.g. ["-y", "@modelcontextprotocol/server-github"]',
             },
+            'url': {
+              'type': 'string',
+              'description': 'Streamable-HTTP endpoint (http transport)',
+            },
+            'headers': {
+              'type': 'object',
+              'description': 'HTTP auth headers (stored securely)',
+            },
+            'env': {
+              'type': 'object',
+              'description': 'environment variables (stored securely)',
+            },
           },
-          'required': ['name', 'command'],
+          'required': ['name'],
         },
       },
     },
@@ -4044,6 +4090,30 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       },
     };
   }
+
+  /// Task 4: resolve an `mcp_<name>` proxy tool to its configured McpServer
+  /// BY NAME. Tries, in order: exact normalized-key match, a fuzzy name
+  /// containment, then a token-subset match so a proxy key like
+  /// `mcp_gh_list` still finds a server actually named `gh`.
+  McpServer? _resolveMcpProxyServer(String toolName) {
+    final raw = toolName.substring(4);
+    final key = _normTool(raw);
+    final servers = AppState.I.mcpServers;
+    return servers.where((s) => _normTool(s.name) == key).firstOrNull ??
+        servers
+            .where(
+              (s) =>
+                  _normTool(s.name).contains(key) ||
+                  (key.isNotEmpty && key.contains(_normTool(s.name))),
+            )
+            .firstOrNull;
+  }
+
+  /// Task 4 test seam: the legacy `mcp_*` proxy's server-name resolution —
+  /// returns the matched server name (or 'not configured').
+  @visibleForTesting
+  Future<String> legacyMcpProxyForTest(String toolName) async =>
+      _resolveMcpProxyServer(toolName)?.name ?? 'not configured';
 
   // ── MAIN LOOP ─────────────────────────────────────────────────────────
 
@@ -6548,23 +6618,24 @@ ${await _agentsMdBlock()}
         _emit('shell', 'MCP: ${match.name} → $toolName');
         return await McpService.I.callTool(match.name, toolName, args);
       case String() when name.startsWith('mcp_'):
-        // Real MCP proxy — call through McpService (spawns/connects as needed).
-        final mcpName = name.substring(4).replaceAll('_', ' ');
+        // Real MCP proxy — resolve the matched server BY NAME first, then
+        // connect + call through its real name. (The old code derived
+        // `mcpName` as `substring(4).replaceAll('_', ' ')`, which never
+        // matched the `_running` map's key, so an already-connected server
+        // would still report "not connected" or fail the call.)
         final action = args['action'] as String? ?? 'execute';
         final mcpArgs = args['args'] as Map<String, dynamic>? ?? {};
-        _emit('shell', 'MCP: $mcpName → $action');
-        if (!McpService.I.isConnected(mcpName)) {
-          // Find the matching McpServer config and connect for real.
-          final match = AppState.I.mcpServers
-              .where((s) => s.name.toLowerCase().contains(mcpName))
-              .firstOrNull;
-          if (match == null) {
-            return 'MCP server "$mcpName" not configured. Add it in Settings → MCP servers.';
-          }
+        final match = _resolveMcpProxyServer(name);
+        if (match == null) {
+          return 'MCP server not configured. Add it in Settings → MCP '
+              'servers (or list servers with catalog_list_mcp).';
+        }
+        _emit('shell', 'MCP: ${match.name} → $action');
+        if (!McpService.I.isConnected(match.name)) {
           final res = await McpService.I.connect(match);
           if (!res.contains('connected')) return res;
         }
-        return await McpService.I.callTool(mcpName, action, mcpArgs);
+        return await McpService.I.callTool(match.name, action, mcpArgs);
       case String() when name.startsWith('plugin_'):
         final toolKey = name.substring(7);
         final plugin = AppState.I.plugins.where(
@@ -6770,23 +6841,42 @@ ${await _agentsMdBlock()}
         return (app.mcpServers.map(
           (s) =>
               '${s.name} — ${s.connected ? 'connected' : 'disconnected'}'
-              ' · ${s.command} ${s.args.join(' ')}',
+              ' · transport: ${s.transport}'
+              '${s.url != null ? ' · url: ${s.url}' : ''}'
+              '${s.transport != 'http' ? ' · ${s.command} ${s.args.join(' ')}' : ''}',
         )).join('\n');
 
       case 'catalog_add_mcp':
         final name = args['name'] as String;
-        final command = args['command'] as String;
+        final command = (args['command'] as String?) ?? '';
         final mArgs =
             (args['args'] as List?)?.whereType<String>().toList() ?? <String>[];
+        final url = (args['url'] as String?)?.trim();
+        final headers = (args['headers'] as Map?)
+                ?.map((k, v) => MapEntry(k.toString(), v.toString())) ??
+            const <String, String>{};
+        final env = (args['env'] as Map?)
+                ?.map((k, v) => MapEntry(k.toString(), v.toString())) ??
+            const <String, String>{};
         _emit('think', 'adding MCP server: $name');
         AppState.I.addCustomMcpServer(
           name: name,
-          command: command,
+          command: command.isEmpty
+              ? (url != null && url.isNotEmpty ? '' : 'npx')
+              : command,
           args: mArgs,
+          url: url != null && url.isNotEmpty ? url : null,
+          headers: headers,
+          cwd: args['cwd'] as String?,
+          startupTimeoutS: (args['startup_timeout_s'] as num?)?.toInt(),
         );
+        if (env.isNotEmpty) {
+          unawaited(AppState.I.setMcpEnv(name, env));
+        }
         _emit('done', 'MCP server added: $name');
-        return 'MCP server "$name" added. Connect it from the Plugins → MCP '
-            'section (or ask me to connect it).';
+        return 'MCP server "$name" added (transport: '
+            '${url != null && url.isNotEmpty ? 'http' : 'stdio'}). Connect it '
+            'from the Plugins → MCP section (or ask me to connect it).';
 
       case 'catalog_add_plugin':
         final name = args['name'] as String;

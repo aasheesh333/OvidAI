@@ -92,6 +92,13 @@ class McpService {
       if (!existing.handshakeDone) return '"${server.name}" is connecting…';
       return '"${server.name}" is already connected';
     }
+    if (server.transport == 'sse') {
+      // Task 4: legacy SSE (GET /sse + POST /message) is NOT the same as
+      // Streamable HTTP and is not implemented — fail clearly so the user
+      // re-configures instead of silently doing nothing.
+      return 'SSE transport not supported, use Streamable HTTP '
+          '(set transport to "http" with a url).';
+    }
     // Reserve the slot BEFORE spawning so a rapid second connect sees it.
     final rs = _RunningServer(server: server);
     _running[server.name] = rs;
@@ -111,16 +118,18 @@ class McpService {
       if (url == null || url.isEmpty) {
         throw Exception('no url configured for HTTP transport');
       }
+      final startupTimeout = Duration(seconds: server.startupTimeoutS);
       final initResult = await _rpcHttp(rs, 'initialize', {
         'protocolVersion': '2024-11-05',
         'capabilities': {},
         'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
-      });
+      }, timeout: startupTimeout);
       if (initResult.isError) {
         throw Exception('initialize failed: ${initResult.error}');
       }
       await _sendNotificationHttp(rs, 'notifications/initialized', {});
-      final toolsResult = await _rpcHttp(rs, 'tools/list', {});
+      final toolsResult = await _rpcHttp(rs, 'tools/list', {},
+          timeout: startupTimeout);
       if (toolsResult.isError) {
         throw Exception('tools/list failed: ${toolsResult.error}');
       }
@@ -174,12 +183,24 @@ class McpService {
       }
       // Per-server env vars (API keys etc.) from secure storage.
       final env = await AppState.I.getMcpEnv(server.name);
+      // Optional working directory for the spawned server (best-effort:
+      // only used when the resolved directory actually exists).
+      Directory? cwdDir;
+      try {
+        final cwd = server.cwd;
+        if (cwd != null && cwd.isNotEmpty) {
+          final prefix = sandbox.prefixPath ?? '';
+          final resolved = cwd.startsWith('/') ? cwd : '$prefix/home/$cwd';
+          final d = Directory(resolved);
+          if (d.existsSync()) cwdDir = d;
+        }
+      } catch (_) {}
       // Native exec — the server command runs through the sandbox env
       // (PATH/LD_LIBRARY_PATH/LD_PRELOAD set by SandboxService.spawn).
       final proc = await sandbox.spawn([
         server.command,
         ...server.args,
-      ], env: env.isEmpty ? null : env);
+      ], env: env.isEmpty ? null : env, hostWorkDir: cwdDir);
       rs.process = proc;
 
       // Route stdout lines into the broadcast stream; drain stderr so it
@@ -230,18 +251,20 @@ class McpService {
       });
 
       // ── MCP handshake ──────────────────────────────────────────────
+      final startupTimeout = Duration(seconds: server.startupTimeoutS);
       final initResult = await _rpc(rs, 'initialize', {
         'protocolVersion': '2024-11-05',
         'capabilities': {},
         'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
-      });
+      }, timeout: startupTimeout);
       if (initResult.isError) {
         throw Exception('initialize failed: ${initResult.error}');
       }
       _sendNotification(rs, 'notifications/initialized', {});
 
       // ── Tool discovery ─────────────────────────────────────────────
-      final toolsResult = await _rpc(rs, 'tools/list', {});
+      final toolsResult = await _rpc(rs, 'tools/list', {},
+          timeout: startupTimeout);
       if (toolsResult.isError) {
         throw Exception('tools/list failed: ${toolsResult.error}');
       }
@@ -299,11 +322,25 @@ class McpService {
         // The user may have manually reconnected (or removed the server)
         // while this timer was pending — never race a live connection.
         if (_running.containsKey(server.name)) return;
-        if (!AppState.I.mcpServers.contains(server)) return;
-        unawaited(connect(server));
+        // Task 4: look the server up by NAME, not object identity — a
+        // reload replaces the McpServer instance, so `contains(server)`
+        // (identity equality) would silently stop reconnects after any
+        // relaunch/reload.
+        final fresh = AppState.I.mcpServers
+            .where((s) => s.name == server.name)
+            .firstOrNull;
+        if (fresh == null) return;
+        unawaited(connect(fresh));
       },
     );
   }
+
+  /// Task 4 test seam: would an automatic reconnect run for [serverName]?
+  /// Reflects the name-based lookup used by [_scheduleReconnect] — true when
+  /// a configured server with that name exists (identity-independent).
+  @visibleForTesting
+  bool reconnectEligibleForTest(String serverName) =>
+      AppState.I.mcpServers.any((s) => s.name == serverName);
 
   /// Test seam: how many reconnect attempts have been recorded for
   /// [serverName] (0 if none).
@@ -487,9 +524,13 @@ class McpService {
   ) {
     final proc = rs.process;
     if (proc == null) return;
-    proc.stdin.writeln(
-      jsonEncode({'jsonrpc': '2.0', 'method': method, 'params': params}),
-    );
+    // A dead pipe throws — dropping the notification is fine (it is
+    // fire-and-forget; the death watcher removes the server anyway).
+    try {
+      proc.stdin.writeln(
+        jsonEncode({'jsonrpc': '2.0', 'method': method, 'params': params}),
+      );
+    } catch (_) {}
   }
 
   /// PR41: Streamable-HTTP JSON-RPC notification — a POST that carries no
@@ -503,14 +544,15 @@ class McpService {
   ) async {
     final url = rs.server.url;
     if (url == null) return;
+    final client = httpClientForTest ?? http.Client();
     try {
-      final client = httpClientForTest ?? http.Client();
-      await client
+      final res = await client
           .post(
             Uri.parse(url),
             headers: {
               'Content-Type': 'application/json',
               'Accept': 'application/json, text/event-stream',
+              if (rs.sessionId != null) 'Mcp-Session-Id': rs.sessionId!,
               ...rs.server.headers,
             },
             body: jsonEncode({
@@ -519,9 +561,12 @@ class McpService {
               'params': params,
             }),
           )
-          .timeout(const Duration(seconds: 15));
+          .timeout(Duration(seconds: rs.server.startupTimeoutS));
+      _rememberSessionId(rs, res.headers);
     } catch (_) {
       // Notifications are fire-and-forget by design.
+    } finally {
+      if (httpClientForTest == null) client.close();
     }
   }
 
@@ -535,21 +580,23 @@ class McpService {
   Future<McpRpcResult> _rpcHttp(
     _RunningServer rs,
     String method,
-    Map<String, dynamic> params,
-  ) async {
+    Map<String, dynamic> params, {
+    Duration? timeout,
+  }) async {
     final url = rs.server.url;
     if (url == null) {
       return McpRpcResult._error('no url configured');
     }
     final id = _nextId++;
+    final client = httpClientForTest ?? http.Client();
     try {
-      final client = httpClientForTest ?? http.Client();
       final res = await client
           .post(
             Uri.parse(url),
             headers: {
               'Content-Type': 'application/json',
               'Accept': 'application/json, text/event-stream',
+              if (rs.sessionId != null) 'Mcp-Session-Id': rs.sessionId!,
               ...rs.server.headers,
             },
             body: jsonEncode({
@@ -559,33 +606,30 @@ class McpService {
               'params': params,
             }),
           )
-          .timeout(Duration(seconds: _rpcTimeoutSeconds));
+          .timeout(timeout ?? Duration(seconds: _rpcTimeoutSeconds));
+      _rememberSessionId(rs, res.headers);
       // A single-object JSON response is the common case; a
-      // "text/event-stream" response carries one or more `data: {...}`
-      // lines — take the LAST one, which per the spec is the final
-      // response for this request (earlier lines are notifications).
+      // "text/event-stream" response carries one or more SSE events
+      // (`event:` + `data:` lines separated by blank lines). Take the
+      // event whose `data` decodes to our `id` (earlier events are
+      // unrelated notifications the server may have flushed first).
       final contentType = res.headers['content-type'] ?? '';
       Map<String, dynamic>? j;
       if (contentType.contains('text/event-stream')) {
-        final dataLines = res.body
-            .split('\n')
-            .where((l) => l.startsWith('data:'))
-            .map((l) => l.substring(5).trim())
-            .where((l) => l.isNotEmpty)
-            .toList();
-        for (final line in dataLines.reversed) {
-          try {
-            final decoded = jsonDecode(line) as Map<String, dynamic>;
-            if (decoded['id'] == id) {
-              j = decoded;
-              break;
-            }
-          } catch (_) {}
-        }
+        j = _parseSseResponse(res.body, id);
       } else if (res.body.trim().isNotEmpty) {
         try {
           j = jsonDecode(res.body) as Map<String, dynamic>;
         } catch (_) {}
+      }
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        // Authentication failure is NOT a transient connection problem —
+        // reconnecting would just loop forever. Re-prompt the user to fix
+        // the credential; never schedule an automatic reconnect for it.
+        return McpRpcResult._error(
+          'authentication failed (HTTP ${res.statusCode}) — check the '
+          'server\'s auth headers/token and re-connect after fixing them.',
+        );
       }
       if (res.statusCode < 200 || res.statusCode >= 300) {
         // The server responded (just not successfully) — it's still up,
@@ -613,7 +657,47 @@ class McpService {
       // an unexpected stdio process death.
       _markHttpFailure(rs);
       return McpRpcResult._error('$e');
+    } finally {
+      // Task 4: don't leak a client/host connection pool per call — close
+      // the client we created (never the caller-injected test mock).
+      if (httpClientForTest == null) client.close();
     }
+  }
+
+  /// Remember a `Mcp-Session-Id` header (case-insensitive) so subsequent
+  /// requests to the SAME server re-use the session (Streamable-HTTP spec).
+  void _rememberSessionId(_RunningServer rs, Map<String, String> headers) {
+    String? sid;
+    for (final e in headers.entries) {
+      if (e.key.toLowerCase() == 'mcp-session-id') {
+        sid = e.value;
+        break;
+      }
+    }
+    if (sid != null && sid.isNotEmpty) rs.sessionId = sid;
+  }
+
+  /// Parse a `text/event-stream` body into the JSON-RPC response whose `id`
+  /// matches [id]. Handles `event:` lines and multi-line `data:` blocks
+  /// (joined per the SSE spec). Returns null if no matching event is found.
+  Map<String, dynamic>? _parseSseResponse(String body, int id) {
+    final events = body.split(RegExp(r'\r?\n\r?\n'));
+    for (final event in events) {
+      final dataParts = <String>[];
+      for (final rawLine in event.split('\n')) {
+        final line = rawLine.trimRight();
+        if (line.startsWith('data:')) {
+          dataParts.add(line.substring(5).trim());
+        }
+      }
+      if (dataParts.isEmpty) continue;
+      final payload = dataParts.join('\n');
+      try {
+        final decoded = jsonDecode(payload) as Map<String, dynamic>;
+        if (decoded['id']?.toString() == id.toString()) return decoded;
+      } catch (_) {}
+    }
+    return null;
   }
 
   /// An HTTP server has no process to watch for death, so a connection-
@@ -640,8 +724,9 @@ class McpService {
   Future<McpRpcResult> _rpc(
     _RunningServer rs,
     String method,
-    Map<String, dynamic> params,
-  ) async {
+    Map<String, dynamic> params, {
+    Duration? timeout,
+  }) async {
     final proc = rs.process;
     if (proc == null) {
       return McpRpcResult._error('server process not running');
@@ -654,40 +739,65 @@ class McpService {
     late final StreamSubscription sub;
     sub = lines.stream.listen((line) {
       if (completer.isCompleted) return;
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) return;
+      Map<String, dynamic>? j;
       try {
-        final j = jsonDecode(line) as Map<String, dynamic>;
-        if (j['id'] == id) {
-          if (j.containsKey('error')) {
-            final err = j['error'];
-            completer.complete(
-              McpRpcResult._error(
-                err is Map
-                    ? '${err['message'] ?? err['code'] ?? 'error'}'
-                    : '$err',
-              ),
-            );
-          } else {
-            completer.complete(McpRpcResult._ok(j['result']));
-          }
+        j = jsonDecode(trimmed) as Map<String, dynamic>;
+      } catch (_) {
+        // A line that STARTS a JSON object/array but won't decode as a
+        // complete value is a pretty-printed (multi-line) payload — stdio
+        // MCP requires exactly one JSON value per line. Surface a clear
+        // error instead of silently ignoring it (which read as a hang).
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          completer.complete(
+            McpRpcResult._error(
+              'server sent pretty-printed (multi-line) JSON — the stdio '
+              'MCP transport requires one JSON value per line; configure '
+              'the server to emit compact single-line JSON.',
+            ),
+          );
           sub.cancel();
         }
-      } catch (_) {
-        // Not JSON or not ours — ignore.
+        return;
+      }
+      // Tolerate string ids — some servers echo the id as "1" instead of 1.
+      if (j['id']?.toString() == id.toString()) {
+        if (j.containsKey('error')) {
+          final err = j['error'];
+          completer.complete(
+            McpRpcResult._error(
+              err is Map
+                  ? '${err['message'] ?? err['code'] ?? 'error'}'
+                  : '$err',
+            ),
+          );
+        } else {
+          completer.complete(McpRpcResult._ok(j['result']));
+        }
+        sub.cancel();
       }
     });
 
-    proc.stdin.writeln(
-      jsonEncode({
-        'jsonrpc': '2.0',
-        'id': id,
-        'method': method,
-        'params': params,
-      }),
-    );
+    // A dead stdin (server crashed mid-call) throws — surface it as an MCP
+    // error rather than an uncaught exception.
+    try {
+      proc.stdin.writeln(
+        jsonEncode({
+          'jsonrpc': '2.0',
+          'id': id,
+          'method': method,
+          'params': params,
+        }),
+      );
+    } catch (_) {
+      await sub.cancel();
+      return McpRpcResult._error('server pipe closed (stdin write failed)');
+    }
 
     try {
       return await completer.future.timeout(
-        Duration(seconds: _rpcTimeoutSeconds),
+        timeout ?? Duration(seconds: _rpcTimeoutSeconds),
         onTimeout: () => McpRpcResult._timeout(),
       );
     } finally {
@@ -748,6 +858,10 @@ class _RunningServer {
   List<McpToolDef> tools = [];
   final stdoutLines = _LineStream();
   final stderrLines = <String>[];
+
+  /// Streamable-HTTP session id (`Mcp-Session-Id`), remembered from the
+  /// initialize response and echoed on subsequent requests.
+  String? sessionId;
 
   /// PR41: set by [McpService.disconnect] BEFORE killing the process, so
   /// the death watcher can tell a user-initiated disconnect apart from an

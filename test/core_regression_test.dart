@@ -9081,6 +9081,329 @@ You are an expert security auditor reviewing code for vulnerabilities.
       expect(env['SECRET_KEY'], 'very_secret_value');
     });
   });
+
+  group('Task 4: MCP import + runtime reliability', () {
+    test('mcp toml single-quote multiline env parses', () {
+      final res = parseMcpConfigForTest(
+        '[mcp_servers.foo]\ncommand=\'npx\'\nargs=[\n"a"\n]\n'
+        '["mcp_servers.foo.env"]\nK="v"',
+      );
+      expect(res.single.name, 'foo');
+      expect(res.single.command, 'npx');
+      expect(res.single.args, ['a']);
+      expect(res.single.env['K'], 'v');
+    });
+
+    test('mcp toml headers.* and cwd and type parse', () {
+      final res = parseMcpConfigForTest(
+        '[mcp_servers.remote]\n'
+        'type = "http"\n'
+        'url = "https://api.example.com/mcp"\n'
+        'headers.Authorization = "Bearer abc"\n'
+        'cwd = "./proj"\n',
+      );
+      expect(res.single.type, 'http');
+      expect(res.single.url, 'https://api.example.com/mcp');
+      expect(res.single.headers['Authorization'], 'Bearer abc');
+      expect(res.single.cwd, './proj');
+    });
+
+    test('mcp json top-level array and servers key parse with ignoredKeys '
+        'surfaced', () {
+      final res = parseMcpConfigForTest('''
+[
+  {"name": "a", "command": "npx", "args": ["-y", "x"], "unknown_a": 1},
+  {"name": "b", "url": "https://b.example/mcp", "bogus": true}
+]
+''');
+      expect(res.length, 2);
+      expect(res.first.name, 'a');
+      expect(res.first.ignoredKeys, contains('unknown_a'));
+      expect(res.last.url, 'https://b.example/mcp');
+      expect(res.last.ignoredKeys, contains('bogus'));
+
+      final serversKey = parseMcpConfigForTest(
+        '{"servers": {"c": {"command": "uvx", "args": ["-y", "z"]}}}',
+      );
+      expect(serversKey.single.name, 'c');
+      expect(serversKey.single.command, 'uvx');
+    });
+
+    test('shell-split args preserve quotes', () {
+      expect(
+        shellSplitArgsForTest('a "b c" d'),
+        ['a', 'b c', 'd'],
+      );
+      expect(
+        shellSplitArgsForTest("x 'y z' --flag='v w'"),
+        ['x', 'y z', '--flag=v w'],
+      );
+    });
+
+    test('McpServer model has cwd/type/startupTimeoutS', () {
+      final s = McpServer(
+        name: 'x',
+        author: 'a',
+        description: 'd',
+        category: 'Custom',
+        command: 'npx',
+        cwd: './x',
+        startupTimeoutS: 90,
+      );
+      expect(s.cwd, './x');
+      expect(s.startupTimeoutS, 90);
+      expect(s.transport, 'stdio');
+    });
+
+    test('updateCustomMcpServer round-trips url/transport/headers/cwd', () {
+      app.addCustomMcpServer(name: 'roundtrip', command: 'npx', args: ['-y', 'a']);
+      final s = app.mcpServers.firstWhere((e) => e.name == 'roundtrip');
+      app.updateCustomMcpServer(
+        s,
+        command: 'uvx',
+        args: ['-y', 'b'],
+        url: 'https://rt.example.com/mcp',
+        transport: 'http',
+        headers: {'X-Token': 't'},
+        cwd: './cwd',
+      );
+      expect(s.command, 'uvx');
+      expect(s.args, ['-y', 'b']);
+      expect(s.url, 'https://rt.example.com/mcp');
+      expect(s.transport, 'http');
+      expect(s.headers['X-Token'], 't');
+      expect(s.cwd, './cwd');
+      app.removeMcpServer(s);
+    });
+
+    test('removeMcpServer disconnects + prunes intent + secure deletes env', () async {
+      app.addCustomMcpServer(
+        name: 'remove-me',
+        command: 'npx',
+        args: ['-y', 'a'],
+        headers: {'X-Api-Key': 'sek'},
+      );
+      final s = app.mcpServers.firstWhere((e) => e.name == 'remove-me');
+      await app.setMcpEnv('remove-me', {'TOKEN': 'v'});
+      await app.setMcpHeaders('remove-me', {'X-Api-Key': 'sek'});
+      s.connected = true;
+      await app.persistMcpIntent();
+
+      await app.removeMcpServer(s);
+
+      expect(McpService.I.isConnected('remove-me'), isFalse);
+      expect((await app.getMcpEnv('remove-me')).isEmpty, isTrue);
+      expect((await app.getMcpHeaders('remove-me')).isEmpty, isTrue);
+      // intent pruned
+      final prefs = await SharedPreferences.getInstance();
+      final intent = prefs.getStringList('ovid_mcp_connected_v1') ?? [];
+      expect(intent.contains('remove-me'), isFalse);
+    });
+
+    test('reconnect lookup by name not identity', () {
+      app.addCustomMcpServer(name: 'byname', command: 'npx');
+      final a = app.mcpServers.firstWhere((s) => s.name == 'byname');
+      // Simulate a reload: a fresh object with the same name replaces the
+      // original identity.
+      app.mcpServers.remove(a);
+      app.mcpServers.add(
+        McpServer(
+          name: 'byname',
+          author: 'you',
+          description: '',
+          category: 'Custom',
+          command: 'npx',
+          custom: true,
+        ),
+      );
+      expect(McpService.I.reconnectEligibleForTest('byname'), isTrue);
+      final replaced = app.mcpServers.firstWhere((s) => s.name == 'byname');
+      app.removeMcpServer(replaced);
+    });
+
+    test('http 401 returns an auth re-prompt error, not a retry loop', () async {
+      McpService.I.httpClientForTest = MockClient((request) async {
+        return http.Response('unauthorized', 401);
+      });
+      final server = McpServer(
+        name: 'auth-401',
+        author: 't',
+        description: '',
+        category: 'Custom',
+        command: '',
+        transport: 'http',
+        url: 'https://auth.example.com/mcp',
+      );
+      final status = await McpService.I.connect(server);
+      expect(status, contains('authentication'));
+      expect(McpService.I.isConnected(server.name), isFalse);
+      expect(McpService.I.hasPendingReconnectForTest(server.name), isFalse);
+      McpService.I.httpClientForTest = null;
+    });
+
+    test('sse transport rejected with clear Streamable HTTP error', () async {
+      final server = McpServer(
+        name: 'sse-reject',
+        author: 't',
+        description: '',
+        category: 'Custom',
+        command: '',
+        transport: 'sse',
+        url: 'https://sse.example.com/mcp',
+      );
+      final status = await McpService.I.connect(server);
+      expect(
+        status.toLowerCase(),
+        contains('sse transport not supported'),
+      );
+    });
+
+    test('stdio tolerates string ids in responses', () async {
+      final res = await McpService.callToolForTest(
+        replies: [
+          '{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"ok-string-id"}]}}',
+        ],
+      );
+      expect(res, contains('ok-string-id'));
+    });
+
+    test('stdio rejects pretty-printed multi-line JSON with a clear error',
+        () async {
+      final res = await McpService.callToolForTest(
+        replies: [
+          '{',
+          '"jsonrpc": "2.0",',
+          '"id": 1',
+          '}',
+        ],
+      );
+      expect(res, contains('pretty-printed'));
+    });
+
+    test('http parses event: + multi-line data and remembers Mcp-Session-Id',
+        () async {
+      final seenSessionHeaders = <String>[];
+      McpService.I.httpClientForTest = MockClient((request) async {
+        final header = request.headers['Mcp-Session-Id'] ??
+            request.headers['mcp-session-id'];
+        if (header != null) seenSessionHeaders.add(header);
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        final method = body['method'] as String;
+        if (method == 'initialize') {
+          return http.Response(
+            'event: message\n'
+            'data: {"jsonrpc":"2.0","id":${body['id']},'
+            '"result":{"protocolVersion":"2024-11-05"}}\n'
+            '\n',
+            200,
+            headers: {
+              'content-type': 'text/event-stream',
+              'Mcp-Session-Id': 'sess-123',
+            },
+          );
+        }
+        return http.Response(
+          'event: message\n'
+          'data: {"jsonrpc":"2.0","id":${body['id']},"result":{"tools":[]}}\n'
+          '\n',
+          200,
+          headers: {'content-type': 'text/event-stream'},
+        );
+      });
+      final server = McpServer(
+        name: 'sse-session',
+        author: 't',
+        description: '',
+        category: 'Custom',
+        command: '',
+        transport: 'http',
+        url: 'https://sse.example.com/mcp',
+      );
+      addTearDown(() {
+        McpService.I.disconnect(server.name);
+        McpService.I.httpClientForTest = null;
+      });
+      final status = await McpService.I.connect(server);
+      expect(status, contains('connected'));
+      expect(seenSessionHeaders, contains('sess-123'));
+      McpService.I.httpClientForTest = null;
+    });
+
+    test('mcp__ proxy and mcp_ proxy resolve the matched server name', () async {
+      app.addCustomMcpServer(name: 'gh', command: 'npx', args: ['-y', 'x']);
+      final resolved = await AgentService.I.legacyMcpProxyForTest('mcp_gh_list');
+      expect(resolved, contains('gh'));
+      final clean = app.mcpServers.firstWhere((s) => s.name == 'gh');
+      app.removeMcpServer(clean);
+    });
+
+    test('catalog_list_mcp shows transport/url', () async {
+      app.addCustomMcpServer(
+        name: 'cat-http',
+        command: '',
+        url: 'https://cat.example.com/mcp',
+      );
+      final res = await AgentService.I.dispatchForTest('catalog_list_mcp', {});
+      expect(res, contains('cat-http'));
+      expect(res, contains('http'));
+      expect(res, contains('https://cat.example.com/mcp'));
+      final s = app.mcpServers.firstWhere((e) => e.name == 'cat-http');
+      app.removeMcpServer(s);
+    });
+
+    test('catalog_add_mcp supports url/headers/env', () async {
+      final res = await AgentService.I.dispatchForTest('catalog_add_mcp', {
+        'name': 'cat-add-http',
+        'url': 'https://add.example.com/mcp',
+        'headers': {'Authorization': 'Bearer zz'},
+        'env': {'SECRET': 'v'},
+      });
+      expect(res, contains('added'));
+      final s = app.mcpServers.firstWhere((e) => e.name == 'cat-add-http');
+      expect(s.transport, 'http');
+      expect(s.url, 'https://add.example.com/mcp');
+      expect((await app.getMcpHeaders(s.name))['Authorization'], 'Bearer zz');
+      expect((await app.getMcpEnv(s.name))['SECRET'], 'v');
+      app.removeMcpServer(s);
+    });
+
+    test('http auth headers stored in secure storage, not plaintext prefs', () async {
+      app.addCustomMcpServer(
+        name: 'secure-headers',
+        command: '',
+        url: 'https://sh.example.com/mcp',
+        headers: {'Authorization': 'Bearer super-secret-token'},
+      );
+      await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getStringList('ovid_custom_mcp_servers_v1') ?? [];
+      final entry = saved
+          .map((j) => jsonDecode(j) as Map<String, dynamic>)
+          .firstWhere((m) => m['name'] == 'secure-headers');
+      expect(jsonEncode(entry), isNot(contains('super-secret-token')));
+      expect(
+        (await app.getMcpHeaders('secure-headers'))['Authorization'],
+        'Bearer super-secret-token',
+      );
+      final s = app.mcpServers.firstWhere((e) => e.name == 'secure-headers');
+      app.removeMcpServer(s);
+    });
+
+    test('disconnected configured servers get a connect stub tool', () {
+      app.addCustomMcpServer(name: 'stub-server', command: 'npx', args: ['-y', 'x']);
+      try {
+        final tools = AgentService.I.toolsForTest();
+        final names = tools
+            .map((t) => ((t['function'] as Map?) ?? {})['name'])
+            .whereType<String>()
+            .toList();
+        expect(names, contains('mcp_stub_server'));
+      } finally {
+        final s = app.mcpServers.firstWhere((e) => e.name == 'stub-server');
+        app.removeMcpServer(s);
+      }
+    });
+  });
 }
 
 class _FakeHttpClient implements HttpClient {

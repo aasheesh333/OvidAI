@@ -250,11 +250,22 @@ class McpServer {
   String transport;
 
   /// Streamable-HTTP endpoint — required when [transport] is 'http',
-  /// unused for 'stdio'.
-  final String? url;
+  /// unused for 'stdio'. Mutable so [AppState.updateCustomMcpServer] can
+  /// round-trip a config edit that adds/removes/renames the endpoint.
+  String? url;
 
   /// Extra HTTP headers (auth tokens etc.) for the 'http' transport.
-  final Map<String, String> headers;
+  /// Mutable for the same round-trip reason; persisted in SECURE storage
+  /// (never plaintext prefs) via [AppState.setMcpHeaders].
+  Map<String, String> headers;
+
+  /// Working directory for the spawned process (stdio transport). Relative
+  /// paths resolve against the sandbox home; absolute paths are used as-is.
+  String? cwd;
+
+  /// Startup (handshake: initialize → tools/list) timeout in seconds.
+  /// Production default 30; distinct from the per-call timeout.
+  int startupTimeoutS;
 
   McpServer({
     required this.name,
@@ -270,8 +281,71 @@ class McpServer {
     this.transport = 'stdio',
     this.url,
     this.headers = const {},
+    this.cwd,
+    this.startupTimeoutS = 30,
   });
+
+  /// The config-file `type` spelling ('stdio' | 'http' | 'sse'). Kept as an
+  /// alias for [transport] so importers can map `type` → transport directly.
+  String get type => transport;
+  set type(String? v) => transport = v ?? 'stdio';
 }
+
+/// Split a shell-style argument string into tokens, preserving single and
+/// double quotes plus simple backslash escapes. Used to accept a raw
+/// `command`/`args` string from a pasted MCP config instead of requiring a
+/// JSON array.
+List<String> shellSplitArgs(String input) {
+  final out = <String>[];
+  final buf = StringBuffer();
+  String? quote; // either "'" or '"' while inside a quoted span
+  var escaped = false;
+  var hasToken = false;
+  for (var i = 0; i < input.length; i++) {
+    final c = input[i];
+    if (escaped) {
+      buf.write(c);
+      escaped = false;
+      hasToken = true;
+      continue;
+    }
+    if (c == r'\' && quote != "'") {
+      escaped = true;
+      hasToken = true;
+      continue;
+    }
+    if (quote != null) {
+      if (c == quote) {
+        quote = null;
+      } else {
+        buf.write(c);
+      }
+      hasToken = true;
+      continue;
+    }
+    if (c == '"' || c == "'") {
+      quote = c;
+      hasToken = true;
+      continue;
+    }
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+      if (hasToken) {
+        out.add(buf.toString());
+        buf.clear();
+        hasToken = false;
+      }
+      continue;
+    }
+    buf.write(c);
+    hasToken = true;
+  }
+  if (hasToken) out.add(buf.toString());
+  return out;
+}
+
+/// Test seam for the pure shell-splitter (no I/O).
+@visibleForTesting
+List<String> shellSplitArgsForTest(String input) => shellSplitArgs(input);
 
 enum MsgKind {
   text,
@@ -2335,6 +2409,7 @@ class AppState extends ChangeNotifier {
             (m['args'] as List?)?.whereType<String>().toList() ?? const [];
         final url = m['url'] as String?;
         final transport = (m['transport'] as String?) ??
+            (m['type'] as String?) ??
             ((url != null && url.isNotEmpty) ? 'http' : 'stdio');
         final headers = (m['headers'] as Map?)
                 ?.map((k, v) => MapEntry(k.toString(), v.toString())) ??
@@ -2346,6 +2421,9 @@ class AppState extends ChangeNotifier {
           if (envMap.isNotEmpty) {
             await setMcpEnv(key, envMap);
           }
+        }
+        if (headers.isNotEmpty) {
+          await setMcpHeaders(key, headers);
         }
 
         mcpServers.add(
@@ -2365,6 +2443,8 @@ class AppState extends ChangeNotifier {
             transport: transport,
             url: url,
             headers: headers,
+            cwd: m['cwd'] as String?,
+            startupTimeoutS: (m['startupTimeoutS'] as num?)?.toInt() ?? 30,
           ),
         );
         mounted++;
@@ -2597,6 +2677,10 @@ class AppState extends ChangeNotifier {
       // for a remote MCP server (`{"url": "https://...", "headers": {…}}`).
       final urlValue = m['url'] as String?;
       final isHttp = urlValue != null && urlValue.isNotEmpty;
+      final headers = (m['headers'] as Map?)?.map(
+            (k, v) => MapEntry(k.toString(), v.toString()),
+          ) ??
+          const <String, String>{};
       mcpServers.add(
         McpServer(
           name: mname,
@@ -2616,12 +2700,15 @@ class AppState extends ChangeNotifier {
           custom: true,
           transport: isHttp ? 'http' : 'stdio',
           url: isHttp ? urlValue : null,
-          headers: (m['headers'] as Map?)?.map(
-                (k, v) => MapEntry(k.toString(), v.toString()),
-              ) ??
-              const {},
+          headers: headers,
+          cwd: m['cwd'] as String?,
+          startupTimeoutS: (m['startupTimeoutS'] as num?)?.toInt() ?? 30,
         ),
       );
+      // Auth headers are a secret — secure storage, never plaintext prefs.
+      if (headers.isNotEmpty) {
+        unawaited(setMcpHeaders(mname, headers));
+      }
       importedMcps++;
     }
 
@@ -2725,44 +2812,76 @@ class AppState extends ChangeNotifier {
     // ignored by McpService.connect.
     String? url,
     Map<String, String> headers = const {},
+    // Task 4: explicit transport/cwd/startup timeout round-trip.
+    String? transport,
+    String? cwd,
+    int? startupTimeoutS,
   }) {
-    final isHttp = url != null && url.isNotEmpty;
-    mcpServers.add(
-      McpServer(
-        name: name.trim(),
-        author: 'you',
-        description: isHttp
-            ? 'Custom MCP server (HTTP) — connects on demand.'
-            : 'Custom MCP server — connects on demand.',
-        category: 'Custom',
-        command: command.trim(),
-        args: args,
-        envHint: envHint,
-        source: 'custom',
-        custom: true,
-        transport: isHttp ? 'http' : 'stdio',
-        url: isHttp ? url : null,
-        headers: headers,
-      ),
+    final isHttp = transport == 'sse' ||
+        ((url != null && url.isNotEmpty) && transport != 'stdio');
+    final resolvedTransport = transport ??
+        (isHttp ? 'http' : 'stdio');
+    final server = McpServer(
+      name: name.trim(),
+      author: 'you',
+      description: resolvedTransport == 'http'
+          ? 'Custom MCP server (HTTP) — connects on demand.'
+          : 'Custom MCP server — connects on demand.',
+      category: 'Custom',
+      command: command.trim(),
+      args: args,
+      envHint: envHint,
+      source: 'custom',
+      custom: true,
+      transport: resolvedTransport,
+      url: url != null && url.isNotEmpty ? url : null,
+      headers: headers,
+      cwd: cwd,
+      startupTimeoutS: startupTimeoutS ?? 30,
     );
+    mcpServers.add(server);
+    if (headers.isNotEmpty) unawaited(setMcpHeaders(server.name, headers));
     _persistCustomMcpServers();
     refresh();
   }
 
-  void removeMcpServer(McpServer s) {
+  Future<void> removeMcpServer(McpServer s) async {
     mcpServers.remove(s);
-    _persistCustomMcpServers();
+    // Task 4: full teardown — kill the process, cancel any pending
+    // reconnect, wipe secure env/headers, and prune the connected intent
+    // so a restart never auto-respawns a removed server.
+    await McpService.I.disconnect(s.name);
+    await Future.wait([
+      deleteMcpEnv(s.name),
+      deleteMcpHeaders(s.name),
+    ]);
+    await _persistCustomMcpServers();
+    await _persistMcpConnectedIntent();
     refresh();
   }
 
-  /// Update an existing custom MCP server's command/args from edited JSON.
+  /// Update an existing custom MCP server from an edited config — round-trips
+  /// command/args/url/transport/headers/cwd/startup timeout. HTTP auth
+  /// headers go to secure storage (never plaintext prefs).
   void updateCustomMcpServer(
     McpServer s, {
     required String command,
     required List<String> args,
+    String? url,
+    String? transport,
+    Map<String, String> headers = const {},
+    String? cwd,
+    int? startupTimeoutS,
   }) {
-    s.command = command;
+    s.command = command.trim();
     s.args = args;
+    s.url = url != null && url.isNotEmpty ? url : null;
+    s.transport = transport ??
+        (s.url != null && s.url!.isNotEmpty ? 'http' : 'stdio');
+    s.headers = headers;
+    s.cwd = cwd;
+    if (startupTimeoutS != null) s.startupTimeoutS = startupTimeoutS;
+    if (headers.isNotEmpty) unawaited(setMcpHeaders(s.name, headers));
     _persistCustomMcpServers();
     refresh();
   }
@@ -2783,11 +2902,13 @@ class AppState extends ChangeNotifier {
               'args': s.args,
               'envHint': s.envHint,
               'source': s.source,
-              // PR41: transport/url/headers — without these a custom
-              // HTTP server reloads as a broken stdio ('npx') entry.
+              // PR41: transport/url — without these a custom HTTP server
+              // reloads as a broken stdio ('npx') entry. Headers are a
+              // secret and are persisted in secure storage instead.
               'transport': s.transport,
               if (s.url != null) 'url': s.url,
-              if (s.headers.isNotEmpty) 'headers': s.headers,
+              if (s.cwd != null) 'cwd': s.cwd,
+              if (s.startupTimeoutS != 30) 'startupTimeoutS': s.startupTimeoutS,
             }),
           )
           .toList();
@@ -2827,10 +2948,11 @@ class AppState extends ChangeNotifier {
             custom: true,
             transport: transport,
             url: m['url'] as String?,
-            headers: (m['headers'] as Map?)?.map(
-                  (k, v) => MapEntry(k.toString(), v.toString()),
-                ) ??
-                const {},
+            // Headers are a secret — read back from secure storage, not
+            // from plaintext prefs (they are no longer persisted there).
+            headers: await getMcpHeaders(name),
+            cwd: m['cwd'] as String?,
+            startupTimeoutS: (m['startupTimeoutS'] as num?)?.toInt() ?? 30,
           ),
         );
       }
@@ -3033,6 +3155,8 @@ class AppState extends ChangeNotifier {
   }
 
   // ── MCP server env vars (secure storage) ────────────────────────────
+  static const _kMcpHeadersPrefix = 'ovid_mcp_headers_';
+
   Future<void> setMcpEnv(String serverName, Map<String, String> env) async {
     try {
       await _secureStorage.write(
@@ -3051,6 +3175,47 @@ class AppState extends ChangeNotifier {
     } catch (_) {
       return {};
     }
+  }
+
+  /// Delete a server's env var blob from secure storage (on remove/reset).
+  Future<void> deleteMcpEnv(String serverName) async {
+    try {
+      await _secureStorage.delete(key: '$_kMcpEnvPrefix$serverName');
+    } catch (_) {}
+  }
+
+  // ── MCP server HTTP auth headers (secure storage) ───────────────────
+  // Task 4 / security: auth headers (Bearer tokens etc.) must never hit
+  // SharedPreferences plaintext. They live alongside env in secure storage.
+  Future<void> setMcpHeaders(String serverName, Map<String, String> headers) async {
+    try {
+      if (headers.isEmpty) {
+        await _secureStorage.delete(key: '$_kMcpHeadersPrefix$serverName');
+      } else {
+        await _secureStorage.write(
+          key: '$_kMcpHeadersPrefix$serverName',
+          value: jsonEncode(headers),
+        );
+      }
+    } catch (_) {}
+  }
+
+  Future<Map<String, String>> getMcpHeaders(String serverName) async {
+    try {
+      final raw = await _secureStorage.read(key: '$_kMcpHeadersPrefix$serverName');
+      if (raw == null || raw.isEmpty) return {};
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      return m.map((k, v) => MapEntry(k, v.toString()));
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// Delete a server's auth-headers blob from secure storage.
+  Future<void> deleteMcpHeaders(String serverName) async {
+    try {
+      await _secureStorage.delete(key: '$_kMcpHeadersPrefix$serverName');
+    } catch (_) {}
   }
 
   // ── Per-session repo selection (Studio) ─────────────────────────────
