@@ -2830,6 +2830,73 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       );
     });
 
+    test('UP2: upload path resolution rejects symlinks outside the workspace', () async {
+      final tempDir = Directory.systemTemp.createTempSync('up2_test');
+      final workspace = Directory('${tempDir.path}/workspace')..createSync();
+      final outside = File('${tempDir.path}/outside.txt')..writeAsStringSync('secret');
+      Link('${workspace.path}/escape.txt').createSync(outside.path);
+      final inside = File('${workspace.path}/inside.txt')..writeAsStringSync('safe');
+      final pinnedWorkspace = Link('${tempDir.path}/pinned-workspace');
+      pinnedWorkspace.createSync(workspace.path);
+      final session = ChatSession(
+        id: 'up2',
+        title: 'UP2',
+        model: 'm',
+        mode: 'auto',
+        workspaceFolder: workspace.path,
+      );
+      app.sessions.insert(0, session);
+      app.activeSessionId = session.id;
+      AgentService.setRunSessionForTest(session.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((s) => s.id == session.id);
+        tempDir.deleteSync(recursive: true);
+      });
+
+      expect(
+        await AgentService.I.dispatchForTest('browser_upload', {
+          'selector': 'input[type=file]',
+          'path': 'escape.txt',
+        }),
+        contains('path escapes the session workspace'),
+      );
+      expect(
+        await AgentService.resolveBrowserUploadPathForTest(
+          Directory(pinnedWorkspace.path),
+          'inside.txt',
+        ),
+        await inside.resolveSymbolicLinks(),
+      );
+    });
+
+    test('UP3: upload finalize JavaScript safely embeds quoted selectors', () {
+      const selector = "[name='attachment']";
+
+      final js = AgentService.buildBrowserUploadFinalizeJavaScriptForTest(
+        selector: selector,
+        filename: 'report.txt',
+      );
+
+      expect(js, contains('document.querySelector(${jsonEncode(selector)})'));
+      expect(js, contains("return 'no matching element';"));
+      expect(js, isNot(contains("no element: $selector")));
+      expect(js, isNot(contains("not a file input: $selector")));
+    });
+
+    test('UP4: production upload file stream emits bounded chunks', () async {
+      final tempDir = Directory.systemTemp.createTempSync('up4_test');
+      final file = File('${tempDir.path}/upload.bin')
+        ..writeAsBytesSync(Uint8List(500 * 1024));
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+
+      final chunks = await AgentService.streamFileForUpload(file).toList();
+
+      expect(chunks.length, equals(2));
+      expect(chunks[0].length, equals(256 * 1024));
+      expect(chunks[1].length, equals(244 * 1024));
+    });
+
     test('BR4: keycode map covers arrows + modifiers (pure helper)', () {
       expect(AgentService.keyCodeForTest('ArrowLeft'), 37);
       expect(AgentService.keyCodeForTest('ArrowRight'), 39);

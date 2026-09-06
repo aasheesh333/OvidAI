@@ -8448,6 +8448,22 @@ ${await _agentsMdBlock()}
     return out;
   }
 
+  @visibleForTesting
+  static Future<String?> resolveBrowserUploadPathForTest(
+    Directory work,
+    String rel,
+  ) async {
+    final lexical = containedPath(work, rel);
+    if (lexical == null) return null;
+    try {
+      final canonicalWork = await work.resolveSymbolicLinks();
+      final canonicalTarget = await File(lexical).resolveSymbolicLinks();
+      return containedPath(Directory(canonicalWork), canonicalTarget);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Resolve a workspace-relative path.  Repo files take precedence; falls
   /// back to the session's sandbox workdir on the host filesystem.
   Future<String?> _resolveFsPath(String rel) async {
@@ -8580,9 +8596,12 @@ ${await _agentsMdBlock()}
 
   /// Split [bytes] into upload chunks without imposing a file-size cap.
   @visibleForTesting
+  static const browserUploadChunkSize = 256 * 1024;
+
+  @visibleForTesting
   static List<Uint8List> chunkFileForUploadForTest(
     Uint8List bytes, {
-    int chunkSize = 256 * 1024,
+    int chunkSize = browserUploadChunkSize,
   }) {
     if (chunkSize <= 0) {
       throw ArgumentError.value(chunkSize, 'chunkSize', 'must be positive');
@@ -8596,6 +8615,49 @@ ${await _agentsMdBlock()}
     }
     return chunks;
   }
+
+  /// Read [file] in the same bounded chunks sent to the browser.
+  static Stream<Uint8List> streamFileForUpload(File file) async* {
+    final input = await file.open();
+    try {
+      while (true) {
+        final chunk = await input.read(browserUploadChunkSize);
+        if (chunk.isEmpty) break;
+        yield chunk;
+      }
+    } finally {
+      await input.close();
+    }
+  }
+
+  @visibleForTesting
+  static String buildBrowserUploadFinalizeJavaScriptForTest({
+    required String selector,
+    required String filename,
+  }) => '''
+(() => {
+  const el = document.querySelector(${jsonEncode(selector)});
+  if (!el) { window.__ovidUploadBuf = null; return 'no matching element'; }
+  if (el.tagName.toLowerCase() !== 'input' || el.type !== 'file') {
+    window.__ovidUploadBuf = null;
+    return 'target is not a file input';
+  }
+  const parts = window.__ovidUploadBuf || [];
+  window.__ovidUploadBuf = null;
+  const blobs = parts.map(b => {
+    const bin = atob(b);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return arr;
+  });
+  const file = new File(blobs, ${jsonEncode(filename)});
+  const dt = new DataTransfer();
+  dt.items.add(file);
+  el.files = dt.files;
+  el.dispatchEvent(new Event('input', {bubbles:true}));
+  el.dispatchEvent(new Event('change', {bubbles:true}));
+  return 'staged ' + ${jsonEncode(filename)};
+})()''';
 
   Future<String> _handleBrowserDownload(Map<String, dynamic> args) async {
     final url = (args['url'] as String? ?? '').trim();
@@ -8647,56 +8709,35 @@ ${await _agentsMdBlock()}
     final rel = (args['path'] as String? ?? '').trim();
     if (sel.isEmpty || rel.isEmpty) return 'selector and path are required';
     final work = await _sessionWorkDir();
-    final safe = containedPath(work, rel);
+    final lexical = containedPath(work, rel);
+    if (lexical == null) {
+      return 'path escapes the session workspace: $rel — use a path inside the workspace.';
+    }
+    if (!File(lexical).existsSync()) {
+      return 'No file "$rel" in the session workspace.';
+    }
+    final safe = await resolveBrowserUploadPathForTest(work, rel);
     if (safe == null) {
       return 'path escapes the session workspace: $rel — use a path inside the workspace.';
     }
     final f = File(safe);
-    if (!f.existsSync()) return 'No file "$rel" in the session workspace.';
     final tab = _activeTab;
     tab.controller ??= controllerForTab(tab);
-    final fname = f.uri.pathSegments.last;
+    final fname = File(lexical).uri.pathSegments.last;
     try {
       await tab.controller!.runJavaScript('window.__ovidUploadBuf = [];');
       int staged = 0;
-      final input = await f.open();
-      try {
-        while (true) {
-          final chunk = await input.read(256 * 1024);
-          if (chunk.isEmpty) break;
-          await tab.controller!.runJavaScript(
-            'window.__ovidUploadBuf.push(${jsonEncode(base64Encode(chunk))});',
-          );
-          staged += chunk.length;
-        }
-      } finally {
-        await input.close();
+      await for (final chunk in streamFileForUpload(f)) {
+        await tab.controller!.runJavaScript(
+          'window.__ovidUploadBuf.push(${jsonEncode(base64Encode(chunk))});',
+        );
+        staged += chunk.length;
       }
 
-      final jsFinalize = '''
-(() => {
-  const el = document.querySelector(${jsonEncode(sel)});
-  if (!el) { window.__ovidUploadBuf = null; return 'no element: $sel'; }
-  if (el.tagName.toLowerCase() !== 'input' || el.type !== 'file') {
-    window.__ovidUploadBuf = null;
-    return 'not a file input: $sel';
-  }
-  const parts = window.__ovidUploadBuf || [];
-  window.__ovidUploadBuf = null;
-  const blobs = parts.map(b => {
-    const bin = atob(b);
-    const arr = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-    return arr;
-  });
-  const file = new File(blobs, ${jsonEncode(fname)});
-  const dt = new DataTransfer();
-  dt.items.add(file);
-  el.files = dt.files;
-  el.dispatchEvent(new Event('input', {bubbles:true}));
-  el.dispatchEvent(new Event('change', {bubbles:true}));
-  return 'staged ' + ${jsonEncode(fname)};
-})()''';
+      final jsFinalize = buildBrowserUploadFinalizeJavaScriptForTest(
+        selector: sel,
+        filename: fname,
+      );
       final r = await tab.controller!.runJavaScriptReturningResult(jsFinalize);
       _emit('shell', 'upload $rel → $sel ($staged bytes)');
       return r.toString();
