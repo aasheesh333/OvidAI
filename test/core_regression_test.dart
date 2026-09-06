@@ -9567,6 +9567,10 @@ You are an expert security auditor reviewing code for vulnerabilities.
         notif.activeForTest = true;
         AgentNotificationService.serviceStopRequestedForTestFlag = false;
         setAnyRunActiveForTest(false);
+        addTearDown(() {
+          AgentNotificationService.serviceStopRequestedForTestFlag = false;
+          AgentNotificationService.keepAliveOverrideForTest = null;
+        });
 
         // When keep-alive is true, agentIdle does not stop the service
         AgentNotificationService.keepAliveOverrideForTest = true;
@@ -9579,7 +9583,28 @@ You are an expert security auditor reviewing code for vulnerabilities.
         await agentIdleForTest();
         expect(AgentNotificationService.serviceStopRequestedForTestFlag, isTrue);
         expect(notif.activeForTest, isFalse);
-        AgentNotificationService.keepAliveOverrideForTest = null;
+      });
+
+      test('STOP2: stopRequested aborts turn only when queue is non-empty, panic stops when empty', () async {
+        final agent = AgentService.I;
+        final app = AppState.I;
+        final s = ChatSession(id: 'stop2_sess', title: 'S', model: 'm', mode: 'auto');
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        addTearDown(() {
+          agent.clearQueueForTest();
+          app.sessions.removeWhere((x) => x.id == 'stop2_sess');
+        });
+
+        // Empty queue -> panic stop across all runs
+        final didQueueResume = agent.stopRequested(sessionId: s.id);
+        expect(didQueueResume, isFalse);
+
+        // Non-empty queue -> aborts current bucket only, preserves queued item
+        agent.queueMessageForTest('follow up prompt');
+        final didQueueResume2 = agent.stopRequested(sessionId: s.id);
+        expect(didQueueResume2, isTrue);
+        expect(agent.queuedMessages, contains('follow up prompt'));
       });
     });
   });

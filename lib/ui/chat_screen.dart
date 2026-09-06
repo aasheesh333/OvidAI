@@ -4147,13 +4147,16 @@ class _InputBarState extends State<_InputBar> {
                       );
                       final hasDraft = controller.text.trim().isNotEmpty;
                       final IconData icon;
+                      final hasQueued = AgentService.I.queuedMessages.isNotEmpty;
                       final Color bg;
                       final String tip;
                       if (runningNow && !hasDraft) {
                         // Running + empty → STOP (red).
                         icon = Icons.stop_rounded;
                         bg = Colors.redAccent;
-                        tip = 'Stop generating';
+                        tip = hasQueued
+                            ? 'Stop current turn (next queued will run)'
+                            : 'Stop (panic stop)';
                       } else if (runningNow && hasDraft) {
                         // Running + draft → SEND-TO-QUEUE (teal).
                         icon = Icons.arrow_upward;
@@ -4175,10 +4178,10 @@ class _InputBarState extends State<_InputBar> {
                           icon: Icon(icon, size: 18, color: Colors.white),
                           onPressed: () {
                             if (runningNow && !hasDraft) {
-                              // PR32: red Stop = INSTANT panic stop — every
-                              // run (this chat, subagents, parallel sessions),
-                              // every job, every spawned process dies NOW.
-                              AgentService.I.cancelAllRuns();
+                              // PR32 / STOP2: stopRequested delegates to cancelAllRuns for panic stop when queue is empty.
+                              AgentService.I.stopRequested(
+                                sessionId: AppState.I.activeSession?.id,
+                              );
                             } else {
                               onSend();
                             }

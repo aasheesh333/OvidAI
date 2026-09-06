@@ -757,6 +757,26 @@ class AgentService extends ChangeNotifier {
     }
   }
 
+  /// Queue-aware stop request:
+  /// - If the target session has queued messages: aborts the CURRENT turn only,
+  ///   leaving the queue intact so the next instruction runs immediately.
+  /// - If the queue is empty: performs a full panic stop (clears all queues,
+  ///   cancels all runs, kills all processes).
+  /// Returns `true` if a queued continuation was preserved, `false` on full panic stop.
+  bool stopRequested({String? sessionId}) {
+    final sid = sessionId ?? AppState.I.activeSessionId;
+    final r = _runs[sid];
+    if (r != null && r.queue.isNotEmpty) {
+      _cancelBucket(r);
+      return true;
+    }
+    for (final b in _runs.values) {
+      b.queue.clear();
+    }
+    cancelAllRuns();
+    return false;
+  }
+
   /// PR32: stop EVERYTHING (notification Stop button / panic stop) —
   /// every session's run, every subagent, every job, every spawned
   /// process. Instant, regardless of which session the UI is on.
