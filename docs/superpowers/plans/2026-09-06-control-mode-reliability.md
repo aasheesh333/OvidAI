@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement Phase A in-app Control Mode, persistent keep-alive foreground service semantics, queue-aware smart Stop, tri-state health tracking with resume re-init, streaming browser file downloads (200MB) and chunked uploads (50MB), and Play Store safety guardrails.
+**Goal:** Implement device-wide Control Mode backed by an Android AccessibilityService (any app, including Back/Home/Recents), node-tree screen reading that avoids per-action screenshots, persistent keep-alive foreground service semantics, queue-aware smart Stop, tri-state health tracking with resume re-init, uncapped streaming browser downloads and uploads, and Play Store safety guardrails.
 
-**Architecture:** Extend `AgentMode` with rank-4 `control` mode double-gated by mode check and read-only/plan blocks; decouple queue draining on cancel to allow single-turn abort when queued items exist vs global panic stop; replace in-memory byte buffers in browser file handling with streaming disk pipes and JS buffer chunking; unify MCP and plugin health under a tri-state model (`connecting`, `working`, `failed`) refreshed on app resume.
+**Architecture:** Extend `AgentMode` with rank-4 `control` mode double-gated by mode check and read-only/plan blocks; decouple queue draining on cancel to allow single-turn abort when queued items exist vs global panic stop; replace in-memory byte buffers in browser file handling with streaming disk pipes and JS buffer chunking with no size ceiling; unify MCP and plugin health under a tri-state model (`connecting`, `working`, `failed`) refreshed on app resume; add `OvidAccessibilityService` exposing global navigation, gesture dispatch, node-tree reads with an event-driven dirty flag, delta diffs, node-handle actions, and screenshot only as a fallback.
 
-**Tech Stack:** Flutter 3 / Dart 3, `webview_flutter` 4.8, `file_picker`, Android Foreground Service (`dataSync`), `flutter test`.
+**Tech Stack:** Flutter 3 / Dart 3, `webview_flutter` 4.8, `file_picker`, Android Foreground Service (`dataSync`), Android AccessibilityService, `flutter test`.
 
-**Spec:** `docs/superpowers/specs/2026-09-06-control-mode-reliability-design.md` @ `d97a0f8`.
+**Spec:** `docs/superpowers/specs/2026-09-06-control-mode-reliability-design.md` @ `0bd0c47`.
 
 ## Global Constraints
 
@@ -17,9 +17,11 @@
 - Downloads land in the session workspace (agent-readable, containment-checked), never public Downloads.
 - Read-Only + plan-mode gates stay: every new interactive tool MUST be denied in both gates.
 - Zero reference-web mentions in `lib/` and `test/`.
-- Do not break the existing test suite (all 377 tests must stay green).
-- Keep `kEnableDeviceControl = false` (Phase B compile-time safety flag).
+- Do not break the existing test suite (all currently-green tests must stay green).
+- No artificial size caps on browser downloads or uploads — only real device free space limits.
+- Node tree is the primary screen reader; screenshots only on empty tree, explicit request, or genuine image content.
 - Frequent commits per task with clear, conventional messages.
+
 
 ---
 
@@ -475,7 +477,7 @@ git commit -m "feat: reconnect services on resume and surface tri-state health U
 
 ---
 
-### Task 5: Streaming browser downloads (200MB disk pipe)
+### Task 5: Streaming browser downloads (uncapped, disk-space bounded)
 
 **Files:**
 - Modify: `lib/core/agent_service.dart:8520-8565` (`_handleBrowserDownload` streaming)
@@ -483,35 +485,44 @@ git commit -m "feat: reconnect services on resume and surface tri-state health U
 
 **Interfaces:**
 - Consumes: `containedPath`, `_sessionWorkDir`, `HttpClient`
-- Produces: `AgentService.downloadFileStreamingForTest`, 200MB download cap, zero memory accumulation.
+- Produces: `AgentService.downloadStreamHelperForTest`, no size cap, zero memory accumulation, partial-file cleanup on failure.
 
 - [ ] **Step 1: Write the failing test**
 
 In `test/core_regression_test.dart`:
 
 ```dart
-test('DL1: streaming download enforces 200MB cap and writes directly to file', () async {
+test('DL1: streaming download writes directly to disk with no size cap', () async {
   final tempDir = Directory.systemTemp.createTempSync('dl1_test');
   final dest = '${tempDir.path}/test_out.bin';
-  addTearDown(() => tempDir.deleteSync(recursive: true));
+  addTearDown(() {
+    if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+  });
 
-  // Test cap check pure helper
-  final result = await AgentService.downloadStreamHelperForTest(
-    dataStream: Stream.value(List<int>.filled(1024, 65)),
-    destPath: dest,
-    maxBytes: 512,
+  // A payload far larger than any old cap streams through untouched.
+  final bigChunks = Stream<List<int>>.fromIterable(
+    List.generate(64, (_) => List<int>.filled(64 * 1024, 65)),
   );
-  expect(result, contains('file too large'));
-  expect(File(dest).existsSync(), isFalse);
-
-  // Under cap -> file written
   final okResult = await AgentService.downloadStreamHelperForTest(
-    dataStream: Stream.value(List<int>.filled(256, 66)),
+    dataStream: bigChunks,
     destPath: dest,
-    maxBytes: 512,
   );
   expect(okResult, contains('downloaded ✓'));
-  expect(File(dest).lengthSync(), equals(256));
+  expect(File(dest).lengthSync(), equals(64 * 64 * 1024));
+
+  // A mid-stream error deletes the partial file instead of leaving junk.
+  final failing = Stream<List<int>>.fromIterable([
+    List<int>.filled(128, 66),
+  ]).asyncExpand((c) async* {
+    yield c;
+    throw const SocketException('connection reset');
+  });
+  final failResult = await AgentService.downloadStreamHelperForTest(
+    dataStream: failing,
+    destPath: dest,
+  );
+  expect(failResult, contains('download failed'));
+  expect(File(dest).existsSync(), isFalse);
 });
 ```
 
@@ -524,11 +535,14 @@ Expected: FAIL with "downloadStreamHelperForTest isn't defined".
 
 In `lib/core/agent_service.dart`:
 ```dart
+  /// Stream [dataStream] straight to [destPath] in whatever chunks arrive.
+  /// There is no artificial size cap: the only limit is real free space, and
+  /// a write failure (ENOSPC or a dropped connection) deletes the partial
+  /// file and reports honestly.
   @visibleForTesting
   static Future<String> downloadStreamHelperForTest({
     required Stream<List<int>> dataStream,
     required String destPath,
-    int maxBytes = 200 * 1024 * 1024,
   }) async {
     final f = File(destPath);
     if (f.existsSync()) f.deleteSync();
@@ -537,19 +551,16 @@ In `lib/core/agent_service.dart`:
     int received = 0;
     try {
       await for (final chunk in dataStream) {
-        received += chunk.length;
-        if (received > maxBytes) {
-          await sink.close();
-          if (f.existsSync()) f.deleteSync();
-          return 'file too large (${received} bytes, cap ${maxBytes ~/ (1024 * 1024)}MB)';
-        }
         sink.add(chunk);
+        received += chunk.length;
       }
       await sink.flush();
       await sink.close();
       return 'downloaded ✓ · ${f.uri.pathSegments.last} · $received bytes';
     } catch (e) {
-      await sink.close();
+      try {
+        await sink.close();
+      } catch (_) {}
       if (f.existsSync()) f.deleteSync();
       return 'download failed: $e';
     }
@@ -581,10 +592,13 @@ Update `_handleBrowserDownload`:
       if (resp.statusCode != 200) {
         return 'download failed (HTTP ${resp.statusCode})';
       }
+      final total = resp.contentLength;
+      if (total > 0) {
+        _emit('nav', 'downloading: $name (${(total / (1024 * 1024)).toStringAsFixed(1)} MB)');
+      }
       final res = await downloadStreamHelperForTest(
         dataStream: resp,
         destPath: safe,
-        maxBytes: 200 * 1024 * 1024,
       );
       if (res.contains('downloaded ✓')) {
         _recordProduced(safe, File(safe).lengthSync());
@@ -606,12 +620,13 @@ Expected: PASS.
 
 ```bash
 git add lib/core/agent_service.dart test/core_regression_test.dart
-git commit -m "feat: streaming browser download with 200MB cap"
+git commit -m "feat: uncapped streaming browser download"
 ```
+
 
 ---
 
-### Task 6: Chunked browser file uploads (50MB cap)
+### Task 6: Chunked browser file uploads (uncapped)
 
 **Files:**
 - Modify: `lib/core/agent_service.dart:8565-8615` (`_handleBrowserUpload` chunked)
@@ -619,24 +634,33 @@ git commit -m "feat: streaming browser download with 200MB cap"
 
 **Interfaces:**
 - Consumes: `containedPath`, `_sessionWorkDir`, `BrowserTab.controller`
-- Produces: `AgentService.chunkFileForUploadForTest`, 50MB upload cap, 256KB base64 chunked JS staging.
+- Produces: `AgentService.chunkFileForUploadForTest`, no upload cap, 256KB base64 chunked JS staging via streaming reads.
 
 - [ ] **Step 1: Write the failing test**
 
 In `test/core_regression_test.dart`:
 
 ```dart
-test('UP1: upload chunking splits bytes into 256KB segments and enforces 50MB cap', () {
+test('UP1: upload chunking splits bytes into 256KB segments with no size cap', () {
   final small = Uint8List(500 * 1024); // 500KB
   final chunks = AgentService.chunkFileForUploadForTest(small, chunkSize: 256 * 1024);
   expect(chunks.length, equals(2));
   expect(chunks[0].length, equals(256 * 1024));
   expect(chunks[1].length, equals(244 * 1024));
 
-  final isAllowed = AgentService.isUploadSizeAllowedForTest(50 * 1024 * 1024);
-  expect(isAllowed, isTrue);
-  final isExceeded = AgentService.isUploadSizeAllowedForTest(50 * 1024 * 1024 + 1);
-  expect(isExceeded, isFalse);
+  // Exact multiples produce no trailing empty chunk.
+  final exact = Uint8List(512 * 1024);
+  final exactChunks = AgentService.chunkFileForUploadForTest(exact, chunkSize: 256 * 1024);
+  expect(exactChunks.length, equals(2));
+
+  // An empty file yields no chunks rather than one empty chunk.
+  expect(AgentService.chunkFileForUploadForTest(Uint8List(0)), isEmpty);
+
+  // Sizes far beyond any old cap still chunk cleanly — no ceiling exists.
+  final huge = Uint8List(3 * 1024 * 1024);
+  final hugeChunks = AgentService.chunkFileForUploadForTest(huge, chunkSize: 256 * 1024);
+  expect(hugeChunks.length, equals(12));
+  expect(hugeChunks.fold<int>(0, (a, c) => a + c.length), equals(huge.length));
 });
 ```
 
@@ -649,6 +673,9 @@ Expected: FAIL with "chunkFileForUploadForTest isn't defined".
 
 In `lib/core/agent_service.dart`:
 ```dart
+  /// Split [bytes] into upload chunks. There is no size cap — chunking is
+  /// what removes the JS string-length wall, so any file the device can
+  /// store can be staged.
   @visibleForTesting
   static List<Uint8List> chunkFileForUploadForTest(Uint8List bytes, {int chunkSize = 256 * 1024}) {
     final List<Uint8List> chunks = [];
@@ -658,10 +685,6 @@ In `lib/core/agent_service.dart`:
     }
     return chunks;
   }
-
-  @visibleForTesting
-  static bool isUploadSizeAllowedForTest(int size, {int maxBytes = 50 * 1024 * 1024}) =>
-      size <= maxBytes;
 ```
 
 Update `_handleBrowserUpload`:
@@ -677,36 +700,40 @@ Update `_handleBrowserUpload`:
     }
     final f = File(safe);
     if (!f.existsSync()) return 'No file "$rel" in the session workspace.';
-    if (!isUploadSizeAllowedForTest(f.lengthSync())) {
-      return 'file too large for upload (cap 50MB)';
-    }
     final tab = _activeTab;
     tab.controller ??= controllerForTab(tab);
+    final fname = safe.split('/').last.replaceAll("'", '');
     try {
-      final bytes = await f.readAsBytes();
-      final chunks = chunkFileForUploadForTest(bytes);
-      final fname = safe.split('/').last.replaceAll("'", '');
-
-      // Initialize buffer on window
+      // Stream the file so the whole thing is never resident in Dart memory;
+      // each 256KB slice is base64'd and pushed into a JS-side buffer.
       await tab.controller!.runJavaScript('window.__ovidUploadBuf = [];');
-      for (final chunk in chunks) {
-        final b64 = base64Encode(chunk);
-        await tab.controller!.runJavaScript(
-          'window.__ovidUploadBuf.push(${jsonEncode(b64)});',
-        );
+      int staged = 0;
+      await for (final slice in f.openRead()) {
+        for (final chunk in chunkFileForUploadForTest(Uint8List.fromList(slice))) {
+          await tab.controller!.runJavaScript(
+            'window.__ovidUploadBuf.push(${jsonEncode(base64Encode(chunk))});',
+          );
+          staged += chunk.length;
+        }
       }
 
       final jsFinalize = '''
 (() => {
   const el = document.querySelector(${jsonEncode(sel)});
-  if (!el) return 'no element: $sel';
-  if (el.tagName.toLowerCase() !== 'input' || el.type !== 'file') return 'not a file input: $sel';
+  if (!el) { window.__ovidUploadBuf = null; return 'no element: $sel'; }
+  if (el.tagName.toLowerCase() !== 'input' || el.type !== 'file') {
+    window.__ovidUploadBuf = null;
+    return 'not a file input: $sel';
+  }
   const parts = window.__ovidUploadBuf || [];
   window.__ovidUploadBuf = null;
-  const binary = parts.map(b => atob(b)).join('');
-  const arr = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) arr[i] = binary.charCodeAt(i);
-  const file = new File([arr], ${jsonEncode(fname)});
+  const blobs = parts.map(b => {
+    const bin = atob(b);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return arr;
+  });
+  const file = new File(blobs, ${jsonEncode(fname)});
   const dt = new DataTransfer();
   dt.items.add(file);
   el.files = dt.files;
@@ -715,9 +742,12 @@ Update `_handleBrowserUpload`:
   return 'staged ' + ${jsonEncode(fname)};
 })()''';
       final r = await tab.controller!.runJavaScriptReturningResult(jsFinalize);
-      _emit('shell', 'upload $rel → $sel');
+      _emit('shell', 'upload $rel → $sel ($staged bytes)');
       return r.toString();
     } catch (e) {
+      try {
+        await tab.controller!.runJavaScript('window.__ovidUploadBuf = null;');
+      } catch (_) {}
       return 'upload failed: $e';
     }
   }
@@ -732,8 +762,9 @@ Expected: PASS.
 
 ```bash
 git add lib/core/agent_service.dart test/core_regression_test.dart
-git commit -m "feat: chunked browser upload with 50MB cap"
+git commit -m "feat: uncapped chunked browser upload"
 ```
+
 
 ---
 
@@ -989,295 +1020,296 @@ git commit -m "feat: AgentMode.control with rank 4 and cold-start fallback"
 
 ---
 
-### Task 9: Phase A in-app control tools (`device_tap`, `device_type`, `device_swipe`, `device_snapshot`)
+### Task 9: Android device-control bridge (AccessibilityService + cached node tree)
 
 **Files:**
-- Modify: `lib/core/agent_service.dart:6360-6420` (add tool dispatch cases)
-- Modify: `lib/core/agent_service.dart:7160-7240` (implement `device_*` handlers)
-- Modify: `lib/core/agent_service.dart:7940-7970` (`_readOnlyBlock`)
-- Modify: `lib/core/agent_service.dart:9280-9300` (`_mutatingTools`)
-- Modify: `lib/core/agent_service.dart:2160-2260` (tool schemas & titles)
+- Create: `android/app/src/main/kotlin/com/dhanuk/ovidai/OvidAccessibilityService.kt`
+- Create: `android/app/src/main/res/xml/ovid_accessibility_service.xml`
+- Modify: `android/app/src/main/AndroidManifest.xml` (register service)
+- Modify: `android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt` (MethodChannel bridge)
 - Test: `test/core_regression_test.dart`
 
 **Interfaces:**
-- Consumes: `AgentMode.control`, `_activeTab`, `BrowserTab.controller`
-- Produces: `device_tap`, `device_type`, `device_swipe`, `device_snapshot`; all denied in read-only and plan mode, and denied when not in control mode.
+- Consumes: Android `AccessibilityService`, `AccessibilityNodeInfo`, `dispatchGesture`, `performGlobalAction`, API 30 `takeScreenshot`.
+- Produces native channel methods: `deviceServiceEnabled`, `deviceOpenAccessibilitySettings`, `deviceRead`, `deviceTap`, `deviceType`, `deviceSwipe`, `deviceSystemNav`, `deviceScreenshot`.
+- `deviceRead` returns `{status, package, window, full, added, changed, removed}`; node rows contain stable `handle`, class, text, description, viewId, bounds, clickable/editable/scrollable/password/checked/focused flags.
 
-- [ ] **Step 1: Write the failing test**
-
-In `test/core_regression_test.dart`:
+- [ ] **Step 1: Write the failing source-contract test**
 
 ```dart
-test('CTRL2: device_* tools denied in read-only, plan mode, and non-control modes', () async {
+test('CTRL2: native accessibility service supports cached reads, global nav, gestures, and screenshots', () {
+  final service = File(
+    'android/app/src/main/kotlin/com/dhanuk/ovidai/OvidAccessibilityService.kt',
+  );
+  expect(service.existsSync(), isTrue);
+  final src = service.readAsStringSync();
+  expect(src, contains('class OvidAccessibilityService : AccessibilityService()'));
+  expect(src, contains('TYPE_WINDOW_CONTENT_CHANGED'));
+  expect(src, contains('TYPE_WINDOW_STATE_CHANGED'));
+  expect(src, contains('dirty = true'));
+  expect(src, contains('rootInActiveWindow'));
+  expect(src, contains('GLOBAL_ACTION_BACK'));
+  expect(src, contains('GLOBAL_ACTION_HOME'));
+  expect(src, contains('GLOBAL_ACTION_RECENTS'));
+  expect(src, contains('dispatchGesture'));
+  expect(src, contains('takeScreenshot'));
+
+  final manifest = File('android/app/src/main/AndroidManifest.xml').readAsStringSync();
+  expect(manifest, contains('.OvidAccessibilityService'));
+  expect(manifest, contains('android.permission.BIND_ACCESSIBILITY_SERVICE'));
+  expect(manifest, contains('android.accessibilityservice.AccessibilityService'));
+
+  final config = File(
+    'android/app/src/main/res/xml/ovid_accessibility_service.xml',
+  ).readAsStringSync();
+  expect(config, contains('typeWindowStateChanged|typeWindowContentChanged'));
+  expect(config, contains('canRetrieveWindowContent="true"'));
+  expect(config, contains('canPerformGestures="true"'));
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `/home/ubuntu/sdk/flutter/bin/flutter test test/core_regression_test.dart --plain-name "CTRL2"`
+Expected: FAIL because `OvidAccessibilityService.kt` does not exist.
+
+- [ ] **Step 3: Implement the native service and bridge**
+
+Create the service with these exact invariants:
+
+```kotlin
+class OvidAccessibilityService : AccessibilityService() {
+    companion object {
+        @Volatile var instance: OvidAccessibilityService? = null
+            private set
+    }
+
+    private var dirty = true
+    private var windowSignature = ""
+    private var previousRows = linkedMapOf<String, Map<String, Any?>>()
+    private val nodesByHandle = mutableMapOf<Int, AccessibilityNodeInfo>()
+    private val handlesByStableKey = mutableMapOf<String, Int>()
+    private var nextHandle = 1
+
+    override fun onServiceConnected() { instance = this; dirty = true }
+    override fun onDestroy() { clearNodeHandles(); instance = null; super.onDestroy() }
+    override fun onInterrupt() = Unit
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        when (event?.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> dirty = true
+        }
+    }
+}
+```
+
+Implement `readScreen(forceFull: Boolean)` so it:
+
+1. Returns `status=unchanged` without traversing if `!dirty && !forceFull`.
+2. Traverses `rootInActiveWindow` only on demand, depth-first, max 300 visible/non-zero nodes and max depth 30.
+3. Derives a stable key from `viewIdResourceName|className|text|contentDescription|bounds` and reuses its integer handle.
+4. Keeps `AccessibilityNodeInfo.obtain(node)` in `nodesByHandle`, recycling old entries on rebuild.
+5. Forces a full result when package/window signature changes; otherwise returns added/changed/removed delta maps.
+6. Sets `dirty=false` only after a successful build.
+
+Implement actions:
+
+- `tap(handle,x,y)`: `ACTION_CLICK` on handle when supplied; otherwise `dispatchGesture` tap.
+- `type(handle,text,submit)`: refuse nodes where `isPassword`; use `ACTION_SET_TEXT` bundle; submit with `ACTION_IME_ENTER` when available.
+- `swipe(from,to,duration)`: `GestureDescription.StrokeDescription`.
+- `systemNav(action)`: exact map `back/home/recents/notifications/quick_settings` to `GLOBAL_ACTION_*`.
+- `takeScreen(result)`: API 30 `takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, ...)`, write PNG under `cacheDir/device-captures/`, return absolute path; lower APIs return an unsupported error.
+
+Register the service in the manifest:
+
+```xml
+<service
+    android:name=".OvidAccessibilityService"
+    android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+    android:exported="true">
+    <intent-filter>
+        <action android:name="android.accessibilityservice.AccessibilityService" />
+    </intent-filter>
+    <meta-data
+        android:name="android.accessibilityservice"
+        android:resource="@xml/ovid_accessibility_service" />
+</service>
+```
+
+Create `res/xml/ovid_accessibility_service.xml`:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:notificationTimeout="100"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"
+    android:canTakeScreenshot="true"
+    android:description="@string/ovid_accessibility_description" />
+```
+
+Add `ovid_accessibility_description` to `res/values/strings.xml` (create it if absent) and route every native channel method in `MainActivity.configureFlutterEngine`. `deviceOpenAccessibilitySettings` starts `Settings.ACTION_ACCESSIBILITY_SETTINGS`; all other methods return `SERVICE_DISABLED` when `instance == null`.
+
+- [ ] **Step 4: Verify focused test and Android compilation**
+
+Run: `/home/ubuntu/sdk/flutter/bin/flutter test test/core_regression_test.dart --plain-name "CTRL2"`
+Expected: PASS.
+
+Run: `/home/ubuntu/sdk/flutter/bin/flutter build apk --debug`
+Expected: `Built build/app/outputs/flutter-apk/app-debug.apk`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add android/app/src/main/kotlin/com/dhanuk/ovidai/OvidAccessibilityService.kt android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt android/app/src/main/AndroidManifest.xml android/app/src/main/res/xml/ovid_accessibility_service.xml android/app/src/main/res/values/strings.xml test/core_regression_test.dart
+git commit -m "feat: Android accessibility control bridge and cached screen tree"
+```
+
+---
+
+### Task 10: Device-control tools, safety gates, disclosure, and screenshot fallback
+
+**Files:**
+- Create: `lib/core/device_control_service.dart`
+- Modify: `lib/core/state.dart` (denylist and disclosure constants)
+- Modify: `lib/core/agent_service.dart` (schemas, dispatch, gates, handlers)
+- Modify: `lib/core/commands.dart` and `lib/ui/chat_screen.dart` (control disclosure flow)
+- Test: `test/core_regression_test.dart`
+
+**Interfaces:**
+- Consumes native methods from Task 9 and `AgentMode.control` from Task 8.
+- Produces `DeviceControlService.I`, `device_read`, `device_tap`, `device_type`, `device_swipe`, `device_system_nav`, `device_screenshot`.
+- All device tools are denied by Read-Only and plan mode, denied unless mode is `control`, denied on sensitive packages/domains, and never available to subagents.
+
+- [ ] **Step 1: Write failing behavioral tests**
+
+```dart
+test('CTRL3: all device tools are read-only blocked and require Control mode', () async {
   final app = AppState.I;
-  final s = ChatSession(id: 'ctrl2', title: 'S', model: 'm', mode: 'safe');
+  final s = ChatSession(id: 'ctrl3', title: 'S', model: 'm', mode: 'safe');
   app.sessions.insert(0, s);
   app.activeSessionId = s.id;
   AgentService.setRunSessionForTest(s.id);
   addTearDown(() {
     AgentService.setRunSessionForTest('');
-    app.sessions.removeWhere((x) => x.id == 'ctrl2');
+    app.sessions.removeWhere((x) => x.id == 'ctrl3');
   });
-
-  // Read-only block
-  expect(await AgentService.I.dispatchForTest('device_tap', {'selector': 'button'}), contains('READ-ONLY MODE'));
-  expect(await AgentService.I.dispatchForTest('device_type', {'text': 'hello'}), contains('READ-ONLY MODE'));
-  expect(await AgentService.I.dispatchForTest('device_swipe', {'from_x': 0, 'from_y': 0, 'to_x': 10, 'to_y': 10}), contains('READ-ONLY MODE'));
-  expect(await AgentService.I.dispatchForTest('device_snapshot', {}), contains('READ-ONLY MODE'));
-
-  // Switch to auto mode -> must be denied because not in control mode
+  for (final tool in [
+    'device_read', 'device_tap', 'device_type', 'device_swipe',
+    'device_system_nav', 'device_screenshot',
+  ]) {
+    expect(await AgentService.I.dispatchForTest(tool, {}), contains('READ-ONLY MODE'));
+  }
   s.mode = 'auto';
-  expect(await AgentService.I.dispatchForTest('device_tap', {'selector': 'button'}), contains('requires Control mode'));
+  expect(await AgentService.I.dispatchForTest('device_read', {}), contains('requires Control mode'));
+});
+
+test('CTRL4: node rows and deltas format compactly without screenshots', () {
+  final full = DeviceControlService.formatReadResultForTest({
+    'status': 'ok', 'full': true, 'package': 'com.example',
+    'added': [
+      {'handle': 12, 'class': 'Button', 'text': 'Send', 'bounds': [880,1520,1010,1600], 'clickable': true},
+    ], 'changed': [], 'removed': [],
+  });
+  expect(full, contains('[12] Button "Send"'));
+  expect(full, contains('clickable'));
+
+  final delta = DeviceControlService.formatReadResultForTest({
+    'status': 'ok', 'full': false, 'package': 'com.example',
+    'added': [{'handle': 22, 'class': 'Toast', 'text': 'Message sent'}],
+    'changed': [], 'removed': [12],
+  });
+  expect(delta, contains('+ [22] Toast "Message sent"'));
+  expect(delta, contains('- [12]'));
+  expect(DeviceControlService.formatReadResultForTest({'status': 'unchanged'}), 'screen unchanged');
+});
+
+test('SAFE1: control blocks sensitive packages/domains and password typing', () {
+  expect(DeviceControlService.isSensitiveTargetForTest(packageName: 'com.paypal.android.p2pmobile'), isTrue);
+  expect(DeviceControlService.isSensitiveTargetForTest(url: 'https://www.wise.com/send'), isTrue);
+  expect(DeviceControlService.isSensitiveTargetForTest(packageName: 'com.example.notes'), isFalse);
+  expect(kControlModeDisclosure, contains('Back / Home / Recents'));
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `/home/ubuntu/sdk/flutter/bin/flutter test test/core_regression_test.dart --plain-name "CTRL2"`
-Expected: FAIL with "unknown tool".
+Run: `/home/ubuntu/sdk/flutter/bin/flutter test test/core_regression_test.dart --plain-name "CTRL3|CTRL4|SAFE1"`
+Expected: compile failures for missing `DeviceControlService` and unknown tools.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Implement Dart bridge and compact formatter**
 
-In `lib/core/agent_service.dart`:
-Add `device_tap`, `device_type`, `device_swipe`, `device_snapshot` to `_mutatingTools` and `_readOnlyBlock`'s denied list.
+Create `DeviceControlService` with `MethodChannel('ovid/native')` methods matching Task 9. `read(full:false)` invokes `deviceRead` and calls `formatReadResultForTest`; if the result has no meaningful nodes, append exactly:
 
-Add tool dispatch cases:
-```dart
-      case 'device_tap':
-      case 'device_type':
-      case 'device_swipe':
-      case 'device_snapshot':
-        if (mode != AgentMode.control) {
-          return 'DENIED: Tool "$name" requires Control mode.';
-        }
-        return await _handleDeviceControlTool(name, args);
-```
+`Screen exposes no readable structure. Use device_screenshot if the current model supports images.`
 
-Implement `_handleDeviceControlTool`:
-```dart
-  Future<String> _handleDeviceControlTool(String name, Map<String, dynamic> args) async {
-    final tab = _activeTab;
-    if (tab.controller == null && browserTabs.isEmpty) {
-      return 'Control surface not available — open a page first (browser_open).';
-    }
-    tab.controller ??= controllerForTab(tab);
+The formatter emits full rows with no blank attributes and delta prefixes `+`, `~`, `-`. It never requests a screenshot itself. Screenshot use remains explicit, so repeated actions do not burn image tokens.
 
-    switch (name) {
-      case 'device_snapshot':
-        return await _handleBrowserSnapshot();
-
-      case 'device_tap':
-        final sel = args['selector'] as String?;
-        final x = args['x'] as num?;
-        final y = args['y'] as num?;
-        final js = sel != null
-            ? '''
-(() => {
-  const el = document.querySelector(${jsonEncode(sel)});
-  if (!el) return 'no element: $sel';
-  el.scrollIntoView({block:'center', behavior:'instant'});
-  const r = el.getBoundingClientRect();
-  const cx = r.left + r.width / 2;
-  const cy = r.top + r.height / 2;
-  const opts = {clientX: cx, clientY: cy, bubbles: true};
-  el.dispatchEvent(new PointerEvent('pointerdown', opts));
-  el.dispatchEvent(new MouseEvent('mousedown', opts));
-  el.dispatchEvent(new PointerEvent('pointerup', opts));
-  el.dispatchEvent(new MouseEvent('mouseup', opts));
-  el.click();
-  return 'tapped ' + ${jsonEncode(sel)};
-})()'''
-            : '''
-(() => {
-  const cx = ${x ?? 0}, cy = ${y ?? 0};
-  const el = document.elementFromPoint(cx, cy) || document.body;
-  const opts = {clientX: cx, clientY: cy, bubbles: true};
-  el.dispatchEvent(new PointerEvent('pointerdown', opts));
-  el.dispatchEvent(new PointerEvent('pointerup', opts));
-  el.click();
-  return 'tapped at (' + cx + ',' + cy + ')';
-})()''';
-        final r = await tab.controller!.runJavaScriptReturningResult(js);
-        _emit('shell', 'device tap');
-        return r.toString();
-
-      case 'device_type':
-        final sel = args['selector'] as String?;
-        final text = (args['text'] as String? ?? '');
-        final submit = args['submit'] as bool? ?? false;
-        final js = '''
-(() => {
-  const el = ${sel != null ? 'document.querySelector(${jsonEncode(sel)})' : 'document.activeElement || document.body'};
-  if (!el) return 'no element found';
-  if (el.focus) el.focus();
-  if ('value' in el) {
-    el.value = ${jsonEncode(text)};
-    el.dispatchEvent(new Event('input', {bubbles:true}));
-    el.dispatchEvent(new Event('change', {bubbles:true}));
-  }
-  ${submit ? '''
-  const form = el.closest('form');
-  if (form) { form.requestSubmit ? form.requestSubmit() : form.submit(); }
-  else {
-    el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
-    el.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
-  }''' : ''}
-  return 'typed into control target';
-})()''';
-        final r = await tab.controller!.runJavaScriptReturningResult(js);
-        _emit('shell', 'device type');
-        return r.toString();
-
-      case 'device_swipe':
-        final fx = args['from_x'] as num;
-        final fy = args['from_y'] as num;
-        final tx = args['to_x'] as num;
-        final ty = args['to_y'] as num;
-        final steps = (args['steps'] as num? ?? 5).toInt().clamp(1, 20);
-        final js = '''
-(() => {
-  const el = document.elementFromPoint($fx, $fy) || document.body;
-  el.dispatchEvent(new PointerEvent('pointerdown', {clientX: $fx, clientY: $fy, bubbles: true}));
-  for (let i = 1; i <= $steps; i++) {
-    const cx = $fx + ($tx - $fx) * (i / $steps);
-    const cy = $fy + ($ty - $fy) * (i / $steps);
-    el.dispatchEvent(new PointerEvent('pointermove', {clientX: cx, clientY: cy, bubbles: true}));
-  }
-  el.dispatchEvent(new PointerEvent('pointerup', {clientX: $tx, clientY: $ty, bubbles: true}));
-  return 'swiped ($fx,$fy) -> ($tx,$ty)';
-})()''';
-        final r = await tab.controller!.runJavaScriptReturningResult(js);
-        _emit('shell', 'device swipe');
-        return r.toString();
-
-      default:
-        return 'unknown device tool: $name';
-    }
-  }
-```
-
-Add schemas to `_coreTools`:
-```dart
-  'device_tap' => {
-    'name': 'device_tap',
-    'description': 'Simulate tap or click on active control tab at selector or coordinates.',
-    'parameters': {
-      'type': 'object',
-      'properties': {
-        'selector': {'type': 'string', 'description': 'CSS selector'},
-        'x': {'type': 'number', 'description': 'X viewport coordinate'},
-        'y': {'type': 'number', 'description': 'Y viewport coordinate'},
-      },
-    },
-  },
-  'device_type': ...
-  'device_swipe': ...
-  'device_snapshot': ...
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `/home/ubuntu/sdk/flutter/bin/flutter test test/core_regression_test.dart --plain-name "CTRL2"`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add lib/core/agent_service.dart test/core_regression_test.dart
-git commit -m "feat: Phase A in-app control tools with double gating"
-```
-
----
-
-### Task 10: Control safety guardrails (Sensitive domain denylist & Phase B gate)
-
-**Files:**
-- Modify: `lib/core/state.dart:40-60` (`kEnableDeviceControl`, `kDeniedControlDomains`)
-- Modify: `lib/core/agent_service.dart:7160-7190` (denylist check in `_handleDeviceControlTool`)
-- Modify: `lib/ui/chat_screen.dart:2100-2130` (control mode disclosure card)
-- Test: `test/core_regression_test.dart`
-
-**Interfaces:**
-- Consumes: `kDeniedControlDomains`, `kEnableDeviceControl`
-- Produces: Blocking device control tools on sensitive banking/payment domains; in-chat disclosure message.
-
-- [ ] **Step 1: Write the failing test**
-
-In `test/core_regression_test.dart`:
+Add constants in `state.dart`:
 
 ```dart
-test('SAFE1: control tools block execution on sensitive domains and Phase B is gated off', () async {
-  expect(kEnableDeviceControl, isFalse);
-
-  final isBlocked = AgentService.isDomainBlockedForControlForTest('https://www.paypal.com/signin');
-  expect(isBlocked, isTrue);
-
-  final isAllowed = AgentService.isDomainBlockedForControlForTest('https://example.com');
-  expect(isAllowed, isFalse);
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `/home/ubuntu/sdk/flutter/bin/flutter test test/core_regression_test.dart --plain-name "SAFE1"`
-Expected: FAIL with "kEnableDeviceControl isn't defined".
-
-- [ ] **Step 3: Write minimal implementation**
-
-In `lib/core/state.dart`:
-```dart
-/// Phase B device-wide accessibility control compile-time gate.
-const bool kEnableDeviceControl = false;
-
-/// Sensitive domains where automated control mode is blocked.
-const List<String> kDeniedControlDomains = [
-  'paypal.com',
-  'wise.com',
-  'chase.com',
-  'bankofamerica.com',
-  'wellsfargo.com',
-  'citigroup.com',
-  'capitalone.com',
+const kDeniedControlDomains = <String>[
+  'paypal.com', 'wise.com', 'chase.com', 'bankofamerica.com',
+  'wellsfargo.com', 'citigroup.com', 'capitalone.com',
 ];
-
-/// User-visible disclosure text when switching to Control mode.
-const String kControlModeDisclosure =
-    'Control mode lets Ovid operate the app on your behalf — tapping and typing '
-    'inside pages you opened. It never sees other apps in this version, never '
-    'autofills passwords, and every action is logged in this chat. You can switch '
-    'modes any time; switching down takes effect immediately.';
+const kDeniedControlPackages = <String>[
+  'com.paypal.android.p2pmobile', 'com.transferwise.android',
+  'com.chase.sig.android', 'com.infonow.bofa',
+  'com.wf.wellsfargomobile', 'com.citi.citimobile',
+  'com.konylabs.capitalone',
+];
+const kControlModeDisclosure =
+  'Control mode lets Ovid use your device the way you would. With your permission '
+  'it can read what is on screen and tap, type, swipe, and use Back / Home / Recents '
+  'in this app and in others. Screen content is sent only to the AI model you chose, '
+  'is not stored or shared, and banking/payment screens and password fields are blocked. '
+  'You enable this in Settings → Accessibility and can turn it off there at any time.';
 ```
 
-In `lib/core/agent_service.dart`:
+- [ ] **Step 4: Add schemas, dispatch, and safety gates**
+
+Add all six tool schemas with complete JSON schemas; `device_tap` accepts `node` or `x/y`, `device_type` requires `text` and accepts `node/submit`, `device_swipe` requires four coordinates and optional `duration_ms`, `device_system_nav` requires enum action, `device_read` accepts enum mode `delta|full`, screenshot has no args.
+
+Add all six to `_mutatingTools` and `_readOnlyBlock`. Dispatch before browser cases:
+
 ```dart
-  @visibleForTesting
-  static bool isDomainBlockedForControlForTest(String url) {
-    final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
-    for (final d in kDeniedControlDomains) {
-      if (host == d || host.endsWith('.$d')) return true;
-    }
-    return false;
+case 'device_read':
+case 'device_tap':
+case 'device_type':
+case 'device_swipe':
+case 'device_system_nav':
+case 'device_screenshot':
+  if (mode != AgentMode.control) {
+    return 'DENIED: Tool "$name" requires Control mode.';
   }
+  if (_runSession?.isSubagent == true) {
+    return 'DENIED: Subagents cannot control the device.';
+  }
+  return _handleDeviceControlTool(name, args);
 ```
 
-In `_handleDeviceControlTool`:
-```dart
-    final currentUrl = tab.url;
-    if (isDomainBlockedForControlForTest(currentUrl)) {
-      return 'BLOCKED: Automated control is restricted on sensitive domains for your security ($currentUrl).';
-    }
-```
+Before mutating actions, query current package from `deviceRead` metadata and call `isSensitiveTargetForTest`; for Ovid's package also check `_activeTab.url`. For `device_type`, native Task 9 password refusal is mandatory defense-in-depth. Each successful action calls `_emit('shell', ...)`. `device_screenshot` records the returned PNG with `_recordProduced`, returning its workspace/cache path plus `Read it with read_image before choosing coordinates.`
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 5: Add disclosure flow**
 
-Run: `/home/ubuntu/sdk/flutter/bin/flutter test test/core_regression_test.dart --plain-name "SAFE1"`
+When `/permission control confirm` or the mode picker selects Control, present a modal using `kControlModeDisclosure` with actions `Not now` and `Enable Control`. `Enable Control` calls `DeviceControlService.I.openAccessibilitySettings()`, then sets the session mode. Do not request or open accessibility settings at app launch. If service remains disabled, keep the selected mode but show an inline notice with a retry button.
+
+- [ ] **Step 6: Run focused and full verification**
+
+Run: `/home/ubuntu/sdk/flutter/bin/flutter test test/core_regression_test.dart --plain-name "CTRL3|CTRL4|SAFE1"`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+Run: `/home/ubuntu/sdk/flutter/bin/flutter test test/core_regression_test.dart`
+Expected: all tests pass.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add lib/core/state.dart lib/core/agent_service.dart lib/ui/chat_screen.dart test/core_regression_test.dart
-git commit -m "feat: control mode safety denylist and disclosure copy"
+git add lib/core/device_control_service.dart lib/core/state.dart lib/core/agent_service.dart lib/core/commands.dart lib/ui/chat_screen.dart test/core_regression_test.dart
+git commit -m "feat: device-wide control tools with node-tree vision and safety gates"
 ```
 
 ---
@@ -1314,11 +1346,11 @@ git commit -m "chore: full regression verification and integration check" --allo
 ## Self-Review
 
 1. **Spec coverage:**
-   - W1 (§2): Control mode architecture -> Task 8 (`AgentMode.control`, rank 4) & Task 9 (Phase A 4 tools)
+   - W1 (§2): Device-wide Control mode -> Task 8 (`AgentMode.control`, rank 4), Task 9 (native AccessibilityService), Task 10 (six agent tools)
    - W2 (§3): MCP/plugin re-init + tri-state health -> Task 3 (`ServiceHealth` model) & Task 4 (re-init wiring + UI)
-   - W3 (§4): Real browser file handling -> Task 5 (200MB streaming download) & Task 6 (50MB chunked upload) & Task 7 (file selector hook + SAF export)
+   - W3 (§4): Real browser file handling -> Task 5 (uncapped streaming download), Task 6 (uncapped chunked upload), Task 7 (file selector hook + SAF export)
    - W4 (§5): Queue / Stop / Keep-alive semantics -> Task 1 (keep-alive) & Task 2 (smart stop)
-   - W5 (§6): Play-safety guardrails -> Task 10 (denylist, disclosure copy)
-   - W6 (§2.4): Accessibility disclosure flow gated off -> Task 10 (`kEnableDeviceControl = false`)
+   - W5 (§6): Play-safety guardrails -> Task 9 (user-enabled service only) & Task 10 (package/domain denylist, password refusal, disclosure)
+   - W6 (§2.3): No repeated screenshots -> Task 9 (dirty flag, stable handles, node deltas) & Task 10 (`device_read` primary; explicit screenshot fallback)
 2. **Placeholder scan:** No TBD, no TODO, all exact paths, exact code blocks, exact terminal commands and assertions provided.
-3. **Type consistency:** `ServiceHealth { connecting, working, failed }`, `AgentMode.control`, `stopRequested({String? sessionId})`, `downloadStreamHelperForTest`, `isDomainBlockedForControlForTest` match exactly across all tasks.
+3. **Type consistency:** `ServiceHealth { connecting, working, failed }`, `AgentMode.control`, `stopRequested({String? sessionId})`, `downloadStreamHelperForTest`, `DeviceControlService`, and the six `device_*` tools match exactly across all tasks.
