@@ -345,7 +345,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 index: agent.activeTabIndex,
                 children: [
                   for (final t in agent.browserTabs)
-                    WebViewWidget(controller: agent.controllerForTab(t)),
+                    WebViewWidget(
+                      key: ValueKey('${t.url}_${t.desktopMode}'),
+                      controller: agent.controllerForTab(t),
+                    ),
                 ],
               ),
             ),

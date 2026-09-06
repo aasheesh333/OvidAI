@@ -29,6 +29,13 @@ import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+String readAgentServiceSourceForTest() {
+  final src = File('lib/core/agent_service.dart').readAsStringSync();
+  const marker = 'WebViewController controllerForTab(BrowserTab tab)';
+  final idx = src.indexOf(marker);
+  return idx >= 0 ? src.substring(idx) : src;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -2661,6 +2668,32 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(src, contains('el.scrollBy({top:'));
       expect(src, contains('totalSteps'));
       expect(src, contains("tag + ' | ' + text + ' | ' + cs + ' | ' + role + ' | ' + stateStr"));
+    });
+
+    test('desktop sets UA before first load and recreates on toggle', () async {
+      final fullSrc = File('lib/core/agent_service.dart').readAsStringSync();
+      final src = readAgentServiceSourceForTest();
+      expect(src.indexOf('setUserAgent(desktopUA)') < src.indexOf('loadRequest'), isTrue);
+      expect(fullSrc.contains('recreateControllerForDesktopToggle'), isTrue);
+    });
+
+    test('real desktop viewport platform channel and documentation copy are present', () async {
+      final agentSrc = File('lib/core/agent_service.dart').readAsStringSync();
+      final settingsSrc = File('lib/ui/settings_screen.dart').readAsStringSync();
+      const honestCopy = 'Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable)';
+
+      expect(agentSrc, contains(honestCopy));
+      expect(settingsSrc, contains(honestCopy));
+      expect(agentSrc, contains("MethodChannel('ovid/webview')"));
+      expect(agentSrc, contains('setDesktopViewport'));
+      expect(agentSrc, contains('applyDesktopViewport'));
+
+      final kotlinHandler = File('android/app/src/main/kotlin/com/dhanuk/ovidai/OvidWebViewHandler.kt').readAsStringSync();
+      expect(kotlinHandler, contains('"ovid/webview"'));
+      expect(kotlinHandler, contains('"setDesktopViewport"'));
+      expect(kotlinHandler, contains('useWideViewPort'));
+      expect(kotlinHandler, contains('loadWithOverviewMode'));
+      expect(kotlinHandler, contains('setSupportMultipleWindows'));
     });
 
     test('BRD: browser_desktop denied read-only and plan mode; setTabDesktopMode updates zoom and UA state', () async {
@@ -8480,13 +8513,14 @@ url = "https://api.example.com/mcp"
       expect(helper, isNot(-1), reason: '_applyTabZoom helper exists');
       expect(src.substring(helper, (helper + 600).clamp(0, src.length)),
           contains('style.zoom'));
-      // setTabDesktopMode must call the helper on the live controller.
+      // setTabDesktopMode recreates the controller fresh on toggle.
+      // Dropped wasted pre-reload _applyTabZoom; keep onPageFinished re-apply for zoom fallback.
       final idx = src.indexOf('Future<void> setTabDesktopMode');
       expect(idx, isNot(-1), reason: 'setTabDesktopMode exists');
       final end = src.indexOf('consoleBucketFor', idx);
       final body = src.substring(idx, end == -1 ? src.length : end);
-      expect(body, contains('_applyTabZoom'),
-          reason: 'setTabDesktopMode must apply zoom JS on the live controller');
+      expect(body, contains('recreateControllerForDesktopToggle'),
+          reason: 'setTabDesktopMode must recreate controller on toggle');
       // onPageFinished must re-apply the tab zoom (reload wipes it).
       final finished = src.indexOf('onPageFinished: (url)');
       expect(finished, isNot(-1));

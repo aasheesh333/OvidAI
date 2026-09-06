@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart' show IconData, Icons, Color;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -1094,6 +1095,12 @@ class AgentService extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> _loadTabUrl(BrowserTab tab, String url) {
+    final c = tab.controller;
+    if (c == null) return Future.value();
+    return c.loadRequest(Uri.parse(url));
+  }
+
   /// Agent-facing: open (or reuse) the session's LIVE PREVIEW tab — a
   /// local index.html rendered by the agent's `preview` tool. The tab is
   /// found by `isPreview` flag rather than URL so re-renders reload the
@@ -1137,10 +1144,10 @@ class AgentService extends ChangeNotifier {
     if (tab == null) {
       tab = _newTabInternal(url);
       tab.title = 'Dev server';
-      tab.controller?.loadRequest(Uri.parse(url));
+      controllerForTab(tab);
     } else if (tab.url != url) {
       tab.url = url;
-      tab.controller?.loadRequest(Uri.parse(url));
+      _loadTabUrl(tab, url);
     }
     activeTabIndex = browserTabs.indexOf(tab);
     _persistBrowserTabs();
@@ -1266,6 +1273,23 @@ class AgentService extends ChangeNotifier {
     notifyListeners();
   }
 
+  static const _webviewChannel = MethodChannel('ovid/webview');
+
+  /// Applies Android WebView WebSettings (wide viewport + overview mode)
+  /// for desktop layout viewport rendering. Falls back gracefully when
+  /// channel is unavailable (unit tests, non-Android, etc.).
+  static Future<bool> applyDesktopViewport(bool enabled) async {
+    try {
+      final res = await _webviewChannel.invokeMapMethod<String, dynamic>(
+        'setDesktopViewport',
+        {'enabled': enabled},
+      );
+      return res?['applied'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Inject the tab's logical zoom into the live page (browser_resize
   /// parity). Zoom is a per-document CSS property — setting [tab.zoom]
   /// alone changes nothing on screen, and every navigation/reload wipes
@@ -1280,29 +1304,34 @@ class AgentService extends ChangeNotifier {
     } catch (_) {}
   }
 
+  Future<void> recreateControllerForDesktopToggle(BrowserTab tab, {bool reload = true}) async {
+    // Clear old controller so WebView / WebSettings initialize fresh.
+    tab.controller = null;
+    tab.loadedOnce = false;
+    notifyListeners();
+    if (reload && tab.url.isNotEmpty && !tab.url.startsWith('ovid://')) {
+      final c = controllerForTab(tab);
+      if (tab.localPreviewPath != null) {
+        c.loadFile(tab.localPreviewPath!);
+      }
+      // Note: if tab.url starts with http, controllerForTab(tab) already invokes
+      // loadRequest(Uri.parse(tab.url)) when tab.loadedOnce was reset to false.
+    }
+  }
+
   Future<void> setTabDesktopMode(BrowserTab tab, bool desktop, {bool reload = true}) async {
     tab.desktopMode = desktop;
     if (desktop) {
       if (BrowserTab.devW > 0) {
         tab.zoom = (BrowserTab.devW / 1280).clamp(0.25, 3.0);
       }
-      if (tab.controller != null) {
-        await tab.controller!.setUserAgent(BrowserTab.desktopUserAgent);
-        await _applyTabZoom(tab);
-        if (reload && tab.loadedOnce) {
-          await tab.controller!.reload();
-        }
-      }
     } else {
       tab.zoom = 1.0;
-      if (tab.controller != null) {
-        await tab.controller!.setUserAgent(null);
-        await _applyTabZoom(tab);
-        if (reload && tab.loadedOnce) {
-          await tab.controller!.reload();
-        }
-      }
     }
+    // WebSettings.setUseWideViewPort takes effect at initialization / load time.
+    // Recreate controller fresh with new viewport settings and UA, dropping
+    // wasted pre-reload zoom while keeping zoom fallback on onPageFinished.
+    await recreateControllerForDesktopToggle(tab, reload: reload);
   }
 
   List<({DateTime at, String kind, String text})> consoleBucketFor(
@@ -1423,7 +1452,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
               // Move the tab to the target instead of launching outside:
               // the agent/user tapped it inside OUR browser, and the page
               // is usually a mobile web URL.
-              tab.controller?.loadRequest(Uri.parse(target));
+              _loadTabUrl(tab, target);
               return NavigationDecision.prevent;
             }
             if (uri.scheme != 'http' &&
@@ -1446,11 +1475,14 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       // Apply desktop viewport and user agent to tabs in desktopMode:
       // desktop = 1280px logical width via the same zoom mechanism
       // browser_resize uses; mobile (default) = device viewport (1.0).
+      final desktopUA = BrowserTab.desktopUserAgent;
       if (tab.desktopMode) {
         if (BrowserTab.devW > 0) {
           tab.zoom = (BrowserTab.devW / 1280).clamp(0.25, 3.0);
         }
-        tab.controller!.setUserAgent(BrowserTab.desktopUserAgent);
+        // Platform wide viewport setting before initial load.
+        unawaited(applyDesktopViewport(true));
+        tab.controller!.setUserAgent(desktopUA);
       }
       final previewPath = tab.localPreviewPath;
       if (previewPath != null) {
@@ -2522,7 +2554,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             'Set the browser viewport for responsive testing. width/height '
             'define the logical viewport (e.g. 1280x800 desktop, 390x844 '
             'phone); the tab renders at that logical size via zoom. Applies '
-            'to the active tab.',
+            'to the active tab. Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable).',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -2540,7 +2572,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         'description':
             'Switch the active tab between desktop and mobile mode. '
             'mode: desktop|mobile. Desktop sets a 1280px logical viewport '
-            'and desktop User-Agent, then reloads.',
+            'and desktop User-Agent, then reloads. '
+            'Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable).',
         'parameters': {
           'type': 'object',
           'properties': {

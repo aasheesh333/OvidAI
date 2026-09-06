@@ -229,7 +229,7 @@ class SettingsScreen extends StatelessWidget {
             icon: Icons.desktop_windows_outlined,
             title: 'Browser: desktop mode',
             subtitleOn:
-                'ON — new tabs render at a 1280px desktop viewport (zoom)',
+                'ON — Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable)',
             subtitleOff:
                 'OFF — new tabs use the device\'s mobile viewport (default)',
             getter: _getBrowserDesktop,
