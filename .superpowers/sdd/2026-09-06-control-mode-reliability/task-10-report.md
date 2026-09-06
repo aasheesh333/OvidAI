@@ -41,3 +41,36 @@ The first disclosure widget run also exposed a real bottom-sheet overflow. The m
 ## Android Aggregate Test Concern
 
 `./gradlew testDebugUnitTest` reached and passed `:app:testDebugUnitTest`, then failed in the third-party `flutter_plugin_android_lifecycle:testDebugUnitTest` Mockito setup (`FlutterLifecycleAdapterTest.java:26`). The isolated application JVM suite passes, and the debug APK builds successfully. Existing Gradle warnings also note deprecated Kotlin plugin configuration in several dependencies.
+
+## Review Follow-Up
+
+The Task 10 review identified inaccurate disclosure copy, metadata-only image handling, a screenshot-directory symlink escape, incomplete schemas, and unhandled Accessibility Settings launch errors.
+
+### Follow-Up RED Evidence
+
+- Focused Flutter tests initially failed to compile because the provider-consumable image queue did not exist.
+- The screenshot symlink regression demonstrated that the previous lexical destination could follow `device-screenshots` outside the workspace.
+- The disclosure UI test reproduced an uncaught `PlatformException(SETTINGS_FAILED)` from the settings launch.
+- The focused Android test initially failed to compile because password refusal was embedded in the Android node method and had no pure action-policy seam.
+
+### Follow-Up Changes
+
+- Replaced the inaccurate privacy claim with explicit disclosure that screen structure and screenshots may be stored in the chat/workspace, are sent to the selected provider, and are subject to that provider's retention policy.
+- `device_screenshot` and `read_image` now stage actual base64 `image_url` content in the current run's next [OI]-compatible chat-completions request. Known text-only or unknown models get an honest unsupported response instead.
+- Screenshot capture now canonicalizes the workspace, rejects a symlinked capture directory, verifies canonical containment, uses an unpredictable filename, and creates it exclusively before streaming bytes.
+- Every device schema now sets `additionalProperties: false`; `device_tap` publishes `anyOf` for either `node` or the `x`/`y` pair while retaining runtime validation.
+- Initial and retry Accessibility Settings launch failures are caught. Control remains selected; the UI displays a controlled snackbar and inline retry/error state.
+- Added a pure Android password-refusal policy seam and JVM regression coverage.
+
+### Follow-Up GREEN Evidence
+
+- Focused Flutter review tests (`CTRL3|CTRL4|SAFE1|CTRL5|CTRL6|CTRL7`): 8 passed.
+- Focused Android password-refusal JVM test: passed.
+- `flutter test test/core_regression_test.dart`: 407 passed.
+- Full `flutter test`: 407 passed.
+- `flutter analyze`: no issues found.
+- `./gradlew :app:testDebugUnitTest`: BUILD SUCCESSFUL.
+- `flutter build apk --debug`: built `build/app/outputs/flutter-apk/app-debug.apk`.
+- `git diff --check`: passed.
+- `reference-web` scan under `lib/` and `test/`: zero matches.
+- Aggregate `./gradlew testDebugUnitTest` still fails only in the third-party `flutter_plugin_android_lifecycle` Mockito test described above; the application JVM suite completes successfully.

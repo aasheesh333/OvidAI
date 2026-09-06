@@ -5649,10 +5649,18 @@ Future<void> _enableControlMode(BuildContext context) async {
     ),
   );
   if (accepted != true) return;
+  AgentService.I.setMode(AgentMode.control);
   try {
     await DeviceControlService.I.openAccessibilitySettings();
-  } finally {
-    AgentService.I.setMode(AgentMode.control);
+  } catch (_) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not open Accessibility Settings. Use the inline retry.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 }
 
@@ -5665,6 +5673,7 @@ class _ControlServiceNotice extends StatefulWidget {
 class _ControlServiceNoticeState extends State<_ControlServiceNotice>
     with WidgetsBindingObserver {
   bool? _enabled;
+  String? _error;
 
   @override
   void initState() {
@@ -5689,6 +5698,18 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
     if (mounted) setState(() => _enabled = enabled);
   }
 
+  Future<void> _retry() async {
+    try {
+      await DeviceControlService.I.openAccessibilitySettings();
+      if (mounted) setState(() => _error = null);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = 'Could not open Accessibility Settings.');
+      }
+    }
+    await _refresh();
+  }
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: AgentService.I,
@@ -5696,18 +5717,25 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
       if (AgentService.I.mode != AgentMode.control || _enabled != false) {
         return const SizedBox.shrink();
       }
-      return Row(
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.warning_amber_rounded, size: 15, color: Aether.warn),
-          const SizedBox(width: 5),
-          Expanded(child: Text('Control service is off', style: TextStyle(fontSize: 11, color: Aether.warn))),
-          TextButton(
-            onPressed: () async {
-              await DeviceControlService.I.openAccessibilitySettings();
-              await _refresh();
-            },
-            child: const Text('Open Accessibility Settings'),
+          Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, size: 15, color: Aether.warn),
+              const SizedBox(width: 5),
+              Expanded(child: Text('Control service is off', style: TextStyle(fontSize: 11, color: Aether.warn))),
+              TextButton(
+                onPressed: _retry,
+                child: const Text('Open Accessibility Settings'),
+              ),
+            ],
           ),
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 20),
+              child: Text(_error!, style: TextStyle(fontSize: 11, color: Aether.danger)),
+            ),
         ],
       );
     },

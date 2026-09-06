@@ -86,6 +86,13 @@ internal data class DeviceActionResult(
     val value: Any? = true,
 )
 
+internal fun passwordTypingRefusal(isPassword: Boolean): DeviceActionResult? =
+    if (isPassword) {
+        DeviceActionResult(false, "PASSWORD_FIELD", "Ovid will not type into password fields.")
+    } else {
+        null
+    }
+
 internal class TreeReadGeneration {
     private val eventGeneration = AtomicLong(1)
     private val builtGeneration = AtomicLong(0)
@@ -404,13 +411,7 @@ class OvidAccessibilityService : AccessibilityService() {
             if (handle != null && !node.refresh()) {
                 return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid.")
             }
-            if (node.isPassword) {
-                return DeviceActionResult(
-                    false,
-                    "PASSWORD_FIELD",
-                    "Ovid will not type into password fields.",
-                )
-            }
+            passwordTypingRefusal(node.isPassword)?.let { return it }
             if (!node.isEditable) {
                 return DeviceActionResult(false, "NOT_EDITABLE", "The selected node is not editable.")
             }

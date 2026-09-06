@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -436,6 +437,7 @@ class AgentRun {
   /// "Produced" panel data — files created/modified in this run
   /// (file_write / fs_edit create / commit), cleared per run.
   final List<({String path, int size})> produced = [];
+  final List<Map<String, dynamic>> pendingVisionMessages = [];
 
   /// Surface of the last model-layer failure for THIS run — HTTP status,
   /// network error, or timeout. Per-session: another session's failure
@@ -2509,7 +2511,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'device_read',
         'description': 'Read the foreground screen as accessibility nodes. Delta is default; this never takes a screenshot.',
-        'parameters': {'type': 'object', 'properties': {'mode': {'type': 'string', 'enum': ['delta', 'full']}}},
+        'parameters': {'type': 'object', 'properties': {'mode': {'type': 'string', 'enum': ['delta', 'full']}}, 'additionalProperties': false},
       },
     },
     {
@@ -2517,7 +2519,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'device_tap',
         'description': 'Tap a node handle (preferred) or x/y screen coordinates.',
-        'parameters': {'type': 'object', 'properties': {'node': {'type': 'integer'}, 'x': {'type': 'number'}, 'y': {'type': 'number'}}},
+        'parameters': {'type': 'object', 'properties': {'node': {'type': 'integer'}, 'x': {'type': 'number'}, 'y': {'type': 'number'}}, 'anyOf': [{'required': ['node']}, {'required': ['x', 'y']}], 'additionalProperties': false},
       },
     },
     {
@@ -2525,7 +2527,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'device_type',
         'description': 'Type into a node or focused editable field. Password fields are refused natively.',
-        'parameters': {'type': 'object', 'properties': {'node': {'type': 'integer'}, 'text': {'type': 'string'}, 'submit': {'type': 'boolean'}}, 'required': ['text']},
+        'parameters': {'type': 'object', 'properties': {'node': {'type': 'integer'}, 'text': {'type': 'string'}, 'submit': {'type': 'boolean'}}, 'required': ['text'], 'additionalProperties': false},
       },
     },
     {
@@ -2533,7 +2535,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'device_swipe',
         'description': 'Swipe between two screen coordinates.',
-        'parameters': {'type': 'object', 'properties': {'from_x': {'type': 'number'}, 'from_y': {'type': 'number'}, 'to_x': {'type': 'number'}, 'to_y': {'type': 'number'}, 'duration_ms': {'type': 'integer'}}, 'required': ['from_x', 'from_y', 'to_x', 'to_y']},
+        'parameters': {'type': 'object', 'properties': {'from_x': {'type': 'number'}, 'from_y': {'type': 'number'}, 'to_x': {'type': 'number'}, 'to_y': {'type': 'number'}, 'duration_ms': {'type': 'integer'}}, 'required': ['from_x', 'from_y', 'to_x', 'to_y'], 'additionalProperties': false},
       },
     },
     {
@@ -2541,7 +2543,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'device_system_nav',
         'description': 'Perform Android system navigation.',
-        'parameters': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['back', 'home', 'recents', 'notifications', 'quick_settings']}}, 'required': ['action']},
+        'parameters': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['back', 'home', 'recents', 'notifications', 'quick_settings']}}, 'required': ['action'], 'additionalProperties': false},
       },
     },
     {
@@ -2549,7 +2551,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'device_screenshot',
         'description': 'Explicitly capture foreground pixels into the session workspace as a fallback.',
-        'parameters': {'type': 'object', 'properties': {}},
+        'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': false},
       },
     },
     // ── Chrome DevTools MCP-style browser tools (inbuilt WebView) ──
@@ -5131,6 +5133,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     lastError = null;
     todoNudgeSent = false;
     _runResolved.produced.clear(); // "Produced" panel resets per run
+    _runResolved.pendingVisionMessages.clear();
     _runResolved.toolCallCounts.clear(); // repeat-tool reminder is per turn
     ctx.run.runEvents.clear();
     // todo dock: the checklist is cleared at the start of each USER
@@ -5661,6 +5664,7 @@ ${await _agentsMdBlock()}
           });
           turnsWithoutProgress++;
         }
+        _appendPendingVisionMessages(msgs);
       }
       _finalizeLive();
     } catch (e) {
@@ -9188,13 +9192,13 @@ ${await _agentsMdBlock()}
       return 'read_image: "$path" is not a raster image '
           '(supported: png/jpg/webp/gif/bmp)';
     }
-    final repoBytes = RepoCache.I.read(path);
-    List<int>? bytes =
-        repoBytes != null ? utf8.encode(repoBytes) : null;
+    final repoText = RepoCache.I.read(path);
+    List<int>? bytes = repoText != null ? utf8.encode(repoText) : null;
     var source = 'repo';
     if (bytes == null) {
-      final host = await _resolveFsPath(path);
-      if (host == null || host.startsWith('repo:')) {
+      final work = await _sessionWorkDir();
+      final host = await resolveBrowserUploadPathForTest(work, path);
+      if (host == null) {
         return 'file not found: $path';
       }
       try {
@@ -9205,9 +9209,70 @@ ${await _agentsMdBlock()}
       }
     }
     _emit('file', 'read image $path');
-    return 'IMAGE $path ($source): ${bytes.length} bytes, .$ext raster. '
-        '(v1 reports metadata; pixel-level vision blocks are a follow-up.)';
+    final staged = _stageVisionImage(
+      path: path,
+      bytes: bytes,
+      extension: ext,
+      reason: 'read_image',
+    );
+    if (!staged) {
+      return 'IMAGE $path ($source): ${bytes.length} bytes, .$ext raster. '
+          'The current model cannot read images. Switch to a vision-capable model.';
+    }
+    return 'IMAGE $path ($source): ${bytes.length} bytes, .$ext raster; '
+        'attached to the next model request as image data.';
   }
+
+  bool _modelSupportsImages(String model) {
+    final id = _baseModelOf(model).toLowerCase();
+    if (id.contains('deepseek') || id.contains('reasoner') ||
+        id.contains('codestral') || id.contains('o3-mini') ||
+        id.contains('gpt-oss')) {
+      return false;
+    }
+    return id.contains('gpt-4o') || id.contains('gpt-4.1') ||
+        id.contains('gemini') || id.contains('claude') ||
+        id.contains('grok') || id.contains('llama-4') ||
+        id.contains('vision') || id.contains('vl');
+  }
+
+  bool _stageVisionImage({
+    required String path,
+    required List<int> bytes,
+    required String extension,
+    required String reason,
+  }) {
+    final model = _runResolved.modelSnapshot ?? _runSession?.model ?? '';
+    if (!_modelSupportsImages(model)) return false;
+    final mime = switch (extension.toLowerCase()) {
+      'jpg' || 'jpeg' => 'image/jpeg',
+      'webp' => 'image/webp',
+      'gif' => 'image/gif',
+      'bmp' => 'image/bmp',
+      _ => 'image/png',
+    };
+    _runResolved.pendingVisionMessages.add({
+      'role': 'user',
+      'content': [
+        {'type': 'text', 'text': 'Image supplied by $reason: $path'},
+        {
+          'type': 'image_url',
+          'image_url': {'url': 'data:$mime;base64,${base64Encode(bytes)}'},
+        },
+      ],
+    });
+    return true;
+  }
+
+  void _appendPendingVisionMessages(List<Map<String, dynamic>> messages) {
+    if (_runResolved.pendingVisionMessages.isEmpty) return;
+    messages.addAll(_runResolved.pendingVisionMessages);
+    _runResolved.pendingVisionMessages.clear();
+  }
+
+  @visibleForTesting
+  void appendPendingVisionMessagesForTest(List<Map<String, dynamic>> messages) =>
+      _appendPendingVisionMessages(messages);
 
   Future<String> _handleDeviceControlTool(String name, Map<String, dynamic> args) async {
     final device = DeviceControlService.I;
@@ -9276,14 +9341,41 @@ ${await _agentsMdBlock()}
           final source = File(nativePath);
           if (!await source.exists()) return 'device_screenshot file was not found: $nativePath';
           final work = await _sessionWorkDir();
-          final destination = containedPath(work,
-              'device-screenshots/screen-${DateTime.now().millisecondsSinceEpoch}.png');
-          if (destination == null) return 'device_screenshot could not create a contained workspace path.';
-          await Directory(File(destination).parent.path).create(recursive: true);
-          final copied = await source.copy(destination);
-          _recordProduced(copied.path, await copied.length());
+          await work.create(recursive: true);
+          final canonicalWork = await work.resolveSymbolicLinks();
+          final captures = Directory('$canonicalWork/device-screenshots');
+          final captureType = await FileSystemEntity.type(captures.path, followLinks: false);
+          if (captureType == FileSystemEntityType.link) {
+            return 'device_screenshot refused an unsafe workspace path: device-screenshots is a symlink.';
+          }
+          await captures.create();
+          final canonicalCaptures = await captures.resolveSymbolicLinks();
+          if (containedPath(Directory(canonicalWork), canonicalCaptures) != canonicalCaptures) {
+            return 'device_screenshot refused an unsafe workspace path.';
+          }
+          File copied;
+          while (true) {
+            final destination = '$canonicalCaptures/screen-${DateTime.now().microsecondsSinceEpoch}-${Random.secure().nextInt(1 << 32)}.png';
+            copied = File(destination);
+            try {
+              await copied.create(exclusive: true);
+              await source.openRead().pipe(copied.openWrite(mode: FileMode.write));
+              break;
+            } on FileSystemException {
+              if (await copied.exists()) continue;
+              rethrow;
+            }
+          }
+          final bytes = await copied.readAsBytes();
+          _recordProduced(copied.path, bytes.length);
           _emit('shell', 'device_screenshot: ${copied.path}');
-          return 'Screenshot saved to ${copied.path}. Read it with read_image before choosing coordinates.';
+          if (!_stageVisionImage(path: copied.path, bytes: bytes,
+              extension: 'png', reason: 'device_screenshot')) {
+            return 'Screenshot saved to ${copied.path}, but the current model cannot read images. '
+                'Switch to a vision-capable model or use device_read/device_system_nav.';
+          }
+          return 'Screenshot saved to ${copied.path} and attached to the next model request. '
+              'The image pixels are available before choosing coordinates.';
       }
       return 'unknown device tool';
     } on PlatformException catch (error) {

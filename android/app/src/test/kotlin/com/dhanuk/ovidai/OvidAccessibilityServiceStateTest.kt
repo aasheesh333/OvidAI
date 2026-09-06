@@ -140,4 +140,10 @@ class OvidAccessibilityServiceStateTest {
         assertEquals(18, cache.nextHandle)
         assertNotNull(cache.beginRead(forceFull = false))
     }
+
+    @Test
+    fun passwordInputsAreRefusedBeforeTyping() {
+        assertEquals("PASSWORD_FIELD", passwordTypingRefusal(true)?.code)
+        assertNull(passwordTypingRefusal(false))
+    }
 }

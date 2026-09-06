@@ -3125,8 +3125,15 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         if (names.contains(fn['name'])) schemas[fn['name'] as String] = fn['parameters'] as Map;
       }
       expect(schemas.keys.toSet(), names);
+      for (final schema in schemas.values) {
+        expect(schema['additionalProperties'], isFalse);
+      }
       expect((schemas['device_read']!['properties'] as Map)['mode']['enum'], ['delta', 'full']);
       expect((schemas['device_tap']!['properties'] as Map).keys, containsAll(['node', 'x', 'y']));
+      expect(schemas['device_tap']!['anyOf'], [
+        {'required': ['node']},
+        {'required': ['x', 'y']},
+      ]);
       expect(schemas['device_type']!['required'], ['text']);
       expect(schemas['device_swipe']!['required'], ['from_x', 'from_y', 'to_x', 'to_y']);
       expect((schemas['device_system_nav']!['properties'] as Map)['action']['enum'], ['back', 'home', 'recents', 'notifications', 'quick_settings']);
@@ -3161,7 +3168,9 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(DeviceControlService.isSensitiveTargetForTest(url: 'https://payments.wise.com/send'), isTrue);
       expect(DeviceControlService.isSensitiveTargetForTest(packageName: 'com.example.notes'), isFalse);
       expect(kControlModeDisclosure, contains('Back / Home / Recents'));
-      expect(kControlModeDisclosure, contains('never stored or shared'));
+      expect(kControlModeDisclosure, contains('may be stored in this chat or its workspace'));
+      expect(kControlModeDisclosure, contains('provider retention follows their policy'));
+      expect(kControlModeDisclosure, isNot(contains('never stored or shared')));
       expect(kControlModeDisclosure, contains('banking or payment screens'));
     });
 
@@ -3203,7 +3212,7 @@ libncursesw.so.6.5←./lib/libncurses.so.6
     test('CTRL6: handlers dispatch, audit and copy screenshots into workspace', () async {
       final work = Directory.systemTemp.createTempSync('ovid-control-work');
       final native = File('${work.parent.path}/native-control-${DateTime.now().microsecondsSinceEpoch}.png')..writeAsBytesSync([137, 80, 78, 71]);
-      final s = ChatSession(id: 'ctrl6', title: 'S', model: 'm', mode: 'control', workspaceFolder: work.path);
+      final s = ChatSession(id: 'ctrl6', title: 'S', model: 'gpt-4o', mode: 'control', workspaceFolder: work.path);
       app.sessions.insert(0, s);
       app.activeSessionId = s.id;
       AgentService.setRunSessionForTest(s.id);
@@ -3233,13 +3242,91 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(await AgentService.I.dispatchForTest('device_system_nav', {'action': 'back'}), contains('back'));
       final screenshot = await AgentService.I.dispatchForTest('device_screenshot', {});
       final path = RegExp(r'(/[^\n]+\.png)').firstMatch(screenshot)!.group(1)!;
-      expect(screenshot, contains('Read it with read_image'));
+      expect(screenshot, contains('attached to the next model request'));
       expect(AgentService.containedPath(work, path), path);
       expect(File(path).readAsBytesSync(), [137, 80, 78, 71]);
       expect(AgentService.I.producedFiles.any((e) => e.path == path), isTrue);
+      final messages = <Map<String, dynamic>>[];
+      AgentService.I.appendPendingVisionMessagesForTest(messages);
+      expect(messages, hasLength(1));
+      final content = messages.single['content'] as List;
+      expect(content.first, {'type': 'text', 'text': contains('device_screenshot')});
+      expect((content.last as Map)['type'], 'image_url');
+      expect((((content.last as Map)['image_url'] as Map)['url'] as String), startsWith('data:image/png;base64,iVBORw=='));
+
+      final readImage = await AgentService.I.dispatchForTest('read_image', {'path': path});
+      expect(readImage, contains('attached to the next model request'));
+      final readMessages = <Map<String, dynamic>>[];
+      AgentService.I.appendPendingVisionMessagesForTest(readMessages);
+      expect(readMessages, hasLength(1));
+      expect((((readMessages.single['content'] as List).last as Map)['image_url'] as Map)['url'], startsWith('data:image/png;base64,iVBORw=='));
       expect(calls.map((c) => c.method), containsAll(['deviceTap', 'deviceType', 'deviceSwipe', 'deviceSystemNav', 'deviceScreenshot']));
       expect(AgentService.I.events.skip(beforeEvents).where((e) => e.kind == 'shell' && e.text.startsWith('device_')).length, 6);
       expect(File('${work.path}/fallthrough.txt').existsSync(), isFalse);
+    });
+
+    test('CTRL6b: screenshots reject symlinked workspace destinations', () async {
+      final work = Directory.systemTemp.createTempSync('ovid-control-link-work');
+      final outside = Directory.systemTemp.createTempSync('ovid-control-link-out');
+      final native = File('${work.parent.path}/native-link-${DateTime.now().microsecondsSinceEpoch}.png')
+        ..writeAsBytesSync([137, 80, 78, 71]);
+      await Link('${work.path}/device-screenshots').create(outside.path);
+      final s = ChatSession(id: 'ctrl6b', title: 'S', model: 'gpt-4o', mode: 'control', workspaceFolder: work.path);
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      const channel = MethodChannel('ovid/device-control-test-ctrl6b');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'deviceRead') return {'status': 'ok', 'full': false, 'package': 'com.example.notes', 'added': <dynamic>[], 'changed': <dynamic>[], 'removed': <dynamic>[]};
+        if (call.method == 'deviceScreenshot') return native.path;
+        return true;
+      });
+      DeviceControlService.setMethodChannelForTest(channel);
+      addTearDown(() {
+        DeviceControlService.setMethodChannelForTest(null);
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
+        AgentService.setRunSessionForTest('');
+        app.activeSessionId = null;
+        app.sessions.removeWhere((x) => x.id == s.id);
+        if (work.existsSync()) work.deleteSync(recursive: true);
+        if (outside.existsSync()) outside.deleteSync(recursive: true);
+        if (native.existsSync()) native.deleteSync();
+      });
+
+      expect(await AgentService.I.dispatchForTest('device_screenshot', {}), contains('unsafe workspace path'));
+      expect(outside.listSync(), isEmpty);
+    });
+
+    test('CTRL6c: text-only models receive an honest screenshot limitation', () async {
+      final work = Directory.systemTemp.createTempSync('ovid-control-text-model');
+      final native = File('${work.parent.path}/native-text-${DateTime.now().microsecondsSinceEpoch}.png')
+        ..writeAsBytesSync([137, 80, 78, 71]);
+      final s = ChatSession(id: 'ctrl6c', title: 'S', model: 'deepseek-chat', mode: 'control', workspaceFolder: work.path);
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      const channel = MethodChannel('ovid/device-control-test-ctrl6c');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'deviceRead') return {'status': 'ok', 'full': false, 'package': 'com.example.notes', 'added': <dynamic>[], 'changed': <dynamic>[], 'removed': <dynamic>[]};
+        if (call.method == 'deviceScreenshot') return native.path;
+        return true;
+      });
+      DeviceControlService.setMethodChannelForTest(channel);
+      addTearDown(() {
+        DeviceControlService.setMethodChannelForTest(null);
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
+        AgentService.setRunSessionForTest('');
+        app.activeSessionId = null;
+        app.sessions.removeWhere((x) => x.id == s.id);
+        if (work.existsSync()) work.deleteSync(recursive: true);
+        if (native.existsSync()) native.deleteSync();
+      });
+
+      final result = await AgentService.I.dispatchForTest('device_screenshot', {});
+      expect(result, contains('current model cannot read images'));
+      final messages = <Map<String, dynamic>>[];
+      AgentService.I.appendPendingVisionMessagesForTest(messages);
+      expect(messages, isEmpty);
     });
 
     testWidgets('CTRL7: Control disclosure permits decline and opens settings only on accept', (tester) async {
@@ -3249,9 +3336,13 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       app.activeSessionId = s.id;
       const channel = MethodChannel('ovid/device-control-test-ctrl7');
       final calls = <MethodCall>[];
+      var failSettingsLaunch = true;
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
         calls.add(call);
         if (call.method == 'deviceServiceEnabled') return false;
+        if (call.method == 'deviceOpenAccessibilitySettings' && failSettingsLaunch) {
+          throw PlatformException(code: 'SETTINGS_FAILED', message: 'settings unavailable');
+        }
         return true;
       });
       DeviceControlService.setMethodChannelForTest(channel);
@@ -3265,9 +3356,8 @@ libncursesw.so.6.5←./lib/libncurses.so.6
 
       await tester.pumpWidget(MaterialApp(theme: Aether.theme(), home: const ChatScreen()));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('General').last);
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Control').last);
+      await tester.enterText(find.byType(TextField).first, '/permission control confirm');
+      await tester.tap(find.byTooltip('Send'));
       await tester.pumpAndSettle();
       expect(find.text('Enable Control'), findsOneWidget);
       expect(find.textContaining('Back / Home / Recents'), findsOneWidget);
@@ -3284,8 +3374,17 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       await tester.pumpAndSettle();
       expect(s.mode, 'control');
       expect(calls.where((c) => c.method == 'deviceOpenAccessibilitySettings').length, 1);
+      expect(find.textContaining('Could not open Accessibility Settings'), findsOneWidget);
       expect(find.text('Control service is off'), findsOneWidget);
       expect(find.text('Open Accessibility Settings'), findsOneWidget);
+      await tester.tap(find.text('Open Accessibility Settings'));
+      await tester.pumpAndSettle();
+      expect(calls.where((c) => c.method == 'deviceOpenAccessibilitySettings').length, 2);
+      expect(find.text('Could not open Accessibility Settings.'), findsOneWidget);
+      failSettingsLaunch = false;
+      await tester.tap(find.text('Open Accessibility Settings'));
+      await tester.pumpAndSettle();
+      expect(calls.where((c) => c.method == 'deviceOpenAccessibilitySettings').length, 3);
     });
 
     test(
@@ -8968,7 +9067,7 @@ url = "https://api.example.com/mcp"
           reason: 'capped footer must tell the model how to continue');
     });
 
-    test('P3: read_image tool exists and returns image metadata', () async {
+    test('P3: read_image tool exists and reports missing images', () async {
       final tools = AgentService.I.toolsForTest();
       final names = tools
           .map((t) => ((t['function'] as Map)['name'] as String))

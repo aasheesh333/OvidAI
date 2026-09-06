@@ -27,9 +27,10 @@ const kControlModeDisclosure =
     'it can read what is on screen and tap, type, swipe, and use Back / Home / Recents '
     'in this app and in others, so it can finish tasks for you end to end.\n\n'
     'Ovid reads the screen only while Control mode is on, and only to do what you asked. '
-    'Screen content is sent to the AI model you chose for this chat and to nowhere else; '
-    'it is never stored or shared. It will not act on banking or payment screens, and '
-    'password fields are blocked. Every action appears in this chat.\n\n'
+    'Screen structure and screenshots may be stored in this chat or its workspace and '
+    'sent to the selected AI provider; provider retention follows their policy. '
+    'Ovid will not act on banking or payment screens, and password fields are blocked. '
+    'Every action appears in this chat.\n\n'
     'You turn this on yourself in Settings > Accessibility, and you can turn it off there at any time.';
 
 /// ---------- Models ----------
