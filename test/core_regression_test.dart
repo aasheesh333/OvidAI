@@ -2639,6 +2639,39 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(await AgentService.I.dispatchForTest('browser_cookies', {'set': 'a=b'}), contains('READ-ONLY MODE'));
     });
 
+    test('DL1: streaming download writes directly to disk with no size cap', () async {
+      final tempDir = Directory.systemTemp.createTempSync('dl1_test');
+      final dest = '${tempDir.path}/test_out.bin';
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      // A payload far larger than any old cap streams through untouched.
+      final bigChunks = Stream<List<int>>.fromIterable(
+        List.generate(64, (_) => List<int>.filled(64 * 1024, 65)),
+      );
+      final okResult = await AgentService.downloadStreamHelperForTest(
+        dataStream: bigChunks,
+        destPath: dest,
+      );
+      expect(okResult, contains('downloaded ✓'));
+      expect(File(dest).lengthSync(), equals(64 * 64 * 1024));
+
+      // A mid-stream error deletes the partial file instead of leaving junk.
+      final failing = Stream<List<int>>.fromIterable([
+        List<int>.filled(128, 66),
+      ]).asyncExpand((c) async* {
+        yield c;
+        throw const SocketException('connection reset');
+      });
+      final failResult = await AgentService.downloadStreamHelperForTest(
+        dataStream: failing,
+        destPath: dest,
+      );
+      expect(failResult, contains('download failed'));
+      expect(File(dest).existsSync(), isFalse);
+    });
+
     test('BR4: keycode map covers arrows + modifiers (pure helper)', () {
       expect(AgentService.keyCodeForTest('ArrowLeft'), 37);
       expect(AgentService.keyCodeForTest('ArrowRight'), 39);

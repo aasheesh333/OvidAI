@@ -8544,6 +8544,37 @@ ${await _agentsMdBlock()}
           )
           .consoleLog;
 
+  /// Stream [dataStream] straight to [destPath] in whatever chunks arrive.
+  /// There is no artificial size cap: the only limit is real free space, and
+  /// a write failure (ENOSPC or a dropped connection) deletes the partial
+  /// file and reports honestly.
+  @visibleForTesting
+  static Future<String> downloadStreamHelperForTest({
+    required Stream<List<int>> dataStream,
+    required String destPath,
+  }) async {
+    final f = File(destPath);
+    if (f.existsSync()) f.deleteSync();
+    f.parent.createSync(recursive: true);
+    final sink = f.openWrite();
+    int received = 0;
+    try {
+      await for (final chunk in dataStream) {
+        sink.add(chunk);
+        received += chunk.length;
+      }
+      await sink.flush();
+      await sink.close();
+      return 'downloaded ✓ · ${f.uri.pathSegments.last} · $received bytes';
+    } catch (e) {
+      try {
+        await sink.close();
+      } catch (_) {}
+      if (f.existsSync()) f.deleteSync();
+      return 'download failed: $e';
+    }
+  }
+
   Future<String> _handleBrowserDownload(Map<String, dynamic> args) async {
     final url = (args['url'] as String? ?? '').trim();
     if (url.isEmpty) return 'url is required';
@@ -8560,25 +8591,27 @@ ${await _agentsMdBlock()}
     }
     _emit('nav', 'downloading: $name');
     try {
-      final r = await HttpShim.get(
-        Uri.parse(url),
-        headers: {'User-Agent': 'OvidAgent/1.0'},
-        maxResponseBytes: 20 * 1024 * 1024,
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 30);
+      final req = await client.getUrl(Uri.parse(url));
+      req.headers.set(HttpHeaders.userAgentHeader, 'OvidAgent/1.0');
+      final resp = await req.close();
+      if (resp.statusCode != 200) {
+        return 'download failed (HTTP ${resp.statusCode})';
+      }
+      final total = resp.contentLength;
+      if (total > 0) {
+        _emit('nav', 'downloading: $name (${(total / (1024 * 1024)).toStringAsFixed(1)} MB)');
+      }
+      final res = await downloadStreamHelperForTest(
+        dataStream: resp,
+        destPath: safe,
       );
-      if (r.status != 200) return 'download failed (HTTP ${r.status})';
-      if (r.bytes.length > 20 * 1024 * 1024) {
-        return 'file too large (${r.bytes.length} bytes, cap 20MB)';
+      if (res.contains('downloaded ✓')) {
+        _recordProduced(safe, File(safe).lengthSync());
+        return '$res (workspace — read with read_attachment)';
       }
-      final f = File(safe);
-      f.parent.createSync(recursive: true);
-      await f.writeAsBytes(r.bytes);
-      _recordProduced(safe, r.bytes.length);
-      return 'downloaded ✓ · $name · ${r.bytes.length} bytes (workspace — read with read_attachment)';
+      return res;
     } catch (e) {
-      if ((e is HttpException && e.message.contains('Response exceeds')) ||
-          e.toString().contains('Response exceeds')) {
-        return 'file too large (cap 20MB)';
-      }
       return 'download failed: $e';
     }
   }
