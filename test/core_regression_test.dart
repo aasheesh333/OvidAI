@@ -2795,6 +2795,41 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(client.closedWithForce, isTrue);
     });
 
+    test('UP1: upload chunking splits bytes into 256KB segments with no size cap', () {
+      final small = Uint8List(500 * 1024);
+      final chunks = AgentService.chunkFileForUploadForTest(
+        small,
+        chunkSize: 256 * 1024,
+      );
+      expect(chunks.length, equals(2));
+      expect(chunks[0].length, equals(256 * 1024));
+      expect(chunks[1].length, equals(244 * 1024));
+
+      final exact = Uint8List(512 * 1024);
+      final exactChunks = AgentService.chunkFileForUploadForTest(
+        exact,
+        chunkSize: 256 * 1024,
+      );
+      expect(exactChunks.length, equals(2));
+
+      expect(AgentService.chunkFileForUploadForTest(Uint8List(0)), isEmpty);
+      expect(
+        () => AgentService.chunkFileForUploadForTest(small, chunkSize: 0),
+        throwsArgumentError,
+      );
+
+      final huge = Uint8List(3 * 1024 * 1024);
+      final hugeChunks = AgentService.chunkFileForUploadForTest(
+        huge,
+        chunkSize: 256 * 1024,
+      );
+      expect(hugeChunks.length, equals(12));
+      expect(
+        hugeChunks.fold<int>(0, (total, chunk) => total + chunk.length),
+        equals(huge.length),
+      );
+    });
+
     test('BR4: keycode map covers arrows + modifiers (pure helper)', () {
       expect(AgentService.keyCodeForTest('ArrowLeft'), 37);
       expect(AgentService.keyCodeForTest('ArrowRight'), 39);

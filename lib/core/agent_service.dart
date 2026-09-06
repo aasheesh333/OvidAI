@@ -8578,6 +8578,25 @@ ${await _agentsMdBlock()}
     }
   }
 
+  /// Split [bytes] into upload chunks without imposing a file-size cap.
+  @visibleForTesting
+  static List<Uint8List> chunkFileForUploadForTest(
+    Uint8List bytes, {
+    int chunkSize = 256 * 1024,
+  }) {
+    if (chunkSize <= 0) {
+      throw ArgumentError.value(chunkSize, 'chunkSize', 'must be positive');
+    }
+    final chunks = <Uint8List>[];
+    for (int offset = 0; offset < bytes.length; offset += chunkSize) {
+      final end = offset + chunkSize < bytes.length
+          ? offset + chunkSize
+          : bytes.length;
+      chunks.add(bytes.sublist(offset, end));
+    }
+    return chunks;
+  }
+
   Future<String> _handleBrowserDownload(Map<String, dynamic> args) async {
     final url = (args['url'] as String? ?? '').trim();
     if (url.isEmpty) return 'url is required';
@@ -8634,24 +8653,43 @@ ${await _agentsMdBlock()}
     }
     final f = File(safe);
     if (!f.existsSync()) return 'No file "$rel" in the session workspace.';
-    if (f.lengthSync() > 10 * 1024 * 1024) {
-      return 'file too large for upload (cap 10MB)';
-    }
     final tab = _activeTab;
     tab.controller ??= controllerForTab(tab);
+    final fname = f.uri.pathSegments.last;
     try {
-      final bytes = await f.readAsBytes();
-      final b64 = base64Encode(bytes);
-      final fname = safe.split('/').last.replaceAll("'", '');
-      final js = '''
+      await tab.controller!.runJavaScript('window.__ovidUploadBuf = [];');
+      int staged = 0;
+      final input = await f.open();
+      try {
+        while (true) {
+          final chunk = await input.read(256 * 1024);
+          if (chunk.isEmpty) break;
+          await tab.controller!.runJavaScript(
+            'window.__ovidUploadBuf.push(${jsonEncode(base64Encode(chunk))});',
+          );
+          staged += chunk.length;
+        }
+      } finally {
+        await input.close();
+      }
+
+      final jsFinalize = '''
 (() => {
   const el = document.querySelector(${jsonEncode(sel)});
-  if (!el) return 'no element: $sel';
-  if (el.tagName.toLowerCase() !== 'input' || el.type !== 'file') return 'not a file input: $sel';
-  const bin = atob(${jsonEncode(b64)});
-  const arr = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-  const file = new File([arr], ${jsonEncode(fname)});
+  if (!el) { window.__ovidUploadBuf = null; return 'no element: $sel'; }
+  if (el.tagName.toLowerCase() !== 'input' || el.type !== 'file') {
+    window.__ovidUploadBuf = null;
+    return 'not a file input: $sel';
+  }
+  const parts = window.__ovidUploadBuf || [];
+  window.__ovidUploadBuf = null;
+  const blobs = parts.map(b => {
+    const bin = atob(b);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return arr;
+  });
+  const file = new File(blobs, ${jsonEncode(fname)});
   const dt = new DataTransfer();
   dt.items.add(file);
   el.files = dt.files;
@@ -8659,10 +8697,13 @@ ${await _agentsMdBlock()}
   el.dispatchEvent(new Event('change', {bubbles:true}));
   return 'staged ' + ${jsonEncode(fname)};
 })()''';
-      final r = await tab.controller!.runJavaScriptReturningResult(js);
-      _emit('shell', 'upload $rel → $sel');
+      final r = await tab.controller!.runJavaScriptReturningResult(jsFinalize);
+      _emit('shell', 'upload $rel → $sel ($staged bytes)');
       return r.toString();
     } catch (e) {
+      try {
+        await tab.controller!.runJavaScript('window.__ovidUploadBuf = null;');
+      } catch (_) {}
       return 'upload failed: $e';
     }
   }
