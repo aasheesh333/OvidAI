@@ -810,13 +810,14 @@ void main() {
     });
 
     test(
-      'AgentMode labels match (Read-Only/General/Full Access/Studio)',
+      'AgentMode labels match access presets',
       () {
         expect(AgentMode.safe.label, 'Read-Only');
         expect(AgentMode.auto.label, 'General');
         expect(AgentMode.drive.label, 'Full Access');
         expect(AgentMode.studio.label, 'Studio');
-        expect(AgentMode.values.length, 4);
+        expect(AgentMode.control.label, 'Control');
+        expect(AgentMode.values.length, 5);
         // Studio auto-approves everything except commit.
         expect(AgentMode.studio.hint, contains('Studio'));
       },
@@ -3048,6 +3049,61 @@ libncursesw.so.6.5←./lib/libncurses.so.6
 
       app.sessions.removeWhere((x) => x.id == 'sub-s');
     });
+
+    test(
+      'CTRL1: control is strongest, confirmed, child-capped, and cold-safe',
+      () async {
+        final app = AppState.I;
+        final session = ChatSession(
+          id: 'ctrl1',
+          title: 'Control',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, session);
+        app.activeSessionId = session.id;
+        final agent = AgentService.I;
+        addTearDown(() {
+          app.sessions.removeWhere((item) => item.id == session.id);
+        });
+
+        expect(AgentService.modeRankForTest(AgentMode.control), 4);
+
+        final blocked = await CommandService.I.execute('/permission control');
+        expect(blocked?.feedback, contains('confirm'));
+        expect(session.mode, 'auto');
+
+        final confirmed = await CommandService.I.execute(
+          '/permission control confirm',
+        );
+        expect(confirmed?.feedback, contains('Control'));
+        expect(session.mode, 'control');
+        expect(agent.childModeForTest(), AgentMode.drive);
+        expect(
+          agent.childModeForTest(modeName: 'control'),
+          AgentMode.drive,
+        );
+
+        final dispatchTool = agent.toolsForTest().firstWhere(
+          (tool) => (tool['function'] as Map)['name'] == 'dispatch_agent',
+        );
+        final modeSchema = ((dispatchTool['function'] as Map)['parameters']
+            as Map)['properties']['mode'] as Map;
+        expect(modeSchema['enum'], contains('control'));
+
+        expect(AppState.sanitizeColdStartMode('control'), 'drive');
+        expect(AppState.sanitizeColdStartMode('auto'), 'auto');
+        expect(
+          ChatSession.fromJson({
+            'id': 'cold-control',
+            'title': 'Cold',
+            'model': 'm',
+            'mode': 'control',
+          }).mode,
+          'drive',
+        );
+      },
+    );
 
     test('SkillService parses frontmatter name correctly', () async {
       final dir = Directory.systemTemp.createTempSync('ovid-skills-test');

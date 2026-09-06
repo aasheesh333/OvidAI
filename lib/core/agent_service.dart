@@ -74,8 +74,9 @@ class BrowserTab {
 /// FULL      → sab kuch free, no confirmation (Codex full-send)
 /// STUDIO    → general + full Studio access: files edit, terminal, repo
 ///             sync free; sirf publish/commit confirm karta hai
+/// CONTROL   → strongest mode for guarded device and in-app automation
 /// ═══════════════════════════════════════════════════════════════════
-enum AgentMode { safe, auto, drive, studio }
+enum AgentMode { safe, auto, drive, studio, control }
 
 extension AgentModeX on AgentMode {
   String get label => switch (this) {
@@ -83,6 +84,7 @@ extension AgentModeX on AgentMode {
     AgentMode.auto => 'General',
     AgentMode.drive => 'Full Access',
     AgentMode.studio => 'Studio',
+    AgentMode.control => 'Control',
   };
   String get hint => switch (this) {
     AgentMode.safe =>
@@ -94,18 +96,22 @@ extension AgentModeX on AgentMode {
     AgentMode.studio =>
       'Studio mode — files edit, terminal run, repo access free. '
           'Asks for confirmation before publishing or committing.',
+    AgentMode.control =>
+      'Automated device & in-app control with safety guardrails.',
   };
   IconData get icon => switch (this) {
     AgentMode.safe => Icons.visibility_outlined,
     AgentMode.auto => Icons.tune_outlined,
     AgentMode.drive => Icons.rocket_launch_outlined,
     AgentMode.studio => Icons.code_rounded,
+    AgentMode.control => Icons.accessibility_new_outlined,
   };
   Color get color => switch (this) {
     AgentMode.safe => Aether.success,
     AgentMode.auto => Aether.accent,
     AgentMode.drive => Aether.warn,
     AgentMode.studio => const Color(0xFF9B7EDE),
+    AgentMode.control => Aether.danger,
   };
 }
 
@@ -3627,8 +3633,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
               'description':
                   'Access mode for the child. Can only match or LOWER your '
                   'own privilege: safe (read-only) < auto < studio < drive. '
-                  'Default: your current mode.',
-              'enum': ['safe', 'auto', 'studio', 'drive'],
+                  'Control requests are capped at drive. Default: your '
+                  'current mode, capped at drive.',
+              'enum': ['safe', 'auto', 'studio', 'drive', 'control'],
             },
             'allowed_tools': {
               'type': 'array',
@@ -7983,6 +7990,7 @@ ${await _agentsMdBlock()}
     if (running != null && running.isSubagent) return true;
     switch (mode) {
       case AgentMode.drive:
+      case AgentMode.control:
         return true;
       case AgentMode.auto:
       case AgentMode.studio:
@@ -10122,16 +10130,7 @@ ${await _agentsMdBlock()}
   /// parent mode — a child can inherit or downgrade, never escalate.
   @visibleForTesting
   AgentMode childModeForTest({String? modeName}) {
-    final parentMode = mode;
-    var childMode = parentMode;
-    if (modeName != null) {
-      for (final m in AgentMode.values) {
-        if (m.name == modeName && _modeRank(m) <= _modeRank(parentMode)) {
-          childMode = m;
-        }
-      }
-    }
-    return childMode;
+    return _resolveChildMode(mode, modeName);
   }
 
   Future<String> _handleSkill(Map<String, dynamic> args) async {
@@ -10390,14 +10389,31 @@ ${await _agentsMdBlock()}
   }
 
   // ── Mode privilege ranking (restriction order) ──────────────────────
-  /// Read-Only < General < Studio < Full Access. Used to ensure a subagent
-  /// can never be dispatched with MORE privilege than its parent.
+  /// Read-Only < General < Studio < Full Access < Control. Used to ensure a
+  /// subagent can never be dispatched with MORE privilege than its parent.
   static int _modeRank(AgentMode m) => switch (m) {
     AgentMode.safe => 0,
     AgentMode.auto => 1,
     AgentMode.studio => 2,
     AgentMode.drive => 3,
+    AgentMode.control => 4,
   };
+
+  @visibleForTesting
+  static int modeRankForTest(AgentMode m) => _modeRank(m);
+
+  static AgentMode _resolveChildMode(AgentMode parentMode, String? modeName) {
+    var childMode = parentMode;
+    if (modeName != null) {
+      for (final candidate in AgentMode.values) {
+        if (candidate.name == modeName &&
+            _modeRank(candidate) <= _modeRank(parentMode)) {
+          childMode = candidate;
+        }
+      }
+    }
+    return childMode == AgentMode.control ? AgentMode.drive : childMode;
+  }
 
   Future<String> _handleDispatchAgent(Map<String, dynamic> args) async {
     final prompt = (args['prompt'] as String).trim();
@@ -10425,16 +10441,9 @@ ${await _agentsMdBlock()}
     }
 
     // The child inherits the parent's mode; an explicit `mode` can only
-    // DOWNGRADE privilege (a Read-Only parent never spawns Full Access).
+    // DOWNGRADE privilege, and Control is always capped at Full Access.
     final parentMode = mode;
-    var childMode = parentMode;
-    if (modeName != null) {
-      for (final m in AgentMode.values) {
-        if (m.name == modeName && _modeRank(m) <= _modeRank(parentMode)) {
-          childMode = m;
-        }
-      }
-    }
+    final childMode = _resolveChildMode(parentMode, modeName);
 
     final child = AppState.I.createSubagentSession(
       parent: parent,

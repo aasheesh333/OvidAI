@@ -541,8 +541,9 @@ class ChatSession {
 
   /// Per-session agent access mode (the session policy gate per-conversation mode parity).
   /// One of 'safe' (Read-Only), 'auto' (General), 'drive' (Full Access),
-  /// 'studio' (Studio). Parallel sessions keep INDEPENDENT modes — no
-  /// cross-session mode bleed. Persisted with the session.
+  /// 'studio' (Studio), or 'control' (Control). Parallel sessions keep
+  /// INDEPENDENT modes — no cross-session mode bleed. Persisted with the
+  /// session.
   String mode;
 
   /// Agent preset — a named composition of a tool roster + a persona
@@ -672,7 +673,7 @@ class ChatSession {
     providerId: j['providerId'] as String?,
     sandboxId: j['sandboxId'] as String?,
     repo: j['repo'] as String?,
-    mode: j['mode'] as String? ?? 'auto',
+    mode: AppState.sanitizeColdStartMode(j['mode'] as String? ?? 'auto'),
     presetId: j['presetId'] as String? ?? 'standard',
     workspaceFolder: j['workspaceFolder'] as String?,
     compactedSummary: j['compactedSummary'] as String?,
@@ -755,6 +756,10 @@ class AppState extends ChangeNotifier {
   static AppState? _testInstance;
   static AppState get I => _testInstance ?? _singleton;
   static final AppState _singleton = AppState._();
+
+  static String sanitizeColdStartMode(String mode) {
+    return mode == 'control' ? 'drive' : mode;
+  }
 
   @visibleForTesting
   factory AppState.createForTest() {

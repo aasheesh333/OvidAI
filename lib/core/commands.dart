@@ -251,7 +251,7 @@ class CommandService {
     register(
       AgentCommand(
         name: 'permission',
-        hint: '[read-only|general|studio|full-access]',
+        hint: '[read-only|general|studio|full-access|control]',
         description: 'Show or set what the agent may do in this chat',
         handler: (args) async {
           final agent = AgentService.I;
@@ -276,15 +276,15 @@ class CommandService {
                   '${AgentMode.values.map(_permName).join(', ')}.',
             );
           }
-          if (target == AgentMode.drive && !flags.contains('confirm')) {
-            // Full access removes every confirmation, so it is opt-in with an
-            // explicit acknowledgement rather than a single word.
-            return const CommandResult(
+          if ((target == AgentMode.drive || target == AgentMode.control) &&
+              !flags.contains('confirm')) {
+            // Strong modes are opt-in with an explicit acknowledgement rather
+            // than a single word.
+            return CommandResult(
               feedback:
-                  'Full Access lets the agent run anything with no '
-                  'confirmation, including destructive commands and repo '
-                  'pushes. Re-run `/permission full-access confirm` to '
-                  'accept that risk.',
+                  '${target.label} grants strong permissions. Re-run '
+                  '`/permission ${_permName(target)} confirm` to accept '
+                  'that risk.',
             );
           }
           agent.mode = target;
