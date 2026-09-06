@@ -8549,6 +8549,9 @@ ${await _agentsMdBlock()}
   /// a write failure (ENOSPC or a dropped connection) deletes the partial
   /// file and reports honestly.
   @visibleForTesting
+  static HttpClient Function()? browserDownloadClientFactoryForTest;
+
+  @visibleForTesting
   static Future<String> downloadStreamHelperForTest({
     required Stream<List<int>> dataStream,
     required String destPath,
@@ -8590,12 +8593,14 @@ ${await _agentsMdBlock()}
       return 'path escapes the session workspace: $name — use a path inside the workspace.';
     }
     _emit('nav', 'downloading: $name');
+    final client = browserDownloadClientFactoryForTest?.call() ?? HttpClient();
     try {
-      final client = HttpClient()..connectionTimeout = const Duration(seconds: 30);
+      client.connectionTimeout = const Duration(seconds: 30);
       final req = await client.getUrl(Uri.parse(url));
       req.headers.set(HttpHeaders.userAgentHeader, 'OvidAgent/1.0');
       final resp = await req.close();
       if (resp.statusCode != 200) {
+        await resp.drain<void>();
         return 'download failed (HTTP ${resp.statusCode})';
       }
       final total = resp.contentLength;
@@ -8613,6 +8618,8 @@ ${await _agentsMdBlock()}
       return res;
     } catch (e) {
       return 'download failed: $e';
+    } finally {
+      client.close(force: true);
     }
   }
 

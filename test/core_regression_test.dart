@@ -2639,37 +2639,160 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(await AgentService.I.dispatchForTest('browser_cookies', {'set': 'a=b'}), contains('READ-ONLY MODE'));
     });
 
-    test('DL1: streaming download writes directly to disk with no size cap', () async {
+    test('DL1: browser download streams more than 20 MiB and closes its client', () async {
       final tempDir = Directory.systemTemp.createTempSync('dl1_test');
-      final dest = '${tempDir.path}/test_out.bin';
+      final session = ChatSession(
+        id: 'dl1',
+        title: 'DL1',
+        model: 'm',
+        mode: 'auto',
+        workspaceFolder: tempDir.path,
+      );
+      app.sessions.insert(0, session);
+      app.activeSessionId = session.id;
+      AgentService.setRunSessionForTest(session.id);
+      const chunkSize = 64 * 1024;
+      const chunkCount = 321;
+      final response = _FakeDownloadHttpResponse(
+        statusCode: HttpStatus.ok,
+        contentLength: chunkSize * chunkCount,
+        chunks: Stream<List<int>>.fromIterable(
+          Iterable.generate(chunkCount, (_) => List<int>.filled(chunkSize, 65)),
+        ),
+      );
+      final client = _FakeDownloadHttpClient(response);
+      AgentService.browserDownloadClientFactoryForTest = () => client;
       addTearDown(() {
+        AgentService.browserDownloadClientFactoryForTest = null;
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((s) => s.id == session.id);
         if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
       });
 
-      // A payload far larger than any old cap streams through untouched.
-      final bigChunks = Stream<List<int>>.fromIterable(
-        List.generate(64, (_) => List<int>.filled(64 * 1024, 65)),
+      final result = await AgentService.I.dispatchForTest(
+        'browser_download',
+        {'url': 'https://example.test/large.bin'},
       );
-      final okResult = await AgentService.downloadStreamHelperForTest(
-        dataStream: bigChunks,
-        destPath: dest,
-      );
-      expect(okResult, contains('downloaded ✓'));
-      expect(File(dest).lengthSync(), equals(64 * 64 * 1024));
 
-      // A mid-stream error deletes the partial file instead of leaving junk.
-      final failing = Stream<List<int>>.fromIterable([
-        List<int>.filled(128, 66),
-      ]).asyncExpand((c) async* {
-        yield c;
-        throw const SocketException('connection reset');
-      });
-      final failResult = await AgentService.downloadStreamHelperForTest(
-        dataStream: failing,
-        destPath: dest,
+      expect(result, contains('downloaded ✓'));
+      expect(File('${tempDir.path}/large.bin').lengthSync(), chunkSize * chunkCount);
+      expect(client.closedWithForce, isTrue);
+      expect(response.completed, isTrue);
+    });
+
+    test('DL2: non-200 download drains the response and closes its client', () async {
+      final tempDir = Directory.systemTemp.createTempSync('dl2_test');
+      final session = ChatSession(
+        id: 'dl2',
+        title: 'DL2',
+        model: 'm',
+        mode: 'auto',
+        workspaceFolder: tempDir.path,
       );
-      expect(failResult, contains('download failed'));
-      expect(File(dest).existsSync(), isFalse);
+      app.sessions.insert(0, session);
+      app.activeSessionId = session.id;
+      AgentService.setRunSessionForTest(session.id);
+      final response = _FakeDownloadHttpResponse(
+        statusCode: HttpStatus.notFound,
+        contentLength: 3,
+        chunks: Stream<List<int>>.value([1, 2, 3]),
+      );
+      final client = _FakeDownloadHttpClient(response);
+      AgentService.browserDownloadClientFactoryForTest = () => client;
+      addTearDown(() {
+        AgentService.browserDownloadClientFactoryForTest = null;
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((s) => s.id == session.id);
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final result = await AgentService.I.dispatchForTest(
+        'browser_download',
+        {'url': 'https://example.test/missing.bin'},
+      );
+
+      expect(result, contains('HTTP 404'));
+      expect(response.completed, isTrue);
+      expect(client.closedWithForce, isTrue);
+      expect(File('${tempDir.path}/missing.bin').existsSync(), isFalse);
+    });
+
+    test('DL3: stream failure deletes the partial file and closes its client', () async {
+      final tempDir = Directory.systemTemp.createTempSync('dl3_test');
+      final session = ChatSession(
+        id: 'dl3',
+        title: 'DL3',
+        model: 'm',
+        mode: 'auto',
+        workspaceFolder: tempDir.path,
+      );
+      app.sessions.insert(0, session);
+      app.activeSessionId = session.id;
+      AgentService.setRunSessionForTest(session.id);
+      final response = _FakeDownloadHttpResponse(
+        statusCode: HttpStatus.ok,
+        contentLength: -1,
+        chunks: Stream<List<int>>.fromIterable([
+          List<int>.filled(128, 66),
+        ]).asyncExpand((c) async* {
+          yield c;
+          throw const SocketException('connection reset');
+        }),
+      );
+      final client = _FakeDownloadHttpClient(response);
+      AgentService.browserDownloadClientFactoryForTest = () => client;
+      addTearDown(() {
+        AgentService.browserDownloadClientFactoryForTest = null;
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((s) => s.id == session.id);
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final result = await AgentService.I.dispatchForTest(
+        'browser_download',
+        {'url': 'https://example.test/partial.bin'},
+      );
+
+      expect(result, contains('download failed'));
+      expect(client.closedWithForce, isTrue);
+      expect(File('${tempDir.path}/partial.bin').existsSync(), isFalse);
+    });
+
+    test('DL4: request failure closes its client', () async {
+      final tempDir = Directory.systemTemp.createTempSync('dl4_test');
+      final session = ChatSession(
+        id: 'dl4',
+        title: 'DL4',
+        model: 'm',
+        mode: 'auto',
+        workspaceFolder: tempDir.path,
+      );
+      app.sessions.insert(0, session);
+      app.activeSessionId = session.id;
+      AgentService.setRunSessionForTest(session.id);
+      final client = _FakeDownloadHttpClient(
+        _FakeDownloadHttpResponse(
+          statusCode: HttpStatus.ok,
+          contentLength: 0,
+          chunks: const Stream<List<int>>.empty(),
+        ),
+        getUrlError: const SocketException('host unreachable'),
+      );
+      AgentService.browserDownloadClientFactoryForTest = () => client;
+      addTearDown(() {
+        AgentService.browserDownloadClientFactoryForTest = null;
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((s) => s.id == session.id);
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final result = await AgentService.I.dispatchForTest(
+        'browser_download',
+        {'url': 'https://example.test/unreachable.bin'},
+      );
+
+      expect(result, contains('download failed'));
+      expect(client.closedWithForce, isTrue);
     });
 
     test('BR4: keycode map covers arrows + modifiers (pure helper)', () {
@@ -9763,6 +9886,95 @@ class _FakeHttpClient implements HttpClient {
   void close({bool force = false}) {
     closedWithForce = force;
   }
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FakeDownloadHttpClient implements HttpClient {
+  _FakeDownloadHttpClient(this.response, {this.getUrlError});
+
+  final HttpClientResponse response;
+  final Object? getUrlError;
+  bool closedWithForce = false;
+
+  @override
+  Duration? connectionTimeout;
+
+  @override
+  Future<HttpClientRequest> getUrl(Uri url) async {
+    if (getUrlError != null) throw getUrlError!;
+    return _FakeDownloadHttpRequest(response);
+  }
+
+  @override
+  void close({bool force = false}) {
+    closedWithForce = force;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FakeDownloadHttpRequest implements HttpClientRequest {
+  _FakeDownloadHttpRequest(this.response);
+
+  final HttpClientResponse response;
+
+  @override
+  final HttpHeaders headers = _FakeDownloadHttpHeaders();
+
+  @override
+  Future<HttpClientResponse> close() async => response;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FakeDownloadHttpHeaders implements HttpHeaders {
+  @override
+  void set(String name, Object value, {bool preserveHeaderCase = false}) {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FakeDownloadHttpResponse extends Stream<List<int>>
+    implements HttpClientResponse {
+  _FakeDownloadHttpResponse({
+    required this.statusCode,
+    required this.contentLength,
+    required this.chunks,
+  });
+
+  @override
+  final int statusCode;
+
+  @override
+  final int contentLength;
+
+  final Stream<List<int>> chunks;
+  bool completed = false;
+
+  @override
+  Future<E> drain<E>([E? futureValue]) =>
+      chunks.drain<E>(futureValue).whenComplete(() => completed = true);
+
+  @override
+  StreamSubscription<List<int>> listen(
+    void Function(List<int>)? onData, {
+    Function? onError,
+    void Function()? onDone,
+    bool? cancelOnError,
+  }) => chunks.listen(
+    onData,
+    onError: onError,
+    onDone: () {
+      completed = true;
+      onDone?.call();
+    },
+    cancelOnError: cancelOnError,
+  );
+
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
