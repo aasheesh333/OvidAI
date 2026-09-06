@@ -12,6 +12,26 @@ import 'theme.dart';
 import 'sandbox_service.dart';
 import 'presets.dart';
 
+const kDeniedControlDomains = <String>[
+  'paypal.com', 'wise.com', 'chase.com', 'bankofamerica.com',
+  'wellsfargo.com', 'citigroup.com', 'capitalone.com',
+];
+const kDeniedControlPackages = <String>[
+  'com.paypal.android.p2pmobile', 'com.transferwise.android',
+  'com.chase.sig.android', 'com.infonow.bofa',
+  'com.wf.wellsfargomobile', 'com.citi.citimobile',
+  'com.konylabs.capitalone',
+];
+const kControlModeDisclosure =
+    'Control mode lets Ovid use your device the way you would. With your permission '
+    'it can read what is on screen and tap, type, swipe, and use Back / Home / Recents '
+    'in this app and in others, so it can finish tasks for you end to end.\n\n'
+    'Ovid reads the screen only while Control mode is on, and only to do what you asked. '
+    'Screen content is sent to the AI model you chose for this chat and to nowhere else; '
+    'it is never stored or shared. It will not act on banking or payment screens, and '
+    'password fields are blocked. Every action appears in this chat.\n\n'
+    'You turn this on yourself in Settings > Accessibility, and you can turn it off there at any time.';
+
 /// ---------- Models ----------
 
 class ProviderConfig {

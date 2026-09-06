@@ -14,6 +14,7 @@ import 'sidebar.dart';
 import 'subagent_screen.dart';
 import '../core/agent_service.dart';
 import '../core/commands.dart';
+import '../core/device_control_service.dart';
 import '../core/mcp_service.dart';
 import '../core/presets.dart';
 import '../core/skills.dart';
@@ -1123,6 +1124,10 @@ class _ChatScreenState extends State<ChatScreen>
                           _showModeSheetFromCommand(context);
                           return;
                         }
+                        if (result.popup == 'controlDisclosure') {
+                          await _enableControlMode(context);
+                          return;
+                        }
                         if (result.popup == 'preset') {
                           _showPresetSheetFromCommand(context);
                           return;
@@ -1216,9 +1221,13 @@ class _ChatScreenState extends State<ChatScreen>
                 trailing: AgentService.I.mode == m
                     ? Icon(Icons.check, size: 16, color: Aether.accent)
                     : null,
-                onTap: () {
+                onTap: () async {
                   Navigator.pop(context);
-                  AgentService.I.setMode(m);
+                  if (m == AgentMode.control) {
+                    await _enableControlMode(context);
+                  } else {
+                    AgentService.I.setMode(m);
+                  }
                 },
               ),
             const SizedBox(height: 10),
@@ -4106,6 +4115,7 @@ class _InputBarState extends State<_InputBar> {
                   if (!locked) onSend();
                 },
               ),
+              const _ControlServiceNotice(),
               // ── Toolbar row ──
               Row(
                 children: [
@@ -5569,12 +5579,14 @@ class _ModeChip extends StatelessWidget {
   void _showModeSheet(BuildContext context) {
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: Aether.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
       builder: (_) => SafeArea(
-        child: Column(
+        child: SingleChildScrollView(
+          child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             const SizedBox(height: 12),
@@ -5599,17 +5611,107 @@ class _ModeChip extends StatelessWidget {
                 trailing: AgentService.I.mode == m
                     ? const Icon(Icons.check, size: 18, color: Aether.accent)
                     : null,
-                onTap: () {
-                  AgentService.I.setMode(m);
+                onTap: () async {
                   Navigator.pop(context);
+                  if (m == AgentMode.control) {
+                    await _enableControlMode(context);
+                  } else {
+                    AgentService.I.setMode(m);
+                  }
                 },
               ),
             const SizedBox(height: 8),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
+}
+
+Future<void> _enableControlMode(BuildContext context) async {
+  final accepted = await showDialog<bool>(
+    context: context,
+    barrierDismissible: false,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Enable Control mode'),
+      content: const SingleChildScrollView(child: Text(kControlModeDisclosure)),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('Not now'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: const Text('Enable Control'),
+        ),
+      ],
+    ),
+  );
+  if (accepted != true) return;
+  try {
+    await DeviceControlService.I.openAccessibilitySettings();
+  } finally {
+    AgentService.I.setMode(AgentMode.control);
+  }
+}
+
+class _ControlServiceNotice extends StatefulWidget {
+  const _ControlServiceNotice();
+  @override
+  State<_ControlServiceNotice> createState() => _ControlServiceNoticeState();
+}
+
+class _ControlServiceNoticeState extends State<_ControlServiceNotice>
+    with WidgetsBindingObserver {
+  bool? _enabled;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final enabled = await DeviceControlService.I.isEnabled().catchError((_) => false);
+    if (mounted) setState(() => _enabled = enabled);
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: AgentService.I,
+    builder: (_, _) {
+      if (AgentService.I.mode != AgentMode.control || _enabled != false) {
+        return const SizedBox.shrink();
+      }
+      return Row(
+        children: [
+          Icon(Icons.warning_amber_rounded, size: 15, color: Aether.warn),
+          const SizedBox(width: 5),
+          Expanded(child: Text('Control service is off', style: TextStyle(fontSize: 11, color: Aether.warn))),
+          TextButton(
+            onPressed: () async {
+              await DeviceControlService.I.openAccessibilitySettings();
+              await _refresh();
+            },
+            child: const Text('Open Accessibility Settings'),
+          ),
+        ],
+      );
+    },
+  );
 }
 
 /// ═══════════════ web-IDE style markdown renderer ═══════════════

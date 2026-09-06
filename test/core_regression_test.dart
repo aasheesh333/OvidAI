@@ -14,6 +14,7 @@ import 'package:http/testing.dart';
 import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/commands.dart';
+import 'package:ovid_ai/core/device_control_service.dart';
 import 'package:ovid_ai/core/github_service.dart';
 import 'package:ovid_ai/core/hook_service.dart';
 import 'package:ovid_ai/core/mcp_service.dart';
@@ -3064,6 +3065,7 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         app.activeSessionId = session.id;
         final agent = AgentService.I;
         addTearDown(() {
+          app.activeSessionId = null;
           app.sessions.removeWhere((item) => item.id == session.id);
         });
 
@@ -3076,8 +3078,9 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         final confirmed = await CommandService.I.execute(
           '/permission control confirm',
         );
-        expect(confirmed?.feedback, contains('Control'));
-        expect(session.mode, 'control');
+        expect(confirmed?.popup, 'controlDisclosure');
+        expect(session.mode, 'auto');
+        agent.mode = AgentMode.control;
         expect(agent.childModeForTest(), AgentMode.drive);
         expect(
           agent.childModeForTest(modeName: 'control'),
@@ -3104,6 +3107,186 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         );
       },
     );
+
+    test('CTRL3: device schemas and policy gates are complete', () async {
+      final s = ChatSession(id: 'ctrl3', title: 'S', model: 'm', mode: 'safe');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.activeSessionId = null;
+        app.sessions.removeWhere((x) => x.id == s.id);
+      });
+      const names = {'device_read', 'device_tap', 'device_type', 'device_swipe', 'device_system_nav', 'device_screenshot'};
+      final schemas = <String, Map>{};
+      for (final tool in AgentService.I.toolsForTest()) {
+        final fn = tool['function'] as Map;
+        if (names.contains(fn['name'])) schemas[fn['name'] as String] = fn['parameters'] as Map;
+      }
+      expect(schemas.keys.toSet(), names);
+      expect((schemas['device_read']!['properties'] as Map)['mode']['enum'], ['delta', 'full']);
+      expect((schemas['device_tap']!['properties'] as Map).keys, containsAll(['node', 'x', 'y']));
+      expect(schemas['device_type']!['required'], ['text']);
+      expect(schemas['device_swipe']!['required'], ['from_x', 'from_y', 'to_x', 'to_y']);
+      expect((schemas['device_system_nav']!['properties'] as Map)['action']['enum'], ['back', 'home', 'recents', 'notifications', 'quick_settings']);
+      expect(schemas['device_screenshot']!['properties'], isEmpty);
+      for (final name in names) {
+        expect(await AgentService.I.dispatchForTest(name, const {}), contains('READ-ONLY MODE'), reason: name);
+      }
+      s.mode = 'auto';
+      expect(await AgentService.I.dispatchForTest('device_read', const {}), contains('requires Control mode'));
+      s..mode = 'control'..planMode = true;
+      expect(await AgentService.I.dispatchForTest('device_read', const {}), contains('PLAN MODE ACTIVE'));
+      s..planMode = false..parentId = 'parent';
+      expect(await AgentService.I.dispatchForTest('device_read', const {}), contains('Subagents cannot control the device'));
+    });
+
+    test('CTRL4: node reads format full, delta, unchanged and empty without implicit screenshots', () {
+      final full = DeviceControlService.formatReadResultForTest({'status': 'ok', 'full': true, 'package': 'com.example', 'added': [{'handle': 12, 'class': 'Button', 'text': 'Send', 'bounds': [880,1520,1010,1600], 'clickable': true}], 'changed': [], 'removed': []});
+      expect(full, contains('[12] Button "Send"'));
+      expect(full, contains('clickable'));
+      expect(full, isNot(contains('device_screenshot')));
+      final delta = DeviceControlService.formatReadResultForTest({'status': 'ok', 'full': false, 'package': 'com.example', 'added': [{'handle': 22, 'class': 'Toast', 'text': 'Message sent'}], 'changed': [{'handle': 13, 'class': 'EditText'}], 'removed': [12]});
+      expect(delta, contains('+ [22] Toast "Message sent"'));
+      expect(delta, contains('~ [13] EditText'));
+      expect(delta, contains('- [12]'));
+      expect(DeviceControlService.formatReadResultForTest({'status': 'unchanged'}), 'screen unchanged');
+      expect(DeviceControlService.formatReadResultForTest({'status': 'ok', 'full': true, 'package': 'com.game', 'added': [], 'changed': [], 'removed': []}), contains('Use device_screenshot'));
+      expect(DeviceControlService.formatReadResultForTest({'status': 'ok', 'full': false, 'added': [], 'changed': [], 'removed': [4]}), isNot(contains('no readable structure')));
+    });
+
+    test('SAFE1: sensitive targets and disclosure are explicit', () {
+      expect(DeviceControlService.isSensitiveTargetForTest(packageName: 'com.paypal.android.p2pmobile'), isTrue);
+      expect(DeviceControlService.isSensitiveTargetForTest(url: 'https://payments.wise.com/send'), isTrue);
+      expect(DeviceControlService.isSensitiveTargetForTest(packageName: 'com.example.notes'), isFalse);
+      expect(kControlModeDisclosure, contains('Back / Home / Recents'));
+      expect(kControlModeDisclosure, contains('never stored or shared'));
+      expect(kControlModeDisclosure, contains('banking or payment screens'));
+    });
+
+    test('CTRL5: live-package safety blocks actions and no action takes a screenshot', () async {
+      final s = ChatSession(id: 'ctrl5', title: 'S', model: 'm', mode: 'control');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      const channel = MethodChannel('ovid/device-control-test-ctrl5');
+      final calls = <MethodCall>[];
+      var packageName = 'com.example.notes';
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        if (call.method == 'deviceRead') return {'status': 'ok', 'full': false, 'package': packageName, 'added': <dynamic>[], 'changed': <dynamic>[], 'removed': <dynamic>[]};
+        return true;
+      });
+      DeviceControlService.setMethodChannelForTest(channel);
+      addTearDown(() {
+        DeviceControlService.setMethodChannelForTest(null);
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
+        AgentService.setRunSessionForTest('');
+        app.activeSessionId = null;
+        app.sessions.removeWhere((x) => x.id == s.id);
+      });
+      expect(await AgentService.I.dispatchForTest('device_tap', {'node': 7}), contains('tapped node 7'));
+      expect(calls.where((c) => c.method == 'deviceScreenshot'), isEmpty);
+      packageName = 'com.paypal.android.p2pmobile';
+      expect(await AgentService.I.dispatchForTest('device_swipe', {'from_x': 1, 'from_y': 2, 'to_x': 3, 'to_y': 4}), contains('sensitive'));
+      expect(calls.where((c) => c.method == 'deviceSwipe'), isEmpty);
+      packageName = 'com.dhanuk.ovidai';
+      AgentService.I.browserTabsFor(s.id)..clear()..add(BrowserTab(url: 'https://chase.com/account'));
+      expect(await AgentService.I.dispatchForTest('device_type', {'text': 'hello'}), contains('sensitive'));
+      expect(calls.where((c) => c.method == 'deviceType'), isEmpty);
+      packageName = '';
+      expect(await AgentService.I.dispatchForTest('device_tap', {'node': 9}), contains('could not verify'));
+      expect(calls.where((c) => c.method == 'deviceTap').length, 1);
+    });
+
+    test('CTRL6: handlers dispatch, audit and copy screenshots into workspace', () async {
+      final work = Directory.systemTemp.createTempSync('ovid-control-work');
+      final native = File('${work.parent.path}/native-control-${DateTime.now().microsecondsSinceEpoch}.png')..writeAsBytesSync([137, 80, 78, 71]);
+      final s = ChatSession(id: 'ctrl6', title: 'S', model: 'm', mode: 'control', workspaceFolder: work.path);
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      const channel = MethodChannel('ovid/device-control-test-ctrl6');
+      final calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        if (call.method == 'deviceRead') return {'status': 'ok', 'full': false, 'package': 'com.example.notes', 'added': <dynamic>[], 'changed': <dynamic>[], 'removed': <dynamic>[]};
+        if (call.method == 'deviceScreenshot') return native.path;
+        return true;
+      });
+      DeviceControlService.setMethodChannelForTest(channel);
+      final beforeEvents = AgentService.I.events.length;
+      addTearDown(() {
+        DeviceControlService.setMethodChannelForTest(null);
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
+        AgentService.setRunSessionForTest('');
+        app.activeSessionId = null;
+        app.sessions.removeWhere((x) => x.id == s.id);
+        if (work.existsSync()) work.deleteSync(recursive: true);
+        if (native.existsSync()) native.deleteSync();
+      });
+      expect(await AgentService.I.dispatchForTest('device_read', {}), contains('Use device_screenshot'));
+      expect(await AgentService.I.dispatchForTest('device_tap', {'x': 10, 'y': 20, 'path': 'fallthrough.txt'}), contains('tapped'));
+      expect(await AgentService.I.dispatchForTest('device_type', {'node': 2, 'text': 'hello', 'submit': true}), contains('typed'));
+      expect(await AgentService.I.dispatchForTest('device_swipe', {'from_x': 1, 'from_y': 2, 'to_x': 3, 'to_y': 4}), contains('swiped'));
+      expect(await AgentService.I.dispatchForTest('device_system_nav', {'action': 'back'}), contains('back'));
+      final screenshot = await AgentService.I.dispatchForTest('device_screenshot', {});
+      final path = RegExp(r'(/[^\n]+\.png)').firstMatch(screenshot)!.group(1)!;
+      expect(screenshot, contains('Read it with read_image'));
+      expect(AgentService.containedPath(work, path), path);
+      expect(File(path).readAsBytesSync(), [137, 80, 78, 71]);
+      expect(AgentService.I.producedFiles.any((e) => e.path == path), isTrue);
+      expect(calls.map((c) => c.method), containsAll(['deviceTap', 'deviceType', 'deviceSwipe', 'deviceSystemNav', 'deviceScreenshot']));
+      expect(AgentService.I.events.skip(beforeEvents).where((e) => e.kind == 'shell' && e.text.startsWith('device_')).length, 6);
+      expect(File('${work.path}/fallthrough.txt').existsSync(), isFalse);
+    });
+
+    testWidgets('CTRL7: Control disclosure permits decline and opens settings only on accept', (tester) async {
+      AgentService.I.debugPauseScheduleTimerForTest(true);
+      final s = ChatSession(id: 'ctrl7', title: 'S', model: 'm', mode: 'auto');
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      const channel = MethodChannel('ovid/device-control-test-ctrl7');
+      final calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        if (call.method == 'deviceServiceEnabled') return false;
+        return true;
+      });
+      DeviceControlService.setMethodChannelForTest(channel);
+      addTearDown(() {
+        AgentService.I.debugPauseScheduleTimerForTest(false);
+        DeviceControlService.setMethodChannelForTest(null);
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
+        app.activeSessionId = null;
+        app.sessions.removeWhere((x) => x.id == s.id);
+      });
+
+      await tester.pumpWidget(MaterialApp(theme: Aether.theme(), home: const ChatScreen()));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('General').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Control').last);
+      await tester.pumpAndSettle();
+      expect(find.text('Enable Control'), findsOneWidget);
+      expect(find.textContaining('Back / Home / Recents'), findsOneWidget);
+      expect(calls.where((c) => c.method == 'deviceOpenAccessibilitySettings'), isEmpty);
+      await tester.tap(find.text('Not now'));
+      await tester.pumpAndSettle();
+      expect(s.mode, 'auto');
+
+      await tester.tap(find.text('General').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Control').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Enable Control'));
+      await tester.pumpAndSettle();
+      expect(s.mode, 'control');
+      expect(calls.where((c) => c.method == 'deviceOpenAccessibilitySettings').length, 1);
+      expect(find.text('Control service is off'), findsOneWidget);
+      expect(find.text('Open Accessibility Settings'), findsOneWidget);
+    });
 
     test(
       'CTRL2: native accessibility service supports cached reads, global nav, gestures, and screenshots',

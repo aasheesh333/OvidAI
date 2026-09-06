@@ -287,6 +287,9 @@ class CommandService {
                   'that risk.',
             );
           }
+          if (target == AgentMode.control) {
+            return const CommandResult(popup: 'controlDisclosure');
+          }
           agent.mode = target;
           return CommandResult(feedback: 'Permission → ${target.label}');
         },

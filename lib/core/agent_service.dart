@@ -26,6 +26,7 @@ import 'hook_service.dart';
 import 'pty_service.dart';
 import 'skills.dart';
 import 'commands.dart';
+import 'device_control_service.dart';
 
 /// A persistent browser tab — owns its WebView controller lazily so the
 /// page state survives across BrowserScreen open/close cycles.
@@ -2503,6 +2504,54 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
 
   // Core tools — always available to the agent
   static const _coreTools = [
+    {
+      'type': 'function',
+      'function': {
+        'name': 'device_read',
+        'description': 'Read the foreground screen as accessibility nodes. Delta is default; this never takes a screenshot.',
+        'parameters': {'type': 'object', 'properties': {'mode': {'type': 'string', 'enum': ['delta', 'full']}}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'device_tap',
+        'description': 'Tap a node handle (preferred) or x/y screen coordinates.',
+        'parameters': {'type': 'object', 'properties': {'node': {'type': 'integer'}, 'x': {'type': 'number'}, 'y': {'type': 'number'}}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'device_type',
+        'description': 'Type into a node or focused editable field. Password fields are refused natively.',
+        'parameters': {'type': 'object', 'properties': {'node': {'type': 'integer'}, 'text': {'type': 'string'}, 'submit': {'type': 'boolean'}}, 'required': ['text']},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'device_swipe',
+        'description': 'Swipe between two screen coordinates.',
+        'parameters': {'type': 'object', 'properties': {'from_x': {'type': 'number'}, 'from_y': {'type': 'number'}, 'to_x': {'type': 'number'}, 'to_y': {'type': 'number'}, 'duration_ms': {'type': 'integer'}}, 'required': ['from_x', 'from_y', 'to_x', 'to_y']},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'device_system_nav',
+        'description': 'Perform Android system navigation.',
+        'parameters': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['back', 'home', 'recents', 'notifications', 'quick_settings']}}, 'required': ['action']},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'device_screenshot',
+        'description': 'Explicitly capture foreground pixels into the session workspace as a fallback.',
+        'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
     // ── Chrome DevTools MCP-style browser tools (inbuilt WebView) ──
     {
       'type': 'function',
@@ -6310,6 +6359,19 @@ ${await _agentsMdBlock()}
       if (childBlock != null) return childBlock;
     }
     switch (name) {
+      case 'device_read':
+      case 'device_tap':
+      case 'device_type':
+      case 'device_swipe':
+      case 'device_system_nav':
+      case 'device_screenshot':
+        if (_runSession?.isSubagent == true) {
+          return 'DENIED: Subagents cannot control the device.';
+        }
+        if (mode != AgentMode.control) {
+          return 'DENIED: Tool "$name" requires Control mode.';
+        }
+        return _handleDeviceControlTool(name, args);
       case 'run_shell':
         final rawCmd = args['command'] as String;
         final cmd = sanitizeShellCommand(rawCmd);
@@ -8070,6 +8132,12 @@ ${await _agentsMdBlock()}
       case 'browser_drag':
       case 'browser_select':
       case 'browser_desktop':
+      case 'device_read':
+      case 'device_tap':
+      case 'device_type':
+      case 'device_swipe':
+      case 'device_system_nav':
+      case 'device_screenshot':
       case 'memory_save':
       case 'create_goal':
       case 'update_goal':
@@ -9141,6 +9209,107 @@ ${await _agentsMdBlock()}
         '(v1 reports metadata; pixel-level vision blocks are a follow-up.)';
   }
 
+  Future<String> _handleDeviceControlTool(String name, Map<String, dynamic> args) async {
+    final device = DeviceControlService.I;
+    try {
+      if (name == 'device_read') {
+        final raw = await device.readRaw(full: args['mode'] == 'full');
+        final packageName = raw['package']?.toString();
+        if (_isSensitiveDeviceTarget(packageName)) return _sensitiveDeviceDenial(packageName);
+        final result = DeviceControlService.formatReadResultForTest(raw);
+        if (raw['status'] == 'ok' || raw['status'] == 'unchanged') {
+          _emit('shell', 'device_read: ${args['mode'] == 'full' ? 'full' : 'delta'}');
+        }
+        return result;
+      }
+
+      final metadata = await device.readRaw();
+      final packageName = metadata['package']?.toString();
+      if (metadata['status'] != 'ok' && metadata['status'] != 'unchanged' ||
+          packageName == null || packageName.trim().isEmpty) {
+        return 'DENIED: Ovid could not verify the live foreground app. Retry device_read before acting.';
+      }
+      if (_isSensitiveDeviceTarget(packageName)) return _sensitiveDeviceDenial(packageName);
+
+      switch (name) {
+        case 'device_tap':
+          final node = (args['node'] as num?)?.toInt();
+          final x = args['x'] as num?;
+          final y = args['y'] as num?;
+          if (node == null && (x == null || y == null)) return 'device_tap requires node or both x and y.';
+          await device.tap(node: node, x: x, y: y);
+          final detail = node != null ? 'tapped node $node' : 'tapped ($x, $y)';
+          _emit('shell', 'device_tap: $detail');
+          return detail;
+        case 'device_type':
+          final text = args['text'] as String?;
+          if (text == null) return 'device_type requires text.';
+          final node = (args['node'] as num?)?.toInt();
+          final submit = args['submit'] == true;
+          await device.type(node: node, text: text, submit: submit);
+          final detail = 'typed ${text.length} characters${node == null ? '' : ' into node $node'}${submit ? ' and submitted' : ''}';
+          _emit('shell', 'device_type: $detail');
+          return detail;
+        case 'device_swipe':
+          final fromX = args['from_x'] as num?;
+          final fromY = args['from_y'] as num?;
+          final toX = args['to_x'] as num?;
+          final toY = args['to_y'] as num?;
+          if (fromX == null || fromY == null || toX == null || toY == null) {
+            return 'device_swipe requires from_x, from_y, to_x, and to_y.';
+          }
+          await device.swipe(fromX: fromX, fromY: fromY, toX: toX, toY: toY,
+              durationMs: (args['duration_ms'] as num?)?.toInt());
+          final detail = 'swiped ($fromX, $fromY) to ($toX, $toY)';
+          _emit('shell', 'device_swipe: $detail');
+          return detail;
+        case 'device_system_nav':
+          final action = args['action'] as String? ?? '';
+          const actions = {'back', 'home', 'recents', 'notifications', 'quick_settings'};
+          if (!actions.contains(action)) return 'device_system_nav requires action: ${actions.join('|')}.';
+          await device.systemNav(action);
+          _emit('shell', 'device_system_nav: $action');
+          return 'system navigation: $action';
+        case 'device_screenshot':
+          final nativePath = await device.screenshot();
+          if (nativePath.trim().isEmpty) return 'device_screenshot returned no file.';
+          final source = File(nativePath);
+          if (!await source.exists()) return 'device_screenshot file was not found: $nativePath';
+          final work = await _sessionWorkDir();
+          final destination = containedPath(work,
+              'device-screenshots/screen-${DateTime.now().millisecondsSinceEpoch}.png');
+          if (destination == null) return 'device_screenshot could not create a contained workspace path.';
+          await Directory(File(destination).parent.path).create(recursive: true);
+          final copied = await source.copy(destination);
+          _recordProduced(copied.path, await copied.length());
+          _emit('shell', 'device_screenshot: ${copied.path}');
+          return 'Screenshot saved to ${copied.path}. Read it with read_image before choosing coordinates.';
+      }
+      return 'unknown device tool';
+    } on PlatformException catch (error) {
+      if (error.code == 'SERVICE_DISABLED') {
+        return 'Control mode needs the Ovid accessibility service. Enable it in Settings > Accessibility > Ovid AI.';
+      }
+      return '$name failed: ${error.message ?? error.code}';
+    } catch (error) {
+      return '$name failed: $error';
+    }
+  }
+
+  bool _isSensitiveDeviceTarget(String? packageName) {
+    String? url;
+    final package = packageName?.trim().toLowerCase() ?? '';
+    if (package == 'com.dhanuk.ovidai' || package.startsWith('com.dhanuk.ovidai:')) {
+      final tabs = browserTabs;
+      if (tabs.isNotEmpty) url = tabs[activeTabIndex.clamp(0, tabs.length - 1)].url;
+    }
+    return DeviceControlService.isSensitiveTarget(packageName: packageName, url: url);
+  }
+
+  String _sensitiveDeviceDenial(String? packageName) =>
+      'DENIED: Ovid will not read or act on this sensitive banking or payment screen '
+      '(${packageName?.trim().isEmpty ?? true ? 'current target' : packageName}). Please complete this step yourself.';
+
   String _numberedLines(String content, int max) {
     final lines = content.split('\n');
     final buf = StringBuffer();
@@ -9616,6 +9785,12 @@ ${await _agentsMdBlock()}
     'update_goal',
     'schedule_create',
     'schedule_delete',
+    'device_read',
+    'device_tap',
+    'device_type',
+    'device_swipe',
+    'device_system_nav',
+    'device_screenshot',
   };
 
   bool _isMutatingTool(String name) =>
