@@ -263,6 +263,7 @@ class SettingsScreen extends StatelessWidget {
           _privacyPolicyTile(context),
 
           const SectionHeader('General'),
+          const _KeepAliveToggle(),
           const _ThemeToggle(),
           const _LocaleTile(),
           _settingTile(Icons.notifications_outlined, 'Notifications', 'On'),
@@ -547,6 +548,31 @@ class _ShareMemoryTile extends StatelessWidget {
 }
 
 /// AI response timeout picker — real, persisted in AppState (responseTimeoutSec).
+/// Background keep-alive toggle — keeps foreground service active in idle state.
+class _KeepAliveToggle extends StatelessWidget {
+  const _KeepAliveToggle();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    return AnimatedBuilder(
+      animation: app,
+      builder: (_, _) => SwitchListTile(
+        dense: true,
+        secondary: Icon(Icons.bolt_outlined, size: 19, color: Aether.textMuted),
+        title: const Text('Background keep-alive', style: TextStyle(fontSize: 14)),
+        subtitle: Text(
+          'Keep assistant listening for scheduled tasks in background',
+          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        ),
+        value: app.keepAliveEnabled,
+        activeTrackColor: Aether.accent,
+        onChanged: (v) => app.keepAliveEnabled = v,
+      ),
+    );
+  }
+}
+
 /// Light/dark theme toggle — flips Aether palette app-wide, persisted.
 class _ThemeToggle extends StatelessWidget {
   const _ThemeToggle();

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'agent_notification_service.dart';
 import 'mcp_service.dart';
 import 'theme.dart';
 import 'sandbox_service.dart';
@@ -914,6 +915,7 @@ class AppState extends ChangeNotifier {
       sandboxSkipped = prefs.getBool(_kSandboxSkipped) ?? false;
       localePref = prefs.getString(_kLocale) ?? 'system';
       seenWelcomeVersion = prefs.getString(_kWelcome) ?? '';
+      _keepAliveEnabled = prefs.getBool(_kKeepAlivePref) ?? true;
       chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0).clamp(
         chatFontScaleMin,
         chatFontScaleMax,
@@ -1191,6 +1193,26 @@ class AppState extends ChangeNotifier {
   /// Auto-run safe commands: read-only shell commands skip confirmation.
   static const _kAutoRunSafe = 'ovid_auto_run_safe';
   bool autoRunSafeCommands = true;
+
+  static const _kKeepAlivePref = 'ovid_keep_alive';
+  bool _keepAliveEnabled = true;
+  bool get keepAliveEnabled => _keepAliveEnabled;
+  set keepAliveEnabled(bool v) {
+    if (_keepAliveEnabled == v) return;
+    _keepAliveEnabled = v;
+    unawaited(_saveKeepAlivePref(v));
+    if (!v) {
+      AgentNotificationService.I.agentIdle();
+    }
+    notifyListeners();
+  }
+
+  Future<void> _saveKeepAlivePref(bool v) async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setBool(_kKeepAlivePref, v);
+    } catch (_) {}
+  }
 
   // ── Locale preference (the locale coordinator client-locale parity: zh/en reply language) ──
   // 'system' follows the device language; 'en'/'zh' pin the reply hint.

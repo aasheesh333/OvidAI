@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'agent_service.dart';
+import 'state.dart';
 
 /// Foreground-service notification manager (the agent keep-alive "always-on assistant"
 /// parity): while an agent run is active, an ongoing low-importance
@@ -28,6 +29,12 @@ class AgentNotificationService {
   int _failCount = 0; // 3 native failures → feature off for the session
   int _lastEventHash = 0;
   Timer? _debounce;
+
+  @visibleForTesting
+  static bool? keepAliveOverrideForTest;
+
+  bool get _isKeepAlive =>
+      keepAliveOverrideForTest ?? AppState.I.keepAliveEnabled;
 
   @visibleForTesting
   static bool Function()? anyRunActiveOverrideForTest;
@@ -136,13 +143,24 @@ class AgentNotificationService {
     });
   }
 
-  /// Run finished / idle → notification goes away.
+  /// Run finished / idle → notification either updates to Ready & Listening
+  /// (if keep-alive enabled) or stops the foreground service.
   void agentIdle() {
     if (!_supported || !_active) return;
     if (_isAnyRunActive()) return;
-    _active = false;
     _lastEventHash = 0;
     _debounce?.cancel();
+
+    if (_isKeepAlive) {
+      // Keep foreground service active so scheduled tasks and message queue fire
+      unawaited(_invoke('agentServiceUpdate', {
+        'title': 'Ovid AI',
+        'text': 'Ready & Listening',
+      }));
+      return;
+    }
+
+    _active = false;
     serviceStopRequestedForTestFlag = true;
     unawaited(_invoke('agentServiceStop', {}));
   }

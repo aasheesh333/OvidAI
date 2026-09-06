@@ -9483,12 +9483,14 @@ You are an expert security auditor reviewing code for vulnerabilities.
       });
 
       test('idle stops service when no runs active', () async {
+        AgentNotificationService.keepAliveOverrideForTest = false;
         AgentNotificationService.I.activeForTest = true;
         AgentNotificationService.I.supportedForTest = true;
         AgentNotificationService.serviceStopRequestedForTestFlag = false;
         setAnyRunActiveForTest(false);
         addTearDown(() {
           AgentNotificationService.serviceStopRequestedForTestFlag = false;
+          AgentNotificationService.keepAliveOverrideForTest = null;
         });
         await agentIdleForTest();
         expect(serviceStopRequestedForTest(), isTrue);
@@ -9557,6 +9559,27 @@ You are an expert security auditor reviewing code for vulnerabilities.
 
         await AgentService.I.checkpointRunEndForTest(sessionId);
         expect(AgentService.I.activeRunCheckpointForTest(), isNot(containsPair(sessionId, 'run_test_123')));
+      });
+
+      test('KEEPALIVE1: idle updates to Ready & Listening when keep-alive enabled, stops when disabled', () async {
+        final notif = AgentNotificationService.I;
+        notif.supportedForTest = true;
+        notif.activeForTest = true;
+        AgentNotificationService.serviceStopRequestedForTestFlag = false;
+        setAnyRunActiveForTest(false);
+
+        // When keep-alive is true, agentIdle does not stop the service
+        AgentNotificationService.keepAliveOverrideForTest = true;
+        await agentIdleForTest();
+        expect(AgentNotificationService.serviceStopRequestedForTestFlag, isFalse);
+        expect(notif.activeForTest, isTrue);
+
+        // When keep-alive is false, agentIdle stops the service
+        AgentNotificationService.keepAliveOverrideForTest = false;
+        await agentIdleForTest();
+        expect(AgentNotificationService.serviceStopRequestedForTestFlag, isTrue);
+        expect(notif.activeForTest, isFalse);
+        AgentNotificationService.keepAliveOverrideForTest = null;
       });
     });
   });
