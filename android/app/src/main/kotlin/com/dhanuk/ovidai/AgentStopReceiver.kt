@@ -30,9 +30,9 @@ class AgentStopReceiver : BroadcastReceiver() {
 
         if (action == AgentForegroundService.ACTION_STOP) {
             AgentNotificationBridge.stopHandler?.invoke()
-        } else if (action == AgentForegroundService.ACTION_EXIT) {
-            AgentNotificationBridge.exitHandler?.invoke()
         }
+        // For ACTION_EXIT, AgentForegroundService.onStartCommand releases wake-lock,
+        // tears down the service, and invokes AgentNotificationBridge.exitHandler once.
     }
 }
 

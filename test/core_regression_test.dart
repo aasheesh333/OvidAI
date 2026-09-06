@@ -9474,6 +9474,10 @@ You are an expert security auditor reviewing code for vulnerabilities.
         AgentNotificationService.I.supportedForTest = true;
         AgentNotificationService.serviceStopRequestedForTestFlag = false;
         setAnyRunActiveForTest(true);
+        addTearDown(() {
+          setAnyRunActiveForTest(false);
+          AgentNotificationService.serviceStopRequestedForTestFlag = false;
+        });
         await agentIdleForTest();
         expect(serviceStopRequestedForTest(), isFalse);
       });
@@ -9483,6 +9487,9 @@ You are an expert security auditor reviewing code for vulnerabilities.
         AgentNotificationService.I.supportedForTest = true;
         AgentNotificationService.serviceStopRequestedForTestFlag = false;
         setAnyRunActiveForTest(false);
+        addTearDown(() {
+          AgentNotificationService.serviceStopRequestedForTestFlag = false;
+        });
         await agentIdleForTest();
         expect(serviceStopRequestedForTest(), isTrue);
       });
@@ -9500,6 +9507,9 @@ You are an expert security auditor reviewing code for vulnerabilities.
         var exitCalled = false;
         AgentNotificationService.I.registerExitHandler(() {
           exitCalled = true;
+        });
+        addTearDown(() {
+          AgentNotificationService.I.registerExitHandler(() {});
         });
         expect(AgentNotificationService.I.onExitCallbackForTest, isNotNull);
 
@@ -9529,6 +9539,10 @@ You are an expert security auditor reviewing code for vulnerabilities.
             );
           }
           return null;
+        });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(const MethodChannel('ovid/native'), null);
         });
 
         await AgentNotificationService.I.invokeForTest('agentServiceStart', {'title': 'T', 'text': 'M'});
