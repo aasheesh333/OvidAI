@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -28,6 +29,45 @@ class AgentNotificationService {
   int _lastEventHash = 0;
   Timer? _debounce;
 
+  @visibleForTesting
+  static bool Function()? anyRunActiveOverrideForTest;
+
+  @visibleForTesting
+  static bool serviceStopRequestedForTestFlag = false;
+
+  @visibleForTesting
+  bool get activeForTest => _active;
+
+  @visibleForTesting
+  set activeForTest(bool v) => _active = v;
+
+  @visibleForTesting
+  bool get supportedForTest => _supported;
+
+  @visibleForTesting
+  set supportedForTest(bool v) => _supported = v;
+
+  @visibleForTesting
+  int get failCountForTest => _failCount;
+
+  void Function()? _onExitCallback;
+
+  @visibleForTesting
+  void Function()? get onExitCallbackForTest => _onExitCallback;
+
+  /// Register a callback to run when the notification EXIT action is received.
+  void registerExitHandler(void Function() handler) {
+    _onExitCallback = handler;
+  }
+
+  @visibleForTesting
+  Future<bool> invokeForTest(String method, Map<String, String> args) => _invoke(method, args);
+
+  bool _isAnyRunActive() =>
+      anyRunActiveOverrideForTest != null
+          ? anyRunActiveOverrideForTest!()
+          : AgentService.I.anyRunActive;
+
   /// Wire the notification Stop button → agent cancel. Called once at
   /// app startup (main.dart).
   Future<void> init() async {
@@ -37,11 +77,17 @@ class AgentNotificationService {
         // EVERY running session (parallel runs, subagents, their jobs
         // and spawned processes), exactly like a panic button.
         AgentService.I.cancelAllRuns();
+      } else if (call.method == 'onAgentExit') {
+        AgentService.I.cancelAllRuns();
+        if (_onExitCallback != null) {
+          _onExitCallback!();
+        }
       }
       return null;
     });
     try {
       await _channel.invokeMethod('agentStopHandler');
+      await _channel.invokeMethod('agentExitHandler');
     } on MissingPluginException {
       _supported = false;
     } on PlatformException {
@@ -93,9 +139,11 @@ class AgentNotificationService {
   /// Run finished / idle → notification goes away.
   void agentIdle() {
     if (!_supported || !_active) return;
+    if (_isAnyRunActive()) return;
     _active = false;
     _lastEventHash = 0;
     _debounce?.cancel();
+    serviceStopRequestedForTestFlag = true;
     unawaited(_invoke('agentServiceStop', {}));
   }
 
@@ -114,9 +162,14 @@ class AgentNotificationService {
       // Native side refused (permission/service policy). The native
       // service ALSO catches startForeground failures and stops itself —
       // so a failure here must never repeat forever or touch the run.
-      _failCount++;
-      if (_failCount >= 3 || e.code.contains('SECURITY')) {
-        _supported = false; // feature off for this app session
+      final isBgDenied = e.code == 'FGS_BACKGROUND_DENIED' ||
+          (e.message?.contains('ForegroundServiceStartNotAllowed') ?? false) ||
+          (e.message?.contains('Background') ?? false);
+      if (!isBgDenied) {
+        _failCount++;
+        if (_failCount >= 3 || e.code.contains('SECURITY')) {
+          _supported = false; // feature off for this app session
+        }
       }
       return false;
     } catch (_) {
@@ -133,4 +186,20 @@ class AgentNotificationService {
     final cut = one.substring(0, 90);
     return '$cut…';
   }
+}
+
+@visibleForTesting
+void setAnyRunActiveForTest(bool active) {
+  AgentNotificationService.anyRunActiveOverrideForTest = () => active;
+}
+
+@visibleForTesting
+Future<void> agentIdleForTest() async {
+  AgentNotificationService.I.agentIdle();
+  await Future<void>.delayed(Duration.zero);
+}
+
+@visibleForTesting
+bool serviceStopRequestedForTest() {
+  return AgentNotificationService.serviceStopRequestedForTestFlag;
 }

@@ -19,6 +19,8 @@ Future<void> main() async {
   await AppState.I.initialize();
   // PR24: plugin-hook kill-switch restore (Settings toggle).
   await HookService.I.loadEnabled();
+  // Restore run checkpoints if restarted via START_STICKY or app rebirth.
+  await AgentService.I.restoreRunCheckpoints();
   // Apply persisted theme BEFORE first frame (no dark flash on light).
   Aether.dark = !AppState.I.lightTheme;
   // Firebase is optional: if google-services.json isn't injected (local debug),
@@ -179,6 +181,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         }
         break;
       case AppLifecycleState.detached:
+        // App detached from engine/activity; cleanup MCP without corrupting persisted runs.
         unawaited(McpService.I.disconnectAll());
         break;
     }

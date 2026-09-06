@@ -10,6 +10,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/commands.dart';
 import 'package:ovid_ai/core/github_service.dart';
@@ -9466,7 +9467,93 @@ You are an expert security auditor reviewing code for vulnerabilities.
         app.removeMcpServer(s);
       }
     });
+
+    group('Task 6: Recents survival + stop vs exit lifecycle', () {
+      test('idle only stops service when no runs active', () async {
+        AgentNotificationService.I.activeForTest = true;
+        AgentNotificationService.I.supportedForTest = true;
+        AgentNotificationService.serviceStopRequestedForTestFlag = false;
+        setAnyRunActiveForTest(true);
+        await agentIdleForTest();
+        expect(serviceStopRequestedForTest(), isFalse);
+      });
+
+      test('idle stops service when no runs active', () async {
+        AgentNotificationService.I.activeForTest = true;
+        AgentNotificationService.I.supportedForTest = true;
+        AgentNotificationService.serviceStopRequestedForTestFlag = false;
+        setAnyRunActiveForTest(false);
+        await agentIdleForTest();
+        expect(serviceStopRequestedForTest(), isTrue);
+      });
+
+      test('stop vs exit split', () {
+        final src = readForegroundServiceSourceForTest();
+        expect(src.contains('ACTION_STOP'), isTrue);
+        expect(src.contains('ACTION_EXIT'), isTrue);
+        expect(src.contains('finishAndRemoveTask'), isTrue);
+        expect(src.contains('stopWithTask="false"'), isTrue);
+        expect(src.contains('onTaskRemoved'), isTrue);
+      });
+
+      test('onAgentExit registers exit callback and cancels runs', () async {
+        var exitCalled = false;
+        AgentNotificationService.I.registerExitHandler(() {
+          exitCalled = true;
+        });
+        expect(AgentNotificationService.I.onExitCallbackForTest, isNotNull);
+
+        await AgentNotificationService.I.init();
+
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .handlePlatformMessage(
+          'ovid/native',
+          const StandardMethodCodec().encodeMethodCall(
+            const MethodCall('onAgentExit'),
+          ),
+          (ByteData? data) {},
+        );
+        expect(exitCalled, isTrue);
+      });
+
+      test('background FGS start failure does not permanently disable notifications', () async {
+        AgentNotificationService.I.supportedForTest = true;
+        final initialFailCount = AgentNotificationService.I.failCountForTest;
+
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(const MethodChannel('ovid/native'), (call) async {
+          if (call.method == 'agentServiceStart') {
+            throw PlatformException(
+              code: 'FGS_BACKGROUND_DENIED',
+              message: 'android.app.ForegroundServiceStartNotAllowedException: startForegroundService denied from background',
+            );
+          }
+          return null;
+        });
+
+        await AgentNotificationService.I.invokeForTest('agentServiceStart', {'title': 'T', 'text': 'M'});
+        expect(AgentNotificationService.I.supportedForTest, isTrue);
+        expect(AgentNotificationService.I.failCountForTest, equals(initialFailCount));
+      });
+
+      test('active runs are checkpointed to preferences and cleaned up', () async {
+        final sessionId = 'test_session_1';
+        await AgentService.I.checkpointRunStartForTest(sessionId, 'run_test_123');
+        expect(AgentService.I.activeRunCheckpointForTest(), containsPair(sessionId, 'run_test_123'));
+
+        await AgentService.I.checkpointRunEndForTest(sessionId);
+        expect(AgentService.I.activeRunCheckpointForTest(), isNot(containsPair(sessionId, 'run_test_123')));
+      });
+    });
   });
+}
+
+String readForegroundServiceSourceForTest() {
+  final fs = File('android/app/src/main/kotlin/com/dhanuk/ovidai/AgentForegroundService.kt').readAsStringSync();
+  final ma = File('android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt').readAsStringSync();
+  final sr = File('android/app/src/main/kotlin/com/dhanuk/ovidai/AgentStopReceiver.kt').readAsStringSync();
+  final manifest = File('android/app/src/main/AndroidManifest.xml').readAsStringSync();
+  return '$fs\n$ma\n$sr\n$manifest';
 }
 
 class _FakeHttpClient implements HttpClient {

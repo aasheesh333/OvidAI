@@ -42,18 +42,44 @@ class AgentForegroundService : Service() {
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var lastTitle: String = "Ovid AI"
+    private var lastText: String = "Agent is working…"
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        // Recents survival: swiping Ovid from recent apps must NOT stop foreground service.
+        // Re-assert notification and partial wake-lock so background tasks continue uninterrupted.
+        try {
+            acquireWakeLock()
+            startForeground(NOTIFICATION_ID, buildNotification(lastTitle, lastText))
+        } catch (_: Exception) {}
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP || intent?.action == ACTION_EXIT) {
+        val action = intent?.action
+        if (action == ACTION_EXIT) {
+            // ACTION_EXIT: stops foreground service completely, releases wake-lock, triggers exit bridge.
             releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
+            AgentNotificationBridge.exitHandler?.invoke()
             return START_NOT_STICKY
         }
-        val title = intent?.getStringExtra(EXTRA_TITLE) ?: "Ovid AI"
-        val text = intent?.getStringExtra(EXTRA_TEXT) ?: "Agent is working…"
+        if (action == ACTION_STOP) {
+            // ACTION_STOP: cancels running agent jobs, but keeps foreground service running if configured or if tasks remain.
+            // Dart onAgentStop cancels active runs. We update notification copy without calling stopSelf().
+            lastText = "Agent stopped"
+            try {
+                startForeground(NOTIFICATION_ID, buildNotification(lastTitle, lastText))
+            } catch (_: Exception) {}
+            return START_STICKY
+        }
+        val title = intent?.getStringExtra(EXTRA_TITLE) ?: lastTitle
+        val text = intent?.getStringExtra(EXTRA_TEXT) ?: lastText
+        lastTitle = title
+        lastText = text
         try {
             startForeground(NOTIFICATION_ID, buildNotification(title, text))
         } catch (e: Exception) {
@@ -91,6 +117,9 @@ class AgentForegroundService : Service() {
 
     override fun onDestroy() {
         releaseWakeLock()
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (_: Exception) {}
         super.onDestroy()
     }
 

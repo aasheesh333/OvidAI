@@ -84,7 +84,13 @@ class MainActivity : FlutterActivity() {
                             }
                             result.success(true)
                         } catch (e: Exception) {
-                            result.error("START_FAIL", "${e.message}", null)
+                            val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                                e.javaClass.name.contains("ForegroundServiceStartNotAllowedException")) {
+                                "FGS_BACKGROUND_DENIED"
+                            } else {
+                                "START_FAIL"
+                            }
+                            result.error(code, "${e.message}", null)
                         }
                     }
                     "agentServiceUpdate" -> {
@@ -120,10 +126,31 @@ class MainActivity : FlutterActivity() {
                         // Dart registers the notification-Stop callback.
                         AgentNotificationBridge.stopHandler = {
                             // Invoke back into Dart on the same channel.
-                            MethodChannel(
-                                flutterEngine.dartExecutor.binaryMessenger,
-                                channelName
-                            ).invokeMethod("onAgentStop", null)
+                            runOnUiThread {
+                                MethodChannel(
+                                    flutterEngine.dartExecutor.binaryMessenger,
+                                    channelName
+                                ).invokeMethod("onAgentStop", null)
+                            }
+                        }
+                        result.success(true)
+                    }
+                    "agentExitHandler" -> {
+                        // Dart registers the notification-Exit callback.
+                        AgentNotificationBridge.exitHandler = {
+                            runOnUiThread {
+                                MethodChannel(
+                                    flutterEngine.dartExecutor.binaryMessenger,
+                                    channelName
+                                ).invokeMethod("onAgentExit", null)
+                                try {
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                                        finishAndRemoveTask()
+                                    } else {
+                                        finish()
+                                    }
+                                } catch (_: Exception) {}
+                            }
                         }
                         result.success(true)
                     }

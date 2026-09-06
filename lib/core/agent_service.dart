@@ -788,8 +788,65 @@ class AgentService extends ChangeNotifier {
     if (r != null) _cancelBucket(r);
   }
 
+  static const String _kActiveRunsCheckpointKey = 'ovid_active_runs_v1';
+  final Map<String, String> _persistedRunCheckpoints = {};
+
+  /// Checkpoint active run start to preferences and ledger so START_STICKY service
+  /// restarts do not corrupt session state.
+  Future<void> checkpointRunStart(String sessionId, String runId) async {
+    _persistedRunCheckpoints[sessionId] = runId;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kActiveRunsCheckpointKey, jsonEncode(_persistedRunCheckpoints));
+    } catch (_) {}
+    unawaited(
+      SessionLedger.I.append(sessionId, 'checkpoint', {
+        'runId': runId,
+        'state': 'running',
+      }),
+    );
+  }
+
+  /// Checkpoint active run end/cleanup from preferences and ledger.
+  Future<void> checkpointRunEnd(String sessionId) async {
+    _persistedRunCheckpoints.remove(sessionId);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (_persistedRunCheckpoints.isEmpty) {
+        await prefs.remove(_kActiveRunsCheckpointKey);
+      } else {
+        await prefs.setString(_kActiveRunsCheckpointKey, jsonEncode(_persistedRunCheckpoints));
+      }
+    } catch (_) {}
+    unawaited(
+      SessionLedger.I.append(sessionId, 'checkpoint', {
+        'state': 'idle',
+      }),
+    );
+  }
+
+  /// Restore and validate active run checkpoints after process start.
+  Future<void> restoreRunCheckpoints() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kActiveRunsCheckpointKey);
+      if (raw != null && raw.isNotEmpty) {
+        final map = jsonDecode(raw);
+        if (map is Map) {
+          _persistedRunCheckpoints.clear();
+          for (final entry in map.entries) {
+            _persistedRunCheckpoints[entry.key.toString()] = entry.value.toString();
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
   void _cancelBucket(AgentRun r) {
     if (r.activeRunId == null && !r.cancelRequested && r.activeClient == null) return;
+    if (r.runKey != null) {
+      unawaited(checkpointRunEnd(r.runKey!));
+    }
     r.cancelRequested = true;
     r.activeRunId = null;
     // Abort the in-flight request and forcefully close the active HTTP client
@@ -4949,6 +5006,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // This run's bucket state — resolve nothing through the active session.
     activeRunId = runId;
     ctx.run.runKey = s.id;
+    unawaited(checkpointRunStart(s.id, runId));
     SandboxService.I.tagRun(s.id);
     // Plan mode is persisted on the session — seed the run bucket from it
     // so gate checks inside the run see the user's last /plan state.
@@ -5494,6 +5552,7 @@ ${await _agentsMdBlock()}
       _appendAssistant('Agent error: $e', session: s);
     } finally {
       activeRunId = null;
+      unawaited(checkpointRunEnd(s.id));
       SandboxService.I.tagRun(null);
       _cancelRequested = false;
       // The Zone exits with this function — there is nothing to pop.
@@ -9729,6 +9788,15 @@ ${await _agentsMdBlock()}
     final r = _runs.putIfAbsent(sessionId, () => AgentRun()..runKey = sessionId);
     r.activeClient = client;
   }
+
+  @visibleForTesting
+  Future<void> checkpointRunStartForTest(String sessionId, String runId) => checkpointRunStart(sessionId, runId);
+
+  @visibleForTesting
+  Future<void> checkpointRunEndForTest(String sessionId) => checkpointRunEnd(sessionId);
+
+  @visibleForTesting
+  Map<String, String> activeRunCheckpointForTest() => Map.unmodifiable(_persistedRunCheckpoints);
 
   /// PR28 / chrome-devtools parity: keycode lookup for browser_press_key.
   static int keyCodeFor(String key) {
