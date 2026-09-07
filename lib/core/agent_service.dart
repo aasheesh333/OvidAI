@@ -2441,15 +2441,17 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       _ => null,
     };
     if (seed != null) return seed;
-    // A registered normalized manifest (spec §4.4) reports its canonical
-    // contribution tools — the generic collapse below is legacy-row only.
+    // A REGISTERED normalized manifest (spec §4.4) reports its canonical
+    // contribution tools — the roster never carries the generic collapse
+    // for such a row, so reporting that name would be a lie. Legacy
+    // unregistered rows keep the generic name below.
     final runtimeId = p.runtimeId;
-    if (runtimeId != null) {
-      final canonical = PluginContributionRegistry.I
+    if (runtimeId != null &&
+        PluginContributionRegistry.I.isRegistered(runtimeId)) {
+      return PluginContributionRegistry.I
           .toolContributionsForPlugin(runtimeId)
           .map((c) => c.toolName)
           .toList();
-      if (canonical.isNotEmpty) return canonical;
     }
     if (_pluginHasMountedSkillsOrCommands(p)) {
       return ['plugin_${_normTool(p.name)}'];
@@ -2542,17 +2544,18 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         if (proxy != null) tools.add(proxy);
       }
       if (!_seedPluginNames.contains(p.name) && p.category != 'MCP') {
-        // A registered normalized manifest routes through the canonical
-        // registry below (spec §4.4) — the generic `plugin_<name>`
-        // collapse remains ONLY for legacy catalog rows without one.
+        // A REGISTERED normalized manifest is governed by the canonical
+        // registry in EVERY session (spec §4.4/§7): its tools appear only
+        // where the activation is visible (canonical loop below), and the
+        // generic `plugin_<name>` collapse — which serves mounted skill
+        // content to ANY session — must never re-advertise a pending or
+        // other-session plugin. The collapse remains ONLY for unregistered
+        // legacy catalog rows.
         final runtimeId = p.runtimeId;
-        final canonicalActive =
+        final registryGoverned =
             runtimeId != null &&
-            PluginContributionRegistry.I.isPluginActiveForSession(
-              runtimeId,
-              runSessionId,
-            );
-        if (!canonicalActive && _pluginHasMountedSkillsOrCommands(p)) {
+            PluginContributionRegistry.I.isRegistered(runtimeId);
+        if (!registryGoverned && _pluginHasMountedSkillsOrCommands(p)) {
           tools.add(_pluginGenericTool(p));
         }
       }
@@ -7120,11 +7123,13 @@ ${await _agentsMdBlock()}
         // Canonical namespaced contribution (spec §4.4) — resolved through
         // the registry and enforced for the RUNNING session: another
         // session cannot call a session-scoped plugin by guessing its
-        // canonical name (spec §7). Unregistered names fall through to
-        // the legacy generic plugin handling below.
+        // canonical name (spec §7). ONLY command/skill/agent kinds execute
+        // here — a guessed hook/MCP tool name (Task 8/9 consumption) falls
+        // through to the honest legacy handling below instead of loading
+        // its declaring file as instruction content.
         final contribution = PluginContributionRegistry.I
             .contributionByToolName(name);
-        if (contribution != null) {
+        if (contribution != null && contribution.isRosterTool) {
           final runSid = _runSession?.id ?? '';
           if (!PluginContributionRegistry.I.isPluginActiveForSession(
             contribution.pluginId,
@@ -7147,6 +7152,21 @@ ${await _agentsMdBlock()}
             .firstOrNull;
         if (plugin == null) {
           return 'Plugin tool "$name" not found or plugin is disabled.';
+        }
+        // A REGISTERED normalized manifest is governed by the canonical
+        // registry (spec §7): the legacy generic name must not serve
+        // mounted content in sessions where the activation is invisible
+        // (pendingGlobal awaiting its one restart, or sessionActive scoped
+        // to another session). Refuse honestly, naming the canonical
+        // namespace and the activation state.
+        final legacyRuntimeId = plugin.runtimeId;
+        if (legacyRuntimeId != null &&
+            PluginContributionRegistry.I.isRegistered(legacyRuntimeId) &&
+            !PluginContributionRegistry.I.isPluginActiveForSession(
+              legacyRuntimeId,
+              _runSession?.id ?? '',
+            )) {
+          return _registeredPluginScopeRefusal(name, legacyRuntimeId);
         }
         final action =
             (args['action'] as String? ?? args['command'] as String? ?? '')
@@ -8478,8 +8498,13 @@ ${await _agentsMdBlock()}
     // todo_write is INTENTIONALLY allowed in Read-Only: the checklist is
     // session-local UI state (never touches disk/repo/network).
     // Generic plugin_* tools are "Execute commands, skills, or workflows"
-    // tools — mutating by definition, so they're gated like the rest.
-    if (name.startsWith('plugin_')) return roDenied;
+    // tools — mutating by definition, so they're gated like the rest. The
+    // canonical §4.4 spelling (`plugin:<pid>/command:<name>`) of the SAME
+    // plugin call must inherit the identical gate — one call, two
+    // spellings, one policy.
+    if (name.startsWith('plugin_') || _isCanonicalPluginCall(name)) {
+      return roDenied;
+    }
     switch (name) {
       // Write-capable tools — always blocked in Read-Only.
       case 'file_write':
@@ -10377,7 +10402,23 @@ ${await _agentsMdBlock()}
   };
 
   bool _isMutatingTool(String name) =>
-      _mutatingTools.contains(name) || name.startsWith('plugin_');
+      _mutatingTools.contains(name) ||
+      name.startsWith('plugin_') ||
+      _isCanonicalPluginCall(name);
+
+  /// True when [name] is the canonical §4.4 spelling
+  /// (`plugin:<pid>/command:<name>`, `…/skill:…`, `…/agent:…`) of a
+  /// REGISTERED roster contribution. That spelling is advertised in every
+  /// canonical roster description, so it passes the same plan/Read-Only
+  /// gates as its `plugin_` tool-name spelling — two spellings of one
+  /// plugin call are never gated differently. Hook/MCP ledger entries
+  /// (Task 8/9) never execute through the canonical head, so they never
+  /// trip the gates.
+  static bool _isCanonicalPluginCall(String name) {
+    if (!name.startsWith('plugin:')) return false;
+    final c = PluginContributionRegistry.I.contributionByCanonicalId(name);
+    return c != null && c.isRosterTool;
+  }
 
   /// PR38: does [cmd] plausibly trigger a native (C/C++) build step?
   /// Heuristic, not exhaustive — a false negative just means the compiler
@@ -10957,6 +10998,16 @@ ${await _agentsMdBlock()}
       '(plugin $pluginId activation: '
       '${PluginContributionRegistry.I.activationFor(pluginId)?.name ?? 'unregistered'}). '
       'Nothing was executed.';
+
+  /// Honest session-scope refusal for a LEGACY generic tool name targeting
+  /// a registered-but-inactive normalized manifest (spec §7): names the
+  /// canonical namespace and the activation state, executes nothing.
+  String _registeredPluginScopeRefusal(String toolName, String pluginId) =>
+      'Plugin tool "$toolName" belongs to plugin "$pluginId", which is not '
+      'active for this session (activation: '
+      '${PluginContributionRegistry.I.activationFor(pluginId)?.name ?? 'unregistered'}). '
+      'Its canonical contributions live under "plugin:$pluginId/…" and are '
+      'scope-enforced. Nothing was executed.';
 
   /// Executes ONE canonical plugin contribution (spec §4.4): the declared
   /// markdown file's body is returned as agent instructions — commands,

@@ -14941,6 +14941,259 @@ cwd = 'tools'
         expect(scoped, isNot(contains('REVIEW CACHE B')));
       },
     );
+
+    test(
+      'PLUGIN4: guessed hook/MCP canonical tool names never execute through the plugin_ dispatch head',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final reg = PluginContributionRegistry.I;
+        final root = Directory.systemTemp.createTempSync(
+          'ovid-plugin4-hookguard',
+        );
+        addTearDown(() => root.deleteSync(recursive: true));
+        File('${root.path}/hooks/hooks.json')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync('{"hooks":{"pre_tool":"HOOK PAYLOAD LEAK"}}');
+        File('${root.path}/.mcp.json')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync(
+            '{"mcpServers":{"fetch":{"command":"MCP DEF LEAK"}}}',
+          );
+
+        final s = ChatSession(
+          id: 'p4-h1',
+          title: 'H1',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        AgentService.setRunSessionForTest(s.id);
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((x) => x.id == 'p4-h1');
+          reg.unregisterPlugin('acme/kit-h');
+        });
+
+        reg.register(
+          NormalizedPluginManifest(
+            id: 'acme/kit-h',
+            name: 'Kit H',
+            version: '1.0.0',
+            format: PluginFormat.claudeCode,
+            rootPath: root.path,
+            hooks: const [
+              PluginHook(
+                pluginId: 'acme/kit-h',
+                event: 'pre_tool',
+                ordinal: 0,
+                payload: 'scripts/gate.sh',
+                path: 'hooks/hooks.json',
+              ),
+            ],
+            mcpServers: const [
+              PluginMcpServer(
+                pluginId: 'acme/kit-h',
+                name: 'fetch',
+                command: 'uvx',
+                path: '.mcp.json',
+              ),
+            ],
+          ),
+          activation: PluginActivation.globalActive,
+        );
+
+        // Hook/MCP contributions hold canonical ledger ids but their
+        // consumption is Task 8/9 — a guessed tool name must NOT be served
+        // as a content load of the declaring file before those semantics
+        // exist. They fall through to the honest legacy "not found".
+        final hookGuess = await agent.dispatchForTest(
+          'plugin_acme_kit-h_hook_pre_tool_0',
+          {},
+        );
+        expect(hookGuess, isNot(contains('HOOK PAYLOAD LEAK')));
+        expect(hookGuess, contains('not found'));
+        final mcpGuess = await agent.dispatchForTest(
+          'plugin_acme_kit-h_mcp_fetch',
+          {},
+        );
+        expect(mcpGuess, isNot(contains('MCP DEF LEAK')));
+        expect(mcpGuess, contains('not found'));
+
+        // The ledger still carries their canonical ids for Task 8/9.
+        expect(
+          reg.contributionByCanonicalId('plugin:acme/kit-h/hook:pre_tool:0'),
+          isNotNull,
+        );
+        expect(
+          reg.contributionByCanonicalId('plugin:acme/kit-h/mcp:fetch'),
+          isNotNull,
+        );
+      },
+    );
+
+    test(
+      'PLUGIN4: the canonical §4.4 spelling of a plugin call inherits the Read-Only and plan-mode gates',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final reg = PluginContributionRegistry.I;
+        final root = Directory.systemTemp.createTempSync(
+          'ovid-plugin4-gates',
+        );
+        addTearDown(() => root.deleteSync(recursive: true));
+        File('${root.path}/commands/review.md')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync(
+            '---\ndescription: d\n---\nGATED REVIEW BODY',
+          );
+
+        final s = ChatSession(
+          id: 'p4-g1',
+          title: 'G1',
+          model: 'm',
+          mode: 'safe',
+        );
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        AgentService.setRunSessionForTest(s.id);
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((x) => x.id == 'p4-g1');
+          reg.unregisterPlugin('acme/kit-g');
+        });
+
+        reg.register(
+          p4Manifest(
+            id: 'acme/kit-g',
+            name: 'Kit G',
+            rootPath: root.path,
+            commands: [
+              p4Command('acme/kit-g', 'review', 'commands/review.md'),
+            ],
+          ),
+          activation: PluginActivation.globalActive,
+        );
+
+        // Read-Only session: BOTH spellings of the same plugin call
+        // refuse — the canonical id cannot bypass the plugin_ gate.
+        expect(
+          await agent.dispatchForTest('plugin_acme_kit-g_command_review', {}),
+          contains('READ-ONLY MODE'),
+        );
+        expect(
+          await agent.dispatchForTest('plugin:acme/kit-g/command:review', {}),
+          contains('READ-ONLY MODE'),
+        );
+
+        // Plan mode: both spellings refuse before dispatch.
+        s.mode = AgentMode.auto.name;
+        s.planMode = true;
+        addTearDown(() => s.planMode = false);
+        expect(
+          await agent.dispatchForTest('plugin_acme_kit-g_command_review', {}),
+          contains('PLAN MODE ACTIVE'),
+        );
+        expect(
+          await agent.dispatchForTest('plugin:acme/kit-g/command:review', {}),
+          contains('PLAN MODE ACTIVE'),
+        );
+      },
+    );
+
+    test(
+      'PLUGIN4: a registered-but-inactive runtime manifest never re-enters rosters through the generic collapse and its legacy tool refuses',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final reg = PluginContributionRegistry.I;
+        final cacheRoot = Directory.systemTemp.createTempSync(
+          'ovid_plugin4_pending_',
+        );
+        addTearDown(() => cacheRoot.deleteSync(recursive: true));
+        AppState.pluginCacheRootOverrideForTest = cacheRoot;
+        addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+
+        // A pendingGlobal row WITH mounted content — the shape Task 7
+        // produces for a Plugins-screen install awaiting one restart.
+        final cacheDir = await app.pluginCacheDirFor('acme/pend-kit');
+        File('${cacheDir.path}/skills/pend-skill/SKILL.md')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync('---\nname: pend-skill\n---\nPEND BODY');
+
+        final s = ChatSession(
+          id: 'p4-p1',
+          title: 'P1',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        AgentService.setRunSessionForTest(s.id);
+
+        final plugin = PluginItem(
+          name: 'Pend Kit',
+          author: 'acme',
+          description: '',
+          version: '1.0.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          source: 'acme/pend-kit',
+          runtimeId: 'acme/pend-kit',
+        );
+        app.plugins.add(plugin);
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((x) => x.id == 'p4-p1');
+          app.plugins.remove(plugin);
+          reg.unregisterPlugin('acme/pend-kit');
+          SkillService.I.clearRoots();
+        });
+
+        reg.register(
+          p4Manifest(
+            id: 'acme/pend-kit',
+            name: 'Pend Kit',
+            rootPath: cacheDir.path,
+            commands: [
+              p4Command('acme/pend-kit', 'pend', 'commands/pend.md'),
+            ],
+          ),
+          activation: PluginActivation.pendingGlobal,
+        );
+        await agent.refreshSkills();
+
+        // Roster: NEITHER the generic collapse NOR a canonical tool in
+        // this session — pendingGlobal is invisible everywhere until
+        // restart (spec §7), and registration governs the row.
+        final names = agent
+            .toolsForTest()
+            .map((t) => ((t['function'] as Map)['name']).toString())
+            .toList();
+        expect(names, isNot(contains('plugin_pend_kit')));
+        expect(names, isNot(contains('plugin_acme_pend-kit_command_pend')));
+
+        // Honest reporting follows the canonical registry, never the
+        // generic name the roster will not carry.
+        expect(agent.pluginToolNames(plugin), [
+          'plugin_acme_pend-kit_command_pend',
+        ]);
+
+        // Dispatch: the legacy generic name refuses for a registered row
+        // that is not visible in the RUNNING session — naming the
+        // canonical namespace and the activation — instead of serving the
+        // mounted skill content cross-scope.
+        final res = await agent.dispatchForTest('plugin_pend_kit', {
+          'action': 'pend-skill',
+        });
+        expect(res, contains('not active'));
+        expect(res, contains('pendingGlobal'));
+        expect(res, contains('plugin:acme/pend-kit/'));
+        expect(res, isNot(contains('PEND BODY')));
+      },
+    );
   });
 }
 
