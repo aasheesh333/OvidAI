@@ -263,6 +263,14 @@ class PluginRuntimeManager extends ChangeNotifier {
   @visibleForTesting
   static PluginDependencyService? depsForTest;
 
+  /// Test seam: when true, the atomic commit rename (spec §5.2 step 8)
+  /// fails on the next install — pins the upgrade rollback path. The
+  /// version directory is shared with the dependency sandbox, so no
+  /// pure-filesystem block can reach the rename without failing the
+  /// dependency stage first.
+  @visibleForTesting
+  static bool failRenameForTest = false;
+
   PluginDependencyService _deps() =>
       depsForTest ?? PluginDependencyService(runtimeRootOverride: runtimeRootOverrideForTest);
 
@@ -617,6 +625,9 @@ class PluginRuntimeManager extends ChangeNotifier {
     // prior version stays fully intact until the new content is in
     // place; a failure restores it.
     try {
+      if (failRenameForTest) {
+        throw const FileSystemException('injected rename failure');
+      }
       contentDir.parent.createSync(recursive: true);
       final pending = Directory(
         '${contentDir.parent.path}/content-pending-'
@@ -654,6 +665,18 @@ class PluginRuntimeManager extends ChangeNotifier {
       }
     } catch (e) {
       PluginContributionRegistry.I.unregisterPlugin(manifest.id);
+      // The failed registration above REPLACED the prior version's, so
+      // the unregister left the plugin with no contributions at all.
+      // Restore the prior entry's registration (same id re-registers in
+      // place) so the prior working version stays active in-session —
+      // content/record/grant were never touched on this path.
+      if (prior != null) {
+        PluginContributionRegistry.I.register(
+          prior.manifest,
+          activation: prior.activation.state,
+          immediateSessionId: prior.activation.immediateSessionId,
+        );
+      }
       if (!overwritesPriorVersion) {
         await deps.removeVersion(manifest.id, manifest.version);
       }

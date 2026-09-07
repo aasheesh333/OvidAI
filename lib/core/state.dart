@@ -980,8 +980,11 @@ class AppState extends ChangeNotifier {
 
     final owned = mcpServers.where((s) {
       if (s.source == 'plugin:${plugin.name}') return true;
-      if (plugin.runtimeId != null &&
-          s.source == 'plugin:${plugin.runtimeId}') {
+      // Runtime-owned rows: PluginRuntimeManager.I.uninstall above has
+      // already NULLed plugin.runtimeId (_clearRowRuntime), so this must
+      // match against the method-entry capture — the live field is dead
+      // here and the Task 9 `plugin:<runtimeId>` rows would survive.
+      if (runtimeId != null && s.source == 'plugin:$runtimeId') {
         return true;
       }
       if (plugin.source != null &&

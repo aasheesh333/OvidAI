@@ -16494,6 +16494,7 @@ cwd = 'tools'
       PluginRuntimeManager.stagingRootOverrideForTest = null;
       PluginRuntimeManager.runtimeRootOverrideForTest = null;
       PluginRuntimeManager.depsForTest = null;
+      PluginRuntimeManager.failRenameForTest = false;
       for (final n in ['runtime-kit', 'screen-kit']) {
         PluginContributionRegistry.I.unregisterPlugin('p7org/$n');
       }
@@ -16926,6 +16927,125 @@ cwd = 'tools'
         );
         expect(rowB.runtimeId, isNull);
         expect(rowB.installed, isFalse);
+      },
+    );
+
+    test(
+      'PLUGIN7: uninstall cleans up plugin:<runtimeId>-owned MCP rows even though the runtime id is cleared first',
+      () async {
+        final app = await p7Boot();
+        final src = p7PluginDir(name: 'Runtime Kit', version: '1.0.0');
+        // NOTE: the catalog source string deliberately DIFFERS from the
+        // runtime id — the legacy `plugin:<source>` clause must not be
+        // able to catch the runtime-owned row by accident.
+        final row = p7Row('P7 Runtime Kit', source: 'p7org/other-repo');
+        app.plugins.add(row);
+        await p7Approve(src);
+        final ok = await app.installPlugin(
+          row,
+          source: LocalFolderPluginSource(src.path),
+          origin: PluginInstallOrigin.pluginsScreen,
+        );
+        expect(ok!.status, PluginInstallStatus.ok);
+        expect(row.runtimeId, 'p7org/runtime-kit');
+
+        // Task 9 handoff shape: plugin-owned MCP rows keyed by the
+        // RUNTIME id. The uninstall teardown nulls plugin.runtimeId
+        // BEFORE the owned-MCP filter runs — the filter must still
+        // catch these rows (pinned: the capture, not the dead field).
+        app.mcpServers.add(
+          McpServer(
+            name: 'p7-runtime-owned-mcp',
+            author: 'p7org',
+            description: 'Runtime-owned MCP',
+            category: 'Plugin',
+            command: 'npx',
+            source: 'plugin:p7org/runtime-kit',
+            custom: true,
+            connected: false,
+          ),
+        );
+
+        await app.uninstallPlugin(row);
+
+        expect(
+          app.mcpServers.any((s) => s.name == 'p7-runtime-owned-mcp'),
+          isFalse,
+          reason: 'plugin:<runtimeId>-owned MCP rows must not survive '
+              'uninstall',
+        );
+        expect(row.runtimeId, isNull);
+        expect(row.installed, isFalse);
+      },
+    );
+
+    test(
+      'PLUGIN7: rename failure during upgrade keeps the prior version registered in-session',
+      () async {
+        final app = await p7Boot();
+        final v1 = p7PluginDir(name: 'Runtime Kit', version: '1.0.0');
+        final runner = RecordingRunner();
+        PluginRuntimeManager.depsForTest = PluginDependencyService(
+          runtimeRootOverride: p7Runtime,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final row = p7Row('P7 Runtime Kit', source: 'p7org/runtime-kit');
+        app.plugins.add(row);
+        await p7Approve(v1);
+        final ok = await app.installPlugin(
+          row,
+          source: LocalFolderPluginSource(v1.path),
+          origin: PluginInstallOrigin.pluginsScreen,
+        );
+        expect(ok!.status, PluginInstallStatus.ok);
+        final reg = PluginContributionRegistry.I;
+        final v1Root =
+            '${p7Runtime.path}/plugin-runtime/p7org/runtime-kit/1.0.0/content';
+        expect(
+          reg.contributionByCanonicalId(
+            'plugin:p7org/runtime-kit/command:review',
+          )!.rootPath,
+          v1Root,
+        );
+
+        // v2 upgrade whose atomic rename fails (injected seam — the
+        // version directory is shared with the dependency sandbox, so
+        // no pure-filesystem block reaches the rename stage).
+        final v2 = p7PluginDir(name: 'Runtime Kit', version: '2.0.0');
+        await p7Approve(v2);
+        PluginRuntimeManager.failRenameForTest = true;
+        addTearDown(() => PluginRuntimeManager.failRenameForTest = false);
+
+        try {
+          await app.installPlugin(
+            row,
+            source: LocalFolderPluginSource(v2.path),
+            origin: PluginInstallOrigin.pluginsScreen,
+          );
+          fail('install must throw on rename failure');
+        } on PluginRuntimeException catch (e) {
+          expect(e.code, PluginRuntimeErrorCode.renameFailed);
+        }
+
+        // The prior version's registration is RESTORED in-session: its
+        // contributions still resolve, against the v1 content root.
+        expect(reg.isRegistered('p7org/runtime-kit'), isTrue);
+        final restored = reg.contributionByCanonicalId(
+          'plugin:p7org/runtime-kit/command:review',
+        );
+        expect(restored, isNotNull);
+        expect(restored!.rootPath, v1Root);
+        expect(reg.activationFor('p7org/runtime-kit'),
+            PluginActivation.pendingGlobal);
+
+        // Prior version content + record untouched by the failed upgrade.
+        expect(File('$v1Root/commands/review.md').existsSync(), isTrue);
+        final rec = await PluginRuntimeManager.I.recordFor(
+          'p7org/runtime-kit',
+        );
+        expect(rec!.state, PluginActivation.pendingGlobal);
+        expect(rec.promoteOnNextBoot, isTrue);
       },
     );
   });
