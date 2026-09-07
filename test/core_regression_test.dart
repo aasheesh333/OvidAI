@@ -12354,6 +12354,102 @@ You are an expert security auditor reviewing code for vulnerabilities.
       },
     );
 
+    test('PLUGIN1c: raw MCP declaration blocks never serialize secret values', () {
+      final server = PluginMcpServer.scrubbedRaw(
+        pluginId: 'acme-inc/reviewer-pro',
+        name: 'fetch',
+        rawDeclaration: const {
+          'type': 'http',
+          'url': 'https://example.com/mcp',
+          'env': {'API_KEY': 'sk-secret-1'},
+          'headers': {'Authorization': 'Bearer t'},
+        },
+        transport: 'http',
+        url: 'https://example.com/mcp',
+        path: '.mcp.json',
+      );
+      // Secret-bearing env/header VALUES become NAMES only (spec §5.1).
+      expect(server.envNames, ['API_KEY']);
+      expect(server.headerNames, ['Authorization']);
+      final encoded = json.encode(server.toJson());
+      expect(encoded, isNot(contains('sk-secret-1')));
+      expect(encoded, isNot(contains('Bearer t')));
+
+      // Non-secret raw fields survive the scrub verbatim.
+      expect(server.frontmatter['url'], 'https://example.com/mcp');
+      expect(server.frontmatter.containsKey('env'), isFalse);
+      expect(server.frontmatter.containsKey('headers'), isFalse);
+
+      // Round-trip stays scrubbed.
+      final back = PluginMcpServer.fromJson(server.toJson());
+      expect(back.envNames, ['API_KEY']);
+      expect(back.headerNames, ['Authorization']);
+      expect(json.encode(back.toJson()), isNot(contains('sk-secret-1')));
+      expect(json.encode(back.toJson()), isNot(contains('Bearer t')));
+
+      // Hostile/stale persisted JSON is scrubbed on read: env/headers blocks
+      // at ANY depth lose their values, their names are absorbed instead.
+      final hostile = PluginMcpServer.fromJson(<String, dynamic>{
+        'pluginId': 'acme-inc/reviewer-pro',
+        'name': 'fetch',
+        'envNames': ['DECLARED_TOKEN'],
+        'frontmatter': {
+          'command': 'uvx',
+          'env': {'API_KEY': 'sk-secret-1'},
+        },
+        'unknownFields': {
+          'vendor': {
+            'headers': {'Authorization': 'Bearer t'},
+          },
+        },
+      });
+      expect(hostile.envNames, ['DECLARED_TOKEN', 'API_KEY']);
+      expect(hostile.headerNames, ['Authorization']);
+      final hostileEncoded = json.encode(hostile.toJson());
+      expect(hostileEncoded, isNot(contains('sk-secret-1')));
+      expect(hostileEncoded, isNot(contains('Bearer t')));
+
+      // Immutability contract: scrubbed record fields are frozen.
+      expect(() => server.envNames.add('X'), throwsUnsupportedError);
+      expect(() => server.frontmatter['command'] = 'sh', throwsUnsupportedError);
+    });
+
+    test(
+      'PLUGIN1d: corrupt approvedAt round-trips to the epoch-0 sentinel, never now',
+      () {
+        final sentinel = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+
+        final garbage = PluginPermissionGrant.fromJson(<String, dynamic>{
+          'pluginId': 'acme-inc/reviewer-pro',
+          'manifestDigest': 'sha256:abc',
+          'capabilities': ['workspaceRead'],
+          'approvedAt': 'not-a-timestamp',
+        });
+        expect(garbage.approvedAt, sentinel);
+
+        final missing = PluginPermissionGrant.fromJson(<String, dynamic>{
+          'pluginId': 'acme-inc/reviewer-pro',
+          'manifestDigest': 'sha256:abc',
+          'capabilities': <String>[],
+        });
+        expect(missing.approvedAt, sentinel);
+        expect(missing.approvedAt.isUtc, isTrue);
+
+        // A valid timestamp still parses exactly.
+        final valid = PluginPermissionGrant.fromJson(<String, dynamic>{
+          'pluginId': 'acme-inc/reviewer-pro',
+          'manifestDigest': 'sha256:abc',
+          'capabilities': ['workspaceRead'],
+          'approvedAt': DateTime.utc(2026).toIso8601String(),
+        });
+        expect(valid.approvedAt, DateTime.utc(2026));
+
+        // Round-tripped collections are frozen (immutability contract).
+        expect(() => valid.capabilities.add(PluginCapability.shellExecute), throwsUnsupportedError);
+        expect(() => missing.environmentReadNames.add('X'), throwsUnsupportedError);
+      },
+    );
+
     test(
       'PLUGIN3: activation records round-trip and PluginItem runtime fields stay legacy-safe',
       () {
@@ -12427,8 +12523,11 @@ You are an expert security auditor reviewing code for vulnerabilities.
           promoteOnNextBoot: true,
           manifestDigest: 'sha256:abc',
           compatibilityWarnings: const [
+            // state.dart contract: this field holds ONLY optional-severity
+            // findings — required findings fail install instead of landing
+            // here as warnings.
             CompatibilityIssue(
-              severity: CompatibilitySeverity.required,
+              severity: CompatibilitySeverity.optional,
               message: 'desktop-only binary cannot run on Android',
               fields: ['mcpServers[0].command'],
             ),
@@ -12441,7 +12540,7 @@ You are an expert security auditor reviewing code for vulnerabilities.
         expect(backItem.manifestDigest, 'sha256:abc');
         expect(
           backItem.compatibilityWarnings.single.severity,
-          CompatibilitySeverity.required,
+          CompatibilitySeverity.optional,
         );
         expect(backItem.compatibilityWarnings.single.fields, [
           'mcpServers[0].command',

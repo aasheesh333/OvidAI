@@ -10,7 +10,9 @@
 ///
 /// Secrets never live here (spec §5.1): contribution records carry only the
 /// NAMES of required environment variables / HTTP headers — values stay in
-/// secure storage, keyed to the owning plugin.
+/// secure storage, keyed to the owning plugin. [scrubMcpSecrets] is the one
+/// authoritative path enforcing this when raw declaration blocks are
+/// normalized.
 library;
 
 /// The source format a manifest was adapted from (spec §4.3).
@@ -370,7 +372,9 @@ class PluginMcpServer {
   /// Source-relative path of the declaring file, e.g. `.mcp.json`.
   final String path;
 
-  /// Raw server declaration block from the source config.
+  /// Raw server declaration block from the source config, scrubbed of
+  /// secret VALUES (spec §5.1): `env`/`headers` objects never survive
+  /// here — only their names, moved into [envNames]/[headerNames].
   final Map<String, dynamic> frontmatter;
 
   final Map<String, dynamic> unknownFields;
@@ -389,6 +393,50 @@ class PluginMcpServer {
     this.frontmatter = const {},
     this.unknownFields = const {},
   });
+
+  /// Authoritative adapter path (spec §5.1): builds a server record from
+  /// the RAW declaration block (`.mcp.json` entry, `config.toml` table,
+  /// pasted generic definition). [scrubMcpSecrets] moves env/header NAMES
+  /// into [envNames]/[headerNames] and strips their secret VALUES from the
+  /// stored frontmatter/unknownFields, so a secret can never round-trip
+  /// through [toJson] into persisted plugin metadata. Explicitly resolved
+  /// [envNames]/[headerNames] merge with the names found in
+  /// [rawDeclaration] (exact-deduplicated, source order).
+  factory PluginMcpServer.scrubbedRaw({
+    required String pluginId,
+    required String name,
+    required Map<String, dynamic> rawDeclaration,
+    String transport = 'stdio',
+    String command = '',
+    List<String> args = const [],
+    String? url,
+    String? cwd,
+    List<String> envNames = const [],
+    List<String> headerNames = const [],
+    String path = '',
+    Map<String, dynamic> unknownFields = const {},
+  }) {
+    final decl = scrubMcpSecrets(rawDeclaration);
+    final unknown = scrubMcpSecrets(unknownFields);
+    return PluginMcpServer(
+      pluginId: pluginId,
+      name: name,
+      transport: transport,
+      command: command,
+      args: List<String>.unmodifiable(args),
+      url: url,
+      cwd: cwd,
+      envNames: _mergedNames([envNames, decl.envNames, unknown.envNames]),
+      headerNames: _mergedNames([
+        headerNames,
+        decl.headerNames,
+        unknown.headerNames,
+      ]),
+      path: path,
+      frontmatter: decl.scrubbed,
+      unknownFields: unknown.scrubbed,
+    );
+  }
 
   /// Registry id (spec §4.4): `plugin:<plugin-id>/mcp:<server-name>`.
   String get canonicalId => 'plugin:$pluginId/mcp:$name';
@@ -412,20 +460,35 @@ class PluginMcpServer {
     'unknownFields': unknownFields,
   };
 
-  factory PluginMcpServer.fromJson(Map<String, dynamic> j) => PluginMcpServer(
-    pluginId: j['pluginId'] as String? ?? '',
-    name: j['name'] as String? ?? '',
-    transport: j['transport'] as String? ?? 'stdio',
-    command: j['command'] as String? ?? '',
-    args: _asStringList(j['args']),
-    url: j['url'] as String?,
-    cwd: j['cwd'] as String?,
-    envNames: _asStringList(j['envNames']),
-    headerNames: _asStringList(j['headerNames']),
-    path: j['path'] as String? ?? '',
-    frontmatter: _asMap(j['frontmatter']),
-    unknownFields: _asMap(j['unknownFields']),
-  );
+  factory PluginMcpServer.fromJson(Map<String, dynamic> j) {
+    // Round-trip safety: even a persisted/hand-edited JSON must never
+    // reintroduce secret VALUES. Re-scrub the raw blocks so envNames /
+    // headerNames absorb any smuggled env/header values on read.
+    final decl = scrubMcpSecrets(_asMap(j['frontmatter']));
+    final unknown = scrubMcpSecrets(_asMap(j['unknownFields']));
+    return PluginMcpServer(
+      pluginId: j['pluginId'] as String? ?? '',
+      name: j['name'] as String? ?? '',
+      transport: j['transport'] as String? ?? 'stdio',
+      command: j['command'] as String? ?? '',
+      args: _asStringList(j['args']),
+      url: j['url'] as String?,
+      cwd: j['cwd'] as String?,
+      envNames: _mergedNames([
+        _asStringList(j['envNames']),
+        decl.envNames,
+        unknown.envNames,
+      ]),
+      headerNames: _mergedNames([
+        _asStringList(j['headerNames']),
+        decl.headerNames,
+        unknown.headerNames,
+      ]),
+      path: j['path'] as String? ?? '',
+      frontmatter: decl.scrubbed,
+      unknownFields: unknown.scrubbed,
+    );
+  }
 }
 
 /// One declared dependency (spec §6). A failed REQUIRED dependency means
@@ -492,9 +555,9 @@ class PluginDependencies {
 
   factory PluginDependencies.fromJson(Map<String, dynamic> j) =>
       PluginDependencies(
-        packages: _asMapList(
-          j['packages'],
-        ).map(PluginDependency.fromJson).toList(),
+        packages: List<PluginDependency>.unmodifiable(
+          _asMapList(j['packages']).map(PluginDependency.fromJson),
+        ),
       );
 }
 
@@ -599,24 +662,32 @@ class NormalizedPluginManifest {
             _enumByName(PluginFormat.values, j['format']) ??
             PluginFormat.genericMcp,
         rootPath: j['rootPath'] as String? ?? '',
-        commands: _asMapList(
-          j['commands'],
-        ).map(PluginCommand.fromJson).toList(),
-        skills: _asMapList(j['skills']).map(PluginSkill.fromJson).toList(),
-        agents: _asMapList(j['agents']).map(PluginAgent.fromJson).toList(),
-        hooks: _asMapList(j['hooks']).map(PluginHook.fromJson).toList(),
-        mcpServers: _asMapList(
-          j['mcpServers'],
-        ).map(PluginMcpServer.fromJson).toList(),
+        commands: List<PluginCommand>.unmodifiable(
+          _asMapList(j['commands']).map(PluginCommand.fromJson),
+        ),
+        skills: List<PluginSkill>.unmodifiable(
+          _asMapList(j['skills']).map(PluginSkill.fromJson),
+        ),
+        agents: List<PluginAgent>.unmodifiable(
+          _asMapList(j['agents']).map(PluginAgent.fromJson),
+        ),
+        hooks: List<PluginHook>.unmodifiable(
+          _asMapList(j['hooks']).map(PluginHook.fromJson),
+        ),
+        mcpServers: List<PluginMcpServer>.unmodifiable(
+          _asMapList(j['mcpServers']).map(PluginMcpServer.fromJson),
+        ),
         dependencies: PluginDependencies.fromJson(_asMap(j['dependencies'])),
         requestedCapabilities: pluginCapabilitiesFromNames(
           j['requestedCapabilities'],
         ),
-        environmentReadNames: _asStringList(j['environmentReadNames']).toSet(),
+        environmentReadNames: Set<String>.unmodifiable(
+          _asStringList(j['environmentReadNames']),
+        ),
         unknownFields: _asMap(j['unknownFields']),
-        compatibility: _asMapList(
-          j['compatibility'],
-        ).map(CompatibilityIssue.fromJson).toList(),
+        compatibility: List<CompatibilityIssue>.unmodifiable(
+          _asMapList(j['compatibility']).map(CompatibilityIssue.fromJson),
+        ),
       );
 }
 
@@ -639,7 +710,7 @@ class PluginPermissionGrant {
 
   final DateTime approvedAt;
 
-  PluginPermissionGrant({
+  const PluginPermissionGrant({
     required this.pluginId,
     required this.manifestDigest,
     required this.capabilities,
@@ -660,10 +731,15 @@ class PluginPermissionGrant {
         pluginId: j['pluginId'] as String? ?? '',
         manifestDigest: j['manifestDigest'] as String? ?? '',
         capabilities: pluginCapabilitiesFromNames(j['capabilities']),
-        environmentReadNames: _asStringList(j['environmentReadNames']).toSet(),
+        environmentReadNames: Set<String>.unmodifiable(
+          _asStringList(j['environmentReadNames']),
+        ),
+        // Fail CLOSED: a corrupt/missing timestamp yields a Visibly-Stale
+        // epoch-0 UTC sentinel, never DateTime.now() (which would make a
+        // damaged grant look freshly approved — spec §5.1).
         approvedAt:
             DateTime.tryParse(j['approvedAt'] as String? ?? '') ??
-            DateTime.now(),
+            DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
       );
 }
 
@@ -743,23 +819,116 @@ CompatibilitySeverity? compatibilitySeverityFromName(Object? raw) =>
 /// never inflate an approval.
 Set<PluginCapability> pluginCapabilitiesFromNames(Object? raw) {
   final out = <PluginCapability>{};
-  if (raw is! Iterable) return out;
+  if (raw is! Iterable) return Set<PluginCapability>.unmodifiable(out);
   for (final e in raw) {
     final cap = _enumByName(PluginCapability.values, e);
     if (cap != null) out.add(cap);
   }
-  return out;
+  return Set<PluginCapability>.unmodifiable(out);
 }
 
-Map<String, dynamic> _asMap(Object? raw) =>
-    raw is Map ? Map<String, dynamic>.from(raw) : const <String, dynamic>{};
+/// Frozen wire helpers (immutability contract): every collection these
+/// return is a fresh copy AND unmodifiable, so no adapter can later mutate a
+/// published manifest's contents through a stored reference. The const
+/// constructors keep accepting caller collections as-is — adapters that need
+/// the frozen guarantee round-trip through `fromJson` or use [scrubMcpSecrets]
+/// / `PluginMcpServer.scrubbedRaw`, which freeze their results too.
+Map<String, dynamic> _asMap(
+  Object? raw,
+) => raw is Map
+    ? Map<String, dynamic>.unmodifiable(Map<String, dynamic>.from(raw))
+    : const <String, dynamic>{};
 
-List<Map<String, dynamic>> _asMapList(Object? raw) => raw is List
-    ? [
+List<Map<String, dynamic>> _asMapList(
+  Object? raw,
+) => raw is List
+    ? List<Map<String, dynamic>>.unmodifiable([
         for (final e in raw)
-          if (e is Map) Map<String, dynamic>.from(e),
-      ]
+          if (e is Map) _asMap(e),
+      ])
     : const <Map<String, dynamic>>[];
 
-List<String> _asStringList(Object? raw) =>
-    raw is List ? [for (final e in raw) e.toString()] : const <String>[];
+List<String> _asStringList(
+  Object? raw,
+) => raw is List
+    ? List<String>.unmodifiable([for (final e in raw) e.toString()])
+    : const <String>[];
+
+/// One authoritative secret scrubber (spec §5.1: secrets are NEVER copied
+/// into plugin metadata or ordinary preferences). Given a raw MCP server
+/// declaration block (`.mcp.json` entry, `config.toml` table, or pasted
+/// generic definition) — or any unknown-fields block — it:
+///
+/// * collects the NAMES of every `env` / `environment` / `headers` object it
+///   finds, at ANY depth (env keys into `envNames`, header keys into
+///   `headerNames`),
+/// * DROPS those objects — with their secret values — from the returned
+///   `scrubbed` map, so a value like `sk-…` or `Bearer …` can never
+///   round-trip through `toJson()` into persisted metadata,
+/// * preserves everything else verbatim, so unknown fields never lose
+///   information.
+///
+/// The result is deeply frozen: nested maps and lists are unmodifiable as
+/// they are rebuilt. Adapters (Task 2) build [PluginMcpServer] records via
+/// [PluginMcpServer.scrubbedRaw], which applies this scrubber.
+({
+  Map<String, dynamic> scrubbed,
+  List<String> envNames,
+  List<String> headerNames,
+})
+scrubMcpSecrets(Map<String, dynamic> raw) {
+  final envNames = <String>[];
+  final headerNames = <String>[];
+  return (
+    scrubbed: Map<String, dynamic>.unmodifiable(
+      _scrubNode(raw, envNames, headerNames) as Map<String, dynamic>,
+    ),
+    envNames: List<String>.unmodifiable(envNames),
+    headerNames: List<String>.unmodifiable(headerNames),
+  );
+}
+
+/// Recursively scrubs one map/list node; harvested names land in [envNames]
+/// / [headerNames] (exact-deduplicated, source order).
+Object? _scrubNode(
+  Object? node,
+  List<String> envNames,
+  List<String> headerNames,
+) {
+  if (node is Map) {
+    final out = <String, dynamic>{};
+    node.forEach((key, value) {
+      final name = key.toString();
+      final lower = name.toLowerCase();
+      final isEnvBlock = lower == 'env' || lower == 'environment';
+      if (value is Map && (isEnvBlock || lower == 'headers')) {
+        // Secret-bearing object: keep the NAMES, drop the VALUES.
+        final names = isEnvBlock ? envNames : headerNames;
+        for (final k in value.keys) {
+          final secretName = k.toString();
+          if (!names.contains(secretName)) names.add(secretName);
+        }
+        return;
+      }
+      out[name] = _scrubNode(value, envNames, headerNames);
+    });
+    return Map<String, dynamic>.unmodifiable(out);
+  }
+  if (node is List) {
+    return List<Object?>.unmodifiable([
+      for (final e in node) _scrubNode(e, envNames, headerNames),
+    ]);
+  }
+  return node;
+}
+
+/// Merges name groups in source order, exact-deduplicated, frozen.
+List<String> _mergedNames(Iterable<Iterable<String>> groups) {
+  final out = <String>[];
+  for (final group in groups) {
+    for (final name in group) {
+      if (!out.contains(name)) out.add(name);
+    }
+  }
+  return List<String>.unmodifiable(out);
+}
