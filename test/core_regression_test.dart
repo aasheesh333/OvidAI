@@ -21,6 +21,7 @@ import 'package:ovid_ai/core/hook_service.dart';
 import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/mcp_config_parse.dart';
 import 'package:ovid_ai/core/plugin_adapters.dart';
+import 'package:ovid_ai/core/plugin_dependency_service.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/plugin_permissions.dart';
 import 'package:ovid_ai/core/plugin_registry.dart';
@@ -15840,6 +15841,430 @@ cwd = 'tools'
       },
     );
   });
+
+  group('PluginCompat Task 6: isolated automatic dependency installer', () {
+    // Recording runner — the injected exec seam. Never executes
+    // anything; records (command, cwd, env) and replays canned
+    // (exit, output) results so tests assert COMMAND SHAPE only.
+    NormalizedPluginManifest p6Manifest({
+      String id = 'acme/dep-kit',
+      String version = '1.2.0',
+      List<PluginDependency> deps = const [],
+    }) => NormalizedPluginManifest(
+      id: id,
+      name: 'Dep Kit',
+      version: version,
+      format: PluginFormat.claudeCode,
+      rootPath: '/tmp/$id',
+      dependencies: PluginDependencies(packages: List.unmodifiable(deps)),
+    );
+
+    PluginPermissionGrant p6Grant({
+      String pluginId = 'acme/dep-kit',
+      Set<PluginCapability> caps = const {},
+    }) => PluginPermissionGrant(
+      pluginId: pluginId,
+      manifestDigest: 'sha256:${'a' * 64}',
+      capabilities: caps,
+      approvedAt: DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+    );
+
+    test(
+      'PLUGIN6: npm installs into the local runtime prefix with lockfile honored and lifecycle scripts denied without shellExecute',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('p6-npm-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final runner = RecordingRunner();
+        final svc = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final manifest = p6Manifest(deps: [
+          const PluginDependency(name: 'left-pad', versionSpec: '^1.3.0'),
+          const PluginDependency(
+            name: 'opt-thing',
+            required: false,
+          ),
+        ]);
+
+        runner.queue((0, 'added 2 packages'));
+        final result = await svc.install(manifest, null);
+
+        expect(result.status, PluginDependencyStatus.ok);
+        // Runtime root layout: <root>/plugin-runtime/<id>/<version>/…
+        final rt = '${dir.path}/plugin-runtime/acme/dep-kit/1.2.0';
+        expect(result.runtimeRoot.path, rt);
+        expect(Directory('$rt/node').existsSync(), isTrue);
+        expect(Directory('$rt/python').existsSync(), isTrue);
+        expect(Directory('$rt/bin').existsSync(), isTrue);
+        expect(Directory('$rt/cache').existsSync(), isTrue);
+        expect(Directory('$rt/storage').existsSync(), isTrue);
+
+        // ONE npm install per batch — both packages in one command.
+        final npmCmds = runner.cmds
+            .where((c) => c.args.isNotEmpty && c.args[0] == 'npm')
+            .toList();
+        expect(npmCmds.length, 1, reason: 'batched single npm install');
+        final args = npmCmds.first.args;
+        expect(args, containsAll(['install', '--no-global']));
+        // Local prefix (never the sandbox global prefix).
+        expect(
+          args,
+          contains('--prefix'),
+          reason: 'npm must install into the plugin-local prefix',
+        );
+        final prefixIdx = args.indexOf('--prefix');
+        expect(args[prefixIdx + 1], '$rt/node');
+        // Lockfile honored, not mutated.
+        expect(args, contains('--no-package-lock'));
+        // Lifecycle scripts DENIED without the shellExecute grant.
+        expect(args, contains('--ignore-scripts'));
+        // Both packages named on the command line (spec form for the
+        // pinned one).
+        expect(args, contains('left-pad@^1.3.0'));
+        expect(args, contains('opt-thing'));
+
+        // Command shape captured honestly: exit code, resolved
+        // versions, checksums, capped logs.
+        expect(result.status, PluginDependencyStatus.ok);
+        expect(result.entries, isNotEmpty);
+        final entry = result.entries.firstWhere(
+          (e) => e.name == 'left-pad',
+        );
+        expect(entry.status, PluginDependencyStatus.ok);
+        expect(entry.command, contains('npm install'));
+        expect(entry.exitCode, 0);
+        expect(entry.resolvedVersion, isNotNull);
+        expect(entry.checksum, isNotNull);
+
+        // Per-plugin env overrides cache/home — no writes outside root.
+        final env = npmCmds.first.env;
+        expect(env, isNotNull);
+        expect(env!['npm_config_cache'], '$rt/cache/npm');
+        expect(env['npm_config_tmp'], '$rt/cache/tmp');
+        expect(env['HOME'], '$rt/storage/home');
+        expect(env['PIP_CACHE_DIR'], '$rt/cache/pip');
+        expect(env['PATH'], startsWith('$rt/bin:'));
+        // cwd is inside the runtime root.
+        expect(
+          SandboxService.isPathContained(rt, runner.cmds.first.cwd!),
+          isTrue,
+        );
+      },
+    );
+
+    test(
+      'PLUGIN6: npm lifecycle scripts allowed only with a shellExecute grant',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('p6-npm2-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final runner = RecordingRunner();
+        final svc = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final manifest = p6Manifest(
+          deps: [const PluginDependency(name: 'node-gyp-ish')],
+        );
+
+        runner.queue((0, 'added 1 package'));
+        final result = await svc.install(
+          manifest,
+          p6Grant(caps: {PluginCapability.shellExecute}),
+        );
+        expect(result.status, PluginDependencyStatus.ok);
+        final npmCmds = runner.cmds
+            .where((c) => c.args.isNotEmpty && c.args[0] == 'npm')
+            .toList();
+        expect(npmCmds, isNotEmpty);
+        expect(
+          npmCmds.first.args,
+          isNot(contains('--ignore-scripts')),
+          reason: 'grant carries shellExecute → scripts may run',
+        );
+      },
+    );
+
+    test(
+      'PLUGIN6: python packages install into an isolated per-plugin target with no scripts',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('p6-py-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final runner = RecordingRunner();
+        final svc = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final manifest = p6Manifest(deps: [
+          const PluginDependency(
+            name: 'requests',
+            versionSpec: '==2.31.0',
+            kind: PluginDependencyKind.python,
+          ),
+        ]);
+
+        runner.queue((0, 'Successfully installed requests-2.31.0'));
+        final result = await svc.install(manifest, null);
+        expect(result.status, PluginDependencyStatus.ok);
+        final rt = '${dir.path}/plugin-runtime/acme/dep-kit/1.2.0';
+
+        final pipCmds = runner.cmds
+            .where((c) => c.args.isNotEmpty && c.args[0] == 'pip')
+            .toList();
+        expect(pipCmds.length, 1);
+        final args = pipCmds.first.args;
+        expect(args.first, 'pip');
+        // Isolated target dir inside the plugin runtime root.
+        expect(args, contains('--target'));
+        final tIdx = args.indexOf('--target');
+        expect(args[tIdx + 1], '$rt/python');
+        // No dependency pollution / no system site-packages.
+        expect(args, contains('--no-deps'));
+        // Post-install hooks denied without shellExecute.
+        expect(args, contains('--no-compile'));
+
+        // Resolved version parsed out of pip's output.
+        final entry = result.entries.firstWhere((e) => e.name == 'requests');
+        expect(entry.resolvedVersion, '2.31.0');
+        expect(entry.checksum, isNotNull);
+      },
+    );
+
+    test(
+      'PLUGIN6: native packages install via the sandbox package manager with an ABI compatibility check',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('p6-native-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final runner = RecordingRunner();
+        final svc = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final manifest = p6Manifest(deps: [
+          const PluginDependency(
+            name: 'ripgrep',
+            kind: PluginDependencyKind.native,
+          ),
+          const PluginDependency(
+            name: 'unsupported-desktop-bin',
+            kind: PluginDependencyKind.native,
+            required: false,
+          ),
+        ]);
+
+        // ovid-pkg install ripgrep succeeds; the desktop-only package
+        // is not in the index (exit 1 + "not found").
+        runner.queue((0, '[ovid-pkg] installing ripgrep'));
+        runner.queue((1, '[ovid-pkg] not found: unsupported-desktop-bin'));
+        final result = await svc.install(manifest, null);
+
+        final ovidCmds = runner.cmds
+            .where((c) => c.args.isNotEmpty && c.args[0] == 'ovid-pkg')
+            .toList();
+        expect(ovidCmds.length, 2);
+        expect(ovidCmds[0].args, ['ovid-pkg', 'install', 'ripgrep']);
+        expect(ovidCmds[1].args, [
+          'ovid-pkg',
+          'install',
+          'unsupported-desktop-bin',
+        ]);
+
+        // Required native dep ok; the desktop-only optional dep yields a
+        // PRECISE compatibility error (degraded, not crash).
+        final rg = result.entries.firstWhere((e) => e.name == 'ripgrep');
+        expect(rg.status, PluginDependencyStatus.ok);
+        final desk = result.entries.firstWhere(
+          (e) => e.name == 'unsupported-desktop-bin',
+        );
+        expect(desk.status, PluginDependencyStatus.failed);
+        expect(desk.error, contains('not available'));
+        expect(
+          desk.error,
+          contains(SandboxService.I.deviceArch),
+          reason: 'error names the device ABI',
+        );
+      },
+    );
+
+    test(
+      'PLUGIN6: required failure aborts with status failed; optional failure degrades with the affected dependency identified',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('p6-fail-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final runner = RecordingRunner();
+        final svc = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final manifest = p6Manifest(deps: [
+          const PluginDependency(name: 'must-have'),
+          const PluginDependency(name: 'nice-to-have', required: false),
+        ]);
+
+        // npm batch fails (both in one command) → required dep failed.
+        runner.queue((1, 'npm ERR! network unreachable'));
+        final result = await svc.install(manifest, null);
+        expect(result.status, PluginDependencyStatus.failed);
+        expect(result.entries.firstWhere((e) => e.name == 'must-have').status,
+            PluginDependencyStatus.failed);
+        expect(result.entries.firstWhere((e) => e.name == 'nice-to-have').status,
+            PluginDependencyStatus.failed);
+
+        // A second manifest where ONLY the optional one fails: separate
+        // python optional dep on its own pip command.
+        final runner2 = RecordingRunner();
+        final svc2 = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: runner2.call,
+          ensureRuntime: (_) async => true,
+        );
+        final manifest2 = p6Manifest(deps: [
+          const PluginDependency(
+            name: 'core-lib',
+            kind: PluginDependencyKind.python,
+          ),
+          const PluginDependency(
+            name: 'fancy-extra',
+            kind: PluginDependencyKind.python,
+            required: false,
+          ),
+        ]);
+        // Optional pip packages install one-per-command (so an optional
+        // failure is attributable to exactly that package).
+        runner2.queue((0, 'Successfully installed core-lib-1.0.0'));
+        runner2.queue((1, 'ERROR: Could not find fancy-extra'));
+        final result2 = await svc2.install(manifest2, null);
+        expect(result2.status, PluginDependencyStatus.degraded);
+        expect(
+          result2.entries.firstWhere((e) => e.name == 'core-lib').status,
+          PluginDependencyStatus.ok,
+        );
+        final failedOpt = result2.entries.firstWhere(
+          (e) => e.name == 'fancy-extra',
+        );
+        expect(failedOpt.status, PluginDependencyStatus.failed);
+        expect(failedOpt.required, isFalse);
+        expect(result2.degradedNames, ['fancy-extra']);
+      },
+    );
+
+    test(
+      'PLUGIN6: no writes outside the plugin runtime root; removeVersion deletes only that version',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('p6-contain-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final runner = RecordingRunner();
+        final svc = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final manifest = p6Manifest(deps: [
+          const PluginDependency(name: 'left-pad'),
+        ]);
+        runner.queue((0, 'added 1 package'));
+        await svc.install(manifest, null);
+
+        // Every recorded command ran with cwd + env overrides inside the
+        // runtime root, and the runner never received an absolute binary
+        // path outside the sandbox's jailed $PREFIX/bin resolution.
+        final rt = '${dir.path}/plugin-runtime/acme/dep-kit/1.2.0';
+        for (final c in runner.cmds) {
+          expect(c.cwd, isNotNull);
+          expect(SandboxService.isPathContained(rt, c.cwd!), isTrue);
+          expect(c.args.first.startsWith('/'), isFalse,
+              reason: 'binaries resolve via sandbox PREFIX/bin, never '
+                  'absolute host paths');
+        }
+        // env overrides never point outside the runtime root.
+        for (final c in runner.cmds) {
+          final e = c.env;
+          if (e == null) continue;
+          for (final k in const [
+            'npm_config_cache',
+            'npm_config_tmp',
+            'HOME',
+            'PIP_CACHE_DIR',
+          ]) {
+            final v = e[k];
+            if (v != null) {
+              expect(SandboxService.isPathContained(rt, v), isTrue,
+                  reason: '$k=$v escapes the runtime root');
+            }
+          }
+        }
+
+        // removeVersion deletes exactly the version dir.
+        final v1 = Directory(rt);
+        expect(v1.existsSync(), isTrue);
+        await svc.removeVersion('acme/dep-kit', '1.2.0');
+        expect(v1.existsSync(), isFalse);
+        // A sibling plugin/version is untouched.
+        final sibling = Directory(
+          '${dir.path}/plugin-runtime/other/plugin/9.9.9',
+        )..createSync(recursive: true);
+        await svc.removeVersion('acme/dep-kit', '1.2.0');
+        expect(sibling.existsSync(), isTrue);
+      },
+    );
+
+    test(
+      'PLUGIN6: probe reports runtime availability per kind without installing',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('p6-probe-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final runner = RecordingRunner();
+        final svc = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        // node+npm present, python missing.
+        runner.queue((0, 'OK node\nOK npm\nMISS python'));
+        final probe = await svc.probe();
+        expect(probe['node'], isTrue);
+        expect(probe['npm'], isTrue);
+        expect(probe['python'], isFalse);
+      },
+    );
+  });
+}
+
+/// One recorded command from the [RecordingRunner] injected-exec seam.
+class RecordedCmd {
+  RecordedCmd(this.args, this.cwd, this.env);
+
+  final List<String> args;
+  final String? cwd;
+  final Map<String, String>? env;
+}
+
+/// The injected runner seam for PLUGIN6 tests: records command shape
+/// (args/cwd/env) and replays queued (exit, output) results. NOTHING is
+/// ever executed — the tests assert the shape of the commands the
+/// service would run through the real sandbox exec.
+class RecordingRunner {
+  final cmds = <RecordedCmd>[];
+  final _queued = <(int, String)>[];
+  int _seq = 0;
+
+  void queue((int, String) result) => _queued.add(result);
+
+  Future<(int, String)> call(
+    List<String> args, {
+    String? cwd,
+    Map<String, String>? env,
+  }) async {
+    cmds.add(RecordedCmd(List.unmodifiable(args), cwd, env));
+    final i = _seq++;
+    if (i < _queued.length) return _queued[i];
+    return (0, '');
+  }
 }
 
 String readForegroundServiceSourceForTest() {

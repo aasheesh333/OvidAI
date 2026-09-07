@@ -1718,6 +1718,44 @@ audit=false
     } catch (_) {}
   }
 
+  /// Plugin-runtime environment overrides (spec §6, additive helper).
+  ///
+  /// Env for dependency installs into a plugin's isolated
+  /// `<app-data>/plugin-runtime/<id>/<version>/` root [runtimeRoot]:
+  /// every cache/tmp/home the package managers would otherwise write
+  /// (into the SHARED sandbox prefix) is redirected under the plugin's
+  /// own root, and the plugin's `bin/` is prepended to PATH. The
+  /// caller merges this OVER the base sandbox env (`exec` merges
+  /// per-call env last), so these values win.
+  static Map<String, String> pluginRuntimeEnv(String runtimeRoot) {
+    // Ensure the redirected dirs exist — npm/pip try to mkdir their
+    // cache/tmp under the compiled-in HOME otherwise (cross-app
+    // EACCES). Sync + best-effort, mirroring _sandboxEnv.
+    try {
+      Directory('$runtimeRoot/cache/npm').createSync(recursive: true);
+      Directory('$runtimeRoot/cache/tmp').createSync(recursive: true);
+      Directory('$runtimeRoot/cache/pip').createSync(recursive: true);
+      Directory('$runtimeRoot/storage/home').createSync(recursive: true);
+      Directory('$runtimeRoot/bin').createSync(recursive: true);
+    } catch (_) {}
+    final prefix = I._prefix?.path;
+    return {
+      'HOME': '$runtimeRoot/storage/home',
+      'TMPDIR': '$runtimeRoot/cache/tmp',
+      'npm_config_cache': '$runtimeRoot/cache/npm',
+      'npm_config_tmp': '$runtimeRoot/cache/tmp',
+      'npm_config_userconfig': '$runtimeRoot/cache/npm/npmrc',
+      'PIP_CACHE_DIR': '$runtimeRoot/cache/pip',
+      'PIP_TARGET': '$runtimeRoot/python',
+      // Plugin bin/ first, then the sandbox's own PATH shape (a
+      // literal $PATH would never expand in a process environment).
+      'PATH':
+          '$runtimeRoot/bin:'
+          '${prefix == null ? '' : '$prefix/bin:'}'
+          '/system/bin:/system/xbin',
+    };
+  }
+
   /// Public self-heal entry (Health repair + tests). Best-effort.
   Future<void> selfHealNow({void Function(String line)? onLine}) async {
     Directory prefix;
