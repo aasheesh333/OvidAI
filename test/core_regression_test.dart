@@ -13701,6 +13701,475 @@ cwd = 'tools'
         expect(mh.mcpServers.single.headerNames, ['Authorization']);
       },
     );
+
+    test(
+      'PLUGIN3: pinned GitHub ref never falls back and fails loudly when it resolves empty',
+      () async {
+        final requested = <String>[];
+        final server = await startMock(requested, (path) {
+          if (path == '/tree/main') {
+            return utf8.encode(
+              jsonEncode({
+                'tree': [
+                  {'path': 'commands/x.md', 'type': 'blob'},
+                ],
+              }),
+            );
+          }
+          if (path == '/raw/commands/x.md') return utf8.encode('X');
+          if (path == '/tree/v9') {
+            // tree exists but holds no blobs at all
+            return utf8.encode(
+              jsonEncode({
+                'tree': [
+                  {'path': 'docs', 'type': 'tree'},
+                ],
+              }),
+            );
+          }
+          return null; // '/tree/v1.2.3' is deliberately unreachable
+        });
+        addTearDown(() => server.close(force: true));
+
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-pin');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+          githubBaseOverride:
+              'http://${server.address.host}:${server.port}',
+        );
+
+        // Install mode: a pinned ref is the ONLY candidate (spec §4.2) —
+        // no silent fallback to main/master when the pin is unreachable.
+        await expectLater(
+          resolver.resolve(
+            GithubPluginSource(owner: 'acme', repo: 'plug', ref: 'v1.2.3'),
+          ),
+          throwsA(
+            isA<PluginSourceException>().having(
+              (e) => e.message,
+              'message',
+              contains('v1.2.3'),
+            ),
+          ),
+        );
+        expect(
+          requested,
+          ['/tree/v1.2.3'],
+          reason: 'a pinned ref must never fall back to main/master',
+        );
+        expectStagingClean(stagingRoot);
+
+        // Install mode: pin resolves to an empty tree → loud failure,
+        // not a silent "success" with zero files.
+        await expectLater(
+          resolver.resolve(
+            GithubPluginSource(owner: 'acme', repo: 'plug', ref: 'v9'),
+          ),
+          throwsA(
+            isA<PluginSourceException>().having(
+              (e) => e.message,
+              'message',
+              contains('no plugin content'),
+            ),
+          ),
+        );
+        expectStagingClean(stagingRoot);
+
+        // The legacy delegation contract (include != null) keeps the
+        // main/master fallback and best-effort empty semantics.
+        requested.clear();
+        final legacyFallback = await resolver.resolve(
+          GithubPluginSource(
+            owner: 'acme',
+            repo: 'plug',
+            ref: 'v1.2.3',
+            include: (rel) => true,
+          ),
+        );
+        expect(requested, contains('/tree/main'));
+        expect(legacyFallback.fileCount, 1);
+        legacyFallback.discard();
+
+        final legacyEmpty = await resolver.resolve(
+          GithubPluginSource(
+            owner: 'acme',
+            repo: 'plug',
+            ref: 'v9',
+            include: (rel) => true,
+          ),
+        );
+        expect(
+          legacyEmpty.fileCount,
+          1,
+          reason: 'legacy contract falls back to main when the pinned tree '
+              'has no matching entries — install mode above refuses this',
+        );
+        legacyEmpty.discard();
+      },
+    );
+
+    test(
+      'PLUGIN3: install-mode GitHub resolution refuses partial staging; legacy include stays best-effort',
+      () async {
+        final server = await startMock(<String>[], (path) {
+          if (path == '/tree/main') {
+            return utf8.encode(
+              jsonEncode({
+                'tree': [
+                  {'path': 'commands/a.md', 'type': 'blob'},
+                  {'path': 'commands/b.md', 'type': 'blob'},
+                ],
+              }),
+            );
+          }
+          if (path == '/raw/commands/a.md') return utf8.encode('A');
+          return null; // '/raw/commands/b.md' 404s → partial staging
+        });
+        addTearDown(() => server.close(force: true));
+
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-partial');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+          githubBaseOverride:
+              'http://${server.address.host}:${server.port}',
+        );
+
+        await expectLater(
+          resolver.resolve(GithubPluginSource(owner: 'acme', repo: 'partial')),
+          throwsA(
+            isA<PluginSourceException>().having(
+              (e) => e.message,
+              'message',
+              contains('partial'),
+            ),
+          ),
+          reason: 'a 404 blob must not yield a "successful" partial install',
+        );
+        expectStagingClean(stagingRoot);
+
+        final legacy = await resolver.resolve(
+          GithubPluginSource(
+            owner: 'acme',
+            repo: 'partial',
+            include: (rel) => true,
+          ),
+        );
+        addTearDown(legacy.discard);
+        expect(legacy.fileCount, 1, reason: 'legacy path stays best-effort');
+        expect(
+          File('${legacy.stagingDir.path}/commands/a.md').readAsStringSync(),
+          'A',
+        );
+      },
+    );
+
+    test(
+      'PLUGIN3: hostile GitHub tree paths never reach disk (lexical validation)',
+      () async {
+        final server = await startMock(<String>[], (path) {
+          if (path == '/tree/main') {
+            return utf8.encode(
+              jsonEncode({
+                'tree': [
+                  {'path': '../evil.txt', 'type': 'blob'},
+                  {'path': '/etc/evil2.txt', 'type': 'blob'},
+                  {'path': 'commands/ok.md', 'type': 'blob'},
+                ],
+              }),
+            );
+          }
+          if (path == '/raw/commands/ok.md') return utf8.encode('safe');
+          return null;
+        });
+        addTearDown(() => server.close(force: true));
+
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-hostile');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+          githubBaseOverride:
+              'http://${server.address.host}:${server.port}',
+        );
+
+        final resolved = await resolver.resolve(
+          GithubPluginSource(owner: 'acme', repo: 'hostile-tree'),
+        );
+        addTearDown(resolved.discard);
+        expect(resolved.fileCount, 1, reason: 'hostile paths are skipped');
+        expect(
+          File('${resolved.stagingDir.path}/commands/ok.md').readAsStringSync(),
+          'safe',
+        );
+        expect(
+          stagingRoot.listSync(recursive: true).where(
+                (e) => e.path.contains('evil'),
+              ),
+          isEmpty,
+          reason: 'remote tree metadata never writes outside staging',
+        );
+        expect(File('${root.path}/evil.txt').existsSync(), isFalse);
+      },
+    );
+
+    test(
+      'PLUGIN3: npm tarballs stage every file for GNU ./ prefixes, custom roots, and flat layouts',
+      () async {
+        List<int> tgzOf(List<List<String>> files) {
+          final tar = Archive();
+          for (final f in files) {
+            tar.addFile(ArchiveFile.string(f[0], f[1]));
+          }
+          return GZipEncoder().encodeBytes(TarEncoder().encodeBytes(tar));
+        }
+
+        final pkgs = <String, List<int>>{
+          // `npm publish ./my.tgz` uploads tarballs verbatim — GNU tar
+          // adds a './' prefix, and hand-rolled tarballs pick their own
+          // single top-level root.
+          'gnu-prefix': tgzOf([
+            ['./package/index.js', 'g'],
+            ['./package/.mcp.json', '{}'],
+          ]),
+          'dist-root': tgzOf([
+            ['dist/index.js', 'd'],
+            ['dist/.mcp.json', '{}'],
+          ]),
+          'flat-root': tgzOf([
+            ['index.js', 'f'],
+            ['.mcp.json', '{}'],
+          ]),
+        };
+        final indexContents = <String, String>{
+          'gnu-prefix': 'g',
+          'dist-root': 'd',
+          'flat-root': 'f',
+        };
+
+        late String base;
+        final server = await startMock(<String>[], (path) {
+          for (final entry in pkgs.entries) {
+            final name = entry.key;
+            if (path == '/$name') {
+              return utf8.encode(
+                jsonEncode({
+                  'dist-tags': {'latest': '1.0.0'},
+                  'versions': {
+                    '1.0.0': {
+                      'dist': {
+                        'tarball': '$base/$name/-/$name-1.0.0.tgz',
+                        'integrity':
+                            'sha512-${base64.encode(sha512.convert(entry.value).bytes)}',
+                      },
+                    },
+                  },
+                }),
+              );
+            }
+            if (path == '/$name/-/$name-1.0.0.tgz') return entry.value;
+          }
+          return null;
+        });
+        base = 'http://${server.address.host}:${server.port}';
+        addTearDown(() => server.close(force: true));
+
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-npmshape');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+          npmRegistryBaseOverride: base,
+        );
+
+        for (final entry in pkgs.entries) {
+          final resolved = await resolver.resolve(
+            NpmPluginSource(package: entry.key),
+          );
+          expect(resolved.fileCount, 2, reason: entry.key);
+          expect(
+            File('${resolved.stagingDir.path}/index.js').readAsStringSync(),
+            indexContents[entry.key],
+            reason: '${entry.key}: shared root stripped, content intact',
+          );
+          expect(
+            File('${resolved.stagingDir.path}/.mcp.json').existsSync(),
+            isTrue,
+            reason: entry.key,
+          );
+          resolved.discard();
+        }
+      },
+    );
+
+    test(
+      'PLUGIN3: marketplace entries declaring local paths are rejected, not imported',
+      () async {
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-mktlocal');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final victim = Directory('${root.path}/victim')
+          ..createSync(recursive: true);
+        File('${victim.path}/notes.md').writeAsStringSync('private');
+
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+        );
+
+        // A declared source comes from a REMOTE catalog document — it
+        // must never address the local filesystem.
+        await expectLater(
+          resolver.resolve(
+            MarketplacePluginSource(
+              catalogName: 'Evil',
+              declaredSource: victim.path,
+            ),
+          ),
+          throwsA(
+            isA<PluginSourceException>().having(
+              (e) => e.message,
+              'message',
+              contains('local'),
+            ),
+          ),
+        );
+        await expectLater(
+          resolver.resolve(
+            MarketplacePluginSource(
+              catalogName: 'Evil',
+              declaredSource: './victim',
+            ),
+          ),
+          throwsA(
+            isA<PluginSourceException>().having(
+              (e) => e.message,
+              'message',
+              contains('local'),
+            ),
+          ),
+        );
+        expectStagingClean(stagingRoot);
+        expect(File('${victim.path}/notes.md').readAsStringSync(), 'private');
+      },
+    );
+
+    test(
+      'PLUGIN3: oversized ZIP and npm payloads are refused with an actionable decode bound',
+      () async {
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-bound');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+
+        final zipFile = File('${root.path}/big.zip')
+          ..writeAsBytesSync(
+            zipOf([ArchiveFile.string('commands/run.md', 'Run. Run. Run.')]),
+          );
+        expect(zipFile.lengthSync(), greaterThan(16));
+
+        final small = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+          maxDecodablePayloadBytes: 16,
+        );
+        await expectLater(
+          small.resolve(ZipPluginSource(zipFile.path)),
+          throwsA(
+            isA<PluginSourceException>().having(
+              (e) => e.message,
+              'message',
+              contains('decode bound'),
+            ),
+          ),
+          reason: 'refuse BEFORE materializing the archive in memory',
+        );
+        expectStagingClean(stagingRoot);
+
+        // The documented production default is a named constant.
+        expect(
+          PluginSourceResolver.kMaxDecodablePayloadBytes,
+          greaterThanOrEqualTo(16 * 1024 * 1024),
+        );
+
+        // npm: the tarball streams to disk, then the bound is checked
+        // before the in-memory decode + integrity hash.
+        final tar = Archive()
+          ..addFile(ArchiveFile.string('package/index.js', 'x'));
+        final tgz = GZipEncoder().encodeBytes(TarEncoder().encodeBytes(tar));
+        expect(tgz.length, greaterThan(16));
+        late String base;
+        final server = await startMock(<String>[], (path) {
+          if (path == '/tiny-pkg') {
+            return utf8.encode(
+              jsonEncode({
+                'dist-tags': {'latest': '1.0.0'},
+                'versions': {
+                  '1.0.0': {
+                    'dist': {
+                      'tarball': '$base/tiny-pkg/-/tiny-pkg-1.0.0.tgz',
+                      'integrity':
+                          'sha512-${base64.encode(sha512.convert(tgz).bytes)}',
+                    },
+                  },
+                },
+              }),
+            );
+          }
+          if (path == '/tiny-pkg/-/tiny-pkg-1.0.0.tgz') return tgz;
+          return null;
+        });
+        base = 'http://${server.address.host}:${server.port}';
+        addTearDown(() => server.close(force: true));
+
+        final smallNpm = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+          npmRegistryBaseOverride: base,
+          maxDecodablePayloadBytes: 16,
+        );
+        await expectLater(
+          smallNpm.resolve(NpmPluginSource(package: 'tiny-pkg')),
+          throwsA(
+            isA<PluginSourceException>().having(
+              (e) => e.message,
+              'message',
+              contains('decode bound'),
+            ),
+          ),
+        );
+        expectStagingClean(stagingRoot);
+
+        // The same payloads resolve fine under the default bound.
+        final full = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+          npmRegistryBaseOverride: base,
+        );
+        final okZip = await full.resolve(ZipPluginSource(zipFile.path));
+        expect(okZip.fileCount, 1);
+        okZip.discard();
+        final okNpm = await full.resolve(NpmPluginSource(package: 'tiny-pkg'));
+        expect(okNpm.fileCount, 1);
+        okNpm.discard();
+      },
+    );
   });
 }
 

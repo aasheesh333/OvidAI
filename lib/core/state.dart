@@ -2447,8 +2447,9 @@ class AppState extends ChangeNotifier {
         final target = File('${cacheDir.path}/$rel');
         try {
           target.parent.createSync(recursive: true);
-          // Byte-identical copy — the resolver never modifies content.
-          target.writeAsBytesSync(entity.readAsBytesSync());
+          // Streaming byte-identical copy — no payload materialization in
+          // memory; the resolver never modifies content.
+          entity.copySync(target.path);
           fetched++;
         } catch (_) {
           continue;

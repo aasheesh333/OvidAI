@@ -23,20 +23,32 @@ import 'package:path_provider/path_provider.dart';
 /// Security invariants:
 /// - Archive entries with absolute paths, `..` traversal, or symlinks that
 ///   escape the staging root reject the whole source; every entry is
-///   validated BEFORE anything is written (two-pass extraction). Only
-///   regular files and directories are ever created — never symlinks or
-///   device nodes.
+///   validated BEFORE anything is written (two-pass extraction). Entry
+///   names are rebuilt from validated segments, so no raw archive text
+///   reaches a filesystem path. Only regular files and directories are
+///   ever created — never symlinks or device nodes.
 /// - Local folder copies enforce lexical and symlink containment: only
 ///   entries whose realpath stays inside the source root are copied.
+/// - A marketplace `source` string is REMOTE catalog metadata: it may only
+///   declare remote sources. Local paths from catalogs are rejected —
+///   local folders enter only as a user-picked [LocalFolderPluginSource].
 /// - Remote tree metadata is untrusted: entry paths are lexically checked
 ///   before they touch a filesystem path.
+/// - In install mode (no `include` filter) resolution is all-or-nothing:
+///   a pinned ref never falls back to `main`/`master`, a blob that cannot
+///   be fetched fails the resolution instead of yielding partial staging,
+///   and a source that resolves to zero files fails loudly. The legacy
+///   best-effort `fetchPluginContent` contract (include != null) is the
+///   only caller that keeps fallbacks and per-file skipping.
 /// - npm tarballs verify `dist.integrity` (SRI, strongest supported
 ///   algorithm) when supplied and fail on mismatch.
 /// - Staging is deleted on every error path.
-/// - Manifest/metadata text parsing is bounded (GitHub tree and npm
-///   registry documents have byte caps; pasted configs too). Bulk plugin
-///   payloads stream to disk and are limited by storage, not an arbitrary
-///   transfer cap.
+/// - ZIP/npm payloads are size-checked against [PluginSourceResolver.kMaxDecodablePayloadBytes]
+///   BEFORE decoding, because archive decode materializes the payload in
+///   memory; oversized payloads fail with an actionable error instead of
+///   an OOM kill. Manifest/metadata text parsing is bounded (GitHub tree
+///   and npm registry documents have byte caps; pasted configs too), and
+///   network payloads stream to disk.
 ///
 /// Network access reuses the existing plugin-fetch shape (unauthenticated
 /// `HttpClient`, 15s connection/request timeouts, `ovid-ai` user agent)
@@ -247,6 +259,7 @@ class PluginSourceResolver {
     this.stagingRootOverride,
     this.githubBaseOverride,
     this.npmRegistryBaseOverride,
+    this.maxDecodablePayloadBytes = kMaxDecodablePayloadBytes,
   });
 
   /// Base directory that will contain `plugin-staging/`. Defaults to the
@@ -261,6 +274,19 @@ class PluginSourceResolver {
 
   /// npm registry base override (e.g. a local mock registry).
   final String? npmRegistryBaseOverride;
+
+  /// Largest ZIP/tarball payload that may be materialized in memory for
+  /// decoding and integrity hashing. `package:archive` decodes from (and
+  /// to) in-memory buffers, so an oversized — or deliberately bloated —
+  /// payload would OOM-kill the app (Android heap) with no actionable
+  /// error. Payloads above this bound are refused BEFORE decoding with a
+  /// precise [PluginSourceException]. 64 MiB is far above any real plugin
+  /// payload and far below mobile heap limits. Overridable per-instance
+  /// (test seam / deployment tuning).
+  static const int kMaxDecodablePayloadBytes = 64 * 1024 * 1024;
+
+  /// Instance override of [kMaxDecodablePayloadBytes].
+  final int maxDecodablePayloadBytes;
 
   static const String _userAgent = 'ovid-ai';
   static const Duration _timeout = Duration(seconds: 15);
@@ -347,8 +373,27 @@ class PluginSourceResolver {
         'marketplace entry "${s.catalogName}" declares an empty source',
       );
     }
-    if (Directory(declared).existsSync()) {
-      return _resolveLocalFolder(LocalFolderPluginSource(declared), staging, p);
+    // A declared source arrives from a REMOTE catalog document, so it must
+    // never address the local filesystem: a hostile marketplace entry
+    // could otherwise name any app-readable directory and have it copied
+    // into staging where adapters turn `.md`/`.json` into model-visible
+    // content. Marketplace-relative entries are already normalized to
+    // `owner/market/raw/...` GitHub form by the marketplace layer; local
+    // folders reach the resolver only as a user-picked
+    // [LocalFolderPluginSource] (picker / document-tree grant).
+    if (declared.startsWith('/') ||
+        declared.startsWith('./') ||
+        declared.startsWith('../') ||
+        declared.startsWith('.\\') ||
+        declared.startsWith('..\\') ||
+        declared.startsWith('~') ||
+        (declared.length > 1 && declared[1] == ':')) {
+      throw PluginSourceException(
+        'marketplace entry "${s.catalogName}" declares a local path source '
+        '(${s.declaredSource}); remote catalogs may only declare remote '
+        'sources — install a local folder through the user-picked local '
+        'plugin source instead',
+      );
     }
     final parts = declared.split('/');
     if (parts.length < 2 || parts[0].isEmpty || parts[1].isEmpty) {
@@ -387,9 +432,20 @@ class PluginSourceResolver {
   ) async {
     final subPrefix =
         s.subPath == null || s.subPath!.isEmpty ? '' : '${s.subPath}/';
+    // A non-null `include` marks the legacy best-effort delegation
+    // contract (AppState.fetchPluginContent): `main`/`master` fallback
+    // behind a pinned ref, per-blob failure skipping, and an empty result
+    // reported as 0 files. Install-mode resolution (include == null) is
+    // strict (spec §4.2 "pinned branch/ref", §5.2 "any failure … rolls
+    // back"): a pinned ref is the ONLY candidate, every matching blob is
+    // required — a partial staging directory is never returned as a
+    // successful [ResolvedPluginSource] — and an empty result fails.
+    final legacyBestEffort = s.include != null;
     final branches =
         s.ref != null && s.ref!.isNotEmpty
-            ? [s.ref!, 'main', 'master']
+            ? (legacyBestEffort
+                ? [s.ref!, 'main', 'master']
+                : <String>[s.ref!])
             : const ['main', 'master'];
 
     var treeReached = false;
@@ -406,10 +462,20 @@ class PluginSourceResolver {
       } catch (_) {
         continue; // unreachable/malformed branch — try the next candidate
       }
-      if (entries.isEmpty) continue;
+      if (entries.isEmpty) {
+        if (!legacyBestEffort) {
+          throw PluginSourceException(
+            'GitHub source ${s.owner}/${s.repo} resolved no plugin content '
+            'at ${s.ref != null && s.ref!.isNotEmpty ? 'ref' : 'branch'} '
+            '$branch',
+          );
+        }
+        continue;
+      }
 
       // First branch with matching content wins (matches the legacy
-      // selective fetch); individual blob failures skip that file.
+      // selective fetch). In install mode a blob that cannot be fetched
+      // fails the whole resolution; in legacy mode it is skipped.
       var staged = 0;
       for (final e in entries) {
         final rel = e['rel']!;
@@ -425,14 +491,22 @@ class PluginSourceResolver {
                       '$branch/$repoPath',
                 ];
         final target = File('${staging.path}/$rel');
+        var downloaded = false;
         for (final u in urls) {
           try {
             await _downloadToFile(Uri.parse(u), target, p);
             staged++;
+            downloaded = true;
             break;
           } catch (_) {
             continue;
           }
+        }
+        if (!downloaded && !legacyBestEffort) {
+          throw PluginSourceException(
+            'GitHub blob fetch failed for ${s.owner}/${s.repo}/$branch/'
+            '$repoPath — refusing to stage a partial plugin source',
+          );
         }
       }
       return staged;
@@ -443,7 +517,9 @@ class PluginSourceResolver {
         '(tried ${branches.join(', ')})',
       );
     }
-    return 0; // tree exists but nothing matched — empty staging is success
+    // Legacy best-effort contract only: the tree existed but nothing
+    // matched the include filter — an empty cache result, not an error.
+    return 0;
   }
 
   Future<List<Map<String, String>>> _githubTreeEntries(
@@ -558,12 +634,12 @@ class PluginSourceResolver {
 
   bool _copyIntoStaging(File from, String toPath, _Progress p) {
     try {
-      final bytes = from.readAsBytesSync();
-      // Byte-identical copy — resolution never modifies source content.
-      File(toPath)
-        ..parent.createSync(recursive: true)
-        ..writeAsBytesSync(bytes);
-      p.add(bytes.length, null);
+      final size = from.lengthSync();
+      File(toPath).parent.createSync(recursive: true);
+      // Byte-identical streaming copy — no payload materialization in
+      // memory, and resolution never modifies source content.
+      from.copySync(toPath);
+      p.add(size, size);
       return true;
     } catch (_) {
       return false;
@@ -576,6 +652,15 @@ class PluginSourceResolver {
     final f = File(s.path);
     if (!f.existsSync()) {
       throw PluginSourceException('zip plugin archive not found: ${s.path}');
+    }
+    // `package:archive` decodes in memory — refuse oversized payloads
+    // with an actionable error instead of an OOM kill.
+    final size = f.lengthSync();
+    if (size > maxDecodablePayloadBytes) {
+      throw PluginSourceException(
+        'zip archive at ${s.path} is $size bytes, over the '
+        '$maxDecodablePayloadBytes-byte in-memory decode bound',
+      );
     }
     Archive archive;
     try {
@@ -642,6 +727,16 @@ class PluginSourceResolver {
     // size bound), then verify before anything is extracted.
     final tgz = File('${staging.path}/.npm-tarball.tgz');
     await _downloadToFile(absolute, tgz, p);
+    // The streamed size is known before anything is materialized: refuse
+    // oversized tarballs BEFORE the in-memory decode + integrity hash.
+    final tgzSize = tgz.lengthSync();
+    if (tgzSize > maxDecodablePayloadBytes) {
+      _deleteQuietly(tgz);
+      throw PluginSourceException(
+        'npm tarball for ${s.package} is $tgzSize bytes, over the '
+        '$maxDecodablePayloadBytes-byte in-memory decode bound',
+      );
+    }
     final List<int> bytes;
     try {
       bytes = tgz.readAsBytesSync();
@@ -671,8 +766,10 @@ class PluginSourceResolver {
         'npm tarball for ${s.package} is not a valid tar',
       );
     }
-    // npm tarballs nest everything under `package/` — re-root staging.
-    return _extractArchiveEntries(tar, staging, stripPrefix: 'package');
+    // npm tarballs nest everything under one top-level directory
+    // (`package/` from `npm pack`, or a custom root in hand-rolled
+    // tarballs published verbatim) — strip that shared root.
+    return _extractArchiveEntries(tar, staging, stripSharedRoot: true);
   }
 
   /// Verify an SRI integrity metadata string. Checks the strongest
@@ -761,22 +858,46 @@ class PluginSourceResolver {
 
   /// Two-pass extraction: validate EVERY entry first (a single hostile
   /// entry rejects the whole archive before any write), then write only
-  /// regular files and directories.
+  /// regular files and directories. With [stripSharedRoot] (npm
+  /// tarballs), when every entry lives under one common top-level
+  /// directory that directory is stripped — `package/` from `npm pack`,
+  /// but also the `./`-prefixed and custom-rooted layouts that
+  /// `npm publish ./my.tgz` uploads verbatim.
   int _extractArchiveEntries(
     Archive archive,
     Directory staging, {
-    String stripPrefix = '',
+    bool stripSharedRoot = false,
   }) {
     final planned = <ArchiveFile, String>{};
     for (final e in archive.files) {
-      final name = _archiveEntryPath(e, stripPrefix);
-      if (name == null) continue;
-      planned[e] = name;
+      final name = _normalizedEntryPath(e);
+      if (name != null) planned[e] = name;
     }
+
+    var stripDir = '';
+    if (stripSharedRoot && planned.isNotEmpty) {
+      final roots = planned.values.map((n) => n.split('/').first).toSet();
+      final candidate = roots.length == 1 ? roots.single : null;
+      // Strip only when the shared root is a real directory prefix for
+      // at least one entry (a lone top-level FILE must not be eaten).
+      if (candidate != null &&
+          planned.values.any(
+            (n) => n.length > candidate.length && n.startsWith('$candidate/'),
+          )) {
+        stripDir = candidate;
+      }
+    }
+
     var count = 0;
     for (final entry in planned.entries) {
       final e = entry.key;
-      final target = '${staging.path}/${entry.value}';
+      var name = entry.value;
+      if (stripDir.isNotEmpty) {
+        if (name == stripDir) continue; // the (directory) root itself
+        name = name.substring(stripDir.length + 1);
+        if (name.isEmpty) continue;
+      }
+      final target = '${staging.path}/$name';
       if (_archiveLinkTarget(e) != null) {
         // Contained symlinks are skipped (escaping ones already threw in
         // pass 1); staging never contains links, and device nodes are
@@ -795,11 +916,14 @@ class PluginSourceResolver {
     return count;
   }
 
-  /// Validate and normalize one archive entry path, or null when the
-  /// entry is not part of the staged tree (outside [stripPrefix]).
-  /// Throws [PluginSourceException] on absolute paths, `..` escapes, and
-  /// symlink entries whose target leaves the staging root.
-  String? _archiveEntryPath(ArchiveFile e, String stripPrefix) {
+  /// Validate and normalize one archive entry path into staging-relative
+  /// segments, or null when the entry names nothing stageable (`''`,
+  /// `.`, a bare `.`-only path). The returned name is REBUILT from the
+  /// validated segments — no un-normalized entry text ever reaches a
+  /// filesystem path. Throws [PluginSourceException] on absolute paths,
+  /// `..` escapes, and symlink entries whose target leaves the staging
+  /// root.
+  String? _normalizedEntryPath(ArchiveFile e) {
     final raw = e.name.replaceAll('\\', '/');
     if (raw.isEmpty) return null;
     if (raw.startsWith('/') || (raw.length > 1 && raw[1] == ':')) {
@@ -807,27 +931,24 @@ class PluginSourceResolver {
         'archive entry has an absolute path: ${e.name}',
       );
     }
-    var name = raw;
-    if (stripPrefix.isNotEmpty) {
-      if (name == stripPrefix || name == '$stripPrefix/') return null;
-      if (!name.startsWith('$stripPrefix/')) return null;
-      name = name.substring(stripPrefix.length + 1);
-    }
-
-    var depth = 0;
-    for (final seg in name.split('/')) {
+    // Rebuild from validated segments: drop empty and `.` segments,
+    // collapse interior `..`, reject anything that climbs above the
+    // staging root.
+    final out = <String>[];
+    for (final seg in raw.split('/')) {
       if (seg.isEmpty || seg == '.') continue;
       if (seg == '..') {
-        depth--;
-        if (depth < 0) {
+        if (out.isEmpty) {
           throw PluginSourceException(
             'archive entry escapes the staging root: ${e.name}',
           );
         }
+        out.removeLast();
         continue;
       }
-      depth++;
+      out.add(seg);
     }
+    if (out.isEmpty) return null;
 
     final link = _archiveLinkTarget(e);
     if (link != null) {
@@ -837,31 +958,22 @@ class PluginSourceResolver {
           'archive symlink target is absolute: ${e.name} -> $link',
         );
       }
-      final linkDir =
-          name.contains('/')
-              ? name.substring(0, name.lastIndexOf('/')).split('/')
-              : const <String>[];
-      var d = 0;
-      for (final seg in [...linkDir, ...t.split('/')]) {
+      final resolved = <String>[...out.take(out.length - 1)];
+      for (final seg in t.split('/')) {
         if (seg.isEmpty || seg == '.') continue;
         if (seg == '..') {
-          d--;
-          if (d < 0) {
+          if (resolved.isEmpty) {
             throw PluginSourceException(
               'archive symlink escapes the staging root: ${e.name} -> $link',
             );
           }
+          resolved.removeLast();
           continue;
         }
-        d++;
+        resolved.add(seg);
       }
     }
-
-    name = name.replaceAll(RegExp(r'/+'), '/');
-    while (name.endsWith('/')) {
-      name = name.substring(0, name.length - 1);
-    }
-    return name.isEmpty ? null : name;
+    return out.join('/');
   }
 
   /// Symlink target of an archive entry, or null for regular entries.
