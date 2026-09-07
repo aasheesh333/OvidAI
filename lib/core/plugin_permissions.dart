@@ -31,8 +31,18 @@ const String _kPluginSecretPrefix = 'ovid_plugin_secret_';
 /// (recursively) and every set-like collection emitted as a sorted list,
 /// then hashed with SHA-256 and prefixed `sha256:` (the
 /// [PluginPermissionGrant.manifestDigest] wire format).
-String pluginManifestDigest(NormalizedPluginManifest manifest) =>
-    'sha256:${sha256.convert(utf8.encode(_canonicalJson(manifest.toJson()))).toString()}';
+///
+/// LOCATION-INDEPENDENT (fix round 1): `rootPath` — the absolute
+/// directory the manifest was inspected from — is EXCLUDED, because the
+/// same plugin content is inspected at different locations across its
+/// lifecycle (resolver staging → content cache → Task 7's post-rename
+/// install directory). The digest binds to plugin CONTENT, not to where
+/// it currently lives, so a grant saved before an atomic staging→install
+/// rename stays effective afterwards.
+String pluginManifestDigest(NormalizedPluginManifest manifest) {
+  final json = manifest.toJson()..remove('rootPath');
+  return 'sha256:${sha256.convert(utf8.encode(_canonicalJson(json))).toString()}';
+}
 
 /// The minimum capability set derived from what a manifest actually
 /// declares — the same inspection rules the adapters apply (spec §5.1),

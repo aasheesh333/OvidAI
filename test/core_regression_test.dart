@@ -15282,6 +15282,41 @@ cwd = 'tools'
         );
         expect(pluginManifestDigest(reordered), digest);
 
+        // LOCATION-INDEPENDENCE (fix round 1): the digest binds to plugin
+        // CONTENT, never to where it was inspected. The same manifest
+        // inspected from two different directories (staging vs cache vs
+        // post-rename install location) must yield the SAME digest, so a
+        // grant saved before Task 7's atomic staging→install rename stays
+        // effective afterwards.
+        final elsewhere = NormalizedPluginManifest(
+          id: manifest.id,
+          name: manifest.name,
+          version: manifest.version,
+          format: manifest.format,
+          rootPath:
+              '/opt/ovid/install-locations/elsewhere/${manifest.id}',
+          commands: manifest.commands,
+          skills: manifest.skills,
+          agents: manifest.agents,
+          hooks: manifest.hooks,
+          mcpServers: manifest.mcpServers,
+          dependencies: manifest.dependencies,
+          requestedCapabilities: manifest.requestedCapabilities,
+          environmentReadNames: manifest.environmentReadNames,
+          unknownFields: manifest.unknownFields,
+          compatibility: manifest.compatibility,
+        );
+        expect(elsewhere.rootPath, isNot(manifest.rootPath));
+        expect(pluginManifestDigest(elsewhere), digest);
+
+        // …while any real CONTENT change still yields a DIFFERENT digest.
+        final changedJson = jsonDecode(
+          jsonEncode(manifest.toJson()),
+        ) as Map<String, dynamic>;
+        changedJson['version'] = '1.0.1';
+        final changed = NormalizedPluginManifest.fromJson(changedJson);
+        expect(pluginManifestDigest(changed), isNot(digest));
+
         final store = PluginPermissionStore();
         expect(await store.load('acme/grant-kit', digest), isNull);
         await store.save(
