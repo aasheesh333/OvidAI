@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:ffi' as ffi;
 
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -21,6 +22,7 @@ import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/mcp_config_parse.dart';
 import 'package:ovid_ai/core/plugin_adapters.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
+import 'package:ovid_ai/core/plugin_source_resolver.dart';
 import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/pty_service.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
@@ -13091,6 +13093,614 @@ cwd = 'tools'
       expect(core.cwd, ui.cwd);
       expect(core.type, ui.type);
     });
+  });
+
+  group('PluginCompat Task 3: secure source resolver', () {
+    Future<HttpServer> startMock(
+      List<String> requested,
+      List<int>? Function(String path) bodyFor,
+    ) async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        final path = request.uri.path;
+        requested.add(path);
+        final body = bodyFor(path);
+        if (body == null) {
+          request.response.statusCode = 404;
+        } else {
+          request.response
+            ..statusCode = 200
+            ..contentLength = body.length
+            ..add(body);
+        }
+        await request.response.close();
+      });
+      return server;
+    }
+
+    List<int> zipOf(List<ArchiveFile> entries) {
+      final a = Archive();
+      for (final e in entries) {
+        a.addFile(e);
+      }
+      return ZipEncoder().encodeBytes(a);
+    }
+
+    /// Assert `plugin-staging` under [stagingRoot] holds no transaction dirs.
+    void expectStagingClean(Directory stagingRoot) {
+      final parent = Directory('${stagingRoot.path}/plugin-staging');
+      expect(
+        parent.existsSync() ? parent.listSync() : <FileSystemEntity>[],
+        isEmpty,
+        reason: 'staging must be deleted on every error',
+      );
+    }
+
+    test(
+      'PLUGIN3: local folder copies into app-private staging with symlink containment',
+      () async {
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-local');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final src = Directory('${root.path}/src-plugin');
+        File('${src.path}/commands/hello.md')
+          ..createSync(recursive: true)
+          ..writeAsStringSync('Say hi.');
+        File('${src.path}/skills/r/SKILL.md')
+          ..createSync(recursive: true)
+          ..writeAsStringSync('---\nname: r\n---\nDo r.');
+        File('${src.path}/skills/r/ref/guide.md')
+          ..createSync(recursive: true)
+          ..writeAsStringSync('Guide.');
+        final secret = File('${root.path}/outside-secret.txt')
+          ..writeAsStringSync('top-secret');
+        Link('${src.path}/escape.txt').createSync(secret.path);
+
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+        );
+        final resolved = await resolver.resolve(
+          LocalFolderPluginSource(src.path),
+        );
+        addTearDown(resolved.discard);
+
+        expect(
+          resolved.stagingDir.path,
+          startsWith('${stagingRoot.path}/plugin-staging/'),
+          reason: 'staging lives under app-private plugin-staging/<tx>',
+        );
+        expect(resolved.fileCount, 3);
+        expect(
+          File('${resolved.stagingDir.path}/commands/hello.md')
+              .readAsStringSync(),
+          'Say hi.',
+        );
+        expect(
+          File('${resolved.stagingDir.path}/skills/r/ref/guide.md')
+              .readAsStringSync(),
+          'Guide.',
+          reason: 'supporting files come along (selective-fetch gap)',
+        );
+        expect(
+          File('${resolved.stagingDir.path}/escape.txt').existsSync(),
+          isFalse,
+          reason: 'symlink escaping the source root is not copied',
+        );
+        // Resolution never modifies source content.
+        expect(
+          File('${src.path}/commands/hello.md').readAsStringSync(),
+          'Say hi.',
+        );
+        expect(Link('${src.path}/escape.txt').existsSync(), isTrue);
+        expect(secret.readAsStringSync(), 'top-secret');
+      },
+    );
+
+    test(
+      'PLUGIN3: ZIP ../escape traversal and absolute entries are rejected, staging deleted',
+      () async {
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-zip');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+        );
+
+        final traversal = File('${root.path}/traversal.zip')
+          ..writeAsBytesSync(
+            zipOf([
+              ArchiveFile.string('ok.txt', 'fine'),
+              ArchiveFile.string('../escape.txt', 'pwned'),
+            ]),
+          );
+        await expectLater(
+          resolver.resolve(ZipPluginSource(traversal.path)),
+          throwsA(
+            isA<PluginSourceException>().having(
+              (e) => e.message,
+              'message',
+              contains('escape'),
+            ),
+          ),
+        );
+
+        final absolute = File('${root.path}/absolute.zip')
+          ..writeAsBytesSync(
+            zipOf([ArchiveFile.string('/tmp/ovid-plugin3-evil.txt', 'pwned')]),
+          );
+        await expectLater(
+          resolver.resolve(ZipPluginSource(absolute.path)),
+          throwsA(
+            isA<PluginSourceException>().having(
+              (e) => e.message,
+              'message',
+              contains('absolute'),
+            ),
+          ),
+        );
+
+        expectStagingClean(stagingRoot);
+        expect(
+          root.listSync(recursive: true).where(
+                (e) => e.path.endsWith('escape.txt') || e.path.endsWith('evil.txt'),
+              ),
+          isEmpty,
+          reason: 'hostile entries never reach disk',
+        );
+        expect(File('/tmp/ovid-plugin3-evil.txt').existsSync(), isFalse);
+      },
+    );
+
+    test(
+      'PLUGIN3: ZIP symlink escape is rejected and clean ZIPs extract byte-identical',
+      () async {
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-zipsl');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+        );
+
+        // A zip entry carrying the unix symlink mode bits (0xa000 nibble)
+        // with an escaping target.
+        final link = ArchiveFile.string('link.txt', '../../../etc/passwd')
+          ..mode = 0xa1a4;
+        final hostile = File('${root.path}/hostile.zip')
+          ..writeAsBytesSync(
+            zipOf([link, ArchiveFile.string('commands/run.md', 'Run.')]),
+          );
+        await expectLater(
+          resolver.resolve(ZipPluginSource(hostile.path)),
+          throwsA(
+            isA<PluginSourceException>().having(
+              (e) => e.message,
+              'message',
+              contains('symlink'),
+            ),
+          ),
+        );
+        expectStagingClean(stagingRoot);
+
+        final clean = File('${root.path}/clean.zip')
+          ..writeAsBytesSync(
+            zipOf([
+              ArchiveFile.string('commands/run.md', 'Run.'),
+              ArchiveFile.string(
+                '.mcp.json',
+                '{"mcpServers":{"demo":{"command":"uvx","args":["demo"]}}}',
+              ),
+            ]),
+          );
+        final resolved = await resolver.resolve(ZipPluginSource(clean.path));
+        addTearDown(resolved.discard);
+        expect(resolved.fileCount, 2);
+        expect(
+          File('${resolved.stagingDir.path}/commands/run.md').readAsStringSync(),
+          'Run.',
+        );
+        expect(
+          File('${resolved.stagingDir.path}/.mcp.json').readAsStringSync(),
+          '{"mcpServers":{"demo":{"command":"uvx","args":["demo"]}}}',
+        );
+      },
+    );
+
+    test(
+      'PLUGIN3: GitHub mock-server archive stages the full tree at a pinned ref with progress',
+      () async {
+        final contents = <String, String>{
+          '.claude-plugin/plugin.json': '{"name":"plug","version":"1.0.0"}',
+          'commands/hello.md': '---\nname: hello\n---\nSay hi.',
+          'skills/r/SKILL.md': '---\nname: r\n---\nDo r.',
+          'skills/r/references/guide.md': 'Guide.',
+          'README.md': '# Readme',
+        };
+        final requested = <String>[];
+        final server = await startMock(requested, (path) {
+          if (path == '/tree/v9') {
+            return utf8.encode(
+              jsonEncode({
+                'tree': [
+                  for (final p in contents.keys) {'path': p, 'type': 'blob'},
+                  {'path': 'commands', 'type': 'tree'},
+                ],
+              }),
+            );
+          }
+          const prefix = '/raw/';
+          if (path.startsWith(prefix)) {
+            final body = contents[path.substring(prefix.length)];
+            if (body != null) return utf8.encode(body);
+          }
+          return null;
+        });
+        addTearDown(() => server.close(force: true));
+
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-gh');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+          githubBaseOverride:
+              'http://${server.address.host}:${server.port}',
+        );
+
+        final progress = <(int, int?)>[];
+        final resolved = await resolver.resolve(
+          GithubPluginSource(owner: 'acme', repo: 'plug', ref: 'v9'),
+          onProgress: (received, total) => progress.add((received, total)),
+        );
+        addTearDown(resolved.discard);
+
+        expect(requested.first, '/tree/v9', reason: 'pinned ref fetched first');
+        expect(requested, isNot(contains('/tree/main')));
+        expect(
+          resolved.stagingDir.path,
+          startsWith('${stagingRoot.path}/plugin-staging/'),
+        );
+        expect(resolved.sourceId, 'acme/plug');
+        expect(resolved.fileCount, contents.length);
+        for (final entry in contents.entries) {
+          expect(
+            File('${resolved.stagingDir.path}/${entry.key}')
+                .readAsStringSync(),
+            entry.value,
+            reason: 'full tree staged byte-identical: ${entry.key}',
+          );
+        }
+        expect(
+          File('${resolved.stagingDir.path}/skills/r/references/guide.md')
+              .existsSync(),
+          isTrue,
+          reason: 'skill supporting files are no longer left behind',
+        );
+        final expectedBytes = contents.values.fold<int>(
+          0,
+          (n, s) => n + utf8.encode(s).length,
+        );
+        expect(progress, isNotEmpty);
+        expect(progress.last.$1, expectedBytes);
+        expect(progress.last.$2, isNotNull, reason: 'content-length known');
+      },
+    );
+
+    test(
+      'PLUGIN3: marketplace source fetches its declared GitHub entry',
+      () async {
+        final requested = <String>[];
+        final server = await startMock(requested, (path) {
+          if (path == '/tree/main') {
+            return utf8.encode(
+              jsonEncode({
+                'tree': [
+                  {'path': 'commands/ship.md', 'type': 'blob'},
+                ],
+              }),
+            );
+          }
+          if (path == '/raw/commands/ship.md') return utf8.encode('Ship it.');
+          return null;
+        });
+        addTearDown(() => server.close(force: true));
+
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-mkt');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+          githubBaseOverride:
+              'http://${server.address.host}:${server.port}',
+        );
+
+        final resolved = await resolver.resolve(
+          MarketplacePluginSource(
+            catalogName: 'Ship Plugin',
+            declaredSource: 'acme/shippy',
+          ),
+        );
+        addTearDown(resolved.discard);
+        expect(requested.first, '/tree/main');
+        expect(resolved.sourceId, 'acme/shippy');
+        expect(
+          File('${resolved.stagingDir.path}/commands/ship.md')
+              .readAsStringSync(),
+          'Ship it.',
+        );
+      },
+    );
+
+    test(
+      'PLUGIN3: npm metadata and tarball resolve into staging and verify sha512 integrity',
+      () async {
+        final tar = Archive()
+          ..addFile(ArchiveFile.string('package/index.js', 'module.exports = 1;'))
+          ..addFile(
+            ArchiveFile.string(
+              'package/package.json',
+              '{"name":"demo-mcp","version":"1.0.0"}',
+            ),
+          )
+          ..addFile(
+            ArchiveFile.string(
+              'package/.mcp.json',
+              '{"mcpServers":{"demo":{"command":"uvx","args":["demo"]}}}',
+            ),
+          );
+        final tgz = GZipEncoder().encodeBytes(TarEncoder().encodeBytes(tar));
+        final integrity = 'sha512-${base64.encode(sha512.convert(tgz).bytes)}';
+
+        final requested = <String>[];
+        late String base;
+        final server = await startMock(requested, (path) {
+          Map<String, dynamic> versionDoc() => {
+            'name': 'demo-mcp',
+            'version': '1.0.0',
+            'dist': {
+              'tarball': '$base/demo-mcp/-/demo-mcp-1.0.0.tgz',
+              'integrity': integrity,
+            },
+          };
+          if (path == '/demo-mcp') {
+            return utf8.encode(
+              jsonEncode({
+                'name': 'demo-mcp',
+                'dist-tags': {'latest': '1.0.0'},
+                'versions': {'1.0.0': versionDoc()},
+              }),
+            );
+          }
+          if (path == '/demo-mcp/1.0.0') {
+            return utf8.encode(jsonEncode(versionDoc()));
+          }
+          if (path == '/demo-mcp/-/demo-mcp-1.0.0.tgz') return tgz;
+          return null;
+        });
+        base = 'http://${server.address.host}:${server.port}';
+        addTearDown(() => server.close(force: true));
+
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-npm');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+          npmRegistryBaseOverride: base,
+        );
+
+        final progress = <(int, int?)>[];
+        final resolved = await resolver.resolve(
+          NpmPluginSource(package: 'demo-mcp'),
+          onProgress: (received, total) => progress.add((received, total)),
+        );
+        addTearDown(resolved.discard);
+        expect(requested, contains('/demo-mcp'));
+        expect(requested, contains('/demo-mcp/-/demo-mcp-1.0.0.tgz'));
+        expect(resolved.sourceId, 'demo-mcp');
+        expect(resolved.fileCount, 3);
+        // npm tarballs nest under `package/`; staging is re-rooted.
+        expect(
+          File('${resolved.stagingDir.path}/index.js').readAsStringSync(),
+          'module.exports = 1;',
+        );
+        expect(
+          File('${resolved.stagingDir.path}/package.json').existsSync(),
+          isTrue,
+        );
+        expect(progress.any((p) => p.$2 == tgz.length), isTrue);
+        expect(progress.last.$1, tgz.length);
+
+        // The staged MCP-only package adapts through the shared registry.
+        final manifest = await const PluginAdapterRegistry().inspect(
+          resolved.stagingDir,
+        );
+        expect(manifest.format, PluginFormat.genericMcp);
+        expect(manifest.mcpServers.single.name, 'demo');
+        resolved.discard();
+
+        requested.clear();
+        final pinned = await resolver.resolve(
+          NpmPluginSource(package: 'demo-mcp', version: '1.0.0'),
+        );
+        addTearDown(pinned.discard);
+        expect(requested, contains('/demo-mcp/1.0.0'));
+        expect(
+          File('${pinned.stagingDir.path}/index.js').readAsStringSync(),
+          'module.exports = 1;',
+        );
+      },
+    );
+
+    test(
+      'PLUGIN3: npm integrity mismatch throws and deletes staging',
+      () async {
+        final tar = Archive()
+          ..addFile(ArchiveFile.string('package/index.js', 'module.exports = 1;'));
+        final tgz = GZipEncoder().encodeBytes(TarEncoder().encodeBytes(tar));
+        final tampered =
+            'sha512-${base64.encode(sha512.convert(utf8.encode('other')).bytes)}';
+
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-npmbad');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        late String base;
+        final server = await startMock(<String>[], (path) {
+          if (path == '/demo-mcp') {
+            return utf8.encode(
+              jsonEncode({
+                'dist-tags': {'latest': '1.0.0'},
+                'versions': {
+                  '1.0.0': {
+                    'dist': {
+                      'tarball': '$base/demo-mcp/-/demo-mcp-1.0.0.tgz',
+                      'integrity': tampered,
+                    },
+                  },
+                },
+              }),
+            );
+          }
+          if (path == '/demo-mcp/-/demo-mcp-1.0.0.tgz') return tgz;
+          return null;
+        });
+        base = 'http://${server.address.host}:${server.port}';
+        addTearDown(() => server.close(force: true));
+
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+          npmRegistryBaseOverride: base,
+        );
+        await expectLater(
+          resolver.resolve(NpmPluginSource(package: 'demo-mcp')),
+          throwsA(
+            isA<PluginSourceException>().having(
+              (e) => e.message,
+              'message',
+              contains('integrity'),
+            ),
+          ),
+        );
+        expectStagingClean(stagingRoot);
+        expect(
+          root.listSync(recursive: true).where((e) => e.path.endsWith('index.js')),
+          isEmpty,
+          reason: 'an unverified payload is never extracted',
+        );
+      },
+    );
+
+    test(
+      'PLUGIN3: pasted JSON and TOML configs become ephemeral MCP-only sources',
+      () async {
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-paste');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+        );
+
+        const jsonCfg =
+            '{"mcpServers":{"demo":{"command":"uvx","args":["demo","--flag"]}}}';
+        final rj = await resolver.resolve(
+          PastedConfigPluginSource(label: 'demo-paste', rawConfig: jsonCfg),
+        );
+        addTearDown(rj.discard);
+        final stagedJson = File('${rj.stagingDir.path}/.mcp.json');
+        expect(stagedJson.readAsStringSync(), jsonCfg, reason: 'stored verbatim');
+        expect(rj.sourceId, 'demo-paste');
+        final mj = await const PluginAdapterRegistry().inspect(rj.stagingDir);
+        expect(mj.format, PluginFormat.genericMcp);
+        expect(mj.mcpServers.single.name, 'demo');
+        expect(mj.mcpServers.single.command, 'uvx');
+
+        const tomlCfg =
+            "[mcp_servers.demo]\ncommand = 'uvx'\nargs = ['demo', '--flag']\n";
+        final rt = await resolver.resolve(
+          PastedConfigPluginSource(label: 'toml-paste', rawConfig: tomlCfg),
+        );
+        addTearDown(rt.discard);
+        final stagedToml = File('${rt.stagingDir.path}/.mcp.json');
+        expect(stagedToml.readAsStringSync(), tomlCfg, reason: 'stored verbatim');
+        final mt = await const PluginAdapterRegistry().inspect(rt.stagingDir);
+        expect(mt.format, PluginFormat.genericMcp);
+        expect(mt.mcpServers.single.name, 'demo');
+        expect(mt.mcpServers.single.command, 'uvx');
+      },
+    );
+
+    test(
+      'PLUGIN3: direct stdio and HTTP MCP sources build MCP-only staging',
+      () async {
+        final root = Directory.systemTemp.createTempSync('ovid-plugin3-direct');
+        addTearDown(() {
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
+        final stagingRoot = Directory('${root.path}/app-private')
+          ..createSync(recursive: true);
+        final resolver = PluginSourceResolver(
+          stagingRootOverride: stagingRoot,
+        );
+
+        final rs = await resolver.resolve(
+          DirectMcpPluginSource.stdio(
+            name: 'local-fs',
+            command: 'npx',
+            args: const ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+          ),
+        );
+        addTearDown(rs.discard);
+        final cfg =
+            jsonDecode(File('${rs.stagingDir.path}/.mcp.json').readAsStringSync())
+                as Map<String, dynamic>;
+        final server = (cfg['mcpServers'] as Map)['local-fs'] as Map;
+        expect(server['command'], 'npx');
+        expect(server['args'], [
+          '-y',
+          '@modelcontextprotocol/server-filesystem',
+          '/tmp',
+        ]);
+        final ms = await const PluginAdapterRegistry().inspect(rs.stagingDir);
+        expect(ms.format, PluginFormat.genericMcp);
+        expect(ms.mcpServers.single.transport, 'stdio');
+        expect(ms.mcpServers.single.command, 'npx');
+
+        final rh = await resolver.resolve(
+          DirectMcpPluginSource.http(
+            name: 'remote',
+            url: 'https://mcp.example.test/v1/api',
+            headers: const {'Authorization': 'Bearer x'},
+          ),
+        );
+        addTearDown(rh.discard);
+        final mh = await const PluginAdapterRegistry().inspect(rh.stagingDir);
+        expect(mh.format, PluginFormat.genericMcp);
+        expect(mh.mcpServers.single.transport, 'http');
+        expect(mh.mcpServers.single.url, 'https://mcp.example.test/v1/api');
+        expect(mh.mcpServers.single.headerNames, ['Authorization']);
+      },
+    );
   });
 }
 

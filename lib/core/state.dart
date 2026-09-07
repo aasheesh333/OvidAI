@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'agent_notification_service.dart';
 import 'mcp_service.dart';
 import 'plugin_manifest.dart';
+import 'plugin_source_resolver.dart';
 import 'theme.dart';
 import 'sandbox_service.dart';
 import 'presets.dart';
@@ -2389,12 +2390,13 @@ class AppState extends ChangeNotifier {
   /// (not every plugin has model-visible content — some are MCP-only or
   /// hook-only, which already work through their own paths).
   ///
-  /// Uses the unauthenticated GitHub REST tree API (works for public
-  /// repos without the user's GitHub login) to discover file paths, then
-  /// raw.githubusercontent.com to fetch each one — same unauthenticated,
-  /// no-token shape as [fetchMarketplaceCatalog] already uses.
-  /// Returns the number of files fetched (0 on any failure — best-effort,
-  /// install must never hard-fail because a plugin repo is unreachable).
+  /// Task 3 delegates the network work to [PluginSourceResolver]: the
+  /// repo is resolved into app-private staging (unauthenticated GitHub
+  /// tree API + raw fetches, same shape as [fetchMarketplaceCatalog]),
+  /// then this method copies the legacy selective allowlist subset into
+  /// the plugin-content cache and discards staging. Returns the number
+  /// of files cached (0 on any failure — best-effort, install must never
+  /// hard-fail because a plugin repo is unreachable).
   Future<int> fetchPluginContent(String source) async {
     final parts = source.split('/');
     if (parts.length < 2) return 0;
@@ -2402,129 +2404,74 @@ class AppState extends ChangeNotifier {
     final repo = parts[1];
     final cacheDir = await pluginCacheDirFor(source);
 
-    // If source is owner/repo/raw/branch/path, extract subpath
-    String subpathPrefix = '';
+    // If source is owner/repo/raw/branch/path, extract subpath + pinned ref
+    String? subPath;
+    String? ref;
     if (parts.length >= 4 && parts[2] == 'raw') {
+      if (parts[3] != 'branch' && parts[3].isNotEmpty) ref = parts[3];
       if (parts.length > 4) {
-        subpathPrefix = '${parts.sublist(4).join('/')}/';
+        final sp = parts.sublist(4).join('/');
+        if (sp.isNotEmpty) subPath = sp;
       }
     }
 
-    List<Map<String, String>>? targetEntries;
-    final branchesToTry = parts.length >= 4 && parts[2] == 'raw' && parts[3] != 'branch'
-        ? [parts[3], 'main', 'master']
-        : ['main', 'master'];
-
-    for (final branch in branchesToTry) {
-      final treeUrl = pluginContentBaseOverrideForTest != null
-          ? '$pluginContentBaseOverrideForTest/tree/$branch'
-          : 'https://api.github.com/repos/$owner/$repo/git/trees/$branch'
-                '?recursive=1';
-      try {
-        final client = HttpClient()
-          ..connectionTimeout = const Duration(seconds: 15);
-        try {
-          final req = await client
-              .getUrl(Uri.parse(treeUrl))
-              .timeout(const Duration(seconds: 15));
-          req.headers.set('Accept', 'application/vnd.github+json');
-          req.headers.set('User-Agent', 'ovid-ai');
-          final res = await req.close().timeout(const Duration(seconds: 15));
-          if (res.statusCode != 200) continue;
-          final builder = BytesBuilder();
-          await for (final chunk in res) {
-            builder.add(chunk);
-            if (builder.length > 4 * 1024 * 1024) {
-              throw Exception('repo tree too large');
-            }
-          }
-          final j =
-              jsonDecode(utf8.decode(builder.takeBytes()))
-                  as Map<String, dynamic>;
-          final tree = (j['tree'] as List?)?.cast<Map<String, dynamic>>();
-          if (tree == null) continue;
-
-          final matched = <Map<String, String>>[];
-          for (final entry in tree) {
-            if (entry['type'] != 'blob') continue;
-            final fullPath = entry['path'] as String;
-            String relPath = fullPath;
-            if (subpathPrefix.isNotEmpty) {
-              if (!fullPath.startsWith(subpathPrefix)) continue;
-              relPath = fullPath.substring(subpathPrefix.length);
-            }
-            final isAllowed =
-                relPath.startsWith('commands/') ||
-                (relPath.startsWith('skills/') && relPath.endsWith('SKILL.md')) ||
-                (relPath.startsWith('agents/') && relPath.endsWith('.md')) ||
-                relPath == 'hooks/hooks.json' ||
-                relPath == '.claude-plugin/plugin.json' ||
-                relPath == '.mcp.json';
-            if (isAllowed) {
-              matched.add({'rel': relPath, 'repoPath': fullPath, 'branch': branch});
-            }
-          }
-          if (matched.isNotEmpty) {
-            targetEntries = matched;
-            break;
-          }
-        } finally {
-          client.close(force: true);
-        }
-      } catch (_) {
-        continue;
-      }
+    final resolver = PluginSourceResolver(
+      stagingRootOverride: pluginCacheRootOverrideForTest,
+      githubBaseOverride: pluginContentBaseOverrideForTest,
+    );
+    ResolvedPluginSource? resolved;
+    try {
+      resolved = await resolver.resolve(
+        GithubPluginSource(
+          owner: owner,
+          repo: repo,
+          ref: ref,
+          subPath: subPath,
+          include: _isLegacyPluginContentPath,
+        ),
+      );
+    } catch (_) {
+      return 0;
     }
-    if (targetEntries == null || targetEntries.isEmpty) return 0;
-
-    var fetched = 0;
-    for (final item in targetEntries) {
-      final rel = item['rel']!;
-      final repoPath = item['repoPath']!;
-      final branch = item['branch']!;
-      final urls = <String>[
-        if (pluginContentBaseOverrideForTest != null) ...[
-          '$pluginContentBaseOverrideForTest/raw/$repoPath',
-          if (rel != repoPath) '$pluginContentBaseOverrideForTest/raw/$rel',
-        ] else ...[
-          'https://raw.githubusercontent.com/$owner/$repo/$branch/$repoPath',
-        ],
-      ];
-      for (final rawUrl in urls) {
+    try {
+      var fetched = 0;
+      final staged = resolved.stagingDir.listSync(
+        recursive: true,
+        followLinks: false,
+      );
+      for (final entity in staged) {
+        if (entity is! File) continue;
+        final rel = entity.path.substring(
+          resolved.stagingDir.path.length + 1,
+        );
+        final target = File('${cacheDir.path}/$rel');
         try {
-          final client = HttpClient()
-            ..connectionTimeout = const Duration(seconds: 15);
-          try {
-            final req = await client
-                .getUrl(Uri.parse(rawUrl))
-                .timeout(const Duration(seconds: 15));
-            final res = await req.close().timeout(const Duration(seconds: 15));
-            if (res.statusCode != 200) continue;
-            final builder = BytesBuilder();
-            await for (final chunk in res) {
-              builder.add(chunk);
-              if (builder.length > 1024 * 1024) {
-                throw Exception('plugin file too large');
-              }
-            }
-            final content = utf8.decode(
-              builder.takeBytes(),
-              allowMalformed: true,
-            );
-            final target = File('${cacheDir.path}/$rel');
-            target.parent.createSync(recursive: true);
-            target.writeAsStringSync(content);
-            fetched++;
-            break;
-          } finally {
-            client.close(force: true);
-          }
+          target.parent.createSync(recursive: true);
+          // Byte-identical copy — the resolver never modifies content.
+          target.writeAsBytesSync(entity.readAsBytesSync());
+          fetched++;
         } catch (_) {
           continue;
         }
       }
+      return fetched;
+    } catch (_) {
+      return 0;
+    } finally {
+      resolved.discard();
     }
-    return fetched;
+  }
+
+  /// The legacy selective allowlist for the plugin-content cache (PR40 +
+  /// PR44 behavior): the files the chat/skills/hook mounts consume from
+  /// a fetched plugin repo.
+  static bool _isLegacyPluginContentPath(String relPath) {
+    return relPath.startsWith('commands/') ||
+        (relPath.startsWith('skills/') && relPath.endsWith('SKILL.md')) ||
+        (relPath.startsWith('agents/') && relPath.endsWith('.md')) ||
+        relPath == 'hooks/hooks.json' ||
+        relPath == '.claude-plugin/plugin.json' ||
+        relPath == '.mcp.json';
   }
 
   /// P3 (the MCP config parser plugin .mcp.json parity): read the plugin's `.mcp.json` from
