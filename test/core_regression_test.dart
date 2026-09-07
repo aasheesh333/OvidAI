@@ -15889,6 +15889,14 @@ cwd = 'tools'
         ]);
 
         runner.queue((0, 'added 2 packages'));
+        // Version-capture pass (npm ls) — the resolved versions come
+        // from the manager, never fabricated.
+        runner.queue((
+          0,
+          '{"dependencies":{'
+              '"left-pad":{"version":"1.3.11"},'
+              '"opt-thing":{"version":"2.0.0"}}}',
+        ));
         final result = await svc.install(manifest, null);
 
         expect(result.status, PluginDependencyStatus.ok);
@@ -15901,12 +15909,18 @@ cwd = 'tools'
         expect(Directory('$rt/cache').existsSync(), isTrue);
         expect(Directory('$rt/storage').existsSync(), isTrue);
 
-        // ONE npm install per batch — both packages in one command.
-        final npmCmds = runner.cmds
-            .where((c) => c.args.isNotEmpty && c.args[0] == 'npm')
+        // ONE npm INSTALL per batch — both packages in one command
+        // (the second npm command is the `npm ls` version-capture pass).
+        final npmInstalls = runner.cmds
+            .where(
+              (c) =>
+                  c.args.isNotEmpty &&
+                  c.args[0] == 'npm' &&
+                  c.args[1] == 'install',
+            )
             .toList();
-        expect(npmCmds.length, 1, reason: 'batched single npm install');
-        final args = npmCmds.first.args;
+        expect(npmInstalls.length, 1, reason: 'batched single npm install');
+        final args = npmInstalls.first.args;
         expect(args, containsAll(['install', '--no-global']));
         // Local prefix (never the sandbox global prefix).
         expect(
@@ -15935,11 +15949,11 @@ cwd = 'tools'
         expect(entry.status, PluginDependencyStatus.ok);
         expect(entry.command, contains('npm install'));
         expect(entry.exitCode, 0);
-        expect(entry.resolvedVersion, isNotNull);
+        expect(entry.resolvedVersion, '1.3.11');
         expect(entry.checksum, isNotNull);
 
         // Per-plugin env overrides cache/home — no writes outside root.
-        final env = npmCmds.first.env;
+        final env = npmInstalls.first.env;
         expect(env, isNotNull);
         expect(env!['npm_config_cache'], '$rt/cache/npm');
         expect(env['npm_config_tmp'], '$rt/cache/tmp');
@@ -15970,13 +15984,22 @@ cwd = 'tools'
         );
 
         runner.queue((0, 'added 1 package'));
+        runner.queue((
+          0,
+          '{"dependencies":{"node-gyp-ish":{"version":"1.0.0"}}}',
+        ));
         final result = await svc.install(
           manifest,
           p6Grant(caps: {PluginCapability.shellExecute}),
         );
         expect(result.status, PluginDependencyStatus.ok);
         final npmCmds = runner.cmds
-            .where((c) => c.args.isNotEmpty && c.args[0] == 'npm')
+            .where(
+              (c) =>
+                  c.args.isNotEmpty &&
+                  c.args[0] == 'npm' &&
+                  c.args[1] == 'install',
+            )
             .toList();
         expect(npmCmds, isNotEmpty);
         expect(
@@ -16230,6 +16253,175 @@ cwd = 'tools'
         expect(probe['node'], isTrue);
         expect(probe['npm'], isTrue);
         expect(probe['python'], isFalse);
+      },
+    );
+
+    test(
+      'PLUGIN6: hostile version segments never escape the plugin subtree (fix round 1)',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('p6-vers-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+
+        // Install with versions ''/./.. — the runtime root must stay
+        // STRICTLY inside plugin-runtime/<id>/<something>: never the id
+        // dir itself, never its parent (the publisher dir).
+        for (final v in const ['', '.', '..']) {
+          final runner = RecordingRunner();
+          final svc = PluginDependencyService(
+            runtimeRootOverride: dir,
+            runner: runner.call,
+            ensureRuntime: (_) async => true,
+          );
+          final manifest = p6Manifest(version: v, deps: [
+            const PluginDependency(name: 'left-pad'),
+          ]);
+          runner.queue((0, 'added 1 package'));
+          final result = await svc.install(manifest, null);
+
+          final idDir = '${dir.path}/plugin-runtime/acme/dep-kit';
+          final publisherDir = '${dir.path}/plugin-runtime/acme';
+          final rt = result.runtimeRoot.path;
+          expect(rt, isNot(idDir),
+              reason: 'version "$v" must not collapse to the id dir');
+          expect(rt, isNot(publisherDir),
+              reason: 'version "$v" must not escape to the publisher dir');
+          // Strictly one level below the id dir (a real version slot).
+          expect(SandboxService.isPathContained(idDir, rt), isTrue);
+          expect(rt.split('/').length, idDir.split('/').length + 1,
+              reason: 'runtime root is exactly one version segment deep');
+          // And never the raw hostile segment itself.
+          expect(rt.split('/').last, isNot(anyOf('', '.', '..')));
+        }
+
+        // removeVersion(id, '..') / (id, '') cannot escape either: they
+        // touch only a sanitized version slot, never the id/publisher
+        // dirs. Seed the whole plugin subtree and assert it survives.
+        final idDir = Directory('${dir.path}/plugin-runtime/acme/dep-kit');
+        Directory('${idDir.path}/1.0.0/node').createSync(recursive: true);
+        Directory('${idDir.path}/2.0.0/node').createSync(recursive: true);
+        final svc = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: RecordingRunner().call,
+          ensureRuntime: (_) async => true,
+        );
+        await svc.removeVersion('acme/dep-kit', '..');
+        await svc.removeVersion('acme/dep-kit', '');
+        await svc.removeVersion('acme/dep-kit', '.');
+        expect(Directory('${idDir.path}/1.0.0').existsSync(), isTrue,
+            reason: 'removeVersion(..) must not delete sibling versions');
+        expect(Directory('${idDir.path}/2.0.0').existsSync(), isTrue,
+            reason: 'removeVersion("") must not delete every version');
+        expect(idDir.existsSync(), isTrue,
+            reason: 'the plugin id dir must survive hostile removeVersion');
+      },
+    );
+
+    test(
+      'PLUGIN6: npm ls pass populates real resolved versions; ls failure falls back honestly (fix round 1)',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('p6-ls-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+
+        // Happy path: install ok + npm ls JSON reports installed pins.
+        final runner = RecordingRunner();
+        final svc = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final manifest = p6Manifest(deps: [
+          const PluginDependency(name: 'left-pad', versionSpec: '^1.3.0'),
+          const PluginDependency(name: 'opt-thing'),
+        ]);
+        runner.queue((0, 'added 2 packages'));
+        runner.queue((
+          0,
+          '{"dependencies":{'
+              '"left-pad":{"version":"1.3.11"},'
+              '"opt-thing":{"version":"2.0.0"}}}',
+        ));
+        final result = await svc.install(manifest, null);
+        expect(result.status, PluginDependencyStatus.ok);
+
+        // Exactly one extra npm command after the batch install: the
+        // `npm ls` version-capture pass.
+        final npmCmds = runner.cmds
+            .where((c) => c.args.isNotEmpty && c.args[0] == 'npm')
+            .toList();
+        expect(npmCmds.length, 2);
+        final ls = npmCmds[1].args;
+        expect(ls[1], 'ls');
+        expect(ls, contains('--prefix'));
+        expect(ls, contains('--depth=0'));
+        expect(ls, contains('--json'));
+
+        // REAL manager-resolved versions, not the requested specs.
+        expect(
+          result.entries.firstWhere((e) => e.name == 'left-pad')
+              .resolvedVersion,
+          '1.3.11',
+        );
+        expect(
+          result.entries.firstWhere((e) => e.name == 'opt-thing')
+              .resolvedVersion,
+          '2.0.0',
+        );
+
+        // Fallback path: the ls pass FAILS — entries keep the requested
+        // spec (never a fabricated 'latest') and the install stays ok.
+        final runner2 = RecordingRunner();
+        final svc2 = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: runner2.call,
+          ensureRuntime: (_) async => true,
+        );
+        runner2.queue((0, 'added 2 packages'));
+        runner2.queue((1, 'npm ERR! missing: nothing installed'));
+        final result2 = await svc2.install(manifest, null);
+        expect(result2.status, PluginDependencyStatus.ok);
+        expect(
+          result2.entries.firstWhere((e) => e.name == 'left-pad')
+              .resolvedVersion,
+          '^1.3.0',
+          reason: 'ls failure falls back to the REQUESTED spec, honestly',
+        );
+        // An unpinned package under a failed ls pass resolves to null —
+        // never a fabricated "latest".
+        expect(
+          result2.entries.firstWhere((e) => e.name == 'opt-thing')
+              .resolvedVersion,
+          isNull,
+        );
+      },
+    );
+
+    test(
+      'PLUGIN6: install restores a pre-existing run key instead of clearing it (fix round 1)',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('p6-runkey-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final runner = RecordingRunner();
+        final svc = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final manifest = p6Manifest(
+          deps: [const PluginDependency(name: 'left-pad')],
+        );
+
+        // An OUTER run is active when the install starts (an agent
+        // session installing a plugin mid-run).
+        const outerKey = 'outer-run-42';
+        SandboxService.I.tagRun(outerKey);
+        addTearDown(() => SandboxService.I.tagRun(null));
+        runner.queue((0, 'added 1 package'));
+        await svc.install(manifest, null);
+
+        // The global run-key slot is RESTORED to the outer key — not
+        // clobbered to null — so the outer run's later processes stay
+        // tagged and stoppable.
+        expect(SandboxService.I.activeRunKeyForTest, outerKey);
       },
     );
   });

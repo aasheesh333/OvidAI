@@ -1854,6 +1854,16 @@ audit=false
     _activeRunKey = key;
   }
 
+  /// The currently-active run-key slot (read by nested tagged runs —
+  /// e.g. the plugin dependency installer — so they can SAVE and
+  /// RESTORE an outer run's key around their own tag window instead
+  /// of clobbering it).
+  String? get activeRunKey => _activeRunKey;
+
+  /// Test-facing alias of [activeRunKey].
+  @visibleForTesting
+  String? get activeRunKeyForTest => _activeRunKey;
+
   String? get _currentRunKey =>
       (Zone.current[_runZoneKey] as String?) ?? _activeRunKey;
 

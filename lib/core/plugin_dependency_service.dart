@@ -166,15 +166,27 @@ class PluginDependencyService {
     // [A-Za-z0-9._~/-] per segment, drop empty/`.`/`..` segments.
     final safeId = pluginId
         .split('/')
-        .map((s) => s.replaceAll(RegExp(r'[^A-Za-z0-9._~-]'), '_'))
+        .map(_sanitizeSegment)
         .where((s) => s.isNotEmpty && s != '.' && s != '..')
         .join('/');
-    final safeVersion = version.replaceAll(
-      RegExp(r'[^A-Za-z0-9._~-]'),
-      '_',
+    // The version is UNTRUSTED manifest content and `.`/`..` survive
+    // character sanitization untouched (they consist entirely of
+    // allowed chars). Dropping the segment would collapse the runtime
+    // root onto the id dir (version isolation lost, hostile
+    // removeVersion deletes every version) — so a hostile/empty
+    // version maps to a stable fallback slot instead.
+    final safeVersion = _sanitizeSegment(version);
+    return Directory(
+      '${base.path}/plugin-runtime/$safeId/'
+      '${(safeVersion.isEmpty || safeVersion == '.' || safeVersion == '..')
+          ? 'unversioned'
+          : safeVersion}',
     );
-    return Directory('${base.path}/plugin-runtime/$safeId/$safeVersion');
   }
+
+  /// Per-segment character sanitizer for runtime-root path segments.
+  static String _sanitizeSegment(String s) =>
+      s.replaceAll(RegExp(r'[^A-Za-z0-9._~-]'), '_');
 
   // ── install ─────────────────────────────────────────────────────
 
@@ -185,12 +197,17 @@ class PluginDependencyService {
   }) async {
     // Tag every process this install spawns under one run key so a
     // session Stop cascades into it (SandboxService.killRunProcesses).
+    // SAVE the previously-active key: the sandbox keeps a single
+    // global slot, so clearing to null in `finally` would clobber an
+    // OUTER run's tag (its later processes would go untagged) —
+    // restore instead.
     final runKey = 'plugin-deps-${manifest.id}@${manifest.version}';
+    final previousRunKey = SandboxService.I.activeRunKey;
     SandboxService.I.tagRun(runKey);
     try {
       return await _install(manifest, grant, onProgress: onProgress);
     } finally {
-      SandboxService.I.tagRun(null);
+      SandboxService.I.tagRun(previousRunKey);
     }
   }
 
@@ -294,22 +311,36 @@ class PluginDependencyService {
         final ok = exit == 0;
         final checksum =
             'sha256:${sha256.convert(utf8.encode(out)).toString()}';
+        if (!ok) {
+          anyFailed = true;
+        }
+
+        // Version-capture pass: a quiet batch npm install prints no
+        // per-package versions, so ask the manager what it actually
+        // installed (`npm ls --prefix … --depth=0 --json`). Best-effort
+        // — a failed pass falls back to the REQUESTED spec, never a
+        // fabricated "resolved" value.
+        final installed = ok ? await _npmInstalledVersions(rt) : const <String, String>{};
         for (final d in npmDeps) {
+          final installedVersion = installed[d.name];
           entries.add(PluginDependencyResultEntry(
             name: d.name,
             kind: 'npm',
             required: d.required,
             command: cmd,
             exitCode: exit,
-            resolvedVersion: ok ? _npmResolvedVersion(d, out) : null,
+            // Manager-resolved when the ls pass reported it; otherwise
+            // the requested spec for pinned deps, null for unpinned
+            // (honest: we simply do not know what got installed).
+            resolvedVersion: !ok
+                ? null
+                : (installedVersion ??
+                      (d.versionSpec.isEmpty ? null : d.versionSpec)),
             checksum: checksum,
             status: ok ? PluginDependencyStatus.ok : PluginDependencyStatus.failed,
             error: ok ? null : _failureDetail('npm', d, out),
           ));
-          if (!ok) {
-            anyFailed = true;
-            if (d.required) requiredFailed = true;
-          }
+          if (!ok && d.required) requiredFailed = true;
         }
       }
     }
@@ -422,11 +453,38 @@ class PluginDependencyService {
     return null;
   }
 
-  /// npm does not print per-package versions on a quiet batch install;
-  /// report the spec we asked for as the resolved pin when the batch
-  /// succeeded (the lockfile-free local prefix keeps exactly this).
-  static String? _npmResolvedVersion(PluginDependency dep, String out) {
-    return dep.versionSpec.isEmpty ? 'latest' : dep.versionSpec;
+  /// Asks npm what it actually installed in the plugin-local prefix
+  /// (`npm ls --prefix <rt>/node --depth=0 --json`). One extra command
+  /// per install; a failed or malformed pass yields an empty map and
+  /// the caller falls back to the requested spec (never a fabricated
+  /// version).
+  Future<Map<String, String>> _npmInstalledVersions(Directory rt) async {
+    try {
+      final (exit, out) = await runner(
+        [
+          'npm',
+          'ls',
+          '--prefix',
+          '${rt.path}/node',
+          '--depth=0',
+          '--json',
+        ],
+        cwd: rt.path,
+        env: SandboxService.pluginRuntimeEnv(rt.path),
+      );
+      if (exit != 0) return const {};
+      final decoded = jsonDecode(out);
+      if (decoded is! Map) return const {};
+      final deps = decoded['dependencies'];
+      if (deps is! Map) return const {};
+      return {
+        for (final e in deps.entries)
+          if (e.value is Map && (e.value as Map)['version'] != null)
+            e.key.toString(): (e.value as Map)['version'].toString(),
+      };
+    } catch (_) {
+      return const {};
+    }
   }
 
   static String _failureDetail(String kind, PluginDependency dep, String out) {
