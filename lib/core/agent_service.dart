@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -65,7 +64,7 @@ class BrowserTab {
   bool desktopMode;
 
   BrowserTab({required this.url, bool? desktopMode})
-      : desktopMode = desktopMode ?? AppState.I.browserDesktopMode;
+    : desktopMode = desktopMode ?? AppState.I.browserDesktopMode;
 }
 
 /// ═══════════════════════════════════════════════════════════════════
@@ -163,11 +162,19 @@ String _htmlToMarkdown(String html) {
       .replaceAll(RegExp(r'<script[\s\S]*?</script>', multiLine: true), '')
       .replaceAll(RegExp(r'<style[\s\S]*?</style>', multiLine: true), '')
       .replaceAll(RegExp(r'<noscript[\s\S]*?</noscript>', multiLine: true), '')
-      .replaceAll(RegExp(r'<(nav|footer|aside)[\s\S]*?</\1>',
-          multiLine: true, caseSensitive: false), '');
+      .replaceAll(
+        RegExp(
+          r'<(nav|footer|aside)[\s\S]*?</\1>',
+          multiLine: true,
+          caseSensitive: false,
+        ),
+        '',
+      );
 
-  String tag(String re, String Function(Match) f) =>
-      s = s.replaceAllMapped(RegExp(re, multiLine: true, caseSensitive: false), f);
+  String tag(String re, String Function(Match) f) => s = s.replaceAllMapped(
+    RegExp(re, multiLine: true, caseSensitive: false),
+    f,
+  );
 
   tag(r'<h1[^>]*>([\s\S]*?)</h1>', (m) => '\n# ${m[1]}\n');
   tag(r'<h2[^>]*>([\s\S]*?)</h2>', (m) => '\n## ${m[1]}\n');
@@ -179,12 +186,19 @@ String _htmlToMarkdown(String html) {
     if (label.isEmpty) return '';
     return '[${label.replaceAll('\n', ' ')}](${m[1]})';
   });
-  tag(r'<img[^>]*alt="([^"]*)"[^>]*>', (m) =>
-      (m[1] ?? '').trim().isEmpty ? '' : ' [image: ${m[1]}] ');
+  tag(
+    r'<img[^>]*alt="([^"]*)"[^>]*>',
+    (m) => (m[1] ?? '').trim().isEmpty ? '' : ' [image: ${m[1]}] ',
+  );
   tag(r'<img[^>]*>', (m) => '');
-  tag(r'<(br|hr)\s*/?>', (m) => m[1]!.toLowerCase() == 'hr' ? '\n\n---\n\n' : '\n');
-  tag(r'</(p|div|section|article|li|tr|table|ul|ol|h1|h2|h3|h4|h5|h6)>',
-      (m) => '\n');
+  tag(
+    r'<(br|hr)\s*/?>',
+    (m) => m[1]!.toLowerCase() == 'hr' ? '\n\n---\n\n' : '\n',
+  );
+  tag(
+    r'</(p|div|section|article|li|tr|table|ul|ol|h1|h2|h3|h4|h5|h6)>',
+    (m) => '\n',
+  );
   tag(r'<li[^>]*>', (m) => '\n- ');
   tag(r'<pre[^>]*>([\s\S]*?)</pre>', (m) => '\n```\n${m[1]}\n```\n');
   tag(r'<(strong|b)[^>]*>([\s\S]*?)</\1>', (m) => '**${m[2]}**');
@@ -195,15 +209,26 @@ String _htmlToMarkdown(String html) {
   // Strip everything left (tags, entities we don't specifically handle).
   s = s.replaceAll(RegExp(r'<[^>]+>'), ' ');
   const entities = {
-    '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"',
-    '&#39;': "'", '&apos;': "'", '&nbsp;': ' ', '&mdash;': '—',
-    '&ndash;': '–', '&hellip;': '…', '&copy;': '©', '&reg;': '®',
+    '&amp;': '&',
+    '&lt;': '<',
+    '&gt;': '>',
+    '&quot;': '"',
+    '&#39;': "'",
+    '&apos;': "'",
+    '&nbsp;': ' ',
+    '&mdash;': '—',
+    '&ndash;': '–',
+    '&hellip;': '…',
+    '&copy;': '©',
+    '&reg;': '®',
   };
   for (final e in entities.entries) {
     s = s.replaceAll(e.key, e.value);
   }
-  s = s.replaceAllMapped(RegExp(r'&#(\d+);'), (m) =>
-      String.fromCharCode(int.parse(m[1] ?? '0')));
+  s = s.replaceAllMapped(
+    RegExp(r'&#(\d+);'),
+    (m) => String.fromCharCode(int.parse(m[1] ?? '0')),
+  );
 
   // Collapse the noise: 3+ newlines → 2, runs of spaces → 1.
   s = s
@@ -338,8 +363,13 @@ class BgJob {
   BgJob({required this.id, required this.name, required this.command});
 
   Duration get elapsed => DateTime.now().difference(startedAt);
-  String get state =>
-      killed ? 'stopping' : (!started ? 'pending' : !finished ? 'running' : 'done');
+  String get state => killed
+      ? 'stopping'
+      : (!started
+            ? 'pending'
+            : !finished
+            ? 'running'
+            : 'done');
 }
 
 /// A dispatched subagent, tracked by the parent that spawned it.
@@ -348,7 +378,8 @@ class BgJob {
 /// streaming and workspace), so opening it shows exactly what the child did
 /// instead of an opaque "subagent finished" line. This object is just the
 /// parent-side handle: lifecycle, follow-up inbox, and the reported result.
-class SubagentInfo {  final String id;
+class SubagentInfo {
+  final String id;
   final String label;
   final String sessionId;
   final String parentSessionId;
@@ -385,7 +416,6 @@ class SubagentInfo {  final String id;
   Duration get elapsed => (finishedAt ?? DateTime.now()).difference(startedAt);
 }
 
-
 /// Per-session agent run state — one per ChatSession so many sessions run
 /// in parallel without interfering (the parallel session executor multi-session parity).  Switching
 /// sessions NEVER stops another session's run.
@@ -412,6 +442,7 @@ class AgentRun {
   bool planMode = false;
   final Map<int, BgJob> jobs = {};
   int jobCounter = 0;
+
   /// Per-tool call counts within THIS run (repeat-tool reminder, PR18).
   final Map<String, int> toolCallCounts = {};
 
@@ -471,8 +502,7 @@ class AgentRun {
   int cacheWriteTokens = 0;
 
   /// Decode throughput: completion tokens per second over the run.
-  double get decodeTokPerSec =>
-      llmMs <= 0 ? 0 : decodeTokens / (llmMs / 1000);
+  double get decodeTokPerSec => llmMs <= 0 ? 0 : decodeTokens / (llmMs / 1000);
 
   /// Average TTFT over sampled turns (ms).
   int get avgTtftMs => ttftSamples == 0 ? 0 : ttftMs ~/ ttftSamples;
@@ -555,9 +585,11 @@ class AgentService extends ChangeNotifier {
       if (active != null &&
           HookService.I.hasHookListeners('on_session_start')) {
         unawaited(
-          HookService.I.fire('on_session_start', active.id, payload: {
-            'restored': AppState.I.sessions.length,
-          }),
+          HookService.I.fire(
+            'on_session_start',
+            active.id,
+            payload: {'restored': AppState.I.sessions.length},
+          ),
         );
       }
     };
@@ -661,6 +693,7 @@ class AgentService extends ChangeNotifier {
   set activeRunId(String? v) => _runResolved.activeRunId = v;
   ApprovalRequest? get pendingApproval => _runResolved.pendingApproval;
   set pendingApproval(ApprovalRequest? v) => _runResolved.pendingApproval = v;
+
   /// Plan mode, PERSISTED per session (the plan mode coordinator parity): the run bucket reads
   /// through to the session's `planMode` field, so `/plan` survives
   /// restarts and session switches, and the composer chip reads it.
@@ -676,11 +709,13 @@ class AgentService extends ChangeNotifier {
     _runResolved.planMode = v;
     AppState.I.refresh();
   }
+
   bool get cancelRequested => _runResolved.cancelRequested;
   bool get _cancelRequested => _runResolved.cancelRequested;
   set _cancelRequested(bool v) => _runResolved.cancelRequested = v;
   set _activeRequest(HttpClientRequest? v) => _runResolved.activeRequest = v;
   List<String> get _queue => _runResolved.queue;
+
   /// UI view: the ACTIVE session's queue (per-session isolation test).
   List<String> get queuedMessages => List.unmodifiable(_run.queue);
   Map<int, BgJob> get _jobs => _runResolved.jobs;
@@ -690,7 +725,7 @@ class AgentService extends ChangeNotifier {
   /// UI view: live background jobs of [sessionId] (jobs badge popover).
   /// A snapshot list of (id, name, state, elapsedSeconds, outputChars).
   List<({int id, String name, String state, int elapsedSec, int outChars})>
-      jobsFor(String sessionId) {
+  jobsFor(String sessionId) {
     final r = _runs[sessionId];
     if (r == null) return const [];
     return [
@@ -715,6 +750,7 @@ class AgentService extends ChangeNotifier {
     } catch (_) {}
     notifyListeners();
   }
+
   Message? get _activeToolMsg => _runResolved.activeToolMsg;
   set _activeToolMsg(Message? v) => _runResolved.activeToolMsg = v;
   DateTime? get _runStart => _runResolved.runStart;
@@ -794,7 +830,9 @@ class AgentService extends ChangeNotifier {
   /// process. Instant, regardless of which session the UI is on.
   void cancelAllRuns() {
     for (final r in _runs.values.toList()) {
-      if (r.activeRunId != null || r.cancelRequested || r.activeClient != null) {
+      if (r.activeRunId != null ||
+          r.cancelRequested ||
+          r.activeClient != null) {
         _cancelBucket(r);
       }
     }
@@ -809,8 +847,7 @@ class AgentService extends ChangeNotifier {
   }
 
   /// PR32: is ANY run active across all sessions (lifecycle keep-alive)?
-  bool get anyRunActive =>
-      _runs.values.any((r) => r.activeRunId != null);
+  bool get anyRunActive => _runs.values.any((r) => r.activeRunId != null);
 
   /// Stop the run that belongs to [sessionId] — used for subagent sessions
   /// (their Stop button and `interrupt_agent`), which are never the bucket
@@ -829,7 +866,10 @@ class AgentService extends ChangeNotifier {
     _persistedRunCheckpoints[sessionId] = runId;
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_kActiveRunsCheckpointKey, jsonEncode(_persistedRunCheckpoints));
+      await prefs.setString(
+        _kActiveRunsCheckpointKey,
+        jsonEncode(_persistedRunCheckpoints),
+      );
     } catch (_) {}
     unawaited(
       SessionLedger.I.append(sessionId, 'checkpoint', {
@@ -847,13 +887,14 @@ class AgentService extends ChangeNotifier {
       if (_persistedRunCheckpoints.isEmpty) {
         await prefs.remove(_kActiveRunsCheckpointKey);
       } else {
-        await prefs.setString(_kActiveRunsCheckpointKey, jsonEncode(_persistedRunCheckpoints));
+        await prefs.setString(
+          _kActiveRunsCheckpointKey,
+          jsonEncode(_persistedRunCheckpoints),
+        );
       }
     } catch (_) {}
     unawaited(
-      SessionLedger.I.append(sessionId, 'checkpoint', {
-        'state': 'idle',
-      }),
+      SessionLedger.I.append(sessionId, 'checkpoint', {'state': 'idle'}),
     );
   }
 
@@ -867,7 +908,8 @@ class AgentService extends ChangeNotifier {
         if (map is Map) {
           _persistedRunCheckpoints.clear();
           for (final entry in map.entries) {
-            _persistedRunCheckpoints[entry.key.toString()] = entry.value.toString();
+            _persistedRunCheckpoints[entry.key.toString()] = entry.value
+                .toString();
           }
         }
       }
@@ -875,7 +917,9 @@ class AgentService extends ChangeNotifier {
   }
 
   void _cancelBucket(AgentRun r) {
-    if (r.activeRunId == null && !r.cancelRequested && r.activeClient == null) return;
+    if (r.activeRunId == null && !r.cancelRequested && r.activeClient == null) {
+      return;
+    }
     if (r.runKey != null) {
       unawaited(checkpointRunEnd(r.runKey!));
     }
@@ -907,7 +951,8 @@ class AgentService extends ChangeNotifier {
     // AND every background job of this run so the Stop button is
     // immediate in every tier. Subagent children die with the parent
     // (their sessions' buckets are cancelled below via lineage).
-    final runKey = r.runKey ??
+    final runKey =
+        r.runKey ??
         _runs.entries
             .firstWhere((e) => e.value == r, orElse: () => MapEntry('', r))
             .key;
@@ -1011,10 +1056,8 @@ class AgentService extends ChangeNotifier {
 
   /// PR23 test seams.
   @visibleForTesting
-  Future<String> expandReferencesForTest(
-    String text,
-    ChatSession s,
-  ) => expandReferences(text, s);
+  Future<String> expandReferencesForTest(String text, ChatSession s) =>
+      expandReferences(text, s);
 
   @visibleForTesting
   Future<void> drainQueueIntoMsgsForTest(
@@ -1195,9 +1238,10 @@ class AgentService extends ChangeNotifier {
   /// found by `isPreview` flag rather than URL so re-renders reload the
   /// same tab instead of piling up.
   void openPreviewTab(String filePath) {
-    BrowserTab? tab = browserTabs
-        .cast<BrowserTab?>()
-        .firstWhere((t) => t!.localPreviewPath != null, orElse: () => null);
+    BrowserTab? tab = browserTabs.cast<BrowserTab?>().firstWhere(
+      (t) => t!.localPreviewPath != null,
+      orElse: () => null,
+    );
     if (tab == null) {
       tab = _newTabInternal('ovid://preview');
       tab.localPreviewPath = filePath;
@@ -1222,14 +1266,12 @@ class AgentService extends ChangeNotifier {
   /// python http.server etc). Cleartext-to-localhost is allowed via the
   /// network security config (nothing else is).
   void openDevServerTab(String url) {
-    BrowserTab? tab = browserTabs
-        .cast<BrowserTab?>()
-        .firstWhere(
-          (t) =>
-              t!.url.startsWith('http://localhost:') ||
-              t.url.startsWith('http://127.0.0.1:'),
-          orElse: () => null,
-        );
+    BrowserTab? tab = browserTabs.cast<BrowserTab?>().firstWhere(
+      (t) =>
+          t!.url.startsWith('http://localhost:') ||
+          t.url.startsWith('http://127.0.0.1:'),
+      orElse: () => null,
+    );
     if (tab == null) {
       tab = _newTabInternal(url);
       tab.title = 'Dev server';
@@ -1262,7 +1304,8 @@ class AgentService extends ChangeNotifier {
     var path = url.trim();
     if (path.startsWith('file://')) path = path.substring(7);
     // Only treat as local when it's clearly not a web URL.
-    final isLocal = path.startsWith('file:') ||
+    final isLocal =
+        path.startsWith('file:') ||
         path.startsWith('/data/') ||
         path.startsWith('/storage/') ||
         path.startsWith('/work/') ||
@@ -1322,9 +1365,23 @@ class AgentService extends ChangeNotifier {
         final ext = name.contains('.')
             ? name.split('.').last.toLowerCase()
             : '';
-        if (!['html', 'css', 'js', 'svg', 'json', 'png', 'jpg', 'jpeg',
-              'gif', 'webp', 'ico', 'woff', 'woff2', 'ttf', 'map']
-            .contains(ext)) {
+        if (![
+          'html',
+          'css',
+          'js',
+          'svg',
+          'json',
+          'png',
+          'jpg',
+          'jpeg',
+          'gif',
+          'webp',
+          'ico',
+          'woff',
+          'woff2',
+          'ttf',
+          'map',
+        ].contains(ext)) {
           continue;
         }
         try {
@@ -1393,7 +1450,10 @@ class AgentService extends ChangeNotifier {
     } catch (_) {}
   }
 
-  Future<void> recreateControllerForDesktopToggle(BrowserTab tab, {bool reload = true}) async {
+  Future<void> recreateControllerForDesktopToggle(
+    BrowserTab tab, {
+    bool reload = true,
+  }) async {
     // Clear old controller so WebView / WebSettings initialize fresh.
     tab.controller = null;
     tab.loadedOnce = false;
@@ -1410,7 +1470,11 @@ class AgentService extends ChangeNotifier {
     }
   }
 
-  Future<void> setTabDesktopMode(BrowserTab tab, bool desktop, {bool reload = true}) async {
+  Future<void> setTabDesktopMode(
+    BrowserTab tab,
+    bool desktop, {
+    bool reload = true,
+  }) async {
     tab.desktopMode = desktop;
     if (desktop) {
       if (BrowserTab.devW > 0) {
@@ -1428,8 +1492,7 @@ class AgentService extends ChangeNotifier {
 
   List<({DateTime at, String kind, String text})> consoleBucketFor(
     BrowserTab tab,
-  ) =>
-      tab.consoleLog;
+  ) => tab.consoleLog;
 
   /// Agent-facing: get (creating if needed) the controller for a tab.
   WebViewController controllerForTab(BrowserTab tab) {
@@ -1495,7 +1558,11 @@ const _open = window.open;
 window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window.__ovidPopups.push(String(u)); return null; };
 ''');
             } catch (_) {}
-            tab.networkLog.add((at: DateTime.now(), url: url, kind: 'page-finished'));
+            tab.networkLog.add((
+              at: DateTime.now(),
+              url: url,
+              kind: 'page-finished',
+            ));
             if (tab.networkLog.length > 200) {
               tab.networkLog.removeRange(0, tab.networkLog.length - 200);
             }
@@ -1515,7 +1582,11 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
           },
           onWebResourceError: (_) {
             tab.loading = false;
-            tab.networkLog.add((at: DateTime.now(), url: tab.url, kind: 'resource-error'));
+            tab.networkLog.add((
+              at: DateTime.now(),
+              url: tab.url,
+              kind: 'resource-error',
+            ));
             if (tab.networkLog.length > 200) {
               tab.networkLog.removeRange(0, tab.networkLog.length - 200);
             }
@@ -1566,9 +1637,14 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     if (platformController is AndroidWebViewController &&
         tab.fileSelectorRegistration == null) {
       try {
-        final registration = platformController.setOnShowFileSelector((params) async {
+        final registration = platformController.setOnShowFileSelector((
+          params,
+        ) async {
           if (params.isCaptureEnabled) {
-            _emit('shell', 'file chooser: capture requested; existing files only');
+            _emit(
+              'shell',
+              'file chooser: capture requested; existing files only',
+            );
           }
           try {
             final filter = pageFilePickerFilterForTest(params.acceptTypes);
@@ -1589,12 +1665,17 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
           }
         });
         tab.fileSelectorRegistration = registration;
-        unawaited(registration.then<void>((_) {}, onError: (Object error, StackTrace stackTrace) {
-          if (identical(tab.fileSelectorRegistration, registration)) {
-            tab.fileSelectorRegistration = null;
-          }
-          _emit('err', 'file chooser registration failed: $error');
-        }));
+        unawaited(
+          registration.then<void>(
+            (_) {},
+            onError: (Object error, StackTrace stackTrace) {
+              if (identical(tab.fileSelectorRegistration, registration)) {
+                tab.fileSelectorRegistration = null;
+              }
+              _emit('err', 'file chooser registration failed: $error');
+            },
+          ),
+        );
       } catch (error) {
         _emit('err', 'file chooser registration failed: $error');
       }
@@ -1850,15 +1931,16 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
           // case-insensitive prefix/contains match.
           final l = ref.toLowerCase();
           final roots = app.rootSessions;
-          final exact =
-              roots.where((x) => x.title.toLowerCase() == l).toList();
+          final exact = roots.where((x) => x.title.toLowerCase() == l).toList();
           if (exact.length == 1) {
             other = exact.first;
           } else if (exact.isEmpty) {
             final partial = roots
-                .where((x) =>
-                    x.title.toLowerCase().startsWith(l) ||
-                    x.title.toLowerCase().contains(l))
+                .where(
+                  (x) =>
+                      x.title.toLowerCase().startsWith(l) ||
+                      x.title.toLowerCase().contains(l),
+                )
                 .toList();
             if (partial.length == 1) {
               other = partial.first;
@@ -1867,7 +1949,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
                 '── referenced session "$ref" is ambiguous ──\n'
                 'It could be: '
                 '${partial.map((x) => '"${x.title}" (${x.id})').join(', ')}. '
-                'Ask the user to pick one (or use @session:<id>).');
+                'Ask the user to pick one (or use @session:<id>).',
+              );
               continue;
             }
           }
@@ -1878,7 +1961,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
           blocks.add(
             '── referenced session "$ref" not found ──\n'
             'No chat has that id or title. Tell the user, and suggest '
-            'picking one from the @-menu (Sessions group).');
+            'picking one from the @-menu (Sessions group).',
+          );
           continue;
         }
         // The LAST messages carry the work-in-progress context — the old
@@ -1969,7 +2053,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     }
     return repoOwns
         ? 'written ✓ · $path · ${content.length} chars '
-            '(workspace + repo cache — commit() to push)'
+              '(workspace + repo cache — commit() to push)'
         : 'written ✓ · $path · ${content.length} chars';
   }
 
@@ -2126,6 +2210,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       return false;
     }
   }
+
   /// require a prior read.  Keyed by session id so sessions don't leak.
   final Map<String, Set<String>> _readPaths = {};
   Set<String> _readPathsFor(String sid) =>
@@ -2495,13 +2580,11 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     final preset = PresetRegistry.byId(_runSession?.presetId ?? 'standard');
     return preset.allowedTools.isEmpty && preset.deniedTools.isEmpty
         ? tools
-        : tools
-            .where((t) {
-              final fn = t['function'];
-              final name = fn is Map ? fn['name'] as String? : null;
-              return name != null && PresetRegistry.allows(preset, name);
-            })
-            .toList();
+        : tools.where((t) {
+            final fn = t['function'];
+            final name = fn is Map ? fn['name'] as String? : null;
+            return name != null && PresetRegistry.allows(preset, name);
+          }).toList();
   }
 
   // Core tools — always available to the agent
@@ -2510,24 +2593,61 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'type': 'function',
       'function': {
         'name': 'device_read',
-        'description': 'Read the foreground screen as accessibility nodes. Delta is default; this never takes a screenshot.',
-        'parameters': {'type': 'object', 'properties': {'mode': {'type': 'string', 'enum': ['delta', 'full']}}, 'additionalProperties': false},
+        'description':
+            'Read the foreground screen as accessibility nodes. Delta is default; this never takes a screenshot.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'mode': {
+              'type': 'string',
+              'enum': ['delta', 'full'],
+            },
+          },
+          'additionalProperties': false,
+        },
       },
     },
     {
       'type': 'function',
       'function': {
         'name': 'device_tap',
-        'description': 'Tap a node handle (preferred) or x/y screen coordinates.',
-        'parameters': {'type': 'object', 'properties': {'node': {'type': 'integer'}, 'x': {'type': 'number'}, 'y': {'type': 'number'}}, 'anyOf': [{'required': ['node']}, {'required': ['x', 'y']}], 'additionalProperties': false},
+        'description':
+            'Tap a node handle (preferred) or x/y screen coordinates.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'node': {'type': 'integer'},
+            'x': {'type': 'number'},
+            'y': {'type': 'number'},
+          },
+          'anyOf': [
+            {
+              'required': ['node'],
+            },
+            {
+              'required': ['x', 'y'],
+            },
+          ],
+          'additionalProperties': false,
+        },
       },
     },
     {
       'type': 'function',
       'function': {
         'name': 'device_type',
-        'description': 'Type into a node or focused editable field. Password fields are refused natively.',
-        'parameters': {'type': 'object', 'properties': {'node': {'type': 'integer'}, 'text': {'type': 'string'}, 'submit': {'type': 'boolean'}}, 'required': ['text'], 'additionalProperties': false},
+        'description':
+            'Type into a node or focused editable field. Password fields are refused natively.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'node': {'type': 'integer'},
+            'text': {'type': 'string'},
+            'submit': {'type': 'boolean'},
+          },
+          'required': ['text'],
+          'additionalProperties': false,
+        },
       },
     },
     {
@@ -2535,7 +2655,18 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'device_swipe',
         'description': 'Swipe between two screen coordinates.',
-        'parameters': {'type': 'object', 'properties': {'from_x': {'type': 'number'}, 'from_y': {'type': 'number'}, 'to_x': {'type': 'number'}, 'to_y': {'type': 'number'}, 'duration_ms': {'type': 'integer'}}, 'required': ['from_x', 'from_y', 'to_x', 'to_y'], 'additionalProperties': false},
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'from_x': {'type': 'number'},
+            'from_y': {'type': 'number'},
+            'to_x': {'type': 'number'},
+            'to_y': {'type': 'number'},
+            'duration_ms': {'type': 'integer'},
+          },
+          'required': ['from_x', 'from_y', 'to_x', 'to_y'],
+          'additionalProperties': false,
+        },
       },
     },
     {
@@ -2543,15 +2674,36 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'device_system_nav',
         'description': 'Perform Android system navigation.',
-        'parameters': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['back', 'home', 'recents', 'notifications', 'quick_settings']}}, 'required': ['action'], 'additionalProperties': false},
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'action': {
+              'type': 'string',
+              'enum': [
+                'back',
+                'home',
+                'recents',
+                'notifications',
+                'quick_settings',
+              ],
+            },
+          },
+          'required': ['action'],
+          'additionalProperties': false,
+        },
       },
     },
     {
       'type': 'function',
       'function': {
         'name': 'device_screenshot',
-        'description': 'Explicitly capture foreground pixels into the session workspace as a fallback.',
-        'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': false},
+        'description':
+            'Explicitly capture foreground pixels into the session workspace as a fallback.',
+        'parameters': {
+          'type': 'object',
+          'properties': {},
+          'additionalProperties': false,
+        },
       },
     },
     // ── Chrome DevTools MCP-style browser tools (inbuilt WebView) ──
@@ -3340,8 +3492,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             },
             'context': {
               'type': 'integer',
-              'description':
-                  'Lines of context before/after each match (0-10)',
+              'description': 'Lines of context before/after each match (0-10)',
             },
           },
           'required': ['pattern'],
@@ -4709,8 +4860,13 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// Apply a successful compaction: fold [from, cutoff) into the summary,
   /// write the visible "Context compacted" event row. Returns the human
   /// status line.
-  String _applyCompaction(ChatSession s, int from, int cutoff, String summary,
-      {required bool forced}) {
+  String _applyCompaction(
+    ChatSession s,
+    int from,
+    int cutoff,
+    String summary, {
+    required bool forced,
+  }) {
     final shadowed = cutoff - from;
     final shadowedTok = s.messages
         .sublist(from, cutoff)
@@ -4730,9 +4886,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         kind: MsgKind.compact,
         content: forced
             ? 'Context force-pruned · $shadowed message${shadowed == 1 ? '' : 's'} '
-                '(overflow recovery)'
+                  '(overflow recovery)'
             : 'Context compacted · $shadowed message${shadowed == 1 ? '' : 's'} '
-                '(~${_fmtK(shadowedTok)} tokens)',
+                  '(~${_fmtK(shadowedTok)} tokens)',
         toolDetail: summary,
         toolState: 'ok',
       ),
@@ -4741,7 +4897,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     return forced
         ? 'force-pruned $shadowed message(s) (~${_fmtK(shadowedTok)} tokens)'
         : 'compacted $shadowed message(s) (~${_fmtK(shadowedTok)} tokens '
-            'folded into the checkpoint)';
+              'folded into the checkpoint)';
   }
 
   /// F3 (the tool-result pruner): rewrites oversized tool-detail bodies in
@@ -4750,8 +4906,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// messages that were spilled. Runs only when measured ≥ threshold —
   /// below-pressure step checks never prune).
   Future<int> _pruneOversizedToolDetailsBeforeCompact(
-      ChatSession s,
-      int threshold,
+    ChatSession s,
+    int threshold,
   ) async {
     var pruned = 0;
     // Ceiling per tool output: same spirit as the runtime 12 KB trim.
@@ -4786,10 +4942,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // nothing at all — note: "pruner rewrites oversized tool results before
     // range selection… skips summarization when pressure becomes safe".
     final retain = (window * _compactRetainRatio).floor();
-    final pruned = await _pruneOversizedToolDetailsBeforeCompact(
-      s,
-      threshold,
-    );
+    final pruned = await _pruneOversizedToolDetailsBeforeCompact(s, threshold);
     if (pruned > 0) {
       final after = measuredContextTokens(s, systemPrompt: 'x' * 4000);
       _emit(
@@ -4895,7 +5048,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         return left <= 0
             ? 'Nothing to compact — this chat is already fully compacted.'
             : 'Nothing to compact yet — only $left message(s) after the '
-                'last checkpoint (need ≥4 foldable + retained tail).';
+                  'last checkpoint (need ≥4 foldable + retained tail).';
       }
       _emit('think', 'manual /compact — folding $foldable message(s)…');
       try {
@@ -4957,8 +5110,13 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         cutoff,
       );
       if (summaryText != null) {
-        _applyCompaction(s, s.compactedAtCount, cutoff, summaryText,
-            forced: true);
+        _applyCompaction(
+          s,
+          s.compactedAtCount,
+          cutoff,
+          summaryText,
+          forced: true,
+        );
         _emit('think', 'context force-pruned ✓ — retrying the request');
       }
     } catch (e) {
@@ -5053,10 +5211,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     final ctx = _RunCtx(bucket, s, p);
     return runZoned(
       () => _runTaskBody(prompt, ctx, freshTurn: freshTurn),
-      zoneValues: {
-        _runCtxKey: ctx,
-        #ovidRunKey: s.id,
-      },
+      zoneValues: {_runCtxKey: ctx, #ovidRunKey: s.id},
     );
   }
 
@@ -5092,6 +5247,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       } catch (_) {}
       return null;
     }
+
     var text = null as String?;
     final s = _runSession;
     final pinned = s?.workspaceFolder;
@@ -5247,7 +5403,11 @@ Execution tiers: run_shell picks the best tier automatically.
   works the same in every tier via the catalog_* tools.
 ${s.goal != null && s.goal!['status'] == 'active' ? '\nACTIVE GOAL (round ${s.goal!['round']}): "${s.goal!['objective']}". This user message is a goal round — work toward the objective, then update_goal with progress. Do not restate the goal; just advance it.' : ''}
 ${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a [reminder] message arrives, treat its prompt as a user request and act on it.' : ''}
-${s.todos.isNotEmpty ? '\nSESSION TODOS (${s.todos.length} item${s.todos.length == 1 ? '' : 's'} — follow this checklist, do not abandon it):\n${s.todos.map((t) => '- [${t['status'] == 'completed' ? 'x' : t['status'] == 'in_progress' ? '~' : ' '}] ${t['content']}').join('\n')}\nWork through the todo list. Mark items in_progress BEFORE doing them and completed AFTER they are done. If all items are completed, say so and give your final answer.' : ''}
+${s.todos.isNotEmpty ? '\nSESSION TODOS (${s.todos.length} item${s.todos.length == 1 ? '' : 's'} — follow this checklist, do not abandon it):\n${s.todos.map((t) => '- [${t['status'] == 'completed'
+                  ? 'x'
+                  : t['status'] == 'in_progress'
+                  ? '~'
+                  : ' '}] ${t['content']}').join('\n')}\nWork through the todo list. Mark items in_progress BEFORE doing them and completed AFTER they are done. If all items are completed, say so and give your final answer.' : ''}
 ${s.isSubagent ? '''
 ${(s.agentPersona ?? '').isEmpty ? '' : '\nPERSONA: ${s.agentPersona}\n'}
 ${(s.agentOutputHint ?? '').isEmpty ? '' : '\nREQUIRED FINAL OUTPUT SHAPE: ${s.agentOutputHint}\nYour FINAL message must match this shape exactly — the parent parses it.\n'}
@@ -5287,7 +5447,7 @@ ${await _agentsMdBlock()}
       // exactly like the agent loop. Only a final answer, a user cancel, or an
       // unrecoverable provider error stops the loop.
       var turnsWithoutProgress = 0;
-      for (var turn = 0;; turn++) {
+      for (var turn = 0; ; turn++) {
         if (_cancelRequested) {
           _emit('done', 'stopped by user');
           break;
@@ -5295,9 +5455,7 @@ ${await _agentsMdBlock()}
         _resetLiveBuffers();
         // Ledger (PR19): one turn_start barrier per model request — the
         // checkpoint BEFORE the LLM call is what recovery reasons about.
-        unawaited(
-          SessionLedger.I.append(s.id, 'turn_start', {'turn': turn}),
-        );
+        unawaited(SessionLedger.I.append(s.id, 'turn_start', {'turn': turn}));
         unawaited(
           SessionLedger.I.append(s.id, 'checkpoint', {
             'at': 'pre-llm',
@@ -5311,10 +5469,14 @@ ${await _agentsMdBlock()}
         // agent/pre-step message-injection parity, shell flavor).
         if (HookService.I.hasHookListeners('on_turn_start')) {
           unawaited(
-            HookService.I.fire('on_turn_start', s.id, payload: {
-              'turn': turn,
-              'prompt': cleanTruncate(originalPrompt, 400),
-            }),
+            HookService.I.fire(
+              'on_turn_start',
+              s.id,
+              payload: {
+                'turn': turn,
+                'prompt': cleanTruncate(originalPrompt, 400),
+              },
+            ),
           );
         }
         if (HookService.I.hasHookListeners('on_pre_request')) {
@@ -5326,8 +5488,7 @@ ${await _agentsMdBlock()}
           if (hookCtx.isNotEmpty) {
             msgs.insert(0, {
               'role': 'system',
-              'content':
-                  '[plugin hook context — on_pre_request]\n$hookCtx',
+              'content': '[plugin hook context — on_pre_request]\n$hookCtx',
             });
           }
         }
@@ -5351,7 +5512,7 @@ ${await _agentsMdBlock()}
             _emit(
               'think',
               'context overflow — request rebuilt from compacted history '
-              '(${msgs.length} rows)',
+                  '(${msgs.length} rows)',
             );
             msg = await _callLlm(p, msgs, s);
           }
@@ -5395,9 +5556,7 @@ ${await _agentsMdBlock()}
           _runResolved.turns += 1;
           _runResolved.decodeTokens += ct;
           _runResolved.llmMs +=
-              (msg['elapsedMs'] as int?) ??
-              (msg['ttftMs'] as int?) ??
-              0;
+              (msg['elapsedMs'] as int?) ?? (msg['ttftMs'] as int?) ?? 0;
           final ttft = (msg['ttftMs'] as int?) ?? 0;
           if (ttft > 0) {
             _runResolved.ttftMs = ttft; // latest turn's TTFT
@@ -5423,7 +5582,9 @@ ${await _agentsMdBlock()}
             if (role == 'system') {
               sysTok += estimateMessageTokens(content is String ? content : '');
             } else if (role == 'tool') {
-              toolTok += estimateMessageTokens(content is String ? content : '');
+              toolTok += estimateMessageTokens(
+                content is String ? content : '',
+              );
             } else {
               msgTok += estimateMessageTokens(content is String ? content : '');
             }
@@ -5440,8 +5601,10 @@ ${await _agentsMdBlock()}
               promptTokens: pt,
               completionTokens: ct,
               totalTokens: (u?['total_tokens'] as num?)?.toInt() ?? pt + ct,
-              cacheReadTokens: (details?['cached_tokens'] as num?)?.toInt() ??
-                  (u?['cache_read_tokens'] as num?)?.toInt() ?? 0,
+              cacheReadTokens:
+                  (details?['cached_tokens'] as num?)?.toInt() ??
+                  (u?['cache_read_tokens'] as num?)?.toInt() ??
+                  0,
               cacheWriteTokens:
                   (u?['cache_write_tokens'] as num?)?.toInt() ?? 0,
               duration: Duration.zero,
@@ -5602,24 +5765,29 @@ ${await _agentsMdBlock()}
           }
           final streak = run.repeatStreak;
           if (streak == 3) {
-            result = '$result\n\n[note] Same tool + identical args repeated '
+            result =
+                '$result\n\n[note] Same tool + identical args repeated '
                 '3 times — re-read the tool output or change approach.';
           } else if (streak == 5) {
-            result = '$result\n\n[note] Same call now repeated 5 times — '
+            result =
+                '$result\n\n[note] Same call now repeated 5 times — '
                 'stop, reconsider the goal, or ask/notify the user.';
           } else if (streak == 8) {
-            result = '$result\n\n[note] Same call repeated 8 times — '
+            result =
+                '$result\n\n[note] Same call repeated 8 times — '
                 'STOP looping. Explain the blockage to the user and try '
                 'a different approach.';
           }
-          final isErr = _looksLikeToolError(result) || result.startsWith('tool error');
+          final isErr =
+              _looksLikeToolError(result) || result.startsWith('tool error');
           if (isErr) {
             run.consecutiveErrors++;
           } else {
             run.consecutiveErrors = 0;
           }
           if (run.consecutiveErrors >= 3) {
-            result = '$result\n\n[CRITICAL ESCALATION] Tool calls have failed ${run.consecutiveErrors} times consecutively. '
+            result =
+                '$result\n\n[CRITICAL ESCALATION] Tool calls have failed ${run.consecutiveErrors} times consecutively. '
                 'DO NOT continue repeating similar commands or querying missing files. Stop probing and clearly explain the exact problem to the user.';
           }
           msgs.add({
@@ -5652,7 +5820,7 @@ ${await _agentsMdBlock()}
             _emit(
               'think',
               'context compacted — request rebuilt '
-              '(${msgs.length} rows)',
+                  '(${msgs.length} rows)',
             );
           }
           msgs.add({
@@ -5694,10 +5862,11 @@ ${await _agentsMdBlock()}
       // (indexers, notifiers, cleanup) never block the UI.
       if (HookService.I.hasHookListeners('on_turn_end')) {
         unawaited(
-          HookService.I.fire('on_turn_end', pinnedSessionId, payload: {
-            'steps': pinned.steps,
-            'turns': pinned.turns,
-          }),
+          HookService.I.fire(
+            'on_turn_end',
+            pinnedSessionId,
+            payload: {'steps': pinned.steps, 'turns': pinned.turns},
+          ),
         );
       }
       // LLM session title (the title generator parity): one cheap background call after
@@ -5717,9 +5886,7 @@ ${await _agentsMdBlock()}
           // active session only if the original was deleted.
           final target = AppState.I.sessionById(pinnedSessionId);
           if (target != null) {
-            target.messages.add(
-              Message(role: 'user', content: next),
-            );
+            target.messages.add(Message(role: 'user', content: next));
             if (target.title == 'New chat' || target.title.isEmpty) {
               target.title = AppState.autoTitle(next);
             }
@@ -5740,9 +5907,7 @@ ${await _agentsMdBlock()}
           } else {
             // Session was deleted — fall back to the active session.
             AppState.I.sendMessage(next);
-            unawaited(
-              runTask(next, freshTurn: false, expandRefsFor: target),
-            );
+            unawaited(runTask(next, freshTurn: false, expandRefsFor: target));
           }
         });
       }
@@ -5812,7 +5977,8 @@ ${await _agentsMdBlock()}
       final firstExchange = s.messages
           .take(6)
           .map(
-            (m) => '${m.role == 'user' ? 'User' : 'Assistant'}: '
+            (m) =>
+                '${m.role == 'user' ? 'User' : 'Assistant'}: '
                 '${cleanTruncate(m.content, 300)}',
           )
           .join('\n');
@@ -5853,10 +6019,15 @@ ${await _agentsMdBlock()}
   /// catch-all keeps a stuck tool from hanging the run forever.
   Duration _toolTimeoutFor(String name) {
     // Tools that legitimately wait on humans or long jobs are exempt.
-    if (name == 'ask_user_question' || name == 'exit_plan_mode' ||
-        name == 'request_permission' || name.startsWith('mcp__') ||
-        name == 'job_output' || name == 'job_list' || name == 'list_agents' ||
-        name == 'send_message' || name == 'dispatch_agent') {
+    if (name == 'ask_user_question' ||
+        name == 'exit_plan_mode' ||
+        name == 'request_permission' ||
+        name.startsWith('mcp__') ||
+        name == 'job_output' ||
+        name == 'job_list' ||
+        name == 'list_agents' ||
+        name == 'send_message' ||
+        name == 'dispatch_agent') {
       return const Duration(minutes: 30);
     }
     return switch (name) {
@@ -5875,7 +6046,8 @@ ${await _agentsMdBlock()}
     List<Map<String, dynamic>> msgs,
     ChatSession session, {
     bool includeTools = true,
-  }) async {    var lastErr = 'unknown';
+  }) async {
+    var lastErr = 'unknown';
     for (var attempt = 0; attempt <= 4; attempt++) {
       if (_cancelRequested) return null;
       final r = await _callLlmOnce(
@@ -5894,7 +6066,10 @@ ${await _agentsMdBlock()}
       if (attempt < 4) {
         // 3s, 9s, 27s, 60s — exponential-ish backoff.
         final wait = [3, 9, 27, 60][attempt];
-        _emit('think', 'retrying ${p.name} in ${wait}s (attempt ${attempt + 2}/5)…');
+        _emit(
+          'think',
+          'retrying ${p.name} in ${wait}s (attempt ${attempt + 2}/5)…',
+        );
         await Future.delayed(Duration(seconds: wait));
       }
     }
@@ -6060,12 +6235,14 @@ ${await _agentsMdBlock()}
           in res
               .cast<List<int>>()
               .transform(SseLineSplitter(maxBytes: 8 * 1024 * 1024))
-              .transform(_IdleResetTimeout(idleBudget, (msg) {
-                lastError =
-                    'model stream idle for ${idleBudget.inSeconds}s — Settings '
-                    'me timeout badhayein';
-                return TimeoutException(lastError ?? 'model stream timeout');
-              }))) {
+              .transform(
+                _IdleResetTimeout(idleBudget, (msg) {
+                  lastError =
+                      'model stream idle for ${idleBudget.inSeconds}s — Settings '
+                      'me timeout badhayein';
+                  return TimeoutException(lastError ?? 'model stream timeout');
+                }),
+              )) {
         final line = raw.trim();
         if (line.isEmpty || !line.startsWith('data:')) continue;
         final payload = line.substring(5).trim();
@@ -6279,7 +6456,8 @@ ${await _agentsMdBlock()}
         // state + ledger 'ok: false' as a user-declined approval) — a
         // hook deny and a user deny are the same shape of outcome to the
         // model and to the chat UI.
-        final msg = 'DENIED by hook (${gate.deniedByPlugin}): '
+        final msg =
+            'DENIED by hook (${gate.deniedByPlugin}): '
             '${gate.reason}';
         if (ledgerSid != null) {
           unawaited(
@@ -6309,12 +6487,16 @@ ${await _agentsMdBlock()}
       // (indexers, loggers). Never blocks the loop.
       if (HookService.I.hasHookListeners('on_post_tool')) {
         unawaited(
-          HookService.I.fire('on_post_tool', ledgerSid ?? '', payload: {
-            'tool': name,
-            'ms': sw.elapsedMilliseconds,
-            'ok': !res.startsWith('DENIED'),
-            'result': cleanTruncate(res, 400),
-          }),
+          HookService.I.fire(
+            'on_post_tool',
+            ledgerSid ?? '',
+            payload: {
+              'tool': name,
+              'ms': sw.elapsedMilliseconds,
+              'ok': !res.startsWith('DENIED'),
+              'result': cleanTruncate(res, 400),
+            },
+          ),
         );
       }
       return res;
@@ -6382,10 +6564,11 @@ ${await _agentsMdBlock()}
         final isSubagent = _runSession?.isSubagent ?? false;
         if (!isSubagent) {
           final work = await _sessionWorkDir();
-          final policyCheck = SandboxService.I.checkPolicy(
-            ['bash', '-c', cmd],
-            hostWorkDir: work,
-          );
+          final policyCheck = SandboxService.I.checkPolicy([
+            'bash',
+            '-c',
+            cmd,
+          ], hostWorkDir: work);
           if (policyCheck != null) {
             _emit('shell', 'command blocked by sandbox policy');
             return policyCheck;
@@ -6421,8 +6604,7 @@ ${await _agentsMdBlock()}
             if (usePty) {
               final shell = await PtyPool.I.getOrCreate(
                 _runSession?.id ?? 'default',
-                () async =>
-                    SandboxService.I.spawn(['bash'], hostWorkDir: work),
+                () async => SandboxService.I.spawn(['bash'], hostWorkDir: work),
               );
               if (shell != null) {
                 final out = await shell.run(cmd, timeoutSeconds: 600);
@@ -6469,7 +6651,8 @@ ${await _agentsMdBlock()}
             unawaited(syncOpenFilesFromDisk());
             var finalOut = out.isEmpty ? '(no output)' : out;
             if (_looksLikeNativeModuleError(finalOut)) {
-              finalOut += '\n\n[sandbox notice: this command failed to load a native compiled Node module (glibc/x86_64 or mismatched ABI). '
+              finalOut +=
+                  '\n\n[sandbox notice: this command failed to load a native compiled Node module (glibc/x86_64 or mismatched ABI). '
                   'The native sandbox runs on Android bionic ARM64; precompiled Linux glibc binary addons (.node) cannot be loaded directly. '
                   'Use pure JS packages or compile them with npm rebuild / node-gyp if sources are available.]';
             }
@@ -6684,7 +6867,9 @@ ${await _agentsMdBlock()}
           return 'Error: queries must contain at most '
               '$_webSearchMaxQueries queries';
         }
-        final label = distinct.length == 1 ? distinct.first : distinct.join(' | ');
+        final label = distinct.length == 1
+            ? distinct.first
+            : distinct.join(' | ');
         _emit('nav', 'searching: $label');
         try {
           return await _webSearch(distinct);
@@ -6866,12 +7051,15 @@ ${await _agentsMdBlock()}
         return await McpService.I.callTool(match.name, action, mcpArgs);
       case String() when name.startsWith('plugin_'):
         final toolKey = name.substring(7);
-        final plugin = AppState.I.plugins.where(
-          (p) =>
-              p.installed &&
-              p.enabled &&
-              (_normTool(p.name) == toolKey || p.name.toLowerCase() == toolKey),
-        ).firstOrNull;
+        final plugin = AppState.I.plugins
+            .where(
+              (p) =>
+                  p.installed &&
+                  p.enabled &&
+                  (_normTool(p.name) == toolKey ||
+                      p.name.toLowerCase() == toolKey),
+            )
+            .firstOrNull;
         if (plugin == null) {
           return 'Plugin tool "$name" not found or plugin is disabled.';
         }
@@ -6945,8 +7133,9 @@ ${await _agentsMdBlock()}
               await refreshSkills();
               // P3: a plugin can ship .mcp.json — register its declared
               // MCP servers so they auto-connect on next launch.
-              mountedMcps =
-                  await AppState.I.mountPluginMcpServers(match.source!);
+              mountedMcps = await AppState.I.mountPluginMcpServers(
+                match.source!,
+              );
               // Task 3: register hooks/hooks.json (matcher + JSON decision
               // hooks) from the fetched plugin content.
               await AppState.I.registerPluginHooks(match);
@@ -6999,7 +7188,7 @@ ${await _agentsMdBlock()}
           final names = tools.map((t) => t.name).join(', ');
           return res.contains('connected')
               ? '$res${tools.isEmpty ? '' : ' — tools: $names'}. '
-                  'They are available to you now as mcp__<server>__<tool>.'
+                    'They are available to you now as mcp__<server>__<tool>.'
               : res;
         } catch (e) {
           return 'MCP connect failed: $e';
@@ -7080,11 +7269,15 @@ ${await _agentsMdBlock()}
         final mArgs =
             (args['args'] as List?)?.whereType<String>().toList() ?? <String>[];
         final url = (args['url'] as String?)?.trim();
-        final headers = (args['headers'] as Map?)
-                ?.map((k, v) => MapEntry(k.toString(), v.toString())) ??
+        final headers =
+            (args['headers'] as Map?)?.map(
+              (k, v) => MapEntry(k.toString(), v.toString()),
+            ) ??
             const <String, String>{};
-        final env = (args['env'] as Map?)
-                ?.map((k, v) => MapEntry(k.toString(), v.toString())) ??
+        final env =
+            (args['env'] as Map?)?.map(
+              (k, v) => MapEntry(k.toString(), v.toString()),
+            ) ??
             const <String, String>{};
         _emit('think', 'adding MCP server: $name');
         AppState.I.addCustomMcpServer(
@@ -7150,7 +7343,8 @@ ${await _agentsMdBlock()}
         // is visible (a blind dispatch on a hidden element silently does
         // nothing — the model then hallucinates success), small settle
         // delay, then click.
-        final check = '''
+        final check =
+            '''
 (() => {
   const el = document.querySelector(${jsonEncode(sel)});
   if (!el) return 'MISSING';
@@ -7285,7 +7479,11 @@ ${await _agentsMdBlock()}
   const el = document.querySelector(${jsonEncode(target)});
   if (!el) return 'no element: $target';
   el.scrollIntoView({block:'center', behavior:'instant'});
-  el.scrollBy({top:${dir == 'up' ? '-$amount' : dir == 'down' ? '$amount' : '0'}, behavior:'smooth'});
+  el.scrollBy({top:${dir == 'up'
+                  ? '-$amount'
+                  : dir == 'down'
+                  ? '$amount'
+                  : '0'}, behavior:'smooth'});
   return 'scrolled element $target $dir';
 })()''';
         try {
@@ -7378,7 +7576,9 @@ ${await _agentsMdBlock()}
               checkJs =
                   'document.body ? document.body.innerText.includes(${jsonEncode(text ?? '')}) : false';
             }
-            final r = await tab.controller!.runJavaScriptReturningResult(checkJs);
+            final r = await tab.controller!.runJavaScriptReturningResult(
+              checkJs,
+            );
             if (r.toString() == 'true') {
               found = true;
               break;
@@ -7388,10 +7588,13 @@ ${await _agentsMdBlock()}
         }
         final targetDesc = (sel != null && sel.trim().isNotEmpty)
             ? (state == 'text' && text != null && text.isNotEmpty
-                ? '$sel contains "$text"'
-                : '$sel ($state)')
+                  ? '$sel contains "$text"'
+                  : '$sel ($state)')
             : (text ?? '');
-        _emit('shell', found ? 'wait ✓ $targetDesc' : 'wait ⏱ timeout $targetDesc');
+        _emit(
+          'shell',
+          found ? 'wait ✓ $targetDesc' : 'wait ⏱ timeout $targetDesc',
+        );
         return found
             ? 'found: $targetDesc (after ${sw.elapsedMilliseconds}ms)'
             : 'timeout: "$targetDesc" did not appear within ${timeoutMs}ms';
@@ -7435,7 +7638,8 @@ ${await _agentsMdBlock()}
         tab.controller ??= controllerForTab(tab);
         final sel = args['selector'] as String;
         // Human-like: scroll into view, then a full pointer event chain.
-        final js = '''
+        final js =
+            '''
 (() => {
   const el = document.querySelector(${jsonEncode(sel)});
   if (!el) return 'no element: $sel';
@@ -7463,7 +7667,8 @@ ${await _agentsMdBlock()}
         final fromSel = args['from'] as String;
         final toSel = args['to'] as String;
         final steps = (args['steps'] as num?)?.toInt() ?? 5;
-        final js = '''
+        final js =
+            '''
 (() => {
   const from = document.querySelector(${jsonEncode(fromSel)});
   const to = document.querySelector(${jsonEncode(toSel)});
@@ -7511,7 +7716,8 @@ ${await _agentsMdBlock()}
         tab.controller ??= controllerForTab(tab);
         final sel = args['selector'] as String;
         final value = args['value'] as String;
-        final js = '''
+        final js =
+            '''
 (() => {
   const el = document.querySelector(${jsonEncode(sel)});
   if (!el) return 'no element: $sel';
@@ -7533,10 +7739,12 @@ ${await _agentsMdBlock()}
       case 'browser_fill':
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
-        final fields = (args['fields'] as Map?)?.cast<String, String>() ??
+        final fields =
+            (args['fields'] as Map?)?.cast<String, String>() ??
             const <String, String>{};
         if (fields.isEmpty) return 'fields map is empty';
-        final js = '''
+        final js =
+            '''
 (() => {
   const fields = ${jsonEncode(fields)};
   const done = [];
@@ -7563,7 +7771,8 @@ ${await _agentsMdBlock()}
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
         final text = args['text'] as String;
-        final js = '''
+        final js =
+            '''
 (() => {
   const t = ${jsonEncode(text)};
   const body = document.body ? document.body.innerText : '';
@@ -7766,7 +7975,8 @@ ${await _agentsMdBlock()}
         if (offset < 1) offset = 1;
         if (limit < 1) limit = 1;
         if (limit > 2000) limit = 2000;
-        final c = RepoCache.I.read(path) ??
+        final c =
+            RepoCache.I.read(path) ??
             await () async {
               // Host workspace fallback: sandbox files are readable even
               // when no GitHub repo is synced (mirrors fs_edit view).
@@ -7866,8 +8076,7 @@ ${await _agentsMdBlock()}
         if (!ok) return 'DENIED by user';
         // One write path (C7): disk + repo cache together — `run_shell cat`
         // after a `file_write` must see the same bytes.
-        return await _writeWorkspaceFile(path, content,
-            toolLabel: 'edited');
+        return await _writeWorkspaceFile(path, content, toolLabel: 'edited');
 
       case 'commit':
         final message = (args['message'] ?? 'Ovid agent update') as String;
@@ -7956,13 +8165,17 @@ ${await _agentsMdBlock()}
     // Fix missing delimiter between redirection and next command:
     // e.g. "2>&1 ls" -> "2>&1; ls"
     c = c.replaceAllMapped(
-      RegExp(r'(2>&1|>+&1|>+\s*\S+)\s+(?=(ls|cd|pwd|cat|head|tail|grep|find|rm|mkdir|echo|node|npm|python|python3)\b)'),
+      RegExp(
+        r'(2>&1|>+&1|>+\s*\S+)\s+(?=(ls|cd|pwd|cat|head|tail|grep|find|rm|mkdir|echo|node|npm|python|python3)\b)',
+      ),
       (m) => '${m.group(1)}; ',
     );
     // Fix piping to head/tail followed immediately by another command:
     // e.g. "| head -5 pwd" -> "| head -5; pwd"
     c = c.replaceAllMapped(
-      RegExp(r'(\|\s*(?:head|tail)\s+-[0-9]+)\s+(?=(ls|cd|pwd|cat|grep|find|rm|mkdir|echo|node|npm|python|python3)\b)'),
+      RegExp(
+        r'(\|\s*(?:head|tail)\s+-[0-9]+)\s+(?=(ls|cd|pwd|cat|grep|find|rm|mkdir|echo|node|npm|python|python3)\b)',
+      ),
       (m) => '${m.group(1)}; ',
     );
     return c;
@@ -7981,16 +8194,67 @@ ${await _agentsMdBlock()}
   /// Read-only command detector for the "Auto-run safe commands" setting:
   /// ON (default) → read-only shell commands skip the safe-mode confirm.
   static const _readOnlyCommands = [
-    'ls', 'cat', 'head', 'tail', 'grep', 'find', 'wc', 'file', 'stat', 'du',
-    'df', 'pwd', 'whoami', 'id', 'uname', 'uptime', 'env', 'printenv',
-    'which', 'command', 'type', 'echo', 'date', 'cal', 'hostname',
-    'git status', 'git log', 'git diff', 'git branch', 'git show',
-    'git remote', 'git config --get', 'git rev-parse', 'git ls-files',
-    'node --version', 'npm --version', 'npm ls', 'npm list', 'npm view',
-    'npm ping', 'python --version', 'python3 --version', 'pip list',
-    'pip show', 'pip --version', 'curl --version', 'curl -I', 'curl -s',
-    'wget --version', 'ps', 'top', 'lsblk', 'mount', 'ip addr', 'ifconfig',
-    'netstat', 'ping', 'dig', 'nslookup', 'traceroute', 'tree',
+    'ls',
+    'cat',
+    'head',
+    'tail',
+    'grep',
+    'find',
+    'wc',
+    'file',
+    'stat',
+    'du',
+    'df',
+    'pwd',
+    'whoami',
+    'id',
+    'uname',
+    'uptime',
+    'env',
+    'printenv',
+    'which',
+    'command',
+    'type',
+    'echo',
+    'date',
+    'cal',
+    'hostname',
+    'git status',
+    'git log',
+    'git diff',
+    'git branch',
+    'git show',
+    'git remote',
+    'git config --get',
+    'git rev-parse',
+    'git ls-files',
+    'node --version',
+    'npm --version',
+    'npm ls',
+    'npm list',
+    'npm view',
+    'npm ping',
+    'python --version',
+    'python3 --version',
+    'pip list',
+    'pip show',
+    'pip --version',
+    'curl --version',
+    'curl -I',
+    'curl -s',
+    'wget --version',
+    'ps',
+    'top',
+    'lsblk',
+    'mount',
+    'ip addr',
+    'ifconfig',
+    'netstat',
+    'ping',
+    'dig',
+    'nslookup',
+    'traceroute',
+    'tree',
   ];
 
   bool _isReadOnlyCommand(String cmd) => isReadOnlyCommand(cmd);
@@ -8031,7 +8295,10 @@ ${await _agentsMdBlock()}
     Future<bool> askAndAudit(String t, String s, String d) async {
       final ok = await _askUser(t, s, d);
       if (sessionId != null) {
-        await SessionLedger.I.append(sessionId, 'approval', {'tool': tool, 'ok': ok});
+        await SessionLedger.I.append(sessionId, 'approval', {
+          'tool': tool,
+          'ok': ok,
+        });
       }
       return ok;
     }
@@ -8060,7 +8327,9 @@ ${await _agentsMdBlock()}
         return true;
       case AgentMode.auto:
       case AgentMode.studio:
-        return tool != 'commit' ? true : await askAndAudit(tool, summary, detail);
+        return tool != 'commit'
+            ? true
+            : await askAndAudit(tool, summary, detail);
       case AgentMode.safe:
         // "Auto-run safe commands" ON → read-only commands skip confirm.
         if (AppState.I.autoRunSafeCommands &&
@@ -8079,7 +8348,8 @@ ${await _agentsMdBlock()}
   String? _readOnlyBlock(String name, Map<String, dynamic> args) {
     if (mode != AgentMode.safe) return null;
 
-    const roDenied = 'READ-ONLY MODE: this action is blocked. The user '
+    const roDenied =
+        'READ-ONLY MODE: this action is blocked. The user '
         'selected Read-Only — you may read, search, browse and run '
         'read-only shell commands, but you may NOT write files, edit code, '
         'start jobs or commit. Explain what you need to change and ask the '
@@ -8161,7 +8431,12 @@ ${await _agentsMdBlock()}
     }
   }
 
-  Future<bool> _askUser(String t, String s, String d, {String? planBody}) async {
+  Future<bool> _askUser(
+    String t,
+    String s,
+    String d, {
+    String? planBody,
+  }) async {
     final req = ApprovalRequest(
       tool: t,
       summary: s,
@@ -8217,9 +8492,10 @@ ${await _agentsMdBlock()}
       'run_shell' || 'job_start' => args['command'],
       'run_code' => args['code'] ?? args['program'],
       'fetch_url' || 'browser_open' || 'browser_navigate' => args['url'],
-      'web_search' => (args['queries'] is List)
-          ? (args['queries'] as List).join(' | ')
-          : args['query'], // legacy single-query shape
+      'web_search' =>
+        (args['queries'] is List)
+            ? (args['queries'] as List).join(' | ')
+            : args['query'], // legacy single-query shape
       'memory_search' || 'session_search' => args['query'],
       'dispatch_agent' => args['prompt'],
       'report' => args['content'],
@@ -8235,12 +8511,13 @@ ${await _agentsMdBlock()}
       'browser_upload' => args['path'],
       'browser_desktop' => args['mode'],
       'browser_hover' || 'browser_select' => args['selector'],
-      'browser_drag' =>
-          '${args['from']} → ${args['to']}',
+      'browser_drag' => '${args['from']} → ${args['to']}',
       'browser_fill' => '${(args['fields'] as Map?)?.length ?? 0} fields',
       'browser_find' => args['text'],
       'browser_cookies' =>
-          args['set'] ?? args['delete'] ?? (args['clear'] == true ? 'clear' : (args['get'] ?? 'all')),
+        args['set'] ??
+            args['delete'] ??
+            (args['clear'] == true ? 'clear' : (args['get'] ?? 'all')),
       'create_goal' => args['objective'],
       'schedule_create' => args['prompt'],
       'memory_save' => args['content'],
@@ -8292,7 +8569,8 @@ ${await _agentsMdBlock()}
   static bool isTransientProviderError(String err) {
     final l = err.toLowerCase();
     // Non-retryable classes first.
-    if (l.contains('response exceeded') || l.contains('api key') ||
+    if (l.contains('response exceeded') ||
+        l.contains('api key') ||
         l.contains('invalid') && l.contains('key')) {
       return false;
     }
@@ -8603,7 +8881,7 @@ ${await _agentsMdBlock()}
 
   @visibleForTesting
   static ({FileType type, List<String>? allowedExtensions})
-      pageFilePickerFilterForTest(List<String> acceptTypes) {
+  pageFilePickerFilterForTest(List<String> acceptTypes) {
     final accepted = acceptTypes
         .expand((value) => value.split(','))
         .map((value) => value.trim().toLowerCase().split(';').first)
@@ -8633,8 +8911,11 @@ ${await _agentsMdBlock()}
       'application/msword': ['doc'],
       'application/pdf': ['pdf'],
       'application/vnd.ms-excel': ['xls'],
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['xlsx'],
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['docx'],
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': [
+        'xlsx',
+      ],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+          ['docx'],
       'application/zip': ['zip'],
       'image/gif': ['gif'],
       'image/heic': ['heic'],
@@ -8659,7 +8940,10 @@ ${await _agentsMdBlock()}
       }
       extensions.addAll(mapped);
     }
-    return (type: FileType.custom, allowedExtensions: extensions.toList(growable: false));
+    return (
+      type: FileType.custom,
+      allowedExtensions: extensions.toList(growable: false),
+    );
   }
 
   Future<String> exportFileToSaf(String relPath) async {
@@ -8688,7 +8972,8 @@ ${await _agentsMdBlock()}
   }
 
   @visibleForTesting
-  Future<String> exportFileToSafForTest(String relPath) => exportFileToSaf(relPath);
+  Future<String> exportFileToSafForTest(String relPath) =>
+      exportFileToSaf(relPath);
 
   /// Resolve a workspace-relative path.  Repo files take precedence; falls
   /// back to the session's sandbox workdir on the host filesystem.
@@ -8709,7 +8994,8 @@ ${await _agentsMdBlock()}
     final action = (args['action'] as String? ?? 'read').toLowerCase();
     try {
       final r = await tab.controller!.runJavaScriptReturningResult(
-        'JSON.stringify(window.__ovidDialog || null)');
+        'JSON.stringify(window.__ovidDialog || null)',
+      );
       final raw = r.toString();
       if (action == 'read') return 'dialog: $raw';
     } catch (_) {}
@@ -8778,13 +9064,9 @@ ${await _agentsMdBlock()}
 
   List<({DateTime at, String kind, String text})> consoleLogForTest(
     String tabKey,
-  ) =>
-      browserTabs
-          .firstWhere(
-            (t) => t.url == tabKey,
-            orElse: () => _activeTab,
-          )
-          .consoleLog;
+  ) => browserTabs
+      .firstWhere((t) => t.url == tabKey, orElse: () => _activeTab)
+      .consoleLog;
 
   /// Stream [dataStream] straight to [destPath] in whatever chunks arrive.
   /// There is no artificial size cap: the only limit is real free space, and
@@ -8860,7 +9142,8 @@ ${await _agentsMdBlock()}
   static String buildBrowserUploadFinalizeJavaScriptForTest({
     required String selector,
     required String filename,
-  }) => '''
+  }) =>
+      '''
 (() => {
   const el = document.querySelector(${jsonEncode(selector)});
   if (!el) { window.__ovidUploadBuf = null; return 'no matching element'; }
@@ -8892,7 +9175,9 @@ ${await _agentsMdBlock()}
     var name = (args['filename'] as String? ?? '').trim();
     if (name.isEmpty) {
       name = Uri.tryParse(url)?.pathSegments.lastOrNull ?? '';
-      if (name.isEmpty) name = 'download-${DateTime.now().millisecondsSinceEpoch}';
+      if (name.isEmpty) {
+        name = 'download-${DateTime.now().millisecondsSinceEpoch}';
+      }
     }
     final work = await _sessionWorkDir();
     final safe = containedPath(work, name);
@@ -8912,7 +9197,10 @@ ${await _agentsMdBlock()}
       }
       final total = resp.contentLength;
       if (total > 0) {
-        _emit('nav', 'downloading: $name (${(total / (1024 * 1024)).toStringAsFixed(1)} MB)');
+        _emit(
+          'nav',
+          'downloading: $name (${(total / (1024 * 1024)).toStringAsFixed(1)} MB)',
+        );
       }
       final res = await downloadStreamHelperForTest(
         dataStream: resp,
@@ -9023,8 +9311,7 @@ ${await _agentsMdBlock()}
         _readPathsFor(sid).add(path);
         // One write path (C7): create also lands in the repo cache when
         // the repo is bound, so commit() can push it.
-        return await _writeWorkspaceFile(path, content,
-            toolLabel: 'created');
+        return await _writeWorkspaceFile(path, content, toolLabel: 'created');
 
       case 'str_replace':
         final oldStr = args['old_str'] as String? ?? '';
@@ -9167,14 +9454,18 @@ ${await _agentsMdBlock()}
     for (var i = start; i < end; i++) {
       buf.writeln('${(i + 1).toString().padLeft(4)}: ${lines[i]}');
       if (buf.length > maxBytes) {
-        buf.writeln('… [capped at 51200 bytes — ${total - i - 1} more lines; '
-            're-read with offset=${i + 2}]');
+        buf.writeln(
+          '… [capped at 51200 bytes — ${total - i - 1} more lines; '
+          're-read with offset=${i + 2}]',
+        );
         break;
       }
     }
     if (end < total) {
-      buf.writeln('… (${total - end} more lines — re-read with '
-          'offset=${end + 1}, limit=$limit)');
+      buf.writeln(
+        '… (${total - end} more lines — re-read with '
+        'offset=${end + 1}, limit=$limit)',
+      );
     }
     return buf.toString();
   }
@@ -9223,17 +9514,52 @@ ${await _agentsMdBlock()}
         'attached to the next model request as image data.';
   }
 
-  bool _modelSupportsImages(String model) {
-    final id = _baseModelOf(model).toLowerCase();
-    if (id.contains('deepseek') || id.contains('reasoner') ||
-        id.contains('codestral') || id.contains('o3-mini') ||
-        id.contains('gpt-oss')) {
-      return false;
-    }
-    return id.contains('gpt-4o') || id.contains('gpt-4.1') ||
-        id.contains('gemini') || id.contains('claude') ||
-        id.contains('grok') || id.contains('llama-4') ||
-        id.contains('vision') || id.contains('vl');
+  /// Whether [model] is a known vision-capable model.
+  ///
+  /// This is a strict allowlist: unknown models return false, so a
+  /// text-only model never has image parts smuggled into its request.
+  /// Substring matching was deliberately dropped — `contains('vl')`
+  /// matched things like `mistral-large`.
+  ///
+  /// [model] may carry the " · High/Low/Medium" effort suffix, which
+  /// [_baseModelOf] strips. Aggregator ids are normalised first: a
+  /// vendor prefix (`openai/gpt-4o`) and an OpenRouter route suffix
+  /// (`:free`, `:nitro`) are removed, so the same model routed through
+  /// OpenRouter is not misclassified as text-only.
+  @visibleForTesting
+  static bool modelSupportsImages(String model) {
+    var id = _baseModelOf(model).trim().toLowerCase();
+    final route = id.indexOf(':');
+    if (route != -1) id = id.substring(0, route);
+    final vendor = id.lastIndexOf('/');
+    if (vendor != -1) id = id.substring(vendor + 1);
+    const exact = <String>{
+      'gpt-4o',
+      'gpt-4o-mini',
+      'gpt-4.1',
+      'gpt-4.1-mini',
+      'gpt-4.1-nano',
+      'gemini-1.5-pro',
+      'gemini-1.5-flash',
+      'gemini-2.0-flash',
+      'gemini-2.0-flash-lite',
+      'gemini-2.5-pro',
+      'gemini-2.5-flash',
+      'gemini-2.5-flash-lite',
+      'grok-vision-beta',
+      'grok-2-vision-1212',
+      'llama-4-maverick',
+      'llama-4-scout',
+    };
+    if (exact.contains(id)) return true;
+    return RegExp(r'^gpt-4o(?:-mini)?-\d{4}-\d{2}-\d{2}$').hasMatch(id) ||
+        RegExp(
+          r'^gpt-4\.1(?:-(?:mini|nano))?-\d{4}-\d{2}-\d{2}$',
+        ).hasMatch(id) ||
+        RegExp(
+          r'^claude-(?:3(?:-[57])?-(?:opus|sonnet|haiku)|(?:opus|sonnet|haiku)-4)(?:-[a-z0-9.-]+)?$',
+        ).hasMatch(id) ||
+        RegExp(r'^qwen(?:2(?:\.5)?|3)-vl(?:-[a-z0-9.-]+)?$').hasMatch(id);
   }
 
   bool _stageVisionImage({
@@ -9243,7 +9569,7 @@ ${await _agentsMdBlock()}
     required String reason,
   }) {
     final model = _runResolved.modelSnapshot ?? _runSession?.model ?? '';
-    if (!_modelSupportsImages(model)) return false;
+    if (!modelSupportsImages(model)) return false;
     final mime = switch (extension.toLowerCase()) {
       'jpg' || 'jpeg' => 'image/jpeg',
       'webp' => 'image/webp',
@@ -9271,19 +9597,28 @@ ${await _agentsMdBlock()}
   }
 
   @visibleForTesting
-  void appendPendingVisionMessagesForTest(List<Map<String, dynamic>> messages) =>
-      _appendPendingVisionMessages(messages);
+  void appendPendingVisionMessagesForTest(
+    List<Map<String, dynamic>> messages,
+  ) => _appendPendingVisionMessages(messages);
 
-  Future<String> _handleDeviceControlTool(String name, Map<String, dynamic> args) async {
+  Future<String> _handleDeviceControlTool(
+    String name,
+    Map<String, dynamic> args,
+  ) async {
     final device = DeviceControlService.I;
     try {
       if (name == 'device_read') {
         final raw = await device.readRaw(full: args['mode'] == 'full');
         final packageName = raw['package']?.toString();
-        if (_isSensitiveDeviceTarget(packageName)) return _sensitiveDeviceDenial(packageName);
+        if (_isSensitiveDeviceTarget(packageName)) {
+          return _sensitiveDeviceDenial(packageName);
+        }
         final result = DeviceControlService.formatReadResultForTest(raw);
         if (raw['status'] == 'ok' || raw['status'] == 'unchanged') {
-          _emit('shell', 'device_read: ${args['mode'] == 'full' ? 'full' : 'delta'}');
+          _emit(
+            'shell',
+            'device_read: ${args['mode'] == 'full' ? 'full' : 'delta'}',
+          );
         }
         return result;
       }
@@ -9291,17 +9626,22 @@ ${await _agentsMdBlock()}
       final metadata = await device.readRaw();
       final packageName = metadata['package']?.toString();
       if (metadata['status'] != 'ok' && metadata['status'] != 'unchanged' ||
-          packageName == null || packageName.trim().isEmpty) {
+          packageName == null ||
+          packageName.trim().isEmpty) {
         return 'DENIED: Ovid could not verify the live foreground app. Retry device_read before acting.';
       }
-      if (_isSensitiveDeviceTarget(packageName)) return _sensitiveDeviceDenial(packageName);
+      if (_isSensitiveDeviceTarget(packageName)) {
+        return _sensitiveDeviceDenial(packageName);
+      }
 
       switch (name) {
         case 'device_tap':
           final node = (args['node'] as num?)?.toInt();
           final x = args['x'] as num?;
           final y = args['y'] as num?;
-          if (node == null && (x == null || y == null)) return 'device_tap requires node or both x and y.';
+          if (node == null && (x == null || y == null)) {
+            return 'device_tap requires node or both x and y.';
+          }
           await device.tap(node: node, x: x, y: y);
           final detail = node != null ? 'tapped node $node' : 'tapped ($x, $y)';
           _emit('shell', 'device_tap: $detail');
@@ -9312,7 +9652,8 @@ ${await _agentsMdBlock()}
           final node = (args['node'] as num?)?.toInt();
           final submit = args['submit'] == true;
           await device.type(node: node, text: text, submit: submit);
-          final detail = 'typed ${text.length} characters${node == null ? '' : ' into node $node'}${submit ? ' and submitted' : ''}';
+          final detail =
+              'typed ${text.length} characters${node == null ? '' : ' into node $node'}${submit ? ' and submitted' : ''}';
           _emit('shell', 'device_type: $detail');
           return detail;
         case 'device_swipe':
@@ -9323,54 +9664,55 @@ ${await _agentsMdBlock()}
           if (fromX == null || fromY == null || toX == null || toY == null) {
             return 'device_swipe requires from_x, from_y, to_x, and to_y.';
           }
-          await device.swipe(fromX: fromX, fromY: fromY, toX: toX, toY: toY,
-              durationMs: (args['duration_ms'] as num?)?.toInt());
+          await device.swipe(
+            fromX: fromX,
+            fromY: fromY,
+            toX: toX,
+            toY: toY,
+            durationMs: (args['duration_ms'] as num?)?.toInt(),
+          );
           final detail = 'swiped ($fromX, $fromY) to ($toX, $toY)';
           _emit('shell', 'device_swipe: $detail');
           return detail;
         case 'device_system_nav':
           final action = args['action'] as String? ?? '';
-          const actions = {'back', 'home', 'recents', 'notifications', 'quick_settings'};
-          if (!actions.contains(action)) return 'device_system_nav requires action: ${actions.join('|')}.';
+          const actions = {
+            'back',
+            'home',
+            'recents',
+            'notifications',
+            'quick_settings',
+          };
+          if (!actions.contains(action)) {
+            return 'device_system_nav requires action: ${actions.join('|')}.';
+          }
           await device.systemNav(action);
           _emit('shell', 'device_system_nav: $action');
           return 'system navigation: $action';
         case 'device_screenshot':
           final nativePath = await device.screenshot();
-          if (nativePath.trim().isEmpty) return 'device_screenshot returned no file.';
+          if (nativePath.trim().isEmpty) {
+            return 'device_screenshot returned no file.';
+          }
           final source = File(nativePath);
-          if (!await source.exists()) return 'device_screenshot file was not found: $nativePath';
-          final work = await _sessionWorkDir();
-          await work.create(recursive: true);
-          final canonicalWork = await work.resolveSymbolicLinks();
-          final captures = Directory('$canonicalWork/device-screenshots');
-          final captureType = await FileSystemEntity.type(captures.path, followLinks: false);
-          if (captureType == FileSystemEntityType.link) {
-            return 'device_screenshot refused an unsafe workspace path: device-screenshots is a symlink.';
+          if (!await source.exists()) {
+            return 'device_screenshot file was not found: $nativePath';
           }
-          await captures.create();
-          final canonicalCaptures = await captures.resolveSymbolicLinks();
-          if (containedPath(Directory(canonicalWork), canonicalCaptures) != canonicalCaptures) {
-            return 'device_screenshot refused an unsafe workspace path.';
-          }
-          File copied;
-          while (true) {
-            final destination = '$canonicalCaptures/screen-${DateTime.now().microsecondsSinceEpoch}-${Random.secure().nextInt(1 << 32)}.png';
-            copied = File(destination);
-            try {
-              await copied.create(exclusive: true);
-              await source.openRead().pipe(copied.openWrite(mode: FileMode.write));
-              break;
-            } on FileSystemException {
-              if (await copied.exists()) continue;
-              rethrow;
-            }
-          }
+          final copied = File(
+            await device.copyScreenshotIntoWorkspace(
+              source.path,
+              await _sessionWorkDir(),
+            ),
+          );
           final bytes = await copied.readAsBytes();
           _recordProduced(copied.path, bytes.length);
           _emit('shell', 'device_screenshot: ${copied.path}');
-          if (!_stageVisionImage(path: copied.path, bytes: bytes,
-              extension: 'png', reason: 'device_screenshot')) {
+          if (!_stageVisionImage(
+            path: copied.path,
+            bytes: bytes,
+            extension: 'png',
+            reason: 'device_screenshot',
+          )) {
             return 'Screenshot saved to ${copied.path}, but the current model cannot read images. '
                 'Switch to a vision-capable model or use device_read/device_system_nav.';
           }
@@ -9391,11 +9733,17 @@ ${await _agentsMdBlock()}
   bool _isSensitiveDeviceTarget(String? packageName) {
     String? url;
     final package = packageName?.trim().toLowerCase() ?? '';
-    if (package == 'com.dhanuk.ovidai' || package.startsWith('com.dhanuk.ovidai:')) {
+    if (package == 'com.dhanuk.ovidai' ||
+        package.startsWith('com.dhanuk.ovidai:')) {
       final tabs = browserTabs;
-      if (tabs.isNotEmpty) url = tabs[activeTabIndex.clamp(0, tabs.length - 1)].url;
+      if (tabs.isNotEmpty) {
+        url = tabs[activeTabIndex.clamp(0, tabs.length - 1)].url;
+      }
     }
-    return DeviceControlService.isSensitiveTarget(packageName: packageName, url: url);
+    return DeviceControlService.isSensitiveTarget(
+      packageName: packageName,
+      url: url,
+    );
   }
 
   String _sensitiveDeviceDenial(String? packageName) =>
@@ -9692,14 +10040,18 @@ ${await _agentsMdBlock()}
             '-i',
             '-n',
             '--no-heading',
-            '--color', 'never',
+            '--color',
+            'never',
             '--hidden',
             '--no-ignore',
-            '--max-filesize', '2M',
-            '--max-count-total', '$remaining',
+            '--max-filesize',
+            '2M',
+            '--max-count-total',
+            '$remaining',
             if (ctxLines > 0) ...['-C', '$ctxLines'],
             if (include != null && include.isNotEmpty) ...['--glob', include],
-            '-e', pattern,
+            '-e',
+            pattern,
             relRoot,
           ], hostWorkDir: work)
           .timeout(const Duration(seconds: 45));
@@ -10187,8 +10539,7 @@ ${await _agentsMdBlock()}
           }
           AppState.I.refresh();
           AppState.I.persistSessions();
-          unawaited(
-            runTask(delivery, sessionId: s.id, freshTurn: false));
+          unawaited(runTask(delivery, sessionId: s.id, freshTurn: false));
         }
       }
     }
@@ -10287,7 +10638,7 @@ ${await _agentsMdBlock()}
   /// (null = model failure). Bypasses the F4 retry loop.
   @visibleForTesting
   Future<String?> Function(ChatSession s, int from, int cutoff)?
-      compactionSummarizerForTest;
+  compactionSummarizerForTest;
 
   /// PR43 test seam: call _applyCompaction directly (bypasses the lock
   /// and the LLM summarizer — tests the state/string contract in isolation).
@@ -10318,7 +10669,10 @@ ${await _agentsMdBlock()}
   List<AgentTool> agentToolsForTest() {
     return _tools.map((t) {
       final fn = (t['function'] as Map?)?.cast<String, dynamic>() ?? {};
-      return AgentTool(fn['name'] as String? ?? '', fn['description'] as String? ?? '');
+      return AgentTool(
+        fn['name'] as String? ?? '',
+        fn['description'] as String? ?? '',
+      );
     }).toList();
   }
 
@@ -10334,32 +10688,40 @@ ${await _agentsMdBlock()}
   /// clears the override.
   @visibleForTesting
   static void setRunSessionForTest(String sessionId) {
-    _runSessionOverrideForTest =
-        sessionId.isEmpty ? null : sessionId;
+    _runSessionOverrideForTest = sessionId.isEmpty ? null : sessionId;
   }
 
   static String? _runSessionOverrideForTest;
 
   @visibleForTesting
   void setActiveRunForTest(String sessionId, String? runId) {
-    final r = _runs.putIfAbsent(sessionId, () => AgentRun()..runKey = sessionId);
+    final r = _runs.putIfAbsent(
+      sessionId,
+      () => AgentRun()..runKey = sessionId,
+    );
     r.activeRunId = runId;
   }
 
   @visibleForTesting
   void setActiveClientForTest(String sessionId, HttpClient? client) {
-    final r = _runs.putIfAbsent(sessionId, () => AgentRun()..runKey = sessionId);
+    final r = _runs.putIfAbsent(
+      sessionId,
+      () => AgentRun()..runKey = sessionId,
+    );
     r.activeClient = client;
   }
 
   @visibleForTesting
-  Future<void> checkpointRunStartForTest(String sessionId, String runId) => checkpointRunStart(sessionId, runId);
+  Future<void> checkpointRunStartForTest(String sessionId, String runId) =>
+      checkpointRunStart(sessionId, runId);
 
   @visibleForTesting
-  Future<void> checkpointRunEndForTest(String sessionId) => checkpointRunEnd(sessionId);
+  Future<void> checkpointRunEndForTest(String sessionId) =>
+      checkpointRunEnd(sessionId);
 
   @visibleForTesting
-  Map<String, String> activeRunCheckpointForTest() => Map.unmodifiable(_persistedRunCheckpoints);
+  Map<String, String> activeRunCheckpointForTest() =>
+      Map.unmodifiable(_persistedRunCheckpoints);
 
   /// PR28 / chrome-devtools parity: keycode lookup for browser_press_key.
   static int keyCodeFor(String key) {
@@ -10449,19 +10811,20 @@ ${await _agentsMdBlock()}
         // load; the handle records it as stopped, not silently finished.
         s.agentState = 'stopped';
       }
-      _subagents[id] = SubagentInfo(
-        id: id,
-        label: s.agentLabel ?? s.title,
-        sessionId: s.id,
-        parentSessionId: parent.id,
-        // Restored handles are bookkeeping only; the parent's live mode is
-        // re-resolved when a follow-up actually starts a run.
-        parentMode: AgentMode.auto,
-        prompt: s.messages.isNotEmpty ? s.messages.first.content : '',
-      )
-        ..finished = true
-        ..finishedAt = DateTime.now()
-        ..result = s.agentResult ?? '';
+      _subagents[id] =
+          SubagentInfo(
+              id: id,
+              label: s.agentLabel ?? s.title,
+              sessionId: s.id,
+              parentSessionId: parent.id,
+              // Restored handles are bookkeeping only; the parent's live mode is
+              // re-resolved when a follow-up actually starts a run.
+              parentMode: AgentMode.auto,
+              prompt: s.messages.isNotEmpty ? s.messages.first.content : '',
+            )
+            ..finished = true
+            ..finishedAt = DateTime.now()
+            ..result = s.agentResult ?? '';
     }
   }
 
@@ -10541,7 +10904,8 @@ ${await _agentsMdBlock()}
       }
       unawaited(
         SessionLedger.I.append(s.id, 'note', {
-          'note': 'recovered ${stuck.length} tool row(s) as UNKNOWN '
+          'note':
+              'recovered ${stuck.length} tool row(s) as UNKNOWN '
               '(app death mid-run)',
         }),
       );
@@ -10615,8 +10979,7 @@ ${await _agentsMdBlock()}
     parent.messages.add(Message(role: 'user', content: report));
     AppState.I.refresh();
     AppState.I.persistSessions();
-    unawaited(
-      runTask(report, sessionId: parent.id, freshTurn: false));
+    unawaited(runTask(report, sessionId: parent.id, freshTurn: false));
     _emit('think', 'woke parent with report from ${sub.id}');
     return 'reported — the parent was woken with your message.';
   }
@@ -10636,22 +10999,21 @@ ${await _agentsMdBlock()}
     final parent = _runSession;
     if (parent == null) return 'No active session.';
     final ids = scope == 'descendants'
-        ? {
-            parent.id,
-            ...AppState.I.descendantsOf(parent.id).map((s) => s.id),
-          }
+        ? {parent.id, ...AppState.I.descendantsOf(parent.id).map((s) => s.id)}
         : {parent.id};
     final mine = _subagents.values
         .where((s) => ids.contains(s.parentSessionId))
         .toList();
     if (mine.isEmpty) return 'No subagents dispatched ($scope).';
-    final lines = mine.map((s) {
-      final child = AppState.I.sessionById(s.sessionId);
-      final turns = child?.messages.length ?? 0;
-      return '${s.id} [${s.state}] ${s.elapsed.inSeconds}s · $turns rows · '
-          '${s.messages.isEmpty ? 'inbox empty' : '${s.messages.length} queued'}'
-          ' — ${cleanTruncate(s.label, 60)}';
-    }).join('\n');
+    final lines = mine
+        .map((s) {
+          final child = AppState.I.sessionById(s.sessionId);
+          final turns = child?.messages.length ?? 0;
+          return '${s.id} [${s.state}] ${s.elapsed.inSeconds}s · $turns rows · '
+              '${s.messages.isEmpty ? 'inbox empty' : '${s.messages.length} queued'}'
+              ' — ${cleanTruncate(s.label, 60)}';
+        })
+        .join('\n');
     return 'Subagents ($scope, ${mine.length}):\n$lines';
   }
 
@@ -10781,8 +11143,7 @@ ${await _agentsMdBlock()}
     if (parent == null) throw StateError('No active session.');
     final depth = AppState.I.lineageOf(parent.id).length - 1;
     if (depth >= _maxSubagentDepth) {
-      throw StateError(
-          'Subagent depth limit ($_maxSubagentDepth) reached.');
+      throw StateError('Subagent depth limit ($_maxSubagentDepth) reached.');
     }
     final child = AppState.I.createSubagentSession(
       parent: parent,
@@ -10836,9 +11197,7 @@ ${await _agentsMdBlock()}
           ? (rawPhases[p] as Map).cast<String, dynamic>()
           : <String, dynamic>{};
       final phaseName = (phase['name'] as String? ?? 'phase ${p + 1}').trim();
-      final tasks = (phase['tasks'] as List? ?? [])
-          .whereType<Map>()
-          .toList();
+      final tasks = (phase['tasks'] as List? ?? []).whereType<Map>().toList();
       if (tasks.isEmpty) return 'phase "$phaseName" has no tasks';
       if (tasks.length > 6) {
         return 'phase "$phaseName" has too many tasks (>6)';
@@ -10846,9 +11205,10 @@ ${await _agentsMdBlock()}
       _emit(
         'think',
         'workflow "$name" · phase ${p + 1} "$phaseName" · ${tasks.length} '
-        'task(s)',
+            'task(s)',
       );
-      card?.toolDetail = '${card.toolDetail ?? ''}'
+      card?.toolDetail =
+          '${card.toolDetail ?? ''}'
           '── phase $phaseName (${tasks.length} tasks) ──\n';
 
       // Fan out: all tasks of one phase run in parallel.
@@ -10860,16 +11220,12 @@ ${await _agentsMdBlock()}
         final fullPrompt = carried.isEmpty
             ? prompt
             : '$prompt\n\n[Previous phase result — established context]\n'
-                '${cleanTruncate(carried, 4000)}';
+                  '${cleanTruncate(carried, 4000)}';
         futures.add(() async {
           try {
             final (sub, answer) = await _spawnChild(fullPrompt, label);
             membersStarted++;
-            return (
-              label: label,
-              result: answer,
-              state: sub.state,
-            );
+            return (label: label, result: answer, state: sub.state);
           } catch (e) {
             return (label: label, result: 'member failed: $e', state: 'failed');
           }
@@ -10877,7 +11233,8 @@ ${await _agentsMdBlock()}
       }
       final results = await Future.wait(futures);
       for (final r in results) {
-        card?.toolDetail = '${card.toolDetail ?? ''}'
+        card?.toolDetail =
+            '${card.toolDetail ?? ''}'
             '· ${r.label}: ${r.state}\n';
       }
       phaseResults.add(
@@ -10901,8 +11258,10 @@ ${await _agentsMdBlock()}
   Future<String> _handleRalph(Map<String, dynamic> args) async {
     final objective = (args['objective'] as String? ?? '').trim();
     if (objective.isEmpty) return 'objective is required';
-    final maxRounds =
-        ((args['max_rounds'] as num?)?.toInt() ?? 10).clamp(1, 50);
+    final maxRounds = ((args['max_rounds'] as num?)?.toInt() ?? 10).clamp(
+      1,
+      50,
+    );
 
     _emit('think', 'ralph: "${cleanTruncate(objective, 60)}" (cap $maxRounds)');
     final card = _activeToolMsg;
@@ -10913,7 +11272,8 @@ ${await _agentsMdBlock()}
     String lastSummary = '';
     while (round < maxRounds) {
       round++;
-      card?.toolDetail = '${card.toolDetail ?? ''}'
+      card?.toolDetail =
+          '${card.toolDetail ?? ''}'
           '── round $round/$maxRounds ──\n';
       final prompt = StringBuffer()
         ..writeln('IMMUTABLE OBJECTIVE: $objective')
@@ -10926,9 +11286,7 @@ ${await _agentsMdBlock()}
         prompt
           ..writeln('[Previous worker handoff]')
           ..writeln(handoff)
-          ..writeln(
-            'Continue from the handoff; do not redo finished work.',
-          );
+          ..writeln('Continue from the handoff; do not redo finished work.');
       }
       prompt
         ..writeln('End with EXACTLY this JSON as your final message:')
@@ -10942,7 +11300,8 @@ ${await _agentsMdBlock()}
         prompt.toString(),
         'ralph r$round',
       );
-      card?.toolDetail = '${card.toolDetail ?? ''}'
+      card?.toolDetail =
+          '${card.toolDetail ?? ''}'
           '· ${sub.state}: ${cleanTruncate(answer, 100)}\n';
       AppState.I.refresh();
 
@@ -10955,9 +11314,10 @@ ${await _agentsMdBlock()}
           report = jsonDecode(jsonMatch.group(0)!) as Map<String, dynamic>;
         } catch (_) {}
       }
-      final status = (report?['status'] as String? ??
-              (sub.state == 'failed' ? 'blocked' : 'continue'))
-          .toLowerCase();
+      final status =
+          (report?['status'] as String? ??
+                  (sub.state == 'failed' ? 'blocked' : 'continue'))
+              .toLowerCase();
       lastSummary = (report?['summary'] as String? ?? '').isNotEmpty
           ? report!['summary'] as String
           : cleanTruncate(answer, 200);
@@ -11012,9 +11372,10 @@ ${await _agentsMdBlock()}
               '· ${m.toolTitle ?? m.toolName ?? 'tool'}'
                   '${(m.toolSummary ?? '').isEmpty ? '' : ' — ${m.toolSummary}'}',
             MsgKind.reasoning => '· thinking…',
-            _ => m.role == 'user'
-                ? '> ${cleanTruncate(m.content, 100)}'
-                : '· ${cleanTruncate(m.content, 100)}',
+            _ =>
+              m.role == 'user'
+                  ? '> ${cleanTruncate(m.content, 100)}'
+                  : '· ${cleanTruncate(m.content, 100)}',
           };
           card.toolDetail = '${card.toolDetail ?? ''}$line\n';
         }
@@ -11105,8 +11466,7 @@ ${await _agentsMdBlock()}
       parent.messages.add(Message(role: 'user', content: notice));
       AppState.I.refresh();
       AppState.I.persistSessions();
-      unawaited(
-        runTask(notice, sessionId: parent.id, freshTurn: false));
+      unawaited(runTask(notice, sessionId: parent.id, freshTurn: false));
     }
   }
 
@@ -11140,10 +11500,11 @@ ${await _agentsMdBlock()}
         // /data/data/com.termux/... cross-app paths → EACCES everywhere).
         // ANY mode: a non-studio job with the sandbox installed must run
         // inside it too — /system/bin/sh has no node at all.
-        job.process = await SandboxService.I.spawn(
-          ['bash', '-c', cmd],
-          hostWorkDir: work,
-        );
+        job.process = await SandboxService.I.spawn([
+          'bash',
+          '-c',
+          cmd,
+        ], hostWorkDir: work);
       } else {
         job.process = await Process.start('/system/bin/sh', [
           '-c',
@@ -11293,7 +11654,9 @@ ${await _agentsMdBlock()}
       query,
       limit: limit,
       cursor: cursor,
-      sessionId: scope == 'this' ? (_runSession?.id ?? app.activeSessionId) : null,
+      sessionId: scope == 'this'
+          ? (_runSession?.id ?? app.activeSessionId)
+          : null,
     );
     if (hits.isEmpty) {
       return 'No matches for "$query"'
@@ -11303,7 +11666,9 @@ ${await _agentsMdBlock()}
       for (final h in hits)
         '[${h.role} · ${_sessionShortName(h.sessionId)}] ${h.snippet}',
     ];
-    final more = hits.length >= limit ? '\n(more: re-call with cursor ${cursor + limit})' : '';
+    final more = hits.length >= limit
+        ? '\n(more: re-call with cursor ${cursor + limit})'
+        : '';
     return 'session_search "$query" → ${hits.length} result(s):\n'
         '${lines.join('\n')}$more';
   }
@@ -11382,9 +11747,7 @@ ${await _agentsMdBlock()}
   /// matching the web search client abort-then-settle semantics.
   Future<String> _webSearch(List<String> queries) async {
     // Fan out concurrently. A failure rejects the whole call.
-    final perQuery = await Future.wait(
-      queries.map((q) => _ddgSearch(q)),
-    );
+    final perQuery = await Future.wait(queries.map((q) => _ddgSearch(q)));
 
     // Round-robin merge: rank 1 of query A, rank 1 of B, …, rank 2 of A…
     final byUrl = <String, _WebSearchSource>{};
@@ -11411,11 +11774,11 @@ ${await _agentsMdBlock()}
     final lines = [
       for (final s in capped)
         '- [${s.title.isEmpty ? s.url : s.title}](${s.url})'
-        '${s.snippet.isEmpty ? '' : ' — ${s.snippet}'}',
+            '${s.snippet.isEmpty ? '' : ' — ${s.snippet}'}',
     ];
     final truncated = ordered.length > capped.length
         ? '\n\n(Showing the first ${capped.length} sources. '
-            'Refine the query for more.)'
+              'Refine the query for more.)'
         : '';
     return 'Web search: ${queries.join(' | ')}\n\nSources:\n'
         '${lines.join('\n')}$truncated\n\n'
@@ -11429,8 +11792,7 @@ ${await _agentsMdBlock()}
   static String? ddgBaseOverrideForTest;
 
   Future<List<_WebSearchSource>> _ddgSearch(String query) async {
-    final base =
-        ddgBaseOverrideForTest ?? 'https://html.duckduckgo.com/html/';
+    final base = ddgBaseOverrideForTest ?? 'https://html.duckduckgo.com/html/';
     final url = Uri.parse('$base?q=${Uri.encodeQueryComponent(query)}');
     final r = await HttpShim.get(url, headers: {'User-Agent': 'OvidAgent/1.0'});
     if (r.status != 200) {
@@ -11447,8 +11809,7 @@ ${await _agentsMdBlock()}
       if (results.length >= _webSearchMaxResults) break;
       final title = _stripHtml(m.group(1) ?? '');
       final snippet = _stripHtml(m.group(2) ?? '');
-      final urlMatch = RegExp(r'href="([^"]+)"')
-          .firstMatch(m.group(0) ?? '');
+      final urlMatch = RegExp(r'href="([^"]+)"').firstMatch(m.group(0) ?? '');
       var href = urlMatch?.group(1) ?? '';
       // DuckDuckGo wraps links as /l/?uddg=<urlencoded>; unwrap them.
       final uddg = RegExp(r'[?&]uddg=([^&]+)').firstMatch(href);
@@ -11457,11 +11818,7 @@ ${await _agentsMdBlock()}
       }
       if (title.isEmpty || href.isEmpty) continue;
       if (!href.startsWith('http')) continue;
-      results.add(_WebSearchSource(
-        url: href,
-        title: title,
-        snippet: snippet,
-      ));
+      results.add(_WebSearchSource(url: href, title: title, snippet: snippet));
     }
     return results;
   }
@@ -11493,7 +11850,8 @@ ${await _agentsMdBlock()}
           .toLowerCase()
           .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
           .replaceAll(RegExp(r'^-+|-+$'), '');
-      final name = 'gen-${DateTime.now().millisecondsSinceEpoch}'
+      final name =
+          'gen-${DateTime.now().millisecondsSinceEpoch}'
           '-${slug.isEmpty ? 'image' : (slug.length > 40 ? slug.substring(0, 40) : slug)}.jpg';
       final f = File('${work.path}/$name');
       f.parent.createSync(recursive: true);
@@ -11543,7 +11901,7 @@ ${await _agentsMdBlock()}
       .replaceAll(RegExp(r'^-+|-+$'), '');
 
   /// Strip the " · High/Low/Medium" effort suffix from a model label.
-  String _baseModelOf(String raw) {
+  static String _baseModelOf(String raw) {
     final m = RegExp(
       r'·\s*(low|medium|high)$',
       caseSensitive: false,

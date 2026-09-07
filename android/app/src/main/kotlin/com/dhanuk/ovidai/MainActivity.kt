@@ -12,6 +12,7 @@ import android.os.ParcelFileDescriptor
 import android.provider.Settings
 import android.system.Os
 import android.system.OsConstants
+import android.system.ErrnoException
 import java.io.File
 import java.io.FileInputStream
 import java.net.URLConnection
@@ -73,6 +74,78 @@ class MainActivity : FlutterActivity() {
         } else {
             result.error(action.code, action.message, null)
         }
+    }
+
+    /// Copy a screenshot into the agent workspace without ever clobbering or
+    /// following a symlink. `O_CREAT or O_EXCL or O_NOFOLLOW` makes the create
+    /// atomic: the destination must not exist, and the final path component is
+    /// never resolved through a link. The copy is then written through that
+    /// exclusively-opened descriptor, so nothing can substitute the file
+    /// between the create and the write. A failed copy is unlinked, so a
+    /// partial screenshot never survives to be read back.
+    ///
+    /// `Os.openat`/`Os.unlinkat`/`O_DIRECTORY` are not public SDK API, so the
+    /// directory cannot be pinned by descriptor here; the Dart caller
+    /// canonicalises the workspace and re-verifies containment of the result.
+    private fun copyDeviceScreenshot(
+        sourcePath: String,
+        directoryPath: String,
+        fileName: String,
+    ): String {
+        require(File(fileName).name == fileName && fileName != "." && fileName != "..") {
+            "Invalid screenshot filename."
+        }
+        val directory = File(directoryPath)
+        require(directory.canonicalPath == directory.absolutePath) {
+            "Screenshot directory is not a canonical directory."
+        }
+        // lstat, not isDirectory(): a symlink to a directory must not pass.
+        require(OsConstants.S_ISDIR(Os.lstat(directoryPath).st_mode)) {
+            "Screenshot directory is not a directory."
+        }
+
+        val destinationPath = File(directory, fileName).absolutePath
+        val sourceFd = Os.open(
+            sourcePath,
+            OsConstants.O_RDONLY or OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW,
+            0,
+        )
+        try {
+            require(OsConstants.S_ISREG(Os.fstat(sourceFd).st_mode)) {
+                "Screenshot source is not a regular file."
+            }
+            val destinationFd = Os.open(
+                destinationPath,
+                OsConstants.O_WRONLY or OsConstants.O_CREAT or OsConstants.O_EXCL or
+                    OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW,
+                384, // 0600
+            )
+            var copied = false
+            try {
+                // Explicit read/write loop rather than FileInputStream/
+                // FileOutputStream(FileDescriptor): those wrappers' fd
+                // ownership is an unspecified libcore detail, and we must
+                // close each descriptor exactly once so the failure path can
+                // still unlink the destination. Os.write may be short.
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val read = Os.read(sourceFd, buffer, 0, buffer.size)
+                    if (read <= 0) break
+                    var written = 0
+                    while (written < read) {
+                        written += Os.write(destinationFd, buffer, written, read - written)
+                    }
+                }
+                Os.fsync(destinationFd)
+                copied = true
+            } finally {
+                runCatching { Os.close(destinationFd) }
+                if (!copied) runCatching { Os.remove(destinationPath) }
+            }
+        } finally {
+            runCatching { Os.close(sourceFd) }
+        }
+        return destinationPath
     }
 
     /// The ABI the PackageManager chose for THIS install — the last path
@@ -267,6 +340,23 @@ class MainActivity : FlutterActivity() {
                     "deviceScreenshot" -> {
                         val service = deviceService(result) ?: return@setMethodCallHandler
                         service.takeScreen(result)
+                    }
+                    "deviceCopyScreenshot" -> {
+                        val sourcePath = call.argument<String>("sourcePath")
+                        val directoryPath = call.argument<String>("directoryPath")
+                        val fileName = call.argument<String>("fileName")
+                        if (sourcePath.isNullOrBlank() || directoryPath.isNullOrBlank() || fileName.isNullOrBlank()) {
+                            result.error("BAD_ARGS", "Screenshot copy requires sourcePath, directoryPath, and fileName.", null)
+                        } else {
+                            try {
+                                result.success(copyDeviceScreenshot(sourcePath, directoryPath, fileName))
+                            } catch (error: ErrnoException) {
+                                val code = if (error.errno == OsConstants.EEXIST) "DEST_EXISTS" else "COPY_FAILED"
+                                result.error(code, "Could not copy screenshot: ${error.message}", error.errno)
+                            } catch (error: Throwable) {
+                                result.error("COPY_FAILED", "Could not copy screenshot: ${error.message}", null)
+                            }
+                        }
                     }
                     "safExportFile" -> {
                         val sourcePath = call.argument<String>("sourcePath")

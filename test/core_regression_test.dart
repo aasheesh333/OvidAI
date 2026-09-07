@@ -28,7 +28,8 @@ import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
 import 'package:ovid_ai/ui/health_screen.dart';
-import 'package:ovid_ai/ui/plugins_screen.dart' show McpCard, parseMcpConfigForTest, toolGainsForTest;
+import 'package:ovid_ai/ui/plugins_screen.dart'
+    show McpCard, parseMcpConfigForTest, toolGainsForTest;
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
 import 'package:ovid_ai/core/sandbox_pkg.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
@@ -64,7 +65,9 @@ void main() {
         try {
           return ffi.DynamicLibrary.open('libsqlite3.so.0');
         } catch (_) {
-          return ffi.DynamicLibrary.open('/usr/lib/x86_64-linux-gnu/libsqlite3.so.0');
+          return ffi.DynamicLibrary.open(
+            '/usr/lib/x86_64-linux-gnu/libsqlite3.so.0',
+          );
         }
       });
     }
@@ -810,19 +813,16 @@ void main() {
       expect(app2.responseTimeoutSec, inInclusiveRange(5, 3600));
     });
 
-    test(
-      'AgentMode labels match access presets',
-      () {
-        expect(AgentMode.safe.label, 'Read-Only');
-        expect(AgentMode.auto.label, 'General');
-        expect(AgentMode.drive.label, 'Full Access');
-        expect(AgentMode.studio.label, 'Studio');
-        expect(AgentMode.control.label, 'Control');
-        expect(AgentMode.values.length, 5);
-        // Studio auto-approves everything except commit.
-        expect(AgentMode.studio.hint, contains('Studio'));
-      },
-    );
+    test('AgentMode labels match access presets', () {
+      expect(AgentMode.safe.label, 'Read-Only');
+      expect(AgentMode.auto.label, 'General');
+      expect(AgentMode.drive.label, 'Full Access');
+      expect(AgentMode.studio.label, 'Studio');
+      expect(AgentMode.control.label, 'Control');
+      expect(AgentMode.values.length, 5);
+      // Studio auto-approves everything except commit.
+      expect(AgentMode.studio.hint, contains('Studio'));
+    });
 
     test('Studio open-file tabs: open/close/select', () {
       final a = AgentService.I;
@@ -1020,18 +1020,21 @@ void main() {
       expect(Message.fromJson(tail.toJson()).kind, MsgKind.turnTail);
     });
 
-    test('MsgKind.compact row round-trips through JSON (the reference transcript)', () {
-      final c = Message(
-        role: 'assistant',
-        kind: MsgKind.compact,
-        content: 'Context compacted · 24 messages (~31.4K tokens)',
-        toolDetail: '## Summary\n…',
-      );
-      final r = Message.fromJson(c.toJson());
-      expect(r.kind, MsgKind.compact);
-      expect(r.content, contains('Context compacted'));
-      expect(r.toolDetail, contains('Summary'));
-    });
+    test(
+      'MsgKind.compact row round-trips through JSON (the reference transcript)',
+      () {
+        final c = Message(
+          role: 'assistant',
+          kind: MsgKind.compact,
+          content: 'Context compacted · 24 messages (~31.4K tokens)',
+          toolDetail: '## Summary\n…',
+        );
+        final r = Message.fromJson(c.toJson());
+        expect(r.kind, MsgKind.compact);
+        expect(r.content, contains('Context compacted'));
+        expect(r.toolDetail, contains('Summary'));
+      },
+    );
 
     test('tool icon + title mapping (the reference ToolRow parity)', () {
       expect(AgentService.toolIcon('run_shell'), 'terminal');
@@ -1056,7 +1059,10 @@ void main() {
         expect(AgentService.contextWindowFor('claude-opus-4-20250514'), 200000);
         expect(AgentService.contextWindowFor('gemini-2.5-flash'), 1048576);
         expect(AgentService.contextWindowFor('grok-3'), 256000);
-        expect(AgentService.contextWindowFor('nvidia/nemotron-3-super'), 262144);
+        expect(
+          AgentService.contextWindowFor('nvidia/nemotron-3-super'),
+          262144,
+        );
         expect(
           AgentService.contextWindowFor('nvidia/nemotron-3.5-lightning-30b'),
           32768,
@@ -1139,171 +1145,191 @@ void main() {
   });
 
   group('PR9: parallel sessions', () {
-    test('session bleed: mid-run switch keeps stream + output in A, B clean', () async {
-      final app = AppState.I;
-      final agent = AgentService.I;
-      final provider = app.providerById('ollama-local')!;
-      final originals = ({
-        'baseUrl': provider.baseUrl,
-        'models': List<String>.of(provider.models),
-        'selectedModel': provider.selectedModel,
-      });
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    test(
+      'session bleed: mid-run switch keeps stream + output in A, B clean',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final provider = app.providerById('ollama-local')!;
+        final originals = ({
+          'baseUrl': provider.baseUrl,
+          'models': List<String>.of(provider.models),
+          'selectedModel': provider.selectedModel,
+        });
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
 
-      final sessionA = ChatSession(
-        id: 'bleed-a',
-        title: 'A',
-        providerId: provider.id,
-        model: 'test-model',
-        messages: [Message(role: 'user', content: 'hello')],
-      );
-      final sessionB = ChatSession(id: 'bleed-b', title: 'B', model: 'test-model');
-      app.sessions.addAll([sessionA, sessionB]);
-      app.activeSessionId = sessionA.id;
-      provider
-        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
-        ..models = ['test-model']
-        ..selectedModel = 'test-model';
-
-      // Server streams 3 SSE deltas slowly, then finishes.
-      final serverTask = server.first.then((request) async {
-        request.response.headers.chunkedTransferEncoding = true;
-        for (var i = 0; i < 3; i++) {
-          request.response.add(
-            utf8.encode(
-              'data: ${jsonEncode({
-                'choices': [
-                  {
-                    'delta': {'content': 'chunk$i '},
-                    'finish_reason': i == 2 ? 'stop' : null,
-                  },
-                ],
-              })}\n\n',
-            ),
-          );
-          await request.response.flush();
-          await Future<void>.delayed(const Duration(milliseconds: 120));
-        }
-        try {
-          await request.response.close();
-        } catch (_) {}
-      });
-
-      try {
-        final run = agent.runTask('task in A');
-        // Wait for the first chunk to start streaming into A, then
-        // switch to session B mid-run (the classic bleed repro).
-        await Future<void>.delayed(const Duration(milliseconds: 200));
-        app.selectSession(sessionB.id);
-        await Future<void>.delayed(const Duration(milliseconds: 250));
-        // While switched away, B's chat must stay pristine…
-        expect(sessionB.messages, isEmpty,
-            reason: 'B must not receive any of A\'s streaming or events');
-        await run.timeout(const Duration(seconds: 10));
-        await serverTask.timeout(const Duration(seconds: 10));
-
-        // …and A must own the complete streamed answer.
-        expect(sessionB.messages, isEmpty);
-        final aText = sessionA.messages
-            .where((m) => m.role == 'assistant')
-            .map((m) => m.content)
-            .join('');
-        expect(aText, contains('chunk0'));
-        expect(aText, contains('chunk2'));
-      } finally {
+        final sessionA = ChatSession(
+          id: 'bleed-a',
+          title: 'A',
+          providerId: provider.id,
+          model: 'test-model',
+          messages: [Message(role: 'user', content: 'hello')],
+        );
+        final sessionB = ChatSession(
+          id: 'bleed-b',
+          title: 'B',
+          model: 'test-model',
+        );
+        app.sessions.addAll([sessionA, sessionB]);
+        app.activeSessionId = sessionA.id;
         provider
-          ..baseUrl = originals['baseUrl'] as String
-          ..models = originals['models'] as List<String>
-          ..selectedModel = originals['selectedModel'] as String?;
-        await server.close(force: true);
-        app.deleteSession(sessionA.id);
-        app.deleteSession(sessionB.id);
-      }
-    });
+          ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+          ..models = ['test-model']
+          ..selectedModel = 'test-model';
 
-    test('session bleed: queued continuation lands in the RUNNING session', () async {
-      final app = AppState.I;
-      final agent = AgentService.I;
-      final provider = app.providerById('ollama-local')!;
-      final originals = ({
-        'baseUrl': provider.baseUrl,
-        'models': List<String>.of(provider.models),
-        'selectedModel': provider.selectedModel,
-      });
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      var requests = 0;
-
-      final sessionA = ChatSession(
-        id: 'qc-a',
-        title: 'A',
-        providerId: provider.id,
-        model: 'test-model',
-        messages: [Message(role: 'user', content: 'hello')],
-      );
-      final sessionB = ChatSession(id: 'qc-b', title: 'B', model: 'test-model');
-      app.sessions.addAll([sessionA, sessionB]);
-      app.activeSessionId = sessionA.id;
-      provider
-        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
-        ..models = ['test-model']
-        ..selectedModel = 'test-model';
-
-      // Serve every request (run + continuation) with a quick final answer.
-      final serverTask = () async {
-        await for (final request in server) {
-          requests++;
+        // Server streams 3 SSE deltas slowly, then finishes.
+        final serverTask = server.first.then((request) async {
           request.response.headers.chunkedTransferEncoding = true;
-          request.response.add(
-            utf8.encode(
-              'data: ${jsonEncode({
-                'choices': [
-                  {
-                    'delta': {'content': 'done '},
-                    'finish_reason': 'stop',
-                  },
-                ],
-              })}\n\n',
-            ),
-          );
-          await request.response.flush();
+          for (var i = 0; i < 3; i++) {
+            request.response.add(
+              utf8.encode(
+                'data: ${jsonEncode({
+                  'choices': [
+                    {
+                      'delta': {'content': 'chunk$i '},
+                      'finish_reason': i == 2 ? 'stop' : null,
+                    },
+                  ],
+                })}\n\n',
+              ),
+            );
+            await request.response.flush();
+            await Future<void>.delayed(const Duration(milliseconds: 120));
+          }
           try {
             await request.response.close();
           } catch (_) {}
-        }
-      }();
-      unawaited(serverTask);
+        });
 
-      try {
-        // Start a run in A, queue a follow-up for A, then switch to B.
-        final run = agent.runTask('first in A');
-        agent.enqueueMessage('queued follow-up');
-        await Future<void>.delayed(const Duration(milliseconds: 150));
-        app.selectSession(sessionB.id);
-        await run.timeout(const Duration(seconds: 10));
-        // The queued follow-up must start a continuation run in A (not B).
-        // Wait for the second request (the continuation).
-        for (var i = 0; i < 50 && requests < 2; i++) {
-          await Future<void>.delayed(const Duration(milliseconds: 100));
+        try {
+          final run = agent.runTask('task in A');
+          // Wait for the first chunk to start streaming into A, then
+          // switch to session B mid-run (the classic bleed repro).
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+          app.selectSession(sessionB.id);
+          await Future<void>.delayed(const Duration(milliseconds: 250));
+          // While switched away, B's chat must stay pristine…
+          expect(
+            sessionB.messages,
+            isEmpty,
+            reason: 'B must not receive any of A\'s streaming or events',
+          );
+          await run.timeout(const Duration(seconds: 10));
+          await serverTask.timeout(const Duration(seconds: 10));
+
+          // …and A must own the complete streamed answer.
+          expect(sessionB.messages, isEmpty);
+          final aText = sessionA.messages
+              .where((m) => m.role == 'assistant')
+              .map((m) => m.content)
+              .join('');
+          expect(aText, contains('chunk0'));
+          expect(aText, contains('chunk2'));
+        } finally {
+          provider
+            ..baseUrl = originals['baseUrl'] as String
+            ..models = originals['models'] as List<String>
+            ..selectedModel = originals['selectedModel'] as String?;
+          await server.close(force: true);
+          app.deleteSession(sessionA.id);
+          app.deleteSession(sessionB.id);
         }
-        expect(requests, greaterThanOrEqualTo(2),
-            reason: 'queued message should trigger a continuation run');
-        // B never received A's queued message as a user bubble.
-        expect(sessionB.messages.where((m) => m.role == 'user'), isEmpty);
-        // A received it.
-        expect(
-          sessionA.messages.map((m) => m.content),
-          contains('queued follow-up'),
+      },
+    );
+
+    test(
+      'session bleed: queued continuation lands in the RUNNING session',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final provider = app.providerById('ollama-local')!;
+        final originals = ({
+          'baseUrl': provider.baseUrl,
+          'models': List<String>.of(provider.models),
+          'selectedModel': provider.selectedModel,
+        });
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        var requests = 0;
+
+        final sessionA = ChatSession(
+          id: 'qc-a',
+          title: 'A',
+          providerId: provider.id,
+          model: 'test-model',
+          messages: [Message(role: 'user', content: 'hello')],
         );
-      } finally {
+        final sessionB = ChatSession(
+          id: 'qc-b',
+          title: 'B',
+          model: 'test-model',
+        );
+        app.sessions.addAll([sessionA, sessionB]);
+        app.activeSessionId = sessionA.id;
         provider
-          ..baseUrl = originals['baseUrl'] as String
-          ..models = originals['models'] as List<String>
-          ..selectedModel = originals['selectedModel'] as String?;
-        await server.close(force: true);
-        app.deleteSession(sessionA.id);
-        app.deleteSession(sessionB.id);
-      }
-    });
+          ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+          ..models = ['test-model']
+          ..selectedModel = 'test-model';
+
+        // Serve every request (run + continuation) with a quick final answer.
+        final serverTask = () async {
+          await for (final request in server) {
+            requests++;
+            request.response.headers.chunkedTransferEncoding = true;
+            request.response.add(
+              utf8.encode(
+                'data: ${jsonEncode({
+                  'choices': [
+                    {
+                      'delta': {'content': 'done '},
+                      'finish_reason': 'stop',
+                    },
+                  ],
+                })}\n\n',
+              ),
+            );
+            await request.response.flush();
+            try {
+              await request.response.close();
+            } catch (_) {}
+          }
+        }();
+        unawaited(serverTask);
+
+        try {
+          // Start a run in A, queue a follow-up for A, then switch to B.
+          final run = agent.runTask('first in A');
+          agent.enqueueMessage('queued follow-up');
+          await Future<void>.delayed(const Duration(milliseconds: 150));
+          app.selectSession(sessionB.id);
+          await run.timeout(const Duration(seconds: 10));
+          // The queued follow-up must start a continuation run in A (not B).
+          // Wait for the second request (the continuation).
+          for (var i = 0; i < 50 && requests < 2; i++) {
+            await Future<void>.delayed(const Duration(milliseconds: 100));
+          }
+          expect(
+            requests,
+            greaterThanOrEqualTo(2),
+            reason: 'queued message should trigger a continuation run',
+          );
+          // B never received A's queued message as a user bubble.
+          expect(sessionB.messages.where((m) => m.role == 'user'), isEmpty);
+          // A received it.
+          expect(
+            sessionA.messages.map((m) => m.content),
+            contains('queued follow-up'),
+          );
+        } finally {
+          provider
+            ..baseUrl = originals['baseUrl'] as String
+            ..models = originals['models'] as List<String>
+            ..selectedModel = originals['selectedModel'] as String?;
+          await server.close(force: true);
+          app.deleteSession(sessionA.id);
+          app.deleteSession(sessionB.id);
+        }
+      },
+    );
 
     test('queue is per-session — switching sessions isolates queues', () {
       final app = AppState.I;
@@ -1763,9 +1789,11 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       });
 
       // The questions card must appear as a pending approval.
-      for (var i = 0;
-          i < 50 && AgentService.I.pendingApproval?.questions == null;
-          i++) {
+      for (
+        var i = 0;
+        i < 50 && AgentService.I.pendingApproval?.questions == null;
+        i++
+      ) {
         await Future<void>.delayed(const Duration(milliseconds: 20));
       }
       final req = AgentService.I.pendingApproval;
@@ -1985,178 +2013,186 @@ libncursesw.so.6.5←./lib/libncurses.so.6
     });
 
     // ─── Session/model isolation (P0 fix) ────────────────────────────
-    test('parallel same-provider runs keep models + streams isolated', () async {
-      final app = AppState.I;
-      final agent = AgentService.I;
-      final provider = app.providerById('ollama-local')!;
-      final originals = ({
-        'baseUrl': provider.baseUrl,
-        'models': List<String>.of(provider.models),
-        'selectedModel': provider.selectedModel,
-      });
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      final bodies = <String>[];
+    test(
+      'parallel same-provider runs keep models + streams isolated',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final provider = app.providerById('ollama-local')!;
+        final originals = ({
+          'baseUrl': provider.baseUrl,
+          'models': List<String>.of(provider.models),
+          'selectedModel': provider.selectedModel,
+        });
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        final bodies = <String>[];
 
-      final sessionA = ChatSession(
-        id: 'par-a',
-        title: 'A',
-        providerId: provider.id,
-        model: 'model-a',
-        messages: [Message(role: 'user', content: 'prompt A')],
-      );
-      final sessionB = ChatSession(
-        id: 'par-b',
-        title: 'B',
-        providerId: provider.id,
-        model: 'model-b',
-        messages: [Message(role: 'user', content: 'prompt B')],
-      );
-      app.sessions.addAll([sessionA, sessionB]);
-      app.activeSessionId = sessionA.id;
-      provider
-        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
-        ..models = ['model-a', 'model-b'];
+        final sessionA = ChatSession(
+          id: 'par-a',
+          title: 'A',
+          providerId: provider.id,
+          model: 'model-a',
+          messages: [Message(role: 'user', content: 'prompt A')],
+        );
+        final sessionB = ChatSession(
+          id: 'par-b',
+          title: 'B',
+          providerId: provider.id,
+          model: 'model-b',
+          messages: [Message(role: 'user', content: 'prompt B')],
+        );
+        app.sessions.addAll([sessionA, sessionB]);
+        app.activeSessionId = sessionA.id;
+        provider
+          ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+          ..models = ['model-a', 'model-b'];
 
-      final serverTask = () async {
-        await for (final request in server) {
+        final serverTask = () async {
+          await for (final request in server) {
+            final body = await utf8.decoder.bind(request).join();
+            final payload = jsonDecode(body) as Map<String, dynamic>;
+            bodies.add(payload['model'] as String);
+            request.response.headers.chunkedTransferEncoding = true;
+            request.response.add(
+              utf8.encode(
+                'data: ${jsonEncode({
+                  'choices': [
+                    {
+                      'delta': {'content': 'reply-for-${payload['model']}'},
+                      'finish_reason': 'stop',
+                    },
+                  ],
+                })}\n\n',
+              ),
+            );
+            await request.response.flush();
+            try {
+              await request.response.close();
+            } catch (_) {}
+          }
+        }();
+        unawaited(serverTask);
+
+        try {
+          // Start both runs — A on active session, B background via sessionId.
+          final runA = agent.runTask('prompt A', sessionId: sessionA.id);
+          final runB = agent.runTask('prompt B', sessionId: sessionB.id);
+          await runA.timeout(const Duration(seconds: 10));
+          await runB.timeout(const Duration(seconds: 10));
+
+          // Each request was made with its OWN session's model.
+          expect(bodies, contains('model-a'));
+          expect(bodies, contains('model-b'));
+
+          // Each session's assistant output contains only its own reply —
+          // no cross-session merge when two same-provider runs are parallel.
+          final aText = sessionA.messages
+              .where((m) => m.role == 'assistant')
+              .map((m) => m.content)
+              .join('\n');
+          final bText = sessionB.messages
+              .where((m) => m.role == 'assistant')
+              .map((m) => m.content)
+              .join('\n');
+          expect(aText, contains('reply-for-model-a'));
+          expect(aText, isNot(contains('reply-for-model-b')));
+          expect(bText, contains('reply-for-model-b'));
+          expect(bText, isNot(contains('reply-for-model-a')));
+        } finally {
+          provider
+            ..baseUrl = originals['baseUrl'] as String
+            ..models = originals['models'] as List<String>
+            ..selectedModel = originals['selectedModel'] as String?;
+          await server.close(force: true);
+          app.deleteSession(sessionA.id);
+          app.deleteSession(sessionB.id);
+        }
+      },
+    );
+
+    test(
+      'mid-run model switch never changes the in-flight session model',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final provider = app.providerById('ollama-local')!;
+        final originals = ({
+          'baseUrl': provider.baseUrl,
+          'models': List<String>.of(provider.models),
+          'selectedModel': provider.selectedModel,
+        });
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        String? capturedModel;
+
+        final sessionA = ChatSession(
+          id: 'model-a2',
+          title: 'A',
+          providerId: provider.id,
+          model: 'deepseek-chat',
+          messages: [Message(role: 'user', content: 'hello')],
+        );
+        final sessionB = ChatSession(
+          id: 'model-b2',
+          title: 'B',
+          providerId: provider.id,
+          model: 'deepseek-reasoner',
+          messages: [Message(role: 'user', content: 'hi B')],
+        );
+        app.sessions.addAll([sessionA, sessionB]);
+        app.activeSessionId = sessionA.id;
+        provider
+          ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+          ..models = ['deepseek-chat', 'deepseek-reasoner'];
+
+        final serverTask = server.first.then((request) async {
           final body = await utf8.decoder.bind(request).join();
-          final payload = jsonDecode(body) as Map<String, dynamic>;
-          bodies.add(payload['model'] as String);
+          capturedModel = jsonDecode(body)['model'] as String?;
           request.response.headers.chunkedTransferEncoding = true;
-          request.response.add(
-            utf8.encode(
-              'data: ${jsonEncode({
-                'choices': [
-                  {
-                    'delta': {'content': 'reply-for-${payload['model']}'},
-                    'finish_reason': 'stop',
-                  },
-                ],
-              })}\n\n',
-            ),
-          );
-          await request.response.flush();
+          // Slow stream — time to switch sessions and setModel mid-run.
+          for (var i = 0; i < 2; i++) {
+            request.response.add(
+              utf8.encode(
+                'data: ${jsonEncode({
+                  'choices': [
+                    {
+                      'delta': {'content': 'chunk$i '},
+                    },
+                  ],
+                })}\n\n',
+              ),
+            );
+            await request.response.flush();
+            await Future<void>.delayed(const Duration(milliseconds: 120));
+          }
           try {
             await request.response.close();
           } catch (_) {}
-        }
-      }();
-      unawaited(serverTask);
+        });
 
-      try {
-        // Start both runs — A on active session, B background via sessionId.
-        final runA = agent.runTask('prompt A', sessionId: sessionA.id);
-        final runB = agent.runTask('prompt B', sessionId: sessionB.id);
-        await runA.timeout(const Duration(seconds: 10));
-        await runB.timeout(const Duration(seconds: 10));
-
-        // Each request was made with its OWN session's model.
-        expect(bodies, contains('model-a'));
-        expect(bodies, contains('model-b'));
-
-        // Each session's assistant output contains only its own reply —
-        // no cross-session merge when two same-provider runs are parallel.
-        final aText = sessionA.messages
-            .where((m) => m.role == 'assistant')
-            .map((m) => m.content)
-            .join('\n');
-        final bText = sessionB.messages
-            .where((m) => m.role == 'assistant')
-            .map((m) => m.content)
-            .join('\n');
-        expect(aText, contains('reply-for-model-a'));
-        expect(aText, isNot(contains('reply-for-model-b')));
-        expect(bText, contains('reply-for-model-b'));
-        expect(bText, isNot(contains('reply-for-model-a')));
-      } finally {
-        provider
-          ..baseUrl = originals['baseUrl'] as String
-          ..models = originals['models'] as List<String>
-          ..selectedModel = originals['selectedModel'] as String?;
-        await server.close(force: true);
-        app.deleteSession(sessionA.id);
-        app.deleteSession(sessionB.id);
-      }
-    });
-
-    test('mid-run model switch never changes the in-flight session model', () async {
-      final app = AppState.I;
-      final agent = AgentService.I;
-      final provider = app.providerById('ollama-local')!;
-      final originals = ({
-        'baseUrl': provider.baseUrl,
-        'models': List<String>.of(provider.models),
-        'selectedModel': provider.selectedModel,
-      });
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      String? capturedModel;
-
-      final sessionA = ChatSession(
-        id: 'model-a2',
-        title: 'A',
-        providerId: provider.id,
-        model: 'deepseek-chat',
-        messages: [Message(role: 'user', content: 'hello')],
-      );
-      final sessionB = ChatSession(
-        id: 'model-b2',
-        title: 'B',
-        providerId: provider.id,
-        model: 'deepseek-reasoner',
-        messages: [Message(role: 'user', content: 'hi B')],
-      );
-      app.sessions.addAll([sessionA, sessionB]);
-      app.activeSessionId = sessionA.id;
-      provider
-        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
-        ..models = ['deepseek-chat', 'deepseek-reasoner'];
-
-      final serverTask = server.first.then((request) async {
-        final body = await utf8.decoder.bind(request).join();
-        capturedModel = jsonDecode(body)['model'] as String?;
-        request.response.headers.chunkedTransferEncoding = true;
-        // Slow stream — time to switch sessions and setModel mid-run.
-        for (var i = 0; i < 2; i++) {
-          request.response.add(
-            utf8.encode(
-              'data: ${jsonEncode({
-                'choices': [
-                  {'delta': {'content': 'chunk$i '}},
-                ],
-              })}\n\n',
-            ),
-          );
-          await request.response.flush();
-          await Future<void>.delayed(const Duration(milliseconds: 120));
-        }
         try {
-          await request.response.close();
-        } catch (_) {}
-      });
+          final run = agent.runTask('hello', sessionId: sessionA.id);
+          await Future<void>.delayed(const Duration(milliseconds: 150));
+          // Switch to B AND setModel on the shared provider mid-run.
+          app.selectSession(sessionB.id);
+          app.setModel(provider.id, 'deepseek-reasoner');
+          await run.timeout(const Duration(seconds: 10));
+          await serverTask.timeout(const Duration(seconds: 10));
 
-      try {
-        final run = agent.runTask('hello', sessionId: sessionA.id);
-        await Future<void>.delayed(const Duration(milliseconds: 150));
-        // Switch to B AND setModel on the shared provider mid-run.
-        app.selectSession(sessionB.id);
-        app.setModel(provider.id, 'deepseek-reasoner');
-        await run.timeout(const Duration(seconds: 10));
-        await serverTask.timeout(const Duration(seconds: 10));
-
-        // The model sent on the wire stayed deepseek-chat.
-        expect(capturedModel, 'deepseek-chat');
-        // B's session still has its own model.
-        expect(sessionB.model, 'deepseek-reasoner');
-      } finally {
-        provider
-          ..baseUrl = originals['baseUrl'] as String
-          ..models = originals['models'] as List<String>
-          ..selectedModel = originals['selectedModel'] as String?;
-        await server.close(force: true);
-        app.deleteSession(sessionA.id);
-        app.deleteSession(sessionB.id);
-      }
-    });
+          // The model sent on the wire stayed deepseek-chat.
+          expect(capturedModel, 'deepseek-chat');
+          // B's session still has its own model.
+          expect(sessionB.model, 'deepseek-reasoner');
+        } finally {
+          provider
+            ..baseUrl = originals['baseUrl'] as String
+            ..models = originals['models'] as List<String>
+            ..selectedModel = originals['selectedModel'] as String?;
+          await server.close(force: true);
+          app.deleteSession(sessionA.id);
+          app.deleteSession(sessionB.id);
+        }
+      },
+    );
 
     test('switching sessions does not mutate provider.selectedModel', () {
       final app = AppState.I;
@@ -2184,7 +2220,8 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         expect(
           provider.selectedModel,
           'm1',
-          reason: 'session switch must not write to shared provider'
+          reason:
+              'session switch must not write to shared provider'
               'selectedModel — that is how model bleed happens',
         );
         app.newSession();
@@ -2262,8 +2299,9 @@ libncursesw.so.6.5←./lib/libncurses.so.6
             .timeout(const Duration(seconds: 10));
         expect(requestBodies, isNotEmpty);
         final sys =
-            (requestBodies.first['messages'] as List)
-                .firstWhere((m) => m['role'] == 'system')['content']
+            (requestBodies.first['messages'] as List).firstWhere(
+                  (m) => m['role'] == 'system',
+                )['content']
                 as String;
         expect(sys, contains('SESSION TODOS'));
         expect(sys, contains('edit the file'));
@@ -2313,7 +2351,10 @@ libncursesw.so.6.5←./lib/libncurses.so.6
           // Mark the todo completed on second request so the loop stops.
           if (bodies.length >= 2) {
             session.todos.clear();
-            session.todos.add({'content': 'find the bug', 'status': 'completed'});
+            session.todos.add({
+              'content': 'find the bug',
+              'status': 'completed',
+            });
           }
           request.response.headers.chunkedTransferEncoding = true;
           request.response.add(
@@ -2356,30 +2397,33 @@ libncursesw.so.6.5←./lib/libncurses.so.6
   });
 
   group('PR10: modes, skills upload, folder pinning', () {
-    test('ChatSession.mode + workspaceFolder JSON round-trip (legacy default)', () {
-      final s = ChatSession(
-        id: 's1',
-        title: 't',
-        model: 'm',
-        mode: 'studio',
-        workspaceFolder: '/storage/emulated/0/MyProj',
-      );
-      final j = s.toJson();
-      expect(j['mode'], 'studio');
-      expect(j['workspaceFolder'], '/storage/emulated/0/MyProj');
-      final back = ChatSession.fromJson(j);
-      expect(back.mode, 'studio');
-      expect(back.workspaceFolder, '/storage/emulated/0/MyProj');
+    test(
+      'ChatSession.mode + workspaceFolder JSON round-trip (legacy default)',
+      () {
+        final s = ChatSession(
+          id: 's1',
+          title: 't',
+          model: 'm',
+          mode: 'studio',
+          workspaceFolder: '/storage/emulated/0/MyProj',
+        );
+        final j = s.toJson();
+        expect(j['mode'], 'studio');
+        expect(j['workspaceFolder'], '/storage/emulated/0/MyProj');
+        final back = ChatSession.fromJson(j);
+        expect(back.mode, 'studio');
+        expect(back.workspaceFolder, '/storage/emulated/0/MyProj');
 
-      // Legacy sessions without a mode field default to General.
-      final legacy = ChatSession.fromJson({
-        'id': 's2',
-        'title': 'old',
-        'model': 'm',
-      });
-      expect(legacy.mode, 'auto');
-      expect(legacy.workspaceFolder, isNull);
-    });
+        // Legacy sessions without a mode field default to General.
+        final legacy = ChatSession.fromJson({
+          'id': 's2',
+          'title': 'old',
+          'model': 'm',
+        });
+        expect(legacy.mode, 'auto');
+        expect(legacy.workspaceFolder, isNull);
+      },
+    );
 
     test('AppState.setSessionMode only changes the ACTIVE session', () async {
       final app = AppState.I;
@@ -2441,7 +2485,10 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       );
       // fs_edit view is still allowed (read-only), so no READ-ONLY denial.
       expect(
-        await agent.dispatchForTest('fs_edit', {'command': 'view', 'path': 'a.dart'}),
+        await agent.dispatchForTest('fs_edit', {
+          'command': 'view',
+          'path': 'a.dart',
+        }),
         isNot(contains('READ-ONLY MODE')),
       );
       // Read-only shell command is NOT hard-blocked (it proceeds to
@@ -2464,7 +2511,10 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         AgentService.setRunSessionForTest('');
         app.sessions.removeWhere((x) => x.id == 'sec1');
       });
-      final ro = await AgentService.I.dispatchForTest('run_code', {'code': '1+1', 'lang': 'python'});
+      final ro = await AgentService.I.dispatchForTest('run_code', {
+        'code': '1+1',
+        'lang': 'python',
+      });
       expect(ro, contains('READ-ONLY MODE'));
     });
 
@@ -2478,9 +2528,20 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         AgentService.setRunSessionForTest('');
         app.sessions.removeWhere((x) => x.id == 'sec2');
       });
-      expect(await AgentService.I.dispatchForTest('dispatch_agent', {'prompt': 'hi'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('workflow', {'goal': 'hi'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('ralph', {'goal': 'hi'}), contains('READ-ONLY MODE'));
+      expect(
+        await AgentService.I.dispatchForTest('dispatch_agent', {
+          'prompt': 'hi',
+        }),
+        contains('READ-ONLY MODE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('workflow', {'goal': 'hi'}),
+        contains('READ-ONLY MODE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('ralph', {'goal': 'hi'}),
+        contains('READ-ONLY MODE'),
+      );
     });
 
     test('SEC3: read_attachment refuses workspace escape', () async {
@@ -2493,7 +2554,9 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         AgentService.setRunSessionForTest('');
         app.sessions.removeWhere((x) => x.id == 'sec3');
       });
-      final res = await AgentService.I.dispatchForTest('read_attachment', {'filename': '../../etc/passwd'});
+      final res = await AgentService.I.dispatchForTest('read_attachment', {
+        'filename': '../../etc/passwd',
+      });
       expect(res, contains('escapes the session workspace'));
     });
 
@@ -2505,33 +2568,47 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(maybeIdx, greaterThanOrEqualTo(0));
       expect(subIdx, greaterThan(maybeIdx));
       expect(destIdx, greaterThan(maybeIdx));
-      expect(destIdx, lessThan(subIdx), reason: 'destructive check must come BEFORE subagent early-return');
+      expect(
+        destIdx,
+        lessThan(subIdx),
+        reason: 'destructive check must come BEFORE subagent early-return',
+      );
     });
 
-    test('SEC4b: subagent attempting destructive command is immediately denied without prompt', () async {
-      final app = AppState.I;
-      final parent = ChatSession(id: 'sec4-p', title: 'P', model: 'm', mode: 'auto');
-      app.sessions.insert(0, parent);
-      final child = app.createSubagentSession(
-        parent: parent,
-        label: 'sub',
-        mode: 'auto',
-      );
-      app.sessions.insert(0, child);
-      app.activeSessionId = child.id;
-      AgentService.setRunSessionForTest(child.id);
-      addTearDown(() {
-        AgentService.setRunSessionForTest('');
-        AgentService.I.pendingApproval = null;
-        app.sessions.removeWhere((x) => x.id == 'sec4-p' || x.id == child.id);
-      });
-      // Destructive command in subagent should be denied immediately without popping an approval prompt.
-      // We race with a short timeout so that if it blocks on _askUser, it fails fast.
-      final resFuture = AgentService.I.dispatchForTest('run_shell', {'command': 'rm -rf /'});
-      final res = await resFuture.timeout(const Duration(milliseconds: 500));
-      expect(res, equals('DENIED by user'));
-      expect(AgentService.I.pendingApproval, isNull);
-    });
+    test(
+      'SEC4b: subagent attempting destructive command is immediately denied without prompt',
+      () async {
+        final app = AppState.I;
+        final parent = ChatSession(
+          id: 'sec4-p',
+          title: 'P',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, parent);
+        final child = app.createSubagentSession(
+          parent: parent,
+          label: 'sub',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, child);
+        app.activeSessionId = child.id;
+        AgentService.setRunSessionForTest(child.id);
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          AgentService.I.pendingApproval = null;
+          app.sessions.removeWhere((x) => x.id == 'sec4-p' || x.id == child.id);
+        });
+        // Destructive command in subagent should be denied immediately without popping an approval prompt.
+        // We race with a short timeout so that if it blocks on _askUser, it fails fast.
+        final resFuture = AgentService.I.dispatchForTest('run_shell', {
+          'command': 'rm -rf /',
+        });
+        final res = await resFuture.timeout(const Duration(milliseconds: 500));
+        expect(res, equals('DENIED by user'));
+        expect(AgentService.I.pendingApproval, isNull);
+      },
+    );
 
     test('SEC5: interactive browser + state writes blocked read-only', () async {
       final app = AppState.I;
@@ -2543,18 +2620,74 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         AgentService.setRunSessionForTest('');
         app.sessions.removeWhere((x) => x.id == 'sec5');
       });
-      expect(await AgentService.I.dispatchForTest('browser_click', {'selector': 'button'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('browser_type', {'selector': 'input', 'text': 'x'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('browser_evaluate', {'script': '1'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('browser_press_key', {'key': 'Enter'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('browser_fill', {'selector': 'input', 'value': 'x'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('browser_drag', {'selector': 'div'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('browser_select', {'selector': 'select', 'value': 'x'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('memory_save', {'content': 'x'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('create_goal', {'title': 'x'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('update_goal', {'id': 'x'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('schedule_create', {'prompt': 'x', 'after_seconds': 600}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('schedule_delete', {'id': 'x'}), contains('READ-ONLY MODE'));
+      expect(
+        await AgentService.I.dispatchForTest('browser_click', {
+          'selector': 'button',
+        }),
+        contains('READ-ONLY MODE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('browser_type', {
+          'selector': 'input',
+          'text': 'x',
+        }),
+        contains('READ-ONLY MODE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('browser_evaluate', {
+          'script': '1',
+        }),
+        contains('READ-ONLY MODE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('browser_press_key', {
+          'key': 'Enter',
+        }),
+        contains('READ-ONLY MODE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('browser_fill', {
+          'selector': 'input',
+          'value': 'x',
+        }),
+        contains('READ-ONLY MODE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('browser_drag', {
+          'selector': 'div',
+        }),
+        contains('READ-ONLY MODE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('browser_select', {
+          'selector': 'select',
+          'value': 'x',
+        }),
+        contains('READ-ONLY MODE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('memory_save', {'content': 'x'}),
+        contains('READ-ONLY MODE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('create_goal', {'title': 'x'}),
+        contains('READ-ONLY MODE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('update_goal', {'id': 'x'}),
+        contains('READ-ONLY MODE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('schedule_create', {
+          'prompt': 'x',
+          'after_seconds': 600,
+        }),
+        contains('READ-ONLY MODE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('schedule_delete', {'id': 'x'}),
+        contains('READ-ONLY MODE'),
+      );
       // Read-only-safe browser tools stay allowed (must NOT hit the deny list).
       // No WebView platform in unit tests — reaching the handler throws an
       // assertion instead of returning text. Either way, the gate let it
@@ -2579,39 +2712,68 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         AgentService.setRunSessionForTest('');
         app.sessions.removeWhere((x) => x.id == 'sec6');
       });
-      expect(await AgentService.I.dispatchForTest('run_code', {'code': '1+1', 'lang': 'python'}), contains('PLAN MODE ACTIVE'));
-      expect(await AgentService.I.dispatchForTest('dispatch_agent', {'prompt': 'hi'}), contains('PLAN MODE ACTIVE'));
+      expect(
+        await AgentService.I.dispatchForTest('run_code', {
+          'code': '1+1',
+          'lang': 'python',
+        }),
+        contains('PLAN MODE ACTIVE'),
+      );
+      expect(
+        await AgentService.I.dispatchForTest('dispatch_agent', {
+          'prompt': 'hi',
+        }),
+        contains('PLAN MODE ACTIVE'),
+      );
     });
 
-    test('SEC7: todo_write stays allowed read-only (documented); attachment missing key is a tool error', () async {
-      final app = AppState.I;
-      final s = ChatSession(id: 'sec7', title: 'S', model: 'm', mode: 'safe');
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      AgentService.setRunSessionForTest(s.id);
-      addTearDown(() {
-        AgentService.setRunSessionForTest('');
-        app.sessions.removeWhere((x) => x.id == 'sec7');
-      });
-      final todo = await AgentService.I.dispatchForTest('todo_write', {'todos': []});
-      expect(todo, isNot(contains('READ-ONLY MODE')));
-      final att = await AgentService.I.dispatchForTest('read_attachment', {});
-      expect(att, contains('filename is required'));
-    });
+    test(
+      'SEC7: todo_write stays allowed read-only (documented); attachment missing key is a tool error',
+      () async {
+        final app = AppState.I;
+        final s = ChatSession(id: 'sec7', title: 'S', model: 'm', mode: 'safe');
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        AgentService.setRunSessionForTest(s.id);
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((x) => x.id == 'sec7');
+        });
+        final todo = await AgentService.I.dispatchForTest('todo_write', {
+          'todos': [],
+        });
+        expect(todo, isNot(contains('READ-ONLY MODE')));
+        final att = await AgentService.I.dispatchForTest('read_attachment', {});
+        expect(att, contains('filename is required'));
+      },
+    );
 
-    test('BR1: dialog + popup tools denied read-only, dialog state machine works', () async {
-      final app = AppState.I;
-      final s = ChatSession(id: 'br1', title: 'S', model: 'm', mode: 'safe');
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      AgentService.setRunSessionForTest(s.id);
-      addTearDown(() {
-        AgentService.setRunSessionForTest('');
-        app.sessions.removeWhere((x) => x.id == 'br1');
-      });
-      expect(await AgentService.I.dispatchForTest('browser_dialog', {'action': 'read'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('browser_popups', {'action': 'list'}), contains('READ-ONLY MODE'));
-    });
+    test(
+      'BR1: dialog + popup tools denied read-only, dialog state machine works',
+      () async {
+        final app = AppState.I;
+        final s = ChatSession(id: 'br1', title: 'S', model: 'm', mode: 'safe');
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        AgentService.setRunSessionForTest(s.id);
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((x) => x.id == 'br1');
+        });
+        expect(
+          await AgentService.I.dispatchForTest('browser_dialog', {
+            'action': 'read',
+          }),
+          contains('READ-ONLY MODE'),
+        );
+        expect(
+          await AgentService.I.dispatchForTest('browser_popups', {
+            'action': 'list',
+          }),
+          contains('READ-ONLY MODE'),
+        );
+      },
+    );
 
     test('BR2: console + network tools denied read-only', () async {
       final app = AppState.I;
@@ -2623,143 +2785,186 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         AgentService.setRunSessionForTest('');
         app.sessions.removeWhere((x) => x.id == 'br2');
       });
-      expect(await AgentService.I.dispatchForTest('browser_console', {'action': 'read'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('browser_network', {'action': 'list'}), contains('READ-ONLY MODE'));
-    });
-
-    test('BR3: download/upload/cookie-write denied read-only; download escapes refused', () async {
-      final app = AppState.I;
-      final s = ChatSession(id: 'br3', title: 'S', model: 'm', mode: 'safe');
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      AgentService.setRunSessionForTest(s.id);
-      addTearDown(() {
-        AgentService.setRunSessionForTest('');
-        app.sessions.removeWhere((x) => x.id == 'br3');
-      });
-      expect(await AgentService.I.dispatchForTest('browser_download', {'url': 'https://example.com/a.pdf'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('browser_upload', {'selector': 'input', 'path': 'a.txt'}), contains('READ-ONLY MODE'));
-      expect(await AgentService.I.dispatchForTest('browser_cookies', {'set': 'a=b'}), contains('READ-ONLY MODE'));
-    });
-
-    test('DL1: browser download streams more than 20 MiB and closes its client', () async {
-      final tempDir = Directory.systemTemp.createTempSync('dl1_test');
-      final session = ChatSession(
-        id: 'dl1',
-        title: 'DL1',
-        model: 'm',
-        mode: 'auto',
-        workspaceFolder: tempDir.path,
-      );
-      app.sessions.insert(0, session);
-      app.activeSessionId = session.id;
-      AgentService.setRunSessionForTest(session.id);
-      const chunkSize = 64 * 1024;
-      const chunkCount = 321;
-      final response = _FakeDownloadHttpResponse(
-        statusCode: HttpStatus.ok,
-        contentLength: chunkSize * chunkCount,
-        chunks: Stream<List<int>>.fromIterable(
-          Iterable.generate(chunkCount, (_) => List<int>.filled(chunkSize, 65)),
-        ),
-      );
-      final client = _FakeDownloadHttpClient(response);
-      AgentService.browserDownloadClientFactoryForTest = () => client;
-      addTearDown(() {
-        AgentService.browserDownloadClientFactoryForTest = null;
-        AgentService.setRunSessionForTest('');
-        app.sessions.removeWhere((s) => s.id == session.id);
-        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
-      });
-
-      final result = await AgentService.I.dispatchForTest(
-        'browser_download',
-        {'url': 'https://example.test/large.bin'},
-      );
-
-      expect(result, contains('downloaded ✓'));
-      expect(File('${tempDir.path}/large.bin').lengthSync(), chunkSize * chunkCount);
-      expect(client.closedWithForce, isTrue);
-      expect(response.completed, isTrue);
-    });
-
-    test('DL2: non-200 download drains the response and closes its client', () async {
-      final tempDir = Directory.systemTemp.createTempSync('dl2_test');
-      final session = ChatSession(
-        id: 'dl2',
-        title: 'DL2',
-        model: 'm',
-        mode: 'auto',
-        workspaceFolder: tempDir.path,
-      );
-      app.sessions.insert(0, session);
-      app.activeSessionId = session.id;
-      AgentService.setRunSessionForTest(session.id);
-      final response = _FakeDownloadHttpResponse(
-        statusCode: HttpStatus.notFound,
-        contentLength: 3,
-        chunks: Stream<List<int>>.value([1, 2, 3]),
-      );
-      final client = _FakeDownloadHttpClient(response);
-      AgentService.browserDownloadClientFactoryForTest = () => client;
-      addTearDown(() {
-        AgentService.browserDownloadClientFactoryForTest = null;
-        AgentService.setRunSessionForTest('');
-        app.sessions.removeWhere((s) => s.id == session.id);
-        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
-      });
-
-      final result = await AgentService.I.dispatchForTest(
-        'browser_download',
-        {'url': 'https://example.test/missing.bin'},
-      );
-
-      expect(result, contains('HTTP 404'));
-      expect(response.completed, isTrue);
-      expect(client.closedWithForce, isTrue);
-      expect(File('${tempDir.path}/missing.bin').existsSync(), isFalse);
-    });
-
-    test('DL3: stream failure deletes the partial file and closes its client', () async {
-      final tempDir = Directory.systemTemp.createTempSync('dl3_test');
-      final session = ChatSession(
-        id: 'dl3',
-        title: 'DL3',
-        model: 'm',
-        mode: 'auto',
-        workspaceFolder: tempDir.path,
-      );
-      app.sessions.insert(0, session);
-      app.activeSessionId = session.id;
-      AgentService.setRunSessionForTest(session.id);
-      final response = _FakeDownloadHttpResponse(
-        statusCode: HttpStatus.ok,
-        contentLength: -1,
-        chunks: Stream<List<int>>.fromIterable([
-          List<int>.filled(128, 66),
-        ]).asyncExpand((c) async* {
-          yield c;
-          throw const SocketException('connection reset');
+      expect(
+        await AgentService.I.dispatchForTest('browser_console', {
+          'action': 'read',
         }),
+        contains('READ-ONLY MODE'),
       );
-      final client = _FakeDownloadHttpClient(response);
-      AgentService.browserDownloadClientFactoryForTest = () => client;
-      addTearDown(() {
-        AgentService.browserDownloadClientFactoryForTest = null;
-        AgentService.setRunSessionForTest('');
-        app.sessions.removeWhere((s) => s.id == session.id);
-        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
-      });
-
-      final result = await AgentService.I.dispatchForTest(
-        'browser_download',
-        {'url': 'https://example.test/partial.bin'},
+      expect(
+        await AgentService.I.dispatchForTest('browser_network', {
+          'action': 'list',
+        }),
+        contains('READ-ONLY MODE'),
       );
-
-      expect(result, contains('download failed'));
-      expect(client.closedWithForce, isTrue);
-      expect(File('${tempDir.path}/partial.bin').existsSync(), isFalse);
     });
+
+    test(
+      'BR3: download/upload/cookie-write denied read-only; download escapes refused',
+      () async {
+        final app = AppState.I;
+        final s = ChatSession(id: 'br3', title: 'S', model: 'm', mode: 'safe');
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        AgentService.setRunSessionForTest(s.id);
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((x) => x.id == 'br3');
+        });
+        expect(
+          await AgentService.I.dispatchForTest('browser_download', {
+            'url': 'https://example.com/a.pdf',
+          }),
+          contains('READ-ONLY MODE'),
+        );
+        expect(
+          await AgentService.I.dispatchForTest('browser_upload', {
+            'selector': 'input',
+            'path': 'a.txt',
+          }),
+          contains('READ-ONLY MODE'),
+        );
+        expect(
+          await AgentService.I.dispatchForTest('browser_cookies', {
+            'set': 'a=b',
+          }),
+          contains('READ-ONLY MODE'),
+        );
+      },
+    );
+
+    test(
+      'DL1: browser download streams more than 20 MiB and closes its client',
+      () async {
+        final tempDir = Directory.systemTemp.createTempSync('dl1_test');
+        final session = ChatSession(
+          id: 'dl1',
+          title: 'DL1',
+          model: 'm',
+          mode: 'auto',
+          workspaceFolder: tempDir.path,
+        );
+        app.sessions.insert(0, session);
+        app.activeSessionId = session.id;
+        AgentService.setRunSessionForTest(session.id);
+        const chunkSize = 64 * 1024;
+        const chunkCount = 321;
+        final response = _FakeDownloadHttpResponse(
+          statusCode: HttpStatus.ok,
+          contentLength: chunkSize * chunkCount,
+          chunks: Stream<List<int>>.fromIterable(
+            Iterable.generate(
+              chunkCount,
+              (_) => List<int>.filled(chunkSize, 65),
+            ),
+          ),
+        );
+        final client = _FakeDownloadHttpClient(response);
+        AgentService.browserDownloadClientFactoryForTest = () => client;
+        addTearDown(() {
+          AgentService.browserDownloadClientFactoryForTest = null;
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((s) => s.id == session.id);
+          if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+        });
+
+        final result = await AgentService.I.dispatchForTest(
+          'browser_download',
+          {'url': 'https://example.test/large.bin'},
+        );
+
+        expect(result, contains('downloaded ✓'));
+        expect(
+          File('${tempDir.path}/large.bin').lengthSync(),
+          chunkSize * chunkCount,
+        );
+        expect(client.closedWithForce, isTrue);
+        expect(response.completed, isTrue);
+      },
+    );
+
+    test(
+      'DL2: non-200 download drains the response and closes its client',
+      () async {
+        final tempDir = Directory.systemTemp.createTempSync('dl2_test');
+        final session = ChatSession(
+          id: 'dl2',
+          title: 'DL2',
+          model: 'm',
+          mode: 'auto',
+          workspaceFolder: tempDir.path,
+        );
+        app.sessions.insert(0, session);
+        app.activeSessionId = session.id;
+        AgentService.setRunSessionForTest(session.id);
+        final response = _FakeDownloadHttpResponse(
+          statusCode: HttpStatus.notFound,
+          contentLength: 3,
+          chunks: Stream<List<int>>.value([1, 2, 3]),
+        );
+        final client = _FakeDownloadHttpClient(response);
+        AgentService.browserDownloadClientFactoryForTest = () => client;
+        addTearDown(() {
+          AgentService.browserDownloadClientFactoryForTest = null;
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((s) => s.id == session.id);
+          if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+        });
+
+        final result = await AgentService.I.dispatchForTest(
+          'browser_download',
+          {'url': 'https://example.test/missing.bin'},
+        );
+
+        expect(result, contains('HTTP 404'));
+        expect(response.completed, isTrue);
+        expect(client.closedWithForce, isTrue);
+        expect(File('${tempDir.path}/missing.bin').existsSync(), isFalse);
+      },
+    );
+
+    test(
+      'DL3: stream failure deletes the partial file and closes its client',
+      () async {
+        final tempDir = Directory.systemTemp.createTempSync('dl3_test');
+        final session = ChatSession(
+          id: 'dl3',
+          title: 'DL3',
+          model: 'm',
+          mode: 'auto',
+          workspaceFolder: tempDir.path,
+        );
+        app.sessions.insert(0, session);
+        app.activeSessionId = session.id;
+        AgentService.setRunSessionForTest(session.id);
+        final response = _FakeDownloadHttpResponse(
+          statusCode: HttpStatus.ok,
+          contentLength: -1,
+          chunks: Stream<List<int>>.fromIterable([List<int>.filled(128, 66)])
+              .asyncExpand((c) async* {
+                yield c;
+                throw const SocketException('connection reset');
+              }),
+        );
+        final client = _FakeDownloadHttpClient(response);
+        AgentService.browserDownloadClientFactoryForTest = () => client;
+        addTearDown(() {
+          AgentService.browserDownloadClientFactoryForTest = null;
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((s) => s.id == session.id);
+          if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+        });
+
+        final result = await AgentService.I.dispatchForTest(
+          'browser_download',
+          {'url': 'https://example.test/partial.bin'},
+        );
+
+        expect(result, contains('download failed'));
+        expect(client.closedWithForce, isTrue);
+        expect(File('${tempDir.path}/partial.bin').existsSync(), isFalse);
+      },
+    );
 
     test('DL4: request failure closes its client', () async {
       final tempDir = Directory.systemTemp.createTempSync('dl4_test');
@@ -2789,89 +2994,96 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
       });
 
-      final result = await AgentService.I.dispatchForTest(
-        'browser_download',
-        {'url': 'https://example.test/unreachable.bin'},
-      );
+      final result = await AgentService.I.dispatchForTest('browser_download', {
+        'url': 'https://example.test/unreachable.bin',
+      });
 
       expect(result, contains('download failed'));
       expect(client.closedWithForce, isTrue);
     });
 
-    test('UP1: upload chunking splits bytes into 256KB segments with no size cap', () {
-      final small = Uint8List(500 * 1024);
-      final chunks = AgentService.chunkFileForUploadForTest(
-        small,
-        chunkSize: 256 * 1024,
-      );
-      expect(chunks.length, equals(2));
-      expect(chunks[0].length, equals(256 * 1024));
-      expect(chunks[1].length, equals(244 * 1024));
+    test(
+      'UP1: upload chunking splits bytes into 256KB segments with no size cap',
+      () {
+        final small = Uint8List(500 * 1024);
+        final chunks = AgentService.chunkFileForUploadForTest(
+          small,
+          chunkSize: 256 * 1024,
+        );
+        expect(chunks.length, equals(2));
+        expect(chunks[0].length, equals(256 * 1024));
+        expect(chunks[1].length, equals(244 * 1024));
 
-      final exact = Uint8List(512 * 1024);
-      final exactChunks = AgentService.chunkFileForUploadForTest(
-        exact,
-        chunkSize: 256 * 1024,
-      );
-      expect(exactChunks.length, equals(2));
+        final exact = Uint8List(512 * 1024);
+        final exactChunks = AgentService.chunkFileForUploadForTest(
+          exact,
+          chunkSize: 256 * 1024,
+        );
+        expect(exactChunks.length, equals(2));
 
-      expect(AgentService.chunkFileForUploadForTest(Uint8List(0)), isEmpty);
-      expect(
-        () => AgentService.chunkFileForUploadForTest(small, chunkSize: 0),
-        throwsArgumentError,
-      );
+        expect(AgentService.chunkFileForUploadForTest(Uint8List(0)), isEmpty);
+        expect(
+          () => AgentService.chunkFileForUploadForTest(small, chunkSize: 0),
+          throwsArgumentError,
+        );
 
-      final huge = Uint8List(3 * 1024 * 1024);
-      final hugeChunks = AgentService.chunkFileForUploadForTest(
-        huge,
-        chunkSize: 256 * 1024,
-      );
-      expect(hugeChunks.length, equals(12));
-      expect(
-        hugeChunks.fold<int>(0, (total, chunk) => total + chunk.length),
-        equals(huge.length),
-      );
-    });
+        final huge = Uint8List(3 * 1024 * 1024);
+        final hugeChunks = AgentService.chunkFileForUploadForTest(
+          huge,
+          chunkSize: 256 * 1024,
+        );
+        expect(hugeChunks.length, equals(12));
+        expect(
+          hugeChunks.fold<int>(0, (total, chunk) => total + chunk.length),
+          equals(huge.length),
+        );
+      },
+    );
 
-    test('UP2: upload path resolution rejects symlinks outside the workspace', () async {
-      final tempDir = Directory.systemTemp.createTempSync('up2_test');
-      final workspace = Directory('${tempDir.path}/workspace')..createSync();
-      final outside = File('${tempDir.path}/outside.txt')..writeAsStringSync('secret');
-      Link('${workspace.path}/escape.txt').createSync(outside.path);
-      final inside = File('${workspace.path}/inside.txt')..writeAsStringSync('safe');
-      final pinnedWorkspace = Link('${tempDir.path}/pinned-workspace');
-      pinnedWorkspace.createSync(workspace.path);
-      final session = ChatSession(
-        id: 'up2',
-        title: 'UP2',
-        model: 'm',
-        mode: 'auto',
-        workspaceFolder: workspace.path,
-      );
-      app.sessions.insert(0, session);
-      app.activeSessionId = session.id;
-      AgentService.setRunSessionForTest(session.id);
-      addTearDown(() {
-        AgentService.setRunSessionForTest('');
-        app.sessions.removeWhere((s) => s.id == session.id);
-        tempDir.deleteSync(recursive: true);
-      });
+    test(
+      'UP2: upload path resolution rejects symlinks outside the workspace',
+      () async {
+        final tempDir = Directory.systemTemp.createTempSync('up2_test');
+        final workspace = Directory('${tempDir.path}/workspace')..createSync();
+        final outside = File('${tempDir.path}/outside.txt')
+          ..writeAsStringSync('secret');
+        Link('${workspace.path}/escape.txt').createSync(outside.path);
+        final inside = File('${workspace.path}/inside.txt')
+          ..writeAsStringSync('safe');
+        final pinnedWorkspace = Link('${tempDir.path}/pinned-workspace');
+        pinnedWorkspace.createSync(workspace.path);
+        final session = ChatSession(
+          id: 'up2',
+          title: 'UP2',
+          model: 'm',
+          mode: 'auto',
+          workspaceFolder: workspace.path,
+        );
+        app.sessions.insert(0, session);
+        app.activeSessionId = session.id;
+        AgentService.setRunSessionForTest(session.id);
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((s) => s.id == session.id);
+          tempDir.deleteSync(recursive: true);
+        });
 
-      expect(
-        await AgentService.I.dispatchForTest('browser_upload', {
-          'selector': 'input[type=file]',
-          'path': 'escape.txt',
-        }),
-        contains('path escapes the session workspace'),
-      );
-      expect(
-        await AgentService.resolveBrowserUploadPathForTest(
-          Directory(pinnedWorkspace.path),
-          'inside.txt',
-        ),
-        await inside.resolveSymbolicLinks(),
-      );
-    });
+        expect(
+          await AgentService.I.dispatchForTest('browser_upload', {
+            'selector': 'input[type=file]',
+            'path': 'escape.txt',
+          }),
+          contains('path escapes the session workspace'),
+        );
+        expect(
+          await AgentService.resolveBrowserUploadPathForTest(
+            Directory(pinnedWorkspace.path),
+            'inside.txt',
+          ),
+          await inside.resolveSymbolicLinks(),
+        );
+      },
+    );
 
     test('UP3: upload finalize JavaScript safely embeds quoted selectors', () {
       const selector = "[name='attachment']";
@@ -2916,115 +3128,155 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       final tools = AgentService.I.toolsForTest();
       final toolMap = {
         for (final t in tools)
-          t['function']['name'] as String: t['function'] as Map<String, dynamic>
+          t['function']['name'] as String:
+              t['function'] as Map<String, dynamic>,
       };
 
-      final scrollParams = toolMap['browser_scroll']!['parameters']['properties'] as Map;
+      final scrollParams =
+          toolMap['browser_scroll']!['parameters']['properties'] as Map;
       expect(scrollParams.containsKey('selector'), isTrue);
 
-      final waitParams = toolMap['browser_wait_for']!['parameters']['properties'] as Map;
+      final waitParams =
+          toolMap['browser_wait_for']!['parameters']['properties'] as Map;
       expect(waitParams.containsKey('selector'), isTrue);
       expect(waitParams.containsKey('state'), isTrue);
 
-      final dragParams = toolMap['browser_drag']!['parameters']['properties'] as Map;
+      final dragParams =
+          toolMap['browser_drag']!['parameters']['properties'] as Map;
       expect(dragParams.containsKey('steps'), isTrue);
 
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       expect(src, contains('el.scrollBy({top:'));
       expect(src, contains('totalSteps'));
-      expect(src, contains("tag + ' | ' + text + ' | ' + cs + ' | ' + role + ' | ' + stateStr"));
+      expect(
+        src,
+        contains(
+          "tag + ' | ' + text + ' | ' + cs + ' | ' + role + ' | ' + stateStr",
+        ),
+      );
     });
 
     test('desktop sets UA before first load and recreates on toggle', () async {
       final fullSrc = File('lib/core/agent_service.dart').readAsStringSync();
       final src = readAgentServiceSourceForTest();
-      expect(src.indexOf('setUserAgent(desktopUA)') < src.indexOf('loadRequest'), isTrue);
+      expect(
+        src.indexOf('setUserAgent(desktopUA)') < src.indexOf('loadRequest'),
+        isTrue,
+      );
       expect(fullSrc.contains('recreateControllerForDesktopToggle'), isTrue);
     });
 
-    test('real desktop viewport platform channel and documentation copy are present', () async {
-      final agentSrc = File('lib/core/agent_service.dart').readAsStringSync();
-      final settingsSrc = File('lib/ui/settings_screen.dart').readAsStringSync();
-      const honestCopy = 'Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable)';
+    test(
+      'real desktop viewport platform channel and documentation copy are present',
+      () async {
+        final agentSrc = File('lib/core/agent_service.dart').readAsStringSync();
+        final settingsSrc = File(
+          'lib/ui/settings_screen.dart',
+        ).readAsStringSync();
+        const honestCopy =
+            'Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable)';
 
-      expect(agentSrc, contains(honestCopy));
-      expect(settingsSrc, contains(honestCopy));
-      expect(agentSrc, contains("MethodChannel('ovid/webview')"));
-      expect(agentSrc, contains('setDesktopViewport'));
-      expect(agentSrc, contains('applyDesktopViewport'));
+        expect(agentSrc, contains(honestCopy));
+        expect(settingsSrc, contains(honestCopy));
+        expect(agentSrc, contains("MethodChannel('ovid/webview')"));
+        expect(agentSrc, contains('setDesktopViewport'));
+        expect(agentSrc, contains('applyDesktopViewport'));
 
-      final kotlinHandler = File('android/app/src/main/kotlin/com/dhanuk/ovidai/OvidWebViewHandler.kt').readAsStringSync();
-      expect(kotlinHandler, contains('"ovid/webview"'));
-      expect(kotlinHandler, contains('"setDesktopViewport"'));
-      expect(kotlinHandler, contains('useWideViewPort'));
-      expect(kotlinHandler, contains('loadWithOverviewMode'));
-      expect(kotlinHandler, contains('setSupportMultipleWindows'));
-    });
+        final kotlinHandler = File(
+          'android/app/src/main/kotlin/com/dhanuk/ovidai/OvidWebViewHandler.kt',
+        ).readAsStringSync();
+        expect(kotlinHandler, contains('"ovid/webview"'));
+        expect(kotlinHandler, contains('"setDesktopViewport"'));
+        expect(kotlinHandler, contains('useWideViewPort'));
+        expect(kotlinHandler, contains('loadWithOverviewMode'));
+        expect(kotlinHandler, contains('setSupportMultipleWindows'));
+      },
+    );
 
-    test('applyDesktopViewport dispatches setDesktopViewport with enabled flag over ovid/webview', () async {
-      final calls = <MethodCall>[];
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
-        const MethodChannel('ovid/webview'),
-        (call) async {
-          calls.add(call);
-          if (call.method == 'setDesktopViewport') {
-            return {'applied': true, 'enabled': call.arguments['enabled']};
-          }
-          return null;
-        },
-      );
-      addTearDown(() {
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
-          const MethodChannel('ovid/webview'),
-          null,
+    test(
+      'applyDesktopViewport dispatches setDesktopViewport with enabled flag over ovid/webview',
+      () async {
+        final calls = <MethodCall>[];
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(const MethodChannel('ovid/webview'), (
+              call,
+            ) async {
+              calls.add(call);
+              if (call.method == 'setDesktopViewport') {
+                return {'applied': true, 'enabled': call.arguments['enabled']};
+              }
+              return null;
+            });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(
+                const MethodChannel('ovid/webview'),
+                null,
+              );
+        });
+
+        final resDesktop = await AgentService.applyDesktopViewport(true);
+        expect(resDesktop, isTrue);
+        expect(calls.last.arguments, {'enabled': true});
+
+        final resMobile = await AgentService.applyDesktopViewport(false);
+        expect(resMobile, isTrue);
+        expect(calls.last.arguments, {'enabled': false});
+      },
+    );
+
+    test(
+      'BRD: browser_desktop denied read-only and plan mode; setTabDesktopMode updates zoom and UA state',
+      () async {
+        final app = AppState.I;
+        final s = ChatSession(id: 'brd', title: 'S', model: 'm', mode: 'safe');
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        AgentService.setRunSessionForTest(s.id);
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((x) => x.id == 'brd');
+        });
+
+        // 1. Read-only gate
+        expect(
+          await AgentService.I.dispatchForTest('browser_desktop', {
+            'mode': 'desktop',
+          }),
+          contains('READ-ONLY MODE'),
         );
-      });
 
-      final resDesktop = await AgentService.applyDesktopViewport(true);
-      expect(resDesktop, isTrue);
-      expect(calls.last.arguments, {'enabled': true});
+        // 2. Plan mode gate
+        s.mode = AgentMode.auto.name;
+        s.planMode = true;
+        expect(
+          await AgentService.I.dispatchForTest('browser_desktop', {
+            'mode': 'desktop',
+          }),
+          contains('PLAN MODE'),
+        );
+        s.planMode = false;
 
-      final resMobile = await AgentService.applyDesktopViewport(false);
-      expect(resMobile, isTrue);
-      expect(calls.last.arguments, {'enabled': false});
-    });
+        // 3. Tab default and setTabDesktopMode logic
+        final tab = BrowserTab(url: 'https://example.com');
+        expect(tab.desktopMode, app.browserDesktopMode);
 
-    test('BRD: browser_desktop denied read-only and plan mode; setTabDesktopMode updates zoom and UA state', () async {
-      final app = AppState.I;
-      final s = ChatSession(id: 'brd', title: 'S', model: 'm', mode: 'safe');
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      AgentService.setRunSessionForTest(s.id);
-      addTearDown(() {
-        AgentService.setRunSessionForTest('');
-        app.sessions.removeWhere((x) => x.id == 'brd');
-      });
+        await AgentService.I.setTabDesktopMode(tab, true, reload: false);
+        expect(tab.desktopMode, isTrue);
+        expect(tab.zoom, closeTo(BrowserTab.devW / 1280, 0.01));
 
-      // 1. Read-only gate
-      expect(await AgentService.I.dispatchForTest('browser_desktop', {'mode': 'desktop'}), contains('READ-ONLY MODE'));
+        await AgentService.I.setTabDesktopMode(tab, false, reload: false);
+        expect(tab.desktopMode, isFalse);
+        expect(tab.zoom, 1.0);
 
-      // 2. Plan mode gate
-      s.mode = AgentMode.auto.name;
-      s.planMode = true;
-      expect(await AgentService.I.dispatchForTest('browser_desktop', {'mode': 'desktop'}), contains('PLAN MODE'));
-      s.planMode = false;
-
-      // 3. Tab default and setTabDesktopMode logic
-      final tab = BrowserTab(url: 'https://example.com');
-      expect(tab.desktopMode, app.browserDesktopMode);
-
-      await AgentService.I.setTabDesktopMode(tab, true, reload: false);
-      expect(tab.desktopMode, isTrue);
-      expect(tab.zoom, closeTo(BrowserTab.devW / 1280, 0.01));
-
-      await AgentService.I.setTabDesktopMode(tab, false, reload: false);
-      expect(tab.desktopMode, isFalse);
-      expect(tab.zoom, 1.0);
-
-      // 4. Tool exists in roster
-      final tools = AgentService.I.toolsForTest();
-      expect(tools.any((t) => (t['function'] as Map)['name'] == 'browser_desktop'), isTrue);
-    });
+        // 4. Tool exists in roster
+        final tools = AgentService.I.toolsForTest();
+        expect(
+          tools.any((t) => (t['function'] as Map)['name'] == 'browser_desktop'),
+          isTrue,
+        );
+      },
+    );
 
     test('subagent child inherits parent mode and cannot escalate', () async {
       final app = AppState.I;
@@ -3082,16 +3334,15 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         expect(session.mode, 'auto');
         agent.mode = AgentMode.control;
         expect(agent.childModeForTest(), AgentMode.drive);
-        expect(
-          agent.childModeForTest(modeName: 'control'),
-          AgentMode.drive,
-        );
+        expect(agent.childModeForTest(modeName: 'control'), AgentMode.drive);
 
         final dispatchTool = agent.toolsForTest().firstWhere(
           (tool) => (tool['function'] as Map)['name'] == 'dispatch_agent',
         );
-        final modeSchema = ((dispatchTool['function'] as Map)['parameters']
-            as Map)['properties']['mode'] as Map;
+        final modeSchema =
+            ((dispatchTool['function'] as Map)['parameters']
+                    as Map)['properties']['mode']
+                as Map;
         expect(modeSchema['enum'], contains('control'));
 
         expect(AppState.sanitizeColdStartMode('control'), 'drive');
@@ -3118,173 +3369,449 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         app.activeSessionId = null;
         app.sessions.removeWhere((x) => x.id == s.id);
       });
-      const names = {'device_read', 'device_tap', 'device_type', 'device_swipe', 'device_system_nav', 'device_screenshot'};
+      const names = {
+        'device_read',
+        'device_tap',
+        'device_type',
+        'device_swipe',
+        'device_system_nav',
+        'device_screenshot',
+      };
       final schemas = <String, Map>{};
       for (final tool in AgentService.I.toolsForTest()) {
         final fn = tool['function'] as Map;
-        if (names.contains(fn['name'])) schemas[fn['name'] as String] = fn['parameters'] as Map;
+        if (names.contains(fn['name'])) {
+          schemas[fn['name'] as String] = fn['parameters'] as Map;
+        }
       }
       expect(schemas.keys.toSet(), names);
       for (final schema in schemas.values) {
         expect(schema['additionalProperties'], isFalse);
       }
-      expect((schemas['device_read']!['properties'] as Map)['mode']['enum'], ['delta', 'full']);
-      expect((schemas['device_tap']!['properties'] as Map).keys, containsAll(['node', 'x', 'y']));
+      expect((schemas['device_read']!['properties'] as Map)['mode']['enum'], [
+        'delta',
+        'full',
+      ]);
+      expect(
+        (schemas['device_tap']!['properties'] as Map).keys,
+        containsAll(['node', 'x', 'y']),
+      );
       expect(schemas['device_tap']!['anyOf'], [
-        {'required': ['node']},
-        {'required': ['x', 'y']},
+        {
+          'required': ['node'],
+        },
+        {
+          'required': ['x', 'y'],
+        },
       ]);
       expect(schemas['device_type']!['required'], ['text']);
-      expect(schemas['device_swipe']!['required'], ['from_x', 'from_y', 'to_x', 'to_y']);
-      expect((schemas['device_system_nav']!['properties'] as Map)['action']['enum'], ['back', 'home', 'recents', 'notifications', 'quick_settings']);
+      expect(schemas['device_swipe']!['required'], [
+        'from_x',
+        'from_y',
+        'to_x',
+        'to_y',
+      ]);
+      expect(
+        (schemas['device_system_nav']!['properties'] as Map)['action']['enum'],
+        ['back', 'home', 'recents', 'notifications', 'quick_settings'],
+      );
       expect(schemas['device_screenshot']!['properties'], isEmpty);
       for (final name in names) {
-        expect(await AgentService.I.dispatchForTest(name, const {}), contains('READ-ONLY MODE'), reason: name);
+        expect(
+          await AgentService.I.dispatchForTest(name, const {}),
+          contains('READ-ONLY MODE'),
+          reason: name,
+        );
       }
       s.mode = 'auto';
-      expect(await AgentService.I.dispatchForTest('device_read', const {}), contains('requires Control mode'));
-      s..mode = 'control'..planMode = true;
-      expect(await AgentService.I.dispatchForTest('device_read', const {}), contains('PLAN MODE ACTIVE'));
-      s..planMode = false..parentId = 'parent';
-      expect(await AgentService.I.dispatchForTest('device_read', const {}), contains('Subagents cannot control the device'));
+      expect(
+        await AgentService.I.dispatchForTest('device_read', const {}),
+        contains('requires Control mode'),
+      );
+      s
+        ..mode = 'control'
+        ..planMode = true;
+      expect(
+        await AgentService.I.dispatchForTest('device_read', const {}),
+        contains('PLAN MODE ACTIVE'),
+      );
+      s
+        ..planMode = false
+        ..parentId = 'parent';
+      expect(
+        await AgentService.I.dispatchForTest('device_read', const {}),
+        contains('Subagents cannot control the device'),
+      );
     });
 
-    test('CTRL4: node reads format full, delta, unchanged and empty without implicit screenshots', () {
-      final full = DeviceControlService.formatReadResultForTest({'status': 'ok', 'full': true, 'package': 'com.example', 'added': [{'handle': 12, 'class': 'Button', 'text': 'Send', 'bounds': [880,1520,1010,1600], 'clickable': true}], 'changed': [], 'removed': []});
-      expect(full, contains('[12] Button "Send"'));
-      expect(full, contains('clickable'));
-      expect(full, isNot(contains('device_screenshot')));
-      final delta = DeviceControlService.formatReadResultForTest({'status': 'ok', 'full': false, 'package': 'com.example', 'added': [{'handle': 22, 'class': 'Toast', 'text': 'Message sent'}], 'changed': [{'handle': 13, 'class': 'EditText'}], 'removed': [12]});
-      expect(delta, contains('+ [22] Toast "Message sent"'));
-      expect(delta, contains('~ [13] EditText'));
-      expect(delta, contains('- [12]'));
-      expect(DeviceControlService.formatReadResultForTest({'status': 'unchanged'}), 'screen unchanged');
-      expect(DeviceControlService.formatReadResultForTest({'status': 'ok', 'full': true, 'package': 'com.game', 'added': [], 'changed': [], 'removed': []}), contains('Use device_screenshot'));
-      expect(DeviceControlService.formatReadResultForTest({'status': 'ok', 'full': false, 'added': [], 'changed': [], 'removed': [4]}), isNot(contains('no readable structure')));
-    });
+    test(
+      'CTRL4: node reads format full, delta, unchanged and empty without implicit screenshots',
+      () {
+        final full = DeviceControlService.formatReadResultForTest({
+          'status': 'ok',
+          'full': true,
+          'package': 'com.example',
+          'added': [
+            {
+              'handle': 12,
+              'class': 'Button',
+              'text': 'Send',
+              'bounds': [880, 1520, 1010, 1600],
+              'clickable': true,
+            },
+          ],
+          'changed': [],
+          'removed': [],
+        });
+        expect(full, contains('[12] Button "Send"'));
+        expect(full, contains('clickable'));
+        expect(full, isNot(contains('device_screenshot')));
+        final delta = DeviceControlService.formatReadResultForTest({
+          'status': 'ok',
+          'full': false,
+          'package': 'com.example',
+          'added': [
+            {'handle': 22, 'class': 'Toast', 'text': 'Message sent'},
+          ],
+          'changed': [
+            {'handle': 13, 'class': 'EditText'},
+          ],
+          'removed': [12],
+        });
+        expect(delta, contains('+ [22] Toast "Message sent"'));
+        expect(delta, contains('~ [13] EditText'));
+        expect(delta, contains('- [12]'));
+        expect(
+          DeviceControlService.formatReadResultForTest({'status': 'unchanged'}),
+          'screen unchanged',
+        );
+        expect(
+          DeviceControlService.formatReadResultForTest({
+            'status': 'ok',
+            'full': true,
+            'package': 'com.game',
+            'added': [],
+            'changed': [],
+            'removed': [],
+          }),
+          contains('Use device_screenshot'),
+        );
+        expect(
+          DeviceControlService.formatReadResultForTest({
+            'status': 'ok',
+            'full': false,
+            'added': [],
+            'changed': [],
+            'removed': [4],
+          }),
+          isNot(contains('no readable structure')),
+        );
+      },
+    );
 
     test('SAFE1: sensitive targets and disclosure are explicit', () {
-      expect(DeviceControlService.isSensitiveTargetForTest(packageName: 'com.paypal.android.p2pmobile'), isTrue);
-      expect(DeviceControlService.isSensitiveTargetForTest(url: 'https://payments.wise.com/send'), isTrue);
-      expect(DeviceControlService.isSensitiveTargetForTest(packageName: 'com.example.notes'), isFalse);
+      expect(
+        DeviceControlService.isSensitiveTargetForTest(
+          packageName: 'com.paypal.android.p2pmobile',
+        ),
+        isTrue,
+      );
+      expect(
+        DeviceControlService.isSensitiveTargetForTest(
+          url: 'https://payments.wise.com/send',
+        ),
+        isTrue,
+      );
+      expect(
+        DeviceControlService.isSensitiveTargetForTest(
+          packageName: 'com.example.notes',
+        ),
+        isFalse,
+      );
       expect(kControlModeDisclosure, contains('Back / Home / Recents'));
-      expect(kControlModeDisclosure, contains('may be stored in this chat or its workspace'));
-      expect(kControlModeDisclosure, contains('provider retention follows their policy'));
+      expect(
+        kControlModeDisclosure,
+        contains('may be stored in this chat or its workspace'),
+      );
+      expect(
+        kControlModeDisclosure,
+        contains('provider retention follows their policy'),
+      );
       expect(kControlModeDisclosure, isNot(contains('never stored or shared')));
       expect(kControlModeDisclosure, contains('banking or payment screens'));
     });
 
-    test('CTRL5: live-package safety blocks actions and no action takes a screenshot', () async {
-      final s = ChatSession(id: 'ctrl5', title: 'S', model: 'm', mode: 'control');
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      AgentService.setRunSessionForTest(s.id);
-      const channel = MethodChannel('ovid/device-control-test-ctrl5');
-      final calls = <MethodCall>[];
-      var packageName = 'com.example.notes';
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
-        calls.add(call);
-        if (call.method == 'deviceRead') return {'status': 'ok', 'full': false, 'package': packageName, 'added': <dynamic>[], 'changed': <dynamic>[], 'removed': <dynamic>[]};
-        return true;
-      });
-      DeviceControlService.setMethodChannelForTest(channel);
-      addTearDown(() {
-        DeviceControlService.setMethodChannelForTest(null);
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
-        AgentService.setRunSessionForTest('');
-        app.activeSessionId = null;
-        app.sessions.removeWhere((x) => x.id == s.id);
-      });
-      expect(await AgentService.I.dispatchForTest('device_tap', {'node': 7}), contains('tapped node 7'));
-      expect(calls.where((c) => c.method == 'deviceScreenshot'), isEmpty);
-      packageName = 'com.paypal.android.p2pmobile';
-      expect(await AgentService.I.dispatchForTest('device_swipe', {'from_x': 1, 'from_y': 2, 'to_x': 3, 'to_y': 4}), contains('sensitive'));
-      expect(calls.where((c) => c.method == 'deviceSwipe'), isEmpty);
-      packageName = 'com.dhanuk.ovidai';
-      AgentService.I.browserTabsFor(s.id)..clear()..add(BrowserTab(url: 'https://chase.com/account'));
-      expect(await AgentService.I.dispatchForTest('device_type', {'text': 'hello'}), contains('sensitive'));
-      expect(calls.where((c) => c.method == 'deviceType'), isEmpty);
-      packageName = '';
-      expect(await AgentService.I.dispatchForTest('device_tap', {'node': 9}), contains('could not verify'));
-      expect(calls.where((c) => c.method == 'deviceTap').length, 1);
-    });
+    test(
+      'CTRL5: live-package safety blocks actions and no action takes a screenshot',
+      () async {
+        final s = ChatSession(
+          id: 'ctrl5',
+          title: 'S',
+          model: 'm',
+          mode: 'control',
+        );
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        AgentService.setRunSessionForTest(s.id);
+        const channel = MethodChannel('ovid/device-control-test-ctrl5');
+        final calls = <MethodCall>[];
+        var packageName = 'com.example.notes';
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, (call) async {
+              calls.add(call);
+              if (call.method == 'deviceRead') {
+                return {
+                  'status': 'ok',
+                  'full': false,
+                  'package': packageName,
+                  'added': <dynamic>[],
+                  'changed': <dynamic>[],
+                  'removed': <dynamic>[],
+                };
+              }
+              return true;
+            });
+        DeviceControlService.setMethodChannelForTest(channel);
+        addTearDown(() {
+          DeviceControlService.setMethodChannelForTest(null);
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(channel, null);
+          AgentService.setRunSessionForTest('');
+          app.activeSessionId = null;
+          app.sessions.removeWhere((x) => x.id == s.id);
+        });
+        expect(
+          await AgentService.I.dispatchForTest('device_tap', {'node': 7}),
+          contains('tapped node 7'),
+        );
+        expect(calls.where((c) => c.method == 'deviceScreenshot'), isEmpty);
+        packageName = 'com.paypal.android.p2pmobile';
+        expect(
+          await AgentService.I.dispatchForTest('device_swipe', {
+            'from_x': 1,
+            'from_y': 2,
+            'to_x': 3,
+            'to_y': 4,
+          }),
+          contains('sensitive'),
+        );
+        expect(calls.where((c) => c.method == 'deviceSwipe'), isEmpty);
+        packageName = 'com.dhanuk.ovidai';
+        AgentService.I.browserTabsFor(s.id)
+          ..clear()
+          ..add(BrowserTab(url: 'https://chase.com/account'));
+        expect(
+          await AgentService.I.dispatchForTest('device_type', {
+            'text': 'hello',
+          }),
+          contains('sensitive'),
+        );
+        expect(calls.where((c) => c.method == 'deviceType'), isEmpty);
+        packageName = '';
+        expect(
+          await AgentService.I.dispatchForTest('device_tap', {'node': 9}),
+          contains('could not verify'),
+        );
+        expect(calls.where((c) => c.method == 'deviceTap').length, 1);
+      },
+    );
 
-    test('CTRL6: handlers dispatch, audit and copy screenshots into workspace', () async {
-      final work = Directory.systemTemp.createTempSync('ovid-control-work');
-      final native = File('${work.parent.path}/native-control-${DateTime.now().microsecondsSinceEpoch}.png')..writeAsBytesSync([137, 80, 78, 71]);
-      final s = ChatSession(id: 'ctrl6', title: 'S', model: 'gpt-4o', mode: 'control', workspaceFolder: work.path);
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      AgentService.setRunSessionForTest(s.id);
-      const channel = MethodChannel('ovid/device-control-test-ctrl6');
-      final calls = <MethodCall>[];
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
-        calls.add(call);
-        if (call.method == 'deviceRead') return {'status': 'ok', 'full': false, 'package': 'com.example.notes', 'added': <dynamic>[], 'changed': <dynamic>[], 'removed': <dynamic>[]};
-        if (call.method == 'deviceScreenshot') return native.path;
-        return true;
-      });
-      DeviceControlService.setMethodChannelForTest(channel);
-      final beforeEvents = AgentService.I.events.length;
-      addTearDown(() {
-        DeviceControlService.setMethodChannelForTest(null);
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
-        AgentService.setRunSessionForTest('');
-        app.activeSessionId = null;
-        app.sessions.removeWhere((x) => x.id == s.id);
-        if (work.existsSync()) work.deleteSync(recursive: true);
-        if (native.existsSync()) native.deleteSync();
-      });
-      expect(await AgentService.I.dispatchForTest('device_read', {}), contains('Use device_screenshot'));
-      expect(await AgentService.I.dispatchForTest('device_tap', {'x': 10, 'y': 20, 'path': 'fallthrough.txt'}), contains('tapped'));
-      expect(await AgentService.I.dispatchForTest('device_type', {'node': 2, 'text': 'hello', 'submit': true}), contains('typed'));
-      expect(await AgentService.I.dispatchForTest('device_swipe', {'from_x': 1, 'from_y': 2, 'to_x': 3, 'to_y': 4}), contains('swiped'));
-      expect(await AgentService.I.dispatchForTest('device_system_nav', {'action': 'back'}), contains('back'));
-      final screenshot = await AgentService.I.dispatchForTest('device_screenshot', {});
-      final path = RegExp(r'(/[^\n]+\.png)').firstMatch(screenshot)!.group(1)!;
-      expect(screenshot, contains('attached to the next model request'));
-      expect(AgentService.containedPath(work, path), path);
-      expect(File(path).readAsBytesSync(), [137, 80, 78, 71]);
-      expect(AgentService.I.producedFiles.any((e) => e.path == path), isTrue);
-      final messages = <Map<String, dynamic>>[];
-      AgentService.I.appendPendingVisionMessagesForTest(messages);
-      expect(messages, hasLength(1));
-      final content = messages.single['content'] as List;
-      expect(content.first, {'type': 'text', 'text': contains('device_screenshot')});
-      expect((content.last as Map)['type'], 'image_url');
-      expect((((content.last as Map)['image_url'] as Map)['url'] as String), startsWith('data:image/png;base64,iVBORw=='));
+    test(
+      'CTRL6: handlers dispatch, audit and copy screenshots into workspace',
+      () async {
+        final work = Directory.systemTemp.createTempSync('ovid-control-work');
+        final native = File(
+          '${work.parent.path}/native-control-${DateTime.now().microsecondsSinceEpoch}.png',
+        )..writeAsBytesSync([137, 80, 78, 71]);
+        final s = ChatSession(
+          id: 'ctrl6',
+          title: 'S',
+          model: 'gpt-4o',
+          mode: 'control',
+          workspaceFolder: work.path,
+        );
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        AgentService.setRunSessionForTest(s.id);
+        const channel = MethodChannel('ovid/device-control-test-ctrl6');
+        final calls = <MethodCall>[];
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, (call) async {
+              calls.add(call);
+              if (call.method == 'deviceRead') {
+                return {
+                  'status': 'ok',
+                  'full': false,
+                  'package': 'com.example.notes',
+                  'added': <dynamic>[],
+                  'changed': <dynamic>[],
+                  'removed': <dynamic>[],
+                };
+              }
+              if (call.method == 'deviceScreenshot') return native.path;
+              if (call.method == 'deviceCopyScreenshot') {
+                final args = call.arguments as Map;
+                final destination =
+                    '${args['directoryPath']}/${args['fileName']}';
+                await File(args['sourcePath'] as String).copy(destination);
+                return destination;
+              }
+              return true;
+            });
+        DeviceControlService.setMethodChannelForTest(channel);
+        final beforeEvents = AgentService.I.events.length;
+        addTearDown(() {
+          DeviceControlService.setMethodChannelForTest(null);
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(channel, null);
+          AgentService.setRunSessionForTest('');
+          app.activeSessionId = null;
+          app.sessions.removeWhere((x) => x.id == s.id);
+          if (work.existsSync()) work.deleteSync(recursive: true);
+          if (native.existsSync()) native.deleteSync();
+        });
+        expect(
+          await AgentService.I.dispatchForTest('device_read', {}),
+          contains('Use device_screenshot'),
+        );
+        expect(
+          await AgentService.I.dispatchForTest('device_tap', {
+            'x': 10,
+            'y': 20,
+            'path': 'fallthrough.txt',
+          }),
+          contains('tapped'),
+        );
+        expect(
+          await AgentService.I.dispatchForTest('device_type', {
+            'node': 2,
+            'text': 'hello',
+            'submit': true,
+          }),
+          contains('typed'),
+        );
+        expect(
+          await AgentService.I.dispatchForTest('device_swipe', {
+            'from_x': 1,
+            'from_y': 2,
+            'to_x': 3,
+            'to_y': 4,
+          }),
+          contains('swiped'),
+        );
+        expect(
+          await AgentService.I.dispatchForTest('device_system_nav', {
+            'action': 'back',
+          }),
+          contains('back'),
+        );
+        final screenshot = await AgentService.I.dispatchForTest(
+          'device_screenshot',
+          {},
+        );
+        final path = RegExp(
+          r'(/[^\n]+\.png)',
+        ).firstMatch(screenshot)!.group(1)!;
+        expect(screenshot, contains('attached to the next model request'));
+        expect(AgentService.containedPath(work, path), path);
+        expect(File(path).readAsBytesSync(), [137, 80, 78, 71]);
+        expect(AgentService.I.producedFiles.any((e) => e.path == path), isTrue);
+        final messages = <Map<String, dynamic>>[];
+        AgentService.I.appendPendingVisionMessagesForTest(messages);
+        expect(messages, hasLength(1));
+        final content = messages.single['content'] as List;
+        expect(content.first, {
+          'type': 'text',
+          'text': contains('device_screenshot'),
+        });
+        expect((content.last as Map)['type'], 'image_url');
+        expect(
+          (((content.last as Map)['image_url'] as Map)['url'] as String),
+          startsWith('data:image/png;base64,iVBORw=='),
+        );
 
-      final readImage = await AgentService.I.dispatchForTest('read_image', {'path': path});
-      expect(readImage, contains('attached to the next model request'));
-      final readMessages = <Map<String, dynamic>>[];
-      AgentService.I.appendPendingVisionMessagesForTest(readMessages);
-      expect(readMessages, hasLength(1));
-      expect((((readMessages.single['content'] as List).last as Map)['image_url'] as Map)['url'], startsWith('data:image/png;base64,iVBORw=='));
-      expect(calls.map((c) => c.method), containsAll(['deviceTap', 'deviceType', 'deviceSwipe', 'deviceSystemNav', 'deviceScreenshot']));
-      expect(AgentService.I.events.skip(beforeEvents).where((e) => e.kind == 'shell' && e.text.startsWith('device_')).length, 6);
-      expect(File('${work.path}/fallthrough.txt').existsSync(), isFalse);
-    });
+        final readImage = await AgentService.I.dispatchForTest('read_image', {
+          'path': path,
+        });
+        expect(readImage, contains('attached to the next model request'));
+        final readMessages = <Map<String, dynamic>>[];
+        AgentService.I.appendPendingVisionMessagesForTest(readMessages);
+        expect(readMessages, hasLength(1));
+        expect(
+          (((readMessages.single['content'] as List).last as Map)['image_url']
+              as Map)['url'],
+          startsWith('data:image/png;base64,iVBORw=='),
+        );
+        expect(
+          calls.map((c) => c.method),
+          containsAll([
+            'deviceTap',
+            'deviceType',
+            'deviceSwipe',
+            'deviceSystemNav',
+            'deviceScreenshot',
+          ]),
+        );
+        expect(
+          AgentService.I.events
+              .skip(beforeEvents)
+              .where((e) => e.kind == 'shell' && e.text.startsWith('device_'))
+              .length,
+          6,
+        );
+        expect(File('${work.path}/fallthrough.txt').existsSync(), isFalse);
+      },
+    );
 
     test('CTRL6b: screenshots reject symlinked workspace destinations', () async {
-      final work = Directory.systemTemp.createTempSync('ovid-control-link-work');
-      final outside = Directory.systemTemp.createTempSync('ovid-control-link-out');
-      final native = File('${work.parent.path}/native-link-${DateTime.now().microsecondsSinceEpoch}.png')
-        ..writeAsBytesSync([137, 80, 78, 71]);
+      final work = Directory.systemTemp.createTempSync(
+        'ovid-control-link-work',
+      );
+      final outside = Directory.systemTemp.createTempSync(
+        'ovid-control-link-out',
+      );
+      final native = File(
+        '${work.parent.path}/native-link-${DateTime.now().microsecondsSinceEpoch}.png',
+      )..writeAsBytesSync([137, 80, 78, 71]);
       await Link('${work.path}/device-screenshots').create(outside.path);
-      final s = ChatSession(id: 'ctrl6b', title: 'S', model: 'gpt-4o', mode: 'control', workspaceFolder: work.path);
+      final s = ChatSession(
+        id: 'ctrl6b',
+        title: 'S',
+        model: 'gpt-4o',
+        mode: 'control',
+        workspaceFolder: work.path,
+      );
       app.sessions.insert(0, s);
       app.activeSessionId = s.id;
       AgentService.setRunSessionForTest(s.id);
       const channel = MethodChannel('ovid/device-control-test-ctrl6b');
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
-        if (call.method == 'deviceRead') return {'status': 'ok', 'full': false, 'package': 'com.example.notes', 'added': <dynamic>[], 'changed': <dynamic>[], 'removed': <dynamic>[]};
-        if (call.method == 'deviceScreenshot') return native.path;
-        return true;
-      });
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'deviceRead') {
+              return {
+                'status': 'ok',
+                'full': false,
+                'package': 'com.example.notes',
+                'added': <dynamic>[],
+                'changed': <dynamic>[],
+                'removed': <dynamic>[],
+              };
+            }
+            if (call.method == 'deviceScreenshot') return native.path;
+            if (call.method == 'deviceCopyScreenshot') {
+              final args = call.arguments as Map;
+              final destination =
+                  '${args['directoryPath']}/${args['fileName']}';
+              await File(args['sourcePath'] as String).copy(destination);
+              return destination;
+            }
+            return true;
+          });
       DeviceControlService.setMethodChannelForTest(channel);
       addTearDown(() {
         DeviceControlService.setMethodChannelForTest(null);
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null);
         AgentService.setRunSessionForTest('');
         app.activeSessionId = null;
         app.sessions.removeWhere((x) => x.id == s.id);
@@ -3293,99 +3820,403 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         if (native.existsSync()) native.deleteSync();
       });
 
-      expect(await AgentService.I.dispatchForTest('device_screenshot', {}), contains('unsafe workspace path'));
+      expect(
+        await AgentService.I.dispatchForTest('device_screenshot', {}),
+        contains('unsafe workspace path'),
+      );
       expect(outside.listSync(), isEmpty);
     });
 
-    test('CTRL6c: text-only models receive an honest screenshot limitation', () async {
-      final work = Directory.systemTemp.createTempSync('ovid-control-text-model');
-      final native = File('${work.parent.path}/native-text-${DateTime.now().microsecondsSinceEpoch}.png')
-        ..writeAsBytesSync([137, 80, 78, 71]);
-      final s = ChatSession(id: 'ctrl6c', title: 'S', model: 'deepseek-chat', mode: 'control', workspaceFolder: work.path);
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      AgentService.setRunSessionForTest(s.id);
-      const channel = MethodChannel('ovid/device-control-test-ctrl6c');
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
-        if (call.method == 'deviceRead') return {'status': 'ok', 'full': false, 'package': 'com.example.notes', 'added': <dynamic>[], 'changed': <dynamic>[], 'removed': <dynamic>[]};
-        if (call.method == 'deviceScreenshot') return native.path;
-        return true;
-      });
-      DeviceControlService.setMethodChannelForTest(channel);
-      addTearDown(() {
-        DeviceControlService.setMethodChannelForTest(null);
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
-        AgentService.setRunSessionForTest('');
-        app.activeSessionId = null;
-        app.sessions.removeWhere((x) => x.id == s.id);
-        if (work.existsSync()) work.deleteSync(recursive: true);
-        if (native.existsSync()) native.deleteSync();
-      });
+    test(
+      'CTRL6c: text-only models receive an honest screenshot limitation',
+      () async {
+        final work = Directory.systemTemp.createTempSync(
+          'ovid-control-text-model',
+        );
+        final native = File(
+          '${work.parent.path}/native-text-${DateTime.now().microsecondsSinceEpoch}.png',
+        )..writeAsBytesSync([137, 80, 78, 71]);
+        final s = ChatSession(
+          id: 'ctrl6c',
+          title: 'S',
+          model: 'deepseek-chat',
+          mode: 'control',
+          workspaceFolder: work.path,
+        );
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        AgentService.setRunSessionForTest(s.id);
+        const channel = MethodChannel('ovid/device-control-test-ctrl6c');
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, (call) async {
+              if (call.method == 'deviceRead') {
+                return {
+                  'status': 'ok',
+                  'full': false,
+                  'package': 'com.example.notes',
+                  'added': <dynamic>[],
+                  'changed': <dynamic>[],
+                  'removed': <dynamic>[],
+                };
+              }
+              if (call.method == 'deviceScreenshot') return native.path;
+              if (call.method == 'deviceCopyScreenshot') {
+                final args = call.arguments as Map;
+                final destination =
+                    '${args['directoryPath']}/${args['fileName']}';
+                await File(args['sourcePath'] as String).copy(destination);
+                return destination;
+              }
+              return true;
+            });
+        DeviceControlService.setMethodChannelForTest(channel);
+        addTearDown(() {
+          DeviceControlService.setMethodChannelForTest(null);
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(channel, null);
+          AgentService.setRunSessionForTest('');
+          app.activeSessionId = null;
+          app.sessions.removeWhere((x) => x.id == s.id);
+          if (work.existsSync()) work.deleteSync(recursive: true);
+          if (native.existsSync()) native.deleteSync();
+        });
 
-      final result = await AgentService.I.dispatchForTest('device_screenshot', {});
-      expect(result, contains('current model cannot read images'));
-      final messages = <Map<String, dynamic>>[];
-      AgentService.I.appendPendingVisionMessagesForTest(messages);
-      expect(messages, isEmpty);
-    });
+        final result = await AgentService.I.dispatchForTest(
+          'device_screenshot',
+          {},
+        );
+        expect(result, contains('current model cannot read images'));
+        final messages = <Map<String, dynamic>>[];
+        AgentService.I.appendPendingVisionMessagesForTest(messages);
+        expect(messages, isEmpty);
+      },
+    );
 
-    testWidgets('CTRL7: Control disclosure permits decline and opens settings only on accept', (tester) async {
-      AgentService.I.debugPauseScheduleTimerForTest(true);
-      final s = ChatSession(id: 'ctrl7', title: 'S', model: 'm', mode: 'auto');
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      const channel = MethodChannel('ovid/device-control-test-ctrl7');
-      final calls = <MethodCall>[];
-      var failSettingsLaunch = true;
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
-        calls.add(call);
-        if (call.method == 'deviceServiceEnabled') return false;
-        if (call.method == 'deviceOpenAccessibilitySettings' && failSettingsLaunch) {
-          throw PlatformException(code: 'SETTINGS_FAILED', message: 'settings unavailable');
+    test(
+      'CTRL6d: vision support defaults false and only allows known image models',
+      () {
+        for (final model in <String>[
+          'gpt-4o',
+          'gpt-4o-mini',
+          'gemini-2.5-pro',
+          'grok-2-vision-1212',
+          'gpt-4o · High',
+          'claude-3-5-sonnet-20241022',
+          'claude-sonnet-4-20250514',
+          'qwen2.5-vl-72b-instruct',
+          // Aggregator ids: vendor prefix and OpenRouter route suffix.
+          'openai/gpt-4o',
+          'google/gemini-2.5-pro',
+          'meta-llama/llama-4-maverick',
+          'meta-llama/llama-4-maverick:free',
+          'anthropic/claude-3-5-sonnet',
+        ]) {
+          expect(
+            AgentService.modelSupportsImages(model),
+            isTrue,
+            reason: model,
+          );
         }
-        return true;
+        for (final model in <String>[
+          '',
+          '   ',
+          ' · Low',
+          'grok-2-1212',
+          // The old substring matcher accepted these: 'vl' matched
+          // mistral-large, 'claude' matched text-only Claude 2.
+          'mistral-large',
+          'deepseek/deepseek-chat-v3.1',
+          'grok-code-fast-1',
+          'claude-2.1',
+          'claude-instant-1.2',
+          'claude-text-latest',
+          'gemini-embedding-001',
+          'gemini-text-bison-001',
+          'custom-chat-model',
+        ]) {
+          expect(
+            AgentService.modelSupportsImages(model),
+            isFalse,
+            reason: model.isEmpty ? '<empty>' : model,
+          );
+        }
+      },
+    );
+
+    test(
+      'CTRL6e: screenshot copy retries one collision and writes through one handle',
+      () async {
+        final work = Directory.systemTemp.createTempSync('ovid-copy-collision');
+        final source = File('${work.path}/source.png')
+          ..writeAsBytesSync([1, 2, 3]);
+        var attempts = 0;
+        DeviceControlService.setScreenshotCopyForTest((
+          sourcePath,
+          directoryPath,
+          fileName,
+        ) async {
+          attempts++;
+          if (attempts == 1) throw const ScreenshotCopyException.collision();
+          final file = File('$directoryPath/$fileName');
+          final output = await file.open(mode: FileMode.write);
+          try {
+            await output.writeFrom(await File(sourcePath).readAsBytes());
+          } finally {
+            await output.close();
+          }
+          return file.path;
+        });
+        addTearDown(() {
+          DeviceControlService.setScreenshotCopyForTest(null);
+          if (work.existsSync()) work.deleteSync(recursive: true);
+        });
+
+        final copied = await DeviceControlService.I
+            .copyScreenshotIntoWorkspaceForTest(source.path, work);
+        expect(attempts, 2);
+        expect(File(copied).readAsBytesSync(), [1, 2, 3]);
+      },
+    );
+
+    test(
+      'CTRL6f: screenshot write failure cleans partial and never retries',
+      () async {
+        final work = Directory.systemTemp.createTempSync(
+          'ovid-copy-write-fail',
+        );
+        final source = File('${work.path}/source.png')
+          ..writeAsBytesSync([1, 2, 3]);
+        var attempts = 0;
+        String? partialPath;
+        DeviceControlService.setScreenshotCopyForTest((
+          sourcePath,
+          directoryPath,
+          fileName,
+        ) async {
+          attempts++;
+          partialPath = '$directoryPath/$fileName';
+          File(partialPath!).writeAsBytesSync([1]);
+          throw const ScreenshotCopyException.write('disk full');
+        });
+        addTearDown(() {
+          DeviceControlService.setScreenshotCopyForTest(null);
+          if (work.existsSync()) work.deleteSync(recursive: true);
+        });
+
+        await expectLater(
+          DeviceControlService.I.copyScreenshotIntoWorkspaceForTest(
+            source.path,
+            work,
+          ),
+          throwsA(isA<ScreenshotCopyException>()),
+        );
+        expect(attempts, 1);
+        expect(File(partialPath!).existsSync(), isFalse);
+      },
+    );
+
+    test(
+      'CTRL6g: screenshot source failure is not retried or cleaned as a partial',
+      () async {
+        final work = Directory.systemTemp.createTempSync(
+          'ovid-copy-source-fail',
+        );
+        var attempts = 0;
+        String? existingPath;
+        DeviceControlService.setScreenshotCopyForTest((
+          sourcePath,
+          directoryPath,
+          fileName,
+        ) async {
+          attempts++;
+          existingPath = '$directoryPath/$fileName';
+          File(existingPath!).writeAsBytesSync([9]);
+          throw const ScreenshotCopyException.source('source missing');
+        });
+        addTearDown(() {
+          DeviceControlService.setScreenshotCopyForTest(null);
+          if (work.existsSync()) work.deleteSync(recursive: true);
+        });
+
+        await expectLater(
+          DeviceControlService.I.copyScreenshotIntoWorkspaceForTest(
+            '${work.path}/missing.png',
+            work,
+          ),
+          throwsA(isA<ScreenshotCopyException>()),
+        );
+        expect(attempts, 1);
+        expect(File(existingPath!).readAsBytesSync(), [9]);
+      },
+    );
+
+    test(
+      'CTRL6h: exhausted screenshot collisions preserve existing files',
+      () async {
+        final work = Directory.systemTemp.createTempSync(
+          'ovid-copy-collisions',
+        );
+        final source = File('${work.path}/source.png')
+          ..writeAsBytesSync([1, 2, 3]);
+        final collisions = <File>[];
+        DeviceControlService.setScreenshotCopyForTest((
+          sourcePath,
+          directoryPath,
+          fileName,
+        ) async {
+          final file = File('$directoryPath/$fileName')..writeAsBytesSync([9]);
+          collisions.add(file);
+          throw const ScreenshotCopyException.collision();
+        });
+        addTearDown(() {
+          DeviceControlService.setScreenshotCopyForTest(null);
+          if (work.existsSync()) work.deleteSync(recursive: true);
+        });
+
+        await expectLater(
+          DeviceControlService.I.copyScreenshotIntoWorkspaceForTest(
+            source.path,
+            work,
+          ),
+          throwsA(isA<ScreenshotCopyException>()),
+        );
+        expect(collisions, hasLength(4));
+        expect(
+          collisions.every((file) => file.readAsBytesSync().single == 9),
+          isTrue,
+        );
+      },
+    );
+
+    test('CTRL6i: native copy failures do not unlink unowned paths', () async {
+      final work = Directory.systemTemp.createTempSync('ovid-copy-native-fail');
+      final source = File('${work.path}/source.png')
+        ..writeAsBytesSync([1, 2, 3]);
+      String? existingPath;
+      DeviceControlService.setScreenshotCopyForTest((
+        sourcePath,
+        directoryPath,
+        fileName,
+      ) async {
+        existingPath = '$directoryPath/$fileName';
+        File(existingPath!).writeAsBytesSync([9]);
+        throw PlatformException(code: 'COPY_FAILED', message: 'source missing');
       });
-      DeviceControlService.setMethodChannelForTest(channel);
       addTearDown(() {
-        AgentService.I.debugPauseScheduleTimerForTest(false);
-        DeviceControlService.setMethodChannelForTest(null);
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
-        app.activeSessionId = null;
-        app.sessions.removeWhere((x) => x.id == s.id);
+        DeviceControlService.setScreenshotCopyForTest(null);
+        if (work.existsSync()) work.deleteSync(recursive: true);
       });
 
-      await tester.pumpWidget(MaterialApp(theme: Aether.theme(), home: const ChatScreen()));
-      await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField).first, '/permission control confirm');
-      await tester.tap(find.byTooltip('Send'));
-      await tester.pumpAndSettle();
-      expect(find.text('Enable Control'), findsOneWidget);
-      expect(find.textContaining('Back / Home / Recents'), findsOneWidget);
-      expect(calls.where((c) => c.method == 'deviceOpenAccessibilitySettings'), isEmpty);
-      await tester.tap(find.text('Not now'));
-      await tester.pumpAndSettle();
-      expect(s.mode, 'auto');
-
-      await tester.tap(find.text('General').last);
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Control').last);
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Enable Control'));
-      await tester.pumpAndSettle();
-      expect(s.mode, 'control');
-      expect(calls.where((c) => c.method == 'deviceOpenAccessibilitySettings').length, 1);
-      expect(find.textContaining('Could not open Accessibility Settings'), findsOneWidget);
-      expect(find.text('Control service is off'), findsOneWidget);
-      expect(find.text('Open Accessibility Settings'), findsOneWidget);
-      await tester.tap(find.text('Open Accessibility Settings'));
-      await tester.pumpAndSettle();
-      expect(calls.where((c) => c.method == 'deviceOpenAccessibilitySettings').length, 2);
-      expect(find.text('Could not open Accessibility Settings.'), findsOneWidget);
-      failSettingsLaunch = false;
-      await tester.tap(find.text('Open Accessibility Settings'));
-      await tester.pumpAndSettle();
-      expect(calls.where((c) => c.method == 'deviceOpenAccessibilitySettings').length, 3);
+      await expectLater(
+        DeviceControlService.I.copyScreenshotIntoWorkspaceForTest(
+          source.path,
+          work,
+        ),
+        throwsA(isA<ScreenshotCopyException>()),
+      );
+      expect(File(existingPath!).readAsBytesSync(), [9]);
     });
+
+    testWidgets(
+      'CTRL7: Control disclosure permits decline and opens settings only on accept',
+      (tester) async {
+        AgentService.I.debugPauseScheduleTimerForTest(true);
+        final s = ChatSession(
+          id: 'ctrl7',
+          title: 'S',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        const channel = MethodChannel('ovid/device-control-test-ctrl7');
+        final calls = <MethodCall>[];
+        var failSettingsLaunch = true;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, (call) async {
+              calls.add(call);
+              if (call.method == 'deviceServiceEnabled') return false;
+              if (call.method == 'deviceOpenAccessibilitySettings' &&
+                  failSettingsLaunch) {
+                throw PlatformException(
+                  code: 'SETTINGS_FAILED',
+                  message: 'settings unavailable',
+                );
+              }
+              return true;
+            });
+        DeviceControlService.setMethodChannelForTest(channel);
+        addTearDown(() {
+          AgentService.I.debugPauseScheduleTimerForTest(false);
+          DeviceControlService.setMethodChannelForTest(null);
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(channel, null);
+          app.activeSessionId = null;
+          app.sessions.removeWhere((x) => x.id == s.id);
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
+        );
+        await tester.pumpAndSettle();
+        await tester.enterText(
+          find.byType(TextField).first,
+          '/permission control confirm',
+        );
+        await tester.tap(find.byTooltip('Send'));
+        await tester.pumpAndSettle();
+        expect(find.text('Enable Control'), findsOneWidget);
+        expect(find.textContaining('Back / Home / Recents'), findsOneWidget);
+        expect(
+          calls.where((c) => c.method == 'deviceOpenAccessibilitySettings'),
+          isEmpty,
+        );
+        await tester.tap(find.text('Not now'));
+        await tester.pumpAndSettle();
+        expect(s.mode, 'auto');
+
+        await tester.tap(find.text('General').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Control').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Enable Control'));
+        await tester.pumpAndSettle();
+        expect(s.mode, 'control');
+        expect(
+          calls
+              .where((c) => c.method == 'deviceOpenAccessibilitySettings')
+              .length,
+          1,
+        );
+        expect(
+          find.textContaining('Could not open Accessibility Settings'),
+          findsOneWidget,
+        );
+        expect(find.text('Control service is off'), findsOneWidget);
+        expect(find.text('Open Accessibility Settings'), findsOneWidget);
+        await tester.tap(find.text('Open Accessibility Settings'));
+        await tester.pumpAndSettle();
+        expect(
+          calls
+              .where((c) => c.method == 'deviceOpenAccessibilitySettings')
+              .length,
+          2,
+        );
+        expect(
+          find.text('Could not open Accessibility Settings.'),
+          findsOneWidget,
+        );
+        failSettingsLaunch = false;
+        await tester.tap(find.text('Open Accessibility Settings'));
+        await tester.pumpAndSettle();
+        expect(
+          calls
+              .where((c) => c.method == 'deviceOpenAccessibilitySettings')
+              .length,
+          3,
+        );
+      },
+    );
 
     test(
       'CTRL2: native accessibility service supports cached reads, global nav, gestures, and screenshots',
@@ -3524,44 +4355,51 @@ Translate the following. This is the skill body.''');
   });
 
   group('PR11: parity audit fixes', () {
-    test('history replay keeps tool output instead of empty assistant turns', () {
-      final s = ChatSession(
-        id: 'replay-s',
-        title: 'R',
-        model: 'm',
-        messages: [
-          Message(role: 'user', content: 'read the config'),
-          Message(
-            role: 'assistant',
-            kind: MsgKind.tool,
-            toolName: 'file_read',
-            content: 'lib/main.dart',
-            toolDetail: 'void main() { runApp(); }',
-            toolState: 'ok',
-          ),
-          Message(role: 'assistant', content: 'It boots the app.'),
-          // Compaction rows are apparatus, never replayed.
-          Message(role: 'assistant', kind: MsgKind.compact, content: 'summary'),
-        ],
-      );
+    test(
+      'history replay keeps tool output instead of empty assistant turns',
+      () {
+        final s = ChatSession(
+          id: 'replay-s',
+          title: 'R',
+          model: 'm',
+          messages: [
+            Message(role: 'user', content: 'read the config'),
+            Message(
+              role: 'assistant',
+              kind: MsgKind.tool,
+              toolName: 'file_read',
+              content: 'lib/main.dart',
+              toolDetail: 'void main() { runApp(); }',
+              toolState: 'ok',
+            ),
+            Message(role: 'assistant', content: 'It boots the app.'),
+            // Compaction rows are apparatus, never replayed.
+            Message(
+              role: 'assistant',
+              kind: MsgKind.compact,
+              content: 'summary',
+            ),
+          ],
+        );
 
-      final replay = AgentService.I.replayHistoryForTest(s);
-      expect(replay.length, 3);
-      expect(replay[0]['role'], 'user');
-      final toolMsg = replay[1]['content'] as String;
-      expect(toolMsg, contains('file_read'));
-      expect(
-        toolMsg,
-        contains('void main()'),
-        reason: 'tool output lives in toolDetail and must survive replay',
-      );
-      expect(replay[2]['content'], 'It boots the app.');
-      expect(
-        replay.any((m) => (m['content'] as String).trim().isEmpty),
-        isFalse,
-        reason: 'empty assistant turns poison the request envelope',
-      );
-    });
+        final replay = AgentService.I.replayHistoryForTest(s);
+        expect(replay.length, 3);
+        expect(replay[0]['role'], 'user');
+        final toolMsg = replay[1]['content'] as String;
+        expect(toolMsg, contains('file_read'));
+        expect(
+          toolMsg,
+          contains('void main()'),
+          reason: 'tool output lives in toolDetail and must survive replay',
+        );
+        expect(replay[2]['content'], 'It boots the app.');
+        expect(
+          replay.any((m) => (m['content'] as String).trim().isEmpty),
+          isFalse,
+          reason: 'empty assistant turns poison the request envelope',
+        );
+      },
+    );
 
     test('failed tool rows replay with their failure marked', () {
       final s = ChatSession(
@@ -3590,18 +4428,15 @@ Translate the following. This is the skill body.''');
 
       app.githubSync = true;
       final withSync = AgentService.I.toolsForTest();
-      int count(String name) => withSync
-          .where((t) => (t['function'] as Map)['name'] == name)
-          .length;
+      int count(String name) =>
+          withSync.where((t) => (t['function'] as Map)['name'] == name).length;
       expect(count('repo_sync'), 1);
       expect(count('repo_tree'), 1);
 
       app.githubSync = false;
       final withoutSync = AgentService.I.toolsForTest();
       expect(
-        withoutSync.where(
-          (t) => (t['function'] as Map)['name'] == 'repo_sync',
-        ),
+        withoutSync.where((t) => (t['function'] as Map)['name'] == 'repo_sync'),
         isEmpty,
       );
     });
@@ -3627,125 +4462,150 @@ Translate the following. This is the skill body.''');
       expect(AgentService.containedPath(work, '   '), isNull);
     });
 
-    test('SAF1: exportFileToSaf validates path containment and surfaces result', () async {
-      final res = await AgentService.I.exportFileToSafForTest('../outside.txt');
-      expect(res, contains('path escapes the session workspace'));
-    });
+    test(
+      'SAF1: exportFileToSaf validates path containment and surfaces result',
+      () async {
+        final res = await AgentService.I.exportFileToSafForTest(
+          '../outside.txt',
+        );
+        expect(res, contains('path escapes the session workspace'));
+      },
+    );
 
-    test('SAF2: exportFileToSaf rejects symlinks outside the workspace', () async {
-      final tempDir = Directory.systemTemp.createTempSync('saf2_test');
-      final workspace = Directory('${tempDir.path}/workspace')..createSync();
-      final outside = File('${tempDir.path}/outside.txt')..writeAsStringSync('secret');
-      Link('${workspace.path}/escape.txt').createSync(outside.path);
-      final session = ChatSession(
-        id: 'saf2',
-        title: 'SAF2',
-        model: 'm',
-        workspaceFolder: workspace.path,
-      );
-      app.sessions.insert(0, session);
-      app.activeSessionId = session.id;
-      AgentService.setRunSessionForTest(session.id);
-      var channelCalled = false;
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(const MethodChannel('ovid/native'), (call) async {
-        channelCalled = true;
-        return true;
-      });
-      addTearDown(() {
+    test(
+      'SAF2: exportFileToSaf rejects symlinks outside the workspace',
+      () async {
+        final tempDir = Directory.systemTemp.createTempSync('saf2_test');
+        final workspace = Directory('${tempDir.path}/workspace')..createSync();
+        final outside = File('${tempDir.path}/outside.txt')
+          ..writeAsStringSync('secret');
+        Link('${workspace.path}/escape.txt').createSync(outside.path);
+        final session = ChatSession(
+          id: 'saf2',
+          title: 'SAF2',
+          model: 'm',
+          workspaceFolder: workspace.path,
+        );
+        app.sessions.insert(0, session);
+        app.activeSessionId = session.id;
+        AgentService.setRunSessionForTest(session.id);
+        var channelCalled = false;
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(const MethodChannel('ovid/native'), null);
-        AgentService.setRunSessionForTest('');
-        app.sessions.removeWhere((s) => s.id == session.id);
-        tempDir.deleteSync(recursive: true);
-      });
+            .setMockMethodCallHandler(const MethodChannel('ovid/native'), (
+              call,
+            ) async {
+              channelCalled = true;
+              return true;
+            });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(
+                const MethodChannel('ovid/native'),
+                null,
+              );
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((s) => s.id == session.id);
+          tempDir.deleteSync(recursive: true);
+        });
 
-      final res = await AgentService.I.exportFileToSafForTest('escape.txt');
+        final res = await AgentService.I.exportFileToSafForTest('escape.txt');
 
-      expect(res, contains('path escapes the session workspace'));
-      expect(channelCalled, isFalse);
-    });
+        expect(res, contains('path escapes the session workspace'));
+        expect(channelCalled, isFalse);
+      },
+    );
 
-    test('SAF3: exportFileToSaf awaits and surfaces the native export result', () async {
-      final tempDir = Directory.systemTemp.createTempSync('saf3_test');
-      final workspace = Directory('${tempDir.path}/workspace')..createSync();
-      final source = File('${workspace.path}/report.txt')
-        ..writeAsStringSync('report bytes');
-      final session = ChatSession(
-        id: 'saf3',
-        title: 'SAF3',
-        model: 'm',
-        workspaceFolder: workspace.path,
-      );
-      app.sessions.insert(0, session);
-      app.activeSessionId = session.id;
-      AgentService.setRunSessionForTest(session.id);
-      final calls = <MethodCall>[];
-      var nativeResult = true;
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(const MethodChannel('ovid/native'), (call) async {
-        calls.add(call);
-        return nativeResult;
-      });
-      addTearDown(() {
+    test(
+      'SAF3: exportFileToSaf awaits and surfaces the native export result',
+      () async {
+        final tempDir = Directory.systemTemp.createTempSync('saf3_test');
+        final workspace = Directory('${tempDir.path}/workspace')..createSync();
+        final source = File('${workspace.path}/report.txt')
+          ..writeAsStringSync('report bytes');
+        final session = ChatSession(
+          id: 'saf3',
+          title: 'SAF3',
+          model: 'm',
+          workspaceFolder: workspace.path,
+        );
+        app.sessions.insert(0, session);
+        app.activeSessionId = session.id;
+        AgentService.setRunSessionForTest(session.id);
+        final calls = <MethodCall>[];
+        var nativeResult = true;
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(const MethodChannel('ovid/native'), null);
-        AgentService.setRunSessionForTest('');
-        app.sessions.removeWhere((s) => s.id == session.id);
-        tempDir.deleteSync(recursive: true);
-      });
+            .setMockMethodCallHandler(const MethodChannel('ovid/native'), (
+              call,
+            ) async {
+              calls.add(call);
+              return nativeResult;
+            });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(
+                const MethodChannel('ovid/native'),
+                null,
+              );
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((s) => s.id == session.id);
+          tempDir.deleteSync(recursive: true);
+        });
 
-      expect(
-        await AgentService.I.exportFileToSaf('report.txt'),
-        'exported ✓',
-      );
-      expect(calls.single.method, 'safExportFile');
-      expect(calls.single.arguments, {
-        'sourcePath': await source.resolveSymbolicLinks(),
-        'fileName': 'report.txt',
-      });
+        expect(
+          await AgentService.I.exportFileToSaf('report.txt'),
+          'exported ✓',
+        );
+        expect(calls.single.method, 'safExportFile');
+        expect(calls.single.arguments, {
+          'sourcePath': await source.resolveSymbolicLinks(),
+          'fileName': 'report.txt',
+        });
 
-      nativeResult = false;
-      expect(
-        await AgentService.I.exportFileToSaf('report.txt'),
-        'export cancelled',
-      );
-    });
+        nativeResult = false;
+        expect(
+          await AgentService.I.exportFileToSaf('report.txt'),
+          'export cancelled',
+        );
+      },
+    );
 
-    test('SAF4: Android export copies bytes only after a document is chosen', () {
-      final source = File(
-        'android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt',
-      ).readAsStringSync();
+    test(
+      'SAF4: Android export copies bytes only after a document is chosen',
+      () {
+        final source = File(
+          'android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt',
+        ).readAsStringSync();
 
-      expect(source, contains('override fun onActivityResult'));
-      expect(source, contains('startActivityForResult'));
-      expect(source, contains('Intent.ACTION_CREATE_DOCUMENT'));
-      expect(source, contains('OsConstants.O_NOFOLLOW'));
-      expect(source, contains('ParcelFileDescriptor.dup'));
-      expect(source, contains('safExportCoordinator.complete(destination)'));
-      expect(source, contains('safExportCoordinator.cleanup()'));
-    });
+        expect(source, contains('override fun onActivityResult'));
+        expect(source, contains('startActivityForResult'));
+        expect(source, contains('Intent.ACTION_CREATE_DOCUMENT'));
+        expect(source, contains('OsConstants.O_NOFOLLOW'));
+        expect(source, contains('ParcelFileDescriptor.dup'));
+        expect(source, contains('safExportCoordinator.complete(destination)'));
+        expect(source, contains('safExportCoordinator.cleanup()'));
+      },
+    );
 
-    test('SAF5: page file chooser returns content URIs and safe file URI fallbacks', () {
-      final uris = AgentService.pageFileUrisForTest([
-        PlatformFile(
-          name: 'cloud.pdf',
-          size: 10,
-          path: '/cache/cloud.pdf',
-          identifier: 'content://provider/cloud.pdf',
-        ),
-        PlatformFile(name: 'local.txt', size: 3, path: '/tmp/local.txt'),
-        PlatformFile(name: 'unavailable.bin', size: 1),
-      ]);
+    test(
+      'SAF5: page file chooser returns content URIs and safe file URI fallbacks',
+      () {
+        final uris = AgentService.pageFileUrisForTest([
+          PlatformFile(
+            name: 'cloud.pdf',
+            size: 10,
+            path: '/cache/cloud.pdf',
+            identifier: 'content://provider/cloud.pdf',
+          ),
+          PlatformFile(name: 'local.txt', size: 3, path: '/tmp/local.txt'),
+          PlatformFile(name: 'unavailable.bin', size: 1),
+        ]);
 
-      expect(uris, [
-        'content://provider/cloud.pdf',
-        'file:///tmp/local.txt',
-      ]);
-      final source = readAgentServiceSourceForTest();
-      expect(source, contains('setOnShowFileSelector'));
-      expect(source, contains('FileSelectorMode.openMultiple'));
-    });
+        expect(uris, ['content://provider/cloud.pdf', 'file:///tmp/local.txt']);
+        final source = readAgentServiceSourceForTest();
+        expect(source, contains('setOnShowFileSelector'));
+        expect(source, contains('FileSelectorMode.openMultiple'));
+      },
+    );
 
     test('SAF6: page file chooser maps only representable accept filters', () {
       final images = AgentService.pageFilePickerFilterForTest(['image/*']);
@@ -3840,23 +4700,26 @@ Translate the following. This is the skill body.''');
       expect(s.schedules, hasLength(1));
     });
 
-    test('marketplace add returns the normalized repo and persists it', () async {
-      final app = AppState.I;
-      addTearDown(() => app.removeMarketplace('acme/plugins'));
+    test(
+      'marketplace add returns the normalized repo and persists it',
+      () async {
+        final app = AppState.I;
+        addTearDown(() => app.removeMarketplace('acme/plugins'));
 
-      expect(
-        app.addMarketplace('https://github.com/acme/plugins.git'),
-        'acme/plugins',
-      );
-      expect(app.marketplaces, contains('acme/plugins'));
-      expect(app.addMarketplace('acme/plugins'), isNull);
+        expect(
+          app.addMarketplace('https://github.com/acme/plugins.git'),
+          'acme/plugins',
+        );
+        expect(app.marketplaces, contains('acme/plugins'));
+        expect(app.addMarketplace('acme/plugins'), isNull);
 
-      final prefs = await SharedPreferences.getInstance();
-      expect(
-        prefs.getStringList('ovid_marketplaces_v1'),
-        contains('acme/plugins'),
-      );
-    });
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.getStringList('ovid_marketplaces_v1'),
+          contains('acme/plugins'),
+        );
+      },
+    );
 
     test('/permission requires an explicit confirm for full access', () async {
       final app = AppState.I;
@@ -3944,7 +4807,8 @@ Translate the following. This is the skill body.''');
       app.activeSessionId = parent.id;
       addTearDown(() {
         app.sessions.removeWhere(
-          (x) => x.id == id || AppState.I.lineageOf(x.id).any((a) => a.id == id),
+          (x) =>
+              x.id == id || AppState.I.lineageOf(x.id).any((a) => a.id == id),
         );
       });
       return parent;
@@ -4042,28 +4906,34 @@ Translate the following. This is the skill body.''');
       expect(app.childrenOf(grandchild.id), isEmpty);
     });
 
-    test('a one-shot child refuses follow-ups; interrupt marks it stopped', () async {
-      final app = AppState.I;
-      final parent = newParent('sa-p5');
-      final oneShot = app.createSubagentSession(
-        parent: parent,
-        label: 'one-shot',
-        mode: 'auto',
-      );
-      expect(oneShot.agentContinuable, isFalse);
-      expect(AgentService.I.canContinueSubagent(oneShot.id), isFalse);
+    test(
+      'a one-shot child refuses follow-ups; interrupt marks it stopped',
+      () async {
+        final app = AppState.I;
+        final parent = newParent('sa-p5');
+        final oneShot = app.createSubagentSession(
+          parent: parent,
+          label: 'one-shot',
+          mode: 'auto',
+        );
+        expect(oneShot.agentContinuable, isFalse);
+        expect(AgentService.I.canContinueSubagent(oneShot.id), isFalse);
 
-      final res = await AgentService.I.continueSubagent(oneShot.id, 'more work');
-      expect(res, contains('one-shot'));
-      expect(
-        oneShot.messages,
-        isEmpty,
-        reason: 'a refused follow-up must not enter the transcript',
-      );
+        final res = await AgentService.I.continueSubagent(
+          oneShot.id,
+          'more work',
+        );
+        expect(res, contains('one-shot'));
+        expect(
+          oneShot.messages,
+          isEmpty,
+          reason: 'a refused follow-up must not enter the transcript',
+        );
 
-      AgentService.I.interruptSubagent(oneShot.id);
-      expect(oneShot.agentState, 'stopped');
-    });
+        AgentService.I.interruptSubagent(oneShot.id);
+        expect(oneShot.agentState, 'stopped');
+      },
+    );
 
     test('deleting a chat deletes its subagents', () {
       final app = AppState.I;
@@ -4091,39 +4961,42 @@ Translate the following. This is the skill body.''');
       );
     });
 
-    test('subagent fields round-trip; a killed running child loads stopped', () {
-      final s = ChatSession(
-        id: 'sa-json',
-        title: 'worker',
-        model: 'm',
-        parentId: 'root-1',
-        agentLabel: 'worker',
-        agentState: 'running',
-        agentContinuable: true,
-        agentResult: 'done',
-        agentAllowedTools: const ['file_read', 'fs_grep'],
-      );
-      final back = ChatSession.fromJson(s.toJson());
-      expect(back.parentId, 'root-1');
-      expect(back.isSubagent, isTrue);
-      expect(back.agentLabel, 'worker');
-      expect(back.agentContinuable, isTrue);
-      expect(back.agentResult, 'done');
-      expect(back.agentAllowedTools, ['file_read', 'fs_grep']);
-      // The app died mid-run: nothing is running after a restart.
-      expect(back.agentState, 'stopped');
-
-      final finished = ChatSession.fromJson(
-        ChatSession(
-          id: 'sa-json2',
-          title: 'w',
+    test(
+      'subagent fields round-trip; a killed running child loads stopped',
+      () {
+        final s = ChatSession(
+          id: 'sa-json',
+          title: 'worker',
           model: 'm',
           parentId: 'root-1',
-          agentState: 'finished',
-        ).toJson(),
-      );
-      expect(finished.agentState, 'finished');
-    });
+          agentLabel: 'worker',
+          agentState: 'running',
+          agentContinuable: true,
+          agentResult: 'done',
+          agentAllowedTools: const ['file_read', 'fs_grep'],
+        );
+        final back = ChatSession.fromJson(s.toJson());
+        expect(back.parentId, 'root-1');
+        expect(back.isSubagent, isTrue);
+        expect(back.agentLabel, 'worker');
+        expect(back.agentContinuable, isTrue);
+        expect(back.agentResult, 'done');
+        expect(back.agentAllowedTools, ['file_read', 'fs_grep']);
+        // The app died mid-run: nothing is running after a restart.
+        expect(back.agentState, 'stopped');
+
+        final finished = ChatSession.fromJson(
+          ChatSession(
+            id: 'sa-json2',
+            title: 'w',
+            model: 'm',
+            parentId: 'root-1',
+            agentState: 'finished',
+          ).toJson(),
+        );
+        expect(finished.agentState, 'finished');
+      },
+    );
 
     test('a subagent card keeps a link to its child session', () {
       final m = Message(
@@ -4209,22 +5082,27 @@ block</pre>
       expect(res, contains('Invalid params'));
     });
 
-    test('MCP timeout surfaces as a timeout error, not the text "null"',
-        () async {
-      McpService.rpcTimeoutSecondsForTest = 1; // shrink the deadline
-      try {
-        final res = await McpService.callToolForTest(
-          replies: const [],
-          method: 'tools/call',
-        );
-        expect(res, contains('MCP error'));
-        expect(res, contains('timed out'));
-        expect(res, isNot(contains('null')),
-            reason: 'the old code handed the model the literal string "null"');
-      } finally {
-        McpService.rpcTimeoutSecondsForTest = 30;
-      }
-    });
+    test(
+      'MCP timeout surfaces as a timeout error, not the text "null"',
+      () async {
+        McpService.rpcTimeoutSecondsForTest = 1; // shrink the deadline
+        try {
+          final res = await McpService.callToolForTest(
+            replies: const [],
+            method: 'tools/call',
+          );
+          expect(res, contains('MCP error'));
+          expect(res, contains('timed out'));
+          expect(
+            res,
+            isNot(contains('null')),
+            reason: 'the old code handed the model the literal string "null"',
+          );
+        } finally {
+          McpService.rpcTimeoutSecondsForTest = 30;
+        }
+      },
+    );
 
     test('MCP callTool honours isError from the server', () async {
       final res = await McpService.callToolForTest(
@@ -4241,9 +5119,9 @@ block</pre>
       final res = await McpService.callToolForTest(
         replies: [
           '{"jsonrpc":"2.0","id":1,"result":{"content":['
-          '{"type":"text","text":"hello"},'
-          '{"type":"resource","resource":{"text":"res-body"}},'
-          '{"type":"image","data":"..."}]}}',
+              '{"type":"text","text":"hello"},'
+              '{"type":"resource","resource":{"text":"res-body"}},'
+              '{"type":"image","data":"..."}]}}',
         ],
         method: 'tools/call',
       );
@@ -4271,68 +5149,66 @@ block</pre>
     }
 
     test('web_search rejects empty and oversized query arrays', () async {
-      final res = await AgentService.I.dispatchForTest(
-        'web_search',
-        {'queries': const []},
-      );
+      final res = await AgentService.I.dispatchForTest('web_search', {
+        'queries': const [],
+      });
       expect(res, contains('Error: queries must contain at least one query'));
 
-      final res2 = await AgentService.I.dispatchForTest(
-        'web_search',
-        {
-          'queries': ['a', 'b', 'c', 'd', 'e'],
-        },
-      );
+      final res2 = await AgentService.I.dispatchForTest('web_search', {
+        'queries': ['a', 'b', 'c', 'd', 'e'],
+      });
       expect(res2, contains('at most 4 queries'));
     });
 
-    test('web_search runs queries concurrently, dedupes URLs, cites links',
-        () async {
-      // Two queries: the second shares one URL with the first (dedup) and
-      // adds its own result (round-robin interleaving across queries).
-      final q1 = [
-        _ddgResult('Alpha result', 'https://ex.com/alpha', 'About alpha'),
-        _ddgResult('Shared result', 'https://ex.com/shared', 'Both'),
-      ].join();
-      final q2 = [
-        _ddgResult('Beta result', 'https://ex.com/beta', 'About beta'),
-        _ddgResult('Shared result dup', 'https://ex.com/shared', 'Dup'),
-      ].join();
-      var hits = 0;
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      server.listen((request) async {
-        hits++;
-        final html = request.uri.queryParameters['q'] == 'one' ? q1 : q2;
-        final body = utf8.encode(html);
-        request.response
-          ..statusCode = 200
-          ..contentLength = body.length
-          ..add(body);
-        await request.response.close();
-      });
-      addTearDown(() => server.close(force: true));
-      AgentService.ddgBaseOverrideForTest =
-          'http://${server.address.host}:${server.port}';
+    test(
+      'web_search runs queries concurrently, dedupes URLs, cites links',
+      () async {
+        // Two queries: the second shares one URL with the first (dedup) and
+        // adds its own result (round-robin interleaving across queries).
+        final q1 = [
+          _ddgResult('Alpha result', 'https://ex.com/alpha', 'About alpha'),
+          _ddgResult('Shared result', 'https://ex.com/shared', 'Both'),
+        ].join();
+        final q2 = [
+          _ddgResult('Beta result', 'https://ex.com/beta', 'About beta'),
+          _ddgResult('Shared result dup', 'https://ex.com/shared', 'Dup'),
+        ].join();
+        var hits = 0;
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((request) async {
+          hits++;
+          final html = request.uri.queryParameters['q'] == 'one' ? q1 : q2;
+          final body = utf8.encode(html);
+          request.response
+            ..statusCode = 200
+            ..contentLength = body.length
+            ..add(body);
+          await request.response.close();
+        });
+        addTearDown(() => server.close(force: true));
+        AgentService.ddgBaseOverrideForTest =
+            'http://${server.address.host}:${server.port}';
 
-      final res = await AgentService.I.dispatchForTest('web_search', {
-        'queries': ['one', 'two'],
-      });
-      AgentService.ddgBaseOverrideForTest = null;
+        final res = await AgentService.I.dispatchForTest('web_search', {
+          'queries': ['one', 'two'],
+        });
+        AgentService.ddgBaseOverrideForTest = null;
 
-      expect(hits, 2, reason: 'each query runs once');
-      expect(res, contains('[Alpha result](https://ex.com/alpha)'));
-      expect(res, contains('[Beta result](https://ex.com/beta)'));
-      expect(res, contains('https://ex.com/shared'), reason: 'dup kept once');
-      // Exactly one line for the shared URL — deduped, not repeated.
-      expect('https://ex.com/shared'.allMatches(res).length, 1);
-      expect(res, contains('About alpha'), reason: 'snippets retained');
-      expect(
-        res,
-        contains('Cite the relevant URLs above as markdown links'),
-      );
-      // Round-robin: alpha (q1 rank1) must come before shared-dup (q2 rank2).
-      expect(res.indexOf('ex.com/alpha'), lessThan(res.indexOf('ex.com/beta')));
-    });
+        expect(hits, 2, reason: 'each query runs once');
+        expect(res, contains('[Alpha result](https://ex.com/alpha)'));
+        expect(res, contains('[Beta result](https://ex.com/beta)'));
+        expect(res, contains('https://ex.com/shared'), reason: 'dup kept once');
+        // Exactly one line for the shared URL — deduped, not repeated.
+        expect('https://ex.com/shared'.allMatches(res).length, 1);
+        expect(res, contains('About alpha'), reason: 'snippets retained');
+        expect(res, contains('Cite the relevant URLs above as markdown links'));
+        // Round-robin: alpha (q1 rank1) must come before shared-dup (q2 rank2).
+        expect(
+          res.indexOf('ex.com/alpha'),
+          lessThan(res.indexOf('ex.com/beta')),
+        );
+      },
+    );
 
     test('web_search unwraps DuckDuckGo redirect links', () async {
       final html = _ddgResult(
@@ -4352,80 +5228,88 @@ block</pre>
       expect(res, isNot(contains('duckduckgo.com/l/')));
     });
 
-    test('web_search failure surfaces as Error, not a silent half-result',
-        () async {
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      server.listen((request) async {
-        request.response.statusCode = 503;
-        await request.response.close();
-      });
-      addTearDown(() => server.close(force: true));
-      AgentService.ddgBaseOverrideForTest =
-          'http://${server.address.host}:${server.port}';
+    test(
+      'web_search failure surfaces as Error, not a silent half-result',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((request) async {
+          request.response.statusCode = 503;
+          await request.response.close();
+        });
+        addTearDown(() => server.close(force: true));
+        AgentService.ddgBaseOverrideForTest =
+            'http://${server.address.host}:${server.port}';
 
-      final res = await AgentService.I.dispatchForTest('web_search', {
-        'queries': ['will fail'],
-      });
-      AgentService.ddgBaseOverrideForTest = null;
+        final res = await AgentService.I.dispatchForTest('web_search', {
+          'queries': ['will fail'],
+        });
+        AgentService.ddgBaseOverrideForTest = null;
 
-      expect(res, startsWith('Error:'));
-      expect(res, contains('HTTP 503'));
-    });
+        expect(res, startsWith('Error:'));
+        expect(res, contains('HTTP 503'));
+      },
+    );
 
-    test('agent_install_plugin reports the tools it actually contributes',
-        () async {
-      final app = AppState.I;
-      // Find (or add) a plugin that maps to no tool — a category:Agent
-      // entry with a name outside the tool map.
-      final noTool = PluginItem(
-        name: 'PR14 NoTool Plugin',
-        author: 't',
-        description: '',
-        version: '1',
-        category: 'Agent',
-        installs: 0,
-      );
-      app.plugins.add(noTool);
-      addTearDown(() => app.plugins.remove(noTool));
+    test(
+      'agent_install_plugin reports the tools it actually contributes',
+      () async {
+        final app = AppState.I;
+        // Find (or add) a plugin that maps to no tool — a category:Agent
+        // entry with a name outside the tool map.
+        final noTool = PluginItem(
+          name: 'PR14 NoTool Plugin',
+          author: 't',
+          description: '',
+          version: '1',
+          category: 'Agent',
+          installs: 0,
+        );
+        app.plugins.add(noTool);
+        addTearDown(() => app.plugins.remove(noTool));
 
-      final res = await AgentService.I.dispatchForTest(
-        'agent_install_plugin',
-        {'plugin_name': 'PR14 NoTool Plugin'},
-      );
-      expect(res, contains('installed and enabled'));
-      expect(res, contains('contributes no agent tools'));
-      expect(noTool.installed, isTrue);
+        final res = await AgentService.I.dispatchForTest(
+          'agent_install_plugin',
+          {'plugin_name': 'PR14 NoTool Plugin'},
+        );
+        expect(res, contains('installed and enabled'));
+        expect(res, contains('contributes no agent tools'));
+        expect(noTool.installed, isTrue);
 
-      // And a plugin that DOES map to tools names them.
-      final webSearch = app.plugins.firstWhere(
-        (p) => p.name == 'Web Search',
-        orElse: () => throw StateError('Web Search plugin missing'),
-      );
-      final wasInstalled = webSearch.installed;
-      webSearch.installed = false;
-      addTearDown(() => webSearch.installed = wasInstalled);
-      final res2 = await AgentService.I.dispatchForTest(
-        'agent_install_plugin',
-        {'plugin_name': 'Web Search'},
-      );
-      expect(res2, contains('web_search'));
-      expect(res2, isNot(contains('contributes no agent tools')));
-    });
+        // And a plugin that DOES map to tools names them.
+        final webSearch = app.plugins.firstWhere(
+          (p) => p.name == 'Web Search',
+          orElse: () => throw StateError('Web Search plugin missing'),
+        );
+        final wasInstalled = webSearch.installed;
+        webSearch.installed = false;
+        addTearDown(() => webSearch.installed = wasInstalled);
+        final res2 = await AgentService.I.dispatchForTest(
+          'agent_install_plugin',
+          {'plugin_name': 'Web Search'},
+        );
+        expect(res2, contains('web_search'));
+        expect(res2, isNot(contains('contributes no agent tools')));
+      },
+    );
   });
 
   group('PR15: marketplace formats (Claude + Codex) + realtime install', () {
     test('parses Codex/Claude Desktop mcpServers MAP form', () {
       final app = AppState.I;
       final before = app.mcpServers.length;
-      final msg = app.mergeMarketplaceCatalogForTest({
-        'mcpServers': {
-          'PR15 Map Server': {
-            'command': 'npx',
-            'args': ['-y', '@example/pr15-server'],
-            'env': {'API_KEY': 'x'},
+      final msg = app.mergeMarketplaceCatalogForTest(
+        {
+          'mcpServers': {
+            'PR15 Map Server': {
+              'command': 'npx',
+              'args': ['-y', '@example/pr15-server'],
+              'env': {'API_KEY': 'x'},
+            },
           },
         },
-      }, 'acme', 'plugins');
+        'acme',
+        'plugins',
+      );
       expect(msg, contains('1 MCP server'));
       final added = app.mcpServers.length - before == 1
           ? app.mcpServers.last
@@ -4441,19 +5325,23 @@ block</pre>
     test('parses Claude Code .claude-plugin marketplace plugins list', () {
       final app = AppState.I;
       final before = app.plugins.length;
-      final msg = app.mergeMarketplaceCatalogForTest({
-        'name': 'PR15 Claude Marketplace',
-        'plugins': [
-          {
-            'name': 'PR15 Claude Plugin',
-            'source': './plugins/pr15',
-            'description': 'From a Claude Code marketplace',
-            'version': '0.2.0',
-            'author': 'claude-dev',
-            'category': 'Agent',
-          },
-        ],
-      }, 'claude-owner', 'claude-market');
+      final msg = app.mergeMarketplaceCatalogForTest(
+        {
+          'name': 'PR15 Claude Marketplace',
+          'plugins': [
+            {
+              'name': 'PR15 Claude Plugin',
+              'source': './plugins/pr15',
+              'description': 'From a Claude Code marketplace',
+              'version': '0.2.0',
+              'author': 'claude-dev',
+              'category': 'Agent',
+            },
+          ],
+        },
+        'claude-owner',
+        'claude-market',
+      );
       expect(msg, contains('1 plugin'));
       expect(app.plugins.length, before + 1);
       final p = app.plugins.last;
@@ -4463,8 +5351,7 @@ block</pre>
       expect(p.installed, isFalse, reason: 'marketplace entries start off');
     });
 
-    test('parses our list-form mcpServers and never duplicates entries',
-        () {
+    test('parses our list-form mcpServers and never duplicates entries', () {
       final app = AppState.I;
       final doc = {
         'mcpServers': [
@@ -4486,8 +5373,7 @@ block</pre>
       );
     });
 
-    test('fetch falls through paths and reports actionable failure',
-        () async {
+    test('fetch falls through paths and reports actionable failure', () async {
       // Local server with NO marketplace files → every URL misses → the
       // error must tell the user which files were tried.
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -4515,22 +5401,24 @@ block</pre>
           await request.response.close();
           return;
         }
-        final body = utf8.encode(jsonEncode({
-          'plugins': [
-            {
-              'name': 'PR15 Live Plugin',
-              'description': 'fetched over HTTP',
-              'author': 'live',
-              'category': 'Tool',
+        final body = utf8.encode(
+          jsonEncode({
+            'plugins': [
+              {
+                'name': 'PR15 Live Plugin',
+                'description': 'fetched over HTTP',
+                'author': 'live',
+                'category': 'Tool',
+              },
+            ],
+            'mcpServers': {
+              'PR15 Live MCP': {
+                'command': 'npx',
+                'args': ['-y', '@live/pr15-mcp'],
+              },
             },
-          ],
-          'mcpServers': {
-            'PR15 Live MCP': {
-              'command': 'npx',
-              'args': ['-y', '@live/pr15-mcp'],
-            },
-          },
-        }));
+          }),
+        );
         request.response
           ..statusCode = 200
           ..contentLength = body.length
@@ -4584,8 +5472,7 @@ block</pre>
       return parent;
     }
 
-    test('background child stores a durable agentId for cold resume',
-        () async {
+    test('background child stores a durable agentId for cold resume', () async {
       final app = AppState.I;
       final parent = newParent('sg-p1');
 
@@ -4594,8 +5481,7 @@ block</pre>
         'label': 'Research',
         'run_in_background': true,
         'persona': 'You are a meticulous researcher',
-        'output_schema_hint':
-            'a JSON object with keys status, findings, files',
+        'output_schema_hint': 'a JSON object with keys status, findings, files',
       });
 
       final child = app.childrenOf(parent.id).single;
@@ -4608,36 +5494,38 @@ block</pre>
       );
     });
 
-    test('restoreSubagentHandles rebuilds the registry after restart',
-        () async {
-      final app = AppState.I;
-      final parent = newParent('sg-p2');
-      // Simulate a persisted settled child: durable id + lineage + state,
-      // but NO live handle (as after an app restart).
-      final child = app.createSubagentSession(
-        parent: parent,
-        label: 'Resumed child',
-        mode: 'auto',
-        continuable: true,
-      );
-      child.agentId = 'sub-77';
-      child.agentState = 'finished';
-      child.agentResult = 'found 3 endpoints';
+    test(
+      'restoreSubagentHandles rebuilds the registry after restart',
+      () async {
+        final app = AppState.I;
+        final parent = newParent('sg-p2');
+        // Simulate a persisted settled child: durable id + lineage + state,
+        // but NO live handle (as after an app restart).
+        final child = app.createSubagentSession(
+          parent: parent,
+          label: 'Resumed child',
+          mode: 'auto',
+          continuable: true,
+        );
+        child.agentId = 'sub-77';
+        child.agentState = 'finished';
+        child.agentResult = 'found 3 endpoints';
 
-      AgentService.I.restoreSubagentHandles();
+        AgentService.I.restoreSubagentHandles();
 
-      final sub = AgentService.I.subagentForSession(child.id);
-      expect(sub, isNotNull, reason: 'handle rebuilt from persisted lineage');
-      expect(sub!.id, 'sub-77');
-      expect(sub.finished, isTrue);
-      expect(sub.label, 'Resumed child');
-      // Counter reseeded past the persisted max, so new ids never collide.
-      final res = await AgentService.I.dispatchForTest('dispatch_agent', {
-        'prompt': 'next task',
-        'run_in_background': true,
-      });
-      expect(res, contains('sub-78'));
-    });
+        final sub = AgentService.I.subagentForSession(child.id);
+        expect(sub, isNotNull, reason: 'handle rebuilt from persisted lineage');
+        expect(sub!.id, 'sub-77');
+        expect(sub.finished, isTrue);
+        expect(sub.label, 'Resumed child');
+        // Counter reseeded past the persisted max, so new ids never collide.
+        final res = await AgentService.I.dispatchForTest('dispatch_agent', {
+          'prompt': 'next task',
+          'run_in_background': true,
+        });
+        expect(res, contains('sub-78'));
+      },
+    );
 
     test('settlement notice reaches an idle parent as a new turn', () async {
       final parent = newParent('sg-p3');
@@ -4715,9 +5603,12 @@ block</pre>
       });
       expect(w, anyOf(contains('woken'), contains('queued')));
       expect(
-        parent.messages.any((m) => m.content.contains('blocker: no write access')),
+        parent.messages.any(
+          (m) => m.content.contains('blocker: no write access'),
+        ),
         isTrue,
-        reason: 'the report row is on the parent transcript (a fail-fast '
+        reason:
+            'the report row is on the parent transcript (a fail-fast '
             'error row may follow it)',
       );
     });
@@ -4735,7 +5626,12 @@ block</pre>
   group('PR17: quick wins — todos, write path, goal, plan, feedback', () {
     ChatSession newSession(String id) {
       final app = AppState.I;
-      final s = ChatSession(id: id, title: 'New chat', model: 'm', mode: 'auto');
+      final s = ChatSession(
+        id: id,
+        title: 'New chat',
+        model: 'm',
+        mode: 'auto',
+      );
       app.sessions.insert(0, s);
       app.activeSessionId = s.id;
       addTearDown(() => app.sessions.removeWhere((x) => x.id == id));
@@ -4782,11 +5678,7 @@ block</pre>
                     'message': {'role': 'assistant', 'content': 'done'},
                   },
                 ],
-                'usage': {
-                  'prompt_tokens': 10,
-                  'completion_tokens': 5,
-                  'total_tokens': 15,
-                },
+                'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15},
               })}\n\n',
             ),
           );
@@ -4805,13 +5697,15 @@ block</pre>
         expect(
           session.todos.where((t) => t['status'] != 'completed'),
           isEmpty,
-          reason: 'pending items from an earlier task must not leak into a '
+          reason:
+              'pending items from an earlier task must not leak into a '
               'new turn',
         );
         // And the assembled system prompt carries no stale todo section.
         final sys =
-            (requestBodies.first['messages'] as List)
-                .firstWhere((m) => m['role'] == 'system')['content']
+            (requestBodies.first['messages'] as List).firstWhere(
+                  (m) => m['role'] == 'system',
+                )['content']
                 as String;
         expect(sys, isNot(contains('SESSION TODOS')));
       } finally {
@@ -4850,41 +5744,43 @@ block</pre>
       expect(view, contains('hello from file_write'));
     });
 
-    test('goal pause/resume keeps the round, complete clears the bar',
-        () async {
-      final s = newSession('qw-t3');
-      AgentService.setRunSessionForTest(s.id);
-      addTearDown(() => AgentService.setRunSessionForTest(''));
+    test(
+      'goal pause/resume keeps the round, complete clears the bar',
+      () async {
+        final s = newSession('qw-t3');
+        AgentService.setRunSessionForTest(s.id);
+        addTearDown(() => AgentService.setRunSessionForTest(''));
 
-      final created = await AgentService.I.dispatchForTest('create_goal', {
-        'objective': 'ship the parity report',
-      });
-      expect(created, contains('round 0'));
+        final created = await AgentService.I.dispatchForTest('create_goal', {
+          'objective': 'ship the parity report',
+        });
+        expect(created, contains('round 0'));
 
-      final paused = await AgentService.I.dispatchForTest('update_goal', {
-        'status': 'paused',
-      });
-      expect(paused, contains('paused'));
-      expect(s.goal!['status'], 'paused');
-      final roundAtPause = s.goal!['round'] as int;
+        final paused = await AgentService.I.dispatchForTest('update_goal', {
+          'status': 'paused',
+        });
+        expect(paused, contains('paused'));
+        expect(s.goal!['status'], 'paused');
+        final roundAtPause = s.goal!['round'] as int;
 
-      final resumed = await AgentService.I.dispatchForTest('update_goal', {
-        'status': 'active',
-        'progress': 'resumed work',
-      });
-      expect(resumed, contains('active'));
-      expect(
-        s.goal!['round'] as int,
-        roundAtPause,
-        reason: 'pause/resume round-trips keep the round',
-      );
+        final resumed = await AgentService.I.dispatchForTest('update_goal', {
+          'status': 'active',
+          'progress': 'resumed work',
+        });
+        expect(resumed, contains('active'));
+        expect(
+          s.goal!['round'] as int,
+          roundAtPause,
+          reason: 'pause/resume round-trips keep the round',
+        );
 
-      final done = await AgentService.I.dispatchForTest('update_goal', {
-        'status': 'complete',
-      });
-      expect(done, contains('complete'));
-      expect(s.goal!['status'], 'complete');
-    });
+        final done = await AgentService.I.dispatchForTest('update_goal', {
+          'status': 'complete',
+        });
+        expect(done, contains('complete'));
+        expect(s.goal!['status'], 'complete');
+      },
+    );
 
     test('plan mode persists on the session and survives reload', () {
       final s = newSession('qw-t4');
@@ -4901,26 +5797,28 @@ block</pre>
       AgentService.setRunSessionForTest('');
     });
 
-    test('message feedback persists and retracts (the reference message-feedback)',
-        () {
-      final s = newSession('qw-t5');
-      final m = Message(role: 'assistant', content: 'answer');
-      s.messages.add(m);
+    test(
+      'message feedback persists and retracts (the reference message-feedback)',
+      () {
+        final s = newSession('qw-t5');
+        final m = Message(role: 'assistant', content: 'answer');
+        s.messages.add(m);
 
-      m.feedback = 'down';
-      m.feedbackNote = 'wrong API';
-      final j = m.toJson();
-      expect(j['feedback'], 'down');
-      expect(j['feedbackNote'], 'wrong API');
-      final reloaded = Message.fromJson(j);
-      expect(reloaded.feedback, 'down');
-      expect(reloaded.feedbackNote, 'wrong API');
+        m.feedback = 'down';
+        m.feedbackNote = 'wrong API';
+        final j = m.toJson();
+        expect(j['feedback'], 'down');
+        expect(j['feedbackNote'], 'wrong API');
+        final reloaded = Message.fromJson(j);
+        expect(reloaded.feedback, 'down');
+        expect(reloaded.feedbackNote, 'wrong API');
 
-      // Retract on re-click semantics: null clears both.
-      m.feedback = null;
-      m.feedbackNote = null;
-      expect(m.toJson().containsKey('feedback'), isFalse);
-    });
+        // Retract on re-click semantics: null clears both.
+        m.feedback = null;
+        m.feedbackNote = null;
+        expect(m.toJson().containsKey('feedback'), isFalse);
+      },
+    );
 
     test('imageGen message persists its workspace path', () {
       final m = Message(
@@ -4948,7 +5846,12 @@ block</pre>
   group('PR18: context engineering — spill, budgets, CAS, metering', () {
     ChatSession newSession(String id) {
       final app = AppState.I;
-      final s = ChatSession(id: id, title: 'New chat', model: 'm', mode: 'auto');
+      final s = ChatSession(
+        id: id,
+        title: 'New chat',
+        model: 'm',
+        mode: 'auto',
+      );
       app.sessions.insert(0, s);
       app.activeSessionId = s.id;
       addTearDown(() => app.sessions.removeWhere((x) => x.id == id));
@@ -4964,28 +5867,38 @@ block</pre>
       expect(out, small, reason: 'fits — nothing spilled');
     });
 
-    test('spillToolOutput persists overflow + exact notice + locator',
-        () async {
-      final s = newSession('ce-s1');
-      AgentService.setRunSessionForTest(s.id);
-      addTearDown(() => AgentService.setRunSessionForTest(''));
+    test(
+      'spillToolOutput persists overflow + exact notice + locator',
+      () async {
+        final s = newSession('ce-s1');
+        AgentService.setRunSessionForTest(s.id);
+        addTearDown(() => AgentService.setRunSessionForTest(''));
 
-      final big = List.generate(300, (i) => 'line-$i ${'x' * 50}').join('\n');
-      final out = await spillToolOutput('run_shell', big, cap: 1000);
+        final big = List.generate(300, (i) => 'line-$i ${'x' * 50}').join('\n');
+        final out = await spillToolOutput('run_shell', big, cap: 1000);
 
-      expect(out, contains('characters omitted — full output saved to'));
-      expect(out, contains('.spill/'), reason: 'locator names the spill file');
-      expect(out, contains('sed -n'), reason: 'run_shell gets a line-range hint');
-      expect(out.startsWith('line-0'), isTrue, reason: 'head preserved');
-      expect(out.contains('line-299'), isTrue, reason: 'tail preserved');
+        expect(out, contains('characters omitted — full output saved to'));
+        expect(
+          out,
+          contains('.spill/'),
+          reason: 'locator names the spill file',
+        );
+        expect(
+          out,
+          contains('sed -n'),
+          reason: 'run_shell gets a line-range hint',
+        );
+        expect(out.startsWith('line-0'), isTrue, reason: 'head preserved');
+        expect(out.contains('line-299'), isTrue, reason: 'tail preserved');
 
-      // The spill file really exists in the workspace with the FULL text.
-      final dir = await AgentService.I.sessionWorkDirForTest();
-      final loc = RegExp(r'\.spill/\d+\.txt').firstMatch(out)!.group(0)!;
-      final f = File('${dir.path}/$loc');
-      expect(f.existsSync(), isTrue);
-      expect(f.readAsStringSync(), big);
-    });
+        // The spill file really exists in the workspace with the FULL text.
+        final dir = await AgentService.I.sessionWorkDirForTest();
+        final loc = RegExp(r'\.spill/\d+\.txt').firstMatch(out)!.group(0)!;
+        final f = File('${dir.path}/$loc');
+        expect(f.existsSync(), isTrue);
+        expect(f.readAsStringSync(), big);
+      },
+    );
 
     test('grep-style tools get a narrower-pattern locator', () async {
       final s = newSession('ce-s2');
@@ -4996,8 +5909,7 @@ block</pre>
       expect(out, contains('narrower `pattern`'));
     });
 
-    test('FS CAS: edit after external change hits FS_STALE_VERSION',
-        () async {
+    test('FS CAS: edit after external change hits FS_STALE_VERSION', () async {
       final s = newSession('ce-s3');
       AgentService.setRunSessionForTest(s.id);
       addTearDown(() => AgentService.setRunSessionForTest(''));
@@ -5024,8 +5936,11 @@ block</pre>
         'new_str': 'ALPHA',
       });
       expect(res, contains('FS_STALE_VERSION'));
-      expect(f.readAsStringSync(), contains('BETA-CHANGED'),
-          reason: 'the guard must not clobber the newer content');
+      expect(
+        f.readAsStringSync(),
+        contains('BETA-CHANGED'),
+        reason: 'the guard must not clobber the newer content',
+      );
 
       // Re-read refreshes the stamp; the retry then succeeds.
       await AgentService.I.dispatchForTest('fs_edit', {
@@ -5054,8 +5969,11 @@ block</pre>
           .map((m) => m['content'] as String? ?? '')
           .where((c) => c.contains('msg-'))
           .toList();
-      expect(contents, isNot(contains('msg-0')),
-          reason: 'compacted rows are not re-sent');
+      expect(
+        contents,
+        isNot(contains('msg-0')),
+        reason: 'compacted rows are not re-sent',
+      );
       expect(contents.where((c) => c.contains('msg-8')), isNotEmpty);
       expect(contents.where((c) => c.contains('msg-9')), isNotEmpty);
     });
@@ -5094,7 +6012,12 @@ block</pre>
   group('PR19: session domain — ledger, recovery, FTS5, export', () {
     ChatSession newSession(String id) {
       final app = AppState.I;
-      final s = ChatSession(id: id, title: 'Title of $id', model: 'm', mode: 'auto');
+      final s = ChatSession(
+        id: id,
+        title: 'Title of $id',
+        model: 'm',
+        mode: 'auto',
+      );
       app.sessions.insert(0, s);
       app.activeSessionId = s.id;
       addTearDown(() => app.sessions.removeWhere((x) => x.id == id));
@@ -5110,10 +6033,7 @@ block</pre>
         'ms': 12,
         'ok': true,
       });
-      await SessionLedger.I.append(s.id, 'turn_end', {
-        'steps': 1,
-        'turns': 1,
-      });
+      await SessionLedger.I.append(s.id, 'turn_end', {'steps': 1, 'turns': 1});
       final events = await SessionLedger.I.read(s.id);
       expect(events, hasLength(4));
       expect(events.map((e) => e['seq']), [1, 2, 3, 4]);
@@ -5133,9 +6053,15 @@ block</pre>
       final s = newSession('sd-l2');
       await SessionLedger.I.append(s.id, 'turn_start', {'turn': 0});
       await SessionLedger.I.append(s.id, 'tool_start', {'tool': 'fs_glob'});
-      await SessionLedger.I.append(s.id, 'tool_end', {'tool': 'fs_glob', 'ms': 10});
+      await SessionLedger.I.append(s.id, 'tool_end', {
+        'tool': 'fs_glob',
+        'ms': 10,
+      });
       await SessionLedger.I.append(s.id, 'tool_start', {'tool': 'fs_glob'});
-      await SessionLedger.I.append(s.id, 'tool_end', {'tool': 'fs_glob', 'ms': 5});
+      await SessionLedger.I.append(s.id, 'tool_end', {
+        'tool': 'fs_glob',
+        'ms': 5,
+      });
       await SessionLedger.I.append(s.id, 'turn_end', {'steps': 2});
       final p = await SessionLedger.I.projection(s.id);
       expect(p.turns, 1);
@@ -5157,17 +6083,17 @@ block</pre>
       );
       AgentService.I.recoverInterruptedRunsForTest();
       expect(s.messages.last.toolState, 'unknown');
-      expect(
-        s.messages.last.toolDetail,
-        contains('outcome unknown'),
-      );
+      expect(s.messages.last.toolDetail, contains('outcome unknown'));
     });
 
     test('FTS5 search: ranked hits with snippets + session filter', () async {
       final s1 = newSession('sd-f1');
       s1.messages.addAll([
         Message(role: 'user', content: 'fix the kafka consumer rebalance bug'),
-        Message(role: 'assistant', content: 'the rebalance timeout was too low'),
+        Message(
+          role: 'assistant',
+          content: 'the rebalance timeout was too low',
+        ),
       ]);
       final s2 = newSession('sd-f2');
       s2.messages.add(
@@ -5224,7 +6150,12 @@ block</pre>
   group('PR20: references, takeover, queue steer, popupSelect, viewport', () {
     ChatSession newSession(String id) {
       final app = AppState.I;
-      final s = ChatSession(id: id, title: 'Title of $id', model: 'm', mode: 'auto');
+      final s = ChatSession(
+        id: id,
+        title: 'Title of $id',
+        model: 'm',
+        mode: 'auto',
+      );
       app.sessions.insert(0, s);
       app.activeSessionId = s.id;
       addTearDown(() => app.sessions.removeWhere((x) => x.id == id));
@@ -5241,14 +6172,18 @@ block</pre>
         s,
       );
       expect(out, contains('referenced file "notes.txt"'));
-      expect(out, contains('the launch code is 42'),
-          reason: 'file content reaches the model');
+      expect(
+        out,
+        contains('the launch code is 42'),
+        reason: 'file content reaches the model',
+      );
     });
 
     test('expandReferences: @session:id includes recent messages', () async {
       final other = newSession('rf-other');
-      other.messages
-          .add(Message(role: 'user', content: 'remember this decision'));
+      other.messages.add(
+        Message(role: 'user', content: 'remember this decision'),
+      );
 
       final s = newSession('rf-s2');
       final out = await AgentService.I.expandReferences(
@@ -5274,8 +6209,11 @@ block</pre>
       agent.queueMessageForTest('third');
 
       agent.steerQueuedMessage(2);
-      expect(agent.queuedMessages.first, 'third',
-          reason: 'steered row is injected next');
+      expect(
+        agent.queuedMessages.first,
+        'third',
+        reason: 'steered row is injected next',
+      );
       expect(agent.queuedMessages, ['third', 'first', 'second']);
       agent.clearQueueForTest();
     });
@@ -5370,13 +6308,15 @@ block</pre>
       AgentService.setRunSessionForTest(s.id);
       addTearDown(() => AgentService.setRunSessionForTest(''));
 
-      final stdTools = AgentService.I.toolsForTest()
+      final stdTools = AgentService.I
+          .toolsForTest()
           .map((t) => t['function']['name'] as String)
           .toSet();
       expect(stdTools, contains('browser_navigate'));
 
       s.presetId = 'minimal';
-      final minTools = AgentService.I.toolsForTest()
+      final minTools = AgentService.I
+          .toolsForTest()
           .map((t) => t['function']['name'] as String)
           .toSet();
       expect(minTools, isNot(contains('browser_navigate')));
@@ -5461,32 +6401,35 @@ block</pre>
       expect(app.sessionById(id)?.presetId, 'code');
     });
 
-    test('workflow toggle off removes workflow/ralph from the roster',
-        () async {
-      final app = AppState.I;
-      final s = freshSession('preset-wf');
-      AgentService.setRunSessionForTest(s.id);
-      addTearDown(() => AgentService.setRunSessionForTest(''));
+    test(
+      'workflow toggle off removes workflow/ralph from the roster',
+      () async {
+        final app = AppState.I;
+        final s = freshSession('preset-wf');
+        AgentService.setRunSessionForTest(s.id);
+        addTearDown(() => AgentService.setRunSessionForTest(''));
 
-      final before = AgentService.I.toolsForTest()
-          .map((t) => t['function']['name'] as String)
-          .toSet();
-      expect(before, contains('workflow'));
-      expect(before, contains('ralph'));
+        final before = AgentService.I
+            .toolsForTest()
+            .map((t) => t['function']['name'] as String)
+            .toSet();
+        expect(before, contains('workflow'));
+        expect(before, contains('ralph'));
 
-      app.workflowEnabled = false;
-      addTearDown(() => app.workflowEnabled = true);
-      final after = AgentService.I.toolsForTest()
-          .map((t) => t['function']['name'] as String)
-          .toSet();
-      expect(after, isNot(contains('workflow')));
-      expect(after, isNot(contains('ralph')));
-    });
+        app.workflowEnabled = false;
+        addTearDown(() => app.workflowEnabled = true);
+        final after = AgentService.I
+            .toolsForTest()
+            .map((t) => t['function']['name'] as String)
+            .toSet();
+        expect(after, isNot(contains('workflow')));
+        expect(after, isNot(contains('ralph')));
+      },
+    );
   });
 
   group('PR22: sandbox real-Linux hardening', () {
-    test('shebang rewrite maps Termux usr/ paths onto the flat prefix',
-        () {
+    test('shebang rewrite maps Termux usr/ paths onto the flat prefix', () {
       // The mapping contract PR22 fixes: Termux's payload root IS the
       // "usr", so /data/data/com.termux/files/usr/bin/env must rewrite
       // to $PREFIX/bin/env — NOT $PREFIX/usr/bin/env (which never
@@ -5495,8 +6438,10 @@ block</pre>
       final p = '/data/user/0/com.dhanuk.ovidai/files/sandbox';
       // Same ordering as _patchExtractedShebangs: usr/ first, then the
       // bare prefix as fallback.
-      var rewritten = termuxShebang
-          .replaceFirst('/data/data/com.termux/files/usr/', '$p/');
+      var rewritten = termuxShebang.replaceFirst(
+        '/data/data/com.termux/files/usr/',
+        '$p/',
+      );
       expect(rewritten, '#!$p/bin/env node');
       expect(rewritten, isNot(contains('$p/usr/')));
 
@@ -5508,10 +6453,8 @@ block</pre>
       expect(fallback, '#!$p/bin/sh');
     });
 
-    test('usr compat self-symlink resolves usr/bin/env → bin/env',
-        () async {
-      final tmp =
-          await Directory.systemTemp.createTemp('ovid-pr22-usr-');
+    test('usr compat self-symlink resolves usr/bin/env → bin/env', () async {
+      final tmp = await Directory.systemTemp.createTemp('ovid-pr22-usr-');
       addTearDown(() => tmp.deleteSync(recursive: true));
       // Mini-prefix: bin/env only, no usr/ — the broken on-device state.
       Directory('${tmp.path}/bin').createSync(recursive: true);
@@ -5522,37 +6465,37 @@ block</pre>
       expect(File('${tmp.path}/usr/bin/env').existsSync(), isTrue);
     });
 
-    test('self-heal creates the usr link + libz so-links when missing',
-        () async {
-      final tmp =
-          await Directory.systemTemp.createTemp('ovid-pr22-heal-');
-      addTearDown(() => tmp.deleteSync(recursive: true));
-      // A sandbox shape the OLD build could have produced: no usr/ link,
-      // libz.so.1.3.2 present but no so-version links (Map bug loss).
-      Directory('${tmp.path}/bin').createSync(recursive: true);
-      File('${tmp.path}/bin/bash').writeAsStringSync('');
-      File('${tmp.path}/bin/coreutils').writeAsStringSync('');
-      Directory('${tmp.path}/lib').createSync(recursive: true);
-      File('${tmp.path}/lib/libz.so.1.3.2').writeAsStringSync('');
-      await SandboxService.I.selfHealNow();
-      // NOTE: selfHealNow uses the REAL files root; in a unit test the
-      // host sandbox dir does not exist, so the call is a no-op — the
-      // link-creation logic itself is covered by the direct calls below.
-      // Direct equivalent of the heal loop (mirrors _selfHealSandbox):
-      final link1 = Link('${tmp.path}/lib/libz.so.1');
-      if (!link1.existsSync()) {
-        link1.createSync('libz.so.1.3.2');
-      }
-      expect(Link('${tmp.path}/lib/libz.so.1').existsSync(), isTrue);
-      expect(
-        File('${tmp.path}/lib/libz.so.1').existsSync(),
-        isTrue,
-        reason: 'so-version link resolves to the versioned file',
-      );
-    });
+    test(
+      'self-heal creates the usr link + libz so-links when missing',
+      () async {
+        final tmp = await Directory.systemTemp.createTemp('ovid-pr22-heal-');
+        addTearDown(() => tmp.deleteSync(recursive: true));
+        // A sandbox shape the OLD build could have produced: no usr/ link,
+        // libz.so.1.3.2 present but no so-version links (Map bug loss).
+        Directory('${tmp.path}/bin').createSync(recursive: true);
+        File('${tmp.path}/bin/bash').writeAsStringSync('');
+        File('${tmp.path}/bin/coreutils').writeAsStringSync('');
+        Directory('${tmp.path}/lib').createSync(recursive: true);
+        File('${tmp.path}/lib/libz.so.1.3.2').writeAsStringSync('');
+        await SandboxService.I.selfHealNow();
+        // NOTE: selfHealNow uses the REAL files root; in a unit test the
+        // host sandbox dir does not exist, so the call is a no-op — the
+        // link-creation logic itself is covered by the direct calls below.
+        // Direct equivalent of the heal loop (mirrors _selfHealSandbox):
+        final link1 = Link('${tmp.path}/lib/libz.so.1');
+        if (!link1.existsSync()) {
+          link1.createSync('libz.so.1.3.2');
+        }
+        expect(Link('${tmp.path}/lib/libz.so.1').existsSync(), isTrue);
+        expect(
+          File('${tmp.path}/lib/libz.so.1').existsSync(),
+          isTrue,
+          reason: 'so-version link resolves to the versioned file',
+        );
+      },
+    );
 
-    test('job_start uses the sandbox spawn whenever it is installed',
-        () {
+    test('job_start uses the sandbox spawn whenever it is installed', () {
       // Source-level contract (no process spawn in unit tests): the
       // non-studio branch must route through SandboxService.spawn —
       // the old code gated on `mode == AgentMode.studio`, leaving
@@ -5565,8 +6508,7 @@ block</pre>
       expect(body, isNot(contains('mode == AgentMode.studio &&')));
     });
 
-    test('sandbox env always points npm tmp + cache inside the prefix',
-        () {
+    test('sandbox env always points npm tmp + cache inside the prefix', () {
       final src = File('lib/core/sandbox_service.dart').readAsStringSync();
       expect(src, contains("npm_config_tmp': '\$p/tmp'"));
       expect(src, contains("npm_config_cache': '\$p/home/.npm'"));
@@ -5577,73 +6519,83 @@ block</pre>
   });
 
   group('PR23: mention fixes + model snapshot', () {
-    test('expandReferences rejects @../ traversal but keeps dotted names',
-        () async {
-      final s = ChatSession(id: 'trav1', title: 'T', model: 'm');
-      final app = AppState.I;
-      final prevActive = app.activeSessionId;
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      addTearDown(() {
-        app.sessions.removeWhere((x) => x.id == s.id);
-        app.activeSessionId = prevActive;
-      });
-      final ws = await AgentService.I.sessionWorkDirForTest();
-      // A real file + a real dotted name (must NOT be rejected).
-      File('${ws.path}/notes.txt').writeAsStringSync('secret notes');
-      File('${ws.path}/a..b.txt').writeAsStringSync('dotted is fine');
+    test(
+      'expandReferences rejects @../ traversal but keeps dotted names',
+      () async {
+        final s = ChatSession(id: 'trav1', title: 'T', model: 'm');
+        final app = AppState.I;
+        final prevActive = app.activeSessionId;
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        addTearDown(() {
+          app.sessions.removeWhere((x) => x.id == s.id);
+          app.activeSessionId = prevActive;
+        });
+        final ws = await AgentService.I.sessionWorkDirForTest();
+        // A real file + a real dotted name (must NOT be rejected).
+        File('${ws.path}/notes.txt').writeAsStringSync('secret notes');
+        File('${ws.path}/a..b.txt').writeAsStringSync('dotted is fine');
 
-      final ok = await AgentService.I
-          .expandReferencesForTest('check @notes.txt', s);
-      expect(ok, contains('referenced file "notes.txt"'));
+        final ok = await AgentService.I.expandReferencesForTest(
+          'check @notes.txt',
+          s,
+        );
+        expect(ok, contains('referenced file "notes.txt"'));
 
-      final dotted = await AgentService.I
-          .expandReferencesForTest('check @a..b.txt', s);
-      expect(dotted, contains('referenced file "a..b.txt"'));
+        final dotted = await AgentService.I.expandReferencesForTest(
+          'check @a..b.txt',
+          s,
+        );
+        expect(dotted, contains('referenced file "a..b.txt"'));
 
-      // Traversal attempts resolve to nothing (no expansion block; the
-      // raw text — which naturally still contains the token — goes to
-      // the model unchanged, exactly like an unresolvable mention).
-      final esc = await AgentService.I
-          .expandReferencesForTest('read @../../etc/passwd', s);
-      expect(esc, isNot(contains('referenced file')));
-      expect(esc, isNot(contains('[expanded references]')));
-      expect(esc, 'read @../../etc/passwd');
-    });
+        // Traversal attempts resolve to nothing (no expansion block; the
+        // raw text — which naturally still contains the token — goes to
+        // the model unchanged, exactly like an unresolvable mention).
+        final esc = await AgentService.I.expandReferencesForTest(
+          'read @../../etc/passwd',
+          s,
+        );
+        expect(esc, isNot(contains('referenced file')));
+        expect(esc, isNot(contains('[expanded references]')));
+        expect(esc, 'read @../../etc/passwd');
+      },
+    );
 
-    test('queued message drain expands @file refs for the running session',
-        () async {
-      final app = AppState.I;
-      final s = ChatSession(
-        id: 'qdrain1',
-        title: 'Q',
-        model: 'm',
-        mode: 'auto',
-      );
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      final prevActive = app.activeSessionId;
-      addTearDown(() {
-        app.sessions.removeWhere((x) => x.id == s.id);
-        app.activeSessionId = prevActive == 'qdrain1' ? '' : prevActive;
-      });
-      final ws = await AgentService.I.sessionWorkDirForTest();
-      File('${ws.path}/todo.md').writeAsStringSync('- fix the bug');
+    test(
+      'queued message drain expands @file refs for the running session',
+      () async {
+        final app = AppState.I;
+        final s = ChatSession(
+          id: 'qdrain1',
+          title: 'Q',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        final prevActive = app.activeSessionId;
+        addTearDown(() {
+          app.sessions.removeWhere((x) => x.id == s.id);
+          app.activeSessionId = prevActive == 'qdrain1' ? '' : prevActive;
+        });
+        final ws = await AgentService.I.sessionWorkDirForTest();
+        File('${ws.path}/todo.md').writeAsStringSync('- fix the bug');
 
-      AgentService.I.queueMessageForTest('summarize @todo.md');
-      addTearDown(() => AgentService.I.clearQueueForTest());
-      final msgs = <Map<String, dynamic>>[];
-      await AgentService.I.drainQueueIntoMsgsForTest(
-        msgs,
-        forSessionId: 'qdrain1',
-      );
-      expect(msgs, isNotEmpty);
-      expect(
-        msgs.last['content'],
-        contains('referenced file "todo.md"'),
-        reason: 'queued text got the same expansion as a direct send',
-      );
-    });
+        AgentService.I.queueMessageForTest('summarize @todo.md');
+        addTearDown(() => AgentService.I.clearQueueForTest());
+        final msgs = <Map<String, dynamic>>[];
+        await AgentService.I.drainQueueIntoMsgsForTest(
+          msgs,
+          forSessionId: 'qdrain1',
+        );
+        expect(msgs, isNotEmpty);
+        expect(
+          msgs.last['content'],
+          contains('referenced file "todo.md"'),
+          reason: 'queued text got the same expansion as a direct send',
+        );
+      },
+    );
 
     test('run start snapshots the model; mid-run picker switch does not '
         'affect the in-flight run', () async {
@@ -5670,8 +6622,7 @@ block</pre>
       bucket.modelSnapshot = null;
     });
 
-    test('composer mention boundary: @ after ( [ , > opens the menu',
-        () {
+    test('composer mention boundary: @ after ( [ , > opens the menu', () {
       // Source-level contract for the boundary set (PR23/M7) — mirrors
       // _onTextChanged's check without needing a widget test.
       const openers = ' \n\t([,>';
@@ -5684,105 +6635,109 @@ block</pre>
   });
 
   group('PR24: plugin hooks', () {
-    test('marketplace hooks parse (map + list forms, unknown events die)',
-        () async {
-      final app = AppState.I;
-      // Map form via merge — drive the private parse path through a
-      // plugin insert using the same _parsePluginHooks rules: valid
-      // events kept, unknown dropped, empty commands dropped.
-      final p = PluginItem(
-        name: 'hooked',
-        author: 'you',
-        description: 'hooks plugin',
-        version: '1.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        installs: 1,
-        // Constructor stores as given (the _parsePluginHooks filter runs
-        // at MARKETPLACE import time — see the merge contract below).
-        hooks: {
-          'on_turn_start': 'echo start',
-          'on_bogus_event': 'echo never',
-        },
-      );
-      app.plugins.add(p);
-      addTearDown(() => app.plugins.remove(p));
+    test(
+      'marketplace hooks parse (map + list forms, unknown events die)',
+      () async {
+        final app = AppState.I;
+        // Map form via merge — drive the private parse path through a
+        // plugin insert using the same _parsePluginHooks rules: valid
+        // events kept, unknown dropped, empty commands dropped.
+        final p = PluginItem(
+          name: 'hooked',
+          author: 'you',
+          description: 'hooks plugin',
+          version: '1.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          installs: 1,
+          // Constructor stores as given (the _parsePluginHooks filter runs
+          // at MARKETPLACE import time — see the merge contract below).
+          hooks: {
+            'on_turn_start': 'echo start',
+            'on_bogus_event': 'echo never',
+          },
+        );
+        app.plugins.add(p);
+        addTearDown(() => app.plugins.remove(p));
 
-      expect(p.hooks['on_turn_start'], 'echo start');
-      // Unknown events are never FIRED: fire() iterates only listeners
-      // whose event matches, and the agent only calls the 5 known names.
-      expect(PluginItem.hookEvents.contains('on_bogus_event'), isFalse);
-      // The marketplace parse contract: unknown + empty dropped, valid kept.
-      // (Drive _parsePluginHooks through a merge shape.)
-      final merged = app.mergeMarketplaceCatalogForTest(
-        {
-          'plugins': [
-            {
-              'name': 'hooked-market',
-              'hooks': {
-                'on_turn_end': 'echo end',
-                'on_bogus_event': 'echo never',
-                'on_pre_request': '   ',
+        expect(p.hooks['on_turn_start'], 'echo start');
+        // Unknown events are never FIRED: fire() iterates only listeners
+        // whose event matches, and the agent only calls the 5 known names.
+        expect(PluginItem.hookEvents.contains('on_bogus_event'), isFalse);
+        // The marketplace parse contract: unknown + empty dropped, valid kept.
+        // (Drive _parsePluginHooks through a merge shape.)
+        final merged = app.mergeMarketplaceCatalogForTest(
+          {
+            'plugins': [
+              {
+                'name': 'hooked-market',
+                'hooks': {
+                  'on_turn_end': 'echo end',
+                  'on_bogus_event': 'echo never',
+                  'on_pre_request': '   ',
+                },
               },
-            },
-          ],
-        },
-        'testowner',
-        'testrepo',
-      );
-      expect(merged, contains('Imported 1 plugin'));
-      final imported = app.plugins.firstWhere(
-        (x) => x.name == 'hooked-market',
-      );
-      expect(imported.hooks['on_turn_end'], 'echo end');
-      expect(imported.hooks.containsKey('on_bogus_event'), isFalse);
-      expect(imported.hooks.containsKey('on_pre_request'), isFalse);
-      app.plugins.remove(imported);
-      expect(PluginItem.hookEvents, contains('on_session_start'));
-      expect(PluginItem.hookEvents, contains('on_turn_end'));
-      expect(PluginItem.hookEvents, contains('on_post_tool'));
-    });
+            ],
+          },
+          'testowner',
+          'testrepo',
+        );
+        expect(merged, contains('Imported 1 plugin'));
+        final imported = app.plugins.firstWhere(
+          (x) => x.name == 'hooked-market',
+        );
+        expect(imported.hooks['on_turn_end'], 'echo end');
+        expect(imported.hooks.containsKey('on_bogus_event'), isFalse);
+        expect(imported.hooks.containsKey('on_pre_request'), isFalse);
+        app.plugins.remove(imported);
+        expect(PluginItem.hookEvents, contains('on_session_start'));
+        expect(PluginItem.hookEvents, contains('on_turn_end'));
+        expect(PluginItem.hookEvents, contains('on_post_tool'));
+      },
+    );
 
-    test('HookService fires the command with env vars and returns stdout',
-        () async {
-      final app = AppState.I;
-      final p = PluginItem(
-        name: 'hook-runner',
-        author: 'you',
-        description: '',
-        version: '1.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        installs: 1,
-        hooks: {'on_pre_request': 'date'},
-      );
-      app.plugins.add(p);
-      addTearDown(() => app.plugins.remove(p));
+    test(
+      'HookService fires the command with env vars and returns stdout',
+      () async {
+        final app = AppState.I;
+        final p = PluginItem(
+          name: 'hook-runner',
+          author: 'you',
+          description: '',
+          version: '1.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          installs: 1,
+          hooks: {'on_pre_request': 'date'},
+        );
+        app.plugins.add(p);
+        addTearDown(() => app.plugins.remove(p));
 
-      final svc = HookService.I;
-      svc.enabled = true;
-      addTearDown(() => svc.enabled = true);
-      String? gotCmd;
-      Map<String, String>? gotEnv;
-      svc.executorForTest = (cmd, env) async {
-        gotCmd = cmd;
-        gotEnv = env;
-        return 'hook says hi';
-      };
-      addTearDown(() => svc.executorForTest = null);
+        final svc = HookService.I;
+        svc.enabled = true;
+        addTearDown(() => svc.enabled = true);
+        String? gotCmd;
+        Map<String, String>? gotEnv;
+        svc.executorForTest = (cmd, env) async {
+          gotCmd = cmd;
+          gotEnv = env;
+          return 'hook says hi';
+        };
+        addTearDown(() => svc.executorForTest = null);
 
-      final out = await svc.fire('on_pre_request', 'hook-sess-1');
-      expect(gotCmd, 'date');
-      final env = gotEnv!;
-      expect(env['OVID_HOOK_EVENT'], 'on_pre_request');
-      expect(env['OVID_HOOK_PLUGIN'], 'hook-runner');
-      expect(env['OVID_HOOK_SESSION'], 'hook-sess-1');
-      expect(env['OVID_HOOK_PAYLOAD'], contains('hook-sess-1'));
-      expect(out, 'hook says hi');
-      expect(svc.fired, greaterThan(0));
-    });
+        final out = await svc.fire('on_pre_request', 'hook-sess-1');
+        expect(gotCmd, 'date');
+        final env = gotEnv!;
+        expect(env['OVID_HOOK_EVENT'], 'on_pre_request');
+        expect(env['OVID_HOOK_PLUGIN'], 'hook-runner');
+        expect(env['OVID_HOOK_SESSION'], 'hook-sess-1');
+        expect(env['OVID_HOOK_PAYLOAD'], contains('hook-sess-1'));
+        expect(out, 'hook says hi');
+        expect(svc.fired, greaterThan(0));
+      },
+    );
 
     test('kill-switch blocks every hook execution', () async {
       final app = AppState.I;
@@ -5816,8 +6771,7 @@ block</pre>
       expect(called, isFalse, reason: 'disabled hooks never execute');
     });
 
-    test('hook stdout over 2 KB is truncated for context injection',
-        () async {
+    test('hook stdout over 2 KB is truncated for context injection', () async {
       final app = AppState.I;
       final p = PluginItem(
         name: 'hook-big',
@@ -5894,8 +6848,7 @@ block</pre>
   });
 
   group('PR25: edit diff cards', () {
-    test('buildEditDiff: create = all + lines; replace = context + hunks',
-        () {
+    test('buildEditDiff: create = all + lines; replace = context + hunks', () {
       // Create (no before): whole file as additions.
       final created = AgentService.buildEditDiff(
         'lib/new.dart',
@@ -5919,11 +6872,7 @@ block</pre>
       expect(replaced, contains(' four')); // context below
 
       // No change → explicit marker.
-      final same = AgentService.buildEditDiff(
-        'a.txt',
-        'same',
-        'same',
-      );
+      final same = AgentService.buildEditDiff('a.txt', 'same', 'same');
       expect(same, contains('(no changes)'));
     });
 
@@ -5940,12 +6889,7 @@ block</pre>
 
     test('edit tools attach the diff to the tool card detail', () async {
       final app = AppState.I;
-      final s = ChatSession(
-        id: 'diff1',
-        title: 'D',
-        model: 'm',
-        mode: 'auto',
-      );
+      final s = ChatSession(id: 'diff1', title: 'D', model: 'm', mode: 'auto');
       app.sessions.insert(0, s);
       app.activeSessionId = s.id;
       addTearDown(() {
@@ -5958,23 +6902,20 @@ block</pre>
       // Observe (view) then edit — the read-before-write gate.
       final ws = await AgentService.I.sessionWorkDirForTest();
       File('${ws.path}/cfg.txt').writeAsStringSync('alpha\nbeta\n');
-      await AgentService.I.dispatchForTest(
-        'fs_edit',
-        {'command': 'view', 'path': 'cfg.txt'},
-      );
+      await AgentService.I.dispatchForTest('fs_edit', {
+        'command': 'view',
+        'path': 'cfg.txt',
+      });
 
       // Arm a card as a real run's _toolStart would, then edit: the diff
       // must land on that card's detail (D1 contract).
       AgentService.I.armToolCardForTest('fs_edit');
-      final res = await AgentService.I.dispatchForTest(
-        'fs_edit',
-        {
-          'command': 'str_replace',
-          'path': 'cfg.txt',
-          'old_str': 'beta',
-          'new_str': 'gamma',
-        },
-      );
+      final res = await AgentService.I.dispatchForTest('fs_edit', {
+        'command': 'str_replace',
+        'path': 'cfg.txt',
+        'old_str': 'beta',
+        'new_str': 'gamma',
+      });
       expect(res, contains('edited'));
       // The active tool card now carries a real diff in its detail.
       final msg = s.messages.where((m) => m.toolName == 'fs_edit').last;
@@ -6011,7 +6952,8 @@ block</pre>
 
       final measured = AgentService.I.measuredContextTokens(s);
       // Only the 2 live rows + summary count — the 18 folded rows don't.
-      final twoRows = 2 *
+      final twoRows =
+          2 *
           (AgentService.estimateMessageTokens('old message 19 ' * 20) +
               AgentService.estimateMessageTokens(''));
       final summaryTok = AgentService.estimateMessageTokens('short summary');
@@ -6126,8 +7068,7 @@ block</pre>
       expect(tab.logicalWidth, 1280);
     });
 
-    test('header shows jobs only: subagents + trajectory icons removed',
-        () {
+    test('header shows jobs only: subagents + trajectory icons removed', () {
       final src = File('lib/ui/chat_screen.dart').readAsStringSync();
       // The AppBar actions block no longer contains the removed icons.
       final actionsStart = src.indexOf('actions: [');
@@ -6154,7 +7095,8 @@ block</pre>
       AgentService.setRunSessionForTest(s.id);
       addTearDown(() => AgentService.setRunSessionForTest(''));
 
-      final names = AgentService.I.toolsForTest()
+      final names = AgentService.I
+          .toolsForTest()
           .map((t) => t['function']['name'] as String)
           .toSet();
       for (final n in [
@@ -6173,8 +7115,7 @@ block</pre>
       }
     });
 
-    test('browser_click reports not-found without a live controller',
-        () async {
+    test('browser_click reports not-found without a live controller', () async {
       final app = AppState.I;
       final s = ChatSession(id: 'br2', title: 'B', model: 'm', mode: 'auto');
       app.sessions.insert(0, s);
@@ -6226,13 +7167,13 @@ block</pre>
 
   group('PR29: compaction parity', () {
     ProviderConfig fakeProvider() => ProviderConfig(
-          id: 'prov-c29',
-          name: 'Test',
-          description: '',
-          baseUrl: 'https://x.test',
-          models: const ['m'],
-          requiresApiKey: false,
-        );
+      id: 'prov-c29',
+      name: 'Test',
+      description: '',
+      baseUrl: 'https://x.test',
+      models: const ['m'],
+      requiresApiKey: false,
+    );
 
     ChatSession newCompactSession(String id, {int msgs = 0}) {
       final app = AppState.I;
@@ -6247,26 +7188,28 @@ block</pre>
       return s;
     }
 
-    test('/compact on a short chat reports honestly instead of lying',
-        () async {
-      final app = AppState.I;
-      final prov = fakeProvider();
-      app.providers.add(prov);
-      addTearDown(() => app.providers.removeWhere((p) => p.id == 'prov-c29'));
-      final s = newCompactSession('c29-short', msgs: 3);
-      s.providerId = prov.id;
-      app.activeSessionId = s.id;
-      addTearDown(() {
-        app.activeSessionId = '';
-      });
+    test(
+      '/compact on a short chat reports honestly instead of lying',
+      () async {
+        final app = AppState.I;
+        final prov = fakeProvider();
+        app.providers.add(prov);
+        addTearDown(() => app.providers.removeWhere((p) => p.id == 'prov-c29'));
+        final s = newCompactSession('c29-short', msgs: 3);
+        s.providerId = prov.id;
+        app.activeSessionId = s.id;
+        addTearDown(() {
+          app.activeSessionId = '';
+        });
 
-      final res = await CommandService.I.execute('/compact');
-      expect(res!.feedback, contains('Nothing to compact'));
-      expect(res.feedback, isNot(contains('Session compacted —')));
-      // History untouched.
-      expect(s.messages.length, 3);
-      expect(s.compactedSummary, isNull);
-    });
+        final res = await CommandService.I.execute('/compact');
+        expect(res!.feedback, contains('Nothing to compact'));
+        expect(res.feedback, isNot(contains('Session compacted —')));
+        // History untouched.
+        expect(s.messages.length, 3);
+        expect(s.compactedSummary, isNull);
+      },
+    );
 
     test('/compact on a fully-compacted chat says so', () async {
       final app = AppState.I;
@@ -6285,8 +7228,7 @@ block</pre>
       expect(res!.feedback, contains('already fully compacted'));
     });
 
-    test('/compact folds the span and reports honest counts (seam)',
-        () async {
+    test('/compact folds the span and reports honest counts (seam)', () async {
       final app = AppState.I;
       final prov = fakeProvider();
       app.providers.add(prov);
@@ -6319,8 +7261,7 @@ block</pre>
       );
     });
 
-    test('summarizer failure is reported honestly (nothing changes)',
-        () async {
+    test('summarizer failure is reported honestly (nothing changes)', () async {
       final app = AppState.I;
       final s = newCompactSession('c29-fail', msgs: 40);
       AgentService.I.compactionSummarizerForTest = (sess, from, cutoff) async {
@@ -6350,14 +7291,12 @@ block</pre>
       expect(ck['role'], 'user');
       expect(ck['content'], contains('<compacted-summary>'));
       expect(ck['content'], contains('CHECKPOINT BODY'));
-      expect(ck['content'],
-          contains('without acknowledging this checkpoint'));
+      expect(ck['content'], contains('without acknowledging this checkpoint'));
       // History replays AFTER the checkpoint.
       expect(msgs.length, greaterThan(2));
     });
 
-    test('summarizer instruction matches the 8-section checkpoint',
-        () {
+    test('summarizer instruction matches the 8-section checkpoint', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       expect(src, contains('## Primary Request and Intent'));
       expect(src, contains('## Key Technical Concepts'));
@@ -6373,22 +7312,27 @@ block</pre>
   });
 
   group('PR30: apt mirror rotation', () {
-    test('the reported on-device error phrasing triggers a rotation',
-        () {
+    test('the reported on-device error phrasing triggers a rotation', () {
       // The EXACT wording from the device log: apt exits 100 with
       // "does not have a Release file" — the old matcher never matched
       // this phrase (it only knew "no release file"), so every retry
       // burned on the same dead mirror.
       final svc = SandboxService.I;
-      const deviceError = "E: The repository "
+      const deviceError =
+          "E: The repository "
           "'https://packages-cf.termux.dev/apt/termux-main stable Release' "
           "does not have a Release file.";
       final before = svc.currentMirrorIndexForTest;
       final rotated = svc.rotateMirrorForTest(deviceError);
-      expect(rotated, isTrue,
-          reason: '"does not have a Release file" must rotate');
-      expect(svc.currentMirrorIndexForTest,
-          (before + 1) % SandboxService.mirrorCountForTest);
+      expect(
+        rotated,
+        isTrue,
+        reason: '"does not have a Release file" must rotate',
+      );
+      expect(
+        svc.currentMirrorIndexForTest,
+        (before + 1) % SandboxService.mirrorCountForTest,
+      );
       // Rotate back to leave state clean.
       svc.rotateMirrorForTest('connection timed out');
     });
@@ -6405,10 +7349,7 @@ block</pre>
       }
       // Benign output must NOT rotate.
       final before = svc.currentMirrorIndexForTest;
-      expect(
-        svc.rotateMirrorForTest('Reading package lists... Done'),
-        isFalse,
-      );
+      expect(svc.rotateMirrorForTest('Reading package lists... Done'), isFalse);
       expect(svc.currentMirrorIndexForTest, before);
     });
 
@@ -6426,8 +7367,10 @@ block</pre>
       // so this now matches the still-intact first half of the literal).
       expect(
         src,
-        contains("'nodejs npm python python-pip uv git curl zlib "
-            "make binutils '"),
+        contains(
+          "'nodejs npm python python-pip uv git curl zlib "
+          "make binutils '",
+        ),
       );
       // deb fallback wanted list (PR30).
       expect(src, contains("'curl',\n          'zlib',"));
@@ -6441,72 +7384,80 @@ block</pre>
     // and silently never rewrote anything — npm/npx kept Termux-app
     // shebangs → "Permission denied". This test runs the EXACT
     // production bash through real bash on the host.
-    test('production sed expression rewrites npm/npx shebangs + chmods',
-        () async {
-      final tmp =
-          await Directory.systemTemp.createTemp('ovid-pr31-');
-      addTearDown(() {
-        try {
-          tmp.deleteSync(recursive: true);
-        } catch (_) {}
-      });
-      final p = tmp.path;
-      // Mini sandbox: bin/npm, bin/npx + a nested cli script.
-      Directory('$p/bin').createSync(recursive: true);
-      Directory('$p/lib/node_modules/npm/bin').createSync(recursive: true);
-      File('$p/bin/npx')
-          .writeAsStringSync('#!/data/data/com.termux/files/usr/bin/env node\n');
-      File('$p/bin/npm')
-          .writeAsStringSync('#!/data/data/com.termux/files/usr/bin/env node\n');
-      File('$p/lib/node_modules/npm/bin/npm-cli.js')
-          .writeAsStringSync('#!/data/data/com.termux/files/usr/bin/env node\n');
-      // Exec bit OFF on npx (the reported state).
-      Process.runSync('chmod', ['-x', '$p/bin/npx']);
+    test(
+      'production sed expression rewrites npm/npx shebangs + chmods',
+      () async {
+        final tmp = await Directory.systemTemp.createTemp('ovid-pr31-');
+        addTearDown(() {
+          try {
+            tmp.deleteSync(recursive: true);
+          } catch (_) {}
+        });
+        final p = tmp.path;
+        // Mini sandbox: bin/npm, bin/npx + a nested cli script.
+        Directory('$p/bin').createSync(recursive: true);
+        Directory('$p/lib/node_modules/npm/bin').createSync(recursive: true);
+        File(
+          '$p/bin/npx',
+        ).writeAsStringSync('#!/data/data/com.termux/files/usr/bin/env node\n');
+        File(
+          '$p/bin/npm',
+        ).writeAsStringSync('#!/data/data/com.termux/files/usr/bin/env node\n');
+        File(
+          '$p/lib/node_modules/npm/bin/npm-cli.js',
+        ).writeAsStringSync('#!/data/data/com.termux/files/usr/bin/env node\n');
+        // Exec bit OFF on npx (the reported state).
+        Process.runSync('chmod', ['-x', '$p/bin/npx']);
 
-      final sedExpr =
-          's|/data/data/com.termux/files/usr/|$p/|g; '
-          's|/data/data/com.termux/files|$p|g';
-      final script = 'export PREFIX="$p"; '
-          'for dir in "\$PREFIX/bin" "\$PREFIX/lib/node_modules" '
-          '"\$PREFIX/lib" "\$PREFIX/etc"; do '
-          '[ -d "\$dir" ] || continue; '
-          'find "\$dir" -maxdepth 6 -type f ! -name "*.so*" '
-          '! -name "*.png" ! -name "*.jpg" ! -name "*.a" '
-          '-exec sh -c \'head -c2 "\$1" 2>/dev/null | grep -q "#!" && '
-          'sed -i "$sedExpr" "\$1"\' _ {} \\; '
-          '2>/dev/null; done; '
-          'chmod +x "\$PREFIX"/bin/* 2>/dev/null';
-      final r = await Process.run('bash', ['-c', script]);
-      expect(r.exitCode, 0, reason: r.stderr.toString());
+        final sedExpr =
+            's|/data/data/com.termux/files/usr/|$p/|g; '
+            's|/data/data/com.termux/files|$p|g';
+        final script =
+            'export PREFIX="$p"; '
+            'for dir in "\$PREFIX/bin" "\$PREFIX/lib/node_modules" '
+            '"\$PREFIX/lib" "\$PREFIX/etc"; do '
+            '[ -d "\$dir" ] || continue; '
+            'find "\$dir" -maxdepth 6 -type f ! -name "*.so*" '
+            '! -name "*.png" ! -name "*.jpg" ! -name "*.a" '
+            '-exec sh -c \'head -c2 "\$1" 2>/dev/null | grep -q "#!" && '
+            'sed -i "$sedExpr" "\$1"\' _ {} \\; '
+            '2>/dev/null; done; '
+            'chmod +x "\$PREFIX"/bin/* 2>/dev/null';
+        final r = await Process.run('bash', ['-c', script]);
+        expect(r.exitCode, 0, reason: r.stderr.toString());
 
-      expect(
-        File('$p/bin/npx').readAsStringSync(),
-        startsWith('#!$p/bin/env node'),
-        reason: 'npx shebang rewritten to OUR prefix',
-      );
-      expect(
-        File('$p/bin/npm').readAsStringSync(),
-        startsWith('#!$p/bin/env node'),
-      );
-      expect(
-        File('$p/lib/node_modules/npm/bin/npm-cli.js').readAsStringSync(),
-        startsWith('#!$p/bin/env node'),
-        reason: 'nested npm cli script rewritten too',
-      );
-      // Exec bit restored by the chmod pass.
-      final ls = await Process.run('bash',
-          ['-c', '[ -x "$p/bin/npx" ] && echo X_OK || echo X_NO']);
-      expect(ls.stdout.toString().trim(), 'X_OK',
-          reason: 'npx executable after the pass');
-    });
+        expect(
+          File('$p/bin/npx').readAsStringSync(),
+          startsWith('#!$p/bin/env node'),
+          reason: 'npx shebang rewritten to OUR prefix',
+        );
+        expect(
+          File('$p/bin/npm').readAsStringSync(),
+          startsWith('#!$p/bin/env node'),
+        );
+        expect(
+          File('$p/lib/node_modules/npm/bin/npm-cli.js').readAsStringSync(),
+          startsWith('#!$p/bin/env node'),
+          reason: 'nested npm cli script rewritten too',
+        );
+        // Exec bit restored by the chmod pass.
+        final ls = await Process.run('bash', [
+          '-c',
+          '[ -x "$p/bin/npx" ] && echo X_OK || echo X_NO',
+        ]);
+        expect(
+          ls.stdout.toString().trim(),
+          'X_OK',
+          reason: 'npx executable after the pass',
+        );
+      },
+    );
 
-    test('the OLD malformed sed shape is rejected by this sed build',
-        () async {
+    test('the OLD malformed sed shape is rejected by this sed build', () async {
       // Regression guard: the PR22 form (`s|...|...|g; ` with the `;`
       // inside the expression followed by a second command) must FAIL
       // loudly if it ever comes back.
-      final tmp =
-          await Directory.systemTemp.createTemp('ovid-pr31-old-');
+      final tmp = await Directory.systemTemp.createTemp('ovid-pr31-old-');
       addTearDown(() {
         try {
           tmp.deleteSync(recursive: true);
@@ -6517,10 +7468,10 @@ block</pre>
       final p = tmp.path;
       final oldShape =
           's|/data/data/com.termux/files/usr/|$p/|g; sed -i "s|x|y|g" "\$f"';
-      final r = await Process.run(
-        'bash',
-        ['-c', 'sed -i "$oldShape" "${f.path}" 2>&1; echo "rc=\$?"'],
-      );
+      final r = await Process.run('bash', [
+        '-c',
+        'sed -i "$oldShape" "${f.path}" 2>&1; echo "rc=\$?"',
+      ]);
       // GNU sed exits 2 (unknown option) or reports the error — never a
       // silent success. Either way the file must NOT be half-rewritten.
       expect(r.stdout.toString(), isNot(contains('g; sed')));
@@ -6547,50 +7498,63 @@ block</pre>
   });
 
   group('PR32: instant stop + boot fix + keep-alive', () {
-    test('boot path: checkExisting has NO self-heal await (black-screen fix)',
-        () {
-      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
-      final start = src.indexOf('Future<bool> checkExisting()');
-      final body = src.substring(start, src.indexOf('Future<void> selfHealInBackground'));
-      // The boot path must NOT await the multi-minute heal.
-      expect(body, isNot(contains('await _selfHealSandbox')));
-      // ...and the heal must run from the post-frame background instead.
-      expect(src, contains('Future<void> selfHealInBackground'));
-      final main = File('lib/main.dart').readAsStringSync();
-      expect(
-        main,
-        contains('selfHealInBackground'),
-        reason: 'heal runs AFTER runApp (post-frame), never before',
-      );
-    });
+    test(
+      'boot path: checkExisting has NO self-heal await (black-screen fix)',
+      () {
+        final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+        final start = src.indexOf('Future<bool> checkExisting()');
+        final body = src.substring(
+          start,
+          src.indexOf('Future<void> selfHealInBackground'),
+        );
+        // The boot path must NOT await the multi-minute heal.
+        expect(body, isNot(contains('await _selfHealSandbox')));
+        // ...and the heal must run from the post-frame background instead.
+        expect(src, contains('Future<void> selfHealInBackground'));
+        final main = File('lib/main.dart').readAsStringSync();
+        expect(
+          main,
+          contains('selfHealInBackground'),
+          reason: 'heal runs AFTER runApp (post-frame), never before',
+        );
+      },
+    );
 
-    test('killAllProcesses SIGKILLs every tracked process (host-executed)',
-        () async {
-      final svc = SandboxService.I;
-      // _trackedRun is private — drive it through execHost, but that hard
-      // /system/bin/sh paths. On the HOST (unit tests) spawn via the same
-      // tracker by faking the sandbox prefix to /bin (sh exists there).
-      final shPath = File('/system/bin/sh').existsSync()
-          ? '/system/bin/sh'
-          : '/bin/sh';
-      expect(File(shPath).existsSync(), isTrue, reason: 'a shell for the test');
-      // Spawn directly (the tracker's registration path — same API the
-      // sandbox execs use internally) via a tiny tracked sleep.
-      final proc = await Process.start(shPath, ['-c', 'sleep 30']);
-      svc.liveProcessesForTest.add(proc);
-      final done = proc.exitCode.then((_) => 'killed');
-      await Future.delayed(const Duration(milliseconds: 200));
-      // Instant stop: everything dies NOW (SIGKILL).
-      svc.killAllProcesses();
-      final r = await done.timeout(const Duration(seconds: 3));
-      expect(r, 'killed');
-      expect(proc.exitCode, isNot(0),
-          reason: 'SIGKILL exit — not a natural 0');
-      expect(svc.liveProcessesForTest, isEmpty);
-    });
+    test(
+      'killAllProcesses SIGKILLs every tracked process (host-executed)',
+      () async {
+        final svc = SandboxService.I;
+        // _trackedRun is private — drive it through execHost, but that hard
+        // /system/bin/sh paths. On the HOST (unit tests) spawn via the same
+        // tracker by faking the sandbox prefix to /bin (sh exists there).
+        final shPath = File('/system/bin/sh').existsSync()
+            ? '/system/bin/sh'
+            : '/bin/sh';
+        expect(
+          File(shPath).existsSync(),
+          isTrue,
+          reason: 'a shell for the test',
+        );
+        // Spawn directly (the tracker's registration path — same API the
+        // sandbox execs use internally) via a tiny tracked sleep.
+        final proc = await Process.start(shPath, ['-c', 'sleep 30']);
+        svc.liveProcessesForTest.add(proc);
+        final done = proc.exitCode.then((_) => 'killed');
+        await Future.delayed(const Duration(milliseconds: 200));
+        // Instant stop: everything dies NOW (SIGKILL).
+        svc.killAllProcesses();
+        final r = await done.timeout(const Duration(seconds: 3));
+        expect(r, 'killed');
+        expect(
+          proc.exitCode,
+          isNot(0),
+          reason: 'SIGKILL exit — not a natural 0',
+        );
+        expect(svc.liveProcessesForTest, isEmpty);
+      },
+    );
 
-    test('cancelAllRuns kills jobs + spawned processes on every bucket',
-        () {
+    test('cancelAllRuns kills jobs + spawned processes on every bucket', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       expect(src, contains('void cancelAllRuns()'));
       expect(src, contains('killAllProcesses'));
@@ -6601,8 +7565,9 @@ block</pre>
       // Chat red button + notification Stop use the panic stop.
       final chat = File('lib/ui/chat_screen.dart').readAsStringSync();
       expect(chat, contains('cancelAllRuns'));
-      final notif = File('lib/core/agent_notification_service.dart')
-          .readAsStringSync();
+      final notif = File(
+        'lib/core/agent_notification_service.dart',
+      ).readAsStringSync();
       expect(notif, contains('cancelAllRuns'));
     });
 
@@ -6640,14 +7605,13 @@ block</pre>
       final before = app.mcpServers.map((s) => s.name).toSet();
       await seedCache(
         'acme/tools',
-        mcpJson: '{"mcpServers":{"acme-fs":{"command":"npx",'
+        mcpJson:
+            '{"mcpServers":{"acme-fs":{"command":"npx",'
             '"args":["-y","@acme/fs"],"env":{"API_KEY":"k"}},'
             '"acme-web":{"command":"uvx","args":["acme-web"]}}}',
       );
       addTearDown(() {
-        app.mcpServers.removeWhere(
-          (s) => s.name.startsWith('acme-'),
-        );
+        app.mcpServers.removeWhere((s) => s.name.startsWith('acme-'));
       });
 
       final n = await app.mountPluginMcpServers('acme/tools');
@@ -6701,7 +7665,8 @@ block</pre>
         ),
       );
       addTearDown(
-          () => app.mcpServers.removeWhere((s) => s.name == 'dupe-srv'));
+        () => app.mcpServers.removeWhere((s) => s.name == 'dupe-srv'),
+      );
       await seedCache(
         'acme/dupe',
         mcpJson: '{"mcpServers":{"dupe-srv":{"command":"fake"}}}',
@@ -6724,25 +7689,27 @@ block</pre>
       return AgentService.I.runBucketForTest(s.id);
     }
 
-    test('same tool + same args streak reaches 3/5/8; changing either resets',
-        () {
-      final bucket = newBucket();
-      final calls = <String>[];
-      for (var i = 0; i < 8; i++) {
-        const name = 'run_shell';
-        const argsMap = {'command': 'ls -la'};
-        final canon = jsonEncode(argsMap);
-        if (bucket.repeatKey?.name == name &&
-            bucket.repeatKey!.canonArgs == canon) {
-          bucket.repeatStreak++;
-        } else {
-          bucket.repeatKey = (name: name, canonArgs: canon);
-          bucket.repeatStreak = 1;
+    test(
+      'same tool + same args streak reaches 3/5/8; changing either resets',
+      () {
+        final bucket = newBucket();
+        final calls = <String>[];
+        for (var i = 0; i < 8; i++) {
+          const name = 'run_shell';
+          const argsMap = {'command': 'ls -la'};
+          final canon = jsonEncode(argsMap);
+          if (bucket.repeatKey?.name == name &&
+              bucket.repeatKey!.canonArgs == canon) {
+            bucket.repeatStreak++;
+          } else {
+            bucket.repeatKey = (name: name, canonArgs: canon);
+            bucket.repeatStreak = 1;
+          }
+          calls.add('${bucket.repeatStreak}');
         }
-        calls.add('${bucket.repeatStreak}');
-      }
-      expect(calls, ['1', '2', '3', '4', '5', '6', '7', '8']);
-    });
+        expect(calls, ['1', '2', '3', '4', '5', '6', '7', '8']);
+      },
+    );
 
     test('different args reset the streak', () {
       final bucket = newBucket();
@@ -6756,6 +7723,7 @@ block</pre>
           bucket.repeatStreak = 1;
         }
       }
+
       call('run_shell', 'ls');
       call('run_shell', 'ls');
       call('run_shell', 'ls');
@@ -6779,6 +7747,7 @@ block</pre>
           bucket.repeatStreak = 1;
         }
       }
+
       call('browser_click');
       call('browser_click');
       expect(bucket.repeatStreak, 2);
@@ -6799,6 +7768,7 @@ block</pre>
           b.repeatStreak = 1;
         }
       }
+
       bump(b1);
       bump(b1);
       bump(b1);
@@ -6807,8 +7777,7 @@ block</pre>
       expect(b2.repeatStreak, 1);
     });
 
-    test('agent service wiring: reminder texts exist at the 3/5/8 streaks',
-        () {
+    test('agent service wiring: reminder texts exist at the 3/5/8 streaks', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       expect(src, contains('repeatStreak'));
       expect(src, contains('Same tool + identical args repeated'));
@@ -6819,44 +7788,45 @@ block</pre>
   });
 
   group('PR46: persistent PTY (F1)', () {
-    test('PTY keeps state across commands in one shell (host-verified)',
-        () async {
-      final shell = await PtyShell.start(() async {
-        final bin = File('/bin/bash').existsSync()
-            ? '/bin/bash'
-            : '/usr/bin/bash';
-        // Non-interactive bash is the real shape (production spawn) —
-        // no command echo, no PS1 chatter, block-buffered lines are
-        // flushed by our marker protocol.
-        return Process.start(bin, ['--norc'], workingDirectory: '/tmp');
-      });
-      expect(shell, isNotNull, reason: 'host bash spawned');
-      addTearDown(() async {
-        await shell!.close();
-      });
+    test(
+      'PTY keeps state across commands in one shell (host-verified)',
+      () async {
+        final shell = await PtyShell.start(() async {
+          final bin = File('/bin/bash').existsSync()
+              ? '/bin/bash'
+              : '/usr/bin/bash';
+          // Non-interactive bash is the real shape (production spawn) —
+          // no command echo, no PS1 chatter, block-buffered lines are
+          // flushed by our marker protocol.
+          return Process.start(bin, ['--norc'], workingDirectory: '/tmp');
+        });
+        expect(shell, isNotNull, reason: 'host bash spawned');
+        addTearDown(() async {
+          await shell!.close();
+        });
 
-      final wd = '/tmp/ovid-pty-${DateTime.now().millisecondsSinceEpoch}';
-      Directory(wd).createSync(recursive: true);
-      addTearDown(() {
-        try {
-          Directory(wd).deleteSync(recursive: true);
-        } catch (_) {}
-      });
+        final wd = '/tmp/ovid-pty-${DateTime.now().millisecondsSinceEpoch}';
+        Directory(wd).createSync(recursive: true);
+        addTearDown(() {
+          try {
+            Directory(wd).deleteSync(recursive: true);
+          } catch (_) {}
+        });
 
-      // cd + export once, read twice in later commands.
-      final r1 = await shell!.run('cd "$wd" && export OVID_TEST_HELLO=42');
-      expect(r1, startsWith('rc=0'));
-      final r2 = await shell.run('pwd; echo "v=\$OVID_TEST_HELLO"');
-      expect(r2, startsWith('rc=0'));
-      expect(r2, contains(wd));
-      expect(r2, contains('v=42'));
-      expect(r1, isNot(r2));
-    });
+        // cd + export once, read twice in later commands.
+        final r1 = await shell!.run('cd "$wd" && export OVID_TEST_HELLO=42');
+        expect(r1, startsWith('rc=0'));
+        final r2 = await shell.run('pwd; echo "v=\$OVID_TEST_HELLO"');
+        expect(r2, startsWith('rc=0'));
+        expect(r2, contains(wd));
+        expect(r2, contains('v=42'));
+        expect(r1, isNot(r2));
+      },
+    );
 
     test('PTY output parser strips the marker + carries rc', () async {
       final shell = await PtyShell.start(() async {
-        return Process.start('/bin/bash', ['--norc'],
-            workingDirectory: '/tmp');
+        return Process.start('/bin/bash', ['--norc'], workingDirectory: '/tmp');
       });
       addTearDown(() async {
         await shell!.close();
@@ -6890,69 +7860,71 @@ block</pre>
   });
 
   group('PR43: F3 tool-result pruner + F4 convergence retry', () {
-    test('pruner rewrites oversized tool details; skips summarizer when safe',
-        () async {
-      final app = AppState.I;
-      final s = ChatSession(
-        id: 'f3-p1',
-        title: 'F3',
-        model: 'm',
-        mode: 'auto',
-      );
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      final prevActive = app.activeSessionId;
-      addTearDown(() {
-        app.sessions.removeWhere((x) => x.id == s.id);
-        app.activeSessionId = prevActive == s.id ? '' : prevActive;
-      });
-      AgentService.setRunSessionForTest(s.id);
-      addTearDown(() => AgentService.setRunSessionForTest(''));
+    test(
+      'pruner rewrites oversized tool details; skips summarizer when safe',
+      () async {
+        final app = AppState.I;
+        final s = ChatSession(
+          id: 'f3-p1',
+          title: 'F3',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        final prevActive = app.activeSessionId;
+        addTearDown(() {
+          app.sessions.removeWhere((x) => x.id == s.id);
+          app.activeSessionId = prevActive == s.id ? '' : prevActive;
+        });
+        AgentService.setRunSessionForTest(s.id);
+        addTearDown(() => AgentService.setRunSessionForTest(''));
 
-      // Tiny window: 800 tokens, threshold at 640. Oversized tool detail
-      // (12K chars ≈ 3002 tokens) alone puts us way over threshold.
-      app.contextWindowOverride = 800;
-      addTearDown(() => app.contextWindowOverride = 0);
-      s.messages.add(Message(
-        role: 'assistant',
-        kind: MsgKind.tool,
-        toolName: 'run_shell',
-        toolDetail: 'line\n' * 3000, // ~15000 chars — clearly oversized
-        toolState: 'ok',
-      ));
-      s.messages.add(Message(role: 'user', content: 'summary?'));
+        // Tiny window: 800 tokens, threshold at 640. Oversized tool detail
+        // (12K chars ≈ 3002 tokens) alone puts us way over threshold.
+        app.contextWindowOverride = 800;
+        addTearDown(() => app.contextWindowOverride = 0);
+        s.messages.add(
+          Message(
+            role: 'assistant',
+            kind: MsgKind.tool,
+            toolName: 'run_shell',
+            toolDetail: 'line\n' * 3000, // ~15000 chars — clearly oversized
+            toolState: 'ok',
+          ),
+        );
+        s.messages.add(Message(role: 'user', content: 'summary?'));
 
-      var called = 0;
-      AgentService.I.compactionSummarizerForTest = (sess, a, b) async {
-        called++;
-        return 'summary';
-      };
-      addTearDown(() => AgentService.I.compactionSummarizerForTest = null);
+        var called = 0;
+        AgentService.I.compactionSummarizerForTest = (sess, a, b) async {
+          called++;
+          return 'summary';
+        };
+        addTearDown(() => AgentService.I.compactionSummarizerForTest = null);
 
-      final before = AgentService.I.measuredContextTokens(s);
-      await AgentService.I.maybeCompactForTest(
-        s,
-        AppState.I.providers.first,
-      );
+        final before = AgentService.I.measuredContextTokens(s);
+        await AgentService.I.maybeCompactForTest(s, AppState.I.providers.first);
 
-      expect(
-        s.compactedSummary,
-        isNull,
-        reason: 'pruning alone brought pressure below threshold; parity: '
-            'no summarization call',
-      );
-      expect(called, 0, reason: 'summarizer skipped after pruning');
-      expect(
-        AgentService.I.measuredContextTokens(s),
-        lessThan(before),
-        reason: 'pressure actually dropped',
-      );
-      // The tool output was rewritten to a spill reference.
-      final card = s.messages.firstWhere((m) => m.kind == MsgKind.tool);
-      expect(card.toolDetail, contains('.spill/'));
-      expect(card.toolDetail, contains('omitted'));
-      expect(card.toolDetail!.length, lessThan(6000));
-    });
+        expect(
+          s.compactedSummary,
+          isNull,
+          reason:
+              'pruning alone brought pressure below threshold; parity: '
+              'no summarization call',
+        );
+        expect(called, 0, reason: 'summarizer skipped after pruning');
+        expect(
+          AgentService.I.measuredContextTokens(s),
+          lessThan(before),
+          reason: 'pressure actually dropped',
+        );
+        // The tool output was rewritten to a spill reference.
+        final card = s.messages.firstWhere((m) => m.kind == MsgKind.tool);
+        expect(card.toolDetail, contains('.spill/'));
+        expect(card.toolDetail, contains('omitted'));
+        expect(card.toolDetail!.length, lessThan(6000));
+      },
+    );
 
     test('F4: compaction state advances only when the summary is used', () {
       final app = AppState.I;
@@ -7030,41 +8002,43 @@ block</pre>
       expect(noTasks, contains('no tasks'));
     });
 
-    test('workflow spawns one child session per task, phases in order',
-        () async {
-      final parent = newParent('wf-p2');
-      AgentService.setRunSessionForTest(parent.id);
-      addTearDown(() => AgentService.setRunSessionForTest(''));
+    test(
+      'workflow spawns one child session per task, phases in order',
+      () async {
+        final parent = newParent('wf-p2');
+        AgentService.setRunSessionForTest(parent.id);
+        addTearDown(() => AgentService.setRunSessionForTest(''));
 
-      // The runs fail fast (no provider in tests) — the structure is what
-      // we verify: 2 phases × (2+1) tasks = 3 child sessions in lineage.
-      await AgentService.I.dispatchForTest('workflow', {
-        'name': 'W',
-        'phases': [
-          {
-            'name': 'scan',
-            'tasks': [
-              {'label': 'a', 'prompt': 'map A'},
-              {'label': 'b', 'prompt': 'map B'},
-            ],
-          },
-          {
-            'name': 'report',
-            'tasks': [
-              {'label': 'c', 'prompt': 'write up'},
-            ],
-          },
-        ],
-      });
+        // The runs fail fast (no provider in tests) — the structure is what
+        // we verify: 2 phases × (2+1) tasks = 3 child sessions in lineage.
+        await AgentService.I.dispatchForTest('workflow', {
+          'name': 'W',
+          'phases': [
+            {
+              'name': 'scan',
+              'tasks': [
+                {'label': 'a', 'prompt': 'map A'},
+                {'label': 'b', 'prompt': 'map B'},
+              ],
+            },
+            {
+              'name': 'report',
+              'tasks': [
+                {'label': 'c', 'prompt': 'write up'},
+              ],
+            },
+          ],
+        });
 
-      final kids = AppState.I.childrenOf(parent.id);
-      expect(kids.length, 3);
-      expect(
-        kids.map((c) => c.agentLabel).toSet(),
-        {'a', 'b', 'c'},
-        reason: 'each task got its own child session',
-      );
-    });
+        final kids = AppState.I.childrenOf(parent.id);
+        expect(kids.length, 3);
+        expect(
+          kids.map((c) => c.agentLabel).toSet(),
+          {'a', 'b', 'c'},
+          reason: 'each task got its own child session',
+        );
+      },
+    );
 
     test('ralph echoes the objective and stops when a worker reports '
         'blocked', () async {
@@ -7087,10 +8061,9 @@ block</pre>
       final parent = newParent('wf-p4');
       AgentService.setRunSessionForTest(parent.id);
       addTearDown(() => AgentService.setRunSessionForTest(''));
-      final res = await AgentService.I.dispatchForTest(
-        'ralph',
-        {'objective': '   '},
-      );
+      final res = await AgentService.I.dispatchForTest('ralph', {
+        'objective': '   ',
+      });
       expect(res, contains('objective is required'));
     });
   });
@@ -7099,8 +8072,9 @@ block</pre>
     setUp(() => AgentService.I.debugPauseScheduleTimerForTest(true));
     tearDown(() => AgentService.I.debugPauseScheduleTimerForTest(false));
 
-    testWidgets('bare /preset opens the sheet; tapping a row applies it',
-        (tester) async {
+    testWidgets('bare /preset opens the sheet; tapping a row applies it', (
+      tester,
+    ) async {
       app.newSession();
       app.sendMessage('hello there'); // mid-chat — the old refusal case
       final s = app.activeSession!;
@@ -7132,139 +8106,178 @@ block</pre>
     });
   });
 
-  group('PR34: sandbox installs on the right ABI, fails honestly, never traps', () {
-    test('preflight gate blocks Android 6 with an actionable message', () {
-      final e = sandboxPreflightGate(sdkInt: 23, dataExecAllowed: true);
-      expect(e, isA<SandboxUnsupportedException>());
-      expect(e!.message, contains('API 23'));
-      expect(e.message, contains('Android 7+'));
-      expect(e.message, contains('Continue without it'));
-      expect(sandboxPreflightGate(sdkInt: 22, dataExecAllowed: true),
-          isA<SandboxUnsupportedException>());
-    });
+  group(
+    'PR34: sandbox installs on the right ABI, fails honestly, never traps',
+    () {
+      test('preflight gate blocks Android 6 with an actionable message', () {
+        final e = sandboxPreflightGate(sdkInt: 23, dataExecAllowed: true);
+        expect(e, isA<SandboxUnsupportedException>());
+        expect(e!.message, contains('API 23'));
+        expect(e.message, contains('Android 7+'));
+        expect(e.message, contains('Continue without it'));
+        expect(
+          sandboxPreflightGate(sdkInt: 22, dataExecAllowed: true),
+          isA<SandboxUnsupportedException>(),
+        );
+      });
 
-    test('preflight gate allows Android 7+ and unknown (host) SDK levels',
+      test(
+        'preflight gate allows Android 7+ and unknown (host) SDK levels',
         () {
-      expect(sandboxPreflightGate(sdkInt: 24, dataExecAllowed: true), isNull);
-      expect(sandboxPreflightGate(sdkInt: 35, dataExecAllowed: true), isNull);
-      // Unknown SDK (channel unavailable in host tests) must never gate.
-      expect(sandboxPreflightGate(sdkInt: -1, dataExecAllowed: true), isNull);
-    });
+          expect(
+            sandboxPreflightGate(sdkInt: 24, dataExecAllowed: true),
+            isNull,
+          );
+          expect(
+            sandboxPreflightGate(sdkInt: 35, dataExecAllowed: true),
+            isNull,
+          );
+          // Unknown SDK (channel unavailable in host tests) must never gate.
+          expect(
+            sandboxPreflightGate(sdkInt: -1, dataExecAllowed: true),
+            isNull,
+          );
+        },
+      );
 
-    test('preflight gate blocks exec-denying ROMs', () {
-      final e = sandboxPreflightGate(sdkInt: 33, dataExecAllowed: false);
-      expect(e, isA<SandboxUnsupportedException>());
-      expect(e!.message, contains('app storage'));
-    });
+      test('preflight gate blocks exec-denying ROMs', () {
+        final e = sandboxPreflightGate(sdkInt: 33, dataExecAllowed: false);
+        expect(e, isA<SandboxUnsupportedException>());
+        expect(e!.message, contains('app storage'));
+      });
 
-    test('apt arch follows the payload ABI, not device capability', () {
-      expect(aptArchFor('arm64-v8a', 'arm'), 'aarch64');
-      expect(aptArchFor('armeabi-v7a', 'arm64'), 'arm');
-      expect(aptArchFor('x86_64', 'arm64'), 'x86_64');
-      // Unknown payload (older builds) falls back to the device arch.
-      expect(aptArchFor(null, 'arm64'), 'aarch64');
-      expect(aptArchFor('unknown', 'arm'), 'arm');
-    });
+      test('apt arch follows the payload ABI, not device capability', () {
+        expect(aptArchFor('arm64-v8a', 'arm'), 'aarch64');
+        expect(aptArchFor('armeabi-v7a', 'arm64'), 'arm');
+        expect(aptArchFor('x86_64', 'arm64'), 'x86_64');
+        // Unknown payload (older builds) falls back to the device arch.
+        expect(aptArchFor(null, 'arm64'), 'aarch64');
+        expect(aptArchFor('unknown', 'arm'), 'arm');
+      });
 
-    test('sandbox skip flag persists and clears', () async {
-      await app.setSandboxSkipped(true);
-      expect(app.sandboxSkipped, isTrue);
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getBool('ovid_sandbox_skipped'), isTrue);
+      test('sandbox skip flag persists and clears', () async {
+        await app.setSandboxSkipped(true);
+        expect(app.sandboxSkipped, isTrue);
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getBool('ovid_sandbox_skipped'), isTrue);
 
-      await app.setSandboxSkipped(false);
-      expect(app.sandboxSkipped, isFalse);
-      expect(prefs.getBool('ovid_sandbox_skipped'), isNull);
-    });
-  });
+        await app.setSandboxSkipped(false);
+        expect(app.sandboxSkipped, isFalse);
+        expect(prefs.getBool('ovid_sandbox_skipped'), isNull);
+      });
+    },
+  );
 
   group('PR35: sandbox exec cast + @session reference', () {
-    test('exec() returns real command output (String-cast regression)',
-        () async {
-      final svc = SandboxService.I;
-      // Regression: PR32's _trackedRun decodes stdout/stderr to String;
-      // exec()'s stale `as List<int>` cast threw
-      // "'String' is not a subtype of type 'List<int>' in type cast"
-      // on EVERY sandbox command (run_shell, run_code, jobs).
-      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
-      expect(src, isNot(contains('result.stdout as List<int>')));
-      // Behavioral: drive the fixed path with a real <prefix>/bin/sh.
-      final tmp = await Directory.systemTemp.createTemp('pr35prefix');
-      await Directory('${tmp.path}/bin').create(recursive: true);
-      final shTarget = File('/usr/bin/sh').existsSync()
-          ? '/usr/bin/sh'
-          : '/bin/sh';
-      Link('${tmp.path}/bin/sh').createSync(shTarget);
-      addTearDown(() {
-        svc.sandboxPrefixForTest = null;
-        tmp.deleteSync(recursive: true);
-      });
-      svc.sandboxPrefixForTest = tmp;
-      final out = await svc
-          .exec(['sh', '-c', 'echo sandbox-ok'],
-              hostWorkDir: Directory.systemTemp)
-          .timeout(const Duration(seconds: 20));
-      expect(out, contains('sandbox-ok'));
-    });
+    test(
+      'exec() returns real command output (String-cast regression)',
+      () async {
+        final svc = SandboxService.I;
+        // Regression: PR32's _trackedRun decodes stdout/stderr to String;
+        // exec()'s stale `as List<int>` cast threw
+        // "'String' is not a subtype of type 'List<int>' in type cast"
+        // on EVERY sandbox command (run_shell, run_code, jobs).
+        final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+        expect(src, isNot(contains('result.stdout as List<int>')));
+        // Behavioral: drive the fixed path with a real <prefix>/bin/sh.
+        final tmp = await Directory.systemTemp.createTemp('pr35prefix');
+        await Directory('${tmp.path}/bin').create(recursive: true);
+        final shTarget = File('/usr/bin/sh').existsSync()
+            ? '/usr/bin/sh'
+            : '/bin/sh';
+        Link('${tmp.path}/bin/sh').createSync(shTarget);
+        addTearDown(() {
+          svc.sandboxPrefixForTest = null;
+          tmp.deleteSync(recursive: true);
+        });
+        svc.sandboxPrefixForTest = tmp;
+        final out = await svc
+            .exec([
+              'sh',
+              '-c',
+              'echo sandbox-ok',
+            ], hostWorkDir: Directory.systemTemp)
+            .timeout(const Duration(seconds: 20));
+        expect(out, contains('sandbox-ok'));
+      },
+    );
 
-    test('@session:<id> expands the LAST messages, not the opening lines',
-        () async {
-      final app = AppState.I;
-      final other = ChatSession(id: 'pr35old', title: 'Old work', model: 'm');
-      for (var i = 0; i < 20; i++) {
-        other.messages.add(Message(role: 'user', content: 'early $i'));
-      }
-      other.messages.add(Message(role: 'user', content: 'the latest state'));
-      final cur = ChatSession(id: 'pr35cur', title: 'Cur', model: 'm');
-      final prevActive = app.activeSessionId;
-      app.sessions
-        ..insert(0, other)
-        ..insert(0, cur);
-      app.activeSessionId = cur.id;
-      addTearDown(() {
-        app.sessions.removeWhere((x) => x.id == 'pr35old' || x.id == 'pr35cur');
-        app.activeSessionId = prevActive;
-      });
-      final expanded = await AgentService.I
-          .expandReferencesForTest('continue @session:pr35old', cur);
-      expect(expanded, contains('referenced session "Old work"'));
-      expect(expanded, contains('the latest state'));
-      expect(expanded, isNot(contains('early 0')));
-    });
-
-    test('@session:<title> resolves by title; unknown refs are visible',
-        () async {
-      final app = AppState.I;
-      final other =
-          ChatSession(id: 'pr35t1', title: 'Deploy bug hunt', model: 'm');
-      other.messages.add(Message(role: 'assistant', content: 'found it'));
-      final cur = ChatSession(id: 'pr35cur2', title: 'Cur2', model: 'm');
-      final prevActive = app.activeSessionId;
-      app.sessions
-        ..insert(0, other)
-        ..insert(0, cur);
-      app.activeSessionId = cur.id;
-      addTearDown(() {
+    test(
+      '@session:<id> expands the LAST messages, not the opening lines',
+      () async {
+        final app = AppState.I;
+        final other = ChatSession(id: 'pr35old', title: 'Old work', model: 'm');
+        for (var i = 0; i < 20; i++) {
+          other.messages.add(Message(role: 'user', content: 'early $i'));
+        }
+        other.messages.add(Message(role: 'user', content: 'the latest state'));
+        final cur = ChatSession(id: 'pr35cur', title: 'Cur', model: 'm');
+        final prevActive = app.activeSessionId;
         app.sessions
-            .removeWhere((x) => x.id == 'pr35t1' || x.id == 'pr35cur2');
-        app.activeSessionId = prevActive;
-      });
-      final byTitle = await AgentService.I
-          .expandReferencesForTest('see @session:deploy bug', cur);
-      expect(byTitle, contains('found it'));
+          ..insert(0, other)
+          ..insert(0, cur);
+        app.activeSessionId = cur.id;
+        addTearDown(() {
+          app.sessions.removeWhere(
+            (x) => x.id == 'pr35old' || x.id == 'pr35cur',
+          );
+          app.activeSessionId = prevActive;
+        });
+        final expanded = await AgentService.I.expandReferencesForTest(
+          'continue @session:pr35old',
+          cur,
+        );
+        expect(expanded, contains('referenced session "Old work"'));
+        expect(expanded, contains('the latest state'));
+        expect(expanded, isNot(contains('early 0')));
+      },
+    );
 
-      // A dropped block looked like the AI "cannot access" the session —
-      // unresolvable refs must surface to the model instead.
-      final missing = await AgentService.I
-          .expandReferencesForTest('see @session:nope', cur);
-      expect(missing, contains('not found'));
-    });
+    test(
+      '@session:<title> resolves by title; unknown refs are visible',
+      () async {
+        final app = AppState.I;
+        final other = ChatSession(
+          id: 'pr35t1',
+          title: 'Deploy bug hunt',
+          model: 'm',
+        );
+        other.messages.add(Message(role: 'assistant', content: 'found it'));
+        final cur = ChatSession(id: 'pr35cur2', title: 'Cur2', model: 'm');
+        final prevActive = app.activeSessionId;
+        app.sessions
+          ..insert(0, other)
+          ..insert(0, cur);
+        app.activeSessionId = cur.id;
+        addTearDown(() {
+          app.sessions.removeWhere(
+            (x) => x.id == 'pr35t1' || x.id == 'pr35cur2',
+          );
+          app.activeSessionId = prevActive;
+        });
+        final byTitle = await AgentService.I.expandReferencesForTest(
+          'see @session:deploy bug',
+          cur,
+        );
+        expect(byTitle, contains('found it'));
 
-    test('subagent @-mention menu inserts a resolvable @session:<id> token',
-        () {
-      final src = File('lib/ui/chat_screen.dart').readAsStringSync();
-      expect(src, contains("insert: '@session:\${sub.sessionId} '"));
-    });
+        // A dropped block looked like the AI "cannot access" the session —
+        // unresolvable refs must surface to the model instead.
+        final missing = await AgentService.I.expandReferencesForTest(
+          'see @session:nope',
+          cur,
+        );
+        expect(missing, contains('not found'));
+      },
+    );
+
+    test(
+      'subagent @-mention menu inserts a resolvable @session:<id> token',
+      () {
+        final src = File('lib/ui/chat_screen.dart').readAsStringSync();
+        expect(src, contains("insert: '@session:\${sub.sessionId} '"));
+      },
+    );
   });
 
   group('PR36: targetSdk 28 keeps sandbox exec legal on Android 10+', () {
@@ -7307,8 +8320,9 @@ block</pre>
       // EACCES on execve — the same denial the device reports.
       File('${tmp.path}/bin/bash').writeAsStringSync('#!/nope\n');
       File('${tmp.path}/bin/coreutils').writeAsStringSync('x');
-      File('${tmp.path}/lib/libtermux-exec-direct-ld-preload.so')
-          .writeAsStringSync('x');
+      File(
+        '${tmp.path}/lib/libtermux-exec-direct-ld-preload.so',
+      ).writeAsStringSync('x');
       final svc = SandboxService.I;
       svc.sandboxPrefixForTest = tmp;
       addTearDown(() {
@@ -7365,40 +8379,41 @@ block</pre>
           request.response.headers.chunkedTransferEncoding = true;
           if (requestCount == 1) {
             // First round: text + a run_shell tool call.
-            request.response.add(utf8.encode(
-              'data: ${jsonEncode({
-                'choices': [
-                  {
-                    'delta': {
-                      'content': 'running it',
-                      'tool_calls': [
-                        {
-                          'index': 0,
-                          'id': 'call_1',
-                          'function': {
-                            'name': 'run_shell',
-                            'arguments': '{"command":"echo hi"}',
+            request.response.add(
+              utf8.encode(
+                'data: ${jsonEncode({
+                  'choices': [
+                    {
+                      'delta': {
+                        'content': 'running it',
+                        'tool_calls': [
+                          {
+                            'index': 0,
+                            'id': 'call_1',
+                            'function': {'name': 'run_shell', 'arguments': '{"command":"echo hi"}'},
                           },
-                        },
-                      ],
+                        ],
+                      },
+                      'finish_reason': 'tool_calls',
                     },
-                    'finish_reason': 'tool_calls',
-                  },
-                ],
-              })}\n\n',
-            ));
+                  ],
+                })}\n\n',
+              ),
+            );
           } else {
             // Follow-up rounds: final answer.
-            request.response.add(utf8.encode(
-              'data: ${jsonEncode({
-                'choices': [
-                  {
-                    'delta': {'content': 'all done'},
-                    'finish_reason': 'stop',
-                  },
-                ],
-              })}\n\n',
-            ));
+            request.response.add(
+              utf8.encode(
+                'data: ${jsonEncode({
+                  'choices': [
+                    {
+                      'delta': {'content': 'all done'},
+                      'finish_reason': 'stop',
+                    },
+                  ],
+                })}\n\n',
+              ),
+            );
           }
           await request.response.flush();
           try {
@@ -7479,8 +8494,7 @@ block</pre>
         r"const pkgs =\s*\n\s*'([^']*)'\s*\n\s*'([^']*)';",
       ).firstMatch(src);
       expect(eagerListMatch, isNotNull, reason: 'eager pkgs string moved?');
-      final eagerList =
-          '${eagerListMatch!.group(1)}${eagerListMatch.group(2)}';
+      final eagerList = '${eagerListMatch!.group(1)}${eagerListMatch.group(2)}';
       expect(eagerList, isNot(contains('clang')));
     });
 
@@ -7503,8 +8517,18 @@ block</pre>
       // `!_installed` early-return path is what every host unit test hits).
       final probe = await SandboxService.I.probeRuntimes();
       for (final b in [
-        'bash', 'node', 'npm', 'python', 'git', 'curl',
-        'rg', 'ssh', 'rsync', 'jq', 'unzip', 'tmux',
+        'bash',
+        'node',
+        'npm',
+        'python',
+        'git',
+        'curl',
+        'rg',
+        'ssh',
+        'rsync',
+        'jq',
+        'unzip',
+        'tmux',
       ]) {
         expect(probe, contains(b));
       }
@@ -7534,8 +8558,7 @@ block</pre>
       expect(body, contains('SandboxService.I.ensureCompiler('));
     });
 
-    test('native-build regex matches build/install verbs, not plain reads',
-        () {
+    test('native-build regex matches build/install verbs, not plain reads', () {
       // Same pattern the source defines — verified against representative
       // commands so the trigger heuristic is provably correct without
       // needing a real sandbox exec.
@@ -7567,8 +8590,14 @@ block</pre>
       // The source's actual regex must carry the same three fragments —
       // otherwise this test would validate a pattern the app doesn't run.
       final src = File('lib/core/agent_service.dart').readAsStringSync();
-      expect(src, contains(r'\b(npm|yarn|pnpm)\s+(i|install|ci|rebuild|add)\b|'));
-      expect(src, contains(r'\bnode-gyp\b|\bmake\b|\bcmake\b|\bcc\b|\bgcc\b|\bclang\b|'));
+      expect(
+        src,
+        contains(r'\b(npm|yarn|pnpm)\s+(i|install|ci|rebuild|add)\b|'),
+      );
+      expect(
+        src,
+        contains(r'\bnode-gyp\b|\bmake\b|\bcmake\b|\bcc\b|\bgcc\b|\bclang\b|'),
+      );
       expect(src, contains(r'\bpip3?\s+install\b'));
     });
 
@@ -7593,231 +8622,252 @@ block</pre>
     });
   });
 
-  group('PR39: hook deny/block — on_pre_tool gating (Claude Code PreToolUse parity)', () {
-    test('on_pre_tool is a registered, valid hook event', () {
-      expect(PluginItem.hookEvents, contains('on_pre_tool'));
-    });
-
-    test('fireGate allows when no listener is registered', () async {
-      final res = await HookService.I.fireGate('on_pre_tool', 'gate-sess-0');
-      expect(res.allowed, isTrue);
-    });
-
-    test('exit code 2 denies; the tool never runs and the reason surfaces',
-        () async {
-      final app = AppState.I;
-      final p = PluginItem(
-        name: 'guard-plugin',
-        author: 'you',
-        description: '',
-        version: '1.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        installs: 1,
-        hooks: {'on_pre_tool': 'exit 2'},
-      );
-      app.plugins.add(p);
-      addTearDown(() => app.plugins.remove(p));
-      final svc = HookService.I;
-      svc.gateExecutorForTest = (cmd, env) async =>
-          (2, 'dangerous command blocked by policy');
-      addTearDown(() => svc.gateExecutorForTest = null);
-
-      final res = await svc.fireGate('on_pre_tool', 'gate-sess-1');
-      expect(res.allowed, isFalse);
-      expect(res.deniedByPlugin, 'guard-plugin');
-      expect(res.reason, contains('dangerous command blocked'));
-    });
-
-    test('exit code 0 (or anything but 2) allows', () async {
-      final app = AppState.I;
-      final p = PluginItem(
-        name: 'observer-plugin',
-        author: 'you',
-        description: '',
-        version: '1.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        installs: 1,
-        hooks: {'on_pre_tool': 'exit 0'},
-      );
-      app.plugins.add(p);
-      addTearDown(() => app.plugins.remove(p));
-      final svc = HookService.I;
-      svc.gateExecutorForTest = (cmd, env) async => (0, '');
-      addTearDown(() => svc.gateExecutorForTest = null);
-
-      final res = await svc.fireGate('on_pre_tool', 'gate-sess-2');
-      expect(res.allowed, isTrue);
-    });
-
-    test('a hook that cannot execute fails OPEN, never wedges the run',
-        () async {
-      // No sandbox installed AND no test executor configured — the real
-      // fail-open path (SandboxService.I.isInstalled == false in tests).
-      final app = AppState.I;
-      final p = PluginItem(
-        name: 'unreachable-plugin',
-        author: 'you',
-        description: '',
-        version: '1.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        installs: 1,
-        hooks: {'on_pre_tool': 'exit 2'},
-      );
-      app.plugins.add(p);
-      addTearDown(() => app.plugins.remove(p));
-      final svc = HookService.I;
-      expect(svc.gateExecutorForTest, isNull);
-
-      final res = await svc.fireGate('on_pre_tool', 'gate-sess-3');
-      expect(
-        res.allowed,
-        isTrue,
-        reason: 'a hook that cannot run must never brick every tool call',
-      );
-    });
-
-    test('the kill-switch disables the gate exactly like every other hook',
-        () async {
-      final app = AppState.I;
-      final p = PluginItem(
-        name: 'gate-killed',
-        author: 'you',
-        description: '',
-        version: '1.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        installs: 1,
-        hooks: {'on_pre_tool': 'exit 2'},
-      );
-      app.plugins.add(p);
-      addTearDown(() => app.plugins.remove(p));
-      final svc = HookService.I;
-      svc.enabled = false;
-      addTearDown(() => svc.enabled = true);
-      var called = false;
-      svc.gateExecutorForTest = (cmd, env) async {
-        called = true;
-        return (2, 'should never run');
-      };
-      addTearDown(() => svc.gateExecutorForTest = null);
-
-      final res = await svc.fireGate('on_pre_tool', 'gate-sess-4');
-      expect(res.allowed, isTrue);
-      expect(called, isFalse);
-    });
-
-    test('_dispatch short-circuits BEFORE _dispatchInner on a hook deny',
-        () async {
-      final app = AppState.I;
-      final s = ChatSession(
-        id: 'gate-dispatch-s',
-        title: 'gate',
-        model: 'm',
-        mode: 'drive',
-      );
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
-
-      final p = PluginItem(
-        name: 'shell-guard',
-        author: 'you',
-        description: '',
-        version: '1.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        installs: 1,
-        hooks: {'on_pre_tool': 'exit 2'},
-      );
-      app.plugins.add(p);
-      addTearDown(() => app.plugins.remove(p));
-      final svc = HookService.I;
-      svc.gateExecutorForTest = (cmd, env) async =>
-          (2, 'rm -rf is not allowed by policy');
-      addTearDown(() => svc.gateExecutorForTest = null);
-
-      // run_shell would normally hit approval + real exec — the gate must
-      // return BEFORE any of that, so no approval prompt, no exec.
-      final res = await AgentService.I.dispatchForTest('run_shell', {
-        'command': 'rm -rf /',
+  group(
+    'PR39: hook deny/block — on_pre_tool gating (Claude Code PreToolUse parity)',
+    () {
+      test('on_pre_tool is a registered, valid hook event', () {
+        expect(PluginItem.hookEvents, contains('on_pre_tool'));
       });
-      expect(res, startsWith('DENIED by hook (shell-guard):'));
-      expect(res, contains('rm -rf is not allowed by policy'));
-    });
 
-    test('on_pre_tool payload carries the tool name', () async {
-      final app = AppState.I;
-      final p = PluginItem(
-        name: 'payload-check',
-        author: 'you',
-        description: '',
-        version: '1.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        installs: 1,
-        hooks: {'on_pre_tool': 'inspect'},
-      );
-      app.plugins.add(p);
-      addTearDown(() => app.plugins.remove(p));
-      final svc = HookService.I;
-      Map<String, String>? gotEnv;
-      svc.gateExecutorForTest = (cmd, env) async {
-        gotEnv = env;
-        return (0, '');
-      };
-      addTearDown(() => svc.gateExecutorForTest = null);
+      test('fireGate allows when no listener is registered', () async {
+        final res = await HookService.I.fireGate('on_pre_tool', 'gate-sess-0');
+        expect(res.allowed, isTrue);
+      });
 
-      await svc.fireGate(
-        'on_pre_tool',
-        'gate-sess-5',
-        payload: {'tool': 'run_shell'},
+      test(
+        'exit code 2 denies; the tool never runs and the reason surfaces',
+        () async {
+          final app = AppState.I;
+          final p = PluginItem(
+            name: 'guard-plugin',
+            author: 'you',
+            description: '',
+            version: '1.0',
+            category: 'Tool',
+            installed: true,
+            enabled: true,
+            installs: 1,
+            hooks: {'on_pre_tool': 'exit 2'},
+          );
+          app.plugins.add(p);
+          addTearDown(() => app.plugins.remove(p));
+          final svc = HookService.I;
+          svc.gateExecutorForTest = (cmd, env) async =>
+              (2, 'dangerous command blocked by policy');
+          addTearDown(() => svc.gateExecutorForTest = null);
+
+          final res = await svc.fireGate('on_pre_tool', 'gate-sess-1');
+          expect(res.allowed, isFalse);
+          expect(res.deniedByPlugin, 'guard-plugin');
+          expect(res.reason, contains('dangerous command blocked'));
+        },
       );
-      expect(gotEnv!['OVID_HOOK_PAYLOAD'], contains('run_shell'));
-    });
-  });
+
+      test('exit code 0 (or anything but 2) allows', () async {
+        final app = AppState.I;
+        final p = PluginItem(
+          name: 'observer-plugin',
+          author: 'you',
+          description: '',
+          version: '1.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          installs: 1,
+          hooks: {'on_pre_tool': 'exit 0'},
+        );
+        app.plugins.add(p);
+        addTearDown(() => app.plugins.remove(p));
+        final svc = HookService.I;
+        svc.gateExecutorForTest = (cmd, env) async => (0, '');
+        addTearDown(() => svc.gateExecutorForTest = null);
+
+        final res = await svc.fireGate('on_pre_tool', 'gate-sess-2');
+        expect(res.allowed, isTrue);
+      });
+
+      test(
+        'a hook that cannot execute fails OPEN, never wedges the run',
+        () async {
+          // No sandbox installed AND no test executor configured — the real
+          // fail-open path (SandboxService.I.isInstalled == false in tests).
+          final app = AppState.I;
+          final p = PluginItem(
+            name: 'unreachable-plugin',
+            author: 'you',
+            description: '',
+            version: '1.0',
+            category: 'Tool',
+            installed: true,
+            enabled: true,
+            installs: 1,
+            hooks: {'on_pre_tool': 'exit 2'},
+          );
+          app.plugins.add(p);
+          addTearDown(() => app.plugins.remove(p));
+          final svc = HookService.I;
+          expect(svc.gateExecutorForTest, isNull);
+
+          final res = await svc.fireGate('on_pre_tool', 'gate-sess-3');
+          expect(
+            res.allowed,
+            isTrue,
+            reason: 'a hook that cannot run must never brick every tool call',
+          );
+        },
+      );
+
+      test(
+        'the kill-switch disables the gate exactly like every other hook',
+        () async {
+          final app = AppState.I;
+          final p = PluginItem(
+            name: 'gate-killed',
+            author: 'you',
+            description: '',
+            version: '1.0',
+            category: 'Tool',
+            installed: true,
+            enabled: true,
+            installs: 1,
+            hooks: {'on_pre_tool': 'exit 2'},
+          );
+          app.plugins.add(p);
+          addTearDown(() => app.plugins.remove(p));
+          final svc = HookService.I;
+          svc.enabled = false;
+          addTearDown(() => svc.enabled = true);
+          var called = false;
+          svc.gateExecutorForTest = (cmd, env) async {
+            called = true;
+            return (2, 'should never run');
+          };
+          addTearDown(() => svc.gateExecutorForTest = null);
+
+          final res = await svc.fireGate('on_pre_tool', 'gate-sess-4');
+          expect(res.allowed, isTrue);
+          expect(called, isFalse);
+        },
+      );
+
+      test(
+        '_dispatch short-circuits BEFORE _dispatchInner on a hook deny',
+        () async {
+          final app = AppState.I;
+          final s = ChatSession(
+            id: 'gate-dispatch-s',
+            title: 'gate',
+            model: 'm',
+            mode: 'drive',
+          );
+          app.sessions.insert(0, s);
+          app.activeSessionId = s.id;
+          addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+
+          final p = PluginItem(
+            name: 'shell-guard',
+            author: 'you',
+            description: '',
+            version: '1.0',
+            category: 'Tool',
+            installed: true,
+            enabled: true,
+            installs: 1,
+            hooks: {'on_pre_tool': 'exit 2'},
+          );
+          app.plugins.add(p);
+          addTearDown(() => app.plugins.remove(p));
+          final svc = HookService.I;
+          svc.gateExecutorForTest = (cmd, env) async =>
+              (2, 'rm -rf is not allowed by policy');
+          addTearDown(() => svc.gateExecutorForTest = null);
+
+          // run_shell would normally hit approval + real exec — the gate must
+          // return BEFORE any of that, so no approval prompt, no exec.
+          final res = await AgentService.I.dispatchForTest('run_shell', {
+            'command': 'rm -rf /',
+          });
+          expect(res, startsWith('DENIED by hook (shell-guard):'));
+          expect(res, contains('rm -rf is not allowed by policy'));
+        },
+      );
+
+      test('on_pre_tool payload carries the tool name', () async {
+        final app = AppState.I;
+        final p = PluginItem(
+          name: 'payload-check',
+          author: 'you',
+          description: '',
+          version: '1.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          installs: 1,
+          hooks: {'on_pre_tool': 'inspect'},
+        );
+        app.plugins.add(p);
+        addTearDown(() => app.plugins.remove(p));
+        final svc = HookService.I;
+        Map<String, String>? gotEnv;
+        svc.gateExecutorForTest = (cmd, env) async {
+          gotEnv = env;
+          return (0, '');
+        };
+        addTearDown(() => svc.gateExecutorForTest = null);
+
+        await svc.fireGate(
+          'on_pre_tool',
+          'gate-sess-5',
+          payload: {'tool': 'run_shell'},
+        );
+        expect(gotEnv!['OVID_HOOK_PAYLOAD'], contains('run_shell'));
+      });
+    },
+  );
 
   group('Task 3: hook args + matchers + JSON decision', () {
-    test('on_pre_tool matcher skips a non-matching tool (fails open)', () async {
-      final app = AppState.I;
-      final p = PluginItem(
-        name: 'matcher-skip',
-        author: 'you',
-        description: '',
-        version: '1.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        installs: 1,
-        hooks: {'on_pre_tool': 'exit 2'},
-        hookMatchers: {'on_pre_tool': 'run_shell'},
-      );
-      app.plugins.add(p);
-      addTearDown(() => app.plugins.remove(p));
-      final svc = HookService.I;
-      var called = false;
-      svc.gateExecutorForTest = (cmd, env) async {
-        called = true;
-        return (2, 'blocked');
-      };
-      addTearDown(() => svc.gateExecutorForTest = null);
+    test(
+      'on_pre_tool matcher skips a non-matching tool (fails open)',
+      () async {
+        final app = AppState.I;
+        final p = PluginItem(
+          name: 'matcher-skip',
+          author: 'you',
+          description: '',
+          version: '1.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          installs: 1,
+          hooks: {'on_pre_tool': 'exit 2'},
+          hookMatchers: {'on_pre_tool': 'run_shell'},
+        );
+        app.plugins.add(p);
+        addTearDown(() => app.plugins.remove(p));
+        final svc = HookService.I;
+        var called = false;
+        svc.gateExecutorForTest = (cmd, env) async {
+          called = true;
+          return (2, 'blocked');
+        };
+        addTearDown(() => svc.gateExecutorForTest = null);
 
-      final res = await svc.fireGate(
-        'on_pre_tool',
-        'task3-sess-1',
-        payload: {'tool': 'file_read', 'args': {'path': '/etc/hosts'}},
-      );
-      expect(res.allowed, isTrue);
-      expect(called, isFalse, reason: 'matcher must skip the non-matching hook');
-    });
+        final res = await svc.fireGate(
+          'on_pre_tool',
+          'task3-sess-1',
+          payload: {
+            'tool': 'file_read',
+            'args': {'path': '/etc/hosts'},
+          },
+        );
+        expect(res.allowed, isTrue);
+        expect(
+          called,
+          isFalse,
+          reason: 'matcher must skip the non-matching hook',
+        );
+      },
+    );
 
     test('on_pre_tool matcher blocks a matching tool', () async {
       final app = AppState.I;
@@ -7842,7 +8892,10 @@ block</pre>
       final res = await svc.fireGate(
         'on_pre_tool',
         'task3-sess-2',
-        payload: {'tool': 'run_shell', 'args': {'command': 'rm -rf /'}},
+        payload: {
+          'tool': 'run_shell',
+          'args': {'command': 'rm -rf /'},
+        },
       );
       expect(res.allowed, isFalse);
       expect(res.deniedByPlugin, 'matcher-block');
@@ -7892,16 +8945,17 @@ block</pre>
       app.plugins.add(p);
       addTearDown(() => app.plugins.remove(p));
       final svc = HookService.I;
-      svc.gateExecutorForTest = (cmd, env) async => (
-        0,
-        '{"decision":"block","reason":"policy forbids this"}',
-      );
+      svc.gateExecutorForTest = (cmd, env) async =>
+          (0, '{"decision":"block","reason":"policy forbids this"}');
       addTearDown(() => svc.gateExecutorForTest = null);
 
       final res = await svc.fireGate(
         'on_pre_tool',
         'task3-sess-4',
-        payload: {'tool': 'run_shell', 'args': {'command': 'rm'}},
+        payload: {
+          'tool': 'run_shell',
+          'args': {'command': 'rm'},
+        },
       );
       expect(res.allowed, isFalse);
       expect(res.reason, contains('policy forbids this'));
@@ -7923,10 +8977,8 @@ block</pre>
       app.plugins.add(p);
       addTearDown(() => app.plugins.remove(p));
       final svc = HookService.I;
-      svc.gateExecutorForTest = (cmd, env) async => (
-        0,
-        '{"decision":"allow","note":"looks fine"}',
-      );
+      svc.gateExecutorForTest = (cmd, env) async =>
+          (0, '{"decision":"allow","note":"looks fine"}');
       addTearDown(() => svc.gateExecutorForTest = null);
 
       final res = await svc.fireGate(
@@ -7937,75 +8989,88 @@ block</pre>
       expect(res.allowed, isTrue);
     });
 
-    test('on_pre_tool payload carries full args (not just tool name)', () async {
-      final app = AppState.I;
-      final p = PluginItem(
-        name: 'args-payload',
-        author: 'you',
-        description: '',
-        version: '1.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        installs: 1,
-        hooks: {'on_pre_tool': 'inspect'},
-      );
-      app.plugins.add(p);
-      addTearDown(() => app.plugins.remove(p));
-      final svc = HookService.I;
-      Map<String, String>? gotEnv;
-      svc.gateExecutorForTest = (cmd, env) async {
-        gotEnv = env;
-        return (0, '');
-      };
-      addTearDown(() => svc.gateExecutorForTest = null);
+    test(
+      'on_pre_tool payload carries full args (not just tool name)',
+      () async {
+        final app = AppState.I;
+        final p = PluginItem(
+          name: 'args-payload',
+          author: 'you',
+          description: '',
+          version: '1.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          installs: 1,
+          hooks: {'on_pre_tool': 'inspect'},
+        );
+        app.plugins.add(p);
+        addTearDown(() => app.plugins.remove(p));
+        final svc = HookService.I;
+        Map<String, String>? gotEnv;
+        svc.gateExecutorForTest = (cmd, env) async {
+          gotEnv = env;
+          return (0, '');
+        };
+        addTearDown(() => svc.gateExecutorForTest = null);
 
-      await svc.fireGate(
-        'on_pre_tool',
-        'task3-sess-6',
-        payload: {'tool': 'run_shell', 'args': {'command': 'rm -rf /'}},
-      );
-      final payload = gotEnv!['OVID_HOOK_PAYLOAD']!;
-      expect(payload, contains('args'));
-      expect(payload, contains('rm -rf /'));
-    });
+        await svc.fireGate(
+          'on_pre_tool',
+          'task3-sess-6',
+          payload: {
+            'tool': 'run_shell',
+            'args': {'command': 'rm -rf /'},
+          },
+        );
+        final payload = gotEnv!['OVID_HOOK_PAYLOAD']!;
+        expect(payload, contains('args'));
+        expect(payload, contains('rm -rf /'));
+      },
+    );
 
-    test('registerPluginHooks parses hooks.json map form with matcher', () async {
-      final app = AppState.I;
-      final tempDir = Directory.systemTemp.createTempSync('ovid_hooks_map_');
-      addTearDown(() => tempDir.deleteSync(recursive: true));
-      AppState.pluginCacheRootOverrideForTest = tempDir;
-      addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+    test(
+      'registerPluginHooks parses hooks.json map form with matcher',
+      () async {
+        final app = AppState.I;
+        final tempDir = Directory.systemTemp.createTempSync('ovid_hooks_map_');
+        addTearDown(() => tempDir.deleteSync(recursive: true));
+        AppState.pluginCacheRootOverrideForTest = tempDir;
+        addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
 
-      final p = PluginItem(
-        name: 'hooked-map',
-        author: 'you',
-        description: '',
-        version: '1.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        source: 'acme/hooked',
-      );
-      app.plugins.add(p);
-      addTearDown(() => app.plugins.remove(p));
+        final p = PluginItem(
+          name: 'hooked-map',
+          author: 'you',
+          description: '',
+          version: '1.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          source: 'acme/hooked',
+        );
+        app.plugins.add(p);
+        addTearDown(() => app.plugins.remove(p));
 
-      final cacheDir = Directory('${tempDir.path}/plugin-content/acme_hooked');
-      cacheDir.createSync(recursive: true);
-      Directory('${cacheDir.path}/hooks').createSync(recursive: true);
-      File('${cacheDir.path}/hooks/hooks.json').writeAsStringSync(jsonEncode({
-        'hooks': {
-          'on_pre_tool': 'exit 2',
-          'on_turn_start': {'command': 'echo start', 'matcher': 'run_*'},
-        },
-      }));
+        final cacheDir = Directory(
+          '${tempDir.path}/plugin-content/acme_hooked',
+        );
+        cacheDir.createSync(recursive: true);
+        Directory('${cacheDir.path}/hooks').createSync(recursive: true);
+        File('${cacheDir.path}/hooks/hooks.json').writeAsStringSync(
+          jsonEncode({
+            'hooks': {
+              'on_pre_tool': 'exit 2',
+              'on_turn_start': {'command': 'echo start', 'matcher': 'run_*'},
+            },
+          }),
+        );
 
-      final n = await app.registerPluginHooks(p);
-      expect(n, 2);
-      expect(p.hooks['on_pre_tool'], 'exit 2');
-      expect(p.hooks['on_turn_start'], 'echo start');
-      expect(p.hookMatchers['on_turn_start'], 'run_*');
-    });
+        final n = await app.registerPluginHooks(p);
+        expect(n, 2);
+        expect(p.hooks['on_pre_tool'], 'exit 2');
+        expect(p.hooks['on_turn_start'], 'echo start');
+        expect(p.hookMatchers['on_turn_start'], 'run_*');
+      },
+    );
 
     test('registerPluginHooks parses hooks.json list form', () async {
       final app = AppState.I;
@@ -8027,15 +9092,19 @@ block</pre>
       app.plugins.add(p);
       addTearDown(() => app.plugins.remove(p));
 
-      final cacheDir = Directory('${tempDir.path}/plugin-content/acme_hooked-list');
+      final cacheDir = Directory(
+        '${tempDir.path}/plugin-content/acme_hooked-list',
+      );
       cacheDir.createSync(recursive: true);
       Directory('${cacheDir.path}/hooks').createSync(recursive: true);
-      File('${cacheDir.path}/hooks/hooks.json').writeAsStringSync(jsonEncode({
-        'hooks': [
-          {'event': 'on_pre_tool', 'command': 'exit 2', 'matcher': 'run_*'},
-          {'event': 'on_turn_end', 'command': 'echo done'},
-        ],
-      }));
+      File('${cacheDir.path}/hooks/hooks.json').writeAsStringSync(
+        jsonEncode({
+          'hooks': [
+            {'event': 'on_pre_tool', 'command': 'exit 2', 'matcher': 'run_*'},
+            {'event': 'on_turn_end', 'command': 'echo done'},
+          ],
+        }),
+      );
 
       final n = await app.registerPluginHooks(p);
       expect(n, 2);
@@ -8049,16 +9118,20 @@ block</pre>
     test('marketplace plugin entry with owner/repo source keeps it', () {
       final app = AppState.I;
       final before = app.plugins.length;
-      app.mergeMarketplaceCatalogForTest({
-        'plugins': [
-          {
-            'name': 'PR40 Source Plugin',
-            'source': 'someorg/some-plugin',
-            'description': 'has a fetchable source',
-            'category': 'Tool',
-          },
-        ],
-      }, 'owner', 'market');
+      app.mergeMarketplaceCatalogForTest(
+        {
+          'plugins': [
+            {
+              'name': 'PR40 Source Plugin',
+              'source': 'someorg/some-plugin',
+              'description': 'has a fetchable source',
+              'category': 'Tool',
+            },
+          ],
+        },
+        'owner',
+        'market',
+      );
       expect(app.plugins.length, before + 1);
       final p = app.plugins.last;
       expect(p.name, 'PR40 Source Plugin');
@@ -8066,20 +9139,23 @@ block</pre>
       app.plugins.remove(p);
     });
 
-    test('a local "./dir" source resolves against the marketplace repo',
-        () {
+    test('a local "./dir" source resolves against the marketplace repo', () {
       final app = AppState.I;
       final before = app.plugins.length;
-      app.mergeMarketplaceCatalogForTest({
-        'plugins': [
-          {
-            'name': 'PR40 Local Plugin',
-            'source': './plugins/local-one',
-            'description': 'local dir, now resolved against marketplace',
-            'category': 'Tool',
-          },
-        ],
-      }, 'owner', 'market');
+      app.mergeMarketplaceCatalogForTest(
+        {
+          'plugins': [
+            {
+              'name': 'PR40 Local Plugin',
+              'source': './plugins/local-one',
+              'description': 'local dir, now resolved against marketplace',
+              'category': 'Tool',
+            },
+          ],
+        },
+        'owner',
+        'market',
+      );
       expect(app.plugins.length, before + 1);
       final p = app.plugins.last;
       expect(p.source, 'owner/market/raw/branch/plugins/local-one');
@@ -8089,11 +9165,15 @@ block</pre>
     test('a plugin with no source declared has a null source', () {
       final app = AppState.I;
       final before = app.plugins.length;
-      app.mergeMarketplaceCatalogForTest({
-        'plugins': [
-          {'name': 'PR40 No Source Plugin', 'description': 'x'},
-        ],
-      }, 'owner', 'market');
+      app.mergeMarketplaceCatalogForTest(
+        {
+          'plugins': [
+            {'name': 'PR40 No Source Plugin', 'description': 'x'},
+          ],
+        },
+        'owner',
+        'market',
+      );
       final p = app.plugins.last;
       expect(p.source, isNull);
       app.plugins.remove(p);
@@ -8106,16 +9186,18 @@ block</pre>
       server.listen((request) async {
         final path = request.uri.path;
         if (path == '/tree/main') {
-          final body = utf8.encode(jsonEncode({
-            'tree': [
-              {'path': 'commands/hello.md', 'type': 'blob'},
-              {'path': 'skills/reviewer/SKILL.md', 'type': 'blob'},
-              // Not fetched: wrong dir, wrong filename, or a tree entry.
-              {'path': 'README.md', 'type': 'blob'},
-              {'path': 'skills/reviewer/notes.txt', 'type': 'blob'},
-              {'path': 'commands', 'type': 'tree'},
-            ],
-          }));
+          final body = utf8.encode(
+            jsonEncode({
+              'tree': [
+                {'path': 'commands/hello.md', 'type': 'blob'},
+                {'path': 'skills/reviewer/SKILL.md', 'type': 'blob'},
+                // Not fetched: wrong dir, wrong filename, or a tree entry.
+                {'path': 'README.md', 'type': 'blob'},
+                {'path': 'skills/reviewer/notes.txt', 'type': 'blob'},
+                {'path': 'commands', 'type': 'tree'},
+              ],
+            }),
+          );
           request.response
             ..statusCode = 200
             ..contentLength = body.length
@@ -8157,10 +9239,7 @@ block</pre>
         if (dir.existsSync()) dir.deleteSync(recursive: true);
       });
       expect(File('${dir.path}/commands/hello.md').existsSync(), isTrue);
-      expect(
-        File('${dir.path}/skills/reviewer/SKILL.md').existsSync(),
-        isTrue,
-      );
+      expect(File('${dir.path}/skills/reviewer/SKILL.md').existsSync(), isTrue);
       expect(File('${dir.path}/README.md').existsSync(), isFalse);
       expect(
         File('${dir.path}/skills/reviewer/notes.txt').existsSync(),
@@ -8168,49 +9247,57 @@ block</pre>
       );
     });
 
-    test('fetchPluginContent degrades to 0 on a repo with neither directory',
-        () async {
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      server.listen((request) async {
-        if (request.uri.path == '/tree/main') {
-          final body = utf8.encode(jsonEncode({
-            'tree': [
-              {'path': 'src/index.ts', 'type': 'blob'},
-            ],
-          }));
-          request.response
-            ..statusCode = 200
-            ..contentLength = body.length
-            ..add(body);
+    test(
+      'fetchPluginContent degrades to 0 on a repo with neither directory',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((request) async {
+          if (request.uri.path == '/tree/main') {
+            final body = utf8.encode(
+              jsonEncode({
+                'tree': [
+                  {'path': 'src/index.ts', 'type': 'blob'},
+                ],
+              }),
+            );
+            request.response
+              ..statusCode = 200
+              ..contentLength = body.length
+              ..add(body);
+            await request.response.close();
+            return;
+          }
+          request.response.statusCode = 404;
           await request.response.close();
-          return;
-        }
-        request.response.statusCode = 404;
-        await request.response.close();
-      });
-      addTearDown(() => server.close(force: true));
-      AppState.pluginContentBaseOverrideForTest =
-          'http://${server.address.host}:${server.port}';
-      addTearDown(() => AppState.pluginContentBaseOverrideForTest = null);
+        });
+        addTearDown(() => server.close(force: true));
+        AppState.pluginContentBaseOverrideForTest =
+            'http://${server.address.host}:${server.port}';
+        addTearDown(() => AppState.pluginContentBaseOverrideForTest = null);
 
-      final fetched = await AppState.I.fetchPluginContent('acme/empty');
-      expect(fetched, 0);
-    });
+        final fetched = await AppState.I.fetchPluginContent('acme/empty');
+        expect(fetched, 0);
+      },
+    );
 
-    test('fetchPluginContent never throws when the network is unreachable',
-        () async {
-      AppState.pluginContentBaseOverrideForTest =
-          'http://127.0.0.1:1'; // nothing listens here
-      addTearDown(() => AppState.pluginContentBaseOverrideForTest = null);
-      final fetched = await AppState.I.fetchPluginContent('acme/offline');
-      expect(fetched, 0);
-    });
+    test(
+      'fetchPluginContent never throws when the network is unreachable',
+      () async {
+        AppState.pluginContentBaseOverrideForTest =
+            'http://127.0.0.1:1'; // nothing listens here
+        addTearDown(() => AppState.pluginContentBaseOverrideForTest = null);
+        final fetched = await AppState.I.fetchPluginContent('acme/offline');
+        expect(fetched, 0);
+      },
+    );
 
-    test('fetchPluginContent rejects a malformed source (no owner/repo)',
-        () async {
-      expect(await AppState.I.fetchPluginContent('not-a-repo'), 0);
-      expect(await AppState.I.fetchPluginContent(''), 0);
-    });
+    test(
+      'fetchPluginContent rejects a malformed source (no owner/repo)',
+      () async {
+        expect(await AppState.I.fetchPluginContent('not-a-repo'), 0);
+        expect(await AppState.I.fetchPluginContent(''), 0);
+      },
+    );
 
     test('removePluginContent deletes the cache dir', () async {
       final dir = await AppState.I.pluginCacheDirFor('acme/to-remove');
@@ -8222,53 +9309,55 @@ block</pre>
       expect(dir.existsSync(), isFalse);
     });
 
-    test('_refreshSkillRoots mounts an installed+enabled plugin\'s '
-        'commands/skills dirs, and reload() picks up the fetched skill',
-        () async {
-      final app = AppState.I;
-      final agent = AgentService.I;
+    test(
+      '_refreshSkillRoots mounts an installed+enabled plugin\'s '
+      'commands/skills dirs, and reload() picks up the fetched skill',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
 
-      // Simulate a fetched plugin: write directly into its cache dir
-      // (equivalent to fetchPluginContent having already run).
-      final dir = await app.pluginCacheDirFor('acme/mounted-plugin');
-      addTearDown(() {
-        if (dir.existsSync()) dir.deleteSync(recursive: true);
-      });
-      Directory('${dir.path}/commands').createSync(recursive: true);
-      File('${dir.path}/commands/greet.md').writeAsStringSync(
-        '---\nname: greet\nuser-invocable: true\n---\nSay hello.',
-      );
+        // Simulate a fetched plugin: write directly into its cache dir
+        // (equivalent to fetchPluginContent having already run).
+        final dir = await app.pluginCacheDirFor('acme/mounted-plugin');
+        addTearDown(() {
+          if (dir.existsSync()) dir.deleteSync(recursive: true);
+        });
+        Directory('${dir.path}/commands').createSync(recursive: true);
+        File('${dir.path}/commands/greet.md').writeAsStringSync(
+          '---\nname: greet\nuser-invocable: true\n---\nSay hello.',
+        );
 
-      final p = PluginItem(
-        name: 'mounted-plugin',
-        author: 'acme',
-        description: '',
-        version: '1.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        installs: 0,
-        source: 'acme/mounted-plugin',
-      );
-      app.plugins.add(p);
-      addTearDown(() {
-        app.plugins.remove(p);
-        SkillService.I.clearRoots();
-      });
+        final p = PluginItem(
+          name: 'mounted-plugin',
+          author: 'acme',
+          description: '',
+          version: '1.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          installs: 0,
+          source: 'acme/mounted-plugin',
+        );
+        app.plugins.add(p);
+        addTearDown(() {
+          app.plugins.remove(p);
+          SkillService.I.clearRoots();
+        });
 
-      await agent.refreshSkills();
+        await agent.refreshSkills();
 
-      expect(
-        SkillService.I.skills.any((s) => s.name == 'greet'),
-        isTrue,
-        reason: 'the plugin\'s fetched command becomes a real skill',
-      );
-      expect(
-        SkillService.I.userSkills.any((s) => s.name == 'greet'),
-        isTrue,
-        reason: 'user-invocable → shows in the /-menu',
-      );
-    });
+        expect(
+          SkillService.I.skills.any((s) => s.name == 'greet'),
+          isTrue,
+          reason: 'the plugin\'s fetched command becomes a real skill',
+        );
+        expect(
+          SkillService.I.userSkills.any((s) => s.name == 'greet'),
+          isTrue,
+          reason: 'user-invocable → shows in the /-menu',
+        );
+      },
+    );
 
     test('a DISABLED plugin\'s content is not mounted', () async {
       final app = AppState.I;
@@ -8308,16 +9397,16 @@ block</pre>
   group('PR41: MCP Streamable-HTTP transport + reconnect backoff', () {
     setUp(() {
       // Fast, deterministic backoff for every test in this group.
-      McpService.reconnectInitialDelayForTest =
-          const Duration(milliseconds: 5);
+      McpService.reconnectInitialDelayForTest = const Duration(milliseconds: 5);
       McpService.reconnectMaxDelayForTest = const Duration(milliseconds: 20);
       McpService.reconnectMaxAttemptsForTest = 3;
       McpService.rpcTimeoutSecondsForTest = 2;
     });
     tearDown(() {
       McpService.I.httpClientForTest = null;
-      McpService.reconnectInitialDelayForTest =
-          const Duration(milliseconds: 500);
+      McpService.reconnectInitialDelayForTest = const Duration(
+        milliseconds: 500,
+      );
       McpService.reconnectMaxDelayForTest = const Duration(seconds: 30);
       McpService.reconnectMaxAttemptsForTest = 10;
       McpService.rpcTimeoutSecondsForTest = 30;
@@ -8335,18 +9424,21 @@ block</pre>
       expect(s.url, isNull);
     });
 
-    test('map-form marketplace entry with a url becomes an http server',
-        () {
+    test('map-form marketplace entry with a url becomes an http server', () {
       final app = AppState.I;
       final before = app.mcpServers.length;
-      app.mergeMarketplaceCatalogForTest({
-        'mcpServers': {
-          'PR41 HTTP Server': {
-            'url': 'https://example.com/mcp',
-            'headers': {'Authorization': 'Bearer tok'},
+      app.mergeMarketplaceCatalogForTest(
+        {
+          'mcpServers': {
+            'PR41 HTTP Server': {
+              'url': 'https://example.com/mcp',
+              'headers': {'Authorization': 'Bearer tok'},
+            },
           },
         },
-      }, 'acme', 'market');
+        'acme',
+        'market',
+      );
       expect(app.mcpServers.length, before + 1);
       final s = app.mcpServers.last;
       expect(s.transport, 'http');
@@ -8355,15 +9447,21 @@ block</pre>
       app.mcpServers.remove(s);
     });
 
-    test('map-form marketplace entry with a command (no url) stays stdio',
-        () {
+    test('map-form marketplace entry with a command (no url) stays stdio', () {
       final app = AppState.I;
       final before = app.mcpServers.length;
-      app.mergeMarketplaceCatalogForTest({
-        'mcpServers': {
-          'PR41 Stdio Server': {'command': 'npx', 'args': ['-y', 'x']},
+      app.mergeMarketplaceCatalogForTest(
+        {
+          'mcpServers': {
+            'PR41 Stdio Server': {
+              'command': 'npx',
+              'args': ['-y', 'x'],
+            },
+          },
         },
-      }, 'acme', 'market');
+        'acme',
+        'market',
+      );
       final s = app.mcpServers.last;
       expect(s.transport, 'stdio');
       expect(s.url, isNull);
@@ -8422,48 +9520,50 @@ block</pre>
       expect(calls, containsAll(['initialize', 'tools/list']));
     });
 
-    test('callTool over http returns the text content, same shape as stdio',
-        () async {
-      McpService.I.httpClientForTest = MockClient((request) async {
-        final body = jsonDecode(request.body) as Map<String, dynamic>;
-        if (body['method'] == 'tools/call') {
+    test(
+      'callTool over http returns the text content, same shape as stdio',
+      () async {
+        McpService.I.httpClientForTest = MockClient((request) async {
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          if (body['method'] == 'tools/call') {
+            return http.Response(
+              jsonEncode({
+                'jsonrpc': '2.0',
+                'id': body['id'],
+                'result': {
+                  'content': [
+                    {'type': 'text', 'text': 'remote result'},
+                  ],
+                },
+              }),
+              200,
+            );
+          }
           return http.Response(
-            jsonEncode({
-              'jsonrpc': '2.0',
-              'id': body['id'],
-              'result': {
-                'content': [
-                  {'type': 'text', 'text': 'remote result'},
-                ],
-              },
-            }),
+            jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': {}}),
             200,
           );
-        }
-        return http.Response(
-          jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': {}}),
-          200,
+        });
+        final server = McpServer(
+          name: 'PR41 CallTool Server',
+          author: 't',
+          description: '',
+          category: 'Custom',
+          command: 'npx',
+          transport: 'http',
+          url: 'https://example.com/mcp',
         );
-      });
-      final server = McpServer(
-        name: 'PR41 CallTool Server',
-        author: 't',
-        description: '',
-        category: 'Custom',
-        command: 'npx',
-        transport: 'http',
-        url: 'https://example.com/mcp',
-      );
-      addTearDown(() => McpService.I.disconnect(server.name));
-      await McpService.I.connect(server);
+        addTearDown(() => McpService.I.disconnect(server.name));
+        await McpService.I.connect(server);
 
-      final result = await McpService.I.callTool(
-        server.name,
-        'remote_tool',
-        {},
-      );
-      expect(result, 'remote result');
-    });
+        final result = await McpService.I.callTool(
+          server.name,
+          'remote_tool',
+          {},
+        );
+        expect(result, 'remote result');
+      },
+    );
 
     test('a JSON-RPC error over http surfaces as "MCP error: …", never a '
         'fake success', () async {
@@ -8568,83 +9668,87 @@ block</pre>
       expect(McpService.I.hasPendingReconnectForTest(server.name), isFalse);
     });
 
-    test('an unexpected mid-session http failure (after a successful '
-        'connect) schedules reconnect, capped at reconnectMaxAttempts',
-        () async {
-      var shouldFail = false;
-      McpService.I.httpClientForTest = MockClient((request) async {
-        if (shouldFail) throw const SocketException('reset by peer');
-        final body = jsonDecode(request.body) as Map<String, dynamic>;
-        return http.Response(
-          jsonEncode({
-            'jsonrpc': '2.0',
-            'id': body['id'],
-            'result': body['method'] == 'tools/list' ? {'tools': []} : {},
-          }),
-          200,
+    test(
+      'an unexpected mid-session http failure (after a successful '
+      'connect) schedules reconnect, capped at reconnectMaxAttempts',
+      () async {
+        var shouldFail = false;
+        McpService.I.httpClientForTest = MockClient((request) async {
+          if (shouldFail) throw const SocketException('reset by peer');
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response(
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': body['id'],
+              'result': body['method'] == 'tools/list' ? {'tools': []} : {},
+            }),
+            200,
+          );
+        });
+        final app = AppState.I;
+        final server = McpServer(
+          name: 'PR41 Flaky Server',
+          author: 't',
+          description: '',
+          category: 'Custom',
+          command: 'npx',
+          transport: 'http',
+          url: 'https://example.com/mcp',
         );
-      });
-      final app = AppState.I;
-      final server = McpServer(
-        name: 'PR41 Flaky Server',
-        author: 't',
-        description: '',
-        category: 'Custom',
-        command: 'npx',
-        transport: 'http',
-        url: 'https://example.com/mcp',
-      );
-      app.mcpServers.add(server);
-      addTearDown(() {
-        McpService.I.disconnect(server.name);
-        app.mcpServers.remove(server);
-      });
+        app.mcpServers.add(server);
+        addTearDown(() {
+          McpService.I.disconnect(server.name);
+          app.mcpServers.remove(server);
+        });
 
-      final status = await McpService.I.connect(server);
-      expect(status, contains('connected (http)'));
+        final status = await McpService.I.connect(server);
+        expect(status, contains('connected (http)'));
 
-      // Now the server starts failing every call — the next callTool
-      // triggers the connection-level failure path.
-      shouldFail = true;
-      await McpService.I.callTool(server.name, 'x', {});
-      expect(McpService.I.isConnected(server.name), isFalse);
-      expect(McpService.I.hasPendingReconnectForTest(server.name), isTrue);
-      expect(McpService.I.reconnectAttemptsForTest(server.name), 1);
+        // Now the server starts failing every call — the next callTool
+        // triggers the connection-level failure path.
+        shouldFail = true;
+        await McpService.I.callTool(server.name, 'x', {});
+        expect(McpService.I.isConnected(server.name), isFalse);
+        expect(McpService.I.hasPendingReconnectForTest(server.name), isTrue);
+        expect(McpService.I.reconnectAttemptsForTest(server.name), 1);
 
-      // Let the scheduled reconnect fire — it fails again (shouldFail is
-      // still true), so a SECOND reconnect is scheduled with a longer
-      // delay, doubling the attempt count.
-      await Future<void>.delayed(const Duration(milliseconds: 60));
-      expect(
-        McpService.I.reconnectAttemptsForTest(server.name),
-        greaterThanOrEqualTo(1),
-      );
-    });
+        // Let the scheduled reconnect fire — it fails again (shouldFail is
+        // still true), so a SECOND reconnect is scheduled with a longer
+        // delay, doubling the attempt count.
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        expect(
+          McpService.I.reconnectAttemptsForTest(server.name),
+          greaterThanOrEqualTo(1),
+        );
+      },
+    );
 
-    test('disconnect() cancels any pending reconnect and never triggers one',
-        () async {
-      McpService.I.httpClientForTest = MockClient((request) async {
-        throw const SocketException('unreachable');
-      });
-      final app = AppState.I;
-      final server = McpServer(
-        name: 'PR41 Manual Disconnect Server',
-        author: 't',
-        description: '',
-        category: 'Custom',
-        command: 'npx',
-        transport: 'http',
-        url: 'https://example.com/mcp',
-      );
-      app.mcpServers.add(server);
-      addTearDown(() => app.mcpServers.remove(server));
+    test(
+      'disconnect() cancels any pending reconnect and never triggers one',
+      () async {
+        McpService.I.httpClientForTest = MockClient((request) async {
+          throw const SocketException('unreachable');
+        });
+        final app = AppState.I;
+        final server = McpServer(
+          name: 'PR41 Manual Disconnect Server',
+          author: 't',
+          description: '',
+          category: 'Custom',
+          command: 'npx',
+          transport: 'http',
+          url: 'https://example.com/mcp',
+        );
+        app.mcpServers.add(server);
+        addTearDown(() => app.mcpServers.remove(server));
 
-      await McpService.I.connect(server); // fails immediately (unreachable)
-      expect(McpService.I.hasPendingReconnectForTest(server.name), isFalse);
+        await McpService.I.connect(server); // fails immediately (unreachable)
+        expect(McpService.I.hasPendingReconnectForTest(server.name), isFalse);
 
-      await McpService.I.disconnect(server.name);
-      expect(McpService.I.reconnectAttemptsForTest(server.name), 0);
-    });
+        await McpService.I.disconnect(server.name);
+        expect(McpService.I.reconnectAttemptsForTest(server.name), 0);
+      },
+    );
 
     test('custom HTTP server persists transport/url/headers across a '
         'simulated restart', () async {
@@ -8721,8 +9825,11 @@ url = "https://api.example.com/mcp"
 ''');
       expect(res.length, 2);
       final gh = res.firstWhere((s) => s.name == 'github');
-      expect(gh.env['GITHUB_TOKEN'], 'ghp_abc123',
-          reason: 'TOML env lines must no longer be dropped');
+      expect(
+        gh.env['GITHUB_TOKEN'],
+        'ghp_abc123',
+        reason: 'TOML env lines must no longer be dropped',
+      );
       final remote = res.firstWhere((s) => s.name == 'remote-api');
       expect(remote.url, 'https://api.example.com/mcp');
     });
@@ -8776,9 +9883,7 @@ url = "https://api.example.com/mcp"
       final work = await agent.sessionWorkDirForTest();
       File('${work.path}/real.txt').writeAsStringSync('milk in real file\n');
 
-      final out = await agent.dispatchForTest('fs_grep', {
-        'pattern': 'milk',
-      });
+      final out = await agent.dispatchForTest('fs_grep', {'pattern': 'milk'});
       expect(out, contains('[rg-ran] milk'));
       expect(
         out,
@@ -8833,9 +9938,7 @@ url = "https://api.example.com/mcp"
       final work = await agent.sessionWorkDirForTest();
       File('${work.path}/real.txt').writeAsStringSync('lookaround milk\n');
 
-      final out = await agent.dispatchForTest('fs_grep', {
-        'pattern': 'milk',
-      });
+      final out = await agent.dispatchForTest('fs_grep', {'pattern': 'milk'});
       expect(out, contains('real.txt'), reason: 'Dart walk found it');
       expect(
         out,
@@ -8871,43 +9974,40 @@ url = "https://api.example.com/mcp"
       final work = await agent.sessionWorkDirForTest();
       File('${work.path}/real.txt').writeAsStringSync('milk hidden from rg\n');
 
-      final out = await agent.dispatchForTest('fs_grep', {
-        'pattern': 'milk',
-      });
+      final out = await agent.dispatchForTest('fs_grep', {'pattern': 'milk'});
       expect(out, contains('no matches'));
       expect(out, isNot(contains('real.txt')));
     });
 
-    test('no sandbox at all → unchanged pure-Dart behavior (gate check)',
-        () async {
-      final app = AppState.I;
-      final agent = AgentService.I;
-      final svc = SandboxService.I;
-      expect(svc.prefixPath, isNull, reason: 'no fake prefix in this test');
+    test(
+      'no sandbox at all → unchanged pure-Dart behavior (gate check)',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final svc = SandboxService.I;
+        expect(svc.prefixPath, isNull, reason: 'no fake prefix in this test');
 
-      final s = ChatSession(
-        id: 'pr42-rg-4',
-        title: 'rg',
-        model: 'm',
-        mode: 'auto',
-      );
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+        final s = ChatSession(
+          id: 'pr42-rg-4',
+          title: 'rg',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
 
-      final work = await agent.sessionWorkDirForTest();
-      File('${work.path}/plain.txt').writeAsStringSync('milk dart path\n');
+        final work = await agent.sessionWorkDirForTest();
+        File('${work.path}/plain.txt').writeAsStringSync('milk dart path\n');
 
-      final out = await agent.dispatchForTest('fs_grep', {
-        'pattern': 'milk',
-      });
-      expect(out, contains('plain.txt'));
-      expect(out, contains('milk dart path'));
-    });
+        final out = await agent.dispatchForTest('fs_grep', {'pattern': 'milk'});
+        expect(out, contains('plain.txt'));
+        expect(out, contains('milk dart path'));
+      },
+    );
 
     test('fs_glob deliberately stays on the Dart walk — rg traversal '
-        'defaults would hide the workspace dot-dirs (.dsh/.agents/.spill)',
-        () {
+        'defaults would hide the workspace dot-dirs (.dsh/.agents/.spill)', () {
       // Source contract: the glob handler must not shell out to rg.
       // This is a DECISION, not an omission: rg --files skips hidden
       // files and respects .gitignore by default, which would silently
@@ -8926,85 +10026,137 @@ url = "https://api.example.com/mcp"
   });
 
   group('PR47: apt/pkg parity wall + npm/npx direct wrappers (K1-K8)', () {
-    test('K1: OvidPkgInstaller writes direct npm and npx wrappers without Termux env', () {
-      final tmp = Directory.systemTemp.createTempSync('ovid-pr47-k1');
-      addTearDown(() => tmp.deleteSync(recursive: true));
+    test(
+      'K1: OvidPkgInstaller writes direct npm and npx wrappers without Termux env',
+      () {
+        final tmp = Directory.systemTemp.createTempSync('ovid-pr47-k1');
+        addTearDown(() => tmp.deleteSync(recursive: true));
 
-      OvidPkgInstaller.writeAll(tmp);
+        OvidPkgInstaller.writeAll(tmp);
 
-      final npmFile = File('${tmp.path}/bin/npm');
-      expect(npmFile.existsSync(), isTrue);
-      final npmContent = npmFile.readAsStringSync();
-      expect(npmContent, startsWith('#!${tmp.path}/bin/sh\n'));
-      expect(npmContent, contains('exec "${tmp.path}/bin/node" "${tmp.path}/lib/node_modules/npm/bin/npm-cli.js" "\$@"'));
-      expect(npmContent, isNot(contains('com.termux')));
-      expect(npmContent, isNot(contains('/data/data/')));
-      expect(npmContent, isNot(contains('/usr/bin/env')));
+        final npmFile = File('${tmp.path}/bin/npm');
+        expect(npmFile.existsSync(), isTrue);
+        final npmContent = npmFile.readAsStringSync();
+        expect(npmContent, startsWith('#!${tmp.path}/bin/sh\n'));
+        expect(
+          npmContent,
+          contains(
+            'exec "${tmp.path}/bin/node" "${tmp.path}/lib/node_modules/npm/bin/npm-cli.js" "\$@"',
+          ),
+        );
+        expect(npmContent, isNot(contains('com.termux')));
+        expect(npmContent, isNot(contains('/data/data/')));
+        expect(npmContent, isNot(contains('/usr/bin/env')));
 
-      final npxFile = File('${tmp.path}/bin/npx');
-      expect(npxFile.existsSync(), isTrue);
-      final npxContent = npxFile.readAsStringSync();
-      expect(npxContent, startsWith('#!${tmp.path}/bin/sh\n'));
-      expect(npxContent, contains('exec "${tmp.path}/bin/node" "${tmp.path}/lib/node_modules/npm/bin/npx-cli.js" "\$@"'));
-      expect(npxContent, isNot(contains('com.termux')));
-      expect(npxContent, isNot(contains('/data/data/')));
-      expect(npxContent, isNot(contains('/usr/bin/env')));
-    });
+        final npxFile = File('${tmp.path}/bin/npx');
+        expect(npxFile.existsSync(), isTrue);
+        final npxContent = npxFile.readAsStringSync();
+        expect(npxContent, startsWith('#!${tmp.path}/bin/sh\n'));
+        expect(
+          npxContent,
+          contains(
+            'exec "${tmp.path}/bin/node" "${tmp.path}/lib/node_modules/npm/bin/npx-cli.js" "\$@"',
+          ),
+        );
+        expect(npxContent, isNot(contains('com.termux')));
+        expect(npxContent, isNot(contains('/data/data/')));
+        expect(npxContent, isNot(contains('/usr/bin/env')));
+      },
+    );
 
-    test('K2 & K3: OvidPkgInstaller writes ovid-pkg and apt/apt-get/pkg forward wrappers', () {
-      final tmp = Directory.systemTemp.createTempSync('ovid-pr47-k2');
-      addTearDown(() => tmp.deleteSync(recursive: true));
+    test(
+      'K2 & K3: OvidPkgInstaller writes ovid-pkg and apt/apt-get/pkg forward wrappers',
+      () {
+        final tmp = Directory.systemTemp.createTempSync('ovid-pr47-k2');
+        addTearDown(() => tmp.deleteSync(recursive: true));
 
-      OvidPkgInstaller.writeAll(tmp);
+        OvidPkgInstaller.writeAll(tmp);
 
-      final ovidPkg = File('${tmp.path}/bin/ovid-pkg');
-      expect(ovidPkg.existsSync(), isTrue);
-      final ovidPkgContent = ovidPkg.readAsStringSync();
-      expect(ovidPkgContent, startsWith('#!${tmp.path}/bin/sh\n'));
-      expect(ovidPkgContent, contains('curl -fsSL'));
-      expect(ovidPkgContent, contains('dpkg --root='));
-      expect(ovidPkgContent, contains('update)'));
-      expect(ovidPkgContent, contains('install)'));
-      expect(ovidPkgContent, contains('search)'));
+        final ovidPkg = File('${tmp.path}/bin/ovid-pkg');
+        expect(ovidPkg.existsSync(), isTrue);
+        final ovidPkgContent = ovidPkg.readAsStringSync();
+        expect(ovidPkgContent, startsWith('#!${tmp.path}/bin/sh\n'));
+        expect(ovidPkgContent, contains('curl -fsSL'));
+        expect(ovidPkgContent, contains('dpkg --root='));
+        expect(ovidPkgContent, contains('update)'));
+        expect(ovidPkgContent, contains('install)'));
+        expect(ovidPkgContent, contains('search)'));
 
-      for (final tool in ['apt', 'apt-get', 'pkg']) {
-        final wrapper = File('${tmp.path}/bin/$tool');
-        expect(wrapper.existsSync(), isTrue, reason: '$tool wrapper must exist');
-        final content = wrapper.readAsStringSync();
-        expect(content, startsWith('#!${tmp.path}/bin/sh\n'));
-        expect(content, contains('exec "${tmp.path}/bin/ovid-pkg" "\$@"'));
-      }
-    });
+        for (final tool in ['apt', 'apt-get', 'pkg']) {
+          final wrapper = File('${tmp.path}/bin/$tool');
+          expect(
+            wrapper.existsSync(),
+            isTrue,
+            reason: '$tool wrapper must exist',
+          );
+          final content = wrapper.readAsStringSync();
+          expect(content, startsWith('#!${tmp.path}/bin/sh\n'));
+          expect(content, contains('exec "${tmp.path}/bin/ovid-pkg" "\$@"'));
+        }
+      },
+    );
 
-    test('K4: SandboxService hooks OvidPkgInstaller.writeAll in selfHeal and install', () {
-      final src = File('lib/core/sandbox_service.dart').readAsStringSync();
-      expect(src, contains('OvidPkgInstaller.writeAll(prefix)'));
-      // Appears in both _installRuntime and _selfHeal
-      final count = RegExp(r'OvidPkgInstaller\.writeAll\(prefix\)').allMatches(src).length;
-      expect(count, greaterThanOrEqualTo(2));
-    });
+    test(
+      'K4: SandboxService hooks OvidPkgInstaller.writeAll in selfHeal and install',
+      () {
+        final src = File('lib/core/sandbox_service.dart').readAsStringSync();
+        expect(src, contains('OvidPkgInstaller.writeAll(prefix)'));
+        // Appears in both _installRuntime and _selfHeal
+        final count = RegExp(
+          r'OvidPkgInstaller\.writeAll\(prefix\)',
+        ).allMatches(src).length;
+        expect(count, greaterThanOrEqualTo(2));
+      },
+    );
 
-    test('K5: AgentService._isEchoPlaceholder identifies bare echo fake-work', () {
-      final agent = AgentService.I;
+    test(
+      'K5: AgentService._isEchoPlaceholder identifies bare echo fake-work',
+      () {
+        final agent = AgentService.I;
 
-      // Positive cases: echo / printf placeholders
-      expect(agent.isEchoPlaceholderForTest('echo "Command 1 executed"'), isTrue);
-      expect(agent.isEchoPlaceholderForTest("echo 'Done'"), isTrue);
-      expect(agent.isEchoPlaceholderForTest('printf "all done\\n"'), isTrue);
-      expect(agent.isEchoPlaceholderForTest('echo "step 1" && echo "step 2"'), isTrue);
-      expect(agent.isEchoPlaceholderForTest('true && echo "finished"'), isTrue);
-      expect(agent.isEchoPlaceholderForTest(': ; echo "nothing"'), isTrue);
+        // Positive cases: echo / printf placeholders
+        expect(
+          agent.isEchoPlaceholderForTest('echo "Command 1 executed"'),
+          isTrue,
+        );
+        expect(agent.isEchoPlaceholderForTest("echo 'Done'"), isTrue);
+        expect(agent.isEchoPlaceholderForTest('printf "all done\\n"'), isTrue);
+        expect(
+          agent.isEchoPlaceholderForTest('echo "step 1" && echo "step 2"'),
+          isTrue,
+        );
+        expect(
+          agent.isEchoPlaceholderForTest('true && echo "finished"'),
+          isTrue,
+        );
+        expect(agent.isEchoPlaceholderForTest(': ; echo "nothing"'), isTrue);
 
-      // Negative cases: real commands or file writes
-      expect(agent.isEchoPlaceholderForTest('echo "hello" > output.txt'), isFalse);
-      expect(agent.isEchoPlaceholderForTest('echo "world" >> append.log'), isFalse);
-      expect(agent.isEchoPlaceholderForTest('npm test'), isFalse);
-      expect(agent.isEchoPlaceholderForTest('npm test && echo "done"'), isFalse);
-      expect(agent.isEchoPlaceholderForTest('node server.js'), isFalse);
-      expect(agent.isEchoPlaceholderForTest('python3 main.py'), isFalse);
-      expect(agent.isEchoPlaceholderForTest('cat README.md | grep title'), isFalse);
-      expect(agent.isEchoPlaceholderForTest('mkdir -p build && touch build/app'), isFalse);
-    });
+        // Negative cases: real commands or file writes
+        expect(
+          agent.isEchoPlaceholderForTest('echo "hello" > output.txt'),
+          isFalse,
+        );
+        expect(
+          agent.isEchoPlaceholderForTest('echo "world" >> append.log'),
+          isFalse,
+        );
+        expect(agent.isEchoPlaceholderForTest('npm test'), isFalse);
+        expect(
+          agent.isEchoPlaceholderForTest('npm test && echo "done"'),
+          isFalse,
+        );
+        expect(agent.isEchoPlaceholderForTest('node server.js'), isFalse);
+        expect(agent.isEchoPlaceholderForTest('python3 main.py'), isFalse);
+        expect(
+          agent.isEchoPlaceholderForTest('cat README.md | grep title'),
+          isFalse,
+        );
+        expect(
+          agent.isEchoPlaceholderForTest('mkdir -p build && touch build/app'),
+          isFalse,
+        );
+      },
+    );
 
     test('K6: HealthScreen offers hard reset sandbox action', () {
       final src = File('lib/ui/health_screen.dart').readAsStringSync();
@@ -9024,136 +10176,212 @@ url = "https://api.example.com/mcp"
 
   // ── PR48: prompt-context bundle — file_read windowing, read_image,
   // AGENTS.md, time-context, locale, welcome (RED first, TDD) ──
-  group('PR48: file_read windowing + read_image (the reference tool-fs parity)', () {
-    Map<String, dynamic> fileReadSchema() {
-      final tools = AgentService.I.toolsForTest();
-      return tools.firstWhere(
-        (t) => (t['function'] as Map)['name'] == 'file_read',
-      )['function'] as Map<String, dynamic>;
-    }
+  group(
+    'PR48: file_read windowing + read_image (the reference tool-fs parity)',
+    () {
+      Map<String, dynamic> fileReadSchema() {
+        final tools = AgentService.I.toolsForTest();
+        return tools.firstWhere(
+              (t) => (t['function'] as Map)['name'] == 'file_read',
+            )['function']
+            as Map<String, dynamic>;
+      }
 
-    test('P1: file_read schema carries offset/limit (the reference read windowing)', () {
-      final props =
-          (fileReadSchema()['parameters'] as Map)['properties'] as Map;
-      expect(props.containsKey('offset'), isTrue,
-          reason: 'read has offset (1-based start line)');
-      expect(props.containsKey('limit'), isTrue,
-          reason: 'read has limit (max lines, cap 2000)');
-    });
+      test(
+        'P1: file_read schema carries offset/limit (the reference read windowing)',
+        () {
+          final props =
+              (fileReadSchema()['parameters'] as Map)['properties'] as Map;
+          expect(
+            props.containsKey('offset'),
+            isTrue,
+            reason: 'read has offset (1-based start line)',
+          );
+          expect(
+            props.containsKey('limit'),
+            isTrue,
+            reason: 'read has limit (max lines, cap 2000)',
+          );
+        },
+      );
 
-    test('P2: file_read honors offset/limit with totalLines + capped footer',
+      test(
+        'P2: file_read honors offset/limit with totalLines + capped footer',
         () async {
-      final agent = AgentService.I;
-      final lines = List.generate(500, (i) => 'line ${i + 1}');
-      RepoCache.I.files['big.txt'] = '${lines.join('\n')}\n';
-      addTearDown(() => RepoCache.I.files.remove('big.txt'));
+          final agent = AgentService.I;
+          final lines = List.generate(500, (i) => 'line ${i + 1}');
+          RepoCache.I.files['big.txt'] = '${lines.join('\n')}\n';
+          addTearDown(() => RepoCache.I.files.remove('big.txt'));
 
-      final out = await agent.dispatchForTest('file_read', {
-        'path': 'big.txt',
-        'offset': 101,
-        'limit': 50,
+          final out = await agent.dispatchForTest('file_read', {
+            'path': 'big.txt',
+            'offset': 101,
+            'limit': 50,
+          });
+          expect(out, contains('line 101'));
+          expect(out, contains('line 150'));
+          expect(
+            out,
+            isNot(contains('line 100\n')),
+            reason: 'window must start at offset',
+          );
+          expect(
+            out,
+            isNot(contains('line 151\n')),
+            reason: 'window must end at offset+limit-1',
+          );
+          // Fixture has a trailing newline → split yields 501 rows; the
+          // header must report the true totalLines so the model can page.
+          expect(
+            out,
+            contains('totalLines: 501'),
+            reason: 'read reports totalLines so the model can page',
+          );
+          expect(
+            out,
+            contains('offset=151'),
+            reason: 'capped footer must tell the model how to continue',
+          );
+        },
+      );
+
+      test('P3: read_image tool exists and reports missing images', () async {
+        final tools = AgentService.I.toolsForTest();
+        final names = tools
+            .map((t) => ((t['function'] as Map)['name'] as String))
+            .toSet();
+        expect(
+          names,
+          contains('read_image'),
+          reason: 'ovid-tool-fs ships read_image alongside read',
+        );
+
+        final out = await AgentService.I.dispatchForTest('read_image', {
+          'path': 'nope.png',
+        });
+        expect(
+          out,
+          contains('nope.png'),
+          reason: 'missing file must name the path, not "unknown tool"',
+        );
       });
-      expect(out, contains('line 101'));
-      expect(out, contains('line 150'));
-      expect(out, isNot(contains('line 100\n')),
-          reason: 'window must start at offset');
-      expect(out, isNot(contains('line 151\n')),
-          reason: 'window must end at offset+limit-1');
-      // Fixture has a trailing newline → split yields 501 rows; the
-      // header must report the true totalLines so the model can page.
-      expect(out, contains('totalLines: 501'),
-          reason: 'read reports totalLines so the model can page');
-      expect(out, contains('offset=151'),
-          reason: 'capped footer must tell the model how to continue');
-    });
-
-    test('P3: read_image tool exists and reports missing images', () async {
-      final tools = AgentService.I.toolsForTest();
-      final names = tools
-          .map((t) => ((t['function'] as Map)['name'] as String))
-          .toSet();
-      expect(names, contains('read_image'),
-          reason: 'ovid-tool-fs ships read_image alongside read');
-
-      final out = await AgentService.I.dispatchForTest('read_image', {
-        'path': 'nope.png',
-      });
-      expect(out, contains('nope.png'),
-          reason: 'missing file must name the path, not "unknown tool"');
-    });
-  });
+    },
+  );
 
   group('PR48: AGENTS.md + time-context + locale + welcome', () {
-    test('P4: agent loads AGENTS.md workspace instructions into the prompt',
-        () {
+    test('P4: agent loads AGENTS.md workspace instructions into the prompt', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
-      expect(src, contains('AGENTS.md'),
-          reason: 'workspace instruction chain (the reference skills/AGENTS parity)');
-    });
-
-    test('P5: system prompt carries the current time (the reference time-context)', () {
-      final src = File('lib/core/agent_service.dart').readAsStringSync();
-      expect(src, contains('Current time:'),
-          reason: 'model needs a clock for unqualified dates/times');
-    });
-
-    test('P6: locale preference is persisted (the reference client-locale)', () {
-      final src = File('lib/core/state.dart').readAsStringSync();
-      expect(src, contains('ovid_locale'),
-          reason: 'zh/en reply-language pref, locale.preference parity');
-    });
-
-    test('P7: first-run welcome notice is versioned (the reference ui-onboarding)', () {
-      final src = File('lib/core/state.dart').readAsStringSync();
-      expect(src, contains('ovid_welcome'),
-          reason: 'welcomeNoticeVersion parity — show once per version');
-    });
-
-    test('STAB1: runTask with unknown session id errors instead of using active session', () async {
-      final app = AppState.I;
-      final s = ChatSession(id: 'stab1', title: 'S', model: 'm', mode: 'auto');
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      addTearDown(() => app.sessions.removeWhere((x) => x.id == 'stab1'));
-      final before = s.messages.length;
-      await AgentService.I.runTask('hello', sessionId: 'no-such-session');
-      expect(s.messages.length, before,
-          reason: 'must not append provider errors to the wrong session');
-    });
-
-    test('STAB2: runTask refuses re-entry if run is already active for this session', () async {
-      final app = AppState.I;
-      final s = ChatSession(id: 'stab2', title: 'S2', model: 'gpt-4o', mode: 'auto');
-      final p = ProviderConfig(
-        id: 'p-stab2',
-        name: 'OpenAI',
-        description: 'OpenAI',
-        baseUrl: 'https://api.openai.com/v1',
-        apiKey: 'sk-fake',
-        models: ['gpt-4o'],
-      );
-      app.providers.add(p);
-      s.providerId = p.id;
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      addTearDown(() {
-        AgentService.I.runBucketForTest(s.id).activeRunId = null;
-        app.sessions.removeWhere((x) => x.id == 'stab2');
-        app.providers.removeWhere((x) => x.id == 'p-stab2');
-      });
-
-      final bucket = AgentService.I.runBucketForTest(s.id);
-      bucket.activeRunId = 'existing-run-123';
-
-      await AgentService.I.runTask('hello again', sessionId: s.id);
-      expect(bucket.activeRunId, 'existing-run-123',
-          reason: 'activeRunId must not be overwritten or cleared by re-entry');
       expect(
-        bucket.runEvents.any((e) => e.text.contains('refusing re-entry')),
-        isTrue,
-        reason: 'must emit re-entry refusal event',
+        src,
+        contains('AGENTS.md'),
+        reason:
+            'workspace instruction chain (the reference skills/AGENTS parity)',
       );
     });
+
+    test(
+      'P5: system prompt carries the current time (the reference time-context)',
+      () {
+        final src = File('lib/core/agent_service.dart').readAsStringSync();
+        expect(
+          src,
+          contains('Current time:'),
+          reason: 'model needs a clock for unqualified dates/times',
+        );
+      },
+    );
+
+    test(
+      'P6: locale preference is persisted (the reference client-locale)',
+      () {
+        final src = File('lib/core/state.dart').readAsStringSync();
+        expect(
+          src,
+          contains('ovid_locale'),
+          reason: 'zh/en reply-language pref, locale.preference parity',
+        );
+      },
+    );
+
+    test(
+      'P7: first-run welcome notice is versioned (the reference ui-onboarding)',
+      () {
+        final src = File('lib/core/state.dart').readAsStringSync();
+        expect(
+          src,
+          contains('ovid_welcome'),
+          reason: 'welcomeNoticeVersion parity — show once per version',
+        );
+      },
+    );
+
+    test(
+      'STAB1: runTask with unknown session id errors instead of using active session',
+      () async {
+        final app = AppState.I;
+        final s = ChatSession(
+          id: 'stab1',
+          title: 'S',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        addTearDown(() => app.sessions.removeWhere((x) => x.id == 'stab1'));
+        final before = s.messages.length;
+        await AgentService.I.runTask('hello', sessionId: 'no-such-session');
+        expect(
+          s.messages.length,
+          before,
+          reason: 'must not append provider errors to the wrong session',
+        );
+      },
+    );
+
+    test(
+      'STAB2: runTask refuses re-entry if run is already active for this session',
+      () async {
+        final app = AppState.I;
+        final s = ChatSession(
+          id: 'stab2',
+          title: 'S2',
+          model: 'gpt-4o',
+          mode: 'auto',
+        );
+        final p = ProviderConfig(
+          id: 'p-stab2',
+          name: 'OpenAI',
+          description: 'OpenAI',
+          baseUrl: 'https://api.openai.com/v1',
+          apiKey: 'sk-fake',
+          models: ['gpt-4o'],
+        );
+        app.providers.add(p);
+        s.providerId = p.id;
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        addTearDown(() {
+          AgentService.I.runBucketForTest(s.id).activeRunId = null;
+          app.sessions.removeWhere((x) => x.id == 'stab2');
+          app.providers.removeWhere((x) => x.id == 'p-stab2');
+        });
+
+        final bucket = AgentService.I.runBucketForTest(s.id);
+        bucket.activeRunId = 'existing-run-123';
+
+        await AgentService.I.runTask('hello again', sessionId: s.id);
+        expect(
+          bucket.activeRunId,
+          'existing-run-123',
+          reason: 'activeRunId must not be overwritten or cleared by re-entry',
+        );
+        expect(
+          bucket.runEvents.any((e) => e.text.contains('refusing re-entry')),
+          isTrue,
+          reason: 'must emit re-entry refusal event',
+        );
+      },
+    );
 
     test('STAB3: per-run events isolation across sessions', () {
       final bucket1 = AgentService.I.runBucketForTest('sess-1');
@@ -9170,236 +10398,366 @@ url = "https://api.example.com/mcp"
       expect(bucket2.runEvents.first.text, 'sess 2 thinking');
     });
 
-    test('STAB4: SandboxService tagRun and killRunProcesses isolates process cancellation', () async {
-      final sandbox = SandboxService.I;
-      sandbox.tagRun('run-a');
-      final procA = await Process.start('sleep', ['10']);
-      sandbox.liveProcessesForTest.add(procA);
-      sandbox.runProcessesForTest.putIfAbsent('run-a', () => []).add(procA);
+    test(
+      'STAB4: SandboxService tagRun and killRunProcesses isolates process cancellation',
+      () async {
+        final sandbox = SandboxService.I;
+        sandbox.tagRun('run-a');
+        final procA = await Process.start('sleep', ['10']);
+        sandbox.liveProcessesForTest.add(procA);
+        sandbox.runProcessesForTest.putIfAbsent('run-a', () => []).add(procA);
 
-      sandbox.tagRun('run-b');
-      final procB = await Process.start('sleep', ['10']);
-      sandbox.liveProcessesForTest.add(procB);
-      sandbox.runProcessesForTest.putIfAbsent('run-b', () => []).add(procB);
+        sandbox.tagRun('run-b');
+        final procB = await Process.start('sleep', ['10']);
+        sandbox.liveProcessesForTest.add(procB);
+        sandbox.runProcessesForTest.putIfAbsent('run-b', () => []).add(procB);
 
-      addTearDown(() {
-        try { procA.kill(ProcessSignal.sigkill); } catch (_) {}
-        try { procB.kill(ProcessSignal.sigkill); } catch (_) {}
-        sandbox.liveProcessesForTest.remove(procA);
-        sandbox.liveProcessesForTest.remove(procB);
-        sandbox.runProcessesForTest.clear();
-      });
+        addTearDown(() {
+          try {
+            procA.kill(ProcessSignal.sigkill);
+          } catch (_) {}
+          try {
+            procB.kill(ProcessSignal.sigkill);
+          } catch (_) {}
+          sandbox.liveProcessesForTest.remove(procA);
+          sandbox.liveProcessesForTest.remove(procB);
+          sandbox.runProcessesForTest.clear();
+        });
 
-      sandbox.killRunProcesses('run-a');
-      expect(sandbox.runProcessesForTest.containsKey('run-a'), isFalse);
-      expect(sandbox.runProcessesForTest['run-b'], contains(procB));
-      expect(sandbox.liveProcessesForTest, contains(procB));
-      expect(sandbox.liveProcessesForTest.contains(procA), isFalse);
+        sandbox.killRunProcesses('run-a');
+        expect(sandbox.runProcessesForTest.containsKey('run-a'), isFalse);
+        expect(sandbox.runProcessesForTest['run-b'], contains(procB));
+        expect(sandbox.liveProcessesForTest, contains(procB));
+        expect(sandbox.liveProcessesForTest.contains(procA), isFalse);
 
-      sandbox.killAllProcesses();
-      expect(sandbox.liveProcessesForTest, isEmpty);
-      expect(sandbox.runProcessesForTest, isEmpty);
-    });
+        sandbox.killAllProcesses();
+        expect(sandbox.liveProcessesForTest, isEmpty);
+        expect(sandbox.runProcessesForTest, isEmpty);
+      },
+    );
 
-    test('STAB5: cancelRunFor scoped cancel does not kill processes of other sessions', () async {
-      final app = AppState.I;
-      final s1 = ChatSession(id: 'sess-c1', title: 'C1', model: 'm', mode: 'auto');
-      final s2 = ChatSession(id: 'sess-c2', title: 'C2', model: 'm', mode: 'auto');
-      app.sessions.addAll([s1, s2]);
-      addTearDown(() => app.sessions.removeWhere((x) => x.id == 'sess-c1' || x.id == 'sess-c2'));
+    test(
+      'STAB5: cancelRunFor scoped cancel does not kill processes of other sessions',
+      () async {
+        final app = AppState.I;
+        final s1 = ChatSession(
+          id: 'sess-c1',
+          title: 'C1',
+          model: 'm',
+          mode: 'auto',
+        );
+        final s2 = ChatSession(
+          id: 'sess-c2',
+          title: 'C2',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.addAll([s1, s2]);
+        addTearDown(
+          () => app.sessions.removeWhere(
+            (x) => x.id == 'sess-c1' || x.id == 'sess-c2',
+          ),
+        );
 
-      final b1 = AgentService.I.runBucketForTest(s1.id);
-      final b2 = AgentService.I.runBucketForTest(s2.id);
-      b1.activeRunId = 'run-c1';
-      b2.activeRunId = 'run-c2';
-      addTearDown(() {
-        b1.activeRunId = null;
-        b2.activeRunId = null;
-      });
+        final b1 = AgentService.I.runBucketForTest(s1.id);
+        final b2 = AgentService.I.runBucketForTest(s2.id);
+        b1.activeRunId = 'run-c1';
+        b2.activeRunId = 'run-c2';
+        addTearDown(() {
+          b1.activeRunId = null;
+          b2.activeRunId = null;
+        });
 
-      final sandbox = SandboxService.I;
-      final proc2 = await Process.start('sleep', ['10']);
-      sandbox.liveProcessesForTest.add(proc2);
-      sandbox.runProcessesForTest.putIfAbsent(s2.id, () => []).add(proc2);
-      addTearDown(() {
-        try { proc2.kill(ProcessSignal.sigkill); } catch (_) {}
-        sandbox.liveProcessesForTest.remove(proc2);
-        sandbox.runProcessesForTest.remove(s2.id);
-      });
+        final sandbox = SandboxService.I;
+        final proc2 = await Process.start('sleep', ['10']);
+        sandbox.liveProcessesForTest.add(proc2);
+        sandbox.runProcessesForTest.putIfAbsent(s2.id, () => []).add(proc2);
+        addTearDown(() {
+          try {
+            proc2.kill(ProcessSignal.sigkill);
+          } catch (_) {}
+          sandbox.liveProcessesForTest.remove(proc2);
+          sandbox.runProcessesForTest.remove(s2.id);
+        });
 
-      AgentService.I.cancelRunFor(s1.id);
+        AgentService.I.cancelRunFor(s1.id);
 
-      // s2's process must still be alive and registered
-      expect(sandbox.liveProcessesForTest, contains(proc2));
-      expect(sandbox.runProcessesForTest[s2.id], contains(proc2));
-      expect(b1.cancelRequested, isTrue);
-    });
+        // s2's process must still be alive and registered
+        expect(sandbox.liveProcessesForTest, contains(proc2));
+        expect(sandbox.runProcessesForTest[s2.id], contains(proc2));
+        expect(b1.cancelRequested, isTrue);
+      },
+    );
 
-    test('PERM1: custom preset round-trips; sandbox policy blocks denied command', () async {
-      final app = AppState.I;
-      app.saveCustomPresetForTest({'id': 'perm1', 'deniedTools': ['browser_open']});
-      addTearDown(() => app.deleteCustomPresetForTest('perm1'));
-      expect(PresetRegistry.byId('perm1').deniedTools, contains('browser_open'));
-      final res = await AgentService.I.dispatchForTest('run_shell', {'command': 'rm -rf /'});
-      expect(res, isNotEmpty);
-      app.deleteCustomPresetForTest('perm1');
-    });
+    test(
+      'PERM1: custom preset round-trips; sandbox policy blocks denied command',
+      () async {
+        final app = AppState.I;
+        app.saveCustomPresetForTest({
+          'id': 'perm1',
+          'deniedTools': ['browser_open'],
+        });
+        addTearDown(() => app.deleteCustomPresetForTest('perm1'));
+        expect(
+          PresetRegistry.byId('perm1').deniedTools,
+          contains('browser_open'),
+        );
+        final res = await AgentService.I.dispatchForTest('run_shell', {
+          'command': 'rm -rf /',
+        });
+        expect(res, isNotEmpty);
+        app.deleteCustomPresetForTest('perm1');
+      },
+    );
 
-    test('PERM2: approval audit records to session ledger on approval and exit_plan_mode', () async {
-      final app = AppState.I;
-      final root = await Directory.systemTemp.createTemp('ovid-perm2-led-');
-      SessionLedger.rootOverrideForTest = root;
-      addTearDown(() {
-        SessionLedger.rootOverrideForTest = null;
-        try { root.deleteSync(recursive: true); } catch (_) {}
-      });
+    test(
+      'PERM2: approval audit records to session ledger on approval and exit_plan_mode',
+      () async {
+        final app = AppState.I;
+        final root = await Directory.systemTemp.createTemp('ovid-perm2-led-');
+        SessionLedger.rootOverrideForTest = root;
+        addTearDown(() {
+          SessionLedger.rootOverrideForTest = null;
+          try {
+            root.deleteSync(recursive: true);
+          } catch (_) {}
+        });
 
-      final s = ChatSession(id: 'perm2-sess', title: 'Perm2', model: 'm', mode: 'auto');
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      AgentService.setRunSessionForTest(s.id);
-      addTearDown(() {
-        AgentService.setRunSessionForTest('');
-        AgentService.I.pendingApproval = null;
-        app.sessions.removeWhere((x) => x.id == 'perm2-sess');
-      });
+        final s = ChatSession(
+          id: 'perm2-sess',
+          title: 'Perm2',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        AgentService.setRunSessionForTest(s.id);
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          AgentService.I.pendingApproval = null;
+          app.sessions.removeWhere((x) => x.id == 'perm2-sess');
+        });
 
-      // Test exit_plan_mode approval audit
-      final planFuture = AgentService.I.dispatchForTest('exit_plan_mode', {'plan': 'Test Plan'});
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(AgentService.I.pendingApproval, isNotNull);
-      AgentService.I.approve(true);
-      final planRes = await planFuture;
-      expect(planRes, contains('approved'));
+        // Test exit_plan_mode approval audit
+        final planFuture = AgentService.I.dispatchForTest('exit_plan_mode', {
+          'plan': 'Test Plan',
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(AgentService.I.pendingApproval, isNotNull);
+        AgentService.I.approve(true);
+        final planRes = await planFuture;
+        expect(planRes, contains('approved'));
 
-      await SessionLedger.I.flush(s.id);
-      var events = await SessionLedger.I.read(s.id);
-      expect(
-        events.any((e) => e['kind'] == 'approval' && e['tool'] == 'exit_plan_mode' && e['ok'] == true),
-        isTrue,
-      );
+        await SessionLedger.I.flush(s.id);
+        var events = await SessionLedger.I.read(s.id);
+        expect(
+          events.any(
+            (e) =>
+                e['kind'] == 'approval' &&
+                e['tool'] == 'exit_plan_mode' &&
+                e['ok'] == true,
+          ),
+          isTrue,
+        );
 
-      // Test exit_plan_mode rejection audit
-      final planFuture2 = AgentService.I.dispatchForTest('exit_plan_mode', {'plan': 'Plan 2'});
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(AgentService.I.pendingApproval, isNotNull);
-      AgentService.I.approve(false, note: 'Needs more detail');
-      final planRes2 = await planFuture2;
-      expect(planRes2, contains('did not approve'));
+        // Test exit_plan_mode rejection audit
+        final planFuture2 = AgentService.I.dispatchForTest('exit_plan_mode', {
+          'plan': 'Plan 2',
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(AgentService.I.pendingApproval, isNotNull);
+        AgentService.I.approve(false, note: 'Needs more detail');
+        final planRes2 = await planFuture2;
+        expect(planRes2, contains('did not approve'));
 
-      await SessionLedger.I.flush(s.id);
-      events = await SessionLedger.I.read(s.id);
-      expect(
-        events.any((e) => e['kind'] == 'approval' && e['tool'] == 'exit_plan_mode' && e['ok'] == false),
-        isTrue,
-      );
-    });
+        await SessionLedger.I.flush(s.id);
+        events = await SessionLedger.I.read(s.id);
+        expect(
+          events.any(
+            (e) =>
+                e['kind'] == 'approval' &&
+                e['tool'] == 'exit_plan_mode' &&
+                e['ok'] == false,
+          ),
+          isTrue,
+        );
+      },
+    );
 
-    test('PERM3: SandboxPolicy blocks denied commands regex and cwd escaping allowedRoots', () async {
-      final sandbox = SandboxService.I;
-      final originalPolicy = sandbox.policy;
-      addTearDown(() => sandbox.policy = originalPolicy);
+    test(
+      'PERM3: SandboxPolicy blocks denied commands regex and cwd escaping allowedRoots',
+      () async {
+        final sandbox = SandboxService.I;
+        final originalPolicy = sandbox.policy;
+        addTearDown(() => sandbox.policy = originalPolicy);
 
-      sandbox.policy = (
-        allowedRoots: ['/data/allowed'],
-        deniedCommands: [r'danger_cmd'],
-      );
+        sandbox.policy = (
+          allowedRoots: ['/data/allowed'],
+          deniedCommands: [r'danger_cmd'],
+        );
 
-      // Denied command pattern
-      final deniedCmd = await sandbox.exec(['danger_cmd', '--all']);
-      expect(deniedCmd, contains('DENIED by sandbox policy: command matches denied pattern'));
+        // Denied command pattern
+        final deniedCmd = await sandbox.exec(['danger_cmd', '--all']);
+        expect(
+          deniedCmd,
+          contains('DENIED by sandbox policy: command matches denied pattern'),
+        );
 
-      // CWD outside allowed roots
-      final deniedCwd = await sandbox.exec(['echo', 'hi'], cwd: '/etc/forbidden');
-      expect(deniedCwd, contains('DENIED by sandbox policy: cwd escapes allowed roots'));
+        // CWD outside allowed roots
+        final deniedCwd = await sandbox.exec([
+          'echo',
+          'hi',
+        ], cwd: '/etc/forbidden');
+        expect(
+          deniedCwd,
+          contains('DENIED by sandbox policy: cwd escapes allowed roots'),
+        );
 
-      // Host workdir outside allowed roots
-      final deniedWorkDir = await sandbox.exec(['echo', 'hi'], hostWorkDir: Directory('/var/log'));
-      expect(deniedWorkDir, contains('DENIED by sandbox policy: cwd escapes allowed roots'));
-    });
+        // Host workdir outside allowed roots
+        final deniedWorkDir = await sandbox.exec([
+          'echo',
+          'hi',
+        ], hostWorkDir: Directory('/var/log'));
+        expect(
+          deniedWorkDir,
+          contains('DENIED by sandbox policy: cwd escapes allowed roots'),
+        );
+      },
+    );
 
-    test('STOP1: cancelRun immediately clears busy and aborts activeClient with force', () async {
-      final app = AppState.I;
-      final s = ChatSession(id: 'stop1', title: 'S', model: 'm', mode: 'auto');
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      addTearDown(() => app.sessions.removeWhere((x) => x.id == 'stop1'));
+    test(
+      'STOP1: cancelRun immediately clears busy and aborts activeClient with force',
+      () async {
+        final app = AppState.I;
+        final s = ChatSession(
+          id: 'stop1',
+          title: 'S',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s);
+        app.activeSessionId = s.id;
+        addTearDown(() => app.sessions.removeWhere((x) => x.id == 'stop1'));
 
-      final agent = AgentService.I;
-      agent.setActiveRunForTest(s.id, 'run-1');
-      final fakeClient = _FakeHttpClient();
-      agent.setActiveClientForTest(s.id, fakeClient);
+        final agent = AgentService.I;
+        agent.setActiveRunForTest(s.id, 'run-1');
+        final fakeClient = _FakeHttpClient();
+        agent.setActiveClientForTest(s.id, fakeClient);
 
-      expect(agent.busyFor(s.id), isTrue);
-      expect(agent.busy, isTrue);
+        expect(agent.busyFor(s.id), isTrue);
+        expect(agent.busy, isTrue);
 
-      agent.cancelRun();
+        agent.cancelRun();
 
-      // Instant UI state flip
-      expect(agent.busyFor(s.id), isFalse, reason: 'busyFor must flip immediately to false');
-      expect(agent.busy, isFalse, reason: 'busy must flip immediately to false');
-      expect(fakeClient.closedWithForce, isTrue, reason: 'activeClient must be closed with force: true');
-    });
+        // Instant UI state flip
+        expect(
+          agent.busyFor(s.id),
+          isFalse,
+          reason: 'busyFor must flip immediately to false',
+        );
+        expect(
+          agent.busy,
+          isFalse,
+          reason: 'busy must flip immediately to false',
+        );
+        expect(
+          fakeClient.closedWithForce,
+          isTrue,
+          reason: 'activeClient must be closed with force: true',
+        );
+      },
+    );
 
-    test('PERSIST1: agent does not pause tasks with turn budget exhausted break', () {
-      final src = File('lib/core/agent_service.dart').readAsStringSync();
-      expect(src, isNot(contains('turn budget exhausted — task paused')));
-    });
+    test(
+      'PERSIST1: agent does not pause tasks with turn budget exhausted break',
+      () {
+        final src = File('lib/core/agent_service.dart').readAsStringSync();
+        expect(src, isNot(contains('turn budget exhausted — task paused')));
+      },
+    );
 
-    test('BRD2: desktop mode applies zoom JS live + persists across page loads', () {
-      final src = File('lib/core/agent_service.dart').readAsStringSync();
-      // The zoom helper must inject the zoom into the live page
-      // (browser_resize parity — setting tab.zoom alone renders nothing).
-      final helper = src.indexOf('Future<void> _applyTabZoom');
-      expect(helper, isNot(-1), reason: '_applyTabZoom helper exists');
-      expect(src.substring(helper, (helper + 600).clamp(0, src.length)),
-          contains('style.zoom'));
-      // setTabDesktopMode recreates the controller fresh on toggle.
-      // Dropped wasted pre-reload _applyTabZoom; keep onPageFinished re-apply for zoom fallback.
-      final idx = src.indexOf('Future<void> setTabDesktopMode');
-      expect(idx, isNot(-1), reason: 'setTabDesktopMode exists');
-      final end = src.indexOf('consoleBucketFor', idx);
-      final body = src.substring(idx, end == -1 ? src.length : end);
-      expect(body, contains('recreateControllerForDesktopToggle'),
-          reason: 'setTabDesktopMode must recreate controller on toggle');
-      // onPageFinished must re-apply the tab zoom (reload wipes it).
-      final finished = src.indexOf('onPageFinished: (url)');
-      expect(finished, isNot(-1));
-      final finishedEnd = src.indexOf('onWebResourceError', finished);
-      final finishedBody = src.substring(
-          finished, finishedEnd == -1 ? src.length : finishedEnd);
-      expect(finishedBody, contains('_applyTabZoom'),
-          reason: 'onPageFinished must re-apply tab.zoom after every load/reload');
-    });
+    test(
+      'BRD2: desktop mode applies zoom JS live + persists across page loads',
+      () {
+        final src = File('lib/core/agent_service.dart').readAsStringSync();
+        // The zoom helper must inject the zoom into the live page
+        // (browser_resize parity — setting tab.zoom alone renders nothing).
+        final helper = src.indexOf('Future<void> _applyTabZoom');
+        expect(helper, isNot(-1), reason: '_applyTabZoom helper exists');
+        expect(
+          src.substring(helper, (helper + 600).clamp(0, src.length)),
+          contains('style.zoom'),
+        );
+        // setTabDesktopMode recreates the controller fresh on toggle.
+        // Dropped wasted pre-reload _applyTabZoom; keep onPageFinished re-apply for zoom fallback.
+        final idx = src.indexOf('Future<void> setTabDesktopMode');
+        expect(idx, isNot(-1), reason: 'setTabDesktopMode exists');
+        final end = src.indexOf('consoleBucketFor', idx);
+        final body = src.substring(idx, end == -1 ? src.length : end);
+        expect(
+          body,
+          contains('recreateControllerForDesktopToggle'),
+          reason: 'setTabDesktopMode must recreate controller on toggle',
+        );
+        // onPageFinished must re-apply the tab zoom (reload wipes it).
+        final finished = src.indexOf('onPageFinished: (url)');
+        expect(finished, isNot(-1));
+        final finishedEnd = src.indexOf('onWebResourceError', finished);
+        final finishedBody = src.substring(
+          finished,
+          finishedEnd == -1 ? src.length : finishedEnd,
+        );
+        expect(
+          finishedBody,
+          contains('_applyTabZoom'),
+          reason:
+              'onPageFinished must re-apply tab.zoom after every load/reload',
+        );
+      },
+    );
 
-    test('SHELL_LOOP1: sanitizeShellCommand fixes missing delimiters and pipe-to-head issues', () {
-      expect(
-        AgentService.sanitizeShellCommand('ls 2>&1 ls -la'),
-        'ls 2>&1; ls -la',
-      );
-      expect(
-        AgentService.sanitizeShellCommand('ls | head -5 pwd'),
-        'ls | head -5; pwd',
-      );
-    });
+    test(
+      'SHELL_LOOP1: sanitizeShellCommand fixes missing delimiters and pipe-to-head issues',
+      () {
+        expect(
+          AgentService.sanitizeShellCommand('ls 2>&1 ls -la'),
+          'ls 2>&1; ls -la',
+        );
+        expect(
+          AgentService.sanitizeShellCommand('ls | head -5 pwd'),
+          'ls | head -5; pwd',
+        );
+      },
+    );
 
-    test('SHELL_EXEC1: exec with non-zero exit code and empty output does not throw Exception', () async {
-      final svc = SandboxService.I;
-      final tmp = await Directory.systemTemp.createTemp('shellexec');
-      await Directory('${tmp.path}/bin').create(recursive: true);
-      await Directory('${tmp.path}/lib').create(recursive: true);
-      File('${tmp.path}/lib/libtermux-exec-direct-ld-preload.so').writeAsStringSync('');
-      final shTarget = File('/usr/bin/sh').existsSync() ? '/usr/bin/sh' : '/bin/sh';
-      Link('${tmp.path}/bin/sh').createSync(shTarget);
-      addTearDown(() {
-        svc.sandboxPrefixForTest = null;
-        tmp.deleteSync(recursive: true);
-      });
-      svc.sandboxPrefixForTest = tmp;
-      // 'false' command has exitCode 1 and empty output.
-      final out = await svc.exec(['sh', '-c', 'false'], hostWorkDir: Directory.systemTemp);
-      expect(out, contains('exit code 1'));
-    });
+    test(
+      'SHELL_EXEC1: exec with non-zero exit code and empty output does not throw Exception',
+      () async {
+        final svc = SandboxService.I;
+        final tmp = await Directory.systemTemp.createTemp('shellexec');
+        await Directory('${tmp.path}/bin').create(recursive: true);
+        await Directory('${tmp.path}/lib').create(recursive: true);
+        File(
+          '${tmp.path}/lib/libtermux-exec-direct-ld-preload.so',
+        ).writeAsStringSync('');
+        final shTarget = File('/usr/bin/sh').existsSync()
+            ? '/usr/bin/sh'
+            : '/bin/sh';
+        Link('${tmp.path}/bin/sh').createSync(shTarget);
+        addTearDown(() {
+          svc.sandboxPrefixForTest = null;
+          tmp.deleteSync(recursive: true);
+        });
+        svc.sandboxPrefixForTest = tmp;
+        // 'false' command has exitCode 1 and empty output.
+        final out = await svc.exec([
+          'sh',
+          '-c',
+          'false',
+        ], hostWorkDir: Directory.systemTemp);
+        expect(out, contains('exit code 1'));
+      },
+    );
   });
 
   group('Task 1: Marketplace persistence + honest catalog', () {
@@ -9412,17 +10770,19 @@ url = "https://api.example.com/mcp"
     test('marketplace install survives restart resync', () async {
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       server.listen((request) async {
-        final body = utf8.encode(jsonEncode({
-          'name': 'test-marketplace',
-          'plugins': [
-            {
-              'name': 'real-plugin',
-              'source': 'owner/real-plugin',
-              'description': 'A real marketplace plugin',
-              'version': '1.0.0',
-            }
-          ],
-        }));
+        final body = utf8.encode(
+          jsonEncode({
+            'name': 'test-marketplace',
+            'plugins': [
+              {
+                'name': 'real-plugin',
+                'source': 'owner/real-plugin',
+                'description': 'A real marketplace plugin',
+                'version': '1.0.0',
+              },
+            ],
+          }),
+        );
         request.response
           ..statusCode = 200
           ..contentLength = body.length
@@ -9446,164 +10806,193 @@ url = "https://api.example.com/mcp"
       expect(b.pluginSource('real-plugin'), isNotNull);
     });
 
-    test('removeMarketplace prunes merged plugins, MCP servers, and prefs', () async {
-      final app = await freshAppStateForTest();
-      addTearDown(() => AppState.resetTestInstance());
+    test(
+      'removeMarketplace prunes merged plugins, MCP servers, and prefs',
+      () async {
+        final app = await freshAppStateForTest();
+        addTearDown(() => AppState.resetTestInstance());
 
-      app.addMarketplace('testorg/testmkt');
-      app.mergeMarketplaceCatalogForTest({
-        'plugins': [
+        app.addMarketplace('testorg/testmkt');
+        app.mergeMarketplaceCatalogForTest(
           {
-            'name': 'mkt-plugin-1',
-            'source': 'testorg/testmkt',
-            'description': 'Plugin from testmkt',
-          }
-        ],
-        'mcpServers': [
-          {
-            'name': 'mkt-mcp-1',
-            'command': 'npx',
-            'args': ['-y', 'mkt-mcp-1'],
-          }
-        ],
-      }, 'testorg', 'testmkt');
+            'plugins': [
+              {
+                'name': 'mkt-plugin-1',
+                'source': 'testorg/testmkt',
+                'description': 'Plugin from testmkt',
+              },
+            ],
+            'mcpServers': [
+              {
+                'name': 'mkt-mcp-1',
+                'command': 'npx',
+                'args': ['-y', 'mkt-mcp-1'],
+              },
+            ],
+          },
+          'testorg',
+          'testmkt',
+        );
 
-      expect(app.plugins.any((p) => p.name == 'mkt-plugin-1'), isTrue);
-      expect(app.mcpServers.any((s) => s.name == 'mkt-mcp-1'), isTrue);
+        expect(app.plugins.any((p) => p.name == 'mkt-plugin-1'), isTrue);
+        expect(app.mcpServers.any((s) => s.name == 'mkt-mcp-1'), isTrue);
 
-      await app.setPluginInstalled('mkt-plugin-1', true);
-      await app.removeMarketplace('testorg/testmkt');
+        await app.setPluginInstalled('mkt-plugin-1', true);
+        await app.removeMarketplace('testorg/testmkt');
 
-      expect(app.plugins.any((p) => p.name == 'mkt-plugin-1'), isFalse);
-      expect(app.mcpServers.any((s) => s.name == 'mkt-mcp-1'), isFalse);
+        expect(app.plugins.any((p) => p.name == 'mkt-plugin-1'), isFalse);
+        expect(app.mcpServers.any((s) => s.name == 'mkt-mcp-1'), isFalse);
 
-      final prefs = await SharedPreferences.getInstance();
-      final rawPlugins = prefs.getString('ovid_marketplace_merged_v1') ?? '[]';
-      expect(rawPlugins, isNot(contains('mkt-plugin-1')));
-      final rawPluginState = prefs.getString('ovid_plugin_state_v1') ?? '{}';
-      expect(rawPluginState, isNot(contains('mkt-plugin-1')));
-      final rawMcps = prefs.getStringList('ovid_custom_mcp_servers_v1') ?? [];
-      expect(rawMcps.any((j) => j.contains('mkt-mcp-1')), isFalse);
-    });
+        final prefs = await SharedPreferences.getInstance();
+        final rawPlugins =
+            prefs.getString('ovid_marketplace_merged_v1') ?? '[]';
+        expect(rawPlugins, isNot(contains('mkt-plugin-1')));
+        final rawPluginState = prefs.getString('ovid_plugin_state_v1') ?? '{}';
+        expect(rawPluginState, isNot(contains('mkt-plugin-1')));
+        final rawMcps = prefs.getStringList('ovid_custom_mcp_servers_v1') ?? [];
+        expect(rawMcps.any((j) => j.contains('mkt-mcp-1')), isFalse);
+      },
+    );
 
-    test('uninstallPlugin removes cache dir, unmounts owned MCP servers, and refreshes skills', () async {
-      final app = await freshAppStateForTest();
-      addTearDown(() => AppState.resetTestInstance());
+    test(
+      'uninstallPlugin removes cache dir, unmounts owned MCP servers, and refreshes skills',
+      () async {
+        final app = await freshAppStateForTest();
+        addTearDown(() => AppState.resetTestInstance());
 
-      final tmp = Directory.systemTemp.createTempSync('plugin-test-cache');
-      AppState.pluginCacheRootOverrideForTest = tmp;
-      addTearDown(() {
-        AppState.pluginCacheRootOverrideForTest = null;
-        try {
-          tmp.deleteSync(recursive: true);
-        } catch (_) {}
-      });
+        final tmp = Directory.systemTemp.createTempSync('plugin-test-cache');
+        AppState.pluginCacheRootOverrideForTest = tmp;
+        addTearDown(() {
+          AppState.pluginCacheRootOverrideForTest = null;
+          try {
+            tmp.deleteSync(recursive: true);
+          } catch (_) {}
+        });
 
-      final plugin = PluginItem(
-        name: 'test-plugin-uninstall',
-        author: 'testorg',
-        description: 'Testing uninstall cleanup',
-        version: '1.0.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        source: 'testorg/uninstall-repo',
-      );
-      app.plugins.add(plugin);
+        final plugin = PluginItem(
+          name: 'test-plugin-uninstall',
+          author: 'testorg',
+          description: 'Testing uninstall cleanup',
+          version: '1.0.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          source: 'testorg/uninstall-repo',
+        );
+        app.plugins.add(plugin);
 
-      final cacheDir = await app.pluginCacheDirFor('testorg/uninstall-repo');
-      cacheDir.createSync(recursive: true);
-      File('${cacheDir.path}/test.txt').writeAsStringSync('hello');
-      expect(cacheDir.existsSync(), isTrue);
+        final cacheDir = await app.pluginCacheDirFor('testorg/uninstall-repo');
+        cacheDir.createSync(recursive: true);
+        File('${cacheDir.path}/test.txt').writeAsStringSync('hello');
+        expect(cacheDir.existsSync(), isTrue);
 
-      final ownedMcp = McpServer(
-        name: 'test-plugin-owned-mcp',
-        author: 'testorg',
-        description: 'Owned MCP',
-        category: 'Plugin',
-        command: 'npx',
-        source: 'plugin:test-plugin-uninstall',
-        custom: true,
-        connected: false,
-      );
-      app.mcpServers.add(ownedMcp);
+        final ownedMcp = McpServer(
+          name: 'test-plugin-owned-mcp',
+          author: 'testorg',
+          description: 'Owned MCP',
+          category: 'Plugin',
+          command: 'npx',
+          source: 'plugin:test-plugin-uninstall',
+          custom: true,
+          connected: false,
+        );
+        app.mcpServers.add(ownedMcp);
 
-      var skillsRefreshed = false;
-      final prevRefresh = AppState.onRefreshSkills;
-      AppState.onRefreshSkills = () async {
-        skillsRefreshed = true;
-      };
-      addTearDown(() => AppState.onRefreshSkills = prevRefresh);
+        var skillsRefreshed = false;
+        final prevRefresh = AppState.onRefreshSkills;
+        AppState.onRefreshSkills = () async {
+          skillsRefreshed = true;
+        };
+        addTearDown(() => AppState.onRefreshSkills = prevRefresh);
 
-      await app.uninstallPlugin(plugin);
+        await app.uninstallPlugin(plugin);
 
-      expect(plugin.installed, isFalse);
-      expect(plugin.enabled, isFalse);
-      expect(cacheDir.existsSync(), isFalse);
-      expect(app.mcpServers.any((s) => s.name == 'test-plugin-owned-mcp'), isFalse);
-      expect(skillsRefreshed, isTrue);
-    });
+        expect(plugin.installed, isFalse);
+        expect(plugin.enabled, isFalse);
+        expect(cacheDir.existsSync(), isFalse);
+        expect(
+          app.mcpServers.any((s) => s.name == 'test-plugin-owned-mcp'),
+          isFalse,
+        );
+        expect(skillsRefreshed, isTrue);
+      },
+    );
 
-    test('disablePlugin disconnects owned MCP servers and refreshes skills', () async {
-      final app = await freshAppStateForTest();
-      addTearDown(() => AppState.resetTestInstance());
+    test(
+      'disablePlugin disconnects owned MCP servers and refreshes skills',
+      () async {
+        final app = await freshAppStateForTest();
+        addTearDown(() => AppState.resetTestInstance());
 
-      final plugin = PluginItem(
-        name: 'test-plugin-disable',
-        author: 'testorg',
-        description: 'Testing disable',
-        version: '1.0.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        source: 'testorg/disable-repo',
-      );
-      app.plugins.add(plugin);
+        final plugin = PluginItem(
+          name: 'test-plugin-disable',
+          author: 'testorg',
+          description: 'Testing disable',
+          version: '1.0.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          source: 'testorg/disable-repo',
+        );
+        app.plugins.add(plugin);
 
-      final ownedMcp = McpServer(
-        name: 'test-plugin-disable-mcp',
-        author: 'testorg',
-        description: 'Owned MCP',
-        category: 'Plugin',
-        command: 'npx',
-        source: 'plugin:test-plugin-disable',
-        custom: true,
-        connected: true,
-      );
-      app.mcpServers.add(ownedMcp);
+        final ownedMcp = McpServer(
+          name: 'test-plugin-disable-mcp',
+          author: 'testorg',
+          description: 'Owned MCP',
+          category: 'Plugin',
+          command: 'npx',
+          source: 'plugin:test-plugin-disable',
+          custom: true,
+          connected: true,
+        );
+        app.mcpServers.add(ownedMcp);
 
-      var skillsRefreshed = false;
-      final prevRefresh = AppState.onRefreshSkills;
-      AppState.onRefreshSkills = () async {
-        skillsRefreshed = true;
-      };
-      addTearDown(() => AppState.onRefreshSkills = prevRefresh);
+        var skillsRefreshed = false;
+        final prevRefresh = AppState.onRefreshSkills;
+        AppState.onRefreshSkills = () async {
+          skillsRefreshed = true;
+        };
+        addTearDown(() => AppState.onRefreshSkills = prevRefresh);
 
-      await app.disablePlugin(plugin);
+        await app.disablePlugin(plugin);
 
-      expect(plugin.enabled, isFalse);
-      expect(app.mcpServers.any((s) => s.name == 'test-plugin-disable-mcp'), isTrue);
-      expect(ownedMcp.connected, isFalse);
-      expect(skillsRefreshed, isTrue);
-    });
+        expect(plugin.enabled, isFalse);
+        expect(
+          app.mcpServers.any((s) => s.name == 'test-plugin-disable-mcp'),
+          isTrue,
+        );
+        expect(ownedMcp.connected, isFalse);
+        expect(skillsRefreshed, isTrue);
+      },
+    );
 
-    test('seed plugins have zero fake install counts and installsKnown false', () async {
-      final app = await freshAppStateForTest();
-      addTearDown(() => AppState.resetTestInstance());
+    test(
+      'seed plugins have zero fake install counts and installsKnown false',
+      () async {
+        final app = await freshAppStateForTest();
+        addTearDown(() => AppState.resetTestInstance());
 
-      final builtins = app.plugins.where((p) => p.author != 'you');
-      expect(builtins.isNotEmpty, isTrue);
-      for (final p in builtins) {
-        expect(p.installs, 0, reason: '${p.name} has non-zero installs');
-        expect(p.installsKnown, isFalse, reason: '${p.name} has installsKnown true');
-      }
-    });
+        final builtins = app.plugins.where((p) => p.author != 'you');
+        expect(builtins.isNotEmpty, isTrue);
+        for (final p in builtins) {
+          expect(p.installs, 0, reason: '${p.name} has non-zero installs');
+          expect(
+            p.installsKnown,
+            isFalse,
+            reason: '${p.name} has installsKnown true',
+          );
+        }
+      },
+    );
   });
 
   group('Task 2: Plugin runtime capability + manifest parity', () {
     test('imported enabled plugin contributes tools', () async {
       final app = AppState.I;
-      final tempDir = Directory.systemTemp.createTempSync('ovid_plugin_tool_test_');
+      final tempDir = Directory.systemTemp.createTempSync(
+        'ovid_plugin_tool_test_',
+      );
       addTearDown(() => tempDir.deleteSync(recursive: true));
       AppState.pluginCacheRootOverrideForTest = tempDir;
       addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
@@ -9621,14 +11010,24 @@ url = "https://api.example.com/mcp"
       app.plugins.add(plugin);
       addTearDown(() => app.plugins.remove(plugin));
 
-      final skillDir = Directory('${tempDir.path}/plugin-content/acme_real-plugin/skills/real-skill');
+      final skillDir = Directory(
+        '${tempDir.path}/plugin-content/acme_real-plugin/skills/real-skill',
+      );
       skillDir.createSync(recursive: true);
-      File('${skillDir.path}/SKILL.md').writeAsStringSync('---\nname: real-skill\ndescription: A real skill\n---\nDo real work.');
+      File('${skillDir.path}/SKILL.md').writeAsStringSync(
+        '---\nname: real-skill\ndescription: A real skill\n---\nDo real work.',
+      );
 
       await AgentService.I.refreshSkills();
 
       final tools = AgentService.I.toolsForTest();
-      expect(tools.any((t) => (t['function'] as Map)['name'].toString().contains('real_plugin')), isTrue);
+      expect(
+        tools.any(
+          (t) =>
+              (t['function'] as Map)['name'].toString().contains('real_plugin'),
+        ),
+        isTrue,
+      );
       final agentTools = AgentService.I.agentToolsForTest();
       expect(agentTools.any((t) => t.name.contains('real_plugin')), isTrue);
       final names = AgentService.I.pluginToolNames(plugin);
@@ -9637,7 +11036,9 @@ url = "https://api.example.com/mcp"
 
     test('_toolGainsFor derives actual tool gains dynamically', () async {
       final app = AppState.I;
-      final tempDir = Directory.systemTemp.createTempSync('ovid_toolgains_test_');
+      final tempDir = Directory.systemTemp.createTempSync(
+        'ovid_toolgains_test_',
+      );
       addTearDown(() => tempDir.deleteSync(recursive: true));
       AppState.pluginCacheRootOverrideForTest = tempDir;
       addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
@@ -9658,9 +11059,13 @@ url = "https://api.example.com/mcp"
       // Before skills mounted: null
       expect(toolGainsForTest(plugin), isNull);
 
-      final cmdDir = Directory('${tempDir.path}/plugin-content/acme_custom-analyzer/commands');
+      final cmdDir = Directory(
+        '${tempDir.path}/plugin-content/acme_custom-analyzer/commands',
+      );
       cmdDir.createSync(recursive: true);
-      File('${cmdDir.path}/analyze.md').writeAsStringSync('---\nname: analyze\n---\nRun analysis.');
+      File(
+        '${cmdDir.path}/analyze.md',
+      ).writeAsStringSync('---\nname: analyze\n---\nRun analysis.');
 
       await AgentService.I.refreshSkills();
 
@@ -9669,28 +11074,33 @@ url = "https://api.example.com/mcp"
       expect(gains, contains('custom_analyzer'));
     });
 
-    test('_githubPluginSource resolves relative ./dir and /dir sources against marketplace', () {
-      final resolvedDot = AppState.githubPluginSourceForTest(
-        './plugins/local-tool',
-        marketplaceRepo: 'myorg/mymarket',
-      );
-      expect(resolvedDot, 'myorg/mymarket/raw/branch/plugins/local-tool');
+    test(
+      '_githubPluginSource resolves relative ./dir and /dir sources against marketplace',
+      () {
+        final resolvedDot = AppState.githubPluginSourceForTest(
+          './plugins/local-tool',
+          marketplaceRepo: 'myorg/mymarket',
+        );
+        expect(resolvedDot, 'myorg/mymarket/raw/branch/plugins/local-tool');
 
-      final resolvedSlash = AppState.githubPluginSourceForTest(
-        '/plugins/slash-tool',
-        marketplaceRepo: 'myorg/mymarket',
-      );
-      expect(resolvedSlash, 'myorg/mymarket/raw/branch/plugins/slash-tool');
+        final resolvedSlash = AppState.githubPluginSourceForTest(
+          '/plugins/slash-tool',
+          marketplaceRepo: 'myorg/mymarket',
+        );
+        expect(resolvedSlash, 'myorg/mymarket/raw/branch/plugins/slash-tool');
 
-      final noMarket = AppState.githubPluginSourceForTest('./plugins/local-tool');
-      expect(noMarket, isNull);
+        final noMarket = AppState.githubPluginSourceForTest(
+          './plugins/local-tool',
+        );
+        expect(noMarket, isNull);
 
-      final standalone = AppState.githubPluginSourceForTest(
-        'external-org/standalone-repo',
-        marketplaceRepo: 'myorg/mymarket',
-      );
-      expect(standalone, 'external-org/standalone-repo');
-    });
+        final standalone = AppState.githubPluginSourceForTest(
+          'external-org/standalone-repo',
+          marketplaceRepo: 'myorg/mymarket',
+        );
+        expect(standalone, 'external-org/standalone-repo');
+      },
+    );
 
     test('_githubPluginSource rejects or resolves ../ traversal', () {
       // A raw ../ that escapes the marketplace repo root is rejected.
@@ -9718,55 +11128,65 @@ url = "https://api.example.com/mcp"
       );
     });
 
-    test('plugin_* tool returns honest no-op when no skill/command matches', () async {
-      final app = AppState.I;
-      final tempDir = Directory.systemTemp.createTempSync('ovid_plugin_noop_');
-      addTearDown(() => tempDir.deleteSync(recursive: true));
-      AppState.pluginCacheRootOverrideForTest = tempDir;
-      addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+    test(
+      'plugin_* tool returns honest no-op when no skill/command matches',
+      () async {
+        final app = AppState.I;
+        final tempDir = Directory.systemTemp.createTempSync(
+          'ovid_plugin_noop_',
+        );
+        addTearDown(() => tempDir.deleteSync(recursive: true));
+        AppState.pluginCacheRootOverrideForTest = tempDir;
+        addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
 
-      final plugin = PluginItem(
-        name: 'noop-plugin',
-        author: 'acme',
-        description: 'Noop plugin',
-        version: '1.0.0',
-        category: 'Tool',
-        installed: true,
-        enabled: true,
-        source: 'acme/noop-plugin',
-      );
-      app.plugins.add(plugin);
-      addTearDown(() => app.plugins.remove(plugin));
+        final plugin = PluginItem(
+          name: 'noop-plugin',
+          author: 'acme',
+          description: 'Noop plugin',
+          version: '1.0.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          source: 'acme/noop-plugin',
+        );
+        app.plugins.add(plugin);
+        addTearDown(() => app.plugins.remove(plugin));
 
-      final skillDir = Directory(
-        '${tempDir.path}/plugin-content/acme_noop-plugin/skills/real-skill',
-      );
-      skillDir.createSync(recursive: true);
-      File('${skillDir.path}/SKILL.md').writeAsStringSync(
-        '---\nname: real-skill\ndescription: Real\n---\nDo real work.',
-      );
-      await AgentService.I.refreshSkills();
+        final skillDir = Directory(
+          '${tempDir.path}/plugin-content/acme_noop-plugin/skills/real-skill',
+        );
+        skillDir.createSync(recursive: true);
+        File('${skillDir.path}/SKILL.md').writeAsStringSync(
+          '---\nname: real-skill\ndescription: Real\n---\nDo real work.',
+        );
+        await AgentService.I.refreshSkills();
 
-      // Empty action must not claim completion.
-      final emptyRes = await AgentService.I.dispatchForTest(
-        'plugin_noop_plugin',
-        {},
-      );
-      expect(emptyRes, contains('nothing'));
-      expect(emptyRes, isNot(contains('completed')));
+        // Empty action must not claim completion.
+        final emptyRes = await AgentService.I.dispatchForTest(
+          'plugin_noop_plugin',
+          {},
+        );
+        expect(emptyRes, contains('nothing'));
+        expect(emptyRes, isNot(contains('completed')));
 
-      // Non-matching action must not claim completion.
-      final missRes = await AgentService.I.dispatchForTest(
-        'plugin_noop_plugin',
-        {'action': 'does-not-exist'},
-      );
-      expect(missRes, contains('nothing'));
-      expect(missRes, isNot(contains('completed')));
-    });
+        // Non-matching action must not claim completion.
+        final missRes = await AgentService.I.dispatchForTest(
+          'plugin_noop_plugin',
+          {'action': 'does-not-exist'},
+        );
+        expect(missRes, contains('nothing'));
+        expect(missRes, isNot(contains('completed')));
+      },
+    );
 
     test('plugin_* tools are gated in Read-Only and plan mode', () async {
       final app = AppState.I;
-      final s = ChatSession(id: 'plug-gate', title: 'G', model: 'm', mode: 'safe');
+      final s = ChatSession(
+        id: 'plug-gate',
+        title: 'G',
+        model: 'm',
+        mode: 'safe',
+      );
       app.sessions.insert(0, s);
       app.activeSessionId = s.id;
       AgentService.setRunSessionForTest(s.id);
@@ -9776,10 +11196,9 @@ url = "https://api.example.com/mcp"
       });
 
       expect(
-        await AgentService.I.dispatchForTest(
-          'plugin_whatever',
-          {'action': 'x'},
-        ),
+        await AgentService.I.dispatchForTest('plugin_whatever', {
+          'action': 'x',
+        }),
         contains('READ-ONLY MODE'),
       );
 
@@ -9788,109 +11207,139 @@ url = "https://api.example.com/mcp"
       s.planMode = true;
       addTearDown(() => s.planMode = false);
       expect(
-        await AgentService.I.dispatchForTest(
-          'plugin_whatever',
-          {'action': 'x'},
-        ),
+        await AgentService.I.dispatchForTest('plugin_whatever', {
+          'action': 'x',
+        }),
         contains('PLAN MODE ACTIVE'),
       );
     });
 
-    test('fetchPluginContent downloads agents/*.md, hooks/hooks.json, .claude-plugin/plugin.json, and retains frontmatter', () async {
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      server.listen((request) async {
-        final path = request.uri.path;
-        if (path == '/tree/main') {
-          final body = utf8.encode(jsonEncode({
-            'tree': [
-              {'path': 'commands/run.md', 'type': 'blob'},
-              {'path': 'agents/reviewer.md', 'type': 'blob'},
-              {'path': 'hooks/hooks.json', 'type': 'blob'},
-              {'path': '.claude-plugin/plugin.json', 'type': 'blob'},
-              {'path': 'ignored/junk.txt', 'type': 'blob'},
-            ],
-          }));
-          request.response
-            ..statusCode = 200
-            ..contentLength = body.length
-            ..add(body);
+    test(
+      'fetchPluginContent downloads agents/*.md, hooks/hooks.json, .claude-plugin/plugin.json, and retains frontmatter',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((request) async {
+          final path = request.uri.path;
+          if (path == '/tree/main') {
+            final body = utf8.encode(
+              jsonEncode({
+                'tree': [
+                  {'path': 'commands/run.md', 'type': 'blob'},
+                  {'path': 'agents/reviewer.md', 'type': 'blob'},
+                  {'path': 'hooks/hooks.json', 'type': 'blob'},
+                  {'path': '.claude-plugin/plugin.json', 'type': 'blob'},
+                  {'path': 'ignored/junk.txt', 'type': 'blob'},
+                ],
+              }),
+            );
+            request.response
+              ..statusCode = 200
+              ..contentLength = body.length
+              ..add(body);
+            await request.response.close();
+            return;
+          }
+          if (path == '/raw/commands/run.md') {
+            final body = utf8.encode(
+              '---\nname: run\nallowed-tools: [run_shell, file_read]\nargument-hint: <cmd>\nmodel: sonnet\n---\nRun command.',
+            );
+            request.response
+              ..statusCode = 200
+              ..contentLength = body.length
+              ..add(body);
+            await request.response.close();
+            return;
+          }
+          if (path == '/raw/agents/reviewer.md') {
+            final body = utf8.encode(
+              '---\nname: reviewer\n---\nYou are a reviewer.',
+            );
+            request.response
+              ..statusCode = 200
+              ..contentLength = body.length
+              ..add(body);
+            await request.response.close();
+            return;
+          }
+          if (path == '/raw/hooks/hooks.json') {
+            final body = utf8.encode(
+              '{"hooks": {"on_turn_start": "echo start"}}',
+            );
+            request.response
+              ..statusCode = 200
+              ..contentLength = body.length
+              ..add(body);
+            await request.response.close();
+            return;
+          }
+          if (path == '/raw/.claude-plugin/plugin.json') {
+            final body = utf8.encode('{"name": "test-plugin"}');
+            request.response
+              ..statusCode = 200
+              ..contentLength = body.length
+              ..add(body);
+            await request.response.close();
+            return;
+          }
+          request.response.statusCode = 404;
           await request.response.close();
-          return;
-        }
-        if (path == '/raw/commands/run.md') {
-          final body = utf8.encode('---\nname: run\nallowed-tools: [run_shell, file_read]\nargument-hint: <cmd>\nmodel: sonnet\n---\nRun command.');
-          request.response
-            ..statusCode = 200
-            ..contentLength = body.length
-            ..add(body);
-          await request.response.close();
-          return;
-        }
-        if (path == '/raw/agents/reviewer.md') {
-          final body = utf8.encode('---\nname: reviewer\n---\nYou are a reviewer.');
-          request.response
-            ..statusCode = 200
-            ..contentLength = body.length
-            ..add(body);
-          await request.response.close();
-          return;
-        }
-        if (path == '/raw/hooks/hooks.json') {
-          final body = utf8.encode('{"hooks": {"on_turn_start": "echo start"}}');
-          request.response
-            ..statusCode = 200
-            ..contentLength = body.length
-            ..add(body);
-          await request.response.close();
-          return;
-        }
-        if (path == '/raw/.claude-plugin/plugin.json') {
-          final body = utf8.encode('{"name": "test-plugin"}');
-          request.response
-            ..statusCode = 200
-            ..contentLength = body.length
-            ..add(body);
-          await request.response.close();
-          return;
-        }
-        request.response.statusCode = 404;
-        await request.response.close();
-      });
-      addTearDown(() => server.close(force: true));
+        });
+        addTearDown(() => server.close(force: true));
 
-      AppState.pluginContentBaseOverrideForTest = 'http://${server.address.host}:${server.port}';
-      addTearDown(() => AppState.pluginContentBaseOverrideForTest = null);
+        AppState.pluginContentBaseOverrideForTest =
+            'http://${server.address.host}:${server.port}';
+        addTearDown(() => AppState.pluginContentBaseOverrideForTest = null);
 
-      final tempDir = Directory.systemTemp.createTempSync('ovid_fetch_test_');
-      addTearDown(() => tempDir.deleteSync(recursive: true));
-      AppState.pluginCacheRootOverrideForTest = tempDir;
-      addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+        final tempDir = Directory.systemTemp.createTempSync('ovid_fetch_test_');
+        addTearDown(() => tempDir.deleteSync(recursive: true));
+        AppState.pluginCacheRootOverrideForTest = tempDir;
+        addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
 
-      final count = await AppState.I.fetchPluginContent('testowner/testrepo');
-      expect(count, 4, reason: 'commands/run.md, agents/reviewer.md, hooks/hooks.json, .claude-plugin/plugin.json');
+        final count = await AppState.I.fetchPluginContent('testowner/testrepo');
+        expect(
+          count,
+          4,
+          reason:
+              'commands/run.md, agents/reviewer.md, hooks/hooks.json, .claude-plugin/plugin.json',
+        );
 
-      final cacheDir = await AppState.I.pluginCacheDirFor('testowner/testrepo');
-      expect(File('${cacheDir.path}/commands/run.md').existsSync(), isTrue);
-      expect(File('${cacheDir.path}/agents/reviewer.md').existsSync(), isTrue);
-      expect(File('${cacheDir.path}/hooks/hooks.json').existsSync(), isTrue);
-      expect(File('${cacheDir.path}/.claude-plugin/plugin.json').existsSync(), isTrue);
-      expect(File('${cacheDir.path}/ignored/junk.txt').existsSync(), isFalse);
+        final cacheDir = await AppState.I.pluginCacheDirFor(
+          'testowner/testrepo',
+        );
+        expect(File('${cacheDir.path}/commands/run.md').existsSync(), isTrue);
+        expect(
+          File('${cacheDir.path}/agents/reviewer.md').existsSync(),
+          isTrue,
+        );
+        expect(File('${cacheDir.path}/hooks/hooks.json').existsSync(), isTrue);
+        expect(
+          File('${cacheDir.path}/.claude-plugin/plugin.json').existsSync(),
+          isTrue,
+        );
+        expect(File('${cacheDir.path}/ignored/junk.txt').existsSync(), isFalse);
 
-      final runContent = File('${cacheDir.path}/commands/run.md').readAsStringSync();
-      expect(runContent, contains('allowed-tools: [run_shell, file_read]'));
-      expect(runContent, contains('argument-hint: <cmd>'));
-      expect(runContent, contains('model: sonnet'));
-    });
+        final runContent = File(
+          '${cacheDir.path}/commands/run.md',
+        ).readAsStringSync();
+        expect(runContent, contains('allowed-tools: [run_shell, file_read]'));
+        expect(runContent, contains('argument-hint: <cmd>'));
+        expect(runContent, contains('model: sonnet'));
+      },
+    );
 
-    test('skills.dart discovers agents/ personas and parses custom frontmatter', () async {
-      final tempDir = Directory.systemTemp.createTempSync('ovid_agents_discovery_test_');
-      addTearDown(() => tempDir.deleteSync(recursive: true));
+    test(
+      'skills.dart discovers agents/ personas and parses custom frontmatter',
+      () async {
+        final tempDir = Directory.systemTemp.createTempSync(
+          'ovid_agents_discovery_test_',
+        );
+        addTearDown(() => tempDir.deleteSync(recursive: true));
 
-      final agentsDir = Directory('${tempDir.path}/agents');
-      agentsDir.createSync(recursive: true);
+        final agentsDir = Directory('${tempDir.path}/agents');
+        agentsDir.createSync(recursive: true);
 
-      final agentFile = File('${agentsDir.path}/security-auditor.md');
-      agentFile.writeAsStringSync('''---
+        final agentFile = File('${agentsDir.path}/security-auditor.md');
+        agentFile.writeAsStringSync('''---
 name: security-auditor
 description: Audits code for vulnerabilities
 allowed-tools: [file_read, run_shell]
@@ -9901,60 +11350,71 @@ custom-policy: strict
 You are an expert security auditor reviewing code for vulnerabilities.
 ''');
 
-      final service = SkillService.forTest();
-      service.addRoot(tempDir.path);
-      await service.reload();
+        final service = SkillService.forTest();
+        service.addRoot(tempDir.path);
+        await service.reload();
 
-      final agent = service.find('security-auditor');
-      expect(agent, isNotNull);
-      expect(agent!.name, 'security-auditor');
-      expect(agent.description, 'Audits code for vulnerabilities');
-      expect(agent.isAgent, isTrue);
-      expect(agent.allowedTools, containsAll(['file_read', 'run_shell']));
-      expect(agent.argumentHint, '<target-dir>');
-      expect(agent.model, 'claude-3-opus');
-      expect(agent.frontmatter['custom-policy'], 'strict');
-      expect(agent.content.trim(), 'You are an expert security auditor reviewing code for vulnerabilities.');
-    });
+        final agent = service.find('security-auditor');
+        expect(agent, isNotNull);
+        expect(agent!.name, 'security-auditor');
+        expect(agent.description, 'Audits code for vulnerabilities');
+        expect(agent.isAgent, isTrue);
+        expect(agent.allowedTools, containsAll(['file_read', 'run_shell']));
+        expect(agent.argumentHint, '<target-dir>');
+        expect(agent.model, 'claude-3-opus');
+        expect(agent.frontmatter['custom-policy'], 'strict');
+        expect(
+          agent.content.trim(),
+          'You are an expert security auditor reviewing code for vulnerabilities.',
+        );
+      },
+    );
 
-    test('mountPluginMcpServers preserves transport, url, headers, and securely stores env', () async {
-      final app = AppState.I;
-      final tempDir = Directory.systemTemp.createTempSync('ovid_mcp_mount_test_');
-      addTearDown(() => tempDir.deleteSync(recursive: true));
-      AppState.pluginCacheRootOverrideForTest = tempDir;
-      addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+    test(
+      'mountPluginMcpServers preserves transport, url, headers, and securely stores env',
+      () async {
+        final app = AppState.I;
+        final tempDir = Directory.systemTemp.createTempSync(
+          'ovid_mcp_mount_test_',
+        );
+        addTearDown(() => tempDir.deleteSync(recursive: true));
+        AppState.pluginCacheRootOverrideForTest = tempDir;
+        addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
 
-      final cacheDir = Directory('${tempDir.path}/plugin-content/acme_remote-mcp');
-      cacheDir.createSync(recursive: true);
+        final cacheDir = Directory(
+          '${tempDir.path}/plugin-content/acme_remote-mcp',
+        );
+        cacheDir.createSync(recursive: true);
 
-      File('${cacheDir.path}/.mcp.json').writeAsStringSync(jsonEncode({
-        'mcpServers': {
-          'remote-server': {
-            'transport': 'http',
-            'url': 'https://api.example.com/mcp',
-            'headers': {
-              'Authorization': 'Bearer test_token',
+        File('${cacheDir.path}/.mcp.json').writeAsStringSync(
+          jsonEncode({
+            'mcpServers': {
+              'remote-server': {
+                'transport': 'http',
+                'url': 'https://api.example.com/mcp',
+                'headers': {'Authorization': 'Bearer test_token'},
+                'env': {'SECRET_KEY': 'very_secret_value'},
+              },
             },
-            'env': {
-              'SECRET_KEY': 'very_secret_value',
-            },
-          },
-        },
-      }));
+          }),
+        );
 
-      final mounted = await app.mountPluginMcpServers('acme/remote-mcp');
-      expect(mounted, 1);
+        final mounted = await app.mountPluginMcpServers('acme/remote-mcp');
+        expect(mounted, 1);
 
-      final server = app.mcpServers.firstWhere((s) => s.name == 'remote-server');
-      addTearDown(() => app.mcpServers.remove(server));
+        final server = app.mcpServers.firstWhere(
+          (s) => s.name == 'remote-server',
+        );
+        addTearDown(() => app.mcpServers.remove(server));
 
-      expect(server.transport, 'http');
-      expect(server.url, 'https://api.example.com/mcp');
-      expect(server.headers['Authorization'], 'Bearer test_token');
+        expect(server.transport, 'http');
+        expect(server.url, 'https://api.example.com/mcp');
+        expect(server.headers['Authorization'], 'Bearer test_token');
 
-      final env = await app.getMcpEnv('remote-server');
-      expect(env['SECRET_KEY'], 'very_secret_value');
-    });
+        final env = await app.getMcpEnv('remote-server');
+        expect(env['SECRET_KEY'], 'very_secret_value');
+      },
+    );
   });
 
   group('Task 4: MCP import + runtime reliability', () {
@@ -10005,14 +11465,12 @@ You are an expert security auditor reviewing code for vulnerabilities.
     });
 
     test('shell-split args preserve quotes', () {
-      expect(
-        shellSplitArgsForTest('a "b c" d'),
-        ['a', 'b c', 'd'],
-      );
-      expect(
-        shellSplitArgsForTest("x 'y z' --flag='v w'"),
-        ['x', 'y z', '--flag=v w'],
-      );
+      expect(shellSplitArgsForTest('a "b c" d'), ['a', 'b c', 'd']);
+      expect(shellSplitArgsForTest("x 'y z' --flag='v w'"), [
+        'x',
+        'y z',
+        '--flag=v w',
+      ]);
     });
 
     test('McpServer model has cwd/type/startupTimeoutS', () {
@@ -10031,7 +11489,11 @@ You are an expert security auditor reviewing code for vulnerabilities.
     });
 
     test('updateCustomMcpServer round-trips url/transport/headers/cwd', () {
-      app.addCustomMcpServer(name: 'roundtrip', command: 'npx', args: ['-y', 'a']);
+      app.addCustomMcpServer(
+        name: 'roundtrip',
+        command: 'npx',
+        args: ['-y', 'a'],
+      );
       final s = app.mcpServers.firstWhere((e) => e.name == 'roundtrip');
       app.updateCustomMcpServer(
         s,
@@ -10051,29 +11513,32 @@ You are an expert security auditor reviewing code for vulnerabilities.
       app.removeMcpServer(s);
     });
 
-    test('removeMcpServer disconnects + prunes intent + secure deletes env', () async {
-      app.addCustomMcpServer(
-        name: 'remove-me',
-        command: 'npx',
-        args: ['-y', 'a'],
-        headers: {'X-Api-Key': 'sek'},
-      );
-      final s = app.mcpServers.firstWhere((e) => e.name == 'remove-me');
-      await app.setMcpEnv('remove-me', {'TOKEN': 'v'});
-      await app.setMcpHeaders('remove-me', {'X-Api-Key': 'sek'});
-      s.connected = true;
-      await app.persistMcpIntent();
+    test(
+      'removeMcpServer disconnects + prunes intent + secure deletes env',
+      () async {
+        app.addCustomMcpServer(
+          name: 'remove-me',
+          command: 'npx',
+          args: ['-y', 'a'],
+          headers: {'X-Api-Key': 'sek'},
+        );
+        final s = app.mcpServers.firstWhere((e) => e.name == 'remove-me');
+        await app.setMcpEnv('remove-me', {'TOKEN': 'v'});
+        await app.setMcpHeaders('remove-me', {'X-Api-Key': 'sek'});
+        s.connected = true;
+        await app.persistMcpIntent();
 
-      await app.removeMcpServer(s);
+        await app.removeMcpServer(s);
 
-      expect(McpService.I.isConnected('remove-me'), isFalse);
-      expect((await app.getMcpEnv('remove-me')).isEmpty, isTrue);
-      expect((await app.getMcpHeaders('remove-me')).isEmpty, isTrue);
-      // intent pruned
-      final prefs = await SharedPreferences.getInstance();
-      final intent = prefs.getStringList('ovid_mcp_connected_v1') ?? [];
-      expect(intent.contains('remove-me'), isFalse);
-    });
+        expect(McpService.I.isConnected('remove-me'), isFalse);
+        expect((await app.getMcpEnv('remove-me')).isEmpty, isTrue);
+        expect((await app.getMcpHeaders('remove-me')).isEmpty, isTrue);
+        // intent pruned
+        final prefs = await SharedPreferences.getInstance();
+        final intent = prefs.getStringList('ovid_mcp_connected_v1') ?? [];
+        expect(intent.contains('remove-me'), isFalse);
+      },
+    );
 
     test('reconnect lookup by name not identity', () {
       app.addCustomMcpServer(name: 'byname', command: 'npx');
@@ -10096,25 +11561,28 @@ You are an expert security auditor reviewing code for vulnerabilities.
       app.removeMcpServer(replaced);
     });
 
-    test('http 401 returns an auth re-prompt error, not a retry loop', () async {
-      McpService.I.httpClientForTest = MockClient((request) async {
-        return http.Response('unauthorized', 401);
-      });
-      final server = McpServer(
-        name: 'auth-401',
-        author: 't',
-        description: '',
-        category: 'Custom',
-        command: '',
-        transport: 'http',
-        url: 'https://auth.example.com/mcp',
-      );
-      final status = await McpService.I.connect(server);
-      expect(status, contains('authentication'));
-      expect(McpService.I.isConnected(server.name), isFalse);
-      expect(McpService.I.hasPendingReconnectForTest(server.name), isFalse);
-      McpService.I.httpClientForTest = null;
-    });
+    test(
+      'http 401 returns an auth re-prompt error, not a retry loop',
+      () async {
+        McpService.I.httpClientForTest = MockClient((request) async {
+          return http.Response('unauthorized', 401);
+        });
+        final server = McpServer(
+          name: 'auth-401',
+          author: 't',
+          description: '',
+          category: 'Custom',
+          command: '',
+          transport: 'http',
+          url: 'https://auth.example.com/mcp',
+        );
+        final status = await McpService.I.connect(server);
+        expect(status, contains('authentication'));
+        expect(McpService.I.isConnected(server.name), isFalse);
+        expect(McpService.I.hasPendingReconnectForTest(server.name), isFalse);
+        McpService.I.httpClientForTest = null;
+      },
+    );
 
     test('sse transport rejected with clear Streamable HTTP error', () async {
       final server = McpServer(
@@ -10127,10 +11595,7 @@ You are an expert security auditor reviewing code for vulnerabilities.
         url: 'https://sse.example.com/mcp',
       );
       final status = await McpService.I.connect(server);
-      expect(
-        status.toLowerCase(),
-        contains('sse transport not supported'),
-      );
+      expect(status.toLowerCase(), contains('sse transport not supported'));
     });
 
     test('stdio tolerates string ids in responses', () async {
@@ -10142,75 +11607,80 @@ You are an expert security auditor reviewing code for vulnerabilities.
       expect(res, contains('ok-string-id'));
     });
 
-    test('stdio rejects pretty-printed multi-line JSON with a clear error',
-        () async {
-      final res = await McpService.callToolForTest(
-        replies: [
-          '{',
-          '"jsonrpc": "2.0",',
-          '"id": 1',
-          '}',
-        ],
-      );
-      expect(res, contains('pretty-printed'));
-    });
+    test(
+      'stdio rejects pretty-printed multi-line JSON with a clear error',
+      () async {
+        final res = await McpService.callToolForTest(
+          replies: ['{', '"jsonrpc": "2.0",', '"id": 1', '}'],
+        );
+        expect(res, contains('pretty-printed'));
+      },
+    );
 
-    test('http parses event: + multi-line data and remembers Mcp-Session-Id',
-        () async {
-      final seenSessionHeaders = <String>[];
-      McpService.I.httpClientForTest = MockClient((request) async {
-        final header = request.headers['Mcp-Session-Id'] ??
-            request.headers['mcp-session-id'];
-        if (header != null) seenSessionHeaders.add(header);
-        final body = jsonDecode(request.body) as Map<String, dynamic>;
-        final method = body['method'] as String;
-        if (method == 'initialize') {
+    test(
+      'http parses event: + multi-line data and remembers Mcp-Session-Id',
+      () async {
+        final seenSessionHeaders = <String>[];
+        McpService.I.httpClientForTest = MockClient((request) async {
+          final header =
+              request.headers['Mcp-Session-Id'] ??
+              request.headers['mcp-session-id'];
+          if (header != null) seenSessionHeaders.add(header);
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          final method = body['method'] as String;
+          if (method == 'initialize') {
+            return http.Response(
+              'event: message\n'
+              'data: {"jsonrpc":"2.0","id":${body['id']},'
+              '"result":{"protocolVersion":"2024-11-05"}}\n'
+              '\n',
+              200,
+              headers: {
+                'content-type': 'text/event-stream',
+                'Mcp-Session-Id': 'sess-123',
+              },
+            );
+          }
           return http.Response(
             'event: message\n'
-            'data: {"jsonrpc":"2.0","id":${body['id']},'
-            '"result":{"protocolVersion":"2024-11-05"}}\n'
+            'data: {"jsonrpc":"2.0","id":${body['id']},"result":{"tools":[]}}\n'
             '\n',
             200,
-            headers: {
-              'content-type': 'text/event-stream',
-              'Mcp-Session-Id': 'sess-123',
-            },
+            headers: {'content-type': 'text/event-stream'},
           );
-        }
-        return http.Response(
-          'event: message\n'
-          'data: {"jsonrpc":"2.0","id":${body['id']},"result":{"tools":[]}}\n'
-          '\n',
-          200,
-          headers: {'content-type': 'text/event-stream'},
+        });
+        final server = McpServer(
+          name: 'sse-session',
+          author: 't',
+          description: '',
+          category: 'Custom',
+          command: '',
+          transport: 'http',
+          url: 'https://sse.example.com/mcp',
         );
-      });
-      final server = McpServer(
-        name: 'sse-session',
-        author: 't',
-        description: '',
-        category: 'Custom',
-        command: '',
-        transport: 'http',
-        url: 'https://sse.example.com/mcp',
-      );
-      addTearDown(() {
-        McpService.I.disconnect(server.name);
+        addTearDown(() {
+          McpService.I.disconnect(server.name);
+          McpService.I.httpClientForTest = null;
+        });
+        final status = await McpService.I.connect(server);
+        expect(status, contains('connected'));
+        expect(seenSessionHeaders, contains('sess-123'));
         McpService.I.httpClientForTest = null;
-      });
-      final status = await McpService.I.connect(server);
-      expect(status, contains('connected'));
-      expect(seenSessionHeaders, contains('sess-123'));
-      McpService.I.httpClientForTest = null;
-    });
+      },
+    );
 
-    test('mcp__ proxy and mcp_ proxy resolve the matched server name', () async {
-      app.addCustomMcpServer(name: 'gh', command: 'npx', args: ['-y', 'x']);
-      final resolved = await AgentService.I.legacyMcpProxyForTest('mcp_gh_list');
-      expect(resolved, contains('gh'));
-      final clean = app.mcpServers.firstWhere((s) => s.name == 'gh');
-      app.removeMcpServer(clean);
-    });
+    test(
+      'mcp__ proxy and mcp_ proxy resolve the matched server name',
+      () async {
+        app.addCustomMcpServer(name: 'gh', command: 'npx', args: ['-y', 'x']);
+        final resolved = await AgentService.I.legacyMcpProxyForTest(
+          'mcp_gh_list',
+        );
+        expect(resolved, contains('gh'));
+        final clean = app.mcpServers.firstWhere((s) => s.name == 'gh');
+        app.removeMcpServer(clean);
+      },
+    );
 
     test('catalog_list_mcp shows transport/url', () async {
       app.addCustomMcpServer(
@@ -10242,30 +11712,37 @@ You are an expert security auditor reviewing code for vulnerabilities.
       app.removeMcpServer(s);
     });
 
-    test('http auth headers stored in secure storage, not plaintext prefs', () async {
-      app.addCustomMcpServer(
-        name: 'secure-headers',
-        command: '',
-        url: 'https://sh.example.com/mcp',
-        headers: {'Authorization': 'Bearer super-secret-token'},
-      );
-      await SharedPreferences.getInstance();
-      final prefs = await SharedPreferences.getInstance();
-      final saved = prefs.getStringList('ovid_custom_mcp_servers_v1') ?? [];
-      final entry = saved
-          .map((j) => jsonDecode(j) as Map<String, dynamic>)
-          .firstWhere((m) => m['name'] == 'secure-headers');
-      expect(jsonEncode(entry), isNot(contains('super-secret-token')));
-      expect(
-        (await app.getMcpHeaders('secure-headers'))['Authorization'],
-        'Bearer super-secret-token',
-      );
-      final s = app.mcpServers.firstWhere((e) => e.name == 'secure-headers');
-      app.removeMcpServer(s);
-    });
+    test(
+      'http auth headers stored in secure storage, not plaintext prefs',
+      () async {
+        app.addCustomMcpServer(
+          name: 'secure-headers',
+          command: '',
+          url: 'https://sh.example.com/mcp',
+          headers: {'Authorization': 'Bearer super-secret-token'},
+        );
+        await SharedPreferences.getInstance();
+        final prefs = await SharedPreferences.getInstance();
+        final saved = prefs.getStringList('ovid_custom_mcp_servers_v1') ?? [];
+        final entry = saved
+            .map((j) => jsonDecode(j) as Map<String, dynamic>)
+            .firstWhere((m) => m['name'] == 'secure-headers');
+        expect(jsonEncode(entry), isNot(contains('super-secret-token')));
+        expect(
+          (await app.getMcpHeaders('secure-headers'))['Authorization'],
+          'Bearer super-secret-token',
+        );
+        final s = app.mcpServers.firstWhere((e) => e.name == 'secure-headers');
+        app.removeMcpServer(s);
+      },
+    );
 
     test('disconnected configured servers get a connect stub tool', () {
-      app.addCustomMcpServer(name: 'stub-server', command: 'npx', args: ['-y', 'x']);
+      app.addCustomMcpServer(
+        name: 'stub-server',
+        command: 'npx',
+        args: ['-y', 'x'],
+      );
       try {
         final tools = AgentService.I.toolsForTest();
         final names = tools
@@ -10330,206 +11807,329 @@ You are an expert security auditor reviewing code for vulnerabilities.
 
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
             .handlePlatformMessage(
-          'ovid/native',
-          const StandardMethodCodec().encodeMethodCall(
-            const MethodCall('onAgentExit'),
-          ),
-          (ByteData? data) {},
-        );
+              'ovid/native',
+              const StandardMethodCodec().encodeMethodCall(
+                const MethodCall('onAgentExit'),
+              ),
+              (ByteData? data) {},
+            );
         expect(exitCalled, isTrue);
       });
 
-      test('background FGS start failure does not permanently disable notifications', () async {
-        AgentNotificationService.I.supportedForTest = true;
-        final initialFailCount = AgentNotificationService.I.failCountForTest;
+      test(
+        'background FGS start failure does not permanently disable notifications',
+        () async {
+          AgentNotificationService.I.supportedForTest = true;
+          final initialFailCount = AgentNotificationService.I.failCountForTest;
 
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(const MethodChannel('ovid/native'), (call) async {
-          if (call.method == 'agentServiceStart') {
-            throw PlatformException(
-              code: 'FGS_BACKGROUND_DENIED',
-              message: 'android.app.ForegroundServiceStartNotAllowedException: startForegroundService denied from background',
-            );
-          }
-          return null;
-        });
-        addTearDown(() {
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-              .setMockMethodCallHandler(const MethodChannel('ovid/native'), null);
-        });
+              .setMockMethodCallHandler(const MethodChannel('ovid/native'), (
+                call,
+              ) async {
+                if (call.method == 'agentServiceStart') {
+                  throw PlatformException(
+                    code: 'FGS_BACKGROUND_DENIED',
+                    message:
+                        'android.app.ForegroundServiceStartNotAllowedException: startForegroundService denied from background',
+                  );
+                }
+                return null;
+              });
+          addTearDown(() {
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+                .setMockMethodCallHandler(
+                  const MethodChannel('ovid/native'),
+                  null,
+                );
+          });
 
-        await AgentNotificationService.I.invokeForTest('agentServiceStart', {'title': 'T', 'text': 'M'});
-        expect(AgentNotificationService.I.supportedForTest, isTrue);
-        expect(AgentNotificationService.I.failCountForTest, equals(initialFailCount));
-      });
+          await AgentNotificationService.I.invokeForTest('agentServiceStart', {
+            'title': 'T',
+            'text': 'M',
+          });
+          expect(AgentNotificationService.I.supportedForTest, isTrue);
+          expect(
+            AgentNotificationService.I.failCountForTest,
+            equals(initialFailCount),
+          );
+        },
+      );
 
-      test('active runs are checkpointed to preferences and cleaned up', () async {
-        final sessionId = 'test_session_1';
-        await AgentService.I.checkpointRunStartForTest(sessionId, 'run_test_123');
-        expect(AgentService.I.activeRunCheckpointForTest(), containsPair(sessionId, 'run_test_123'));
+      test(
+        'active runs are checkpointed to preferences and cleaned up',
+        () async {
+          final sessionId = 'test_session_1';
+          await AgentService.I.checkpointRunStartForTest(
+            sessionId,
+            'run_test_123',
+          );
+          expect(
+            AgentService.I.activeRunCheckpointForTest(),
+            containsPair(sessionId, 'run_test_123'),
+          );
 
-        await AgentService.I.checkpointRunEndForTest(sessionId);
-        expect(AgentService.I.activeRunCheckpointForTest(), isNot(containsPair(sessionId, 'run_test_123')));
-      });
+          await AgentService.I.checkpointRunEndForTest(sessionId);
+          expect(
+            AgentService.I.activeRunCheckpointForTest(),
+            isNot(containsPair(sessionId, 'run_test_123')),
+          );
+        },
+      );
 
-      test('KEEPALIVE1: idle updates to Ready & Listening when keep-alive enabled, stops when disabled', () async {
-        final notif = AgentNotificationService.I;
-        notif.supportedForTest = true;
-        notif.activeForTest = true;
-        AgentNotificationService.serviceStopRequestedForTestFlag = false;
-        setAnyRunActiveForTest(false);
-        addTearDown(() {
+      test(
+        'KEEPALIVE1: idle updates to Ready & Listening when keep-alive enabled, stops when disabled',
+        () async {
+          final notif = AgentNotificationService.I;
+          notif.supportedForTest = true;
+          notif.activeForTest = true;
           AgentNotificationService.serviceStopRequestedForTestFlag = false;
-          AgentNotificationService.keepAliveOverrideForTest = null;
+          setAnyRunActiveForTest(false);
+          addTearDown(() {
+            AgentNotificationService.serviceStopRequestedForTestFlag = false;
+            AgentNotificationService.keepAliveOverrideForTest = null;
+          });
+
+          // When keep-alive is true, agentIdle does not stop the service
+          AgentNotificationService.keepAliveOverrideForTest = true;
+          await agentIdleForTest();
+          expect(
+            AgentNotificationService.serviceStopRequestedForTestFlag,
+            isFalse,
+          );
+          expect(notif.activeForTest, isTrue);
+
+          // When keep-alive is false, agentIdle stops the service
+          AgentNotificationService.keepAliveOverrideForTest = false;
+          await agentIdleForTest();
+          expect(
+            AgentNotificationService.serviceStopRequestedForTestFlag,
+            isTrue,
+          );
+          expect(notif.activeForTest, isFalse);
+        },
+      );
+
+      test(
+        'STOP2: stopRequested aborts turn only when queue is non-empty, panic stops when empty',
+        () async {
+          final agent = AgentService.I;
+          final app = AppState.I;
+          final s = ChatSession(
+            id: 'stop2_sess',
+            title: 'S',
+            model: 'm',
+            mode: 'auto',
+          );
+          app.sessions.insert(0, s);
+          app.activeSessionId = s.id;
+          addTearDown(() {
+            agent.clearQueueForTest();
+            app.sessions.removeWhere((x) => x.id == 'stop2_sess');
+          });
+
+          // Empty queue -> panic stop across all runs
+          final didQueueResume = agent.stopRequested(sessionId: s.id);
+          expect(didQueueResume, isFalse);
+
+          // Non-empty queue -> aborts current bucket only, preserves queued item
+          agent.queueMessageForTest('follow up prompt');
+          final didQueueResume2 = agent.stopRequested(sessionId: s.id);
+          expect(didQueueResume2, isTrue);
+          expect(agent.queuedMessages, contains('follow up prompt'));
+        },
+      );
+
+      group('ServiceHealth & reconnectServices', () {
+        setUp(() {
+          AppState.I.serviceStatus.clear();
+        });
+        tearDown(() {
+          AppState.I.serviceStatus.clear();
         });
 
-        // When keep-alive is true, agentIdle does not stop the service
-        AgentNotificationService.keepAliveOverrideForTest = true;
-        await agentIdleForTest();
-        expect(AgentNotificationService.serviceStopRequestedForTestFlag, isFalse);
-        expect(notif.activeForTest, isTrue);
+        test(
+          'HEALTH1: tri-state ServiceHealth model transitions connecting -> working -> failed',
+          () {
+            final app = AppState.I;
+            app.updateServiceStatus(
+              'mcp:test_srv',
+              ServiceHealth.connecting,
+              detail: 'spawning',
+            );
+            addTearDown(() => app.serviceStatus.remove('mcp:test_srv'));
+            expect(
+              app.serviceStatusForTest('mcp:test_srv')?.health,
+              ServiceHealth.connecting,
+            );
+            expect(
+              app.serviceStatusForTest('mcp:test_srv')?.detail,
+              'spawning',
+            );
 
-        // When keep-alive is false, agentIdle stops the service
-        AgentNotificationService.keepAliveOverrideForTest = false;
-        await agentIdleForTest();
-        expect(AgentNotificationService.serviceStopRequestedForTestFlag, isTrue);
-        expect(notif.activeForTest, isFalse);
-      });
+            app.updateServiceStatus(
+              'mcp:test_srv',
+              ServiceHealth.working,
+              detail: '4 tools ready',
+            );
+            expect(
+              app.serviceStatusForTest('mcp:test_srv')?.health,
+              ServiceHealth.working,
+            );
 
-      test('STOP2: stopRequested aborts turn only when queue is non-empty, panic stops when empty', () async {
-        final agent = AgentService.I;
-        final app = AppState.I;
-        final s = ChatSession(id: 'stop2_sess', title: 'S', model: 'm', mode: 'auto');
-        app.sessions.insert(0, s);
-        app.activeSessionId = s.id;
-        addTearDown(() {
-          agent.clearQueueForTest();
-          app.sessions.removeWhere((x) => x.id == 'stop2_sess');
+            app.updateServiceStatus(
+              'mcp:test_srv',
+              ServiceHealth.failed,
+              detail: 'process exited 1',
+            );
+            expect(
+              app.serviceStatusForTest('mcp:test_srv')?.health,
+              ServiceHealth.failed,
+            );
+            expect(
+              app.serviceStatusForTest('mcp:test_srv')?.detail,
+              'process exited 1',
+            );
+          },
+        );
+
+        test(
+          'HEALTH2: reconnectServices updates health to connecting and then working or failed',
+          () async {
+            final app = AppState.I;
+            final server = McpServer(
+              name: 'health2_srv',
+              author: 'test',
+              description: 'desc',
+              category: 'custom',
+              command: 'echo',
+              custom: true,
+            );
+            app.mcpServers.add(server);
+            addTearDown(() {
+              app.mcpServers.removeWhere((s) => s.name == 'health2_srv');
+              app.serviceStatus.remove('mcp:health2_srv');
+            });
+
+            await app.reconnectServices(targetServers: ['health2_srv']);
+            final st = app.serviceStatusForTest('mcp:health2_srv');
+            expect(st, isNotNull);
+            expect(
+              st!.health,
+              isIn([ServiceHealth.working, ServiceHealth.failed]),
+            );
+          },
+        );
+
+        testWidgets(
+          'HEALTH3: McpCard renders tri-state indicators for connecting, working, failed',
+          (tester) async {
+            final server = McpServer(
+              name: 'health3_srv',
+              author: 'test',
+              description: 'desc',
+              category: 'custom',
+              command: 'echo',
+              custom: true,
+            );
+            addTearDown(
+              () => AppState.I.serviceStatus.remove('mcp:health3_srv'),
+            );
+
+            AppState.I.updateServiceStatus(
+              'mcp:health3_srv',
+              ServiceHealth.connecting,
+            );
+            await tester.pumpWidget(
+              MaterialApp(
+                theme: Aether.theme(),
+                home: Scaffold(body: McpCard(server: server)),
+              ),
+            );
+            await tester.pump();
+            expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+            AppState.I.updateServiceStatus(
+              'mcp:health3_srv',
+              ServiceHealth.working,
+            );
+            await tester.pumpWidget(
+              MaterialApp(
+                theme: Aether.theme(),
+                home: Scaffold(body: McpCard(server: server)),
+              ),
+            );
+            await tester.pump();
+            expect(find.byIcon(Icons.check_circle_outline), findsOneWidget);
+
+            AppState.I.updateServiceStatus(
+              'mcp:health3_srv',
+              ServiceHealth.failed,
+              detail: 'crashed',
+            );
+            await tester.pumpWidget(
+              MaterialApp(
+                theme: Aether.theme(),
+                home: Scaffold(body: McpCard(server: server)),
+              ),
+            );
+            await tester.pump();
+            expect(find.byIcon(Icons.error_outline), findsOneWidget);
+          },
+        );
+
+        testWidgets('HEALTH4: HealthScreen surfaces services health section', (
+          tester,
+        ) async {
+          AppState.I.updateServiceStatus(
+            'mcp:test_health',
+            ServiceHealth.working,
+            detail: 'connected',
+          );
+          final prevReport = HealthService.I.lastReport;
+          final prevChecking = HealthService.I.checking;
+          addTearDown(() {
+            AppState.I.serviceStatus.remove('mcp:test_health');
+            HealthService.I.lastReport = prevReport;
+            HealthService.I.checking = prevChecking;
+          });
+
+          HealthService.I.lastReport = const HealthReport([
+            HealthCheck(
+              name: 'Fake check',
+              points: 100,
+              ok: true,
+              detail: 'all good',
+            ),
+          ]);
+          HealthService.I.checking = false;
+
+          await tester.pumpWidget(
+            MaterialApp(theme: Aether.theme(), home: const HealthScreen()),
+          );
+          await tester.pump();
+
+          expect(find.text('SERVICES'), findsOneWidget);
+          expect(find.text('mcp:test_health'), findsOneWidget);
+          expect(find.text('WORKING'), findsOneWidget);
         });
-
-        // Empty queue -> panic stop across all runs
-        final didQueueResume = agent.stopRequested(sessionId: s.id);
-        expect(didQueueResume, isFalse);
-
-        // Non-empty queue -> aborts current bucket only, preserves queued item
-        agent.queueMessageForTest('follow up prompt');
-        final didQueueResume2 = agent.stopRequested(sessionId: s.id);
-        expect(didQueueResume2, isTrue);
-        expect(agent.queuedMessages, contains('follow up prompt'));
       });
-
-    group('ServiceHealth & reconnectServices', () {
-      setUp(() {
-        AppState.I.serviceStatus.clear();
-      });
-      tearDown(() {
-        AppState.I.serviceStatus.clear();
-      });
-
-      test('HEALTH1: tri-state ServiceHealth model transitions connecting -> working -> failed', () {
-        final app = AppState.I;
-        app.updateServiceStatus('mcp:test_srv', ServiceHealth.connecting, detail: 'spawning');
-        addTearDown(() => app.serviceStatus.remove('mcp:test_srv'));
-        expect(app.serviceStatusForTest('mcp:test_srv')?.health, ServiceHealth.connecting);
-        expect(app.serviceStatusForTest('mcp:test_srv')?.detail, 'spawning');
-
-        app.updateServiceStatus('mcp:test_srv', ServiceHealth.working, detail: '4 tools ready');
-        expect(app.serviceStatusForTest('mcp:test_srv')?.health, ServiceHealth.working);
-
-        app.updateServiceStatus('mcp:test_srv', ServiceHealth.failed, detail: 'process exited 1');
-        expect(app.serviceStatusForTest('mcp:test_srv')?.health, ServiceHealth.failed);
-        expect(app.serviceStatusForTest('mcp:test_srv')?.detail, 'process exited 1');
-      });
-
-      test('HEALTH2: reconnectServices updates health to connecting and then working or failed', () async {
-        final app = AppState.I;
-        final server = McpServer(
-          name: 'health2_srv',
-          author: 'test',
-          description: 'desc',
-          category: 'custom',
-          command: 'echo',
-          custom: true,
-        );
-        app.mcpServers.add(server);
-        addTearDown(() {
-          app.mcpServers.removeWhere((s) => s.name == 'health2_srv');
-          app.serviceStatus.remove('mcp:health2_srv');
-        });
-
-        await app.reconnectServices(targetServers: ['health2_srv']);
-        final st = app.serviceStatusForTest('mcp:health2_srv');
-        expect(st, isNotNull);
-        expect(st!.health, isIn([ServiceHealth.working, ServiceHealth.failed]));
-      });
-
-      testWidgets('HEALTH3: McpCard renders tri-state indicators for connecting, working, failed', (tester) async {
-        final server = McpServer(
-          name: 'health3_srv',
-          author: 'test',
-          description: 'desc',
-          category: 'custom',
-          command: 'echo',
-          custom: true,
-        );
-        addTearDown(() => AppState.I.serviceStatus.remove('mcp:health3_srv'));
-
-        AppState.I.updateServiceStatus('mcp:health3_srv', ServiceHealth.connecting);
-        await tester.pumpWidget(
-          MaterialApp(theme: Aether.theme(), home: Scaffold(body: McpCard(server: server))),
-        );
-        await tester.pump();
-        expect(find.byType(CircularProgressIndicator), findsOneWidget);
-
-        AppState.I.updateServiceStatus('mcp:health3_srv', ServiceHealth.working);
-        await tester.pumpWidget(
-          MaterialApp(theme: Aether.theme(), home: Scaffold(body: McpCard(server: server))),
-        );
-        await tester.pump();
-        expect(find.byIcon(Icons.check_circle_outline), findsOneWidget);
-
-        AppState.I.updateServiceStatus('mcp:health3_srv', ServiceHealth.failed, detail: 'crashed');
-        await tester.pumpWidget(
-          MaterialApp(theme: Aether.theme(), home: Scaffold(body: McpCard(server: server))),
-        );
-        await tester.pump();
-        expect(find.byIcon(Icons.error_outline), findsOneWidget);
-      });
-
-      testWidgets('HEALTH4: HealthScreen surfaces services health section', (tester) async {
-        AppState.I.updateServiceStatus('mcp:test_health', ServiceHealth.working, detail: 'connected');
-        final prevReport = HealthService.I.lastReport;
-        final prevChecking = HealthService.I.checking;
-        addTearDown(() {
-          AppState.I.serviceStatus.remove('mcp:test_health');
-          HealthService.I.lastReport = prevReport;
-          HealthService.I.checking = prevChecking;
-        });
-
-        HealthService.I.lastReport = const HealthReport([
-          HealthCheck(name: 'Fake check', points: 100, ok: true, detail: 'all good'),
-        ]);
-        HealthService.I.checking = false;
-
-        await tester.pumpWidget(
-          MaterialApp(theme: Aether.theme(), home: const HealthScreen()),
-        );
-        await tester.pump();
-
-        expect(find.text('SERVICES'), findsOneWidget);
-        expect(find.text('mcp:test_health'), findsOneWidget);
-        expect(find.text('WORKING'), findsOneWidget);
-      });
-    });
     });
   });
 }
 
 String readForegroundServiceSourceForTest() {
-  final fs = File('android/app/src/main/kotlin/com/dhanuk/ovidai/AgentForegroundService.kt').readAsStringSync();
-  final ma = File('android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt').readAsStringSync();
-  final sr = File('android/app/src/main/kotlin/com/dhanuk/ovidai/AgentStopReceiver.kt').readAsStringSync();
-  final manifest = File('android/app/src/main/AndroidManifest.xml').readAsStringSync();
+  final fs = File(
+    'android/app/src/main/kotlin/com/dhanuk/ovidai/AgentForegroundService.kt',
+  ).readAsStringSync();
+  final ma = File(
+    'android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt',
+  ).readAsStringSync();
+  final sr = File(
+    'android/app/src/main/kotlin/com/dhanuk/ovidai/AgentStopReceiver.kt',
+  ).readAsStringSync();
+  final manifest = File(
+    'android/app/src/main/AndroidManifest.xml',
+  ).readAsStringSync();
   return '$fs\n$ma\n$sr\n$manifest';
 }
 
@@ -10539,6 +12139,7 @@ class _FakeHttpClient implements HttpClient {
   void close({bool force = false}) {
     closedWithForce = force;
   }
+
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
@@ -10634,6 +12235,6 @@ class _FakeDownloadHttpResponse extends Stream<List<int>>
 
 /// Build one DuckDuckGo-style result block (anchor + snippet pair).
 Iterable<String> _ddgResult(String title, String href, String snippet) => [
-      '<a class="result__a" href="$href">$title</a>',
-      '<a class="result__snippet" href="$href">${snippet}z</a>',
-    ];
+  '<a class="result__a" href="$href">$title</a>',
+  '<a class="result__snippet" href="$href">${snippet}z</a>',
+];

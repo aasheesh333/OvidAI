@@ -74,3 +74,23 @@ The Task 10 review identified inaccurate disclosure copy, metadata-only image ha
 - `git diff --check`: passed.
 - `reference-web` scan under `lib/` and `test/`: zero matches.
 - Aggregate `./gradlew testDebugUnitTest` still fails only in the third-party `flutter_plugin_android_lifecycle` Mockito test described above; the application JVM suite completes successfully.
+
+## Review Follow-Up Round 2
+
+The three round-2 findings are addressed:
+
+- Vision capability detection now strips the existing reasoning-effort suffix through `_baseModelOf`, normalizes aggregator model IDs, uses a strict known-capability allowlist, and defaults unknown or text-only models to no image attachment.
+- Android screenshot transfer now opens the source and destination with native descriptors, refuses symlinks, creates the destination atomically with `O_CREAT | O_EXCL`, writes through that same descriptor, fsyncs it, and removes only a destination that the native copy created but failed to finish.
+- Dart screenshot handling makes at most four attempts, retries only `DEST_EXISTS`, cleans only confirmed write partials, and does not unlink paths on collisions, source failures, or generic native failures. CTRL6d-i cover model classification, collision retry/exhaustion, write cleanup, and non-owned-file preservation.
+
+### Round 2 Verification
+
+- Dart formatter check: passed, 3 files checked with 0 changes on the final run.
+- The requested `--plain-name 'CTRL3|CTRL4|SAFE1|CTRL5|CTRL6|CTRL7'` invocation ran zero tests because this Flutter version treats `--plain-name` literally. The equivalent regex run with `--name` passed all 14 focused tests.
+- Full `flutter test`: 413 passed.
+- `flutter analyze`: no issues found.
+- `./gradlew :app:testDebugUnitTest`: BUILD SUCCESSFUL.
+- `flutter build apk --debug`: built `build/app/outputs/flutter-apk/app-debug.apk`.
+- `git diff --check`: passed.
+
+The Android validations still emit existing Kotlin/Gradle deprecation warnings, and Flutter warns that Android minSdk 23 support will be dropped in a future release; neither warning failed this build.

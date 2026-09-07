@@ -1,7 +1,35 @@
+import 'dart:io';
+import 'dart:math';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'state.dart';
+
+typedef ScreenshotCopy =
+    Future<String> Function(
+      String sourcePath,
+      String directoryPath,
+      String fileName,
+    );
+
+class ScreenshotCopyException implements Exception {
+  final String code;
+  final String message;
+
+  const ScreenshotCopyException._(this.code, this.message);
+  const ScreenshotCopyException.collision()
+    : this._('DEST_EXISTS', 'Screenshot destination already exists.');
+  const ScreenshotCopyException.write(String message)
+    : this._('WRITE_FAILED', message);
+  const ScreenshotCopyException.source(String message)
+    : this._('SOURCE_FAILED', message);
+
+  bool get isCollision => code == 'DEST_EXISTS';
+
+  @override
+  String toString() => message;
+}
 
 class DeviceControlService {
   DeviceControlService._();
@@ -9,12 +37,18 @@ class DeviceControlService {
   static final DeviceControlService I = DeviceControlService._();
   static const _nativeChannel = MethodChannel('ovid/native');
   static MethodChannel? _channelOverrideForTest;
+  static ScreenshotCopy? _screenshotCopyOverrideForTest;
 
   MethodChannel get _channel => _channelOverrideForTest ?? _nativeChannel;
 
   @visibleForTesting
   static void setMethodChannelForTest(MethodChannel? channel) {
     _channelOverrideForTest = channel;
+  }
+
+  @visibleForTesting
+  static void setScreenshotCopyForTest(ScreenshotCopy? copy) {
+    _screenshotCopyOverrideForTest = copy;
   }
 
   Future<bool> isEnabled() async {
@@ -38,12 +72,8 @@ class DeviceControlService {
     return formatReadResultForTest(await readRaw(full: full));
   }
 
-  Future<Object?> tap({int? node, num? x, num? y}) =>
-      _channel.invokeMethod<Object?>('deviceTap', {
-        'node': ?node,
-        'x': ?x,
-        'y': ?y,
-      });
+  Future<Object?> tap({int? node, num? x, num? y}) => _channel
+      .invokeMethod<Object?>('deviceTap', {'node': ?node, 'x': ?x, 'y': ?y});
 
   Future<Object?> type({
     int? node,
@@ -75,6 +105,103 @@ class DeviceControlService {
   Future<String> screenshot() async {
     return await _channel.invokeMethod<String>('deviceScreenshot') ?? '';
   }
+
+  Future<String> copyScreenshotIntoWorkspace(
+    String sourcePath,
+    Directory workspace,
+  ) async {
+    await workspace.create(recursive: true);
+    final canonicalWorkspace = await workspace.resolveSymbolicLinks();
+    final captures = Directory('$canonicalWorkspace/device-screenshots');
+    if (await FileSystemEntity.type(captures.path, followLinks: false) ==
+        FileSystemEntityType.link) {
+      throw const ScreenshotCopyException.write(
+        'unsafe workspace path: device-screenshots is a symlink.',
+      );
+    }
+    await captures.create();
+    final canonicalCaptures = await captures.resolveSymbolicLinks();
+    if (!_isContained(canonicalWorkspace, canonicalCaptures)) {
+      throw const ScreenshotCopyException.write(
+        'unsafe workspace path: screenshot directory escapes the workspace.',
+      );
+    }
+
+    final copy = _screenshotCopyOverrideForTest ?? _copyScreenshotNative;
+    for (var attempt = 0; attempt < 4; attempt++) {
+      final name =
+          'screen-${DateTime.now().microsecondsSinceEpoch}-'
+          '${Random.secure().nextInt(1 << 32)}.png';
+      final destination = File('$canonicalCaptures/$name');
+      try {
+        final copied = await copy(sourcePath, canonicalCaptures, name);
+        final canonicalCopied = await File(copied).resolveSymbolicLinks();
+        if (!_isContained(canonicalCaptures, canonicalCopied)) {
+          await _deletePartial(destination);
+          throw const ScreenshotCopyException.write(
+            'unsafe workspace path: copied screenshot escapes the workspace.',
+          );
+        }
+        return canonicalCopied;
+      } on ScreenshotCopyException catch (error) {
+        if (error.isCollision) {
+          if (attempt < 3) continue;
+          rethrow;
+        }
+        if (error.code == 'WRITE_FAILED') await _deletePartial(destination);
+        rethrow;
+      } on PlatformException catch (error) {
+        if (error.code == 'DEST_EXISTS') {
+          if (attempt < 3) continue;
+          throw ScreenshotCopyException._(
+            error.code,
+            error.message ?? 'Screenshot destination already exists.',
+          );
+        }
+        throw ScreenshotCopyException._(
+          error.code,
+          error.message ?? 'Screenshot copy failed.',
+        );
+      } catch (_) {
+        await _deletePartial(destination);
+        rethrow;
+      }
+    }
+    throw const ScreenshotCopyException.collision();
+  }
+
+  Future<String> _copyScreenshotNative(
+    String sourcePath,
+    String directoryPath,
+    String fileName,
+  ) async {
+    return await _channel.invokeMethod<String>('deviceCopyScreenshot', {
+          'sourcePath': sourcePath,
+          'directoryPath': directoryPath,
+          'fileName': fileName,
+        }) ??
+        (throw const ScreenshotCopyException.write(
+          'Native screenshot copy returned no path.',
+        ));
+  }
+
+  static bool _isContained(String parent, String child) =>
+      child == parent || child.startsWith('$parent/');
+
+  static Future<void> _deletePartial(File file) async {
+    try {
+      if (await FileSystemEntity.type(file.path, followLinks: false) !=
+          FileSystemEntityType.notFound) {
+        await file.delete();
+      }
+    } catch (_) {}
+  }
+
+  @visibleForTesting
+  Future<String> copyScreenshotIntoWorkspaceForTest(
+    String sourcePath,
+    Directory workspace,
+  ) => copyScreenshotIntoWorkspace(sourcePath, workspace);
 
   static String formatReadResultForTest(Map<String, dynamic> result) {
     final status = result['status']?.toString() ?? 'error';
