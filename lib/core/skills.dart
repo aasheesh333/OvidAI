@@ -27,6 +27,12 @@ class Skill {
   final Map<String, String> frontmatter;
   final bool isAgent;
 
+  /// Bundle-relative paths of every non-SKILL.md file that ships beside a
+  /// bundled skill (templates, references, scripts). Empty for flat skills.
+  /// Collected by a symlink-refusing, depth-limited, containment-checked
+  /// walk so a bundle can never pull in a file outside its own directory.
+  final List<String> supportingFiles;
+
   const Skill({
     required this.name,
     required this.description,
@@ -40,6 +46,7 @@ class Skill {
     this.model,
     this.frontmatter = const {},
     this.isAgent = false,
+    this.supportingFiles = const [],
   });
 
   /// Compact catalog line injected into the agent system context.
@@ -91,10 +98,12 @@ class SkillService {
     _skills.sort((a, b) => a.name.compareTo(b.name));
   }
 
-  Future<void> _scanDir(Directory dir) async {
+  Future<void> _scanDir(Directory dir, {int depth = 0}) async {
+    if (depth > kBundleScanMaxDepth) return;
     try {
       await for (final entity in dir.list(followLinks: false)) {
         if (entity is Directory) {
+          if (depth + 1 > kBundleScanMaxDepth) continue;
           // Bundle: <name>/SKILL.md
           final skillMd = File('${entity.path}/SKILL.md');
           if (skillMd.existsSync()) {
@@ -109,10 +118,13 @@ class SkillService {
             continue;
           }
           if (_basename(entity.path) == 'agents') {
-            await _scanDir(entity);
+            await _scanDir(entity, depth: depth + 1);
             continue;
           }
-          // Nested directories with **/SKILL.md are excluded (spec parity).
+          // Plugin bundles may nest below the conventional top-level
+          // directory. Recurse safely; a directory containing SKILL.md was
+          // already consumed as one bundle above.
+          await _scanDir(entity, depth: depth + 1);
         } else if (entity is File && entity.path.endsWith('.md')) {
           final isAgent = entity.path.contains('/agents/') ||
               entity.path.contains('\\agents\\') ||
@@ -190,6 +202,11 @@ class SkillService {
           path.contains('/agents/') ||
           path.contains('\\agents\\') ||
           _basename(file.parent.path) == 'agents';
+      // A bundle (<dir>/SKILL.md) also ships supporting files; a flat
+      // `<name>.md` skill has none.
+      final bundleDir = _basename(file.path) == 'SKILL'
+          ? file.parent
+          : null;
       return Skill(
         name: name,
         description: description,
@@ -203,6 +220,8 @@ class SkillService {
         model: model,
         frontmatter: frontmatter,
         isAgent: resolvedIsAgent,
+        supportingFiles:
+            bundleDir == null ? const [] : scanBundleFiles(bundleDir),
       );
     } catch (_) {
       return null;
@@ -214,6 +233,7 @@ class SkillService {
     final idx = noExt.lastIndexOf('/');
     return idx < 0 ? noExt : noExt.substring(idx + 1);
   }
+
 
   Skill? find(String name) {
     for (final s in _skills) {
@@ -240,4 +260,59 @@ class SkillService {
     }
     return buf.toString();
   }
+}
+
+/// Maximum directory depth a bundle walk will descend.
+const int kBundleScanMaxDepth = 12;
+
+/// Every non-`SKILL.md` file shipped inside a bundle directory, as sorted
+/// `[dir]`-relative paths.
+///
+/// Hardened for untrusted plugin payloads: symlinks are never followed
+/// (`followLinks: false`) and any entry whose real path escapes [dir] is
+/// dropped, so a crafted bundle cannot harvest files outside itself. The
+/// walk stops at [kBundleScanMaxDepth] to bound pathological trees.
+List<String> scanBundleFiles(Directory dir) {
+  final String rootReal;
+  try {
+    rootReal = dir.resolveSymbolicLinksSync();
+  } catch (_) {
+    return const [];
+  }
+  final out = <String>[];
+
+  void walk(Directory current, int depth) {
+    if (depth > kBundleScanMaxDepth) return;
+    final List<FileSystemEntity> entries;
+    try {
+      entries = current.listSync(followLinks: false);
+    } catch (_) {
+      return;
+    }
+    for (final entity in entries) {
+      // With followLinks:false a symlink surfaces as a Link — never
+      // traverse or record it, whatever it points at.
+      if (entity is Link) continue;
+      if (entity is Directory) {
+        walk(entity, depth + 1);
+        continue;
+      }
+      if (entity is! File) continue;
+      final String real;
+      try {
+        real = entity.resolveSymbolicLinksSync();
+      } catch (_) {
+        continue;
+      }
+      // Containment: the real file must live under the real bundle root.
+      if (!real.startsWith('$rootReal/')) continue;
+      final rel = real.substring(rootReal.length + 1);
+      if (rel == 'SKILL.md') continue;
+      out.add(rel);
+    }
+  }
+
+  walk(dir, 0);
+  out.sort();
+  return List.unmodifiable(out);
 }

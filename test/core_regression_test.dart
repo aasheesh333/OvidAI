@@ -18,6 +18,8 @@ import 'package:ovid_ai/core/device_control_service.dart';
 import 'package:ovid_ai/core/github_service.dart';
 import 'package:ovid_ai/core/hook_service.dart';
 import 'package:ovid_ai/core/mcp_service.dart';
+import 'package:ovid_ai/core/mcp_config_parse.dart';
+import 'package:ovid_ai/core/plugin_adapters.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/pty_service.dart';
@@ -12547,6 +12549,389 @@ You are an expert security auditor reviewing code for vulnerabilities.
         ]);
       },
     );
+  });
+
+  group('PluginCompat Task 2: Claude, Codex, and generic MCP adapters', () {
+    test(
+      'PLUGIN2: Claude fixture normalizes recursive contributions, hooks, MCP, and dependencies',
+      () async {
+        final root = Directory.systemTemp.createTempSync('ovid-plugin2-claude');
+        addTearDown(() => root.deleteSync(recursive: true));
+        void write(String path, String content) {
+          final file = File('${root.path}/$path');
+          file.parent.createSync(recursive: true);
+          file.writeAsStringSync(content);
+        }
+
+        write(
+          '.claude-plugin/plugin.json',
+          jsonEncode({
+            'name': 'Reviewer Pro',
+            'version': '2.1.0',
+            'author': {'name': 'Acme Labs', 'url': 'https://acme.test'},
+            'description': 'Reviews changes',
+            'futureTopLevel': {'enabled': true},
+          }),
+        );
+        write(
+          'commands/review/deep.md',
+          '''---
+name: Deep Review
+description: Review a change
+x-command-field: retained
+---
+Review the workspace.''',
+        );
+        write(
+          'skills/research/SKILL.md',
+          '''---
+name: Research
+description: Research a topic
+x-skill-field: retained
+---
+Read the workspace before answering.''',
+        );
+        write('skills/research/templates/prompt.txt', 'supporting prompt');
+        write('skills/research/references/guide.md', '# Guide');
+        write(
+          'agents/reviewer/security.md',
+          '''---
+name: Security Reviewer
+model: inherit
+x-agent-field: retained
+---
+Find security defects.''',
+        );
+        write(
+          'hooks/hooks.json',
+          jsonEncode({
+            'hooks': {
+              'PreToolUse': [
+                {
+                  'matcher': 'Bash|Write',
+                  'hooks': [
+                    {
+                      'type': 'command',
+                      'command': 'scripts/check.sh',
+                      'timeout': 15,
+                      'futureHookField': true,
+                    },
+                    {'type': 'prompt', 'prompt': 'Check policy'},
+                  ],
+                },
+              ],
+              'PostToolUseFailure': [
+                {
+                  'hooks': [
+                    {'type': 'command', 'command': 'scripts/log.sh'},
+                  ],
+                },
+              ],
+              'on_turn_start': 'scripts/turn.sh',
+              'FutureEvent': 'scripts/future.sh',
+            },
+            'futureHooksTopLevel': 'retained',
+          }),
+        );
+        write(
+          '.mcp.json',
+          jsonEncode({
+            'mcpServers': {
+              'local-fs': {
+                'command': 'npx',
+                'args': ['-y', '@acme/fs'],
+                'env': {'ACME_TOKEN': 'super-secret'},
+                'cwd': 'tools/fs',
+                'futureServerField': 7,
+              },
+              'remote': {
+                'url': 'https://acme.test/mcp',
+                'headers': {'Authorization': 'Bearer secret'},
+              },
+              'legacy-events': {
+                'type': 'sse',
+                'url': 'https://acme.test/events',
+              },
+            },
+          }),
+        );
+        write(
+          'package.json',
+          jsonEncode({
+            'dependencies': {'left-pad': '^1.3.0'},
+            'optionalDependencies': {'optional-js': '2.0.0'},
+          }),
+        );
+        write('requirements.txt', 'requests==2.32.0\n# ignored\n');
+        write(
+          'pyproject.toml',
+          '[project]\ndependencies = ["httpx>=0.27"]\n',
+        );
+
+        final manifest = await ClaudePluginAdapter().inspect(root);
+
+        expect(manifest.id, 'acme-labs/reviewer-pro');
+        expect(manifest.format, PluginFormat.claudeCode);
+        expect(manifest.commands.single.canonicalId,
+            'plugin:acme-labs/reviewer-pro/command:deep-review');
+        expect(manifest.commands.single.unknownFields['x-command-field'], 'retained');
+        expect(manifest.skills.single.supportingFiles, [
+          'skills/research/references/guide.md',
+          'skills/research/templates/prompt.txt',
+        ]);
+        expect(manifest.skills.single.unknownFields['x-skill-field'], 'retained');
+        expect(manifest.agents.single.canonicalId,
+            'plugin:acme-labs/reviewer-pro/agent:security-reviewer');
+        expect(manifest.hooks.map((hook) => hook.event), [
+          'pre_tool',
+          'pre_tool',
+          'post_tool',
+          'user_prompt_submit',
+        ]);
+        expect(manifest.hooks.first.matcher, 'Bash|Write');
+        expect(manifest.hooks.first.timeoutS, 15);
+        expect(manifest.hooks.first.unknownFields['futureHookField'], isTrue);
+        expect(manifest.mcpServers.map((server) => server.name), [
+          'local-fs',
+          'remote',
+        ]);
+        expect(manifest.mcpServers.first.envNames, ['ACME_TOKEN']);
+        expect(manifest.mcpServers.last.headerNames, ['Authorization']);
+        expect(jsonEncode(manifest.toJson()), isNot(contains('super-secret')));
+        expect(jsonEncode(manifest.toJson()), isNot(contains('Bearer secret')));
+        expect(manifest.mcpServers.first.frontmatter['futureServerField'], 7);
+        expect(
+          manifest.dependencies.packages
+              .map((dependency) => '${dependency.kind.name}:${dependency.name}:${dependency.required}')
+              .toSet(),
+          containsAll({
+            'npm:left-pad:true',
+            'npm:optional-js:false',
+            'python:requests:true',
+            'python:httpx:true',
+          }),
+        );
+        expect(manifest.requestedCapabilities, {
+          PluginCapability.workspaceRead,
+          PluginCapability.shellExecute,
+          PluginCapability.hooksObserve,
+          PluginCapability.hooksBlock,
+          PluginCapability.mcpRegister,
+          PluginCapability.processSpawn,
+          PluginCapability.networkConnect,
+          PluginCapability.environmentRead,
+        });
+        expect(manifest.environmentReadNames, {'ACME_TOKEN'});
+        expect(manifest.unknownFields['futureTopLevel'], {'enabled': true});
+        expect(manifest.unknownFields['hooks.futureHooksTopLevel'], 'retained');
+        expect(
+          manifest.compatibility.any(
+            (issue) =>
+                issue.severity == CompatibilitySeverity.required &&
+                issue.message.contains('Streamable HTTP'),
+          ),
+          isTrue,
+        );
+        expect(
+          manifest.compatibility.any(
+            (issue) =>
+                issue.severity == CompatibilitySeverity.optional &&
+                issue.fields.contains('hooks.FutureEvent'),
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    test(
+      'PLUGIN2: Codex fixture reads instructions, nested skills, personas, TOML MCP, and dependencies',
+      () async {
+        final root = Directory.systemTemp.createTempSync('ovid-plugin2-codex');
+        addTearDown(() => root.deleteSync(recursive: true));
+        void write(String path, String content) {
+          final file = File('${root.path}/$path');
+          file.parent.createSync(recursive: true);
+          file.writeAsStringSync(content);
+        }
+
+        write('AGENTS.md', '# Root instructions');
+        write('packages/api/AGENTS.md', '# API instructions');
+        write(
+          '.agents/skills/migrate/SKILL.md',
+          '''---
+name: DB Migrate
+description: Plan database migrations
+---
+Inspect schema files.''',
+        );
+        write('.agents/skills/migrate/examples/schema.sql', 'select 1;');
+        write(
+          '.agents/personas/architect.md',
+          '''---
+name: System Architect
+description: Reviews architecture
+---
+Review boundaries.''',
+        );
+        write(
+          'config.toml',
+          '''name = "Codex Toolkit"
+version = "3.0.0"
+publisher = "Codex Org"
+future_setting = "retained"
+
+[mcp_servers.local]
+command = "uvx"
+args = ["codex-server"]
+future_server = true
+
+[mcp_servers.local.env]
+CODEX_TOKEN = "secret-value"
+
+[mcp_servers.web]
+url = "https://codex.test/mcp"
+
+[environment]
+WORKSPACE_PROFILE = "secret-profile"
+''',
+        );
+        write('requirements.txt', 'rich~=13.0\n');
+
+        final manifest = await CodexPluginAdapter().inspect(root);
+
+        expect(manifest.id, 'codex-org/codex-toolkit');
+        expect(manifest.format, PluginFormat.codex);
+        expect(manifest.unknownFields['instructionPaths'], [
+          'AGENTS.md',
+          'packages/api/AGENTS.md',
+        ]);
+        expect(manifest.unknownFields['config.future_setting'], 'retained');
+        expect(manifest.skills.single.name, 'db-migrate');
+        expect(manifest.skills.single.supportingFiles,
+            ['.agents/skills/migrate/examples/schema.sql']);
+        expect(manifest.agents.single.name, 'system-architect');
+        expect(manifest.mcpServers.map((server) => server.transport), [
+          'stdio',
+          'http',
+        ]);
+        expect(manifest.mcpServers.first.envNames, ['CODEX_TOKEN']);
+        expect(manifest.mcpServers.first.frontmatter['future_server'], 'true');
+        expect(manifest.environmentReadNames, {
+          'CODEX_TOKEN',
+          'WORKSPACE_PROFILE',
+        });
+        expect(jsonEncode(manifest.toJson()), isNot(contains('secret-value')));
+        expect(jsonEncode(manifest.toJson()), isNot(contains('secret-profile')));
+        expect(manifest.requestedCapabilities, {
+          PluginCapability.workspaceRead,
+          PluginCapability.mcpRegister,
+          PluginCapability.processSpawn,
+          PluginCapability.networkConnect,
+          PluginCapability.environmentRead,
+        });
+        expect(
+          manifest.dependencies.python.single.versionSpec,
+          '~=13.0',
+        );
+      },
+    );
+
+    test(
+      'PLUGIN2: generic MCP supports aliases and direct definitions and rejects SSE as required',
+      () {
+        final adapter = GenericMcpAdapter();
+        final mapped = adapter.inspectConfig(
+          jsonEncode({
+            'mcp_servers': {
+              'stdio': {
+                'command': 'node',
+                'args': ['server.js'],
+                'env': {'TOKEN': 'secret'},
+              },
+            },
+          }),
+          sourceId: 'Paste / Example',
+        );
+        final listed = adapter.inspectConfig(
+          jsonEncode([
+            {'name': 'remote', 'url': 'https://example.test/mcp'},
+          ]),
+          sourceId: 'Paste / Example',
+        );
+        final direct = adapter.inspectConfig(
+          jsonEncode({'command': 'uvx', 'args': ['direct-server']}),
+          sourceId: 'Paste / Example',
+        );
+        final sse = adapter.inspectConfig(
+          jsonEncode({
+            'servers': {
+              'legacy': {'type': 'sse', 'url': 'https://example.test/sse'},
+            },
+          }),
+          sourceId: 'Paste / Example',
+        );
+
+        expect(mapped.id, 'mcp/paste-example');
+        expect(mapped.mcpServers.single.envNames, ['TOKEN']);
+        expect(listed.mcpServers.single.transport, 'http');
+        expect(direct.mcpServers.single.command, 'uvx');
+        expect(sse.mcpServers, isEmpty);
+        expect(sse.hasRequiredIssues, isTrue);
+        expect(sse.compatibility.single.message, contains('Streamable HTTP'));
+      },
+    );
+
+    test('PLUGIN2: registry selects formats and SkillService scans safely', () async {
+      final claude = Directory.systemTemp.createTempSync('ovid-plugin2-registry');
+      final outside = Directory.systemTemp.createTempSync('ovid-plugin2-outside');
+      addTearDown(() => claude.deleteSync(recursive: true));
+      addTearDown(() => outside.deleteSync(recursive: true));
+      File('${claude.path}/.claude-plugin/plugin.json')
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync('{"name":"Registry","author":"Acme"}');
+      final nested = File('${claude.path}/skills/a/nested/SKILL.md');
+      nested.parent.createSync(recursive: true);
+      nested.writeAsStringSync('''---
+name: Nested
+---
+Nested skill.''');
+      File('${nested.parent.path}/asset.txt').writeAsStringSync('asset');
+      File('${outside.path}/escaped.md').writeAsStringSync('outside');
+      Link('${nested.parent.path}/escaped.md').createSync(
+        '${outside.path}/escaped.md',
+      );
+      var deep = '${claude.path}/skills';
+      for (var i = 0; i < 13; i++) {
+        deep = '$deep/d$i';
+      }
+      File('$deep/SKILL.md')
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync('too deep');
+
+      final manifest = await PluginAdapterRegistry().inspect(claude);
+      final service = SkillService.forTest()..addRoot('${claude.path}/skills');
+      await service.reload();
+
+      expect(manifest.format, PluginFormat.claudeCode);
+      expect(service.skills.map((skill) => skill.name), ['Nested']);
+      expect(service.skills.single.supportingFiles, ['asset.txt']);
+    });
+
+    test('PLUGIN2: extracted MCP parser remains the UI parser delegate', () {
+      const raw = '''[mcp_servers.demo]
+command = 'uvx'
+args = ['demo', '--flag']
+cwd = 'tools'
+''';
+      final core = parseMcpConfig(raw).single;
+      final ui = parseMcpConfigForTest(raw).single;
+
+      expect(core.name, ui.name);
+      expect(core.command, ui.command);
+      expect(core.args, ui.args);
+      expect(core.cwd, ui.cwd);
+      expect(core.type, ui.type);
+    });
   });
 }
 
