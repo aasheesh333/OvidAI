@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'agent_notification_service.dart';
 import 'mcp_service.dart';
+import 'plugin_manifest.dart';
 import 'theme.dart';
 import 'sandbox_service.dart';
 import 'presets.dart';
@@ -188,6 +189,39 @@ class PluginItem {
   /// hook fires for every tool.
   Map<String, String> hookMatchers;
 
+  /// Production-plugin compatibility (design spec §4.3/§7): runtime identity
+  /// and activation state persisted alongside the catalog row.
+  ///
+  /// Canonical runtime id of the installed [NormalizedPluginManifest]
+  /// (`publisher/name`). Null for catalog-only rows that have no normalized
+  /// executable manifest.
+  String? runtimeId;
+
+  /// Honest lifecycle state (spec §7). Defaults to
+  /// [PluginActivation.disabled] — including for legacy persisted rows that
+  /// predate this field: existing installed rows are never auto-promoted to
+  /// `globalActive`; that only happens once the production audit (Task 9)
+  /// verifies real capability.
+  PluginActivation activation;
+
+  /// When [activation] is [PluginActivation.sessionActive]: the only session
+  /// that sees the plugin before restart promotion (agent installs).
+  String? immediateSessionId;
+
+  /// Set when installed during the current boot; `activateForBoot()` promotes
+  /// the plugin to [PluginActivation.globalActive] exactly once on the next
+  /// restart and clears this flag (spec §7).
+  bool promoteOnNextBoot;
+
+  /// Digest of the installed normalized manifest — permission grants are
+  /// keyed by plugin id + this digest (spec §5.1).
+  String? manifestDigest;
+
+  /// Optional-severity [CompatibilityIssue]s surfaced in the UI as visible
+  /// warnings (degraded behavior — spec §4.3/§13). Required-severity findings
+  /// fail install instead of landing here.
+  List<CompatibilityIssue> compatibilityWarnings;
+
   PluginItem({
     required this.name,
     required this.author,
@@ -202,6 +236,12 @@ class PluginItem {
     this.hookMatchers = const {},
     this.source,
     this.marketplace,
+    this.runtimeId,
+    this.activation = PluginActivation.disabled,
+    this.immediateSessionId,
+    this.promoteOnNextBoot = false,
+    this.manifestDigest,
+    this.compatibilityWarnings = const [],
   });
 
   Map<String, dynamic> toJson() => {
@@ -218,6 +258,18 @@ class PluginItem {
     if (marketplace != null) 'marketplace': marketplace,
     if (hooks.isNotEmpty) 'hooks': hooks,
     if (hookMatchers.isNotEmpty) 'hookMatchers': hookMatchers,
+    // Runtime fields are emitted only when non-default, so untouched rows
+    // serialize byte-identical to the pre-existing shape (old readers never
+    // see unexpected keys; old rows parse with honest inert defaults).
+    if (runtimeId != null) 'runtimeId': runtimeId,
+    if (activation != PluginActivation.disabled) 'activation': activation.name,
+    if (immediateSessionId != null) 'immediateSessionId': immediateSessionId,
+    if (promoteOnNextBoot) 'promoteOnNextBoot': promoteOnNextBoot,
+    if (manifestDigest != null) 'manifestDigest': manifestDigest,
+    if (compatibilityWarnings.isNotEmpty)
+      'compatibilityWarnings': compatibilityWarnings
+          .map((i) => i.toJson())
+          .toList(),
   };
 
   factory PluginItem.fromJson(Map<String, dynamic> j) => PluginItem(
@@ -234,6 +286,18 @@ class PluginItem {
     marketplace: j['marketplace'] as String?,
     hooks: (j['hooks'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())) ?? const {},
     hookMatchers: (j['hookMatchers'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())) ?? const {},
+    runtimeId: j['runtimeId'] as String?,
+    activation:
+        pluginActivationFromName(j['activation']) ?? PluginActivation.disabled,
+    immediateSessionId: j['immediateSessionId'] as String?,
+    promoteOnNextBoot: j['promoteOnNextBoot'] as bool? ?? false,
+    manifestDigest: j['manifestDigest'] as String?,
+    compatibilityWarnings:
+        (j['compatibilityWarnings'] as List?)
+            ?.whereType<Map>()
+            .map((i) => CompatibilityIssue.fromJson(i.cast<String, dynamic>()))
+            .toList() ??
+        const [],
   );
 
   /// Valid hook event names (mirrors the wired points in AgentService).

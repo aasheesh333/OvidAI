@@ -18,6 +18,7 @@ import 'package:ovid_ai/core/device_control_service.dart';
 import 'package:ovid_ai/core/github_service.dart';
 import 'package:ovid_ai/core/hook_service.dart';
 import 'package:ovid_ai/core/mcp_service.dart';
+import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/pty_service.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
@@ -12154,6 +12155,299 @@ You are an expert security auditor reviewing code for vulnerabilities.
         });
       });
     });
+  });
+
+  group('PluginCompat Task 1: normalized manifest, grants, activation', () {
+    test(
+      'PLUGIN1: normalized manifest and grants round-trip with stable namespaced IDs',
+      () {
+        final m = NormalizedPluginManifest(
+          id: NormalizedPluginManifest.canonicalId('Acme Inc', 'Reviewer Pro'),
+          name: 'Reviewer Pro',
+          version: '1.2.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/acme',
+          commands: const [],
+          skills: const [],
+          agents: const [],
+          hooks: const [],
+          mcpServers: const [],
+          dependencies: const PluginDependencies(),
+          requestedCapabilities: const {
+            PluginCapability.workspaceRead,
+            PluginCapability.shellExecute,
+          },
+          unknownFields: const {'futureField': true},
+          compatibility: const [],
+        );
+        expect(m.id, 'acme-inc/reviewer-pro');
+        expect(
+          NormalizedPluginManifest.fromJson(
+            m.toJson(),
+          ).unknownFields['futureField'],
+          isTrue,
+        );
+
+        final grant = PluginPermissionGrant(
+          pluginId: m.id,
+          manifestDigest: 'sha256:abc',
+          capabilities: const {PluginCapability.workspaceRead},
+          approvedAt: DateTime.utc(2026),
+        );
+        expect(PluginPermissionGrant.fromJson(grant.toJson()).capabilities, {
+          PluginCapability.workspaceRead,
+        });
+      },
+    );
+
+    test(
+      'PLUGIN1b: contributions carry canonical IDs, frontmatter, and unknown fields through manifest round-trip',
+      () {
+        const pluginId = 'acme-inc/reviewer-pro';
+        expect(
+          NormalizedPluginManifest.canonicalId(
+            'Acme  Inc!!',
+            '__Reviewer--Pro__',
+          ),
+          pluginId,
+        );
+
+        final m = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'Reviewer Pro',
+          version: '1.2.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/acme',
+          commands: const [
+            PluginCommand(
+              pluginId: pluginId,
+              name: 'review',
+              path: 'commands/review.md',
+              frontmatter: {'description': 'Review a PR'},
+              unknownFields: {'allowed-tools': 'read'},
+            ),
+          ],
+          skills: const [
+            PluginSkill(
+              pluginId: pluginId,
+              name: 'pdf-tools',
+              path: 'skills/pdf-tools/SKILL.md',
+              supportingFiles: ['skills/pdf-tools/ref/tables.md'],
+              frontmatter: {'name': 'pdf-tools'},
+            ),
+          ],
+          agents: const [
+            PluginAgent(
+              pluginId: pluginId,
+              name: 'reviewer',
+              path: 'agents/reviewer.md',
+              frontmatter: {'model': 'inherit'},
+            ),
+          ],
+          hooks: const [
+            PluginHook(
+              pluginId: pluginId,
+              event: 'pre_tool',
+              ordinal: 0,
+              type: 'command',
+              payload: r'scripts/gate.sh "$OVID_TOOL_NAME"',
+              matcher: 'run_shell.*',
+              timeoutS: 30,
+              path: 'hooks/hooks.json',
+            ),
+          ],
+          mcpServers: const [
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'fetch',
+              transport: 'stdio',
+              command: 'uvx',
+              args: ['mcp-server-fetch'],
+              envNames: ['ACME_TOKEN'],
+              path: '.mcp.json',
+            ),
+          ],
+          dependencies: const PluginDependencies(
+            packages: [
+              PluginDependency(
+                name: 'gray-matter',
+                versionSpec: '^4.0.3',
+                kind: PluginDependencyKind.npm,
+              ),
+              PluginDependency(
+                name: 'pdfminer.six',
+                kind: PluginDependencyKind.python,
+                required: false,
+              ),
+            ],
+          ),
+          requestedCapabilities: const {
+            PluginCapability.shellExecute,
+            PluginCapability.environmentRead,
+            PluginCapability.mcpRegister,
+            PluginCapability.hooksBlock,
+          },
+          environmentReadNames: const {'ACME_TOKEN'},
+          compatibility: const [
+            CompatibilityIssue(
+              severity: CompatibilitySeverity.optional,
+              message: 'prompt-type hook downgraded to observe-only',
+              fields: ['hooks[1].type'],
+            ),
+          ],
+        );
+
+        expect(
+          m.commands.single.canonicalId,
+          'plugin:acme-inc/reviewer-pro/command:review',
+        );
+        expect(
+          m.skills.single.canonicalId,
+          'plugin:acme-inc/reviewer-pro/skill:pdf-tools',
+        );
+        expect(
+          m.agents.single.canonicalId,
+          'plugin:acme-inc/reviewer-pro/agent:reviewer',
+        );
+        expect(
+          m.hooks.single.canonicalId,
+          'plugin:acme-inc/reviewer-pro/hook:pre_tool:0',
+        );
+        expect(m.hooks.single.canBlock, isTrue);
+        expect(
+          m.mcpServers.single.canonicalId,
+          'plugin:acme-inc/reviewer-pro/mcp:fetch',
+        );
+        expect(
+          m.mcpServers.single.canonicalToolId('get'),
+          'mcp:acme-inc/reviewer-pro/fetch/get',
+        );
+        expect(m.hasRequiredIssues, isFalse);
+
+        final back = NormalizedPluginManifest.fromJson(m.toJson());
+        expect(back.format, PluginFormat.claudeCode);
+        expect(back.commands.single.path, 'commands/review.md');
+        expect(back.commands.single.frontmatter['description'], 'Review a PR');
+        expect(back.commands.single.unknownFields['allowed-tools'], 'read');
+        expect(back.skills.single.supportingFiles, [
+          'skills/pdf-tools/ref/tables.md',
+        ]);
+        expect(back.hooks.single.matcher, 'run_shell.*');
+        expect(back.hooks.single.timeoutS, 30);
+        expect(back.hooks.single.ordinal, 0);
+        expect(back.mcpServers.single.envNames, ['ACME_TOKEN']);
+        expect(back.mcpServers.single.args, ['mcp-server-fetch']);
+        expect(back.environmentReadNames, {'ACME_TOKEN'});
+        expect(back.requestedCapabilities, {
+          PluginCapability.shellExecute,
+          PluginCapability.environmentRead,
+          PluginCapability.mcpRegister,
+          PluginCapability.hooksBlock,
+        });
+        expect(back.dependencies.npm.single.versionSpec, '^4.0.3');
+        expect(back.dependencies.python.single.required, isFalse);
+        expect(
+          back.compatibility.single.severity,
+          CompatibilitySeverity.optional,
+        );
+        expect(back.compatibility.single.fields, ['hooks[1].type']);
+      },
+    );
+
+    test(
+      'PLUGIN3: activation records round-trip and PluginItem runtime fields stay legacy-safe',
+      () {
+        const rec = PluginActivationRecord(
+          pluginId: 'acme-inc/reviewer-pro',
+          state: PluginActivation.sessionActive,
+          immediateSessionId: 'sess-42',
+          installedBootEpoch: 7,
+          promoteOnNextBoot: true,
+        );
+        final back = PluginActivationRecord.fromJson(rec.toJson());
+        expect(back.pluginId, rec.pluginId);
+        expect(back.state, PluginActivation.sessionActive);
+        expect(back.immediateSessionId, 'sess-42');
+        expect(back.installedBootEpoch, 7);
+        expect(back.promoteOnNextBoot, isTrue);
+
+        const pending = PluginActivationRecord(
+          pluginId: 'acme-inc/reviewer-pro',
+          state: PluginActivation.pendingGlobal,
+          installedBootEpoch: 8,
+          promoteOnNextBoot: true,
+        );
+        expect(
+          PluginActivationRecord.fromJson(pending.toJson()).immediateSessionId,
+          isNull,
+        );
+
+        // Legacy persisted catalog rows: missing keys → honest inert defaults,
+        // never an auto-promoted globalActive.
+        final legacy = PluginItem.fromJson(const {
+          'name': 'Old Plugin',
+          'author': 'acme',
+          'description': 'd',
+          'version': '1.0',
+          'category': 'Tool',
+          'installed': true,
+          'enabled': true,
+        });
+        expect(legacy.runtimeId, isNull);
+        expect(legacy.activation, PluginActivation.disabled);
+        expect(legacy.immediateSessionId, isNull);
+        expect(legacy.promoteOnNextBoot, isFalse);
+        expect(legacy.manifestDigest, isNull);
+        expect(legacy.compatibilityWarnings, isEmpty);
+
+        // A default-constructed row must serialize byte-identical to the
+        // pre-existing shape (no new keys emitted).
+        final legacyJson = legacy.toJson();
+        for (final key in const [
+          'runtimeId',
+          'activation',
+          'immediateSessionId',
+          'promoteOnNextBoot',
+          'manifestDigest',
+          'compatibilityWarnings',
+        ]) {
+          expect(legacyJson.containsKey(key), isFalse, reason: key);
+        }
+
+        final item = PluginItem(
+          name: 'Reviewer Pro',
+          author: 'Acme Inc',
+          description: 'd',
+          version: '1.2.0',
+          category: 'Agent',
+          installed: true,
+          enabled: true,
+          runtimeId: 'acme-inc/reviewer-pro',
+          activation: PluginActivation.pendingGlobal,
+          promoteOnNextBoot: true,
+          manifestDigest: 'sha256:abc',
+          compatibilityWarnings: const [
+            CompatibilityIssue(
+              severity: CompatibilitySeverity.required,
+              message: 'desktop-only binary cannot run on Android',
+              fields: ['mcpServers[0].command'],
+            ),
+          ],
+        );
+        final backItem = PluginItem.fromJson(item.toJson());
+        expect(backItem.runtimeId, 'acme-inc/reviewer-pro');
+        expect(backItem.activation, PluginActivation.pendingGlobal);
+        expect(backItem.promoteOnNextBoot, isTrue);
+        expect(backItem.manifestDigest, 'sha256:abc');
+        expect(
+          backItem.compatibilityWarnings.single.severity,
+          CompatibilitySeverity.required,
+        );
+        expect(backItem.compatibilityWarnings.single.fields, [
+          'mcpServers[0].command',
+        ]);
+      },
+    );
   });
 }
 
