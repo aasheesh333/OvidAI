@@ -9522,17 +9522,36 @@ ${await _agentsMdBlock()}
   /// matched things like `mistral-large`.
   ///
   /// [model] may carry the " · High/Low/Medium" effort suffix, which
-  /// [_baseModelOf] strips. Aggregator ids are normalised first: a
-  /// vendor prefix (`openai/gpt-4o`) and an OpenRouter route suffix
-  /// (`:free`, `:nitro`) are removed, so the same model routed through
-  /// OpenRouter is not misclassified as text-only.
+  /// [_baseModelOf] strips. Aggregator ids are normalised ONLY along
+  /// explicitly recognised syntax: a known vendor prefix (`openai/gpt-4o`)
+  /// and a known OpenRouter route suffix (`:free`, `:nitro`). An unknown
+  /// vendor or unknown suffix (`custom/gpt-4o:text-only`) is rejected —
+  /// an id we cannot fully parse is treated as not vision-capable.
   @visibleForTesting
   static bool modelSupportsImages(String model) {
     var id = _baseModelOf(model).trim().toLowerCase();
-    final route = id.indexOf(':');
-    if (route != -1) id = id.substring(0, route);
-    final vendor = id.lastIndexOf('/');
-    if (vendor != -1) id = id.substring(vendor + 1);
+    // Known OpenRouter route suffixes (docs.openrouter.ai/features).
+    const routeSuffixes = <String>{
+      ':free', ':nitro', ':extended', ':floor', ':online', ':thinking',
+      ':beta',
+    };
+    final route = routeSuffixes.where(id.endsWith).toList();
+    if (route.length > 1) return false;
+    if (route.isNotEmpty) id = id.substring(0, id.length - route.first.length);
+    // Known aggregator vendor prefixes; anything else with a slash stays
+    // unnormalised (and therefore fails the allowlist below).
+    const vendorPrefixes = <String>{
+      'openai/', 'anthropic/', 'google/', 'meta-llama/', 'x-ai/',
+      'mistralai/', 'deepseek/', 'qwen/', 'nvidia/', 'microsoft/',
+      'cohere/', 'perplexity/', 'amazon/', 'meta/',
+    };
+    for (final prefix in vendorPrefixes) {
+      if (id.startsWith(prefix)) {
+        id = id.substring(prefix.length);
+        break;
+      }
+    }
+    if (id.contains('/') || id.contains(':')) return false;
     const exact = <String>{
       'gpt-4o',
       'gpt-4o-mini',

@@ -137,7 +137,6 @@ class DeviceControlService {
         final copied = await copy(sourcePath, canonicalCaptures, name);
         final canonicalCopied = await File(copied).resolveSymbolicLinks();
         if (!_isContained(canonicalCaptures, canonicalCopied)) {
-          await _deletePartial(destination);
           throw const ScreenshotCopyException.write(
             'unsafe workspace path: copied screenshot escapes the workspace.',
           );
@@ -163,7 +162,6 @@ class DeviceControlService {
           error.message ?? 'Screenshot copy failed.',
         );
       } catch (_) {
-        await _deletePartial(destination);
         rethrow;
       }
     }

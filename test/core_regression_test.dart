@@ -3933,6 +3933,17 @@ libncursesw.so.6.5←./lib/libncurses.so.6
           'gemini-embedding-001',
           'gemini-text-bison-001',
           'custom-chat-model',
+          // Unknown normalisation syntax must never resolve to an
+          // allowlisted id: unknown vendor, unknown/double route suffix,
+          // or an arbitrary alias riding on a known model name.
+          'custom/gpt-4o:text-only',
+          'custom/gpt-4o',
+          'gpt-4o:text-only',
+          'gpt-4o:free:beta',
+          'openai/gpt-4o:unknown-route',
+          'foo/claude-3-5-sonnet',
+          'claude-3-5-sonnet:',
+          'openai//gpt-4o',
         ]) {
           expect(
             AgentService.modelSupportsImages(model),
@@ -4113,6 +4124,35 @@ libncursesw.so.6.5←./lib/libncurses.so.6
           work,
         ),
         throwsA(isA<ScreenshotCopyException>()),
+      );
+      expect(File(existingPath!).readAsBytesSync(), [9]);
+    });
+
+    test('CTRL6j: untyped exceptions in Dart do not unlink unowned paths', () async {
+      final work = Directory.systemTemp.createTempSync('ovid-copy-untyped-fail');
+      final source = File('${work.path}/source.png')
+        ..writeAsBytesSync([1, 2, 3]);
+      String? existingPath;
+      DeviceControlService.setScreenshotCopyForTest((
+        sourcePath,
+        directoryPath,
+        fileName,
+      ) async {
+        existingPath = '$directoryPath/$fileName';
+        File(existingPath!).writeAsBytesSync([9]);
+        throw StateError('untyped failure during copy');
+      });
+      addTearDown(() {
+        DeviceControlService.setScreenshotCopyForTest(null);
+        if (work.existsSync()) work.deleteSync(recursive: true);
+      });
+
+      await expectLater(
+        DeviceControlService.I.copyScreenshotIntoWorkspaceForTest(
+          source.path,
+          work,
+        ),
+        throwsA(isA<StateError>()),
       );
       expect(File(existingPath!).readAsBytesSync(), [9]);
     });

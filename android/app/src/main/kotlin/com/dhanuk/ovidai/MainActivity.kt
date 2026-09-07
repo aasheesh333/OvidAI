@@ -77,16 +77,14 @@ class MainActivity : FlutterActivity() {
     }
 
     /// Copy a screenshot into the agent workspace without ever clobbering or
-    /// following a symlink. `O_CREAT or O_EXCL or O_NOFOLLOW` makes the create
-    /// atomic: the destination must not exist, and the final path component is
-    /// never resolved through a link. The copy is then written through that
-    /// exclusively-opened descriptor, so nothing can substitute the file
-    /// between the create and the write. A failed copy is unlinked, so a
-    /// partial screenshot never survives to be read back.
-    ///
-    /// `Os.openat`/`Os.unlinkat`/`O_DIRECTORY` are not public SDK API, so the
-    /// directory cannot be pinned by descriptor here; the Dart caller
-    /// canonicalises the workspace and re-verifies containment of the result.
+    /// following a symlink. The destination directory is pinned by descriptor
+    /// with `O_NOFOLLOW`, and the destination file is created relative to that
+    /// pinned directory descriptor via `/proc/self/fd/<dirFd>/<fileName>` with
+    /// `O_CREAT or O_EXCL or O_NOFOLLOW`. This prevents parent-directory TOCTOU
+    /// replacement races and leaf symlink traversal. Bytes are written through
+    /// that exclusively-opened descriptor. A failed copy is removed only after
+    /// confirming that the directory entry still matches the created inode, so
+    /// an unowned replacement file is never deleted.
     private fun copyDeviceScreenshot(
         sourcePath: String,
         directoryPath: String,
@@ -99,53 +97,70 @@ class MainActivity : FlutterActivity() {
         require(directory.canonicalPath == directory.absolutePath) {
             "Screenshot directory is not a canonical directory."
         }
-        // lstat, not isDirectory(): a symlink to a directory must not pass.
-        require(OsConstants.S_ISDIR(Os.lstat(directoryPath).st_mode)) {
-            "Screenshot directory is not a directory."
-        }
 
-        val destinationPath = File(directory, fileName).absolutePath
-        val sourceFd = Os.open(
-            sourcePath,
+        // Pin directory descriptor with O_NOFOLLOW to prevent parent symlink substitution.
+        val dirFd = Os.open(
+            directoryPath,
             OsConstants.O_RDONLY or OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW,
             0,
         )
         try {
-            require(OsConstants.S_ISREG(Os.fstat(sourceFd).st_mode)) {
-                "Screenshot source is not a regular file."
+            require(OsConstants.S_ISDIR(Os.fstat(dirFd).st_mode)) {
+                "Screenshot directory is not a directory."
             }
-            val destinationFd = Os.open(
-                destinationPath,
-                OsConstants.O_WRONLY or OsConstants.O_CREAT or OsConstants.O_EXCL or
-                    OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW,
-                384, // 0600
-            )
-            var copied = false
+            val pfd = ParcelFileDescriptor.dup(dirFd)
             try {
-                // Explicit read/write loop rather than FileInputStream/
-                // FileOutputStream(FileDescriptor): those wrappers' fd
-                // ownership is an unspecified libcore detail, and we must
-                // close each descriptor exactly once so the failure path can
-                // still unlink the destination. Os.write may be short.
-                val buffer = ByteArray(64 * 1024)
-                while (true) {
-                    val read = Os.read(sourceFd, buffer, 0, buffer.size)
-                    if (read <= 0) break
-                    var written = 0
-                    while (written < read) {
-                        written += Os.write(destinationFd, buffer, written, read - written)
+                val procDestPath = "/proc/self/fd/${pfd.fd}/$fileName"
+                val sourceFd = Os.open(
+                    sourcePath,
+                    OsConstants.O_RDONLY or OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW,
+                    0,
+                )
+                try {
+                    require(OsConstants.S_ISREG(Os.fstat(sourceFd).st_mode)) {
+                        "Screenshot source is not a regular file."
                     }
+                    val destinationFd = Os.open(
+                        procDestPath,
+                        OsConstants.O_WRONLY or OsConstants.O_CREAT or OsConstants.O_EXCL or
+                            OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW,
+                        384, // 0600
+                    )
+                    var copied = false
+                    val destStat = Os.fstat(destinationFd)
+                    try {
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            val read = Os.read(sourceFd, buffer, 0, buffer.size)
+                            if (read <= 0) break
+                            var written = 0
+                            while (written < read) {
+                                written += Os.write(destinationFd, buffer, written, read - written)
+                            }
+                        }
+                        Os.fsync(destinationFd)
+                        copied = true
+                    } finally {
+                        if (!copied) {
+                            runCatching {
+                                val checkStat = Os.lstat(procDestPath)
+                                if (checkStat.st_dev == destStat.st_dev && checkStat.st_ino == destStat.st_ino) {
+                                    Os.remove(procDestPath)
+                                }
+                            }
+                        }
+                        runCatching { Os.close(destinationFd) }
+                    }
+                } finally {
+                    runCatching { Os.close(sourceFd) }
                 }
-                Os.fsync(destinationFd)
-                copied = true
             } finally {
-                runCatching { Os.close(destinationFd) }
-                if (!copied) runCatching { Os.remove(destinationPath) }
+                runCatching { pfd.close() }
             }
         } finally {
-            runCatching { Os.close(sourceFd) }
+            runCatching { Os.close(dirFd) }
         }
-        return destinationPath
+        return File(directory, fileName).absolutePath
     }
 
     /// The ABI the PackageManager chose for THIS install — the last path

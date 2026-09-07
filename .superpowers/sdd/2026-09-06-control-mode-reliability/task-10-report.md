@@ -94,3 +94,19 @@ The three round-2 findings are addressed:
 - `git diff --check`: passed.
 
 The Android validations still emit existing Kotlin/Gradle deprecation warnings, and Flutter warns that Android minSdk 23 support will be dropped in a future release; neither warning failed this build.
+
+## Review Follow-Up Round 3
+
+Addressed the three round-3 review items:
+
+1. Strict model normalization: `AgentService.modelSupportsImages` only normalizes explicitly recognized aggregator syntax: known vendor prefixes (`openai/`, `anthropic/`, `google/`, `meta-llama/`, `x-ai/`, `mistralai/`, `deepseek/`, `qwen/`, `nvidia/`, `microsoft/`, `cohere/`, `perplexity/`, `amazon/`, `meta/`) and recognized OpenRouter route suffixes (`:free`, `:nitro`, `:extended`, `:floor`, `:online`, `:thinking`, `:beta`). Any model identifier containing unrecognized slashes or colons (e.g. `custom/gpt-4o:text-only`) fails closed and is treated as not image-capable. Covered in `CTRL6d`.
+2. Parent-directory TOCTOU: `MainActivity.copyDeviceScreenshot` pins the screenshot destination directory with `Os.open(directoryPath, O_RDONLY or O_CLOEXEC or O_NOFOLLOW)` and `S_ISDIR` fstat verification, then opens the destination file atomically relative to that pinned directory via `/proc/self/fd/<dirFd>/<fileName>` with `O_WRONLY or O_CREAT or O_EXCL or O_CLOEXEC or O_NOFOLLOW`. Parent directory substitution or leaf symlink traversal cannot bypass this descriptor-pinned target.
+3. Ownership-safe cleanup: In native code, before deleting a failed copy, `MainActivity` verifies via `Os.lstat` that the directory entry still matches `destStat.st_dev` and `destStat.st_ino` of the opened descriptor, so an unowned replacement file is never deleted. In Dart, `DeviceControlService.copyScreenshotIntoWorkspace` no longer deletes destinations on untyped catch-all exceptions or workspace escapes. Covered in `CTRL6h`, `CTRL6i`, and `CTRL6j`.
+
+### Round 3 Verification
+
+- Focused tests (`CTRL[3-7]|SAFE1`): 15 passed.
+- Full `flutter test`: 414 passed.
+- `flutter analyze`: no issues found.
+- `./gradlew :app:testDebugUnitTest`: BUILD SUCCESSFUL.
+- `git diff --check`: passed cleanly.
