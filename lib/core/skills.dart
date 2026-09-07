@@ -33,6 +33,11 @@ class Skill {
   /// walk so a bundle can never pull in a file outside its own directory.
   final List<String> supportingFiles;
 
+  /// Canonical plugin id (`publisher/name`) of the plugin that contributed
+  /// this skill; null for workspace/user skills. Set by
+  /// [SkillService.addPluginRoot] when the owning root is scanned.
+  final String? pluginId;
+
   const Skill({
     required this.name,
     required this.description,
@@ -47,7 +52,17 @@ class Skill {
     this.frontmatter = const {},
     this.isAgent = false,
     this.supportingFiles = const [],
+    this.pluginId,
   });
+
+  /// Canonical contribution id (spec §4.4) for plugin-contributed skills:
+  /// `plugin:<plugin-id>/skill:<name>`; null for non-plugin skills.
+  String? get canonicalId =>
+      pluginId == null ? null : 'plugin:$pluginId/skill:$name';
+
+  /// The exact id an ambiguous-alias chooser lists: the canonical §4.4 id
+  /// for plugin skills, the declaring path otherwise.
+  String get providerId => canonicalId ?? path;
 
   /// Compact catalog line injected into the agent system context.
   String get catalogLine =>
@@ -66,6 +81,9 @@ class SkillService {
   final List<Skill> _skills = [];
   final Set<String> _roots = {};
 
+  /// Root path → owning plugin canonical id ([addPluginRoot]).
+  final Map<String, String> _pluginRoots = {};
+
   List<Skill> get skills => List.unmodifiable(_skills);
 
   /// Skills the user can invoke from the composer with `/name` or the
@@ -83,8 +101,19 @@ class SkillService {
     _roots.add(path);
   }
 
+  /// Register a search root owned by ONE plugin (canonical `publisher/name`
+  /// id). Skills scanned from it carry [Skill.pluginId], so they gain a
+  /// canonical §4.4 id (`plugin:<plugin-id>/skill:<name>`) and take part in
+  /// session-scoped unique-alias resolution ([resolveAlias]).
+  void addPluginRoot(String path, String pluginId) {
+    if (path.trim().isEmpty || pluginId.trim().isEmpty) return;
+    _roots.add(path);
+    _pluginRoots[path] = pluginId;
+  }
+
   void clearRoots() {
     _roots.clear();
+    _pluginRoots.clear();
     _skills.clear();
   }
 
@@ -93,12 +122,16 @@ class SkillService {
     for (final root in _roots) {
       final dir = Directory(root);
       if (!dir.existsSync()) continue;
-      await _scanDir(dir);
+      await _scanDir(dir, pluginId: _pluginRoots[root]);
     }
     _skills.sort((a, b) => a.name.compareTo(b.name));
   }
 
-  Future<void> _scanDir(Directory dir, {int depth = 0}) async {
+  Future<void> _scanDir(
+    Directory dir, {
+    int depth = 0,
+    String? pluginId,
+  }) async {
     if (depth > kBundleScanMaxDepth) return;
     try {
       await for (final entity in dir.list(followLinks: false)) {
@@ -107,36 +140,51 @@ class SkillService {
           // Bundle: <name>/SKILL.md
           final skillMd = File('${entity.path}/SKILL.md');
           if (skillMd.existsSync()) {
-            final s = await _parse(skillMd, entity.path);
+            final s = await _parse(skillMd, entity.path, pluginId: pluginId);
             if (s != null) _skills.add(s);
             continue;
           }
           final agentMd = File('${entity.path}/AGENT.md');
           if (agentMd.existsSync()) {
-            final s = await _parse(agentMd, entity.path, isAgent: true);
+            final s = await _parse(
+              agentMd,
+              entity.path,
+              isAgent: true,
+              pluginId: pluginId,
+            );
             if (s != null) _skills.add(s);
             continue;
           }
           if (_basename(entity.path) == 'agents') {
-            await _scanDir(entity, depth: depth + 1);
+            await _scanDir(entity, depth: depth + 1, pluginId: pluginId);
             continue;
           }
           // Plugin bundles may nest below the conventional top-level
           // directory. Recurse safely; a directory containing SKILL.md was
           // already consumed as one bundle above.
-          await _scanDir(entity, depth: depth + 1);
+          await _scanDir(entity, depth: depth + 1, pluginId: pluginId);
         } else if (entity is File && entity.path.endsWith('.md')) {
           final isAgent = entity.path.contains('/agents/') ||
               entity.path.contains('\\agents\\') ||
               _basename(dir.path) == 'agents';
-          final s = await _parse(entity, entity.path, isAgent: isAgent);
+          final s = await _parse(
+            entity,
+            entity.path,
+            isAgent: isAgent,
+            pluginId: pluginId,
+          );
           if (s != null) _skills.add(s);
         }
       }
     } catch (_) {}
   }
 
-  Future<Skill?> _parse(File file, String path, {bool isAgent = false}) async {
+  Future<Skill?> _parse(
+    File file,
+    String path, {
+    bool isAgent = false,
+    String? pluginId,
+  }) async {
     try {
       final raw = await file.readAsString();
       var name = _basename(path);
@@ -148,14 +196,13 @@ class SkillService {
       String? argumentHint;
       String? model;
       final frontmatter = <String, String>{};
-      var content = raw;
+      final content = stripMarkdownFrontmatter(raw);
 
       // Minimal YAML frontmatter: between leading --- fences.
       if (raw.startsWith('---')) {
         final end = raw.indexOf('\n---', 3);
         if (end > 0) {
           final fm = raw.substring(3, end);
-          content = raw.substring(end + 4).trim();
           for (final line in fm.split('\n')) {
             final idx = line.indexOf(':');
             if (idx < 0) continue;
@@ -222,6 +269,7 @@ class SkillService {
         isAgent: resolvedIsAgent,
         supportingFiles:
             bundleDir == null ? const [] : scanBundleFiles(bundleDir),
+        pluginId: pluginId,
       );
     } catch (_) {
       return null;
@@ -242,6 +290,53 @@ class SkillService {
     return null;
   }
 
+  /// Canonical §4.4 lookup: resolves `plugin:<plugin-id>/skill:<name>`
+  /// (exact, case-sensitive — canonical ids are exact) to the loaded skill
+  /// contributed by that plugin. Visibility/session enforcement belongs to
+  /// the caller (the agent dispatch consults the contribution registry).
+  Skill? findCanonical(String canonicalId) {
+    for (final s in _skills) {
+      if (s.canonicalId == canonicalId) return s;
+    }
+    return null;
+  }
+
+  /// Unique-alias resolution (spec §4.4): a bare alias resolves ONLY when
+  /// exactly one loaded skill carries it. With several providers the
+  /// result is ambiguous — [SkillAliasResolution.options] lists the exact
+  /// provider ids and the caller must NOT execute/load any of them.
+  ///
+  /// An exact [Skill.providerId] (canonical §4.4 id or declaring path)
+  /// always resolves uniquely to that one skill. [hiddenPluginIds] drops
+  /// skills of plugins that are not visible to the querying session, so
+  /// session-scoping can turn a globally-ambiguous alias unique.
+  SkillAliasResolution resolveAlias(
+    String alias, {
+    Set<String> hiddenPluginIds = const {},
+  }) {
+    final query = alias.trim();
+    if (query.isEmpty) return const SkillAliasResolution([]);
+    List<Skill> visible() => [
+      for (final s in _skills)
+        if (s.pluginId == null || !hiddenPluginIds.contains(s.pluginId)) s,
+    ];
+    // Exact provider id (canonical plugin id or path) wins outright.
+    for (final s in visible()) {
+      if (s.providerId == query) {
+        return SkillAliasResolution([s]);
+      }
+    }
+    var bare = query;
+    if (bare.startsWith('/')) bare = bare.substring(1);
+    if (bare.isEmpty) return const SkillAliasResolution([]);
+    final lower = bare.toLowerCase();
+    final matches = [
+      for (final s in visible())
+        if (s.name.toLowerCase() == lower) s,
+    ]..sort((a, b) => a.providerId.compareTo(b.providerId));
+    return SkillAliasResolution(matches);
+  }
+
   /// Test seam: parse a single SKILL.md file through the real frontmatter
   /// parser without registering a root.
   Future<Skill?> parseForTest(File file, String path) => _parse(file, path);
@@ -260,6 +355,37 @@ class SkillService {
     }
     return buf.toString();
   }
+}
+
+/// Result of a bare-skill-alias resolution (spec §4.4: an alias exists only
+/// when unique; an ambiguous alias yields the exact provider options and
+/// executes nothing).
+class SkillAliasResolution {
+  /// Matching skills sorted by [Skill.providerId] (deterministic options).
+  final List<Skill> matches;
+
+  const SkillAliasResolution(this.matches);
+
+  bool get isAbsent => matches.isEmpty;
+  bool get isUnique => matches.length == 1;
+  bool get isAmbiguous => matches.length > 1;
+  Skill? get unique => isUnique ? matches.first : null;
+
+  /// The exact provider ids an ambiguous-alias chooser must list:
+  /// canonical §4.4 ids for plugin skills, declaring paths otherwise.
+  List<String> get options =>
+      List.unmodifiable(matches.map((m) => m.providerId));
+}
+
+/// Strips a leading `---`-fenced YAML frontmatter block and returns the
+/// trimmed body; returns [raw] unchanged when there is no fenced block.
+/// One shared rule for the skills scanner and the agent's canonical
+/// plugin-contribution loader, so both return the same body.
+String stripMarkdownFrontmatter(String raw) {
+  if (!raw.startsWith('---')) return raw;
+  final end = raw.indexOf('\n---', 3);
+  if (end <= 0) return raw;
+  return raw.substring(end + 4).trim();
 }
 
 /// Maximum directory depth a bundle walk will descend.

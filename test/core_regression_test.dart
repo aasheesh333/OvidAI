@@ -22,6 +22,7 @@ import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/mcp_config_parse.dart';
 import 'package:ovid_ai/core/plugin_adapters.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
+import 'package:ovid_ai/core/plugin_registry.dart';
 import 'package:ovid_ai/core/plugin_source_resolver.dart';
 import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/pty_service.dart';
@@ -14168,6 +14169,776 @@ cwd = 'tools'
         final okNpm = await full.resolve(NpmPluginSource(package: 'tiny-pkg'));
         expect(okNpm.fileCount, 1);
         okNpm.discard();
+      },
+    );
+  });
+
+  group('PluginCompat Task 4: namespaced contributions and session scope', () {
+    NormalizedPluginManifest p4Manifest({
+      required String id,
+      required String name,
+      required String rootPath,
+      List<PluginCommand> commands = const [],
+      List<PluginSkill> skills = const [],
+      List<PluginAgent> agents = const [],
+    }) => NormalizedPluginManifest(
+      id: id,
+      name: name,
+      version: '1.0.0',
+      format: PluginFormat.claudeCode,
+      rootPath: rootPath,
+      commands: commands,
+      skills: skills,
+      agents: agents,
+    );
+
+    PluginCommand p4Command(String pluginId, String name, String path) =>
+        PluginCommand(pluginId: pluginId, name: name, path: path);
+
+    test(
+      'PLUGIN4: colliding contributions coexist as canonical tools; bare alias is ambiguous with the exact list; unique alias resolves',
+      () {
+        final reg = PluginContributionRegistry();
+        reg.register(
+          NormalizedPluginManifest(
+            id: 'acme/review-kit',
+            name: 'Review Kit',
+            version: '1.0.0',
+            format: PluginFormat.claudeCode,
+            rootPath: '/tmp/acme-review-kit',
+            commands: const [
+              PluginCommand(
+                pluginId: 'acme/review-kit',
+                name: 'review',
+                path: 'commands/review.md',
+                frontmatter: {'description': 'Review a PR'},
+              ),
+            ],
+            skills: const [
+              PluginSkill(
+                pluginId: 'acme/review-kit',
+                name: 'deep-review',
+                path: 'skills/deep-review/SKILL.md',
+              ),
+            ],
+            agents: const [
+              PluginAgent(
+                pluginId: 'acme/review-kit',
+                name: 'reviewer',
+                path: 'agents/reviewer.md',
+              ),
+            ],
+            hooks: const [
+              PluginHook(
+                pluginId: 'acme/review-kit',
+                event: 'pre_tool',
+                ordinal: 0,
+                payload: 'scripts/gate.sh',
+              ),
+            ],
+            mcpServers: const [
+              PluginMcpServer(
+                pluginId: 'acme/review-kit',
+                name: 'fetch',
+                command: 'uvx',
+              ),
+            ],
+          ),
+          activation: PluginActivation.globalActive,
+        );
+        reg.register(
+          p4Manifest(
+            id: 'bold/reviewer',
+            name: 'Reviewer',
+            rootPath: '/tmp/bold-reviewer',
+            commands: [
+              p4Command('bold/reviewer', 'review', 'commands/review.md'),
+            ],
+          ),
+          activation: PluginActivation.globalActive,
+        );
+
+        // Both `review` contributions coexist as distinct canonical tools —
+        // only command/skill/agent kinds ride the tool roster.
+        final tools = reg.toolsForSession('sess-any');
+        expect(tools.map((c) => c.canonicalId).toList(), [
+          'plugin:acme/review-kit/command:review',
+          'plugin:acme/review-kit/skill:deep-review',
+          'plugin:acme/review-kit/agent:reviewer',
+          'plugin:bold/reviewer/command:review',
+        ]);
+        expect(tools[0].toolName, 'plugin_acme_review-kit_command_review');
+        expect(tools[3].toolName, 'plugin_bold_reviewer_command_review');
+        expect(tools[0].description, 'Review a PR');
+
+        // Hook and MCP contributions hold canonical ledger IDs (§4.4) but
+        // are not roster tools (their wiring is Task 8/9).
+        expect(
+          reg.contributionByCanonicalId(
+            'plugin:acme/review-kit/hook:pre_tool:0',
+          ),
+          isNotNull,
+        );
+        expect(
+          reg.contributionByCanonicalId('plugin:acme/review-kit/mcp:fetch'),
+          isNotNull,
+        );
+
+        // A colliding registration never overwrote the earlier contribution.
+        expect(
+          reg.contributionByCanonicalId(
+            'plugin:acme/review-kit/command:review',
+          ),
+          isNotNull,
+        );
+
+        // The bare alias `review` is ambiguous — the exact canonical list.
+        final ambiguous = reg.resolveAlias('review');
+        expect(ambiguous.isAmbiguous, isTrue);
+        expect(ambiguous.unique, isNull);
+        expect(ambiguous.options, [
+          'plugin:acme/review-kit/command:review',
+          'plugin:bold/reviewer/command:review',
+        ]);
+        // The composer `/review` alias form resolves identically.
+        expect(reg.resolveAlias('/review').options, ambiguous.options);
+
+        // Unique aliases resolve.
+        expect(reg.resolveAlias('deep-review').isUnique, isTrue);
+        expect(
+          reg.resolveAlias('deep-review').unique?.canonicalId,
+          'plugin:acme/review-kit/skill:deep-review',
+        );
+        expect(reg.resolveAlias('deploy').isAbsent, isTrue);
+        expect(reg.isRegistered('acme/review-kit'), isTrue);
+        expect(
+          reg.activationFor('acme/review-kit'),
+          PluginActivation.globalActive,
+        );
+      },
+    );
+
+    test(
+      'PLUGIN4: sessionActive is visible only in its immediateSessionId, globalActive everywhere, inert states nowhere, unregister removes roster entries',
+      () {
+        final reg = PluginContributionRegistry();
+        NormalizedPluginManifest kit(String id, String cmd) => p4Manifest(
+          id: id,
+          name: id,
+          rootPath: '/tmp/$id',
+          commands: [p4Command(id, cmd, 'commands/$cmd.md')],
+        );
+        reg.register(
+          kit('acme/session-kit', 'sess-cmd'),
+          activation: PluginActivation.sessionActive,
+          immediateSessionId: 'sess-a',
+        );
+        reg.register(
+          kit('acme/global-kit', 'glob-cmd'),
+          activation: PluginActivation.globalActive,
+        );
+        reg.register(
+          kit('acme/pending-kit', 'pend-cmd'),
+          activation: PluginActivation.pendingGlobal,
+        );
+        reg.register(
+          kit('acme/degraded-kit', 'deg-cmd'),
+          activation: PluginActivation.degraded,
+        );
+        reg.register(
+          kit('acme/failed-kit', 'fail-cmd'),
+          activation: PluginActivation.failed,
+        );
+        reg.register(
+          kit('acme/disabled-kit', 'off-cmd'),
+          activation: PluginActivation.disabled,
+        );
+
+        // sessionActive: only the immediate session sees it.
+        expect(
+          reg.isPluginActiveForSession('acme/session-kit', 'sess-a'),
+          isTrue,
+        );
+        expect(
+          reg.isPluginActiveForSession('acme/session-kit', 'sess-b'),
+          isFalse,
+        );
+        expect(reg.isPluginActiveForSession('acme/session-kit', ''), isFalse);
+
+        // globalActive + degraded mount everywhere (degraded is honestly
+        // reported elsewhere, never hidden); pending/failed/disabled never.
+        expect(reg.isPluginActiveForSession('acme/global-kit', 'sess-b'), isTrue);
+        expect(reg.isPluginActiveForSession('acme/global-kit', ''), isTrue);
+        expect(
+          reg.isPluginActiveForSession('acme/degraded-kit', 'sess-b'),
+          isTrue,
+        );
+        expect(
+          reg.isPluginActiveForSession('acme/pending-kit', 'sess-a'),
+          isFalse,
+        );
+        expect(
+          reg.isPluginActiveForSession('acme/failed-kit', 'sess-a'),
+          isFalse,
+        );
+        expect(
+          reg.isPluginActiveForSession('acme/disabled-kit', 'sess-a'),
+          isFalse,
+        );
+        expect(
+          reg.isPluginActiveForSession('acme/unknown-kit', 'sess-a'),
+          isFalse,
+        );
+
+        expect(
+          reg.toolsForSession('sess-a').map((c) => c.pluginId).toList(),
+          ['acme/session-kit', 'acme/global-kit', 'acme/degraded-kit'],
+        );
+        expect(
+          reg.toolsForSession('sess-b').map((c) => c.pluginId).toList(),
+          ['acme/global-kit', 'acme/degraded-kit'],
+        );
+
+        // Aliases respect session scope when queried with a session.
+        expect(
+          reg.resolveAlias('sess-cmd', sessionId: 'sess-a').isUnique,
+          isTrue,
+        );
+        expect(reg.resolveAlias('sess-cmd', sessionId: 'sess-b').isAbsent, isTrue);
+
+        // Promotion replaces in place — exactly one entry per plugin id.
+        reg.register(
+          kit('acme/session-kit', 'sess-cmd'),
+          activation: PluginActivation.globalActive,
+        );
+        expect(
+          reg.isPluginActiveForSession('acme/session-kit', 'sess-b'),
+          isTrue,
+        );
+        expect(
+          reg
+              .toolsForSession('sess-b')
+              .where((c) => c.pluginId == 'acme/session-kit')
+              .length,
+          1,
+        );
+
+        // unregisterPlugin removes roster entries, aliases, and activation.
+        expect(reg.unregisterPlugin('acme/session-kit'), isTrue);
+        expect(
+          reg.toolsForSession('sess-b').map((c) => c.pluginId),
+          isNot(contains('acme/session-kit')),
+        );
+        expect(reg.resolveAlias('sess-cmd').isAbsent, isTrue);
+        expect(
+          reg.isPluginActiveForSession('acme/session-kit', 'sess-b'),
+          isFalse,
+        );
+        expect(reg.unregisterPlugin('acme/session-kit'), isFalse);
+      },
+    );
+
+    test('PLUGIN4: SkillService canonical lookup and unique alias resolution', () async {
+      final rootA = Directory.systemTemp.createTempSync('ovid-plugin4-skillA');
+      final rootB = Directory.systemTemp.createTempSync('ovid-plugin4-skillB');
+      addTearDown(() {
+        rootA.deleteSync(recursive: true);
+        rootB.deleteSync(recursive: true);
+      });
+      File('${rootA.path}/review/SKILL.md')
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync(
+          '---\nname: review\ndescription: A review\n---\nReview body A.',
+        );
+      File('${rootA.path}/deploy/SKILL.md')
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync('---\nname: deploy\n---\nDeploy body A.');
+      File('${rootB.path}/review/SKILL.md')
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync('---\nname: review\n---\nReview body B.');
+
+      final svc = SkillService.forTest()
+        ..addPluginRoot(rootA.path, 'acme/one')
+        ..addPluginRoot(rootB.path, 'bold/two');
+      await svc.reload();
+
+      // Canonical §4.4 lookup hits exactly the owning plugin's skill.
+      final a = svc.findCanonical('plugin:acme/one/skill:review');
+      expect(a, isNotNull);
+      expect(a!.pluginId, 'acme/one');
+      expect(a.content, 'Review body A.');
+      expect(a.canonicalId, 'plugin:acme/one/skill:review');
+      expect(
+        svc.findCanonical('plugin:bold/two/skill:review')?.content,
+        'Review body B.',
+      );
+      expect(
+        svc.findCanonical('plugin:acme/one/skill:deploy')?.content,
+        'Deploy body A.',
+      );
+      expect(svc.findCanonical('plugin:wrong/skill:review'), isNull);
+
+      // A shared name is ambiguous with the exact canonical options; a
+      // unique name resolves.
+      final ambiguous = svc.resolveAlias('review');
+      expect(ambiguous.isAmbiguous, isTrue);
+      expect(ambiguous.unique, isNull);
+      expect(ambiguous.options, [
+        'plugin:acme/one/skill:review',
+        'plugin:bold/two/skill:review',
+      ]);
+      final unique = svc.resolveAlias('/deploy');
+      expect(unique.isUnique, isTrue);
+      expect(unique.unique?.canonicalId, 'plugin:acme/one/skill:deploy');
+
+      // Session-hidden plugin ids drop out: the alias becomes unique.
+      final scoped = svc.resolveAlias(
+        'review',
+        hiddenPluginIds: {'bold/two'},
+      );
+      expect(scoped.isUnique, isTrue);
+      expect(scoped.unique?.pluginId, 'acme/one');
+    });
+
+    test(
+      'PLUGIN4: roster lists canonical tools for the RUNNING session — not the foreground — and unregister removes them',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final reg = PluginContributionRegistry.I;
+        final root = Directory.systemTemp.createTempSync('ovid-plugin4-roster');
+        addTearDown(() => root.deleteSync(recursive: true));
+        File('${root.path}/commands/review.md')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync(
+            '---\ndescription: Global review\n---\nGLOBAL REVIEW BODY',
+          );
+
+        final s1 = ChatSession(
+          id: 'p4-s1',
+          title: 'S1',
+          model: 'm',
+          mode: 'auto',
+        );
+        final s2 = ChatSession(
+          id: 'p4-s2',
+          title: 'S2',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s1);
+        app.sessions.insert(0, s2);
+        app.activeSessionId = s2.id; // foreground is s2 …
+        AgentService.setRunSessionForTest(s1.id); // … but s1 is RUNNING.
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere(
+            (x) => x.id == 'p4-s1' || x.id == 'p4-s2',
+          );
+          reg.unregisterPlugin('acme/global-kit');
+          reg.unregisterPlugin('bold/session-kit');
+        });
+
+        reg.register(
+          p4Manifest(
+            id: 'acme/global-kit',
+            name: 'Global Kit',
+            rootPath: root.path,
+            commands: [
+              p4Command('acme/global-kit', 'review', 'commands/review.md'),
+            ],
+          ),
+          activation: PluginActivation.globalActive,
+        );
+        reg.register(
+          p4Manifest(
+            id: 'bold/session-kit',
+            name: 'Session Kit',
+            rootPath: root.path,
+            commands: [
+              p4Command('bold/session-kit', 'sess-only', 'commands/review.md'),
+            ],
+          ),
+          activation: PluginActivation.sessionActive,
+          immediateSessionId: 'p4-s1',
+        );
+
+        List<String> rosterNames() => agent
+            .toolsForTest()
+            .map((t) => ((t['function'] as Map)['name']).toString())
+            .toList();
+
+        expect(rosterNames(), contains('plugin_acme_global-kit_command_review'));
+        expect(
+          rosterNames(),
+          contains('plugin_bold_session-kit_command_sess-only'),
+        );
+
+        // The roster entry advertises its canonical §4.4 id.
+        final canonicalTool = agent.toolsForTest().firstWhere(
+          (t) =>
+              (t['function'] as Map)['name'] ==
+              'plugin_acme_global-kit_command_review',
+        );
+        expect(
+          (canonicalTool['function'] as Map)['description'].toString(),
+          contains('plugin:acme/global-kit/command:review'),
+        );
+
+        // Flip the RUNNING session: the s1-scoped plugin leaves the roster
+        // although the foreground session is untouched.
+        AgentService.setRunSessionForTest(s2.id);
+        expect(
+          rosterNames(),
+          isNot(contains('plugin_bold_session-kit_command_sess-only')),
+        );
+        expect(rosterNames(), contains('plugin_acme_global-kit_command_review'));
+        AgentService.setRunSessionForTest(s1.id);
+        expect(
+          rosterNames(),
+          contains('plugin_bold_session-kit_command_sess-only'),
+        );
+
+        // unregisterPlugin removes roster entries.
+        reg.unregisterPlugin('bold/session-kit');
+        expect(
+          rosterNames(),
+          isNot(contains('plugin_bold_session-kit_command_sess-only')),
+        );
+      },
+    );
+
+    test(
+      'PLUGIN4: a registered runtime manifest replaces the generic plugin_<name> collapse for its catalog row',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final reg = PluginContributionRegistry.I;
+        final cacheRoot = Directory.systemTemp.createTempSync(
+          'ovid_plugin4_cache_',
+        );
+        addTearDown(() => cacheRoot.deleteSync(recursive: true));
+        AppState.pluginCacheRootOverrideForTest = cacheRoot;
+        addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+
+        // A legacy-shaped mounted skill: without a registered manifest this
+        // row would collapse into the generic plugin_review_kit tool.
+        final skillDir = Directory(
+          '${cacheRoot.path}/plugin-content/acme_review-kit/skills/real-skill',
+        );
+        skillDir.createSync(recursive: true);
+        File(
+          '${skillDir.path}/SKILL.md',
+        ).writeAsStringSync('---\nname: real-skill\n---\nBody.');
+
+        final normRoot = Directory.systemTemp.createTempSync(
+          'ovid-plugin4-norm',
+        );
+        addTearDown(() => normRoot.deleteSync(recursive: true));
+        File('${normRoot.path}/commands/review.md')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync(
+            '---\ndescription: Canonical review\n---\nCANONICAL BODY',
+          );
+
+        final plugin = PluginItem(
+          name: 'Review Kit',
+          author: 'acme',
+          description: '',
+          version: '1.0.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          source: 'acme/review-kit',
+          runtimeId: 'acme/review-kit',
+        );
+        app.plugins.add(plugin);
+        addTearDown(() {
+          app.plugins.remove(plugin);
+          reg.unregisterPlugin('acme/review-kit');
+          SkillService.I.clearRoots();
+        });
+
+        reg.register(
+          p4Manifest(
+            id: 'acme/review-kit',
+            name: 'Review Kit',
+            rootPath: normRoot.path,
+            commands: [
+              p4Command('acme/review-kit', 'review', 'commands/review.md'),
+            ],
+          ),
+          activation: PluginActivation.globalActive,
+        );
+        await agent.refreshSkills();
+
+        final names = agent
+            .toolsForTest()
+            .map((t) => ((t['function'] as Map)['name']).toString())
+            .toList();
+        expect(names, contains('plugin_acme_review-kit_command_review'));
+        expect(names, isNot(contains('plugin_review_kit')));
+
+        // Honest install reporting follows the canonical registry too.
+        expect(agent.pluginToolNames(plugin), [
+          'plugin_acme_review-kit_command_review',
+        ]);
+      },
+    );
+
+    test(
+      'PLUGIN4: canonical dispatch executes; ambiguous alias lists canonical options without executing; scope is enforced by running session',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final reg = PluginContributionRegistry.I;
+        final root = Directory.systemTemp.createTempSync(
+          'ovid-plugin4-dispatch',
+        );
+        addTearDown(() => root.deleteSync(recursive: true));
+        void writeCmd(String file, String body) {
+          File('${root.path}/$file')
+            ..parent.createSync(recursive: true)
+            ..writeAsStringSync('---\ndescription: d\n---\n$body');
+        }
+        writeCmd('commands/review-a.md', 'REVIEW BODY A');
+        writeCmd('commands/review-b.md', 'REVIEW BODY B');
+        writeCmd('commands/deploy-a.md', 'DEPLOY BODY A');
+
+        final s1 = ChatSession(
+          id: 'p4-d1',
+          title: 'D1',
+          model: 'm',
+          mode: 'auto',
+        );
+        final s2 = ChatSession(
+          id: 'p4-d2',
+          title: 'D2',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s1);
+        app.sessions.insert(0, s2);
+        app.activeSessionId = s1.id;
+        AgentService.setRunSessionForTest(s1.id);
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere(
+            (x) => x.id == 'p4-d1' || x.id == 'p4-d2',
+          );
+          reg.unregisterPlugin('acme/kit-a');
+          reg.unregisterPlugin('bold/kit-b');
+          reg.unregisterPlugin('acme/sess-c');
+        });
+
+        reg.register(
+          p4Manifest(
+            id: 'acme/kit-a',
+            name: 'Kit A',
+            rootPath: root.path,
+            commands: [
+              p4Command('acme/kit-a', 'review', 'commands/review-a.md'),
+              p4Command('acme/kit-a', 'deploy', 'commands/deploy-a.md'),
+            ],
+          ),
+          activation: PluginActivation.globalActive,
+        );
+        reg.register(
+          p4Manifest(
+            id: 'bold/kit-b',
+            name: 'Kit B',
+            rootPath: root.path,
+            commands: [
+              p4Command('bold/kit-b', 'review', 'commands/review-b.md'),
+            ],
+          ),
+          activation: PluginActivation.globalActive,
+        );
+        reg.register(
+          p4Manifest(
+            id: 'acme/sess-c',
+            name: 'Sess C',
+            rootPath: root.path,
+            commands: [
+              p4Command('acme/sess-c', 'scoped', 'commands/deploy-a.md'),
+            ],
+          ),
+          activation: PluginActivation.sessionActive,
+          immediateSessionId: 'p4-d2',
+        );
+
+        // A canonical tool executes its OWN declaring file, frontmatter
+        // stripped, arguments appended.
+        final resA = await agent.dispatchForTest(
+          'plugin_acme_kit-a_command_review',
+          {'input': 'PR-42'},
+        );
+        expect(resA, contains('REVIEW BODY A'));
+        expect(resA, contains('Arguments: PR-42'));
+        expect(resA, isNot(contains('description: d')));
+        final resB = await agent.dispatchForTest(
+          'plugin_bold_kit-b_command_review',
+          {},
+        );
+        expect(resB, contains('REVIEW BODY B'));
+        expect(resB, isNot(contains('REVIEW BODY A')));
+
+        // The bare ambiguous alias returns the exact canonical option list
+        // and executes NOTHING.
+        final ambiguous = await agent.dispatchForTest('review', {});
+        expect(ambiguous, contains('plugin:acme/kit-a/command:review'));
+        expect(ambiguous, contains('plugin:bold/kit-b/command:review'));
+        expect(ambiguous, isNot(contains('REVIEW BODY A')));
+        expect(ambiguous, isNot(contains('REVIEW BODY B')));
+
+        // A unique bare alias resolves.
+        final deploy = await agent.dispatchForTest('deploy', {});
+        expect(deploy, contains('DEPLOY BODY A'));
+
+        // Session scope: the RUNNING session (p4-d1) cannot call a plugin
+        // that is sessionActive elsewhere — by canonical tool name or by a
+        // guessed canonical id (spec §7).
+        final scopedOut = await agent.dispatchForTest(
+          'plugin_acme_sess-c_command_scoped',
+          {},
+        );
+        expect(scopedOut, contains('plugin:acme/sess-c/command:scoped'));
+        expect(scopedOut, contains('not active'));
+        expect(scopedOut, isNot(contains('DEPLOY BODY A')));
+        final guessed = await agent.dispatchForTest(
+          'plugin:acme/sess-c/command:scoped',
+          {},
+        );
+        expect(guessed, contains('not active'));
+        expect(guessed, isNot(contains('DEPLOY BODY A')));
+
+        // Its own session runs it.
+        AgentService.setRunSessionForTest(s2.id);
+        final scopedIn = await agent.dispatchForTest(
+          'plugin_acme_sess-c_command_scoped',
+          {},
+        );
+        expect(scopedIn, contains('DEPLOY BODY A'));
+      },
+    );
+
+    test(
+      'PLUGIN4: skill tool lists ambiguous providers without loading, resolves unique names, and honors canonical plugin skill ids with session scope',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final reg = PluginContributionRegistry.I;
+        final cacheRoot = Directory.systemTemp.createTempSync(
+          'ovid_plugin4_skillcache_',
+        );
+        addTearDown(() => cacheRoot.deleteSync(recursive: true));
+        AppState.pluginCacheRootOverrideForTest = cacheRoot;
+        addTearDown(() => AppState.pluginCacheRootOverrideForTest = null);
+
+        final dirA = await app.pluginCacheDirFor('acme/one');
+        final dirB = await app.pluginCacheDirFor('bold/two');
+        File('${dirA.path}/skills/review/SKILL.md')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync('---\nname: review\n---\nREVIEW CACHE A');
+        File('${dirA.path}/skills/ship-it/SKILL.md')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync('---\nname: ship-it\n---\nSHIP CACHE A');
+        File('${dirB.path}/skills/review/SKILL.md')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync('---\nname: review\n---\nREVIEW CACHE B');
+
+        final pA = PluginItem(
+          name: 'one',
+          author: 'acme',
+          description: '',
+          version: '1.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          source: 'acme/one',
+        );
+        final pB = PluginItem(
+          name: 'two',
+          author: 'bold',
+          description: '',
+          version: '1.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          source: 'bold/two',
+        );
+        app.plugins.addAll([pA, pB]);
+        addTearDown(() {
+          app.plugins.remove(pA);
+          app.plugins.remove(pB);
+          reg.unregisterPlugin('acme/one');
+          reg.unregisterPlugin('bold/two');
+          SkillService.I.clearRoots();
+        });
+
+        // A bare ambiguous name lists the providers and loads NO content.
+        final ambiguous = await agent.dispatchForTest('skill', {
+          'name': 'review',
+        });
+        expect(ambiguous, contains('ambiguous'));
+        expect(ambiguous, contains('acme_one'));
+        expect(ambiguous, contains('bold_two'));
+        expect(ambiguous, isNot(contains('REVIEW CACHE A')));
+        expect(ambiguous, isNot(contains('REVIEW CACHE B')));
+
+        // A unique name loads its content.
+        final unique = await agent.dispatchForTest('skill', {'name': 'ship-it'});
+        expect(unique, contains('SHIP CACHE A'));
+
+        // A canonical §4.4 skill id loads exactly the owning plugin's skill.
+        reg.register(
+          NormalizedPluginManifest(
+            id: 'acme/one',
+            name: 'One',
+            version: '1.0',
+            format: PluginFormat.claudeCode,
+            rootPath: dirA.path,
+            skills: const [
+              PluginSkill(
+                pluginId: 'acme/one',
+                name: 'review',
+                path: 'skills/review/SKILL.md',
+              ),
+            ],
+          ),
+          activation: PluginActivation.globalActive,
+        );
+        final canonical = await agent.dispatchForTest('skill', {
+          'name': 'plugin:acme/one/skill:review',
+        });
+        expect(canonical, contains('REVIEW CACHE A'));
+        expect(canonical, isNot(contains('REVIEW CACHE B')));
+
+        // A plugin that is sessionActive elsewhere refuses its canonical
+        // skill id in this session — nothing loads.
+        reg.register(
+          NormalizedPluginManifest(
+            id: 'bold/two',
+            name: 'Two',
+            version: '1.0',
+            format: PluginFormat.claudeCode,
+            rootPath: dirB.path,
+            skills: const [
+              PluginSkill(
+                pluginId: 'bold/two',
+                name: 'review',
+                path: 'skills/review/SKILL.md',
+              ),
+            ],
+          ),
+          activation: PluginActivation.sessionActive,
+          immediateSessionId: 'p4-elsewhere',
+        );
+        final scoped = await agent.dispatchForTest('skill', {
+          'name': 'plugin:bold/two/skill:review',
+        });
+        expect(scoped, contains('not active'));
+        expect(scoped, isNot(contains('REVIEW CACHE B')));
       },
     );
   });

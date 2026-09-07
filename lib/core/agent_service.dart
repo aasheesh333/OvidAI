@@ -23,6 +23,7 @@ import 'session_ledger.dart';
 import 'session_search.dart';
 import 'presets.dart';
 import 'hook_service.dart';
+import 'plugin_registry.dart';
 import 'pty_service.dart';
 import 'skills.dart';
 import 'commands.dart';
@@ -2440,6 +2441,16 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       _ => null,
     };
     if (seed != null) return seed;
+    // A registered normalized manifest (spec §4.4) reports its canonical
+    // contribution tools — the generic collapse below is legacy-row only.
+    final runtimeId = p.runtimeId;
+    if (runtimeId != null) {
+      final canonical = PluginContributionRegistry.I
+          .toolContributionsForPlugin(runtimeId)
+          .map((c) => c.toolName)
+          .toList();
+      if (canonical.isNotEmpty) return canonical;
+    }
     if (_pluginHasMountedSkillsOrCommands(p)) {
       return ['plugin_${_normTool(p.name)}'];
     }
@@ -2475,9 +2486,41 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     };
   }
 
+  /// Roster schema for ONE canonical plugin contribution (spec §4.4): a
+  /// namespaced command/skill/agent tool that replaces the generic
+  /// `plugin_<name>` collapse for normalized manifests. The description
+  /// carries the canonical id so the model (and any chooser UI) can
+  /// address collisions exactly.
+  Map<String, dynamic> _canonicalPluginTool(PluginContribution c) {
+    return {
+      'type': 'function',
+      'function': {
+        'name': c.toolName,
+        'description':
+            'Plugin ${c.kindLabel} "${c.name}" from ${c.pluginId} '
+            '(canonical: ${c.canonicalId})'
+            '${c.description.isEmpty ? '' : ': ${c.description}'}',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'input': {
+              'type': 'string',
+              'description':
+                  'Optional input text, arguments, or prompt for this '
+                  '${c.kindLabel}',
+            },
+          },
+        },
+      },
+    };
+  }
+
   List<Map<String, dynamic>> get _tools {
     final tools = <Map<String, dynamic>>[];
     final app = AppState.I;
+    // Plugin contributions resolve by the RUNNING session id — never the
+    // foreground session (spec §7 session scoping at roster resolution).
+    final runSessionId = _runSession?.id ?? '';
     // Core agent tools — always available, EXCEPT the repo tools, which are
     // gated on the GitHub-sync toggle below. (They used to be added here and
     // again in the gate, so every request carried two identical
@@ -2499,10 +2542,34 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         if (proxy != null) tools.add(proxy);
       }
       if (!_seedPluginNames.contains(p.name) && p.category != 'MCP') {
-        if (_pluginHasMountedSkillsOrCommands(p)) {
+        // A registered normalized manifest routes through the canonical
+        // registry below (spec §4.4) — the generic `plugin_<name>`
+        // collapse remains ONLY for legacy catalog rows without one.
+        final runtimeId = p.runtimeId;
+        final canonicalActive =
+            runtimeId != null &&
+            PluginContributionRegistry.I.isPluginActiveForSession(
+              runtimeId,
+              runSessionId,
+            );
+        if (!canonicalActive && _pluginHasMountedSkillsOrCommands(p)) {
           tools.add(_pluginGenericTool(p));
         }
       }
+    }
+    // Canonical plugin contribution tools for the RUNNING session
+    // (spec §4.4/§7): namespaced command/skill/agent tools from
+    // registered normalized manifests. Session scope is enforced HERE —
+    // a pending or other-session plugin never enters this roster.
+    for (final c in PluginContributionRegistry.I.toolsForSession(
+      runSessionId,
+    )) {
+      final already = tools.any((t) {
+        final fn = t['function'];
+        return fn is Map && fn['name'] == c.toolName;
+      });
+      if (already) continue;
+      tools.add(_canonicalPluginTool(c));
     }
     // ── User settings gates (persisted toggles from Settings screen) ──
     // Memory toggle OFF → no memory_search tool; GitHub sync OFF → no
@@ -7050,6 +7117,24 @@ ${await _agentsMdBlock()}
         }
         return await McpService.I.callTool(match.name, action, mcpArgs);
       case String() when name.startsWith('plugin_'):
+        // Canonical namespaced contribution (spec §4.4) — resolved through
+        // the registry and enforced for the RUNNING session: another
+        // session cannot call a session-scoped plugin by guessing its
+        // canonical name (spec §7). Unregistered names fall through to
+        // the legacy generic plugin handling below.
+        final contribution = PluginContributionRegistry.I
+            .contributionByToolName(name);
+        if (contribution != null) {
+          final runSid = _runSession?.id ?? '';
+          if (!PluginContributionRegistry.I.isPluginActiveForSession(
+            contribution.pluginId,
+            runSid,
+          )) {
+            return _pluginScopeRefusal(contribution.canonicalId,
+                contribution.pluginId);
+          }
+          return await _runPluginContribution(contribution, args);
+        }
         final toolKey = name.substring(7);
         final plugin = AppState.I.plugins
             .where(
@@ -8128,6 +8213,41 @@ ${await _agentsMdBlock()}
         return await _dispatch('file_read', args);
       case 'repo_write':
         return await _dispatch('file_write', args);
+    }
+    // Explicit canonical §4.4 id call (e.g. from a chooser): session scope
+    // is enforced before anything executes — an out-of-scope plugin can
+    // never be called by guessing its canonical name (spec §7).
+    final canonical = PluginContributionRegistry.I.contributionByCanonicalId(
+      name,
+    );
+    if (canonical != null && canonical.isRosterTool) {
+      final runSid = _runSession?.id ?? '';
+      if (!PluginContributionRegistry.I.isPluginActiveForSession(
+        canonical.pluginId,
+        runSid,
+      )) {
+        return _pluginScopeRefusal(canonical.canonicalId, canonical.pluginId);
+      }
+      return await _runPluginContribution(canonical, args);
+    }
+    // Bare alias of registered plugin contributions (spec §4.4): aliases
+    // resolve only when unique for the RUNNING session; an ambiguous alias
+    // returns the exact canonical option list and executes NOTHING.
+    final alias = PluginContributionRegistry.I.resolveAlias(
+      name,
+      sessionId: _runSession?.id ?? '',
+    );
+    if (alias.isAmbiguous) {
+      final choices = alias.matches
+          .map((c) => '${c.canonicalId} (tool: ${c.toolName})')
+          .join(', ');
+      return '"$name" is ambiguous — ${alias.matches.length} plugin '
+          'contributions share this alias: $choices. Nothing was executed. '
+          'Call one canonical tool by its exact name.';
+    }
+    final aliasHit = alias.unique;
+    if (aliasHit != null) {
+      return await _runPluginContribution(aliasHit, args);
     }
     return 'unknown tool';
   }
@@ -10785,14 +10905,96 @@ ${await _agentsMdBlock()}
     final name = (args['name'] as String).trim();
     if (name.isEmpty) return 'skill name is required';
     await _refreshSkillRoots();
-    final skill = SkillService.I.find(name);
-    if (skill == null) {
-      final catalog = SkillService.I.catalogBlock();
-      return 'Skill "$name" not found.\n\n'
-          '${catalog.isEmpty ? 'No skills are installed yet.' : catalog}';
+    final registry = PluginContributionRegistry.I;
+    final runSid = _runSession?.id ?? '';
+    // Plugin ids registered but NOT visible to the RUNNING session are
+    // hidden from alias resolution, so a session-scoped plugin can neither
+    // be loaded nor make an alias ambiguous in another session (spec §7).
+    final hidden = {
+      for (final id in registry.registeredPluginIds)
+        if (!registry.isPluginActiveForSession(id, runSid)) id,
+    };
+    // Unique-alias resolution (spec §4.4): an exact provider id (canonical
+    // plugin skill id or path) or a globally-unique bare name loads; an
+    // ambiguous bare name lists the exact providers and loads NOTHING.
+    final res = SkillService.I.resolveAlias(name, hiddenPluginIds: hidden);
+    if (res.isAmbiguous) {
+      return 'Skill "$name" is ambiguous — ${res.matches.length} providers '
+          'share this alias: ${res.options.join(', ')}. Nothing was loaded. '
+          'Call again with one exact provider id from that list.';
     }
-    _emit('think', 'skill loaded: ${skill.name}');
-    return '<skill_content>\n${skill.content}\n</skill_content>';
+    final skill = res.unique;
+    if (skill != null) {
+      _emit('think', 'skill loaded: ${skill.name}');
+      return '<skill_content>\n${skill.content}\n</skill_content>';
+    }
+    // Canonical §4.4 id with no scanned skill yet — the registry ledger is
+    // the fallback source (session scope enforced before any read).
+    if (name.startsWith('plugin:')) {
+      final contribution = registry.contributionByCanonicalId(name);
+      if (contribution != null && contribution.isRosterTool) {
+        if (!registry.isPluginActiveForSession(
+          contribution.pluginId,
+          runSid,
+        )) {
+          return _pluginScopeRefusal(
+            contribution.canonicalId,
+            contribution.pluginId,
+          );
+        }
+        return await _runPluginContribution(contribution, args);
+      }
+    }
+    final catalog = SkillService.I.catalogBlock();
+    return 'Skill "$name" not found.\n\n'
+        '${catalog.isEmpty ? 'No skills are installed yet.' : catalog}';
+  }
+
+  /// Honest session-scope refusal (spec §7): names the contribution, its
+  /// activation state, and executes nothing.
+  String _pluginScopeRefusal(String canonicalId, String pluginId) =>
+      'Plugin contribution "$canonicalId" is not active for this session '
+      '(plugin $pluginId activation: '
+      '${PluginContributionRegistry.I.activationFor(pluginId)?.name ?? 'unregistered'}). '
+      'Nothing was executed.';
+
+  /// Executes ONE canonical plugin contribution (spec §4.4): the declared
+  /// markdown file's body is returned as agent instructions — commands,
+  /// skills, and agents are prompt bundles, never shell payloads. Path
+  /// containment is enforced lexically before any read; a missing/empty/
+  /// unreadable file is reported honestly instead of faking execution.
+  Future<String> _runPluginContribution(
+    PluginContribution c,
+    Map<String, dynamic> args,
+  ) async {
+    _emit('think', 'plugin ${c.pluginId} ${c.kindLabel}: ${c.name}');
+    if (c.path.isEmpty || c.rootPath.isEmpty) {
+      return 'Plugin contribution "${c.canonicalId}" declares no readable '
+          'file — nothing was executed.';
+    }
+    if (!c.pathContained) {
+      return 'Plugin contribution "${c.canonicalId}" is refused: declaring '
+          'path "${c.path}" escapes its plugin root. Nothing was executed.';
+    }
+    final file = File('${c.rootPath}/${c.path}');
+    if (!file.existsSync()) {
+      return 'Plugin contribution "${c.canonicalId}" cannot run: '
+          '"${c.path}" is missing under the plugin root.';
+    }
+    final String raw;
+    try {
+      raw = await file.readAsString();
+    } catch (e) {
+      return 'Plugin contribution "${c.canonicalId}" is unreadable: $e';
+    }
+    final body = stripMarkdownFrontmatter(raw).trim();
+    if (body.isEmpty) {
+      return 'Plugin contribution "${c.canonicalId}" is empty — nothing '
+          'was executed.';
+    }
+    final input = args['input'] ?? args['arguments'];
+    final inputStr = input != null ? '\n\nArguments: $input' : '';
+    return '<skill_content>\n$body\n</skill_content>$inputStr';
   }
 
   // ── Subagents ─────────────────────────────────────────────────────────
