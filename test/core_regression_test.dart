@@ -25,6 +25,7 @@ import 'package:ovid_ai/core/plugin_dependency_service.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/plugin_permissions.dart';
 import 'package:ovid_ai/core/plugin_registry.dart';
+import 'package:ovid_ai/core/plugin_runtime.dart';
 import 'package:ovid_ai/core/plugin_source_resolver.dart';
 import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/pty_service.dart';
@@ -16422,6 +16423,509 @@ cwd = 'tools'
         // clobbered to null — so the outer run's later processes stay
         // tagged and stoppable.
         expect(SandboxService.I.activeRunKeyForTest, outerKey);
+      },
+    );
+  });
+
+  group('PluginCompat Task 7: atomic runtime manager and one-restart activation', () {
+    Directory p7PluginDir({
+      required String name,
+      required String version,
+      Map<String, String> deps = const {},
+    }) {
+      final dir = Directory.systemTemp.createTempSync('p7-plugin-src-');
+      Directory('${dir.path}/.claude-plugin').createSync(recursive: true);
+      File('${dir.path}/.claude-plugin/plugin.json').writeAsStringSync(
+        jsonEncode({'name': name, 'author': 'p7org', 'version': version}),
+      );
+      Directory('${dir.path}/commands').createSync(recursive: true);
+      File('${dir.path}/commands/review.md').writeAsStringSync(
+        '---\ndescription: P7 command\n---\nP7 BODY $version',
+      );
+      if (deps.isNotEmpty) {
+        File('${dir.path}/package.json').writeAsStringSync(
+          jsonEncode({'dependencies': deps}),
+        );
+      }
+      return dir;
+    }
+
+    Future<void> p7Approve(Directory src) async {
+      final manifest = await const PluginAdapterRegistry().inspect(src);
+      await AppState.pluginPermissions.save(
+        PluginPermissionGrant(
+          pluginId: manifest.id,
+          manifestDigest: pluginManifestDigest(manifest),
+          capabilities: manifest.requestedCapabilities,
+          approvedAt: DateTime.now(),
+        ),
+      );
+    }
+
+    PluginItem p7Row(String name, {String? source}) => PluginItem(
+      name: name,
+      author: 'p7org',
+      description: 'P7 fixture',
+      version: '1.0.0',
+      category: 'Tool',
+      source: source,
+    );
+
+    Future<AppState> p7Boot() async {
+      final app = AppState.createForTest();
+      await app.initialize();
+      return app;
+    }
+
+    late Directory p7Staging;
+    late Directory p7Runtime;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      FlutterSecureStorage.setMockInitialValues({});
+      p7Staging = Directory.systemTemp.createTempSync('p7-staging-');
+      p7Runtime = Directory.systemTemp.createTempSync('p7-runtime-');
+      PluginRuntimeManager.stagingRootOverrideForTest = p7Staging;
+      PluginRuntimeManager.runtimeRootOverrideForTest = p7Runtime;
+    });
+
+    tearDown(() async {
+      AgentService.setRunSessionForTest('');
+      PluginRuntimeManager.stagingRootOverrideForTest = null;
+      PluginRuntimeManager.runtimeRootOverrideForTest = null;
+      PluginRuntimeManager.depsForTest = null;
+      for (final n in ['runtime-kit', 'screen-kit']) {
+        PluginContributionRegistry.I.unregisterPlugin('p7org/$n');
+      }
+      AppState.resetTestInstance();
+      try {
+        p7Staging.deleteSync(recursive: true);
+      } catch (_) {}
+      try {
+        p7Runtime.deleteSync(recursive: true);
+      } catch (_) {}
+      SharedPreferences.setMockInitialValues({});
+    });
+
+    test(
+      'PLUGIN7: agent install activates in the installing session only, with promote-on-next-boot and installed-path contributions',
+      () async {
+        final app = await p7Boot();
+        final src = p7PluginDir(name: 'Runtime Kit', version: '1.0.0');
+        final row = p7Row('P7 Runtime Kit');
+        app.plugins.add(row);
+
+        final s1 = ChatSession(
+          id: 'p7-s1',
+          title: 'S1',
+          model: 'm',
+          mode: 'auto',
+        );
+        final s2 = ChatSession(
+          id: 'p7-s2',
+          title: 'S2',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s1);
+        app.sessions.insert(0, s2);
+        AgentService.setRunSessionForTest(s1.id);
+
+        await p7Approve(src);
+
+        final reply = await AgentService.I.dispatchForTest(
+          'agent_install_plugin',
+          {'plugin_name': 'P7 Runtime Kit', 'local_path': src.path},
+        );
+        expect(reply, contains('installed'));
+        expect(reply, isNot(contains('failed')));
+
+        expect(row.installed, isTrue);
+        expect(row.runtimeId, 'p7org/runtime-kit');
+        expect(row.activation, PluginActivation.sessionActive);
+        expect(row.immediateSessionId, s1.id);
+        expect(row.promoteOnNextBoot, isTrue);
+        expect(row.manifestDigest, isNotNull);
+
+        final reg = PluginContributionRegistry.I;
+        expect(reg.isPluginActiveForSession('p7org/runtime-kit', s1.id), isTrue);
+        expect(reg.isPluginActiveForSession('p7org/runtime-kit', s2.id), isFalse);
+        expect(
+          PluginRuntimeManager.I.isActiveForSession('p7org/runtime-kit', s1.id),
+          isTrue,
+        );
+        expect(
+          PluginRuntimeManager.I.isActiveForSession('p7org/runtime-kit', s2.id),
+          isFalse,
+        );
+        expect(
+          reg.toolsForSession(s2.id).any((c) => c.pluginId == 'p7org/runtime-kit'),
+          isFalse,
+          reason: 'another session cannot resolve the pending plugin',
+        );
+        expect(
+          reg.toolsForSession(s1.id).any((c) => c.pluginId == 'p7org/runtime-kit'),
+          isTrue,
+        );
+
+        // Content committed under the runtime root; contributions resolve
+        // against the INSTALLED path, never the discarded staging dir.
+        final content =
+            '${p7Runtime.path}/plugin-runtime/p7org/runtime-kit/1.0.0/content';
+        expect(File('$content/commands/review.md').existsSync(), isTrue);
+        final contrib = reg.contributionByCanonicalId(
+          'plugin:p7org/runtime-kit/command:review',
+        );
+        expect(contrib, isNotNull);
+        expect(contrib!.rootPath, content);
+        expect(contrib.rootPath, isNot(contains('plugin-staging')));
+      },
+    );
+
+    test(
+      'PLUGIN7: first restart promotes agent and screen installs globally; second restart is idempotent',
+      () async {
+        final a = await p7Boot();
+
+        final agentSrc = p7PluginDir(name: 'Runtime Kit', version: '1.0.0');
+        final agentRow = p7Row('P7 Agent Kit', source: 'p7org/agent-kit');
+        a.plugins.add(agentRow);
+        await p7Approve(agentSrc);
+        final r1 = await a.installPlugin(
+          agentRow,
+          source: LocalFolderPluginSource(agentSrc.path),
+          origin: PluginInstallOrigin.agent,
+          sessionId: 'p7-boot-s1',
+        );
+        expect(r1!.status, PluginInstallStatus.ok);
+
+        final screenSrc = p7PluginDir(name: 'Screen Kit', version: '1.0.0');
+        final screenRow = p7Row('P7 Screen Kit', source: 'p7org/screen-kit');
+        a.plugins.add(screenRow);
+        await p7Approve(screenSrc);
+        final r2 = await a.installPlugin(
+          screenRow,
+          source: LocalFolderPluginSource(screenSrc.path),
+          origin: PluginInstallOrigin.pluginsScreen,
+        );
+        expect(r2!.status, PluginInstallStatus.ok);
+
+        final reg = PluginContributionRegistry.I;
+        // Pre-restart: the agent kit is live ONLY in its session; the
+        // screen kit is pending and unavailable everywhere.
+        expect(
+          reg.isPluginActiveForSession('p7org/runtime-kit', 'p7-boot-s1'),
+          isTrue,
+        );
+        expect(
+          reg.isPluginActiveForSession('p7org/runtime-kit', 'p7-other'),
+          isFalse,
+        );
+        expect(
+          reg.isPluginActiveForSession('p7org/screen-kit', 'p7-boot-s1'),
+          isFalse,
+        );
+        expect(screenRow.activation, PluginActivation.pendingGlobal);
+        expect(screenRow.promoteOnNextBoot, isTrue);
+
+        // Boot B — exactly one restart promotes both globally.
+        final b = await p7Boot();
+        expect(
+          reg.isPluginActiveForSession('p7org/runtime-kit', 'p7-anywhere'),
+          isTrue,
+        );
+        expect(
+          reg.isPluginActiveForSession('p7org/screen-kit', 'p7-anywhere'),
+          isTrue,
+        );
+        final rowB = b.plugins.firstWhere(
+          (p) => p.runtimeId == 'p7org/runtime-kit',
+        );
+        expect(rowB.activation, PluginActivation.globalActive);
+        expect(rowB.promoteOnNextBoot, isFalse);
+        expect(rowB.immediateSessionId, isNull);
+        final rec = await PluginRuntimeManager.I.recordFor('p7org/screen-kit');
+        expect(rec!.state, PluginActivation.globalActive);
+        expect(rec.promoteOnNextBoot, isFalse);
+        expect(rec.immediateSessionId, isNull);
+
+        // Boot C — idempotent: still global, flags stay cleared, exactly
+        // one registration of each contribution.
+        await p7Boot();
+        expect(
+          reg.isPluginActiveForSession('p7org/runtime-kit', 'p7-anywhere'),
+          isTrue,
+        );
+        expect(
+          reg.isPluginActiveForSession('p7org/screen-kit', 'p7-anywhere'),
+          isTrue,
+        );
+        final rec2 = await PluginRuntimeManager.I.recordFor('p7org/screen-kit');
+        expect(rec2!.promoteOnNextBoot, isFalse);
+        expect(
+          reg
+              .toolsForSession('p7-anywhere')
+              .where((t) => t.pluginId == 'p7org/screen-kit')
+              .length,
+          1,
+        );
+      },
+    );
+
+    test(
+      'PLUGIN7: failed required dependency rolls back files, registry, MCP, and secrets with no partial state',
+      () async {
+        final app = await p7Boot();
+        final src = p7PluginDir(
+          name: 'Runtime Kit',
+          version: '1.0.0',
+          deps: {'broken-required': '^1.0.0'},
+        );
+        final runner = RecordingRunner()
+          ..queue((1, 'EPUBLISHCONFLICT broken-required'));
+        PluginRuntimeManager.depsForTest = PluginDependencyService(
+          runtimeRootOverride: p7Runtime,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final row = p7Row('P7 Runtime Kit');
+        app.plugins.add(row);
+        await p7Approve(src);
+
+        final result = await app.installPlugin(
+          row,
+          source: LocalFolderPluginSource(src.path),
+          origin: PluginInstallOrigin.pluginsScreen,
+        );
+
+        expect(result!.status, PluginInstallStatus.failed);
+        expect(result.error, contains('broken-required'));
+
+        // Files: staging discarded, no runtime dirs survive.
+        final staging = Directory('${p7Staging.path}/plugin-staging');
+        expect(
+          staging.existsSync() && staging.listSync().isNotEmpty,
+          isFalse,
+          reason: 'staging must be discarded on failure',
+        );
+        expect(
+          Directory(
+            '${p7Runtime.path}/plugin-runtime/p7org/runtime-kit/1.0.0',
+          ).existsSync(),
+          isFalse,
+        );
+
+        // Registry: nothing registered.
+        expect(
+          PluginContributionRegistry.I.isRegistered('p7org/runtime-kit'),
+          isFalse,
+        );
+
+        // MCP: no owned servers appeared.
+        expect(
+          app.mcpServers.any((s) => s.source.startsWith('plugin:p7org/')),
+          isFalse,
+        );
+
+        // Secrets: nothing written to secure storage for this plugin.
+        final secure = await const FlutterSecureStorage().readAll();
+        expect(
+          secure.keys.where((k) => k.contains('p7org/runtime-kit')),
+          isEmpty,
+        );
+
+        // No partial persisted state; the row stayed uninstalled; the
+        // pre-existing approval itself survives (rollback never revokes
+        // an approval — that is uninstall's job).
+        final prefs = await SharedPreferences.getInstance();
+        final activationRaw = prefs.getString('ovid_plugin_activation_v1');
+        expect(
+          activationRaw == null || !activationRaw.contains('p7org/runtime-kit'),
+          isTrue,
+        );
+        expect(row.installed, isFalse);
+        expect(row.runtimeId, isNull);
+        expect(
+          prefs.getString('ovid_plugin_grants_v1'),
+          contains('p7org/runtime-kit'),
+        );
+      },
+    );
+
+    test(
+      'PLUGIN7: upgrade failure retains the prior version runtime and activation',
+      () async {
+        final app = await p7Boot();
+        final v1 = p7PluginDir(
+          name: 'Runtime Kit',
+          version: '1.0.0',
+          deps: {'left-pad': '^1.0.0'},
+        );
+        final runner = RecordingRunner()
+          ..queue((0, 'added 1 package'))
+          ..queue((0, '{"dependencies":{"left-pad":{"version":"1.3.11"}}}'));
+        PluginRuntimeManager.depsForTest = PluginDependencyService(
+          runtimeRootOverride: p7Runtime,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final row = p7Row('P7 Runtime Kit');
+        app.plugins.add(row);
+        await p7Approve(v1);
+        final ok = await app.installPlugin(
+          row,
+          source: LocalFolderPluginSource(v1.path),
+          origin: PluginInstallOrigin.pluginsScreen,
+        );
+        expect(ok!.status, PluginInstallStatus.ok);
+
+        // v2 upgrade whose required dependency fails.
+        final v2 = p7PluginDir(
+          name: 'Runtime Kit',
+          version: '2.0.0',
+          deps: {'also-broken': '^2.0.0'},
+        );
+        runner.queue((1, 'EPUBLISHCONFLICT also-broken'));
+        await p7Approve(v2);
+        final bad = await app.installPlugin(
+          row,
+          source: LocalFolderPluginSource(v2.path),
+          origin: PluginInstallOrigin.pluginsScreen,
+        );
+        expect(bad!.status, PluginInstallStatus.failed);
+
+        // Prior version intact: content, dependency sandbox, registration,
+        // activation record, and row digest.
+        final reg = PluginContributionRegistry.I;
+        expect(
+          File(
+            '${p7Runtime.path}/plugin-runtime/p7org/runtime-kit/1.0.0'
+            '/content/commands/review.md',
+          ).existsSync(),
+          isTrue,
+        );
+        expect(
+          Directory(
+            '${p7Runtime.path}/plugin-runtime/p7org/runtime-kit/1.0.0/node',
+          ).existsSync(),
+          isTrue,
+        );
+        expect(
+          Directory(
+            '${p7Runtime.path}/plugin-runtime/p7org/runtime-kit/2.0.0',
+          ).existsSync(),
+          isFalse,
+        );
+        expect(reg.isRegistered('p7org/runtime-kit'), isTrue);
+        expect(reg.activationFor('p7org/runtime-kit'),
+            PluginActivation.pendingGlobal);
+        final rec = await PluginRuntimeManager.I.recordFor('p7org/runtime-kit');
+        expect(rec!.state, PluginActivation.pendingGlobal);
+        expect(rec.promoteOnNextBoot, isTrue);
+        expect(row.manifestDigest, pluginManifestDigest(ok.manifest!));
+        expect(
+          reg.manifestFor('p7org/runtime-kit')!.rootPath,
+          '${p7Runtime.path}/plugin-runtime/p7org/runtime-kit/1.0.0/content',
+        );
+      },
+    );
+
+    test(
+      'PLUGIN7: agent install without capability approval refuses honestly and auto-approves nothing',
+      () async {
+        final app = await p7Boot();
+        final src = p7PluginDir(name: 'Runtime Kit', version: '1.0.0');
+        final row = p7Row('P7 Runtime Kit');
+        app.plugins.add(row);
+        final s1 = ChatSession(
+          id: 'p7-s1',
+          title: 'S1',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s1);
+        AgentService.setRunSessionForTest(s1.id);
+        // NOTE: no grant saved — the agent path must not auto-approve.
+
+        final reply = await AgentService.I.dispatchForTest(
+          'agent_install_plugin',
+          {'plugin_name': 'P7 Runtime Kit', 'local_path': src.path},
+        );
+
+        expect(reply, contains('approv'));
+        expect(reply, isNot(contains('installed ✓')));
+        expect(row.installed, isFalse);
+        expect(
+          PluginContributionRegistry.I.isRegistered('p7org/runtime-kit'),
+          isFalse,
+        );
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getString('ovid_plugin_grants_v1'), isNull);
+        expect(
+          Directory('${p7Runtime.path}/plugin-runtime').existsSync(),
+          isFalse,
+        );
+        final staging = Directory('${p7Staging.path}/plugin-staging');
+        expect(staging.existsSync() && staging.listSync().isNotEmpty, isFalse);
+      },
+    );
+
+    test(
+      'PLUGIN7: disable unregisters, enable reactivates, uninstall removes runtime, grant, and record',
+      () async {
+        final app = await p7Boot();
+        final src = p7PluginDir(name: 'Runtime Kit', version: '1.0.0');
+        final row = p7Row('P7 Runtime Kit', source: 'p7org/runtime-kit');
+        app.plugins.add(row);
+        await p7Approve(src);
+        final ok = await app.installPlugin(
+          row,
+          source: LocalFolderPluginSource(src.path),
+          origin: PluginInstallOrigin.pluginsScreen,
+        );
+        expect(ok!.status, PluginInstallStatus.ok);
+
+        // One restart promotes it globally.
+        final b = await p7Boot();
+        final reg = PluginContributionRegistry.I;
+        final rowB = b.plugins.firstWhere(
+          (p) => p.runtimeId == 'p7org/runtime-kit',
+        );
+        expect(
+          reg.isPluginActiveForSession('p7org/runtime-kit', 'any'),
+          isTrue,
+        );
+
+        await b.disablePlugin(rowB);
+        expect(reg.isRegistered('p7org/runtime-kit'), isFalse);
+        expect(rowB.activation, PluginActivation.disabled);
+
+        await b.enablePlugin(rowB);
+        expect(
+          reg.isPluginActiveForSession('p7org/runtime-kit', 'any'),
+          isTrue,
+        );
+        expect(rowB.activation, PluginActivation.globalActive);
+
+        await b.uninstallPlugin(rowB);
+        expect(reg.isRegistered('p7org/runtime-kit'), isFalse);
+        expect(
+          Directory(
+            '${p7Runtime.path}/plugin-runtime/p7org/runtime-kit/1.0.0',
+          ).existsSync(),
+          isFalse,
+        );
+        expect(
+          await PluginRuntimeManager.I.recordFor('p7org/runtime-kit'),
+          isNull,
+        );
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.getString('ovid_plugin_grants_v1'),
+          isNot(contains('p7org/runtime-kit')),
+        );
+        expect(rowB.runtimeId, isNull);
+        expect(rowB.installed, isFalse);
       },
     );
   });

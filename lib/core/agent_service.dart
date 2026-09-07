@@ -23,7 +23,10 @@ import 'session_ledger.dart';
 import 'session_search.dart';
 import 'presets.dart';
 import 'hook_service.dart';
+import 'plugin_manifest.dart';
 import 'plugin_registry.dart';
+import 'plugin_runtime.dart';
+import 'plugin_source_resolver.dart';
 import 'pty_service.dart';
 import 'skills.dart';
 import 'commands.dart';
@@ -4176,6 +4179,12 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
           'type': 'object',
           'properties': {
             'plugin_name': {'type': 'string'},
+            'local_path': {
+              'type': 'string',
+              'description':
+                  'Optional: install from a local plugin folder instead of '
+                  'the catalog row\'s GitHub source.',
+            },
           },
           'required': ['plugin_name'],
         },
@@ -7194,6 +7203,43 @@ ${await _agentsMdBlock()}
               .where((p) => p.name.toLowerCase() == pluginName.toLowerCase())
               .firstOrNull;
           if (match == null) return 'Plugin not found: $pluginName';
+
+          // Task 7 (spec §7): production installs route through the
+          // atomic runtime manager with the agent origin + the RUNNING
+          // session — the plugin is immediately usable ONLY in this
+          // session and promotes globally after exactly one restart.
+          final localPath = args['local_path'] as String?;
+          final runtimeResult = await app.installPlugin(
+            match,
+            source: localPath != null && localPath.isNotEmpty
+                ? LocalFolderPluginSource(localPath)
+                : null,
+            origin: PluginInstallOrigin.agent,
+            sessionId: _runSession?.id,
+          );
+          if (runtimeResult != null) {
+            if (runtimeResult.status == PluginInstallStatus.failed) {
+              return 'install failed: '
+                  '${runtimeResult.error ?? 'unknown error'}';
+            }
+            final sid = _runSession?.id ?? '';
+            final reg = PluginContributionRegistry.I;
+            final visible = sid.isNotEmpty &&
+                reg.isPluginActiveForSession(match.runtimeId ?? '', sid);
+            final scopeNote = visible
+                ? 'active in this session; activates globally after one '
+                      'restart'
+                : 'installed; activates globally after one restart';
+            final parts = <String>[
+              scopeNote,
+              if (runtimeResult.degradedNames.isNotEmpty)
+                'optional dependencies unavailable: '
+                    '${runtimeResult.degradedNames.join(', ')}',
+            ];
+            return 'Plugin "$pluginName" installed ✓ '
+                '(id ${match.runtimeId}) — ${parts.join(' · ')}.';
+          }
+
           match.installed = true;
           match.enabled = true;
           app.persistPluginState();

@@ -11,6 +11,7 @@ import 'mcp_service.dart';
 import 'plugin_manifest.dart';
 import 'plugin_permissions.dart';
 import 'plugin_registry.dart';
+import 'plugin_runtime.dart';
 import 'plugin_source_resolver.dart';
 import 'theme.dart';
 import 'sandbox_service.dart';
@@ -899,9 +900,78 @@ class AppState extends ChangeNotifier {
   /// without a circular import.
   static Future<void> Function()? onRefreshSkills;
 
+  /// Task 7 (spec §4.1/§5.2/§7): the production install transaction —
+  /// resolve → inspect → grant → dependencies → probe → persist →
+  /// registry activation → atomic rename. On success the runtime
+  /// identity/activation fields are applied to [plugin] and persisted.
+  ///
+  /// Returns null when no typed [PluginSource] is derivable (source-less
+  /// legacy catalog rows keep the flag-flip path); a failed result (or a
+  /// [PluginRuntimeException]) means the transaction rolled back and
+  /// nothing changed.
+  Future<PluginInstallResult?> installPlugin(
+    PluginItem plugin, {
+    PluginSource? source,
+    required PluginInstallOrigin origin,
+    String? sessionId,
+    void Function(String line)? onProgress,
+  }) async {
+    final src = source ??
+        (plugin.source != null
+            ? githubPluginSourceFromSourceString(plugin.source!)
+            : null);
+    if (src == null) return null;
+    PluginInspection inspection;
+    try {
+      inspection = await PluginRuntimeManager.I.inspect(src);
+    } catch (e) {
+      return PluginInstallResult.failed(error: 'source resolution failed: $e');
+    }
+    final grant = await pluginPermissions.effectiveGrant(
+      pluginId: inspection.manifest.id,
+      manifest: inspection.manifest,
+    );
+    final result = await PluginRuntimeManager.I.install(
+      inspection,
+      grant: grant,
+      origin: origin,
+      sessionId: sessionId,
+      onProgress: onProgress,
+    );
+    if (result.status != PluginInstallStatus.failed) {
+      plugin.installed = true;
+      plugin.enabled = true;
+      plugin.runtimeId = result.manifest!.id;
+      plugin.activation = result.record!.state;
+      plugin.immediateSessionId = result.record!.immediateSessionId;
+      plugin.promoteOnNextBoot = result.record!.promoteOnNextBoot;
+      plugin.manifestDigest = result.manifestDigest;
+      plugin.compatibilityWarnings = [
+        for (final c in result.manifest!.compatibility)
+          if (c.severity == CompatibilitySeverity.optional) c,
+      ];
+      await persistPluginState();
+      await persistMergedMarketplaceCatalog();
+      try {
+        await onRefreshSkills?.call();
+      } catch (_) {}
+      refresh();
+    }
+    return result;
+  }
+
   Future<void> uninstallPlugin(PluginItem plugin) async {
+    final runtimeId = plugin.runtimeId;
     plugin.installed = false;
     plugin.enabled = false;
+    if (runtimeId != null) {
+      // Task 7: runtime-managed rows tear down the atomic install
+      // (registry, committed content, dependency sandbox, activation
+      // record, grant + owned secrets) before the legacy surfaces below.
+      try {
+        await PluginRuntimeManager.I.uninstall(runtimeId);
+      } catch (_) {}
+    }
     await persistPluginState();
 
     if (plugin.source != null) {
@@ -910,6 +980,10 @@ class AppState extends ChangeNotifier {
 
     final owned = mcpServers.where((s) {
       if (s.source == 'plugin:${plugin.name}') return true;
+      if (plugin.runtimeId != null &&
+          s.source == 'plugin:${plugin.runtimeId}') {
+        return true;
+      }
       if (plugin.source != null &&
           (s.source == 'plugin:${plugin.source}' ||
            s.source == 'plugin:${plugin.source!.replaceAll('/', '_')}')) {
@@ -940,10 +1014,21 @@ class AppState extends ChangeNotifier {
 
   Future<void> disablePlugin(PluginItem plugin) async {
     plugin.enabled = false;
+    if (plugin.runtimeId != null) {
+      // Task 7: runtime-managed rows unmount their registry
+      // contributions and persist the disabled activation.
+      try {
+        await PluginRuntimeManager.I.disable(plugin.runtimeId!);
+      } catch (_) {}
+    }
     await persistPluginState();
 
     final owned = mcpServers.where((s) {
       if (s.source == 'plugin:${plugin.name}') return true;
+      if (plugin.runtimeId != null &&
+          s.source == 'plugin:${plugin.runtimeId}') {
+        return true;
+      }
       if (plugin.source != null &&
           (s.source == 'plugin:${plugin.source}' ||
            s.source == 'plugin:${plugin.source!.replaceAll('/', '_')}')) {
@@ -972,6 +1057,13 @@ class AppState extends ChangeNotifier {
 
   Future<void> enablePlugin(PluginItem plugin) async {
     plugin.enabled = true;
+    if (plugin.runtimeId != null) {
+      // Task 7: runtime-managed rows re-register their contributions
+      // (applying any promotion that came due while disabled).
+      try {
+        await PluginRuntimeManager.I.enable(plugin.runtimeId!);
+      } catch (_) {}
+    }
     await persistPluginState();
     try {
       await onRefreshSkills?.call();
@@ -1037,6 +1129,12 @@ class AppState extends ChangeNotifier {
     await _loadPluginState();
     await syncMarketplaceCatalogs();
     await _applyPluginState();
+    // Task 7 (spec §7): exactly one boot epoch per initialize, then
+    // promote session-scoped/pending installs into global activation.
+    // Rows must be restored from catalog + plugin-state first.
+    try {
+      await PluginRuntimeManager.I.activateForBoot();
+    } catch (_) {}
     // Check if the sandbox was installed on a previous launch so the
     // user is never asked to re-install the ~200 MB rootfs.
     if (await SandboxService.I.checkExisting()) {
@@ -3227,6 +3325,20 @@ class AppState extends ChangeNotifier {
           // a restart (the seed list has no source; only a live
           // marketplace re-sync would have recreated it in memory).
           if (p.source != null) 'source': p.source,
+          // Task 7 (spec §7): runtime fields survive restarts on the
+          // same row — the activation records themselves live under
+          // their own prefs key (PluginRuntimeManager).
+          if (p.runtimeId != null) 'runtimeId': p.runtimeId,
+          if (p.activation != PluginActivation.disabled)
+            'activation': p.activation.name,
+          if (p.immediateSessionId != null)
+            'immediateSessionId': p.immediateSessionId,
+          if (p.promoteOnNextBoot) 'promoteOnNextBoot': p.promoteOnNextBoot,
+          if (p.manifestDigest != null) 'manifestDigest': p.manifestDigest,
+          if (p.compatibilityWarnings.isNotEmpty)
+            'compatibilityWarnings': p.compatibilityWarnings
+                .map((i) => i.toJson())
+                .toList(),
         });
       }
       await prefs.setString(_kPluginState, jsonEncode(state));
@@ -3258,6 +3370,33 @@ class AppState extends ChangeNotifier {
           if (s != null && s.isNotEmpty) {
             p.source = s;
           }
+        }
+        // Task 7: runtime fields restore alongside the flags (tolerant —
+        // legacy rows and corrupt values keep honest defaults).
+        final runtimeId = ps['runtimeId'] as String?;
+        if (runtimeId != null && runtimeId.isNotEmpty) {
+          p.runtimeId = runtimeId;
+        }
+        final activation = pluginActivationFromName(ps['activation']);
+        if (activation != null) {
+          p.activation = activation;
+        }
+        final immediate = ps['immediateSessionId'] as String?;
+        if (immediate != null && immediate.isNotEmpty) {
+          p.immediateSessionId = immediate;
+        }
+        p.promoteOnNextBoot = ps['promoteOnNextBoot'] as bool? ?? false;
+        final digest = ps['manifestDigest'] as String?;
+        if (digest != null && digest.isNotEmpty) {
+          p.manifestDigest = digest;
+        }
+        final warnings = ps['compatibilityWarnings'];
+        if (warnings is List) {
+          p.compatibilityWarnings = [
+            for (final w in warnings)
+              if (w is Map)
+                CompatibilityIssue.fromJson(w.cast<String, dynamic>()),
+          ];
         }
       }
       refresh();
