@@ -12628,6 +12628,8 @@ Find security defects.''',
                 },
               ],
               'on_turn_start': 'scripts/turn.sh',
+              'on_session_end': 'scripts/end.sh',
+              'on_post_request': 'scripts/post.sh',
               'FutureEvent': 'scripts/future.sh',
             },
             'futureHooksTopLevel': 'retained',
@@ -12652,6 +12654,10 @@ Find security defects.''',
                 'type': 'sse',
                 'url': 'https://acme.test/events',
               },
+            },
+            'futureMcpWrapper': {
+              'enabled': true,
+              'env': {'WRAPPER_SECRET': 'wrapper-secret'},
             },
           }),
         );
@@ -12723,6 +12729,11 @@ Find security defects.''',
         });
         expect(manifest.environmentReadNames, {'ACME_TOKEN'});
         expect(manifest.unknownFields['futureTopLevel'], {'enabled': true});
+        expect(manifest.unknownFields['mcp.futureMcpWrapper'], {
+          'enabled': true,
+        });
+        expect(jsonEncode(manifest.unknownFields),
+            isNot(contains('wrapper-secret')));
         expect(manifest.unknownFields['hooks.futureHooksTopLevel'], 'retained');
         expect(
           manifest.compatibility.any(
@@ -12739,6 +12750,14 @@ Find security defects.''',
                 issue.fields.contains('hooks.FutureEvent'),
           ),
           isTrue,
+        );
+        expect(
+          manifest.compatibility.where(
+            (issue) =>
+                issue.fields.contains('hooks.on_session_end') ||
+                issue.fields.contains('hooks.on_post_request'),
+          ),
+          hasLength(2),
         );
       },
     );
@@ -12849,6 +12868,9 @@ WORKSPACE_PROFILE = "secret-profile"
                 'env': {'TOKEN': 'secret'},
               },
             },
+            'futureWrapper': {
+              'env': {'WRAPPER_TOKEN': 'wrapper-secret'},
+            },
           }),
           sourceId: 'Paste / Example',
         );
@@ -12870,11 +12892,31 @@ WORKSPACE_PROFILE = "secret-profile"
           }),
           sourceId: 'Paste / Example',
         );
+        final rawCommand = adapter.inspectConfig(
+          'npx -y "@acme/raw-mcp" --workspace "two words"',
+          sourceId: 'Paste / Example',
+        );
+        final rawUrl = adapter.inspectConfig(
+          'https://example.test/raw-mcp',
+          sourceId: 'Paste / Example',
+        );
 
         expect(mapped.id, 'mcp/paste-example');
         expect(mapped.mcpServers.single.envNames, ['TOKEN']);
+        expect(mapped.unknownFields['mcp.futureWrapper'], <String, dynamic>{});
+        expect(jsonEncode(mapped.unknownFields),
+            isNot(contains('wrapper-secret')));
         expect(listed.mcpServers.single.transport, 'http');
         expect(direct.mcpServers.single.command, 'uvx');
+        expect(rawCommand.mcpServers.single.command, 'npx');
+        expect(rawCommand.mcpServers.single.args, [
+          '-y',
+          '@acme/raw-mcp',
+          '--workspace',
+          'two words',
+        ]);
+        expect(rawUrl.mcpServers.single.transport, 'http');
+        expect(rawUrl.mcpServers.single.url, 'https://example.test/raw-mcp');
         expect(sse.mcpServers, isEmpty);
         expect(sse.hasRequiredIssues, isTrue);
         expect(sse.compatibility.single.message, contains('Streamable HTTP'));
@@ -12915,6 +12957,123 @@ Nested skill.''');
       expect(manifest.format, PluginFormat.claudeCode);
       expect(service.skills.map((skill) => skill.name), ['Nested']);
       expect(service.skills.single.supportingFiles, ['asset.txt']);
+    });
+
+    test('PLUGIN2: adapter output freezes nested manifest collections', () async {
+      final root = Directory.systemTemp.createTempSync('ovid-plugin2-frozen');
+      addTearDown(() => root.deleteSync(recursive: true));
+      void write(String path, String content) {
+        final file = File('${root.path}/$path');
+        file.parent.createSync(recursive: true);
+        file.writeAsStringSync(content);
+      }
+
+      write(
+        '.claude-plugin/plugin.json',
+        '{"name":"Frozen","author":"Acme","future":true}',
+      );
+      write(
+        'commands/run.md',
+        '''---
+name: Run
+x-command: retained
+---
+Run.''',
+      );
+      write(
+        'skills/one/SKILL.md',
+        '''---
+name: One
+---
+Skill.''',
+      );
+      write(
+        'agents/one.md',
+        '''---
+name: Agent
+---
+Agent.''',
+      );
+      write(
+        'hooks/hooks.json',
+        jsonEncode({
+          'hooks': {
+            'PreToolUse': 'scripts/check.sh',
+            'FutureEvent': 'echo future',
+          },
+        }),
+      );
+      write(
+        '.mcp.json',
+        jsonEncode({
+          'mcpServers': {
+            'server': {'command': 'npx', 'args': ['server']},
+          },
+        }),
+      );
+      write('package.json', '{"dependencies":{"pkg":"^1.0.0"}}');
+
+      final manifest = await ClaudePluginAdapter().inspect(root);
+
+      expect(() => manifest.commands.add(manifest.commands.single),
+          throwsUnsupportedError);
+      expect(() => manifest.commands.single.frontmatter['x'] = 'changed',
+          throwsUnsupportedError);
+      expect(() => manifest.skills.add(manifest.skills.single),
+          throwsUnsupportedError);
+      expect(() => manifest.skills.single.supportingFiles.add('x'),
+          throwsUnsupportedError);
+      expect(() => manifest.agents.add(manifest.agents.single),
+          throwsUnsupportedError);
+      expect(() => manifest.hooks.add(manifest.hooks.single),
+          throwsUnsupportedError);
+      expect(() => manifest.dependencies.packages.add(
+          manifest.dependencies.packages.single), throwsUnsupportedError);
+      expect(() => manifest.mcpServers.add(manifest.mcpServers.single),
+          throwsUnsupportedError);
+      expect(() => manifest.mcpServers.single.args.add('x'),
+          throwsUnsupportedError);
+      expect(() => manifest.requestedCapabilities.add(PluginCapability.deviceControl),
+          throwsUnsupportedError);
+      expect(() => manifest.environmentReadNames.add('X'),
+          throwsUnsupportedError);
+      expect(() => manifest.unknownFields['x'] = true, throwsUnsupportedError);
+      expect(() => manifest.compatibility.add(manifest.compatibility.single),
+          throwsUnsupportedError);
+      expect(() => manifest.compatibility.single.fields.add('x'),
+          throwsUnsupportedError);
+    });
+
+    test('PLUGIN2: invalid adapter identity is reported as required issue', () async {
+      final root = Directory.systemTemp.createTempSync('ovid-plugin2-identity');
+      addTearDown(() => root.deleteSync(recursive: true));
+      final file = File('${root.path}/.claude-plugin/plugin.json');
+      file.parent.createSync(recursive: true);
+      file.writeAsStringSync('{"name":"No Publisher"}');
+
+      final manifest = await ClaudePluginAdapter().inspect(root);
+
+      expect(
+        manifest.compatibility.any(
+          (issue) =>
+              issue.severity == CompatibilitySeverity.required &&
+              issue.message.contains('identity'),
+        ),
+        isTrue,
+      );
+    });
+
+    test('PLUGIN2: nested SKILL.md is not a supporting file', () {
+      final root = Directory.systemTemp.createTempSync('ovid-plugin2-skill-files');
+      addTearDown(() => root.deleteSync(recursive: true));
+      final outer = Directory('${root.path}/bundle')..createSync(recursive: true);
+      File('${outer.path}/SKILL.md').writeAsStringSync('outer');
+      File('${outer.path}/asset.txt').writeAsStringSync('asset');
+      File('${outer.path}/nested/SKILL.md')
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync('nested');
+
+      expect(scanBundleFiles(outer), ['asset.txt']);
     });
 
     test('PLUGIN2: extracted MCP parser remains the UI parser delegate', () {

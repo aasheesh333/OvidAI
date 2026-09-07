@@ -266,7 +266,10 @@ class SkillService {
 const int kBundleScanMaxDepth = 12;
 
 /// Every non-`SKILL.md` file shipped inside a bundle directory, as sorted
-/// `[dir]`-relative paths.
+/// `[dir]`-relative paths. A subdirectory containing its own `SKILL.md` is a
+/// SEPARATE bundle (discovered independently by the root skills scan), so
+/// its contents are never supporting material for this one and the whole
+/// subtree is skipped.
 ///
 /// Hardened for untrusted plugin payloads: symlinks are never followed
 /// (`followLinks: false`) and any entry whose real path escapes [dir] is
@@ -294,6 +297,9 @@ List<String> scanBundleFiles(Directory dir) {
       // traverse or record it, whatever it points at.
       if (entity is Link) continue;
       if (entity is Directory) {
+        // Nested bundle: it ships its own SKILL.md, so everything under it
+        // belongs to that bundle, not this one.
+        if (File('${entity.path}/SKILL.md').existsSync()) continue;
         walk(entity, depth + 1);
         continue;
       }

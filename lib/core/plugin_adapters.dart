@@ -4,6 +4,7 @@ import 'dart:io';
 import 'mcp_config_parse.dart';
 import 'plugin_manifest.dart';
 import 'skills.dart';
+import 'state.dart' show shellSplitArgs;
 
 /// ── Plugin compatibility adapters ───────────────────────────────────────
 /// Adapt a [CC] plugin tree, a Codex plugin tree, or a bare MCP config
@@ -36,9 +37,7 @@ String? canonicalHookEvent(String raw) {
   const map = <String, String>{
     // Legacy Ovid aliases.
     'on_session_start': 'session_start',
-    'on_session_end': 'session_end',
     'on_pre_request': 'pre_request',
-    'on_post_request': 'post_request',
     'on_pre_tool': 'pre_tool',
     'on_post_tool': 'post_tool',
     // `on_turn_*` have no literal §8.1 name; these are their turn-lifecycle
@@ -95,6 +94,7 @@ Map<String, dynamic> _unknownFrontmatter(Map<String, String> frontmatter) => {
 /// refusing symlinks so an untrusted tree cannot escape itself.
 List<File> _filesUnder(Directory dir, bool Function(File) test) {
   if (!dir.existsSync()) return const [];
+  final root = dir.resolveSymbolicLinksSync();
   final out = <File>[];
   void walk(Directory current, int depth) {
     if (depth > kBundleScanMaxDepth) return;
@@ -109,7 +109,10 @@ List<File> _filesUnder(Directory dir, bool Function(File) test) {
       if (e is Directory) {
         walk(e, depth + 1);
       } else if (e is File && test(e)) {
-        out.add(e);
+        try {
+          final real = e.resolveSymbolicLinksSync();
+          if (real.startsWith('$root/')) out.add(e);
+        } catch (_) {}
       }
     }
   }
@@ -170,8 +173,8 @@ Future<void> _addMarkdown(
           pluginId: b.pluginId,
           name: name,
           path: rel,
-          frontmatter: frontmatter,
-          unknownFields: unknownFields,
+          frontmatter: Map.unmodifiable(frontmatter),
+          unknownFields: Map.unmodifiable(unknownFields),
         ),
       );
     } else {
@@ -180,8 +183,8 @@ Future<void> _addMarkdown(
           pluginId: b.pluginId,
           name: name,
           path: rel,
-          frontmatter: frontmatter,
-          unknownFields: unknownFields,
+          frontmatter: Map.unmodifiable(frontmatter),
+          unknownFields: Map.unmodifiable(unknownFields),
         ),
       );
     }
@@ -200,12 +203,12 @@ Future<void> _addSkills(_Build b, Directory dir) async {
         pluginId: b.pluginId,
         name: name,
         path: _relative(b.root, file.path),
-        supportingFiles: [
+        supportingFiles: List.unmodifiable([
           for (final rel in scanBundleFiles(file.parent))
             _relative(b.root, '${file.parent.path}/$rel'),
-        ],
-        frontmatter: {...skill.frontmatter},
-        unknownFields: _unknownFrontmatter(skill.frontmatter),
+        ]),
+        frontmatter: Map.unmodifiable({...skill.frontmatter}),
+        unknownFields: Map.unmodifiable(_unknownFrontmatter(skill.frontmatter)),
       ),
     );
   }
@@ -240,8 +243,8 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
         matcher: matcher,
         timeoutS: timeoutS,
         path: sourcePath,
-        frontmatter: frontmatter,
-        unknownFields: unknownFields,
+        frontmatter: Map.unmodifiable(frontmatter),
+        unknownFields: Map.unmodifiable(unknownFields),
       ),
     );
   }
@@ -409,6 +412,23 @@ void _addDependencies(_Build b) {
   }
 }
 
+/// Spec §4.3/§4.4: the manifest `id` is the stable `publisher/name`
+/// identity every contribution's canonical registry key is built on — an
+/// EMPTY publisher segment makes that identity invalid. Empty-publisher
+/// validation is pinned by the adapters as a REQUIRED finding, so
+/// inspection/install fails before activation.
+void _requirePublisherIdentity(_Build b, String idField) {
+  if (!b.pluginId.startsWith('/')) return;
+  b.issues.add(
+    CompatibilityIssue(
+      severity: CompatibilitySeverity.required,
+      message: 'Invalid plugin identity: $idField declares no publisher, so '
+          'the canonical id "publisher/name" has an empty publisher segment.',
+      fields: [idField],
+    ),
+  );
+}
+
 /// Derive the minimum capability set from what the manifest actually
 /// declares (spec §5.1) — never a blanket grant.
 Set<PluginCapability> _inferCapabilities(_Build b) {
@@ -435,23 +455,31 @@ NormalizedPluginManifest _finish(
   required String name,
   required String version,
   required PluginFormat format,
-}) => NormalizedPluginManifest(
-  id: b.pluginId,
-  name: name,
-  version: version,
-  format: format,
-  rootPath: b.root.path,
-  commands: b.commands,
-  skills: b.skills,
-  agents: b.agents,
-  hooks: b.hooks,
-  mcpServers: b.mcpServers,
-  dependencies: PluginDependencies(packages: b.dependencies),
-  requestedCapabilities: _inferCapabilities(b),
-  environmentReadNames: b.envNames,
-  unknownFields: b.unknown,
-  compatibility: b.issues,
-);
+}) {
+  // Round-tripping through the model's defensive decoder freezes all nested
+  // maps/lists as well as the top-level collections before publication.
+  return NormalizedPluginManifest.fromJson(
+    NormalizedPluginManifest(
+      id: b.pluginId,
+      name: name,
+      version: version,
+      format: format,
+      rootPath: b.root.path,
+      commands: List.unmodifiable(b.commands),
+      skills: List.unmodifiable(b.skills),
+      agents: List.unmodifiable(b.agents),
+      hooks: List.unmodifiable(b.hooks),
+      mcpServers: List.unmodifiable(b.mcpServers),
+      dependencies: PluginDependencies(
+        packages: List.unmodifiable(b.dependencies),
+      ),
+      requestedCapabilities: Set.unmodifiable(_inferCapabilities(b)),
+      environmentReadNames: Set.unmodifiable(b.envNames),
+      unknownFields: Map.unmodifiable(b.unknown),
+      compatibility: List.unmodifiable(b.issues),
+    ).toJson(),
+  );
+}
 
 /// Fields `.claude-plugin/plugin.json` contributes to the normalized model —
 /// everything else is preserved as `unknownFields`.
@@ -485,6 +513,7 @@ class ClaudePluginAdapter {
     for (final e in j.entries) {
       if (!_knownClaudeManifestKeys.contains(e.key)) b.unknown[e.key] = e.value;
     }
+    _requirePublisherIdentity(b, '.claude-plugin/plugin.json:author');
 
     await _addMarkdown(b, Directory('${root.path}/commands'), asAgent: false);
     await _addSkills(b, Directory('${root.path}/skills'));
@@ -498,7 +527,14 @@ class ClaudePluginAdapter {
     final mcpFile = File('${root.path}/.mcp.json');
     if (mcpFile.existsSync()) {
       final raw = _readJsonMap(mcpFile);
-      final servers = raw['mcpServers'];
+      final servers = raw['mcpServers'] ?? raw['mcp_servers'] ?? raw['servers'];
+      for (final e in raw.entries) {
+        if (!const {'mcpServers', 'mcp_servers', 'servers'}.contains(e.key)) {
+          b.unknown['mcp.${e.key}'] = scrubMcpSecrets(
+            e.value is Map ? e.value.cast<String, dynamic>() : <String, dynamic>{'value': e.value},
+          ).scrubbed;
+        }
+      }
       _addMcp(
         b,
         parseMcpConfig(mcpFile.readAsStringSync()),
@@ -539,6 +575,7 @@ class CodexPluginAdapter {
       NormalizedPluginManifest.canonicalId(scalar('publisher'), name),
       root,
     );
+    _requirePublisherIdentity(b, 'config.toml:publisher');
 
     // Root + nested AGENTS.md instruction files.
     final instructions = [
@@ -616,12 +653,45 @@ class GenericMcpAdapter {
     final servers =
         decoded['mcpServers'] ?? decoded['mcp_servers'] ?? decoded['servers'];
     if (servers is Map) rawByName = servers.cast<String, dynamic>();
+    for (final e in decoded.entries) {
+      if (!const {'mcpServers', 'mcp_servers', 'servers'}.contains(e.key)) {
+        final value = e.value;
+        b.unknown['mcp.${e.key}'] = value is Map
+            ? scrubMcpSecrets(value.cast<String, dynamic>()).scrubbed
+            : value;
+      }
+    }
 
     // A direct `{"command": ...}` / `{"url": ...}` definition names itself
     // after the source.
     if (parsed.isEmpty &&
         (decoded.containsKey('command') || decoded.containsKey('url'))) {
       parsed = [importedMcpFromJson(_slug(sourceId), decoded)];
+    }
+    if (parsed.isEmpty) {
+      final trimmed = raw.trim();
+      if (RegExp(r'^https?://').hasMatch(trimmed)) {
+        parsed = [
+          ImportedMcp(
+            name: _slug(sourceId),
+            command: '',
+            args: const [],
+            url: trimmed,
+            type: 'http',
+          ),
+        ];
+      } else if (trimmed.isNotEmpty && !trimmed.startsWith('[')) {
+        final args = shellSplitArgs(trimmed);
+        if (args.isNotEmpty) {
+          parsed = [
+            ImportedMcp(
+              name: _slug(sourceId),
+              command: args.first,
+              args: args.skip(1).toList(),
+            ),
+          ];
+        }
+      }
     }
 
     _addMcp(b, parsed, sourceId, rawByName: rawByName);
