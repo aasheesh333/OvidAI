@@ -1,12 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import '../core/agent_service.dart';
 import '../core/mcp_config_parse.dart';
 import '../core/mcp_service.dart';
+import '../core/plugin_adapters.dart';
+import '../core/plugin_registry.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
+import 'plugin_permission_sheet.dart';
 
 /// Agent tools a plugin contributes when installed+enabled — mirrors the
 /// `_tools` gate in AgentService so the install snackbar can report what
@@ -34,6 +38,49 @@ String? _toolGainsFor(PluginItem p) {
 
 @visibleForTesting
 String? toolGainsForTest(PluginItem p) => _toolGainsFor(p);
+
+/// Task 5 (spec §5.1): the consolidated permission gate for Install.
+///
+/// Builds the normalized manifest for the plugin's cached content (if
+/// any was fetched/registered) and shows the one-time capability +
+/// dependency approval sheet — unless the exact manifest digest is
+/// already granted (re-install/re-enable reuses the stored grant; only
+/// a capability-delta update re-prompts — approval is per-install, NOT
+/// per tool call).
+///
+/// Returns true when the install may proceed (accepted, or nothing to
+/// approve — a catalog row with no normalized manifest keeps the legacy
+/// behavior); false when the user cancelled (no state was changed).
+Future<bool> _gateInstallWithPermissionSheet(
+  BuildContext context,
+  PluginItem plugin,
+) async {
+  // The registered runtime manifest (Task 4) is the authoritative shape;
+  // fall back to inspecting the fetched content cache.
+  var manifest = plugin.runtimeId != null
+      ? PluginContributionRegistry.I.manifestFor(plugin.runtimeId!)
+      : null;
+  if (manifest == null && plugin.source != null) {
+    try {
+      final cache = await AppState.I.pluginCacheDirFor(plugin.source!);
+      if (Directory(cache.path).existsSync()) {
+        manifest = await const PluginAdapterRegistry().inspect(cache);
+      }
+    } catch (_) {
+      manifest = null;
+    }
+  }
+  if (manifest == null || manifest.id.isEmpty) return true;
+
+  final grant = await AppState.pluginPermissions.effectiveGrant(
+    pluginId: manifest.id,
+    manifest: manifest,
+  );
+  if (grant != null) return true; // unchanged digest → grant reused
+
+  if (!context.mounted) return false;
+  return await showPluginPermissionSheet(context, manifest: manifest) == true;
+}
 
 /// Plugins library — Claude-Code-extensions style: trending banner carousel,
 /// search, category chips, thousands of community plugins, detail pages.
@@ -632,6 +679,18 @@ class PluginDetailScreen extends StatelessWidget {
                       style: TextStyle(fontSize: 13.5),
                     ),
                     onPressed: () async {
+                      // Task 5 (spec §5.1): one consolidated capability +
+                      // dependency approval before anything flips. Cancel
+                      // leaves NO state — no flags, no grant, no fetch.
+                      // (The full install transaction is Task 7; here the
+                      // sheet gates the existing install path minimally.)
+                      if (!await _gateInstallWithPermissionSheet(
+                        context,
+                        plugin,
+                      )) {
+                        return;
+                      }
+                      if (!context.mounted) return;
                       plugin.installed = true;
                       plugin.enabled = true;
                       app.updateServiceStatus('plugin:${plugin.name}', ServiceHealth.working, detail: 'enabled');

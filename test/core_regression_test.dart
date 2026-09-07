@@ -22,6 +22,7 @@ import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/mcp_config_parse.dart';
 import 'package:ovid_ai/core/plugin_adapters.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
+import 'package:ovid_ai/core/plugin_permissions.dart';
 import 'package:ovid_ai/core/plugin_registry.dart';
 import 'package:ovid_ai/core/plugin_source_resolver.dart';
 import 'package:ovid_ai/core/presets.dart';
@@ -34,6 +35,7 @@ import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
 import 'package:ovid_ai/ui/health_screen.dart';
+import 'package:ovid_ai/ui/plugin_permission_sheet.dart';
 import 'package:ovid_ai/ui/plugins_screen.dart'
     show McpCard, parseMcpConfigForTest, toolGainsForTest;
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
@@ -15192,6 +15194,614 @@ cwd = 'tools'
         expect(res, contains('pendingGlobal'));
         expect(res, contains('plugin:acme/pend-kit/'));
         expect(res, isNot(contains('PEND BODY')));
+      },
+    );
+  });
+
+  group('PluginCompat Task 5: capability approval and secure grants', () {
+    NormalizedPluginManifest p5Manifest({
+      String id = 'acme/grant-kit',
+      String name = 'Grant Kit',
+      String version = '1.0.0',
+      List<PluginCommand> commands = const [],
+      List<PluginSkill> skills = const [],
+      List<PluginAgent> agents = const [],
+      List<PluginHook> hooks = const [],
+      List<PluginMcpServer> mcpServers = const [],
+      PluginDependencies dependencies = const PluginDependencies(),
+      Set<String> envNames = const {},
+      Set<PluginCapability> requestedCapabilities = const {},
+    }) {
+      final m = NormalizedPluginManifest(
+        id: id,
+        name: name,
+        version: version,
+        format: PluginFormat.claudeCode,
+        rootPath: '/tmp/$id',
+        commands: commands,
+        skills: skills,
+        agents: agents,
+        hooks: hooks,
+        mcpServers: mcpServers,
+        dependencies: dependencies,
+        environmentReadNames: envNames,
+      );
+      if (requestedCapabilities.isNotEmpty) return m;
+      return NormalizedPluginManifest(
+        id: m.id,
+        name: m.name,
+        version: m.version,
+        format: m.format,
+        rootPath: m.rootPath,
+        commands: m.commands,
+        skills: m.skills,
+        agents: m.agents,
+        hooks: m.hooks,
+        mcpServers: m.mcpServers,
+        dependencies: m.dependencies,
+        requestedCapabilities: inferRequestedCapabilities(m),
+        environmentReadNames: m.environmentReadNames,
+        unknownFields: m.unknownFields,
+        compatibility: m.compatibility,
+      );
+    }
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      FlutterSecureStorage.setMockInitialValues({});
+    });
+
+    test(
+      'PLUGIN5: first approval persists a grant keyed by plugin id + digest; digest is canonical and order-independent',
+      () async {
+        final manifest = p5Manifest(
+          commands: [
+            PluginCommand(
+              pluginId: 'acme/grant-kit',
+              name: 'review',
+              path: 'commands/review.md',
+            ),
+          ],
+          skills: [
+            PluginSkill(
+              pluginId: 'acme/grant-kit',
+              name: 'deep',
+              path: 'skills/deep/SKILL.md',
+            ),
+          ],
+        );
+        final digest = pluginManifestDigest(manifest);
+        expect(digest, startsWith('sha256:'));
+        expect(digest.length, 'sha256:'.length + 64);
+
+        // Same contributions built in a different insertion shape (the
+        // canonical JSON has sorted keys + sorted set elements) → same
+        // digest. Reordered unknownFields must not change it either.
+        final reordered = NormalizedPluginManifest.fromJson(
+          jsonDecode(jsonEncode(manifest.toJson())) as Map<String, dynamic>,
+        );
+        expect(pluginManifestDigest(reordered), digest);
+
+        final store = PluginPermissionStore();
+        expect(await store.load('acme/grant-kit', digest), isNull);
+        await store.save(
+          PluginPermissionGrant(
+            pluginId: 'acme/grant-kit',
+            manifestDigest: digest,
+            capabilities: const {
+              PluginCapability.workspaceRead,
+              PluginCapability.hooksObserve,
+            },
+            approvedAt: DateTime.fromMillisecondsSinceEpoch(
+              1735689600000,
+              isUtc: true,
+            ),
+          ),
+        );
+        final loaded = await store.load('acme/grant-kit', digest);
+        expect(loaded, isNotNull);
+        expect(loaded!.pluginId, 'acme/grant-kit');
+        expect(loaded.manifestDigest, digest);
+        expect(
+          loaded.capabilities,
+          {
+            PluginCapability.workspaceRead,
+            PluginCapability.hooksObserve,
+          },
+        );
+        expect(loaded.approvedAt,
+            DateTime.fromMillisecondsSinceEpoch(1735689600000, isUtc: true));
+
+        // A grant is scoped to (plugin id, digest) — a different digest
+        // (an update) has no grant yet and must not return the old one.
+        expect(await store.load('acme/grant-kit', 'sha256:other'), isNull);
+      },
+    );
+
+    test(
+      'PLUGIN5: unchanged digest reuses the stored grant — no re-approval needed',
+      () async {
+        final manifest = p5Manifest(
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: 'acme/grant-kit',
+              name: 'srv',
+              transport: 'http',
+              url: 'https://example.test/mcp',
+              envNames: const ['API_TOKEN'],
+              path: '.mcp.json',
+            ),
+          ],
+          envNames: const {'API_TOKEN'},
+        );
+        final digest = pluginManifestDigest(manifest);
+        final store = PluginPermissionStore();
+
+        // Nothing approved yet → re-approval required.
+        final first = await store.effectiveGrant(
+          pluginId: 'acme/grant-kit',
+          manifest: manifest,
+        );
+        expect(first, isNull);
+
+        await store.save(
+          PluginPermissionGrant(
+            pluginId: 'acme/grant-kit',
+            manifestDigest: digest,
+            capabilities: manifest.requestedCapabilities,
+            environmentReadNames: manifest.environmentReadNames,
+            approvedAt: DateTime.now(),
+          ),
+        );
+
+        // Same manifest (same digest) → the stored grant is reused.
+        final again = await store.effectiveGrant(
+          pluginId: 'acme/grant-kit',
+          manifest: manifest,
+        );
+        expect(again, isNotNull);
+        expect(again!.manifestDigest, digest);
+      },
+    );
+
+    test(
+      'PLUGIN5: capability delta on update requires re-approval with the delta computed',
+      () async {
+        final v1 = p5Manifest(
+          commands: [
+            PluginCommand(
+              pluginId: 'acme/grant-kit',
+              name: 'review',
+              path: 'commands/review.md',
+            ),
+          ],
+        );
+        final v1Digest = pluginManifestDigest(v1);
+        expect(v1.requestedCapabilities, {
+          PluginCapability.workspaceRead,
+        });
+
+        final store = PluginPermissionStore();
+        await store.save(
+          PluginPermissionGrant(
+            pluginId: 'acme/grant-kit',
+            manifestDigest: v1Digest,
+            capabilities: v1.requestedCapabilities,
+            approvedAt: DateTime.now(),
+          ),
+        );
+
+        // v2 adds a blocking command hook — shellExecute + hooksObserve +
+        // hooksBlock are NEW relative to the v1 grant.
+        final v2 = p5Manifest(
+          version: '2.0.0',
+          commands: [
+            PluginCommand(
+              pluginId: 'acme/grant-kit',
+              name: 'review',
+              path: 'commands/review.md',
+            ),
+          ],
+          hooks: [
+            PluginHook(
+              pluginId: 'acme/grant-kit',
+              event: 'pre_tool',
+              type: 'command',
+              payload: 'echo check',
+              path: 'hooks/hooks.json',
+            ),
+          ],
+        );
+        final v2Digest = pluginManifestDigest(v2);
+        expect(v2Digest, isNot(v1Digest));
+
+        // No grant for the new digest → paused until delta approval.
+        expect(
+          await store.effectiveGrant(
+            pluginId: 'acme/grant-kit',
+            manifest: v2,
+          ),
+          isNull,
+        );
+
+        final delta = capabilityDelta(
+          granted: await store.load('acme/grant-kit', v1Digest),
+          requested: v2.requestedCapabilities,
+        );
+        expect(
+          delta,
+          {
+            PluginCapability.shellExecute,
+            PluginCapability.hooksObserve,
+            PluginCapability.hooksBlock,
+          },
+        );
+
+        // After delta approval the new digest is effective.
+        await store.save(
+          PluginPermissionGrant(
+            pluginId: 'acme/grant-kit',
+            manifestDigest: v2Digest,
+            capabilities: v2.requestedCapabilities,
+            approvedAt: DateTime.now(),
+          ),
+        );
+        final effective = await store.effectiveGrant(
+          pluginId: 'acme/grant-kit',
+          manifest: v2,
+        );
+        expect(effective, isNotNull);
+        expect(
+          capabilityDelta(
+            granted: effective,
+            requested: v2.requestedCapabilities,
+          ),
+          isEmpty,
+        );
+      },
+    );
+
+    test(
+      'PLUGIN5: revocation clears the grant and plugin-owned secure-storage secrets',
+      () async {
+        final manifest = p5Manifest(
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: 'acme/grant-kit',
+              name: 'srv',
+              envNames: const ['API_TOKEN'],
+              path: '.mcp.json',
+            ),
+          ],
+          envNames: const {'API_TOKEN'},
+        );
+        final digest = pluginManifestDigest(manifest);
+        final store = PluginPermissionStore();
+        await store.save(
+          PluginPermissionGrant(
+            pluginId: 'acme/grant-kit',
+            manifestDigest: digest,
+            capabilities: manifest.requestedCapabilities,
+            environmentReadNames: const {'API_TOKEN'},
+            approvedAt: DateTime.now(),
+          ),
+        );
+        // Owner-scoped secret (values only ever in secure storage).
+        const secretKey = 'ovid_plugin_secret_acme/grant-kit/env/API_TOKEN';
+        final secure = const FlutterSecureStorage();
+        await secure.write(key: secretKey, value: 'sk-super-secret-value');
+        // A sibling plugin's secret must SURVIVE this plugin's revocation.
+        const otherKey =
+            'ovid_plugin_secret_other/kit/env/API_TOKEN';
+        await secure.write(key: otherKey, value: 'sk-other-plugin');
+
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          (await store.load('acme/grant-kit', digest))?.pluginId,
+          'acme/grant-kit',
+        );
+
+        await store.revoke('acme/grant-kit');
+
+        expect(await store.load('acme/grant-kit', digest), isNull);
+        expect(await secure.read(key: secretKey), isNull);
+        expect(await secure.read(key: otherKey), 'sk-other-plugin');
+        // Every prefs entry is gone for the revoked plugin.
+        expect(prefs.getKeys().where((k) => k.contains('acme/grant-kit')), isEmpty);
+      },
+    );
+
+    test(
+      'PLUGIN5: a denied (never-approved or capability-denied) capability is absent from grants',
+      () async {
+        final manifest = p5Manifest(
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: 'acme/grant-kit',
+              name: 'srv',
+              transport: 'http',
+              url: 'https://example.test/mcp',
+              path: '.mcp.json',
+            ),
+          ],
+        );
+        final digest = pluginManifestDigest(manifest);
+        // The manifest REQUESTS networkConnect + mcpRegister…
+        expect(
+          manifest.requestedCapabilities,
+          contains(PluginCapability.networkConnect),
+        );
+
+        // …but the user approves a SUBSET (denies networkConnect): the
+        // persisted grant records exactly the accepted set, and the denied
+        // capability is absent.
+        final store = PluginPermissionStore();
+        await store.save(
+          PluginPermissionGrant(
+            pluginId: 'acme/grant-kit',
+            manifestDigest: digest,
+            capabilities: const {PluginCapability.mcpRegister},
+            approvedAt: DateTime.now(),
+          ),
+        );
+        final loaded = await store.load('acme/grant-kit', digest);
+        expect(loaded!.capabilities, [PluginCapability.mcpRegister]);
+        expect(
+          loaded.capabilities,
+          isNot(contains(PluginCapability.networkConnect)),
+        );
+      },
+    );
+
+    test(
+      'PLUGIN5: secret values never appear in persisted grant JSON or SharedPreferences',
+      () async {
+        const secretValue = 'sk-LEAK-CANARY-abcdef0123456789';
+        final manifest = p5Manifest(
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: 'acme/grant-kit',
+              name: 'srv',
+              envNames: const ['API_TOKEN'],
+              headerNames: const ['Authorization'],
+              path: '.mcp.json',
+            ),
+          ],
+          envNames: const {'API_TOKEN'},
+        );
+        final digest = pluginManifestDigest(manifest);
+        final store = PluginPermissionStore();
+        await store.save(
+          PluginPermissionGrant(
+            pluginId: 'acme/grant-kit',
+            manifestDigest: digest,
+            capabilities: manifest.requestedCapabilities,
+            environmentReadNames: const {'API_TOKEN'},
+            approvedAt: DateTime.now(),
+          ),
+        );
+        // The owning plugin's secret lives ONLY in secure storage.
+        final secure = const FlutterSecureStorage();
+        await secure.write(
+          key: 'ovid_plugin_secret_acme/grant-kit/env/API_TOKEN',
+          value: secretValue,
+        );
+
+        final prefs = await SharedPreferences.getInstance();
+        for (final k in prefs.getKeys()) {
+          final v = prefs.get(k);
+          final encoded = v is String ? v : jsonEncode(v);
+          expect(encoded.contains('API_TOKEN'), isTrue,
+              reason: 'names may appear; key=$k');
+          expect(encoded.contains(secretValue), isFalse,
+              reason: 'SECRET VALUE leaked into prefs key=$k');
+        }
+        final raw = jsonEncode(
+          (await store.load('acme/grant-kit', digest))!.toJson(),
+        );
+        expect(raw, isNot(contains(secretValue)));
+
+        // Corrupted stored JSON tolerates load (returns null, never throws).
+        await prefs.setString('ovid_plugin_grants_v1', '{not json');
+        expect(
+          await PluginPermissionStore().load('acme/grant-kit', digest),
+          isNull,
+        );
+      },
+    );
+
+    test(
+      'PLUGIN5: capability explanations rebuild provenance from contribution paths',
+      () {
+        final manifest = p5Manifest(
+          commands: [
+            PluginCommand(
+              pluginId: 'acme/grant-kit',
+              name: 'review',
+              path: 'commands/review.md',
+            ),
+          ],
+          agents: [
+            PluginAgent(
+              pluginId: 'acme/grant-kit',
+              name: 'helper',
+              path: 'agents/helper.md',
+            ),
+          ],
+          hooks: [
+            PluginHook(
+              pluginId: 'acme/grant-kit',
+              event: 'pre_tool',
+              type: 'command',
+              payload: 'echo hi',
+              path: 'hooks/hooks.json',
+            ),
+            PluginHook(
+              pluginId: 'acme/grant-kit',
+              event: 'notification',
+              type: 'prompt',
+              payload: 'notify',
+              path: 'hooks/notify.md',
+            ),
+          ],
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: 'acme/grant-kit',
+              name: 'stdsrv',
+              transport: 'stdio',
+              command: 'node',
+              path: '.mcp.json',
+            ),
+            PluginMcpServer(
+              pluginId: 'acme/grant-kit',
+              name: 'httpsrv',
+              transport: 'http',
+              url: 'https://example.test/mcp',
+              envNames: const ['API_TOKEN'],
+              headerNames: const ['Authorization'],
+              path: '.mcp.json',
+            ),
+          ],
+          envNames: const {'API_TOKEN', 'HOME_DIR'},
+        );
+
+        final explain = explainCapabilities(manifest);
+
+        PluginCapability cap(PluginCapability c) => c;
+        String sourceOf(PluginCapability c) => explain
+            .firstWhere((e) => e.capability == c)
+            .sourcePath;
+
+        // workspaceRead ← command (first contributing file).
+        expect(sourceOf(cap(PluginCapability.workspaceRead)),
+            'commands/review.md');
+        // hooksObserve ← first hook, shellExecute ← command hook,
+        // hooksBlock ← pre_tool is blocking.
+        expect(sourceOf(PluginCapability.hooksObserve), 'hooks/hooks.json');
+        expect(sourceOf(PluginCapability.shellExecute), 'hooks/hooks.json');
+        expect(sourceOf(PluginCapability.hooksBlock), 'hooks/hooks.json');
+        // mcpRegister ← first mcp server declaration.
+        expect(sourceOf(PluginCapability.mcpRegister), '.mcp.json');
+        // processSpawn ← stdio server; networkConnect ← http server.
+        expect(sourceOf(PluginCapability.processSpawn), '.mcp.json');
+        expect(sourceOf(PluginCapability.networkConnect), '.mcp.json');
+        // environmentRead names ride along on the explanation.
+        final env = explain.firstWhere(
+          (e) => e.capability == PluginCapability.environmentRead,
+        );
+        expect(env.sourcePath, '.mcp.json');
+        expect(env.environmentNames, containsAll(['API_TOKEN', 'HOME_DIR']));
+        // Only inferred capabilities get explanations.
+        expect(
+          explain.map((e) => e.capability),
+          equals({
+            PluginCapability.workspaceRead,
+            PluginCapability.hooksObserve,
+            PluginCapability.shellExecute,
+            PluginCapability.hooksBlock,
+            PluginCapability.mcpRegister,
+            PluginCapability.processSpawn,
+            PluginCapability.networkConnect,
+            PluginCapability.environmentRead,
+          }),
+        );
+      },
+    );
+
+    test(
+      'PLUGIN5: grant store is standalone — save, load by digest, and revoked-missing ids are inert',
+      () async {
+        final store = PluginPermissionStore();
+        // Revoking an id that never had a grant is a no-op, never throws.
+        await store.revoke('nobody/nothing');
+        // Loading a digest that was never saved returns null.
+        expect(
+          await store.load('acme/grant-kit', 'sha256:deadbeef'),
+          isNull,
+        );
+      },
+    );
+
+    testWidgets(
+      'PLUGIN5: permission sheet Accept persists the grant; Cancel leaves no state',
+      (tester) async {
+        final manifest = p5Manifest(
+          commands: [
+            PluginCommand(
+              pluginId: 'acme/grant-kit',
+              name: 'review',
+              path: 'commands/review.md',
+            ),
+          ],
+          dependencies: const PluginDependencies(
+            packages: [
+              PluginDependency(name: 'left-pad', versionSpec: '^1.0.0'),
+            ],
+          ),
+        );
+        final digest = pluginManifestDigest(manifest);
+        final store = PluginPermissionStore();
+        var accepted = false;
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: Aether.theme(),
+            home: Scaffold(
+                body: Builder(
+                  builder: (context) => Center(
+                    child: FilledButton(
+                      onPressed: () async {
+                        accepted = await showPluginPermissionSheet(
+                              context,
+                              manifest: manifest,
+                            ) ==
+                            true;
+                      },
+                      child: const Text('Open'),
+                    ),
+                  ),
+                ),
+            ),
+          ),
+        );
+
+        await tester.tap(find.byType(FilledButton));
+        await tester.pumpAndSettle();
+
+        // The consolidated sheet lists capabilities with reasons and
+        // source paths, plus dependency commands.
+        expect(find.text('commands/review.md'), findsOneWidget);
+        expect(
+          find.textContaining('left-pad', findRichText: true),
+          findsOneWidget,
+        );
+        expect(find.text('Accept'), findsOneWidget);
+        expect(find.text('Cancel'), findsOneWidget);
+
+        // Cancel → no state change.
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+        expect(accepted, isFalse);
+        expect(await store.load('acme/grant-kit', digest), isNull);
+        expect(
+          await store.effectiveGrant(
+            pluginId: 'acme/grant-kit',
+            manifest: manifest,
+          ),
+          isNull,
+          reason: 'cancel leaves nothing approved',
+        );
+
+        // Accept → grant persisted under the manifest digest. The sheet is
+        // non-dismissable, so only the Accept/Cancel buttons end it.
+        await tester.tap(find.byType(FilledButton));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Accept'));
+        await tester.pumpAndSettle();
+        expect(accepted, isTrue);
+        final grant = await store.load('acme/grant-kit', digest);
+        expect(grant, isNotNull);
+        expect(grant!.capabilities, manifest.requestedCapabilities);
+        expect(grant.manifestDigest, digest);
       },
     );
   });

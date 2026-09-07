@@ -364,6 +364,12 @@ class PluginContributionRegistry {
   PluginActivation? activationFor(String pluginId) =>
       _registrations[pluginId]?.activation;
 
+  /// The registered manifest of [pluginId], or null when unregistered.
+  /// Lets permission/revocation surfaces (spec §5.1) reach the exact
+  /// normalized manifest a plugin runs under without re-inspecting disk.
+  NormalizedPluginManifest? manifestFor(String pluginId) =>
+      _registrations[pluginId]?.manifest;
+
   bool isRegistered(String pluginId) => _registrations.containsKey(pluginId);
 
   /// Plugin ids with registered contributions, in registration order.

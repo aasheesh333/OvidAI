@@ -9,6 +9,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'agent_notification_service.dart';
 import 'mcp_service.dart';
 import 'plugin_manifest.dart';
+import 'plugin_permissions.dart';
+import 'plugin_registry.dart';
 import 'plugin_source_resolver.dart';
 import 'theme.dart';
 import 'sandbox_service.dart';
@@ -975,6 +977,43 @@ class AppState extends ChangeNotifier {
       await onRefreshSkills?.call();
     } catch (_) {}
     refresh();
+  }
+
+  // ── Plugin capability grants (spec §5.1 — Task 5) ──────────────────
+  // One consolidated approval per plugin manifest digest. The store is
+  // standalone (Task 7's install transaction calls into it); these
+  // helpers keep the UI/agent wiring one-liners.
+
+  /// The process-wide permission-grant store.
+  static final PluginPermissionStore pluginPermissions =
+      PluginPermissionStore();
+
+  /// The grant currently effective for [plugin]'s registered manifest:
+  /// a stored grant whose digest matches the manifest (unchanged
+  /// manifest → stored grant; changed manifest → null, delta approval
+  /// required — spec §5.1). Null when nothing is registered/approved.
+  Future<PluginPermissionGrant?> effectivePluginGrant(PluginItem plugin) async {
+    final runtimeId = plugin.runtimeId;
+    if (runtimeId == null) return null;
+    final manifest = PluginContributionRegistry.I.manifestFor(runtimeId);
+    if (manifest == null) return null;
+    return pluginPermissions.effectiveGrant(
+      pluginId: runtimeId,
+      manifest: manifest,
+    );
+  }
+
+  /// Revokes [plugin]'s grant and its owned secrets, then disables the
+  /// plugin so its contributions stop applying immediately (spec §5.1:
+  /// "removing a grant immediately disables affected contributions").
+  Future<void> revokePluginGrant(PluginItem plugin) async {
+    final runtimeId = plugin.runtimeId;
+    if (runtimeId != null) {
+      await pluginPermissions.revoke(runtimeId);
+    }
+    if (plugin.enabled) {
+      await disablePlugin(plugin);
+    }
   }
 
   static const _secureStorage = FlutterSecureStorage();
