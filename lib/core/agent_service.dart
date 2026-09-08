@@ -7437,22 +7437,24 @@ ${await _agentsMdBlock()}
                   '${runtimeResult.error ?? 'unknown error'}';
             }
             final sid = _runSession?.id ?? '';
-            final reg = PluginContributionRegistry.I;
-            final visible =
-                sid.isNotEmpty &&
-                reg.isPluginActiveForSession(match.runtimeId ?? '', sid);
-            final scopeNote = visible
-                ? 'active in this session; activates globally after one '
-                      'restart'
-                : 'installed; activates globally after one restart';
+            // Exact-scope report (spec §7): agent installs activate
+            // immediately ONLY in the installing session, then promote
+            // globally after one restart — when no running session id
+            // is known the row keeps the pending screen semantics.
+            final pendingOnly = sid.isEmpty;
+            final scopeNote = pendingOnly
+                ? 'installed (pending: activates globally after one '
+                      'restart)'
+                : 'installed ✓ — active in this session only (id $sid); '
+                      'activates globally after one restart';
             final parts = <String>[
               scopeNote,
               if (runtimeResult.degradedNames.isNotEmpty)
                 'optional dependencies unavailable: '
                     '${runtimeResult.degradedNames.join(', ')}',
             ];
-            return 'Plugin "$pluginName" installed ✓ '
-                '(id ${match.runtimeId}) — ${parts.join(' · ')}.';
+            return 'Plugin "$pluginName" ${parts.join(' · ')} '
+                '(id ${match.runtimeId}).';
           }
 
           match.installed = true;
