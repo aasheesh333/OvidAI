@@ -2451,7 +2451,14 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// install reporting). Mirrors the `_tools` gate below.
   List<String> _pluginToolNames(PluginItem p) {
     if (!p.installed || !p.enabled) return const [];
-    if (p.category == 'MCP') return const ['mcp (proxy)'];
+    if (p.category == 'MCP') {
+      // Task 10: honest parity with the roster gate — the proxy tool only
+      // exists when the plugin's matching MCP server row does.
+      final hasServer = AppState.I.mcpServers.any(
+        (s) => s.name.toLowerCase() == p.name.toLowerCase(),
+      );
+      return hasServer ? const ['mcp (proxy)'] : const [];
+    }
     final seed = switch (p.name) {
       'Web Search' => const ['web_search'],
       'Image Studio' => const ['generate_image'],
