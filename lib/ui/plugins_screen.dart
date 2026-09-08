@@ -715,13 +715,13 @@ class PluginDetailScreen extends StatelessWidget {
                               behavior: SnackBarBehavior.floating,
                             ),
                           );
-                          app.updateServiceStatus('mcp:${server.name}', ServiceHealth.connecting, detail: 'connecting…');
+                           app.updateServiceStatus('mcp:${server.canonicalId}', ServiceHealth.connecting, detail: 'connecting…');
                           final msg =
                               await McpService.I.connect(server);
-                          final isOk = McpService.I.isConnected(server.name);
+                           final isOk = McpService.I.isConnected(server.canonicalId);
                           server.connected = isOk;
                           app.updateServiceStatus(
-                            'mcp:${server.name}',
+                             'mcp:${server.canonicalId}',
                             isOk ? ServiceHealth.working : ServiceHealth.failed,
                             detail: msg,
                           );
@@ -1300,7 +1300,7 @@ class McpCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
             color: () {
-              final status = AppState.I.serviceStatus['mcp:${server.name}'];
+              final status = AppState.I.serviceStatus['mcp:${server.canonicalId}'];
               if (status != null) {
                 switch (status.health) {
                   case ServiceHealth.working:
@@ -1337,7 +1337,7 @@ class McpCard extends StatelessWidget {
                 ),
                 const Spacer(),
                 Builder(builder: (_) {
-                  final status = AppState.I.serviceStatus['mcp:${server.name}'];
+                   final status = AppState.I.serviceStatus['mcp:${server.canonicalId}'];
                   if (status != null) {
                     if (status.health == ServiceHealth.connecting) {
                       return const SizedBox(
@@ -1388,7 +1388,7 @@ class McpCard extends StatelessWidget {
             ),
             const SizedBox(height: 2),
             Builder(builder: (_) {
-              final status = AppState.I.serviceStatus['mcp:${server.name}'];
+               final status = AppState.I.serviceStatus['mcp:${server.canonicalId}'];
               if (status != null) {
                 switch (status.health) {
                   case ServiceHealth.connecting:
@@ -1780,7 +1780,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               );
               // Env values (API keys) → secure storage, passed to the
               // server process at connect time.
-              unawaited(app.setMcpEnv(s.name, env));
+               unawaited(app.setMcpEnv(s.canonicalId, env));
               Navigator.pop(ctx);
               ScaffoldMessenger.of(
                 context,

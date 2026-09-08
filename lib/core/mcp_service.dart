@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'sandbox_service.dart';
+import 'plugin_manifest.dart';
+import 'plugin_registry.dart';
 import 'state.dart';
 
 /// Real MCP client — connects to each server over its configured
@@ -52,15 +54,49 @@ class McpService {
       for (final tool in rs.tools) McpConnectedTool(rs.server, tool),
   ]);
 
-  McpConnectedTool? resolveToolName(String toolName) {
-    final canonical = connectedToolEntries
-        .where((e) => e.canonicalToolName == toolName)
-        .firstOrNull;
-    if (canonical != null) return canonical;
-    final aliases = connectedToolEntries
-        .where((e) => e.legacyToolName == toolName)
+  McpConnectedTool? resolveToolName(
+    String toolName, {
+    bool Function(McpServer server)? visible,
+  }) => _resolveToolEntries(toolName, connectedToolEntries, visible: visible);
+
+  static McpConnectedTool? _resolveToolEntries(
+    String toolName,
+    Iterable<McpConnectedTool> entries, {
+    bool Function(McpServer server)? visible,
+  }) {
+    final candidates = entries
+        .where((entry) => visible == null || visible(entry.server))
+        .toList();
+    final canonical = candidates
+        .where((entry) => entry.canonicalToolName == toolName)
+        .toList();
+    if (canonical.length == 1) return canonical.single;
+    if (canonical.length > 1) return null;
+    final aliases = candidates
+        .where((entry) => entry.legacyToolName == toolName)
         .toList();
     return aliases.length == 1 ? aliases.single : null;
+  }
+
+  @visibleForTesting
+  static McpConnectedTool? resolveToolEntriesForTest(
+    String toolName,
+    Iterable<McpConnectedTool> entries,
+  ) => _resolveToolEntries(toolName, entries);
+
+  static String _providerEncode(String value) => base64Url
+      .encode(utf8.encode(value))
+      .replaceAll('=', '');
+
+  static String providerServerToolName(McpServer server) =>
+      'mcp_${_providerEncode(server.canonicalId)}';
+
+  static String? _runtimeRoot(McpServer server) {
+    final owner = server.ownerPluginId;
+    if (owner == null) return null;
+    final manifest = PluginContributionRegistry.I.manifestFor(owner);
+    if (manifest == null || manifest.rootPath.isEmpty) return null;
+    return Directory(manifest.rootPath).parent.path;
   }
 
   String _key(McpServer server) => server.canonicalId;
@@ -115,6 +151,9 @@ class McpService {
   /// Returns a human-readable status string for the UI.
   Future<String> connect(McpServer server) async {
     final key = _key(server);
+    if (!_ownerActive(server)) {
+      return '"${server.name}" not active: owning plugin is not active';
+    }
     final existing = _running[key];
     if (existing != null) {
       // Someone else's connect may still be handshaking — don't spawn a
@@ -144,6 +183,15 @@ class McpService {
       return _connectHttp(server, rs);
     }
     return _connectStdio(server, rs);
+  }
+
+  static bool _ownerActive(McpServer server) {
+    final owner = server.ownerPluginId;
+    if (owner == null) return true;
+    final activation = PluginContributionRegistry.I.activationFor(owner);
+    return activation == PluginActivation.sessionActive ||
+        activation == PluginActivation.globalActive ||
+        activation == PluginActivation.degraded;
   }
 
   Future<List<String>> _missingCredentials(McpServer server) async {
@@ -239,27 +287,15 @@ class McpService {
       }
       // Per-server env vars (API keys etc.) from secure storage.
       final secretEnv = await AppState.I.getMcpEnv(server.canonicalId);
+      final runtimeRoot = _runtimeRoot(server);
       final env = {
-        if (server.pluginRuntimeRoot != null)
-          ...SandboxService.pluginRuntimeEnv(server.pluginRuntimeRoot!),
+        if (runtimeRoot != null)
+          ...SandboxService.pluginRuntimeEnv(runtimeRoot),
         ...secretEnv,
       };
       // Optional working directory for the spawned server (best-effort:
       // only used when the resolved directory actually exists).
-      Directory? cwdDir;
-      try {
-        final cwd = server.cwd;
-        if (cwd != null && cwd.isNotEmpty) {
-          final prefix = sandbox.prefixPath ?? '';
-          final resolved = server.ownerPluginId != null && !cwd.startsWith('/')
-              ? '$prefix/home/plugin-runtime/${server.ownerPluginId}/$cwd'
-              : cwd.startsWith('/')
-              ? cwd
-              : '$prefix/home/$cwd';
-          final d = Directory(resolved);
-          if (d.existsSync()) cwdDir = d;
-        }
-      } catch (_) {}
+      final cwdDir = _resolveWorkingDirectory(server, sandbox.prefixPath);
       // Native exec — the server command runs through the sandbox env
       // (PATH/LD_LIBRARY_PATH/LD_PRELOAD set by SandboxService.spawn).
       final proc = await sandbox.spawn(
@@ -271,14 +307,7 @@ class McpService {
 
       // Route stdout lines into the broadcast stream; drain stderr so it
       // never blocks the pipes (keep a tail for diagnostics).
-      proc.stdout
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen(rs.stdoutLines.add);
-      proc.stderr
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen(rs.stderrLines.add);
+      _attachStdioStreams(rs, key, proc);
 
       // Server-death watcher: the moment the process exits, drop it from
       // the connected map. Without this, a crashed server stayed
@@ -295,22 +324,6 @@ class McpService {
           }
         }),
       );
-
-      // Server-initiated messages (no id) arrive on the same stream:
-      // notifications/tools/list_changed → re-discover silently.
-      // The notification listener lives exactly as long as the server does
-      // (the stream is per-_RunningServer), so it needs no manual cancel.
-      // ignore: unused_local_variable
-      final notificationSub = rs.stdoutLines.stream.listen((line) {
-        try {
-          final j = jsonDecode(line) as Map<String, dynamic>;
-          if (j.containsKey('id')) return; // a response, not a notification
-          final method = j['method'] as String?;
-          if (method == 'notifications/tools/list_changed') {
-            unawaited(_rediscoverTools(key));
-          }
-        } catch (_) {}
-      });
 
       // ── MCP handshake ──────────────────────────────────────────────
       final startupTimeout = Duration(seconds: server.startupTimeoutS);
@@ -355,6 +368,60 @@ class McpService {
     }
   }
 
+  void _attachStdioStreams(
+    _RunningServer rs,
+    String key,
+    Process process,
+  ) {
+    process.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen(rs.stdoutLines.add);
+    process.stderr
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen(rs.stderrLines.add);
+    rs.stdoutLines.stream.listen((line) {
+      try {
+        final json = jsonDecode(line) as Map<String, dynamic>;
+        if (!json.containsKey('id') &&
+            json['method'] == 'notifications/tools/list_changed') {
+          unawaited(_rediscoverTools(key));
+        }
+      } catch (_) {}
+    });
+  }
+
+  static Directory? _resolveWorkingDirectory(
+    McpServer server,
+    String? sandboxPrefix,
+  ) {
+    final cwd = server.cwd;
+    if (cwd == null || cwd.isEmpty) return null;
+    if (server.ownerPluginId == null) {
+      final resolved = cwd.startsWith('/')
+          ? cwd
+          : '${sandboxPrefix ?? ''}/home/$cwd';
+      final directory = Directory(resolved);
+      return directory.existsSync() ? directory : null;
+    }
+    final runtimeRoot = _runtimeRoot(server);
+    if (runtimeRoot == null || runtimeRoot.isEmpty) {
+      throw StateError('owned MCP runtime root is unavailable');
+    }
+    final root = Directory(runtimeRoot).resolveSymbolicLinksSync();
+    final requested = Directory(cwd.startsWith('/') ? cwd : '$root/$cwd');
+    final resolved = requested.resolveSymbolicLinksSync();
+    if (resolved != root && !resolved.startsWith('$root${Platform.pathSeparator}')) {
+      throw StateError('owned MCP cwd escapes plugin runtime root');
+    }
+    return Directory(resolved);
+  }
+
+  @visibleForTesting
+  static Directory? resolveWorkingDirectoryForTest(McpServer server) =>
+      _resolveWorkingDirectory(server, null);
+
   /// PR41: reconnect backoff timers, one per server name so a repeated
   /// crash doesn't stack multiple pending retries.
   final Map<String, Timer> _reconnectTimers = {};
@@ -394,7 +461,7 @@ class McpService {
       final fresh = AppState.I.mcpServers
           .where((s) => s.canonicalId == key)
           .firstOrNull;
-      if (fresh == null) return;
+      if (fresh == null || !_ownerActive(fresh)) return;
       unawaited(connect(fresh));
     });
   }
@@ -445,8 +512,19 @@ class McpService {
   }
 
   @visibleForTesting
-  Future<void> rediscoverToolsForTest(String serverName) =>
-      _rediscoverTools(_keyForName(serverName));
+  Future<void> attachStdioForTest(
+    McpServer server,
+    Process process, {
+    List<McpToolDef> initialTools = const [],
+  }) async {
+    final key = _key(server);
+    final rs = _RunningServer(server: server)
+      ..process = process
+      ..handshakeDone = true
+      ..tools = List.of(initialTools);
+    _running[key] = rs;
+    _attachStdioStreams(rs, key, process);
+  }
 
   /// Kill a server process. Safe to call when not connected.
   Future<void> disconnect(String serverName) async {
@@ -930,7 +1008,7 @@ class McpConnectedTool {
   String get canonicalId => 'mcp:${server.canonicalId}/${tool.name}';
 
   String get canonicalToolName =>
-      canonicalId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+      'mcp_${McpService._providerEncode(canonicalId)}';
 
   String get legacyToolName => 'mcp__${_safe(server.name)}__${tool.name}';
 

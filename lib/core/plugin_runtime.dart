@@ -920,7 +920,11 @@ class PluginRuntimeManager extends ChangeNotifier {
       activation: rec.state,
       immediateSessionId: rec.immediateSessionId,
     );
-    await AppState.I.mountPluginOwnedMcpServers(entry.manifest);
+    if (rec.state == PluginActivation.globalActive ||
+        rec.state == PluginActivation.degraded ||
+        rec.state == PluginActivation.sessionActive) {
+      await AppState.I.mountPluginOwnedMcpServers(entry.manifest);
+    }
     _syncRow(rec);
     notifyListeners();
   }

@@ -17884,6 +17884,389 @@ cwd = 'tools'
       custom: true,
     );
 
+    NormalizedPluginManifest ownedManifest(
+      String owner,
+      String serverName, {
+      PluginActivation activation = PluginActivation.globalActive,
+    }) => NormalizedPluginManifest(
+      id: owner,
+      name: owner,
+      version: '1',
+      format: PluginFormat.genericMcp,
+      rootPath: '/runtime/$owner/content',
+      mcpServers: [
+        PluginMcpServer(pluginId: owner, name: serverName),
+      ],
+    );
+
+    void registerOwner(
+      String owner, {
+      String serverName = 'shared',
+      PluginActivation activation = PluginActivation.globalActive,
+      String? immediateSessionId,
+    }) {
+      PluginContributionRegistry.I.register(
+        ownedManifest(owner, serverName),
+        activation: activation,
+        immediateSessionId: immediateSessionId,
+      );
+      addTearDown(
+        () => PluginContributionRegistry.I.unregisterPlugin(owner),
+      );
+    }
+
+    MockClient mcpHttpClient({String toolName = 'lookup'}) => MockClient((
+      request,
+    ) async {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      return http.Response(
+        jsonEncode({
+          'jsonrpc': '2.0',
+          'id': body['id'],
+          'result': body['method'] == 'tools/list'
+              ? {
+                  'tools': [
+                    {'name': toolName},
+                  ],
+                }
+              : body['method'] == 'tools/call'
+              ? {
+                  'content': [
+                    {'type': 'text', 'text': request.url.host},
+                  ],
+                }
+              : {},
+        }),
+        200,
+      );
+    });
+
+    test('owned servers fail closed unless their registry owner is active',
+        () async {
+      final states = <PluginActivation>[
+        PluginActivation.pendingGlobal,
+        PluginActivation.failed,
+        PluginActivation.disabled,
+      ];
+      var requests = 0;
+      McpService.I.httpClientForTest = MockClient((request) async {
+        requests++;
+        return http.Response('{}', 200);
+      });
+      addTearDown(() => McpService.I.httpClientForTest = null);
+
+      final unregistered = ownedServer('inactive/unregistered');
+      app.mcpServers.add(unregistered);
+      addTearDown(() => app.mcpServers.remove(unregistered));
+      expect(await McpService.I.connect(unregistered), contains('not active'));
+      expect(McpService.I.isConnected(unregistered.canonicalId), isFalse);
+
+      for (final state in states) {
+        final owner = 'inactive/${state.name}';
+        final server = ownedServer(owner, name: state.name);
+        app.mcpServers.add(server);
+        PluginContributionRegistry.I.register(
+          ownedManifest(owner, server.name),
+          activation: state,
+        );
+        addTearDown(() {
+          PluginContributionRegistry.I.unregisterPlugin(owner);
+          app.mcpServers.remove(server);
+        });
+        expect(await McpService.I.connect(server), contains('not active'));
+        expect(McpService.I.isConnected(server.canonicalId), isFalse);
+      }
+      expect(requests, 0, reason: 'inactive owners must never dial');
+    });
+
+    test('unregistered owned servers are absent from roster and guessed calls',
+        () async {
+      final server = ownedServer('disabled/plugin');
+      app.mcpServers.add(server);
+      addTearDown(() => app.mcpServers.remove(server));
+      final canonical = McpConnectedTool(
+        server,
+        McpToolDef(name: 'lookup'),
+      ).canonicalToolName;
+
+      final names = AgentService.I.toolsForTest()
+          .map((t) => ((t['function'] as Map?) ?? {})['name'])
+          .whereType<String>();
+      expect(names, isNot(contains(canonical)));
+      expect(names, isNot(contains('mcp_disabled_plugin_shared')));
+      final guessed = await AgentService.I.dispatchForTest(canonical, {});
+      expect(guessed, isNot(contains('disabled/plugin.example')));
+      expect(guessed, anyOf(contains('not active'), contains('not configured')));
+    });
+
+    test('canonical provider names do not flatten punctuation collisions', () {
+      final dotted = ownedServer('collision/foo.bar', name: 'api');
+      final slashed = ownedServer('collision/foo/bar', name: 'api');
+      final dottedTool = McpConnectedTool(
+        dotted,
+        McpToolDef(name: 'read.file'),
+      );
+      final slashedTool = McpConnectedTool(
+        slashed,
+        McpToolDef(name: 'read/file'),
+      );
+
+      expect(dottedTool.canonicalToolName,
+          isNot(slashedTool.canonicalToolName));
+      expect(
+        McpService.providerServerToolName(dotted),
+        isNot(McpService.providerServerToolName(slashed)),
+      );
+      expect(
+        RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(dottedTool.canonicalToolName),
+        isTrue,
+      );
+      app.mcpServers.addAll([dotted, slashed]);
+      addTearDown(() {
+        app.mcpServers.removeWhere(
+          (s) => identical(s, dotted) || identical(s, slashed),
+        );
+      });
+      PluginContributionRegistry.I.register(
+        ownedManifest('collision/foo.bar', 'api'),
+        activation: PluginActivation.globalActive,
+      );
+      PluginContributionRegistry.I.register(
+        ownedManifest('collision/foo/bar', 'api'),
+        activation: PluginActivation.globalActive,
+      );
+      addTearDown(() {
+        PluginContributionRegistry.I.unregisterPlugin('collision/foo.bar');
+        PluginContributionRegistry.I.unregisterPlugin('collision/foo/bar');
+      });
+      final stubs = AgentService.I.toolsForTest()
+          .map((t) => ((t['function'] as Map?) ?? {})['name'])
+          .whereType<String>();
+      expect(stubs, contains(McpService.providerServerToolName(dotted)));
+      expect(stubs, contains(McpService.providerServerToolName(slashed)));
+    });
+
+    test('resolveToolName rejects duplicate provider names', () {
+      final a = ownedServer('duplicate/a');
+      final b = ownedServer('duplicate/a');
+      final toolA = McpConnectedTool(a, McpToolDef(name: 'lookup'));
+      final toolB = McpConnectedTool(b, McpToolDef(name: 'lookup'));
+      expect(
+        McpService.resolveToolEntriesForTest(
+          toolA.canonicalToolName,
+          [toolA, toolB],
+        ),
+        isNull,
+      );
+    });
+
+    test('duplicate disconnected canonical stubs are not advertised', () {
+      final a = ownedServer('duplicate/stub');
+      final b = ownedServer('duplicate/stub');
+      registerOwner('duplicate/stub');
+      app.mcpServers.addAll([a, b]);
+      addTearDown(() {
+        app.mcpServers.removeWhere((s) => identical(s, a) || identical(s, b));
+      });
+
+      final names = AgentService.I.toolsForTest()
+          .map((t) => ((t['function'] as Map?) ?? {})['name'])
+          .whereType<String>();
+      expect(names, isNot(contains(McpService.providerServerToolName(a))));
+    });
+
+    test('enabling pendingGlobal keeps owned MCP unmounted until restart',
+        () async {
+      final root = Directory.systemTemp.createTempSync('ovid-p9-pending-');
+      final owner = 'pending/plugin';
+      final manifest = NormalizedPluginManifest(
+        id: owner,
+        name: 'Pending',
+        version: '1',
+        format: PluginFormat.genericMcp,
+        rootPath: root.path,
+        mcpServers: [
+          PluginMcpServer(
+            pluginId: owner,
+            name: 'api',
+            transport: 'http',
+            url: 'https://pending.example/mcp',
+          ),
+        ],
+      );
+      final entry = PluginInstallEntry(
+        activation: PluginActivationRecord(
+          pluginId: owner,
+          state: PluginActivation.pendingGlobal,
+          installedBootEpoch: 999999,
+          promoteOnNextBoot: true,
+        ),
+        manifest: manifest,
+        contentDir: root.path,
+        version: '1',
+        disabled: true,
+      );
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        kPluginActivationPrefKey,
+        jsonEncode({owner: jsonEncode(entry.toJson())}),
+      );
+      var requests = 0;
+      McpService.I.httpClientForTest = MockClient((request) async {
+        requests++;
+        return http.Response('{}', 200);
+      });
+      addTearDown(() async {
+        await PluginRuntimeManager.I.uninstall(owner);
+        McpService.I.httpClientForTest = null;
+        if (root.existsSync()) root.deleteSync(recursive: true);
+      });
+
+      await PluginRuntimeManager.I.enable(owner);
+
+      expect(PluginContributionRegistry.I.activationFor(owner),
+          PluginActivation.pendingGlobal);
+      expect(app.mcpServers.any((s) => s.ownerPluginId == owner), isFalse);
+      expect(requests, 0);
+    });
+
+    test('upgrade prunes removed owned declarations and their secrets',
+        () async {
+      final keep = ownedServer('upgrade/prune', name: 'keep');
+      final removed = ownedServer('upgrade/prune', name: 'removed');
+      final unrelated = ownedServer('other/plugin', name: 'removed');
+      app.mcpServers.addAll([keep, removed, unrelated]);
+      await app.setMcpEnv(removed.canonicalId, {'TOKEN': 'secret'});
+      await app.setMcpHeaders(removed.canonicalId, {'Authorization': 'secret'});
+      final manifest = ownedManifest('upgrade/prune', 'keep');
+      addTearDown(() {
+        app.mcpServers.removeWhere(
+          (s) => identical(s, keep) || identical(s, unrelated),
+        );
+      });
+
+      await app.mountPluginOwnedMcpServers(manifest, connect: false);
+
+      expect(app.mcpServers, contains(keep));
+      expect(app.mcpServers, contains(unrelated));
+      expect(app.mcpServers, isNot(contains(removed)));
+      expect(await app.getMcpEnv(removed.canonicalId), isEmpty);
+      expect(await app.getMcpHeaders(removed.canonicalId), isEmpty);
+      expect(McpService.I.hasPendingReconnectForTest(removed.canonicalId),
+          isFalse);
+    });
+
+    test('owned cwd rejects absolute and symlink escapes at spawn boundary',
+        () {
+      final root = Directory.systemTemp.createTempSync('ovid-p9-cwd-root-');
+      final inside = Directory('${root.path}/inside')..createSync();
+      final outside = Directory.systemTemp.createTempSync('ovid-p9-outside-');
+      final link = Link('${root.path}/escape')..createSync(outside.path);
+      final server = ownedServer('cwd/plugin')
+        ..pluginRuntimeRoot = root.path;
+      PluginContributionRegistry.I.register(
+        NormalizedPluginManifest(
+          id: 'cwd/plugin',
+          name: 'cwd',
+          version: '1',
+          format: PluginFormat.genericMcp,
+          rootPath: '${root.path}/content',
+        ),
+        activation: PluginActivation.globalActive,
+      );
+      addTearDown(() {
+        PluginContributionRegistry.I.unregisterPlugin('cwd/plugin');
+        root.deleteSync(recursive: true);
+        outside.deleteSync(recursive: true);
+      });
+
+      server.cwd = inside.path;
+      expect(McpService.resolveWorkingDirectoryForTest(server)?.path,
+          inside.resolveSymbolicLinksSync());
+      server.cwd = outside.path;
+      expect(() => McpService.resolveWorkingDirectoryForTest(server),
+          throwsStateError);
+      server.cwd = link.path;
+      expect(() => McpService.resolveWorkingDirectoryForTest(server),
+          throwsStateError);
+    });
+
+    test('legacy alias resolves against visible providers for running session',
+        () async {
+      final a = ownedServer('alias/session-a');
+      final b = ownedServer('alias/session-b');
+      a.url = 'https://session-a.example/mcp';
+      b.url = 'https://session-b.example/mcp';
+      app.mcpServers.addAll([a, b]);
+      PluginContributionRegistry.I.register(
+        ownedManifest('alias/session-a', 'shared'),
+        activation: PluginActivation.sessionActive,
+        immediateSessionId: 'p9-alias-a',
+      );
+      PluginContributionRegistry.I.register(
+        ownedManifest('alias/session-b', 'shared'),
+        activation: PluginActivation.sessionActive,
+        immediateSessionId: 'p9-alias-b',
+      );
+      final sessions = [
+        ChatSession(id: 'p9-alias-a', title: 'a', model: 'm'),
+        ChatSession(id: 'p9-alias-b', title: 'b', model: 'm'),
+      ];
+      app.sessions.addAll(sessions);
+      McpService.I.httpClientForTest = mcpHttpClient();
+      await McpService.I.connect(a);
+      await McpService.I.connect(b);
+      addTearDown(() async {
+        AgentService.setRunSessionForTest('');
+        app.sessions.removeWhere((s) => sessions.contains(s));
+        app.mcpServers.removeWhere((s) => identical(s, a) || identical(s, b));
+        PluginContributionRegistry.I.unregisterPlugin('alias/session-a');
+        PluginContributionRegistry.I.unregisterPlugin('alias/session-b');
+        await McpService.I.disconnect(a.canonicalId);
+        await McpService.I.disconnect(b.canonicalId);
+        McpService.I.httpClientForTest = null;
+      });
+
+      AgentService.setRunSessionForTest('p9-alias-a');
+      final result = await AgentService.I.dispatchForTest(
+        'mcp__shared__lookup',
+        {},
+      );
+      expect(result, 'session-a.example');
+    });
+
+    testWidgets('owned MCP UI status and editor use canonical keys',
+        (tester) async {
+      final server = ownedServer('ui/plugin', name: 'shared');
+      app.updateServiceStatus(
+        'mcp:${server.canonicalId}',
+        ServiceHealth.failed,
+        detail: 'owner-specific failure',
+      );
+      app.updateServiceStatus(
+        'mcp:${server.name}',
+        ServiceHealth.working,
+        detail: 'wrong owner',
+      );
+      addTearDown(() {
+        app.serviceStatus.remove('mcp:${server.canonicalId}');
+        app.serviceStatus.remove('mcp:${server.name}');
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: Scaffold(body: McpCard(server: server)),
+        ),
+      );
+      expect(find.byIcon(Icons.error_outline), findsOneWidget);
+
+      final source = File('lib/ui/plugins_screen.dart').readAsStringSync();
+      expect(source, contains("serviceStatus['mcp:\${server.canonicalId}']"));
+      expect(source, contains('setMcpEnv(s.canonicalId, env)'));
+      expect(source, isNot(contains('McpService.I.isConnected(server.name)')));
+    });
+
     test(
       'same visible server names use independent canonical identities',
       () async {
@@ -17918,6 +18301,8 @@ cwd = 'tools'
         });
         final a = ownedServer('plug-a');
         final b = ownedServer('plug-b');
+        registerOwner('plug-a');
+        registerOwner('plug-b');
         addTearDown(() async {
           await McpService.I.disconnect(a.canonicalId);
           await McpService.I.disconnect(b.canonicalId);
@@ -17937,8 +18322,18 @@ cwd = 'tools'
             .map((t) => ((t['function'] as Map?) ?? {})['name'])
             .whereType<String>()
             .toList();
-        expect(names, contains('mcp_plug-a_shared_lookup'));
-        expect(names, contains('mcp_plug-b_shared_lookup'));
+        expect(
+          names,
+          contains(
+            McpConnectedTool(a, McpToolDef(name: 'lookup')).canonicalToolName,
+          ),
+        );
+        expect(
+          names,
+          contains(
+            McpConnectedTool(b, McpToolDef(name: 'lookup')).canonicalToolName,
+          ),
+        );
         expect(
           names,
           isNot(contains('mcp__shared__lookup')),
@@ -17950,6 +18345,8 @@ cwd = 'tools'
     test('legacy MCP connect alias is advertised only when it is unique', () {
       final a = ownedServer('alias-a');
       final b = ownedServer('alias-b');
+      registerOwner('alias-a');
+      registerOwner('alias-b');
       app.mcpServers.addAll([a, b]);
       addTearDown(() {
         app.mcpServers.removeWhere((s) => identical(s, a) || identical(s, b));
@@ -17976,6 +18373,7 @@ cwd = 'tools'
       () async {
         final server = ownedServer('needs-config')
           ..requiredEnvNames = ['API_TOKEN'];
+        registerOwner('needs-config');
         final status = await McpService.I.connect(server);
         addTearDown(() => McpService.I.disconnect(server.canonicalId));
 
@@ -17988,6 +18386,7 @@ cwd = 'tools'
         () async {
       final server = ownedServer('header/plugin', name: 'remote')
         ..requiredHeaderNames = ['Authorization'];
+      registerOwner('header/plugin', serverName: 'remote');
       await app.setMcpHeaders(server.canonicalId, {
         'Authorization': 'Bearer owner-secret',
       });
@@ -18032,6 +18431,13 @@ cwd = 'tools'
             envNames: ['TOKEN'],
           ),
         ],
+      );
+      PluginContributionRegistry.I.register(
+        manifest,
+        activation: PluginActivation.globalActive,
+      );
+      addTearDown(
+        () => PluginContributionRegistry.I.unregisterPlugin(manifest.id),
       );
       await app.setMcpEnv('active/plugin/api', {'TOKEN': 'configured'});
       McpService.I.httpClientForTest = MockClient((request) async {
@@ -18106,39 +18512,34 @@ cwd = 'tools'
       expect(old.pluginRuntimeRoot, '/runtime/v2');
     });
 
-    test('tool rediscovery refreshes the canonical roster', () async {
-      var generation = 0;
-      final server = ownedServer('refresh/plugin', name: 'catalog');
-      McpService.I.httpClientForTest = MockClient((request) async {
-        final body = jsonDecode(request.body) as Map<String, dynamic>;
-        final method = body['method'];
-        return http.Response(
-          jsonEncode({
-            'jsonrpc': '2.0',
-            'id': body['id'],
-            'result': method == 'tools/list'
-                ? {
-                    'tools': [
-                      {'name': generation == 0 ? 'old-tool' : 'new-tool'},
-                    ],
-                  }
-                : {},
-          }),
-          200,
-        );
-      });
+    test('stdio list_changed notification refreshes the canonical roster',
+        () async {
+      final server = ownedServer('refresh/plugin', name: 'catalog')
+        ..transport = 'stdio'
+        ..url = null;
+      registerOwner('refresh/plugin', serverName: 'catalog');
+      final process = Plugin9McpProcess('new-tool');
+      await McpService.I.attachStdioForTest(
+        server,
+        process,
+        initialTools: [McpToolDef(name: 'old-tool')],
+      );
       addTearDown(() async {
         await McpService.I.disconnect(server.canonicalId);
-        McpService.I.httpClientForTest = null;
       });
-      await McpService.I.connect(server);
       expect(
         McpService.I.connectedTools[server.canonicalId]!.single.name,
         'old-tool',
       );
 
-      generation = 1;
-      await McpService.I.rediscoverToolsForTest(server.canonicalId);
+      process.notifyToolsChanged();
+      for (var i = 0;
+          i < 20 &&
+              McpService.I.connectedTools[server.canonicalId]!.single.name !=
+                  'new-tool';
+          i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
 
       expect(
         McpService.I.connectedTools[server.canonicalId]!.single.name,
@@ -18148,8 +18549,26 @@ cwd = 'tools'
           .toolsForTest()
           .map((t) => ((t['function'] as Map?) ?? {})['name'])
           .whereType<String>();
-      expect(names, contains('mcp_refresh_plugin_catalog_new-tool'));
-      expect(names, isNot(contains('mcp_refresh_plugin_catalog_old-tool')));
+      expect(
+        names,
+        contains(
+          McpConnectedTool(
+            server,
+            McpToolDef(name: 'new-tool'),
+          ).canonicalToolName,
+        ),
+      );
+      expect(
+        names,
+        isNot(
+          contains(
+            McpConnectedTool(
+              server,
+              McpToolDef(name: 'old-tool'),
+            ).canonicalToolName,
+          ),
+        ),
+      );
     });
 
     test('session-scoped owned tools stay out of other session rosters',
@@ -18214,15 +18633,19 @@ cwd = 'tools'
       final ownerNames = AgentService.I.toolsForTest()
           .map((t) => ((t['function'] as Map?) ?? {})['name'])
           .whereType<String>();
-      expect(ownerNames, contains('mcp_scope_plugin_api_private-tool'));
+      final canonicalName = McpConnectedTool(
+        server,
+        McpToolDef(name: 'private-tool'),
+      ).canonicalToolName;
+      expect(ownerNames, contains(canonicalName));
 
       AgentService.setRunSessionForTest('p9-other-session');
       final otherNames = AgentService.I.toolsForTest()
           .map((t) => ((t['function'] as Map?) ?? {})['name'])
           .whereType<String>();
-      expect(otherNames, isNot(contains('mcp_scope_plugin_api_private-tool')));
+      expect(otherNames, isNot(contains(canonicalName)));
       final guessed = await AgentService.I.dispatchForTest(
-        'mcp_scope_plugin_api_private-tool',
+        canonicalName,
         {},
       );
       expect(guessed, contains('not active for this session'));
@@ -18318,6 +18741,72 @@ cwd = 'tools'
       await app.removeMcpServer(server);
     });
   });
+}
+
+class Plugin9McpProcess implements Process {
+  Plugin9McpProcess(this.toolName);
+
+  final String toolName;
+  final _stdout = StreamController<List<int>>();
+  final _exit = Completer<int>();
+
+  void notifyToolsChanged() {
+    _stdout.add(
+      utf8.encode(
+        '{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}\n',
+      ),
+    );
+  }
+
+  @override
+  Stream<List<int>> get stdout => _stdout.stream;
+
+  @override
+  Stream<List<int>> get stderr => const Stream.empty();
+
+  @override
+  IOSink get stdin => _Plugin9Stdin(this);
+
+  @override
+  Future<int> get exitCode => _exit.future;
+
+  @override
+  bool kill([ProcessSignal signal = ProcessSignal.sigterm]) {
+    if (!_exit.isCompleted) _exit.complete(0);
+    _stdout.close();
+    return true;
+  }
+
+  @override
+  int get pid => 9;
+}
+
+class _Plugin9Stdin implements IOSink {
+  _Plugin9Stdin(this.process);
+
+  final Plugin9McpProcess process;
+
+  @override
+  void writeln([Object? object = '']) {
+    final request = jsonDecode(object.toString()) as Map<String, dynamic>;
+    if (request['method'] != 'tools/list') return;
+    process._stdout.add(
+      utf8.encode(
+        '${jsonEncode({
+          'jsonrpc': '2.0',
+          'id': request['id'],
+          'result': {
+            'tools': [
+              {'name': process.toolName},
+            ],
+          },
+        })}\n',
+      ),
+    );
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// One recorded command from the [RecordingRunner] injected-exec seam.

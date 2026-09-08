@@ -2788,6 +2788,26 @@ class AppState extends ChangeNotifier {
     bool connect = true,
   }) async {
     var mounted = 0;
+    final declaredIds = {
+      for (final server in manifest.mcpServers)
+        '${manifest.id}/${server.name}',
+    };
+    final removed = mcpServers
+        .where(
+          (server) =>
+              server.ownerPluginId == manifest.id &&
+              !declaredIds.contains(server.canonicalId),
+        )
+        .toList();
+    for (final server in removed) {
+      await McpService.I.disconnect(server.canonicalId);
+      await Future.wait([
+        deleteMcpEnv(server.canonicalId),
+        deleteMcpHeaders(server.canonicalId),
+      ]);
+      serviceStatus.remove('mcp:${server.canonicalId}');
+      mcpServers.remove(server);
+    }
     for (final declared in manifest.mcpServers) {
       final canonicalId = '${manifest.id}/${declared.name}';
       var server = mcpServers
@@ -2843,9 +2863,9 @@ class AppState extends ChangeNotifier {
         detail: status,
       );
     }
-    if (mounted > 0) await _persistCustomMcpServers();
+    if (mounted > 0 || removed.isNotEmpty) await _persistCustomMcpServers();
     if (connect) await _persistMcpConnectedIntent();
-    if (mounted > 0 || connect) refresh();
+    if (mounted > 0 || removed.isNotEmpty || connect) refresh();
     return mounted;
   }
 

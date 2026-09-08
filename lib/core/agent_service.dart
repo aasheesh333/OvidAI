@@ -2399,6 +2399,12 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       .replaceAll(RegExp(r'[^a-z0-9_]+'), '_')
       .replaceAll(RegExp(r'^_+|_+$'), '');
 
+  static bool _mcpOwnerVisible(McpServer server, String sessionId) {
+    final owner = server.ownerPluginId;
+    return owner == null ||
+        PluginContributionRegistry.I.isPluginActiveForSession(owner, sessionId);
+  }
+
   /// The built-in seed plugins that gate their own dedicated tools
   /// (web_search, file_read, …). Shared by the capability check and the
   /// `_tools` roster so the two can never drift apart.
@@ -2614,13 +2620,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // directly with typed arguments instead of the generic mcp_* proxy.
     final connectedMcpTools = McpService.I.connectedToolEntries;
     for (final entry in connectedMcpTools) {
-      final owner = entry.server.ownerPluginId;
-      if (owner != null &&
-          PluginContributionRegistry.I.isRegistered(owner) &&
-          !PluginContributionRegistry.I.isPluginActiveForSession(
-            owner,
-            runSessionId,
-          )) {
+      if (!_mcpOwnerVisible(entry.server, runSessionId)) {
         continue;
       }
       if (entry.server.ownerPluginId != null) {
@@ -2631,7 +2631,6 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             if (e.legacyToolName != entry.legacyToolName) return false;
             final candidateOwner = e.server.ownerPluginId;
             return candidateOwner == null ||
-                !PluginContributionRegistry.I.isRegistered(candidateOwner) ||
                 PluginContributionRegistry.I.isPluginActiveForSession(
                   candidateOwner,
                   runSessionId,
@@ -2649,13 +2648,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // first call. Built-in seed servers are skipped (there are dozens; the
     // model finds them via catalog_list_mcp / agent_install_mcp).
     for (final s in app.mcpServers) {
-      final owner = s.ownerPluginId;
-      if (owner != null &&
-          PluginContributionRegistry.I.isRegistered(owner) &&
-          !PluginContributionRegistry.I.isPluginActiveForSession(
-            owner,
-            runSessionId,
-          )) {
+      if (!_mcpOwnerVisible(s, runSessionId)) {
         continue;
       }
       if (!s.custom || McpService.I.isConnected(s.canonicalId)) continue;
@@ -2666,7 +2659,21 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
                 candidate.custom && _normTool(candidate.name) == safe,
           )
           .length;
-      final canonicalStub = 'mcp_${_normTool(s.canonicalId)}';
+      final canonicalStub = s.ownerPluginId == null
+          ? 'mcp_$safe'
+          : McpService.providerServerToolName(s);
+      final canonicalCount = app.mcpServers
+          .where(
+            (candidate) =>
+                candidate.custom &&
+                _mcpOwnerVisible(candidate, runSessionId) &&
+                (candidate.ownerPluginId == null
+                    ? 'mcp_${_normTool(candidate.name)}'
+                    : McpService.providerServerToolName(candidate)) ==
+                    canonicalStub,
+          )
+          .length;
+      if (canonicalCount != 1) continue;
       final already = tools.any((t) {
         final fn = t['function'];
         return fn is Map && fn['name'] == canonicalStub;
@@ -4604,10 +4611,12 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// BY NAME. Tries, in order: exact normalized-key match, a fuzzy name
   /// containment, then a token-subset match so a proxy key like
   /// `mcp_gh_list` still finds a server actually named `gh`.
-  McpServer? _resolveMcpProxyServer(String toolName) {
+  McpServer? _resolveMcpProxyServer(String toolName, {String? sessionId}) {
     final raw = toolName.substring(4);
     final key = _normTool(raw);
-    final servers = AppState.I.mcpServers;
+    final servers = AppState.I.mcpServers
+        .where((s) => _mcpOwnerVisible(s, sessionId ?? _runSession?.id ?? ''))
+        .toList();
     final canonical = servers
         .where((s) => _normTool(s.canonicalId) == key)
         .toList();
@@ -7223,18 +7232,26 @@ ${await _agentsMdBlock()}
       case String() when name.startsWith('mcp__'):
         // Real discovered MCP tool call: mcp__<server>__<tool>.
         // The tool schema came from tools/list (McpService.connectedTools).
-        final resolved = McpService.I.resolveToolName(name);
+        final runSid = _runSession?.id ?? '';
+        final resolved = McpService.I.resolveToolName(
+          name,
+          visible: (server) => _mcpOwnerVisible(server, runSid),
+        );
         if (resolved == null) {
+          final hidden = McpService.I.resolveToolName(name);
+          if (hidden?.server.ownerPluginId != null) {
+            return _pluginScopeRefusal(
+              hidden!.canonicalId,
+              hidden.server.ownerPluginId!,
+            );
+          }
           return 'MCP tool "$name" is not connected or its alias is ambiguous.';
         }
-        final owner = resolved.server.ownerPluginId;
-        if (owner != null &&
-            PluginContributionRegistry.I.isRegistered(owner) &&
-            !PluginContributionRegistry.I.isPluginActiveForSession(
-              owner,
-              _runSession?.id ?? '',
-            )) {
-          return _pluginScopeRefusal(resolved.canonicalId, owner);
+        if (!_mcpOwnerVisible(resolved.server, runSid)) {
+          return _pluginScopeRefusal(
+            resolved.canonicalId,
+            resolved.server.ownerPluginId!,
+          );
         }
         _emit('shell', 'MCP: ${resolved.server.name} → ${resolved.tool.name}');
         return await McpService.I.callTool(
@@ -7243,16 +7260,26 @@ ${await _agentsMdBlock()}
           args,
         );
       case String() when name.startsWith('mcp_'):
-        final resolved = McpService.I.resolveToolName(name);
+        final runSid = _runSession?.id ?? '';
+        final resolved = McpService.I.resolveToolName(
+          name,
+          visible: (server) => _mcpOwnerVisible(server, runSid),
+        );
+        if (resolved == null) {
+          final hidden = McpService.I.resolveToolName(name);
+          if (hidden?.server.ownerPluginId != null) {
+            return _pluginScopeRefusal(
+              hidden!.canonicalId,
+              hidden.server.ownerPluginId!,
+            );
+          }
+        }
         if (resolved != null) {
-          final owner = resolved.server.ownerPluginId;
-          if (owner != null &&
-              PluginContributionRegistry.I.isRegistered(owner) &&
-              !PluginContributionRegistry.I.isPluginActiveForSession(
-                owner,
-                _runSession?.id ?? '',
-              )) {
-            return _pluginScopeRefusal(resolved.canonicalId, owner);
+          if (!_mcpOwnerVisible(resolved.server, runSid)) {
+            return _pluginScopeRefusal(
+              resolved.canonicalId,
+              resolved.server.ownerPluginId!,
+            );
           }
           _emit(
             'shell',
@@ -7275,6 +7302,9 @@ ${await _agentsMdBlock()}
         if (match == null) {
           return 'MCP server not configured. Add it in Settings → MCP '
               'servers (or list servers with catalog_list_mcp).';
+        }
+        if (!_mcpOwnerVisible(match, runSid)) {
+          return _pluginScopeRefusal(match.canonicalId, match.ownerPluginId!);
         }
         _emit('shell', 'MCP: ${match.name} → $action');
         if (!McpService.I.isConnected(match.canonicalId)) {
