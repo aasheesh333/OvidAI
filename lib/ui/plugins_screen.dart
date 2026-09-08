@@ -29,7 +29,15 @@ String? _toolGainsFor(PluginItem p) {
     _ => null,
   };
   if (seed != null) return seed;
-  if (p.category == 'MCP') return 'mcp (proxy)';
+  if (p.category == 'MCP') {
+    // Fix round 1 (Task 10 finding 1): same gating as the roster's
+    // _mcpProxyTool — the proxy tool exists only while the plugin's
+    // matching MCP server row does. No server row → no claimed gain.
+    final hasServer = AppState.I.mcpServers.any(
+      (s) => s.name.toLowerCase() == p.name.toLowerCase(),
+    );
+    return hasServer ? 'mcp (proxy)' : null;
+  }
   final tools = AgentService.I.pluginToolNames(p);
   if (tools.isNotEmpty) {
     return tools.join(', ');

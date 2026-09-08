@@ -18982,19 +18982,30 @@ cwd = 'tools'
         'Postgres': '@modelcontextprotocol/server-postgres',
         'Playwright': '@playwright/mcp',
       };
-      final seeds = a.mcpServers.where((s) => !s.custom);
+      final seeds = a.mcpServers.where((s) => !s.custom).toList();
       for (final s in seeds) {
-        final pkg = s.args
-            .where((x) => x.startsWith(RegExp(r'^@|mcp-')))
-            .firstOrNull;
-        if (pkg == null) continue;
-        expect(
-          pinned[s.name],
-          pkg,
-          reason:
-              '${s.name} seeds $pkg — not in the pinned tested manifest '
-              '(docs/superpowers/audits/2026-09-06-preinstalled-plugin-mcp-runtime.md)',
-        );
+        // Hygiene (fix round 1): every bundled stdio seed with args must
+        // yield a package candidate — a silent skip here would let a
+        // coordinate-less seed evade the pinned-manifest check entirely.
+        if (s.transport == 'stdio' && s.args.isNotEmpty) {
+          final pkg = s.args
+              .where((x) => x.startsWith(RegExp(r'^@|mcp-')))
+              .firstOrNull;
+          expect(
+            pkg,
+            isNotNull,
+            reason:
+                '${s.name} has stdio args ${s.args} but no package '
+                'candidate — the pinned-manifest extraction cannot check it',
+          );
+          expect(
+            pinned[s.name],
+            pkg,
+            reason:
+                '${s.name} seeds $pkg — not in the pinned tested manifest '
+                '(docs/superpowers/audits/2026-09-06-preinstalled-plugin-mcp-runtime.md)',
+          );
+        }
       }
       // Every pinned row must actually exist in the seed (no silent drops).
       final names = seeds.map((s) => s.name).toSet();
@@ -19031,14 +19042,74 @@ cwd = 'tools'
         expect(McpService.I.isConnected(s.canonicalId), isFalse);
       }
 
-      // And a direct connect() on a credential-dependent server without
-      // its secret reports degraded/needs configuration rather than
-      // spawning. (Bundled seeds have no ownerPluginId so requiredEnv
-      // enforcement is via envHint — connecting without the secret stored
-      // must still not leave a live process.)
+      // Fix round 1 (finding 2): a direct connect() on a BUNDLED
+      // credential-dependent server (ownerPluginId null, envHint declared)
+      // without its secret must NOT spawn — the credential gate must cover
+      // ownerless bundled servers too, not just plugin-owned ones. It
+      // reports the degraded/needs-configuration status instead.
       final github = a.mcpServers.firstWhere((s) => s.name == 'GitHub');
-      await McpService.I.disconnect(github.canonicalId);
+      expect(github.ownerPluginId, isNull, reason: 'bundled seed is ownerless');
+      expect(github.envHint, 'GITHUB_TOKEN');
+      expect(
+        await McpService.I.connect(github),
+        contains('needs configuration'),
+        reason: 'bundled credential server must refuse to connect unconfigured',
+      );
       expect(McpService.I.isConnected(github.canonicalId), isFalse);
+
+      // And the refusal must not persist connected intent: a restart (or
+      // agent_install_mcp) must not auto-respawn it while unconfigured.
+      // Simulate the toggle/intent path the UI uses.
+      github.connected = true;
+      await a.persistMcpIntent();
+      final prefs = await SharedPreferences.getInstance();
+      final intent = prefs.getStringList('ovid_mcp_connected_v1') ?? [];
+      // The intent list records the user's wish; the spawn gate is the
+      // connect() refusal above. Reconnect on an unconfigured server must
+      // also refuse (reconnectServices → connect → degraded, no spawn).
+      expect(intent, contains(github.canonicalId));
+      await a.reconnectServices(targetServers: [github.canonicalId]);
+      expect(McpService.I.isConnected(github.canonicalId), isFalse);
+      expect(github.connected, isFalse);
+      final st = a.serviceStatus['mcp:${github.canonicalId}'];
+      expect(st, isNotNull);
+      expect(st!.health, ServiceHealth.failed);
+      expect(st.detail, contains('needs configuration'));
+    });
+
+    test('bundled credential server connects once its secret is configured', () async {
+      final a = await freshSeededApp();
+      addTearDown(() => AppState.resetTestInstance());
+
+      final postgres = a.mcpServers.firstWhere((s) => s.name == 'Postgres');
+      expect(postgres.envHint, 'DATABASE_URL');
+      // With the secret stored in secure storage the credential gate
+      // passes and the connect proceeds (it then fails on the absent
+      // sandbox — the honest runtime failure — but NEVER on credentials).
+      await a.setMcpEnv(postgres.canonicalId, {'DATABASE_URL': 'pg://test'});
+      final res = await McpService.I.connect(postgres);
+      expect(
+        res,
+        isNot(contains('needs configuration')),
+        reason: 'configured credential server must pass the credential gate',
+      );
+      expect(McpService.I.isConnected(postgres.canonicalId), isFalse);
+    });
+
+    test('custom servers with no declared credentials connect as today', () async {
+      final a = await freshSeededApp();
+      addTearDown(() => AppState.resetTestInstance());
+
+      // A user-added server with no envHint and no requiredEnvNames must
+      // NOT be blocked by the credential gate (it fails later on the
+      // absent sandbox, the pre-existing honest behavior).
+      a.addCustomMcpServer(name: 'p10-bare', command: 'npx');
+      final bare = a.mcpServers.firstWhere((s) => s.name == 'p10-bare');
+      expect(bare.envHint, isNull);
+      final res = await McpService.I.connect(bare);
+      expect(res, isNot(contains('needs configuration')));
+      expect(McpService.I.isConnected(bare.canonicalId), isFalse);
+      a.removeMcpServer(bare);
     });
 
     test('stdio MCP seeds are Android-honest: they need the sandbox', () async {
@@ -19102,6 +19173,66 @@ cwd = 'tools'
         reason: 'capability-less plugin must not be hardcoded working',
       );
       expect(ghostStatus.detail, contains('no agent tools'));
+    });
+
+    test('UI tool-gain claims match roster truth for MCP-category plugins', () async {
+      final a = await freshSeededApp();
+      addTearDown(() => AppState.resetTestInstance());
+
+      // Fix round 1 (finding 1): _toolGainsFor must not claim 'mcp
+      // (proxy)' for an MCP-category install with no matching server row
+      // — same gating the roster (_mcpProxyTool) and _pluginToolNames
+      // already apply. UI claims and roster truth must agree.
+      final ghostMcp = PluginItem(
+        name: 'PLUGIN10 Ghost MCP',
+        author: 'test',
+        description: '',
+        version: '1',
+        category: 'MCP',
+        installed: true,
+        enabled: true,
+      );
+      a.plugins.add(ghostMcp);
+      addTearDown(() => a.plugins.remove(ghostMcp));
+
+      // No server row named 'PLUGIN10 Ghost MCP' exists → no proxy tool.
+      expect(
+        a.mcpServers.any(
+          (s) => s.name.toLowerCase() == ghostMcp.name.toLowerCase(),
+        ),
+        isFalse,
+      );
+      expect(AgentService.I.pluginToolNames(ghostMcp), isEmpty);
+      expect(toolGainsForTest(ghostMcp), isNull,
+          reason: 'UI claimed a tool gain the roster does not mount');
+
+      // With the matching server row present, both claim the proxy.
+      a.mcpServers.add(
+        McpServer(
+          name: ghostMcp.name,
+          author: 'test',
+          description: '',
+          category: 'Custom',
+          command: 'npx',
+        ),
+      );
+      addTearDown(() => a.mcpServers.removeWhere((s) => s.name == ghostMcp.name));
+      expect(AgentService.I.pluginToolNames(ghostMcp), contains('mcp (proxy)'));
+      expect(toolGainsForTest(ghostMcp), contains('mcp (proxy)'));
+
+      // Parity across the whole seeded catalog: whenever the UI claims a
+      // gain, the roster-facing probe must resolve capability too.
+      for (final p in a.plugins.where((p) => p.installed && p.enabled)) {
+        final uiClaim = toolGainsForTest(p);
+        final roster = AgentService.I.pluginToolNames(p);
+        expect(
+          (uiClaim == null) == roster.isEmpty,
+          isTrue,
+          reason:
+              '${p.name}: UI claim=$uiClaim but roster=$roster — the two '
+              'must agree',
+        );
+      }
     });
   });
 }

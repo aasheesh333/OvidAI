@@ -203,15 +203,48 @@ class McpService {
   }
 
   Future<List<String>> _missingCredentials(McpServer server) async {
-    if (server.ownerPluginId == null) return const [];
+    // Task 10 fix round 1 (finding 2): the credential gate covers BOTH
+    // plugin-owned servers (requiredEnvNames/requiredHeaderNames from the
+    // normalized manifest) AND ownerless servers that declare credentials
+    // — bundled seeds via envHint (comma-separated env var names, e.g.
+    // 'GITHUB_TOKEN' or 'SUPABASE_URL,SUPABASE_KEY'), plus any ownerless
+    // row carrying requiredEnvNames. A declared credential that is absent
+    // from secure storage means the server must NOT spawn (spec §10:
+    // credential-dependent MCPs never auto-spawn until configured).
+    // Ownerless servers with no declarations connect as before.
+    final declaredEnv = <String>[
+      ...server.requiredEnvNames,
+      if (server.ownerPluginId == null) ...?_envHintNames(server),
+    ];
+    // envHint is env-only; headers come through requiredHeaderNames
+    // exclusively (ownerless HTTP auth headers are set at add time).
+    final declaredHeaders = server.requiredHeaderNames;
+    if (declaredEnv.isEmpty && declaredHeaders.isEmpty) return const [];
     final env = await AppState.I.getMcpEnv(server.canonicalId);
     final headers = await AppState.I.getMcpHeaders(server.canonicalId);
     return [
-      for (final name in server.requiredEnvNames)
+      for (final name in declaredEnv)
         if ((env[name] ?? '').isEmpty) name,
-      for (final name in server.requiredHeaderNames)
+      for (final name in declaredHeaders)
         if ((headers[name] ?? '').isEmpty) name,
     ];
+  }
+
+  /// envHint is a display hint that doubles as a credential declaration
+  /// for bundled seeds: raw env var names, comma-separated. Empty/blank
+  /// entries are ignored; a JSON-object hint (headers form) declares
+  /// nothing here.
+  static List<String>? _envHintNames(McpServer server) {
+    final hint = server.envHint;
+    if (hint == null || hint.trim().isEmpty || hint.trimLeft().startsWith('{')) {
+      return null;
+    }
+    final names = hint
+        .split(',')
+        .map((n) => n.trim())
+        .where((n) => n.isNotEmpty)
+        .toList();
+    return names.isEmpty ? null : names;
   }
 
   /// PR41: Streamable-HTTP transport — no process, no sandbox. Every
