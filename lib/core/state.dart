@@ -7,6 +7,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'agent_notification_service.dart';
+import 'agent_service.dart' show AgentService;
 import 'mcp_service.dart';
 import 'plugin_adapters.dart';
 import 'plugin_manifest.dart';
@@ -3354,13 +3355,28 @@ class AppState extends ChangeNotifier {
       }
     }
 
-    // Re-verify enabled plugins
+    // Re-verify enabled plugins (Task 10, spec §10): startup health is
+    // derived from a real capability probe — never a hardcoded 'working'
+    // stamp. A plugin that resolves at least one real contribution
+    // (tool/skill/hook/MCP) is working; an installed+enabled row with
+    // nothing mounted fails honestly so the Plugins screen shows an
+    // actionable state.
     for (final p in plugins.where((p) => p.installed && p.enabled)) {
-      updateServiceStatus(
-        'plugin:${p.name}',
-        ServiceHealth.working,
-        detail: 'enabled',
-      );
+      final tools = AgentService.I.pluginToolNames(p);
+      if (tools.isNotEmpty) {
+        updateServiceStatus(
+          'plugin:${p.name}',
+          ServiceHealth.working,
+          detail: 'probe ok · tools: ${tools.join(', ')}',
+        );
+      } else {
+        updateServiceStatus(
+          'plugin:${p.name}',
+          ServiceHealth.failed,
+          detail: 'probe failed: installed+enabled but contributes no agent '
+              'tools, skills, hooks, or MCP servers',
+        );
+      }
     }
     refresh();
   }
@@ -4014,8 +4030,10 @@ class AppState extends ChangeNotifier {
             'Chain-of-thought mode — model thinks step-by-step before replying, shown as collapsible reasoning.',
         version: '1.2.1',
         category: 'Tool',
-        installed: true,
-        enabled: true,
+        // Task 10 (spec §10): the reasoning display is gated by the
+        // showReasoning preference, never by this row — it mounts no
+        // agent tool, so it must not seed as installed (honest catalog:
+        // discoverable rows are labeled Available, not Installed).
       ),
       PluginItem(
         name: 'Image Studio',
@@ -4762,17 +4780,14 @@ class AppState extends ChangeNotifier {
     ]);
 
     // --- MCP servers (official registry + community) ---
+    // Task 10 (spec §10) production audit: bundled MCP seeds carry ONLY
+    // pinned, registry-verified coordinates (the pinned tested manifest
+    // is docs/superpowers/audits/2026-09-06-preinstalled-plugin-mcp-runtime.md).
+    // 22 previously-seeded rows pointed at nonexistent npm packages and
+    // were removed; every remaining row starts disconnected — connected
+    // state is derived only after a real MCP handshake. Deprecated
+    // upstream packages say so in their description.
     mcpServers.addAll([
-      McpServer(
-        name: 'Chrome DevTools',
-        author: 'ovidai',
-        description:
-            'Browser automation for the inbuilt browser — navigate, click, type, evaluate JS, read pages. Powers agent web browsing.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@ovidai/chrome-devtools-mcp'],
-        connected: true,
-      ),
       McpServer(
         name: 'Filesystem',
         author: 'modelcontextprotocol',
@@ -4786,7 +4801,10 @@ class AppState extends ChangeNotifier {
         name: 'GitHub',
         author: 'modelcontextprotocol',
         description:
-            'Repos, issues, PRs and actions — full GitHub access for your agent.',
+            'Repos, issues, PRs and actions — full GitHub access for your '
+            'agent. (Pinned @modelcontextprotocol/server-github is '
+            'deprecated upstream; kept because it still installs and '
+            'works. A GITHUB_TOKEN is required.)',
         category: 'Official',
         command: 'npx',
         args: ['-y', '@modelcontextprotocol/server-github'],
@@ -4814,7 +4832,10 @@ class AppState extends ChangeNotifier {
         name: 'Puppeteer',
         author: 'modelcontextprotocol',
         description:
-            'Headless browser automation — click, scroll, screenshot, scrape.',
+            'Headless browser automation — click, scroll, screenshot, scrape. '
+            '(Pinned @modelcontextprotocol/server-puppeteer is deprecated '
+            'upstream in favor of Playwright; kept because it still '
+            'installs and works.)',
         category: 'Official',
         command: 'npx',
         args: ['-y', '@modelcontextprotocol/server-puppeteer'],
@@ -4823,29 +4844,14 @@ class AppState extends ChangeNotifier {
         name: 'Postgres',
         author: 'modelcontextprotocol',
         description:
-            'Read-only schema inspection and safe queries on your database.',
+            'Read-only schema inspection and safe queries on your database. '
+            '(Pinned @modelcontextprotocol/server-postgres is deprecated '
+            'upstream; kept because it still installs and works. A '
+            'DATABASE_URL is required.)',
         category: 'Official',
         command: 'npx',
         args: ['-y', '@modelcontextprotocol/server-postgres'],
         envHint: 'DATABASE_URL',
-      ),
-      McpServer(
-        name: 'Brave Search',
-        author: 'smithery-ai',
-        description: 'Live web search results straight into the chat.',
-        category: 'Community',
-        command: 'npx',
-        args: ['-y', '@smithery/brave-search'],
-        envHint: 'BRAVE_API_KEY',
-      ),
-      McpServer(
-        name: 'Slack',
-        author: 'community',
-        description: 'Send and read Slack messages from your workspace.',
-        category: 'Community',
-        command: 'npx',
-        args: ['-y', '@smithery/slack-mcp'],
-        envHint: 'SLACK_TOKEN',
       ),
       McpServer(
         name: 'Playwright',
@@ -4855,174 +4861,6 @@ class AppState extends ChangeNotifier {
         category: 'Official',
         command: 'npx',
         args: ['-y', '@playwright/mcp'],
-      ),
-      McpServer(
-        name: 'GitLab',
-        author: 'gitlab',
-        description: 'GitLab repos, merge requests, CI pipelines.',
-        category: 'Community',
-        command: 'npx',
-        args: ['-y', '@smithery/gitlab-mcp'],
-        envHint: 'GITLAB_TOKEN',
-      ),
-      McpServer(
-        name: 'Google Drive',
-        author: 'google',
-        description: 'Search, read, and upload files to Google Drive.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@google/mcp-drive'],
-        envHint: 'GOOGLE_TOKEN',
-      ),
-      McpServer(
-        name: 'Firebase',
-        author: 'firebase',
-        description: 'Firestore, Auth, Storage — full Firebase SDK access.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@firebase/mcp'],
-        envHint: 'FIREBASE_CONFIG',
-      ),
-      McpServer(
-        name: 'Supabase',
-        author: 'supabase',
-        description: 'Postgres + Auth + Storage from Supabase.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@supabase/mcp'],
-        envHint: 'SUPABASE_URL,SUPABASE_KEY',
-      ),
-      McpServer(
-        name: 'Vercel',
-        author: 'vercel',
-        description: 'Deploy, manage projects, domains via Vercel API.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@vercel/mcp'],
-        envHint: 'VERCEL_TOKEN',
-      ),
-      McpServer(
-        name: 'Docker',
-        author: 'docker',
-        description: 'Manage containers, images, volumes, networks.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@docker/mcp'],
-      ),
-      McpServer(
-        name: 'Kubernetes',
-        author: 'k8s',
-        description: 'Pods, services, deployments — cluster control.',
-        category: 'Community',
-        command: 'npx',
-        args: ['-y', '@k8s/mcp'],
-      ),
-      McpServer(
-        name: 'MongoDB',
-        author: 'mongodb',
-        description: 'Document queries, aggregations, indexes.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@mongodb/mcp'],
-        envHint: 'MONGODB_URI',
-      ),
-      McpServer(
-        name: 'Redis',
-        author: 'redis',
-        description: 'Key-value store operations and pub/sub.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@redis/mcp'],
-        envHint: 'REDIS_URL',
-      ),
-      McpServer(
-        name: 'S3',
-        author: 'aws',
-        description: 'S3 buckets — upload, list, download, presigned URLs.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@aws/mcp-s3'],
-        envHint: 'AWS_ACCESS_KEY,AWS_SECRET_KEY',
-      ),
-      McpServer(
-        name: 'Notion',
-        author: 'notion',
-        description: 'Two-way sync with Notion databases and pages.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@notion/mcp'],
-        envHint: 'NOTION_TOKEN',
-      ),
-      McpServer(
-        name: 'Linear',
-        author: 'linear',
-        description: 'Create and update Linear issues and projects.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@linear/mcp'],
-        envHint: 'LINEAR_API_KEY',
-      ),
-      McpServer(
-        name: 'Figma',
-        author: 'figma',
-        description: 'Read design frames, tokens, and export assets.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@figma/mcp'],
-        envHint: 'FIGMA_TOKEN',
-      ),
-      McpServer(
-        name: 'OpenAI DALL·E',
-        author: 'openai',
-        description: 'Image generation via DALL·E 3.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@openai/mcp-dalle'],
-        envHint: 'OPENAI_API_KEY',
-      ),
-      McpServer(
-        name: 'ElevenLabs',
-        author: 'elevenlabs',
-        description: 'Text-to-speech with realistic AI voices.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@elevenlabs/mcp'],
-        envHint: 'ELEVENLABS_API_KEY',
-      ),
-      McpServer(
-        name: 'Twilio',
-        author: 'twilio',
-        description: 'SMS, calls, WhatsApp — messaging APIs.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@twilio/mcp'],
-        envHint: 'TWILIO_ACCOUNT_SID,TWILIO_AUTH_TOKEN',
-      ),
-      McpServer(
-        name: 'Discord',
-        author: 'discord',
-        description: 'Read/send Discord messages, manage servers.',
-        category: 'Community',
-        command: 'npx',
-        args: ['-y', '@discord/mcp'],
-        envHint: 'DISCORD_TOKEN',
-      ),
-      McpServer(
-        name: 'Jira',
-        author: 'atlassian',
-        description: 'Create and update Jira issues and sprints.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@atlassian/mcp-jira'],
-        envHint: 'JIRA_TOKEN',
-      ),
-      McpServer(
-        name: 'Obsidian',
-        author: 'obsidian',
-        description: 'Read/write Obsidian vault notes.',
-        category: 'Community',
-        command: 'npx',
-        args: ['-y', '@obsidian/mcp'],
       ),
     ]);
 

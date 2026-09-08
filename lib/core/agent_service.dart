@@ -2455,7 +2455,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     final seed = switch (p.name) {
       'Web Search' => const ['web_search'],
       'Image Studio' => const ['generate_image'],
-      'File Reader' => const ['file_read'],
+      'File Reader' => const ['read_attachment'],
       'Web Fetch & Reader' => const ['fetch_url'],
       'Code Runner' => const ['run_code'],
       'RAG Memory' => const ['memory_search', 'memory_save'],

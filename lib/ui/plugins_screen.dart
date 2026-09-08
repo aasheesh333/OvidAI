@@ -8,6 +8,7 @@ import '../core/mcp_config_parse.dart';
 import '../core/mcp_service.dart';
 import '../core/plugin_adapters.dart';
 import '../core/plugin_registry.dart';
+import '../core/sandbox_service.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import 'plugin_permission_sheet.dart';
@@ -19,7 +20,7 @@ String? _toolGainsFor(PluginItem p) {
   final seed = switch (p.name) {
     'Web Search' => 'web_search',
     'Image Studio' => 'generate_image',
-    'File Reader' => 'file_read',
+    'File Reader' => 'read_attachment',
     'Web Fetch & Reader' => 'fetch_url',
     'Code Runner' => 'run_code',
     'RAG Memory' => 'memory_search, memory_save',
@@ -38,6 +39,24 @@ String? _toolGainsFor(PluginItem p) {
 
 @visibleForTesting
 String? toolGainsForTest(PluginItem p) => _toolGainsFor(p);
+
+/// Task 10 (spec §10): why an MCP server cannot run on this device right
+/// now, or null when nothing structurally blocks it. Displayed as
+/// `Unsupported on this device: <reason>` on the MCP cards — never a
+/// binary connected/not-connected. Deep runtime probing (node/python
+/// present) is connect()'s job; this is the structural Android gate.
+String? mcpUnsupportedReason(McpServer s) {
+  if (s.transport == 'stdio' && !SandboxService.I.isInstalled) {
+    final needs = s.command == 'npx' || s.command == 'node'
+        ? 'nodejs+npm'
+        : s.command == 'uvx' || s.command == 'uv'
+        ? 'python+uv'
+        : 'a Linux runtime';
+    return 'sandbox not installed — stdio MCP servers spawn inside the '
+        'on-device sandbox and need $needs there';
+  }
+  return null;
+}
 
 /// Task 5 (spec §5.1): the consolidated permission gate for Install.
 ///
@@ -661,7 +680,24 @@ class PluginDetailScreen extends StatelessWidget {
                         app.serviceStatus.remove('plugin:${plugin.name}');
                       } else {
                         await app.enablePlugin(plugin);
-                        app.updateServiceStatus('plugin:${plugin.name}', ServiceHealth.working, detail: 'enabled');
+                        // Task 10: probe-derived, not hardcoded — only
+                        // stamp working when real capability resolves.
+                        final tools = AgentService.I.pluginToolNames(plugin);
+                        if (tools.isNotEmpty) {
+                          app.updateServiceStatus(
+                            'plugin:${plugin.name}',
+                            ServiceHealth.working,
+                            detail: 'probe ok · tools: ${tools.join(', ')}',
+                          );
+                        } else {
+                          app.updateServiceStatus(
+                            'plugin:${plugin.name}',
+                            ServiceHealth.failed,
+                            detail:
+                                'probe failed: contributes no agent tools, '
+                                'skills, hooks, or MCP servers',
+                          );
+                        }
                       }
                     },
                   )
@@ -693,7 +729,24 @@ class PluginDetailScreen extends StatelessWidget {
                       if (!context.mounted) return;
                       plugin.installed = true;
                       plugin.enabled = true;
-                      app.updateServiceStatus('plugin:${plugin.name}', ServiceHealth.working, detail: 'enabled');
+                      // Task 10: probe-derived, not hardcoded — only
+                      // stamp working when real capability resolves.
+                      final gainedTools = AgentService.I.pluginToolNames(plugin);
+                      if (gainedTools.isNotEmpty) {
+                        app.updateServiceStatus(
+                          'plugin:${plugin.name}',
+                          ServiceHealth.working,
+                          detail: 'probe ok · tools: ${gainedTools.join(', ')}',
+                        );
+                      } else {
+                        app.updateServiceStatus(
+                          'plugin:${plugin.name}',
+                          ServiceHealth.failed,
+                          detail:
+                              'probe failed: contributes no agent tools, '
+                              'skills, hooks, or MCP servers',
+                        );
+                      }
                       app.persistPluginState();
                       app.refresh();
                       // Realtime install (the plugin manager parity): an MCP-category
@@ -1423,10 +1476,20 @@ class McpCard extends StatelessWidget {
                 }
               }
               return Text(
-                server.connected ? 'Connected' : 'Not connected',
+                server.connected
+                    ? 'Connected'
+                    : mcpUnsupportedReason(server) != null
+                    ? 'Unsupported'
+                    : server.envHint != null
+                    ? 'Not configured'
+                    : 'Not connected',
                 style: TextStyle(
                   fontSize: 10.5,
-                  color: server.connected ? Aether.success : Aether.textFaint,
+                  color: server.connected
+                      ? Aether.success
+                      : mcpUnsupportedReason(server) != null
+                      ? Aether.dangerC
+                      : Aether.textFaint,
                 ),
               );
             }),
@@ -1600,6 +1663,63 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               onPressed: () => app.toggleMcpServer(s),
             ),
           ),
+          // Task 10 (spec §10): Android-incompatible desktop servers show
+          // `Unsupported on this device` with the missing runtime/ABI
+          // reason — never a silent connect failure.
+          if (mcpUnsupportedReason(s) != null) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Aether.surfaceAlt,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Aether.dangerC.withValues(alpha: 0.35)),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.block_outlined,
+                    size: 15,
+                    color: Aether.dangerC,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Unsupported on this device: ${mcpUnsupportedReason(s)}',
+                      style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          // Task 10 (spec §10): credential-dependent MCPs show their setup
+          // requirements and never auto-spawn until configured.
+          if (s.envHint != null && !s.connected) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Aether.surfaceAlt,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Aether.warn.withValues(alpha: 0.35)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.key_outlined, size: 15, color: Aether.warn),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Needs setup: ${s.envHint} must be configured (secure '
+                      'storage) before this server can connect. It will not '
+                      'start automatically.',
+                      style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
           if (s.connected) ...[
             const SizedBox(height: 8),
             Row(

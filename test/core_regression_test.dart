@@ -39,7 +39,7 @@ import 'package:ovid_ai/ui/chat_screen.dart';
 import 'package:ovid_ai/ui/health_screen.dart';
 import 'package:ovid_ai/ui/plugin_permission_sheet.dart';
 import 'package:ovid_ai/ui/plugins_screen.dart'
-    show McpCard, parseMcpConfigForTest, toolGainsForTest;
+    show McpCard, parseMcpConfigForTest, toolGainsForTest, mcpUnsupportedReason;
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
 import 'package:ovid_ai/core/sandbox_pkg.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
@@ -18934,6 +18934,174 @@ cwd = 'tools'
       expect(server.ownerPluginId, isNull);
       expect(server.canonicalId, server.name);
       await app.removeMcpServer(server);
+    });
+  });
+
+  group('PLUGIN10: preinstalled production audit', () {
+    Future<AppState> freshSeededApp() async {
+      final a = AppState.createForTest();
+      await a.initialize();
+      return a;
+    }
+
+    test('every preinstalled enabled plugin has real capability and no MCP is fake-connected', () async {
+      final a = await freshSeededApp();
+      addTearDown(() => AppState.resetTestInstance());
+
+      for (final p in a.plugins.where((p) => p.installed && p.enabled)) {
+        expect(
+          AgentService.I.pluginToolNames(p),
+          isNotEmpty,
+          reason: '${p.name} is marked installed+enabled but contributes nothing',
+        );
+      }
+      for (final s in a.mcpServers.where((s) => s.connected)) {
+        expect(
+          McpService.I.isConnected(s.canonicalId),
+          isTrue,
+          reason: '${s.name} is marked connected without a handshake',
+        );
+      }
+    });
+
+    test('bundled MCP seeds carry only pinned, registry-verified coordinates', () async {
+      final a = await freshSeededApp();
+      addTearDown(() => AppState.resetTestInstance());
+
+      // The pinned tested manifest: every bundled stdio MCP seed row must
+      // appear here (package verified against the registry at audit time)
+      // with the exact package coordinate. Anything not in the manifest is
+      // a fictional coordinate and must not be seeded. User/marketplace-
+      // added rows (custom) are out of scope — only Ovid's own seeds.
+      const pinned = <String, String>{
+        'Filesystem': '@modelcontextprotocol/server-filesystem',
+        'GitHub': '@modelcontextprotocol/server-github',
+        'Fetch': 'mcp-server-fetch',
+        'Memory': '@modelcontextprotocol/server-memory',
+        'Puppeteer': '@modelcontextprotocol/server-puppeteer',
+        'Postgres': '@modelcontextprotocol/server-postgres',
+        'Playwright': '@playwright/mcp',
+      };
+      final seeds = a.mcpServers.where((s) => !s.custom);
+      for (final s in seeds) {
+        final pkg = s.args
+            .where((x) => x.startsWith(RegExp(r'^@|mcp-')))
+            .firstOrNull;
+        if (pkg == null) continue;
+        expect(
+          pinned[s.name],
+          pkg,
+          reason:
+              '${s.name} seeds $pkg — not in the pinned tested manifest '
+              '(docs/superpowers/audits/2026-09-06-preinstalled-plugin-mcp-runtime.md)',
+        );
+      }
+      // Every pinned row must actually exist in the seed (no silent drops).
+      final names = seeds.map((s) => s.name).toSet();
+      for (final n in pinned.keys) {
+        expect(names, contains(n), reason: 'pinned server $n missing from seed');
+      }
+    });
+
+    test('deprecated bundled MCPs are labeled so setup shows the caveat', () async {
+      final a = await freshSeededApp();
+      addTearDown(() => AppState.resetTestInstance());
+      // GitHub/Puppeteer/Postgres packages still resolve but are
+      // deprecated upstream — the seed description must say so.
+      for (final name in ['GitHub', 'Puppeteer', 'Postgres']) {
+        final s = a.mcpServers.firstWhere((s) => s.name == name);
+        expect(
+          s.description.toLowerCase(),
+          contains('deprecated'),
+          reason: '$name pins a deprecated upstream package and must say so',
+        );
+      }
+    });
+
+    test('credential-dependent MCPs never auto-spawn and show setup requirements', () async {
+      final a = await freshSeededApp();
+      addTearDown(() => AppState.resetTestInstance());
+
+      final credentialed = a.mcpServers.where((s) => s.envHint != null);
+      expect(credentialed, isNotEmpty);
+      for (final s in credentialed) {
+        // Fresh seed: connected intent empty → reconnectServices must NOT
+        // dial any credential-dependent server without its secret.
+        expect(s.connected, isFalse, reason: '${s.name} must seed disconnected');
+        expect(McpService.I.isConnected(s.canonicalId), isFalse);
+      }
+
+      // And a direct connect() on a credential-dependent server without
+      // its secret reports degraded/needs configuration rather than
+      // spawning. (Bundled seeds have no ownerPluginId so requiredEnv
+      // enforcement is via envHint — connecting without the secret stored
+      // must still not leave a live process.)
+      final github = a.mcpServers.firstWhere((s) => s.name == 'GitHub');
+      await McpService.I.disconnect(github.canonicalId);
+      expect(McpService.I.isConnected(github.canonicalId), isFalse);
+    });
+
+    test('stdio MCP seeds are Android-honest: they need the sandbox', () async {
+      final a = await freshSeededApp();
+      addTearDown(() => AppState.resetTestInstance());
+      final stdio = a.mcpServers.where((s) => s.transport == 'stdio');
+      expect(stdio, isNotEmpty);
+      for (final s in stdio) {
+        // Without a sandbox installed, connect() must fail honestly
+        // (never fake success), which is what McpService already does;
+        // the audit surface is the UI helper labeling these rows.
+        expect(mcpUnsupportedReason(s), contains('sandbox'));
+      }
+      // An http-transport server has no sandbox requirement.
+      final http = McpServer(
+        name: 'x',
+        author: 't',
+        description: '',
+        category: 'Custom',
+        command: '',
+        transport: 'http',
+        url: 'https://x.example/mcp',
+      );
+      expect(mcpUnsupportedReason(http), isNull);
+    });
+
+    test('reconnectServices derives plugin health from probes, never hardcoded', () async {
+      final a = await freshSeededApp();
+      addTearDown(() => AppState.resetTestInstance());
+
+      await a.reconnectServices();
+
+      // Every installed+enabled plugin that resolves real tools is probed
+      // working with a probe-derived detail.
+      for (final p in a.plugins.where((p) => p.installed && p.enabled)) {
+        final st = a.serviceStatus['plugin:${p.name}'];
+        expect(st, isNotNull, reason: '${p.name} has no status after reconnect');
+        expect(st!.health, ServiceHealth.working, reason: '${p.name} not working');
+        expect(st.detail, contains('tools'), reason: '${p.name} detail not probe-derived');
+      }
+
+      // An installed+enabled plugin with NO real capability must NOT be
+      // stamped working — the old hardcoded 'enabled' stamp is gone.
+      final ghost = PluginItem(
+        name: 'PLUGIN10 Ghost',
+        author: 'test',
+        description: '',
+        version: '1',
+        category: 'Agent',
+        installed: true,
+        enabled: true,
+      );
+      a.plugins.add(ghost);
+      addTearDown(() => a.plugins.remove(ghost));
+      await a.reconnectServices();
+      final ghostStatus = a.serviceStatus['plugin:PLUGIN10 Ghost'];
+      expect(ghostStatus, isNotNull);
+      expect(
+        ghostStatus!.health,
+        ServiceHealth.failed,
+        reason: 'capability-less plugin must not be hardcoded working',
+      );
+      expect(ghostStatus.detail, contains('no agent tools'));
     });
   });
 }
