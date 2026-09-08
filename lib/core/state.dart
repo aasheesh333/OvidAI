@@ -19,13 +19,21 @@ import 'sandbox_service.dart';
 import 'presets.dart';
 
 const kDeniedControlDomains = <String>[
-  'paypal.com', 'wise.com', 'chase.com', 'bankofamerica.com',
-  'wellsfargo.com', 'citigroup.com', 'capitalone.com',
+  'paypal.com',
+  'wise.com',
+  'chase.com',
+  'bankofamerica.com',
+  'wellsfargo.com',
+  'citigroup.com',
+  'capitalone.com',
 ];
 const kDeniedControlPackages = <String>[
-  'com.paypal.android.p2pmobile', 'com.transferwise.android',
-  'com.chase.sig.android', 'com.infonow.bofa',
-  'com.wf.wellsfargomobile', 'com.citi.citimobile',
+  'com.paypal.android.p2pmobile',
+  'com.transferwise.android',
+  'com.chase.sig.android',
+  'com.infonow.bofa',
+  'com.wf.wellsfargomobile',
+  'com.citi.citimobile',
   'com.konylabs.capitalone',
 ];
 const kControlModeDisclosure =
@@ -309,12 +317,26 @@ class PluginItem {
     installsKnown: j['installsKnown'] as bool? ?? false,
     source: j['source'] as String?,
     marketplace: j['marketplace'] as String?,
-    hooks: (j['hooks'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())) ?? const {},
-    hookMatchers: (j['hookMatchers'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())) ?? const {},
+    hooks:
+        (j['hooks'] as Map?)?.map(
+          (k, v) => MapEntry(k.toString(), v.toString()),
+        ) ??
+        const {},
+    hookMatchers:
+        (j['hookMatchers'] as Map?)?.map(
+          (k, v) => MapEntry(k.toString(), v.toString()),
+        ) ??
+        const {},
     pluginHooks: _effectivePluginHooks(
       _pluginHooksFromJson(j),
-      (j['hooks'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())) ?? const {},
-      (j['hookMatchers'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())) ?? const {},
+      (j['hooks'] as Map?)?.map(
+            (k, v) => MapEntry(k.toString(), v.toString()),
+          ) ??
+          const {},
+      (j['hookMatchers'] as Map?)?.map(
+            (k, v) => MapEntry(k.toString(), v.toString()),
+          ) ??
+          const {},
       j['name'] as String? ?? '',
     ),
     runtimeId: j['runtimeId'] as String?,
@@ -389,15 +411,17 @@ class PluginItem {
       if (canonical == null) continue;
       final cmd = e.value.toString().trim();
       if (cmd.isEmpty) continue;
-      out.add(PluginHook(
-        pluginId: pluginId,
-        event: canonical,
-        ordinal: out.length,
-        type: 'command',
-        payload: cmd,
-        matcher: matchers[e.key.toString()],
-        timeoutS: 30,
-      ));
+      out.add(
+        PluginHook(
+          pluginId: pluginId,
+          event: canonical,
+          ordinal: out.length,
+          type: 'command',
+          payload: cmd,
+          matcher: matchers[e.key.toString()],
+          timeoutS: 30,
+        ),
+      );
     }
     return out;
   }
@@ -420,6 +444,11 @@ class PluginItem {
 /// (running process, JSON-RPC over stdin/stdout, on-demand connect).
 class McpServer {
   String name;
+
+  /// Null for legacy/user-owned servers. Plugin-owned rows keep the source
+  /// name for display and persistence, while this field supplies ownership
+  /// and the collision-free internal identity.
+  final String? ownerPluginId;
   final String author;
   final String description;
   final String category; // Official / Community / Custom
@@ -447,6 +476,12 @@ class McpServer {
   /// (never plaintext prefs) via [AppState.setMcpHeaders].
   Map<String, String> headers;
 
+  /// Credential names required before an owned server may be connected.
+  /// Values are read from secure storage under [canonicalId].
+  List<String> requiredEnvNames;
+  List<String> requiredHeaderNames;
+  String? pluginRuntimeRoot;
+
   /// Working directory for the spawned process (stdio transport). Relative
   /// paths resolve against the sandbox home; absolute paths are used as-is.
   String? cwd;
@@ -461,6 +496,7 @@ class McpServer {
     required this.description,
     required this.category,
     required this.command,
+    this.ownerPluginId,
     this.args = const [],
     this.envHint,
     this.source = 'registry.modelcontextprotocol.io',
@@ -469,9 +505,19 @@ class McpServer {
     this.transport = 'stdio',
     this.url,
     this.headers = const {},
+    List<String>? requiredEnvNames,
+    List<String>? requiredHeaderNames,
+    this.pluginRuntimeRoot,
     this.cwd,
     this.startupTimeoutS = 30,
-  });
+  }) : requiredEnvNames = List.unmodifiable(requiredEnvNames ?? const []),
+       requiredHeaderNames = List.unmodifiable(requiredHeaderNames ?? const []);
+
+  /// Stable internal key. Legacy custom/imported servers intentionally keep
+  /// their bare name so persisted behavior and display remain unchanged.
+  String get canonicalId => ownerPluginId == null || ownerPluginId!.isEmpty
+      ? name
+      : '$ownerPluginId/$name';
 
   /// The config-file `type` spelling ('stdio' | 'http' | 'sse'). Kept as an
   /// alias for [transport] so importers can map `type` → transport directly.
@@ -661,8 +707,7 @@ class Message {
     feedbackNote: j['feedbackNote'] as String?,
     attachments: [
       for (final a in (j['attachments'] as List? ?? []))
-        if (a is Map<String, dynamic>)
-          MessageAttachment.fromJson(a),
+        if (a is Map<String, dynamic>) MessageAttachment.fromJson(a),
     ],
     time: j['time'] != null ? DateTime.tryParse(j['time'] as String) : null,
   );
@@ -965,7 +1010,11 @@ class AppState extends ChangeNotifier {
     _ensureActiveSession();
   }
 
-  Future<void> setPluginInstalled(String name, bool installed, {bool? enabled}) async {
+  Future<void> setPluginInstalled(
+    String name,
+    bool installed, {
+    bool? enabled,
+  }) async {
     final p = plugins.where((x) => x.name == name).firstOrNull;
     if (p == null) return;
     if (!installed) {
@@ -1014,7 +1063,8 @@ class AppState extends ChangeNotifier {
     String? sessionId,
     void Function(String line)? onProgress,
   }) async {
-    final src = source ??
+    final src =
+        source ??
         (plugin.source != null
             ? githubPluginSourceFromSourceString(plugin.source!)
             : null);
@@ -1060,6 +1110,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> uninstallPlugin(PluginItem plugin) async {
     final runtimeId = plugin.runtimeId;
+    final runtimeManaged = runtimeId != null;
     plugin.installed = false;
     plugin.enabled = false;
     if (runtimeId != null) {
@@ -1077,6 +1128,7 @@ class AppState extends ChangeNotifier {
     }
 
     final owned = mcpServers.where((s) {
+      if (runtimeManaged && s.ownerPluginId == runtimeId) return false;
       if (s.source == 'plugin:${plugin.name}') return true;
       // Runtime-owned rows: PluginRuntimeManager.I.uninstall above has
       // already NULLed plugin.runtimeId (_clearRowRuntime), so this must
@@ -1087,7 +1139,7 @@ class AppState extends ChangeNotifier {
       }
       if (plugin.source != null &&
           (s.source == 'plugin:${plugin.source}' ||
-           s.source == 'plugin:${plugin.source!.replaceAll('/', '_')}')) {
+              s.source == 'plugin:${plugin.source!.replaceAll('/', '_')}')) {
         return true;
       }
       return false;
@@ -1096,9 +1148,13 @@ class AppState extends ChangeNotifier {
     for (final s in owned) {
       s.connected = false;
       try {
-        await McpService.I.disconnect(s.name);
+        await McpService.I.disconnect(s.canonicalId);
       } catch (_) {}
       mcpServers.remove(s);
+      await Future.wait([
+        deleteMcpEnv(s.canonicalId),
+        deleteMcpHeaders(s.canonicalId),
+      ]);
     }
 
     if (owned.isNotEmpty) {
@@ -1114,6 +1170,8 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> disablePlugin(PluginItem plugin) async {
+    final runtimeId = plugin.runtimeId;
+    final runtimeManaged = runtimeId != null;
     plugin.enabled = false;
     if (plugin.runtimeId != null) {
       // Task 7: runtime-managed rows unmount their registry
@@ -1125,6 +1183,7 @@ class AppState extends ChangeNotifier {
     await persistPluginState();
 
     final owned = mcpServers.where((s) {
+      if (runtimeManaged && s.ownerPluginId == runtimeId) return false;
       if (s.source == 'plugin:${plugin.name}') return true;
       if (plugin.runtimeId != null &&
           s.source == 'plugin:${plugin.runtimeId}') {
@@ -1132,7 +1191,7 @@ class AppState extends ChangeNotifier {
       }
       if (plugin.source != null &&
           (s.source == 'plugin:${plugin.source}' ||
-           s.source == 'plugin:${plugin.source!.replaceAll('/', '_')}')) {
+              s.source == 'plugin:${plugin.source!.replaceAll('/', '_')}')) {
         return true;
       }
       return false;
@@ -1141,7 +1200,7 @@ class AppState extends ChangeNotifier {
     for (final s in owned) {
       s.connected = false;
       try {
-        await McpService.I.disconnect(s.name);
+        await McpService.I.disconnect(s.canonicalId);
       } catch (_) {}
     }
 
@@ -1697,6 +1756,7 @@ class AppState extends ChangeNotifier {
 
   /// AI response timeout (seconds, user-configurable in Settings).
   static const _kResponseTimeout = 'ovid_response_timeout_sec';
+
   /// Per-EVENT idle timeout (never-stop semantics: as long as chunks keep
   /// arriving the stream runs indefinitely; this is the max silence).
   int responseTimeoutSec = 300;
@@ -2038,8 +2098,7 @@ class AppState extends ChangeNotifier {
     // workspaces too, otherwise orphan children linger invisibly forever.
     final doomed = <ChatSession>[?s, ...descendantsOf(id)];
     sessions.removeWhere((x) => doomed.any((d) => d.id == x.id));
-    if (activeSessionId == null ||
-        doomed.any((d) => d.id == activeSessionId)) {
+    if (activeSessionId == null || doomed.any((d) => d.id == activeSessionId)) {
       activeSessionId = rootSessions.isEmpty ? null : rootSessions.first.id;
     }
     for (final dead in doomed) {
@@ -2386,12 +2445,15 @@ class AppState extends ChangeNotifier {
     await _persistMarketplaces();
 
     // Prune merged plugins belonging to this marketplace
-    final toRemovePlugins = plugins.where((p) =>
-      p.marketplace == repo ||
-      p.marketplace == normalized ||
-      p.source == repo ||
-      p.source == normalized
-    ).toList();
+    final toRemovePlugins = plugins
+        .where(
+          (p) =>
+              p.marketplace == repo ||
+              p.marketplace == normalized ||
+              p.source == repo ||
+              p.source == normalized,
+        )
+        .toList();
     for (final p in toRemovePlugins) {
       if (p.installed) {
         await uninstallPlugin(p);
@@ -2400,14 +2462,17 @@ class AppState extends ChangeNotifier {
     }
 
     // Prune merged MCP servers belonging to this marketplace
-    final toRemoveMcps = mcpServers.where((s) =>
-      s.source == 'marketplace:$repo' ||
-      s.source == 'marketplace:$normalized'
-    ).toList();
+    final toRemoveMcps = mcpServers
+        .where(
+          (s) =>
+              s.source == 'marketplace:$repo' ||
+              s.source == 'marketplace:$normalized',
+        )
+        .toList();
     for (final s in toRemoveMcps) {
       if (s.connected) {
         try {
-          await McpService.I.disconnect(s.name);
+          await McpService.I.disconnect(s.canonicalId);
         } catch (_) {}
       }
       mcpServers.remove(s);
@@ -2442,7 +2507,9 @@ class AppState extends ChangeNotifier {
   Future<void> persistMergedMarketplaceCatalog() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final rows = plugins.where((p) => p.source != null || p.marketplace != null).toList();
+      final rows = plugins
+          .where((p) => p.source != null || p.marketplace != null)
+          .toList();
       await prefs.setString(
         _kMarketplaceMerged,
         jsonEncode(rows.map((e) => e.toJson()).toList()),
@@ -2534,8 +2601,7 @@ class AppState extends ChangeNotifier {
     final urls = <String>[
       // Test override (a local mock server) wins over the real network.
       if (marketplaceBaseOverrideForTest != null) ...[
-        for (final path in paths)
-          '$marketplaceBaseOverrideForTest/$path',
+        for (final path in paths) '$marketplaceBaseOverrideForTest/$path',
       ] else ...[
         // raw.githubusercontent — canonical (both default branches).
         for (final branch in ['main', 'master'])
@@ -2609,7 +2675,9 @@ class AppState extends ChangeNotifier {
   Future<Directory> pluginCacheDirFor(String source) async {
     final safe = source.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_');
     if (pluginCacheRootOverrideForTest != null) {
-      return Directory('${pluginCacheRootOverrideForTest!.path}/plugin-content/$safe');
+      return Directory(
+        '${pluginCacheRootOverrideForTest!.path}/plugin-content/$safe',
+      );
     }
     Directory base;
     try {
@@ -2679,9 +2747,7 @@ class AppState extends ChangeNotifier {
       );
       for (final entity in staged) {
         if (entity is! File) continue;
-        final rel = entity.path.substring(
-          resolved.stagingDir.path.length + 1,
-        );
+        final rel = entity.path.substring(resolved.stagingDir.path.length + 1);
         final target = File('${cacheDir.path}/$rel');
         try {
           target.parent.createSync(recursive: true);
@@ -2713,6 +2779,97 @@ class AppState extends ChangeNotifier {
         relPath == '.mcp.json';
   }
 
+  /// Mount and optionally connect every MCP declaration in a normalized
+  /// plugin manifest. Ownership, secrets, process slots, and reconnect state
+  /// all use `<plugin-id>/<server-name>`; [McpServer.name] stays source-local
+  /// for display and persisted compatibility.
+  Future<int> mountPluginOwnedMcpServers(
+    NormalizedPluginManifest manifest, {
+    bool connect = true,
+  }) async {
+    var mounted = 0;
+    for (final declared in manifest.mcpServers) {
+      final canonicalId = '${manifest.id}/${declared.name}';
+      var server = mcpServers
+          .where((s) => s.canonicalId == canonicalId)
+          .firstOrNull;
+      String? cwd;
+      final declaredCwd = declared.cwd;
+      if (declaredCwd == null || declaredCwd.isEmpty) {
+        cwd = manifest.rootPath;
+      } else if (isLexicallySafeRelPath(declaredCwd)) {
+        cwd = '${manifest.rootPath}/$declaredCwd';
+      }
+      final contentDir = Directory(manifest.rootPath);
+      if (server == null) {
+        server = McpServer(
+          name: declared.name,
+          ownerPluginId: manifest.id,
+          author: manifest.id.split('/').first,
+          description: 'declared by plugin ${manifest.id}',
+          category: 'Plugin',
+          command: declared.command,
+          args: declared.args,
+          source: 'plugin:${manifest.id}',
+          custom: true,
+          transport: declared.transport,
+          url: declared.url,
+          headers: await getMcpHeaders(canonicalId),
+          requiredEnvNames: declared.envNames,
+          requiredHeaderNames: declared.headerNames,
+          cwd: cwd,
+          pluginRuntimeRoot: contentDir.parent.path,
+        );
+        mcpServers.add(server);
+        mounted++;
+      } else {
+        await McpService.I.disconnect(server.canonicalId);
+        server.command = declared.command;
+        server.args = declared.args;
+        server.transport = declared.transport;
+        server.url = declared.url;
+        server.cwd = cwd;
+        server.pluginRuntimeRoot = contentDir.parent.path;
+        server.requiredEnvNames = List.unmodifiable(declared.envNames);
+        server.requiredHeaderNames = List.unmodifiable(declared.headerNames);
+        server.headers = await getMcpHeaders(canonicalId);
+      }
+      if (!connect) continue;
+      final status = await McpService.I.connect(server);
+      server.connected = McpService.I.isConnected(server.canonicalId);
+      updateServiceStatus(
+        'mcp:${server.canonicalId}',
+        server.connected ? ServiceHealth.working : ServiceHealth.failed,
+        detail: status,
+      );
+    }
+    if (mounted > 0) await _persistCustomMcpServers();
+    if (connect) await _persistMcpConnectedIntent();
+    if (mounted > 0 || connect) refresh();
+    return mounted;
+  }
+
+  Future<void> unmountPluginOwnedMcpServers(
+    String pluginId, {
+    required bool uninstall,
+  }) async {
+    final owned = mcpServers.where((s) => s.ownerPluginId == pluginId).toList();
+    for (final server in owned) {
+      server.connected = false;
+      await McpService.I.disconnect(server.canonicalId);
+      if (uninstall) {
+        await Future.wait([
+          deleteMcpEnv(server.canonicalId),
+          deleteMcpHeaders(server.canonicalId),
+        ]);
+        mcpServers.remove(server);
+      }
+    }
+    await _persistCustomMcpServers();
+    await _persistMcpConnectedIntent();
+    if (owned.isNotEmpty) refresh();
+  }
+
   /// P3 (the MCP config parser plugin .mcp.json parity): read the plugin's `.mcp.json` from
   /// its cache dir and register the declared `mcpServers` as connected-
   /// intent items (so plugins shipping MCP servers auto-mount on install).
@@ -2738,16 +2895,20 @@ class AppState extends ChangeNotifier {
         final args =
             (m['args'] as List?)?.whereType<String>().toList() ?? const [];
         final url = m['url'] as String?;
-        final transport = (m['transport'] as String?) ??
+        final transport =
+            (m['transport'] as String?) ??
             (m['type'] as String?) ??
             ((url != null && url.isNotEmpty) ? 'http' : 'stdio');
-        final headers = (m['headers'] as Map?)
-                ?.map((k, v) => MapEntry(k.toString(), v.toString())) ??
+        final headers =
+            (m['headers'] as Map?)?.map(
+              (k, v) => MapEntry(k.toString(), v.toString()),
+            ) ??
             const <String, String>{};
 
         if (m['env'] is Map) {
-          final envMap = (m['env'] as Map)
-              .map((k, v) => MapEntry(k.toString(), v.toString()));
+          final envMap = (m['env'] as Map).map(
+            (k, v) => MapEntry(k.toString(), v.toString()),
+          );
           if (envMap.isNotEmpty) {
             await setMcpEnv(key, envMap);
           }
@@ -2760,10 +2921,12 @@ class AppState extends ChangeNotifier {
           McpServer(
             name: key,
             author: source,
-            description: (m['description'] as String?) ??
+            description:
+                (m['description'] as String?) ??
                 'declared by plugin ${source.replaceAll('_', '/')}',
             category: 'Plugin',
-            command: (m['command'] as String?) ?? (transport == 'http' ? '' : 'npx'),
+            command:
+                (m['command'] as String?) ?? (transport == 'http' ? '' : 'npx'),
             args: args,
             envHint: (m['env'] as Map?)?.keys.isNotEmpty == true
                 ? (m['env'] as Map).keys.first as String?
@@ -2941,8 +3104,10 @@ class AppState extends ChangeNotifier {
   }
 
   @visibleForTesting
-  static String? githubPluginSourceForTest(String? raw, {String? marketplaceRepo}) =>
-      _githubPluginSource(raw, marketplaceRepo: marketplaceRepo);
+  static String? githubPluginSourceForTest(
+    String? raw, {
+    String? marketplaceRepo,
+  }) => _githubPluginSource(raw, marketplaceRepo: marketplaceRepo);
 
   /// `mcpServers`, plus Claude Code `plugins` entries.
   String _mergeMarketplaceCatalog(
@@ -2998,8 +3163,7 @@ class AppState extends ChangeNotifier {
 
     // ── mcpServers — list form AND map form (Codex/Claude Desktop) ──
     void importMcp(Map m, String? fallbackName) {
-      final mname =
-          (m['name'] as String?) ?? fallbackName ?? '';
+      final mname = (m['name'] as String?) ?? fallbackName ?? '';
       if (mname.isEmpty) return;
       if (mcpServers.any((e) => e.name == mname)) return;
       // PR41: an entry with `url` (and no `command`) is a Streamable-HTTP
@@ -3007,7 +3171,8 @@ class AppState extends ChangeNotifier {
       // for a remote MCP server (`{"url": "https://...", "headers": {…}}`).
       final urlValue = m['url'] as String?;
       final isHttp = urlValue != null && urlValue.isNotEmpty;
-      final headers = (m['headers'] as Map?)?.map(
+      final headers =
+          (m['headers'] as Map?)?.map(
             (k, v) => MapEntry(k.toString(), v.toString()),
           ) ??
           const <String, String>{};
@@ -3017,12 +3182,10 @@ class AppState extends ChangeNotifier {
           author: m['author'] as String? ?? owner,
           description: m['description'] as String? ?? '',
           category: m['category'] as String? ?? 'Community',
-          command: (m['command'] as String?) ??
-              (m['cmd'] as String?) ??
-              'npx',
-          args: (m['args'] as List?)?.whereType<String>().toList() ??
-              const [],
-          envHint: (m['envHint'] as String?) ??
+          command: (m['command'] as String?) ?? (m['cmd'] as String?) ?? 'npx',
+          args: (m['args'] as List?)?.whereType<String>().toList() ?? const [],
+          envHint:
+              (m['envHint'] as String?) ??
               ((m['env'] as Map?)?.keys.isNotEmpty == true
                   ? (m['env'] as Map).keys.first as String?
                   : null),
@@ -3078,26 +3241,37 @@ class AppState extends ChangeNotifier {
     s.connected = !s.connected;
     if (s.connected) {
       // Spawn the real MCP server process in the sandbox.
-      updateServiceStatus('mcp:${s.name}', ServiceHealth.connecting, detail: 'connecting…');
+      updateServiceStatus(
+        'mcp:${s.canonicalId}',
+        ServiceHealth.connecting,
+        detail: 'connecting…',
+      );
       unawaited(
-        McpService.I.connect(s).then((msg) {
-          final isOk = McpService.I.isConnected(s.name);
-          s.connected = isOk;
-          updateServiceStatus(
-            'mcp:${s.name}',
-            isOk ? ServiceHealth.working : ServiceHealth.failed,
-            detail: msg,
-          );
-          refresh();
-        }).catchError((e) {
-          s.connected = false;
-          updateServiceStatus('mcp:${s.name}', ServiceHealth.failed, detail: '$e');
-          refresh();
-        }),
+        McpService.I
+            .connect(s)
+            .then((msg) {
+              final isOk = McpService.I.isConnected(s.canonicalId);
+              s.connected = isOk;
+              updateServiceStatus(
+                'mcp:${s.canonicalId}',
+                isOk ? ServiceHealth.working : ServiceHealth.failed,
+                detail: msg,
+              );
+              refresh();
+            })
+            .catchError((e) {
+              s.connected = false;
+              updateServiceStatus(
+                'mcp:${s.canonicalId}',
+                ServiceHealth.failed,
+                detail: '$e',
+              );
+              refresh();
+            }),
       );
     } else {
-      serviceStatus.remove('mcp:${s.name}');
-      unawaited(McpService.I.disconnect(s.name));
+      serviceStatus.remove('mcp:${s.canonicalId}');
+      unawaited(McpService.I.disconnect(s.canonicalId));
     }
     _persistMcpConnectedIntent();
     refresh();
@@ -3115,7 +3289,7 @@ class AppState extends ChangeNotifier {
   Future<void> _persistMcpConnectedIntent() async {
     final names = mcpServers
         .where((s) => s.connected)
-        .map((s) => s.name)
+        .map((s) => s.canonicalId)
         .toList();
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -3136,12 +3310,18 @@ class AppState extends ChangeNotifier {
     }
 
     for (final name in names) {
-      final s = mcpServers.where((s) => s.name == name).firstOrNull;
+      final s = mcpServers
+          .where((s) => s.canonicalId == name || s.name == name)
+          .firstOrNull;
       if (s == null) continue;
-      updateServiceStatus('mcp:$name', ServiceHealth.connecting, detail: 'connecting…');
+      updateServiceStatus(
+        'mcp:$name',
+        ServiceHealth.connecting,
+        detail: 'connecting…',
+      );
       try {
         final res = await McpService.I.connect(s);
-        final isOk = McpService.I.isConnected(name);
+        final isOk = McpService.I.isConnected(s.canonicalId);
         s.connected = isOk;
         updateServiceStatus(
           'mcp:$name',
@@ -3156,7 +3336,11 @@ class AppState extends ChangeNotifier {
 
     // Re-verify enabled plugins
     for (final p in plugins.where((p) => p.installed && p.enabled)) {
-      updateServiceStatus('plugin:${p.name}', ServiceHealth.working, detail: 'enabled');
+      updateServiceStatus(
+        'plugin:${p.name}',
+        ServiceHealth.working,
+        detail: 'enabled',
+      );
     }
     refresh();
   }
@@ -3181,10 +3365,10 @@ class AppState extends ChangeNotifier {
     String? cwd,
     int? startupTimeoutS,
   }) {
-    final isHttp = transport == 'sse' ||
+    final isHttp =
+        transport == 'sse' ||
         ((url != null && url.isNotEmpty) && transport != 'stdio');
-    final resolvedTransport = transport ??
-        (isHttp ? 'http' : 'stdio');
+    final resolvedTransport = transport ?? (isHttp ? 'http' : 'stdio');
     final server = McpServer(
       name: name.trim(),
       author: 'you',
@@ -3204,7 +3388,9 @@ class AppState extends ChangeNotifier {
       startupTimeoutS: startupTimeoutS ?? 30,
     );
     mcpServers.add(server);
-    if (headers.isNotEmpty) unawaited(setMcpHeaders(server.name, headers));
+    if (headers.isNotEmpty) {
+      unawaited(setMcpHeaders(server.canonicalId, headers));
+    }
     _persistCustomMcpServers();
     refresh();
   }
@@ -3214,10 +3400,10 @@ class AppState extends ChangeNotifier {
     // Task 4: full teardown — kill the process, cancel any pending
     // reconnect, wipe secure env/headers, and prune the connected intent
     // so a restart never auto-respawns a removed server.
-    await McpService.I.disconnect(s.name);
+    await McpService.I.disconnect(s.canonicalId);
     await Future.wait([
-      deleteMcpEnv(s.name),
-      deleteMcpHeaders(s.name),
+      deleteMcpEnv(s.canonicalId),
+      deleteMcpHeaders(s.canonicalId),
     ]);
     await _persistCustomMcpServers();
     await _persistMcpConnectedIntent();
@@ -3240,12 +3426,14 @@ class AppState extends ChangeNotifier {
     s.command = command.trim();
     s.args = args;
     s.url = url != null && url.isNotEmpty ? url : null;
-    s.transport = transport ??
-        (s.url != null && s.url!.isNotEmpty ? 'http' : 'stdio');
+    s.transport =
+        transport ?? (s.url != null && s.url!.isNotEmpty ? 'http' : 'stdio');
     s.headers = headers;
     s.cwd = cwd;
     if (startupTimeoutS != null) s.startupTimeoutS = startupTimeoutS;
-    if (headers.isNotEmpty) unawaited(setMcpHeaders(s.name, headers));
+    if (headers.isNotEmpty) {
+      unawaited(setMcpHeaders(s.canonicalId, headers));
+    }
     _persistCustomMcpServers();
     refresh();
   }
@@ -3259,6 +3447,7 @@ class AppState extends ChangeNotifier {
           .map(
             (s) => jsonEncode({
               'name': s.name,
+              if (s.ownerPluginId != null) 'ownerPluginId': s.ownerPluginId,
               'author': s.author,
               'description': s.description,
               'category': s.category,
@@ -3266,6 +3455,12 @@ class AppState extends ChangeNotifier {
               'args': s.args,
               'envHint': s.envHint,
               'source': s.source,
+              if (s.requiredEnvNames.isNotEmpty)
+                'requiredEnvNames': s.requiredEnvNames,
+              if (s.requiredHeaderNames.isNotEmpty)
+                'requiredHeaderNames': s.requiredHeaderNames,
+              if (s.pluginRuntimeRoot != null)
+                'pluginRuntimeRoot': s.pluginRuntimeRoot,
               // PR41: transport/url — without these a custom HTTP server
               // reloads as a broken stdio ('npx') entry. Headers are a
               // secret and are persisted in secure storage instead.
@@ -3293,14 +3488,20 @@ class AppState extends ChangeNotifier {
       for (final j in list) {
         final m = jsonDecode(j) as Map<String, dynamic>;
         final name = m['name'] as String;
-        if (mcpServers.any((s) => s.name == name)) continue;
+        final ownerPluginId = m['ownerPluginId'] as String?;
+        final canonicalId = ownerPluginId == null
+            ? name
+            : '$ownerPluginId/$name';
+        if (mcpServers.any((s) => s.canonicalId == canonicalId)) continue;
         final transport = m['transport'] as String? ?? 'stdio';
         final source = m['source'] as String? ?? 'custom';
         mcpServers.add(
           McpServer(
             name: name,
+            ownerPluginId: ownerPluginId,
             author: m['author'] as String? ?? 'you',
-            description: (m['description'] as String?) ??
+            description:
+                (m['description'] as String?) ??
                 (transport == 'http'
                     ? 'Custom MCP server (HTTP) — connects on demand.'
                     : 'Custom MCP server — connects on demand.'),
@@ -3314,7 +3515,14 @@ class AppState extends ChangeNotifier {
             url: m['url'] as String?,
             // Headers are a secret — read back from secure storage, not
             // from plaintext prefs (they are no longer persisted there).
-            headers: await getMcpHeaders(name),
+            headers: await getMcpHeaders(canonicalId),
+            requiredEnvNames: (m['requiredEnvNames'] as List?)
+                ?.whereType<String>()
+                .toList(),
+            requiredHeaderNames: (m['requiredHeaderNames'] as List?)
+                ?.whereType<String>()
+                .toList(),
+            pluginRuntimeRoot: m['pluginRuntimeRoot'] as String?,
             cwd: m['cwd'] as String?,
             startupTimeoutS: (m['startupTimeoutS'] as num?)?.toInt() ?? 30,
           ),
@@ -3400,7 +3608,8 @@ class AppState extends ChangeNotifier {
             enabled: m['enabled'] as bool? ?? true,
             installs: 0,
             installsKnown: false,
-            hooks: (m['hooks'] as Map?)?.map(
+            hooks:
+                (m['hooks'] as Map?)?.map(
                   (k, v) => MapEntry(k as String, v as String),
                 ) ??
                 const {},
@@ -3592,7 +3801,10 @@ class AppState extends ChangeNotifier {
   // ── MCP server HTTP auth headers (secure storage) ───────────────────
   // Task 4 / security: auth headers (Bearer tokens etc.) must never hit
   // SharedPreferences plaintext. They live alongside env in secure storage.
-  Future<void> setMcpHeaders(String serverName, Map<String, String> headers) async {
+  Future<void> setMcpHeaders(
+    String serverName,
+    Map<String, String> headers,
+  ) async {
     try {
       if (headers.isEmpty) {
         await _secureStorage.delete(key: '$_kMcpHeadersPrefix$serverName');
@@ -3607,7 +3819,9 @@ class AppState extends ChangeNotifier {
 
   Future<Map<String, String>> getMcpHeaders(String serverName) async {
     try {
-      final raw = await _secureStorage.read(key: '$_kMcpHeadersPrefix$serverName');
+      final raw = await _secureStorage.read(
+        key: '$_kMcpHeadersPrefix$serverName',
+      );
       if (raw == null || raw.isEmpty) return {};
       final m = jsonDecode(raw) as Map<String, dynamic>;
       return m.map((k, v) => MapEntry(k, v.toString()));

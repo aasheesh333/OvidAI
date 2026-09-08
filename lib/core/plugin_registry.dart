@@ -79,18 +79,16 @@ class PluginContribution {
     this.description = '',
   }) : toolName = canonicalId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
 
-  factory PluginContribution.fromCommand(
-    PluginCommand c,
-    String rootPath,
-  ) => PluginContribution(
-    kind: PluginContributionKind.command,
-    canonicalId: c.canonicalId,
-    pluginId: c.pluginId,
-    name: c.name,
-    rootPath: rootPath,
-    path: c.path,
-    description: _descriptionOf(c.frontmatter),
-  );
+  factory PluginContribution.fromCommand(PluginCommand c, String rootPath) =>
+      PluginContribution(
+        kind: PluginContributionKind.command,
+        canonicalId: c.canonicalId,
+        pluginId: c.pluginId,
+        name: c.name,
+        rootPath: rootPath,
+        path: c.path,
+        description: _descriptionOf(c.frontmatter),
+      );
 
   factory PluginContribution.fromSkill(PluginSkill s, String rootPath) =>
       PluginContribution(
@@ -152,8 +150,7 @@ class PluginContribution {
   /// escape — the ONLY paths an executor may read. Malformed/hostile
   /// manifest paths (absolute, drive-lettered, escaping) stay in the
   /// ledger but can never be executed.
-  bool get pathContained =>
-      path.isNotEmpty && isLexicallySafeRelPath(path);
+  bool get pathContained => path.isNotEmpty && isLexicallySafeRelPath(path);
 
   /// Command/skill/agent contributions are the roster tools; hook and MCP
   /// wiring is consumed by Task 8/9 respectively.
@@ -300,6 +297,39 @@ class PluginContributionRegistry {
     return List.unmodifiable(out);
   }
 
+  /// Plugin-owned MCP declarations visible in [sessionId]. Discovery tools
+  /// are added later by McpService, but ownership and activation scope come
+  /// from this canonical ledger entry.
+  List<PluginContribution> mcpServersForSession(String sessionId) {
+    final out = <PluginContribution>[];
+    for (final reg in _registrations.values) {
+      if (!_visible(reg, sessionId)) continue;
+      out.addAll(
+        reg.contributions.where(
+          (c) => c.kind == PluginContributionKind.mcpServer,
+        ),
+      );
+    }
+    return List.unmodifiable(out);
+  }
+
+  /// A source-local MCP name is an alias only while exactly one visible
+  /// plugin contributes it. Canonical ids remain available regardless of
+  /// collisions.
+  AliasResolution resolveMcpServerAlias(
+    String alias, {
+    required String sessionId,
+  }) {
+    final lower = alias.trim().toLowerCase();
+    if (lower.isEmpty) return const AliasResolution([]);
+    final matches =
+        mcpServersForSession(
+            sessionId,
+          ).where((c) => c.name.toLowerCase() == lower).toList()
+          ..sort((a, b) => a.canonicalId.compareTo(b.canonicalId));
+    return AliasResolution(List.unmodifiable(matches));
+  }
+
   /// Resolves a bare alias (spec §4.4: `/review`, `skill`, …). Leading
   /// `/` is stripped; matching is case-insensitive against
   /// command/skill/agent names (bare hook/MCP alias semantics belong to
@@ -355,9 +385,7 @@ class PluginContributionRegistry {
   List<PluginContribution> toolContributionsForPlugin(String pluginId) {
     final reg = _registrations[pluginId];
     if (reg == null) return const [];
-    return List.unmodifiable(
-      reg.contributions.where((c) => c.isRosterTool),
-    );
+    return List.unmodifiable(reg.contributions.where((c) => c.isRosterTool));
   }
 
   /// The registered activation state, or null when unregistered.

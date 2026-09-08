@@ -600,8 +600,7 @@ class AgentService extends ChangeNotifier {
       // PR24: on_session_start — boot-time hooks for the restored ACTIVE
       // session (loaders, environment probes). Fire-and-forget.
       final active = AppState.I.activeSession;
-      if (active != null &&
-          HookService.I.hasHookListeners('session_start')) {
+      if (active != null && HookService.I.hasHookListeners('session_start')) {
         unawaited(
           HookService.I.fire(
             'session_start',
@@ -2613,13 +2612,34 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // Each connected MCP server advertises tools with full input schemas.
     // We inject them as `mcp__<server>__<tool>` so the model can call them
     // directly with typed arguments instead of the generic mcp_* proxy.
-    for (final entry in McpService.I.connectedTools.entries) {
-      final serverKey = entry.key
-          .toLowerCase()
-          .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
-          .replaceAll(RegExp(r'^_|_$'), '');
-      for (final t in entry.value) {
-        tools.add(t.toOpenAiTool(serverKey));
+    final connectedMcpTools = McpService.I.connectedToolEntries;
+    for (final entry in connectedMcpTools) {
+      final owner = entry.server.ownerPluginId;
+      if (owner != null &&
+          PluginContributionRegistry.I.isRegistered(owner) &&
+          !PluginContributionRegistry.I.isPluginActiveForSession(
+            owner,
+            runSessionId,
+          )) {
+        continue;
+      }
+      if (entry.server.ownerPluginId != null) {
+        tools.add(entry.toOpenAiTool(canonical: true));
+      }
+      final aliasCount = connectedMcpTools
+          .where((e) {
+            if (e.legacyToolName != entry.legacyToolName) return false;
+            final candidateOwner = e.server.ownerPluginId;
+            return candidateOwner == null ||
+                !PluginContributionRegistry.I.isRegistered(candidateOwner) ||
+                PluginContributionRegistry.I.isPluginActiveForSession(
+                  candidateOwner,
+                  runSessionId,
+                );
+          })
+          .length;
+      if (aliasCount == 1) {
+        tools.add(entry.toOpenAiTool(canonical: false));
       }
     }
     // ── Disconnected but configured servers → connect stubs ──
@@ -2629,17 +2649,33 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // first call. Built-in seed servers are skipped (there are dozens; the
     // model finds them via catalog_list_mcp / agent_install_mcp).
     for (final s in app.mcpServers) {
-      if (!s.custom || McpService.I.isConnected(s.name)) continue;
+      final owner = s.ownerPluginId;
+      if (owner != null &&
+          PluginContributionRegistry.I.isRegistered(owner) &&
+          !PluginContributionRegistry.I.isPluginActiveForSession(
+            owner,
+            runSessionId,
+          )) {
+        continue;
+      }
+      if (!s.custom || McpService.I.isConnected(s.canonicalId)) continue;
       final safe = _normTool(s.name);
+      final sameAlias = app.mcpServers
+          .where(
+            (candidate) =>
+                candidate.custom && _normTool(candidate.name) == safe,
+          )
+          .length;
+      final canonicalStub = 'mcp_${_normTool(s.canonicalId)}';
       final already = tools.any((t) {
         final fn = t['function'];
-        return fn is Map && fn['name'] == 'mcp_$safe';
+        return fn is Map && fn['name'] == canonicalStub;
       });
       if (already) continue;
       tools.add({
         'type': 'function',
         'function': {
-          'name': 'mcp_$safe',
+          'name': canonicalStub,
           'description':
               'The "${s.name}" MCP server (transport: ${s.transport}'
               '${s.url != null ? ', url: ${s.url}' : ''}) is configured but '
@@ -2654,6 +2690,23 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
           },
         },
       });
+      if (s.ownerPluginId != null && sameAlias == 1) {
+        tools.add({
+          'type': 'function',
+          'function': {
+            'name': 'mcp_$safe',
+            'description': 'Unique alias for ${s.canonicalId}.',
+            'parameters': {
+              'type': 'object',
+              'properties': {
+                'action': {'type': 'string'},
+                'args': {'type': 'object'},
+              },
+              'required': ['action'],
+            },
+          },
+        });
+      }
     }
     // ── Workflow orchestration toggle (Settings) ──
     if (!app.workflowEnabled) {
@@ -4555,14 +4608,21 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     final raw = toolName.substring(4);
     final key = _normTool(raw);
     final servers = AppState.I.mcpServers;
-    return servers.where((s) => _normTool(s.name) == key).firstOrNull ??
-        servers
-            .where(
-              (s) =>
-                  _normTool(s.name).contains(key) ||
-                  (key.isNotEmpty && key.contains(_normTool(s.name))),
-            )
-            .firstOrNull;
+    final canonical = servers
+        .where((s) => _normTool(s.canonicalId) == key)
+        .toList();
+    if (canonical.length == 1) return canonical.single;
+    final exact = servers.where((s) => _normTool(s.name) == key).toList();
+    if (exact.length == 1) return exact.single;
+    if (exact.length > 1) return null;
+    final fuzzy = servers
+        .where(
+          (s) =>
+              _normTool(s.name).contains(key) ||
+              (key.isNotEmpty && key.contains(_normTool(s.name))),
+        )
+        .toList();
+    return fuzzy.length == 1 ? fuzzy.single : null;
   }
 
   /// Task 4 test seam: the legacy `mcp_*` proxy's server-name resolution —
@@ -5642,10 +5702,7 @@ ${await _agentsMdBlock()}
               s.id,
               payload: {
                 'turn': turn,
-                'reply': cleanTruncate(
-                  (msg['content'] as String?) ?? '',
-                  400,
-                ),
+                'reply': cleanTruncate((msg['content'] as String?) ?? '', 400),
               },
               model: s.model,
             ),
@@ -7166,32 +7223,29 @@ ${await _agentsMdBlock()}
       case String() when name.startsWith('mcp__'):
         // Real discovered MCP tool call: mcp__<server>__<tool>.
         // The tool schema came from tools/list (McpService.connectedTools).
-        final parts = name.split('__');
-        if (parts.length < 3) {
-          return 'Malformed MCP tool name "$name" (expected mcp__<server>__<tool>).';
+        final resolved = McpService.I.resolveToolName(name);
+        if (resolved == null) {
+          return 'MCP tool "$name" is not connected or its alias is ambiguous.';
         }
-        final serverKey = parts[1];
-        final toolName = parts.sublist(2).join('__');
-        // Resolve the server by fuzzy-matching the sanitized key against
-        // configured server names (same normalization as _tools).
-        String? norm(String s) => s
-            .toLowerCase()
-            .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
-            .replaceAll(RegExp(r'^_|_$'), '');
-        final match = AppState.I.mcpServers
-            .where((s) => norm(s.name) == serverKey)
-            .firstOrNull;
-        if (match == null) {
-          return 'No MCP server matches key "$serverKey". '
-              'Connected tools come from a configured server — check Plugins → MCP.';
-        }
-        if (!McpService.I.isConnected(match.name)) {
-          final res = await McpService.I.connect(match);
-          if (!res.contains('connected')) return res;
-        }
-        _emit('shell', 'MCP: ${match.name} → $toolName');
-        return await McpService.I.callTool(match.name, toolName, args);
+        _emit('shell', 'MCP: ${resolved.server.name} → ${resolved.tool.name}');
+        return await McpService.I.callTool(
+          resolved.server.canonicalId,
+          resolved.tool.name,
+          args,
+        );
       case String() when name.startsWith('mcp_'):
+        final resolved = McpService.I.resolveToolName(name);
+        if (resolved != null) {
+          _emit(
+            'shell',
+            'MCP: ${resolved.server.name} → ${resolved.tool.name}',
+          );
+          return await McpService.I.callTool(
+            resolved.server.canonicalId,
+            resolved.tool.name,
+            args,
+          );
+        }
         // Real MCP proxy — resolve the matched server BY NAME first, then
         // connect + call through its real name. (The old code derived
         // `mcpName` as `substring(4).replaceAll('_', ' ')`, which never
@@ -7205,11 +7259,11 @@ ${await _agentsMdBlock()}
               'servers (or list servers with catalog_list_mcp).';
         }
         _emit('shell', 'MCP: ${match.name} → $action');
-        if (!McpService.I.isConnected(match.name)) {
+        if (!McpService.I.isConnected(match.canonicalId)) {
           final res = await McpService.I.connect(match);
           if (!res.contains('connected')) return res;
         }
-        return await McpService.I.callTool(match.name, action, mcpArgs);
+        return await McpService.I.callTool(match.canonicalId, action, mcpArgs);
       case String() when name.startsWith('plugin_'):
         // Canonical namespaced contribution (spec §4.4) — resolved through
         // the registry and enforced for the RUNNING session: another
@@ -7226,8 +7280,10 @@ ${await _agentsMdBlock()}
             contribution.pluginId,
             runSid,
           )) {
-            return _pluginScopeRefusal(contribution.canonicalId,
-                contribution.pluginId);
+            return _pluginScopeRefusal(
+              contribution.canonicalId,
+              contribution.pluginId,
+            );
           }
           return await _runPluginContribution(contribution, args);
         }
@@ -7306,7 +7362,8 @@ ${await _agentsMdBlock()}
             }
             final sid = _runSession?.id ?? '';
             final reg = PluginContributionRegistry.I;
-            final visible = sid.isNotEmpty &&
+            final visible =
+                sid.isNotEmpty &&
                 reg.isPluginActiveForSession(match.runtimeId ?? '', sid);
             final scopeNote = visible
                 ? 'active in this session; activates globally after one '
@@ -7341,10 +7398,10 @@ ${await _agentsMdBlock()}
                   'that name is configured — add it in Plugins → MCP.';
             }
             final msg = await McpService.I.connect(server);
-            server.connected = McpService.I.isConnected(server.name);
+            server.connected = McpService.I.isConnected(server.canonicalId);
             app.persistMcpIntent();
             app.refresh();
-            final tools = McpService.I.connectedTools[server.name] ?? [];
+            final tools = McpService.I.connectedTools[server.canonicalId] ?? [];
             final names = tools.map((t) => t.name).join(', ');
             return 'Plugin "$pluginName" installed ✓ $msg'
                 '${tools.isEmpty ? '' : ' — tools: $names'}.';
@@ -7413,11 +7470,11 @@ ${await _agentsMdBlock()}
           // discovers tools.  (Previously this only flipped a bool, so
           // the UI said "connected" but nothing actually ran.)
           final res = await McpService.I.connect(match);
-          match.connected = McpService.I.isConnected(match.name);
+          match.connected = McpService.I.isConnected(match.canonicalId);
           app.persistMcpIntent();
           app.refresh();
           _emit('done', res);
-          final tools = McpService.I.connectedTools[match.name] ?? [];
+          final tools = McpService.I.connectedTools[match.canonicalId] ?? [];
           final names = tools.map((t) => t.name).join(', ');
           return res.contains('connected')
               ? '$res${tools.isEmpty ? '' : ' — tools: $names'}. '
@@ -9849,7 +9906,12 @@ ${await _agentsMdBlock()}
     var id = _baseModelOf(model).trim().toLowerCase();
     // Known OpenRouter route suffixes (docs.openrouter.ai/features).
     const routeSuffixes = <String>{
-      ':free', ':nitro', ':extended', ':floor', ':online', ':thinking',
+      ':free',
+      ':nitro',
+      ':extended',
+      ':floor',
+      ':online',
+      ':thinking',
       ':beta',
     };
     final route = routeSuffixes.where(id.endsWith).toList();
@@ -9858,9 +9920,20 @@ ${await _agentsMdBlock()}
     // Known aggregator vendor prefixes; anything else with a slash stays
     // unnormalised (and therefore fails the allowlist below).
     const vendorPrefixes = <String>{
-      'openai/', 'anthropic/', 'google/', 'meta-llama/', 'x-ai/',
-      'mistralai/', 'deepseek/', 'qwen/', 'nvidia/', 'microsoft/',
-      'cohere/', 'perplexity/', 'amazon/', 'meta/',
+      'openai/',
+      'anthropic/',
+      'google/',
+      'meta-llama/',
+      'x-ai/',
+      'mistralai/',
+      'deepseek/',
+      'qwen/',
+      'nvidia/',
+      'microsoft/',
+      'cohere/',
+      'perplexity/',
+      'amazon/',
+      'meta/',
     };
     for (final prefix in vendorPrefixes) {
       if (id.startsWith(prefix)) {
@@ -11146,10 +11219,7 @@ ${await _agentsMdBlock()}
     if (name.startsWith('plugin:')) {
       final contribution = registry.contributionByCanonicalId(name);
       if (contribution != null && contribution.isRosterTool) {
-        if (!registry.isPluginActiveForSession(
-          contribution.pluginId,
-          runSid,
-        )) {
+        if (!registry.isPluginActiveForSession(contribution.pluginId, runSid)) {
           return _pluginScopeRefusal(
             contribution.canonicalId,
             contribution.pluginId,

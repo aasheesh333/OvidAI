@@ -272,7 +272,8 @@ class PluginRuntimeManager extends ChangeNotifier {
   static bool failRenameForTest = false;
 
   PluginDependencyService _deps() =>
-      depsForTest ?? PluginDependencyService(runtimeRootOverride: runtimeRootOverrideForTest);
+      depsForTest ??
+      PluginDependencyService(runtimeRootOverride: runtimeRootOverrideForTest);
 
   Future<Directory> _base() async {
     final override = runtimeRootOverrideForTest;
@@ -301,7 +302,9 @@ class PluginRuntimeManager extends ChangeNotifier {
     final safeVersion = (sv.isEmpty || sv == '.' || sv == '..')
         ? 'unversioned'
         : sv;
-    return Directory('${base.path}/plugin-runtime/$safeId/$safeVersion/content');
+    return Directory(
+      '${base.path}/plugin-runtime/$safeId/$safeVersion/content',
+    );
   }
 
   static NormalizedPluginManifest _withRoot(
@@ -535,11 +538,7 @@ class PluginRuntimeManager extends ChangeNotifier {
         prior != null && prior.version == manifest.version;
     PluginDependencyResult depResult;
     try {
-      depResult = await deps.install(
-        manifest,
-        grant,
-        onProgress: onProgress,
-      );
+      depResult = await deps.install(manifest, grant, onProgress: onProgress);
     } catch (e) {
       if (!overwritesPriorVersion) {
         await deps.removeVersion(manifest.id, manifest.version);
@@ -598,12 +597,12 @@ class PluginRuntimeManager extends ChangeNotifier {
     // step 6)…
     final staging = inspection.source.stagingDir;
     try {
-      File('${staging.path}/$kPluginRuntimeManifestFile').writeAsStringSync(
-        jsonEncode(installed.toJson()),
-      );
-      File('${staging.path}/$kPluginRuntimeActivationFile').writeAsStringSync(
-        jsonEncode(entry.toJson()),
-      );
+      File(
+        '${staging.path}/$kPluginRuntimeManifestFile',
+      ).writeAsStringSync(jsonEncode(installed.toJson()));
+      File(
+        '${staging.path}/$kPluginRuntimeActivationFile',
+      ).writeAsStringSync(jsonEncode(entry.toJson()));
     } catch (e) {
       if (!overwritesPriorVersion) {
         await deps.removeVersion(manifest.id, manifest.version);
@@ -713,6 +712,12 @@ class PluginRuntimeManager extends ChangeNotifier {
     entries[manifest.id] = entry;
     await _saveEntries(entries);
 
+    if (scope == PluginActivation.sessionActive ||
+        scope == PluginActivation.globalActive ||
+        scope == PluginActivation.degraded) {
+      await AppState.I.mountPluginOwnedMcpServers(installed);
+    }
+
     // Prior-version cleanup happens only AFTER the new version is fully
     // committed (a failed upgrade above never reaches this).
     if (old != null && old.contentDir != contentDir.path) {
@@ -815,6 +820,7 @@ class PluginRuntimeManager extends ChangeNotifier {
                 activation: rec.state,
                 immediateSessionId: rec.immediateSessionId,
               );
+              await AppState.I.mountPluginOwnedMcpServers(entry.manifest);
             }
           case PluginActivation.pendingGlobal:
           case PluginActivation.failed:
@@ -851,6 +857,7 @@ class PluginRuntimeManager extends ChangeNotifier {
   /// Unregisters the plugin's contributions and marks the persisted
   /// install disabled (the record survives; [enable] restores it).
   Future<void> disable(String pluginId) async {
+    await AppState.I.unmountPluginOwnedMcpServers(pluginId, uninstall: false);
     final entries = await _loadEntries();
     final entry = entries[pluginId];
     if (entry == null) {
@@ -887,8 +894,7 @@ class PluginRuntimeManager extends ChangeNotifier {
       return;
     }
     var rec = entry.activation;
-    if (rec.promoteOnNextBoot &&
-        rec.installedBootEpoch < await _readEpoch()) {
+    if (rec.promoteOnNextBoot && rec.installedBootEpoch < await _readEpoch()) {
       rec = PluginActivationRecord(
         pluginId: pluginId,
         state: entry.isDegraded
@@ -914,6 +920,7 @@ class PluginRuntimeManager extends ChangeNotifier {
       activation: rec.state,
       immediateSessionId: rec.immediateSessionId,
     );
+    await AppState.I.mountPluginOwnedMcpServers(entry.manifest);
     _syncRow(rec);
     notifyListeners();
   }
@@ -921,6 +928,7 @@ class PluginRuntimeManager extends ChangeNotifier {
   /// Full teardown: registry, committed content, dependency sandbox,
   /// activation record, grant, and plugin-owned secrets (spec §5.1/§9).
   Future<void> uninstall(String pluginId) async {
+    await AppState.I.unmountPluginOwnedMcpServers(pluginId, uninstall: true);
     final entries = await _loadEntries();
     final entry = entries.remove(pluginId);
     await _saveEntries(entries);

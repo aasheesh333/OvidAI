@@ -45,7 +45,36 @@ class McpService {
     for (final e in _running.entries) e.key: e.value.tools,
   };
 
-  bool isConnected(String serverName) => _running.containsKey(serverName);
+  /// Discovered tools with their owning server identity. The agent uses this
+  /// to publish canonical plugin-owned names and only-unambiguous aliases.
+  List<McpConnectedTool> get connectedToolEntries => List.unmodifiable([
+    for (final rs in _running.values)
+      for (final tool in rs.tools) McpConnectedTool(rs.server, tool),
+  ]);
+
+  McpConnectedTool? resolveToolName(String toolName) {
+    final canonical = connectedToolEntries
+        .where((e) => e.canonicalToolName == toolName)
+        .firstOrNull;
+    if (canonical != null) return canonical;
+    final aliases = connectedToolEntries
+        .where((e) => e.legacyToolName == toolName)
+        .toList();
+    return aliases.length == 1 ? aliases.single : null;
+  }
+
+  String _key(McpServer server) => server.canonicalId;
+
+  String _keyForName(String serverName) {
+    if (_running.containsKey(serverName)) return serverName;
+    final match = AppState.I.mcpServers
+        .where((s) => s.name == serverName || s.canonicalId == serverName)
+        .firstOrNull;
+    return match?.canonicalId ?? serverName;
+  }
+
+  bool isConnected(String serverName) =>
+      _running.containsKey(_keyForName(serverName));
 
   /// Inline cap for a tool result handed to the model. Oversized output is
   /// trimmed head+tail with an exact omission notice (spill-style).
@@ -85,7 +114,8 @@ class McpService {
   ///
   /// Returns a human-readable status string for the UI.
   Future<String> connect(McpServer server) async {
-    final existing = _running[server.name];
+    final key = _key(server);
+    final existing = _running[key];
     if (existing != null) {
       // Someone else's connect may still be handshaking — don't spawn a
       // second process for the same server (double-spawn race).
@@ -99,13 +129,33 @@ class McpService {
       return 'SSE transport not supported, use Streamable HTTP '
           '(set transport to "http" with a url).';
     }
+    final missing = await _missingCredentials(server);
+    if (missing.isNotEmpty) {
+      return '"${server.name}" degraded: needs configuration '
+          '(${missing.join(', ')})';
+    }
+    if (server.ownerPluginId != null) {
+      server.headers = await AppState.I.getMcpHeaders(server.canonicalId);
+    }
     // Reserve the slot BEFORE spawning so a rapid second connect sees it.
     final rs = _RunningServer(server: server);
-    _running[server.name] = rs;
+    _running[key] = rs;
     if (server.transport == 'http') {
       return _connectHttp(server, rs);
     }
     return _connectStdio(server, rs);
+  }
+
+  Future<List<String>> _missingCredentials(McpServer server) async {
+    if (server.ownerPluginId == null) return const [];
+    final env = await AppState.I.getMcpEnv(server.canonicalId);
+    final headers = await AppState.I.getMcpHeaders(server.canonicalId);
+    return [
+      for (final name in server.requiredEnvNames)
+        if ((env[name] ?? '').isEmpty) name,
+      for (final name in server.requiredHeaderNames)
+        if ((headers[name] ?? '').isEmpty) name,
+    ];
   }
 
   /// PR41: Streamable-HTTP transport — no process, no sandbox. Every
@@ -113,6 +163,7 @@ class McpService {
   /// is the same three calls (initialize/initialized/tools/list) as stdio,
   /// just carried over HTTP instead of stdin/stdout.
   Future<String> _connectHttp(McpServer server, _RunningServer rs) async {
+    final key = _key(server);
     try {
       final url = server.url;
       if (url == null || url.isEmpty) {
@@ -128,8 +179,12 @@ class McpService {
         throw Exception('initialize failed: ${initResult.error}');
       }
       await _sendNotificationHttp(rs, 'notifications/initialized', {});
-      final toolsResult = await _rpcHttp(rs, 'tools/list', {},
-          timeout: startupTimeout);
+      final toolsResult = await _rpcHttp(
+        rs,
+        'tools/list',
+        {},
+        timeout: startupTimeout,
+      );
       if (toolsResult.isError) {
         throw Exception('tools/list failed: ${toolsResult.error}');
       }
@@ -143,15 +198,16 @@ class McpService {
             <McpToolDef>[];
       }
       rs.handshakeDone = true;
-      _reconnectAttempts.remove(server.name);
+      _reconnectAttempts.remove(key);
       return '"${server.name}" connected (http) · ${rs.tools.length} tools';
     } catch (e) {
-      if (identical(_running[server.name], rs)) _running.remove(server.name);
+      if (identical(_running[key], rs)) _running.remove(key);
       return 'connect failed: $e';
     }
   }
 
   Future<String> _connectStdio(McpServer server, _RunningServer rs) async {
+    final key = _key(server);
     try {
       // Spawn inside the native sandbox — servers are trusted code the
       // user explicitly connected, same trust level as MCP defaults.
@@ -182,7 +238,12 @@ class McpService {
         }
       }
       // Per-server env vars (API keys etc.) from secure storage.
-      final env = await AppState.I.getMcpEnv(server.name);
+      final secretEnv = await AppState.I.getMcpEnv(server.canonicalId);
+      final env = {
+        if (server.pluginRuntimeRoot != null)
+          ...SandboxService.pluginRuntimeEnv(server.pluginRuntimeRoot!),
+        ...secretEnv,
+      };
       // Optional working directory for the spawned server (best-effort:
       // only used when the resolved directory actually exists).
       Directory? cwdDir;
@@ -190,17 +251,22 @@ class McpService {
         final cwd = server.cwd;
         if (cwd != null && cwd.isNotEmpty) {
           final prefix = sandbox.prefixPath ?? '';
-          final resolved = cwd.startsWith('/') ? cwd : '$prefix/home/$cwd';
+          final resolved = server.ownerPluginId != null && !cwd.startsWith('/')
+              ? '$prefix/home/plugin-runtime/${server.ownerPluginId}/$cwd'
+              : cwd.startsWith('/')
+              ? cwd
+              : '$prefix/home/$cwd';
           final d = Directory(resolved);
           if (d.existsSync()) cwdDir = d;
         }
       } catch (_) {}
       // Native exec — the server command runs through the sandbox env
       // (PATH/LD_LIBRARY_PATH/LD_PRELOAD set by SandboxService.spawn).
-      final proc = await sandbox.spawn([
-        server.command,
-        ...server.args,
-      ], env: env.isEmpty ? null : env, hostWorkDir: cwdDir);
+      final proc = await sandbox.spawn(
+        [server.command, ...server.args],
+        env: env.isEmpty ? null : env,
+        hostWorkDir: cwdDir,
+      );
       rs.process = proc;
 
       // Route stdout lines into the broadcast stream; drain stderr so it
@@ -222,13 +288,9 @@ class McpService {
       // backoff instead of just vanishing — ovid-mcp-client parity.
       unawaited(
         proc.exitCode.then((code) {
-          if (identical(_running[server.name], rs)) {
-            _running.remove(server.name);
-            _lastDeath = (
-              server: server.name,
-              code: code,
-              at: DateTime.now(),
-            );
+          if (identical(_running[key], rs)) {
+            _running.remove(key);
+            _lastDeath = (server: key, code: code, at: DateTime.now());
             if (!rs.userDisconnected) _scheduleReconnect(server);
           }
         }),
@@ -245,7 +307,7 @@ class McpService {
           if (j.containsKey('id')) return; // a response, not a notification
           final method = j['method'] as String?;
           if (method == 'notifications/tools/list_changed') {
-            unawaited(_rediscoverTools(server.name));
+            unawaited(_rediscoverTools(key));
           }
         } catch (_) {}
       });
@@ -263,8 +325,12 @@ class McpService {
       _sendNotification(rs, 'notifications/initialized', {});
 
       // ── Tool discovery ─────────────────────────────────────────────
-      final toolsResult = await _rpc(rs, 'tools/list', {},
-          timeout: startupTimeout);
+      final toolsResult = await _rpc(
+        rs,
+        'tools/list',
+        {},
+        timeout: startupTimeout,
+      );
       if (toolsResult.isError) {
         throw Exception('tools/list failed: ${toolsResult.error}');
       }
@@ -278,10 +344,10 @@ class McpService {
             <McpToolDef>[];
       }
       rs.handshakeDone = true;
-      _reconnectAttempts.remove(server.name);
+      _reconnectAttempts.remove(key);
       return '"${server.name}" connected · ${rs.tools.length} tools';
     } catch (e) {
-      if (identical(_running[server.name], rs)) _running.remove(server.name);
+      if (identical(_running[key], rs)) _running.remove(key);
       try {
         rs.process?.kill();
       } catch (_) {}
@@ -308,39 +374,38 @@ class McpService {
   /// listed but disconnected — the user can retry manually, same as
   /// today's behavior before this feature existed).
   void _scheduleReconnect(McpServer server) {
-    _reconnectTimers.remove(server.name)?.cancel();
-    final attempt = (_reconnectAttempts[server.name] ?? 0) + 1;
+    final key = _key(server);
+    _reconnectTimers.remove(key)?.cancel();
+    final attempt = (_reconnectAttempts[key] ?? 0) + 1;
     if (attempt > reconnectMaxAttemptsForTest) return;
     final initialMs = reconnectInitialDelayForTest.inMilliseconds;
     final maxMs = reconnectMaxDelayForTest.inMilliseconds;
     final delayMs = (initialMs * (1 << (attempt - 1))).clamp(initialMs, maxMs);
-    _reconnectAttempts[server.name] = attempt;
-    _reconnectTimers[server.name] = Timer(
-      Duration(milliseconds: delayMs),
-      () {
-        _reconnectTimers.remove(server.name);
-        // The user may have manually reconnected (or removed the server)
-        // while this timer was pending — never race a live connection.
-        if (_running.containsKey(server.name)) return;
-        // Task 4: look the server up by NAME, not object identity — a
-        // reload replaces the McpServer instance, so `contains(server)`
-        // (identity equality) would silently stop reconnects after any
-        // relaunch/reload.
-        final fresh = AppState.I.mcpServers
-            .where((s) => s.name == server.name)
-            .firstOrNull;
-        if (fresh == null) return;
-        unawaited(connect(fresh));
-      },
-    );
+    _reconnectAttempts[key] = attempt;
+    _reconnectTimers[key] = Timer(Duration(milliseconds: delayMs), () {
+      _reconnectTimers.remove(key);
+      // The user may have manually reconnected (or removed the server)
+      // while this timer was pending — never race a live connection.
+      if (_running.containsKey(key)) return;
+      // Task 4: look the server up by NAME, not object identity — a
+      // reload replaces the McpServer instance, so `contains(server)`
+      // (identity equality) would silently stop reconnects after any
+      // relaunch/reload.
+      final fresh = AppState.I.mcpServers
+          .where((s) => s.canonicalId == key)
+          .firstOrNull;
+      if (fresh == null) return;
+      unawaited(connect(fresh));
+    });
   }
 
   /// Task 4 test seam: would an automatic reconnect run for [serverName]?
   /// Reflects the name-based lookup used by [_scheduleReconnect] — true when
   /// a configured server with that name exists (identity-independent).
   @visibleForTesting
-  bool reconnectEligibleForTest(String serverName) =>
-      AppState.I.mcpServers.any((s) => s.name == serverName);
+  bool reconnectEligibleForTest(String serverName) => AppState.I.mcpServers.any(
+    (s) => s.name == serverName || s.canonicalId == serverName,
+  );
 
   /// Test seam: how many reconnect attempts have been recorded for
   /// [serverName] (0 if none).
@@ -364,7 +429,9 @@ class McpService {
   Future<void> _rediscoverTools(String serverName) async {
     final rs = _running[serverName];
     if (rs == null) return;
-    final res = await _rpc(rs, 'tools/list', {});
+    final res = rs.server.transport == 'http'
+        ? await _rpcHttp(rs, 'tools/list', {})
+        : await _rpc(rs, 'tools/list', {});
     if (res.isError) return;
     final payload = res.value;
     if (payload is Map<String, dynamic>) {
@@ -377,10 +444,15 @@ class McpService {
     }
   }
 
+  @visibleForTesting
+  Future<void> rediscoverToolsForTest(String serverName) =>
+      _rediscoverTools(_keyForName(serverName));
+
   /// Kill a server process. Safe to call when not connected.
   Future<void> disconnect(String serverName) async {
-    final rs = _running.remove(serverName);
-    _cancelReconnect(serverName);
+    final key = _keyForName(serverName);
+    final rs = _running.remove(key);
+    _cancelReconnect(key);
     if (rs == null) return;
     rs.userDisconnected = true;
     try {
@@ -399,20 +471,18 @@ class McpService {
     String toolName,
     Map<String, dynamic> args,
   ) async {
-    final rs = _running[serverName];
+    final key = _keyForName(serverName);
+    final rs = _running[key];
     if (rs == null) {
       return 'MCP error: server "$serverName" is not connected'
-          '${_lastDeathOf(serverName)}';
+          '${_lastDeathOf(key)}';
     }
     final res = rs.server.transport == 'http'
         ? await _rpcHttp(rs, 'tools/call', {
             'name': toolName,
             'arguments': args,
           })
-        : await _rpc(rs, 'tools/call', {
-            'name': toolName,
-            'arguments': args,
-          });
+        : await _rpc(rs, 'tools/call', {'name': toolName, 'arguments': args});
     if (res.isTimeout) {
       return 'MCP error: "$toolName" on "$serverName" timed out after '
           '$_rpcTimeoutSeconds s (server may be busy or dead).';
@@ -709,10 +779,10 @@ class McpService {
   /// "recover" from; `_connectHttp`'s own catch handles that case.
   void _markHttpFailure(_RunningServer rs) {
     if (!rs.handshakeDone) return;
-    final name = rs.server.name;
-    if (!identical(_running[name], rs)) return; // already superseded
-    _running.remove(name);
-    _lastDeath = (server: name, code: -1, at: DateTime.now());
+    final key = _key(rs.server);
+    if (!identical(_running[key], rs)) return; // already superseded
+    _running.remove(key);
+    _lastDeath = (server: key, code: -1, at: DateTime.now());
     if (!rs.userDisconnected) _scheduleReconnect(rs.server);
   }
 
@@ -812,17 +882,12 @@ class McpRpcResult {
   final dynamic value;
   final String? error;
   final bool isTimeout;
-  const McpRpcResult._ok(this.value)
-    : error = null,
-      isTimeout = false;
+  const McpRpcResult._ok(this.value) : error = null, isTimeout = false;
   const McpRpcResult._error(String e)
     : value = null,
       error = e,
       isTimeout = false;
-  const McpRpcResult._timeout()
-    : value = null,
-      error = null,
-      isTimeout = true;
+  const McpRpcResult._timeout() : value = null, error = null, isTimeout = true;
   bool get isError => error != null;
 }
 
@@ -847,6 +912,34 @@ class McpToolDef {
       'name': 'mcp__${serverKey}__$name',
       'description': description ?? 'MCP tool $name',
       'parameters': inputSchema ?? {'type': 'object', 'properties': {}},
+    },
+  };
+}
+
+class McpConnectedTool {
+  final McpServer server;
+  final McpToolDef tool;
+
+  const McpConnectedTool(this.server, this.tool);
+
+  static String _safe(String value) => value
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9_-]+'), '_')
+      .replaceAll(RegExp(r'^_+|_+$'), '');
+
+  String get canonicalId => 'mcp:${server.canonicalId}/${tool.name}';
+
+  String get canonicalToolName =>
+      canonicalId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+
+  String get legacyToolName => 'mcp__${_safe(server.name)}__${tool.name}';
+
+  Map<String, dynamic> toOpenAiTool({required bool canonical}) => {
+    'type': 'function',
+    'function': {
+      'name': canonical ? canonicalToolName : legacyToolName,
+      'description': tool.description ?? 'MCP tool ${tool.name}',
+      'parameters': tool.inputSchema ?? {'type': 'object', 'properties': {}},
     },
   };
 }
