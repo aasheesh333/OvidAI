@@ -7227,6 +7227,15 @@ ${await _agentsMdBlock()}
         if (resolved == null) {
           return 'MCP tool "$name" is not connected or its alias is ambiguous.';
         }
+        final owner = resolved.server.ownerPluginId;
+        if (owner != null &&
+            PluginContributionRegistry.I.isRegistered(owner) &&
+            !PluginContributionRegistry.I.isPluginActiveForSession(
+              owner,
+              _runSession?.id ?? '',
+            )) {
+          return _pluginScopeRefusal(resolved.canonicalId, owner);
+        }
         _emit('shell', 'MCP: ${resolved.server.name} → ${resolved.tool.name}');
         return await McpService.I.callTool(
           resolved.server.canonicalId,
@@ -7236,6 +7245,15 @@ ${await _agentsMdBlock()}
       case String() when name.startsWith('mcp_'):
         final resolved = McpService.I.resolveToolName(name);
         if (resolved != null) {
+          final owner = resolved.server.ownerPluginId;
+          if (owner != null &&
+              PluginContributionRegistry.I.isRegistered(owner) &&
+              !PluginContributionRegistry.I.isPluginActiveForSession(
+                owner,
+                _runSession?.id ?? '',
+              )) {
+            return _pluginScopeRefusal(resolved.canonicalId, owner);
+          }
           _emit(
             'shell',
             'MCP: ${resolved.server.name} → ${resolved.tool.name}',

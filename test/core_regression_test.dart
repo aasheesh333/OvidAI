@@ -18221,6 +18221,11 @@ cwd = 'tools'
           .map((t) => ((t['function'] as Map?) ?? {})['name'])
           .whereType<String>();
       expect(otherNames, isNot(contains('mcp_scope_plugin_api_private-tool')));
+      final guessed = await AgentService.I.dispatchForTest(
+        'mcp_scope_plugin_api_private-tool',
+        {},
+      );
+      expect(guessed, contains('not active for this session'));
     });
 
     test(
