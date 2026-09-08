@@ -18075,6 +18075,138 @@ cwd = 'tools'
       expect(names, isNot(contains(McpService.providerServerToolName(a))));
     });
 
+    test('hidden disconnected provider does not suppress visible legacy alias',
+        () {
+      final visible = ownedServer('alias/visible');
+      final hidden = ownedServer('alias/hidden');
+      app.mcpServers.addAll([visible, hidden]);
+      registerOwner(
+        'alias/visible',
+        activation: PluginActivation.sessionActive,
+        immediateSessionId: 'p9-alias-visible',
+      );
+      registerOwner(
+        'alias/hidden',
+        activation: PluginActivation.sessionActive,
+        immediateSessionId: 'p9-alias-hidden',
+      );
+      final session = ChatSession(
+        id: 'p9-alias-visible',
+        title: 'visible',
+        model: 'm',
+      );
+      app.sessions.add(session);
+      AgentService.setRunSessionForTest(session.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.sessions.remove(session);
+        app.mcpServers.removeWhere(
+          (server) => identical(server, visible) || identical(server, hidden),
+        );
+      });
+
+      final names = AgentService.I.toolsForTest()
+          .map((tool) => ((tool['function'] as Map?) ?? {})['name'])
+          .whereType<String>();
+
+      expect(names, contains('mcp_shared'));
+    });
+
+    test('advertised encoded disconnected stub connects intended server',
+        () async {
+      final server = ownedServer('encoded/plugin', name: 'remote');
+      registerOwner('encoded/plugin', serverName: 'remote');
+      app.mcpServers.add(server);
+      final session = ChatSession(
+        id: 'p9-encoded-session',
+        title: 'encoded',
+        model: 'm',
+      );
+      app.sessions.add(session);
+      AgentService.setRunSessionForTest(session.id);
+      McpService.I.httpClientForTest = mcpHttpClient(toolName: 'lookup');
+      addTearDown(() async {
+        AgentService.setRunSessionForTest('');
+        app.sessions.remove(session);
+        app.mcpServers.remove(server);
+        await McpService.I.disconnect(server.canonicalId);
+        McpService.I.httpClientForTest = null;
+      });
+      final names = AgentService.I.toolsForTest()
+          .map((tool) => ((tool['function'] as Map?) ?? {})['name'])
+          .whereType<String>()
+          .toList();
+      final stub = McpService.providerServerToolName(server);
+      expect(names, contains(stub));
+
+      final result = await AgentService.I.dispatchForTest(stub, {
+        'action': 'lookup',
+        'args': <String, dynamic>{},
+      });
+
+      expect(result, 'encoded');
+      expect(McpService.I.isConnected(server.canonicalId), isTrue);
+    });
+
+    test('provider names are bounded stable distinct and dispatchable',
+        () async {
+      final longOwner = 'publisher/${'very-long-plugin-segment-' * 8}';
+      final serverA = ownedServer(
+        longOwner,
+        name: '${'long-server-name-' * 8}a',
+      );
+      final serverB = ownedServer(
+        longOwner,
+        name: '${'long-server-name-' * 8}b',
+      );
+      final toolName = '${'very-long-tool-name-' * 8}lookup';
+      registerOwner(longOwner, serverName: serverA.name);
+      app.mcpServers.addAll([serverA, serverB]);
+      final session = ChatSession(
+        id: 'p9-long-name-session',
+        title: 'long names',
+        model: 'm',
+      );
+      app.sessions.add(session);
+      AgentService.setRunSessionForTest(session.id);
+      McpService.I.httpClientForTest = mcpHttpClient(toolName: toolName);
+      addTearDown(() async {
+        AgentService.setRunSessionForTest('');
+        app.sessions.remove(session);
+        app.mcpServers.removeWhere(
+          (server) => identical(server, serverA) || identical(server, serverB),
+        );
+        await McpService.I.disconnect(serverA.canonicalId);
+        McpService.I.httpClientForTest = null;
+      });
+
+      final stubA = McpService.providerServerToolName(serverA);
+      final stubAAgain = McpService.providerServerToolName(serverA);
+      final stubB = McpService.providerServerToolName(serverB);
+      expect(stubA.length, lessThanOrEqualTo(64));
+      expect(RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(stubA), isTrue);
+      expect(stubAAgain, stubA);
+      expect(stubB, isNot(stubA));
+
+      expect(await McpService.I.connect(serverA), contains('connected'));
+      final connected = McpService.I.connectedToolEntries.singleWhere(
+        (entry) => entry.server.canonicalId == serverA.canonicalId,
+      );
+      expect(connected.canonicalToolName.length, lessThanOrEqualTo(64));
+      expect(
+        RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(connected.canonicalToolName),
+        isTrue,
+      );
+      expect(
+        McpService.I.resolveToolName(connected.canonicalToolName)?.canonicalId,
+        connected.canonicalId,
+      );
+      expect(
+        await AgentService.I.dispatchForTest(connected.canonicalToolName, {}),
+        'publisher',
+      );
+    });
+
     test('enabling pendingGlobal keeps owned MCP unmounted until restart',
         () async {
       final root = Directory.systemTemp.createTempSync('ovid-p9-pending-');

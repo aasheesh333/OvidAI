@@ -2656,7 +2656,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       final sameAlias = app.mcpServers
           .where(
             (candidate) =>
-                candidate.custom && _normTool(candidate.name) == safe,
+                candidate.custom &&
+                _mcpOwnerVisible(candidate, runSessionId) &&
+                _normTool(candidate.name) == safe,
           )
           .length;
       final canonicalStub = s.ownerPluginId == null
@@ -4617,6 +4619,11 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     final servers = AppState.I.mcpServers
         .where((s) => _mcpOwnerVisible(s, sessionId ?? _runSession?.id ?? ''))
         .toList();
+    final encoded = servers
+        .where((s) => McpService.providerServerToolName(s) == toolName)
+        .toList();
+    if (encoded.length == 1) return encoded.single;
+    if (encoded.length > 1) return null;
     final canonical = servers
         .where((s) => _normTool(s.canonicalId) == key)
         .toList();

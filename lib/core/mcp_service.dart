@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
@@ -84,9 +85,16 @@ class McpService {
     Iterable<McpConnectedTool> entries,
   ) => _resolveToolEntries(toolName, entries);
 
-  static String _providerEncode(String value) => base64Url
-      .encode(utf8.encode(value))
-      .replaceAll('=', '');
+  static String _providerEncode(String value) {
+    final readable = value
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9_-]+'), '_')
+        .replaceAll(RegExp(r'^_+|_+$'), '');
+    final prefix = (readable.isEmpty ? 'id' : readable);
+    final boundedPrefix = prefix.length <= 27 ? prefix : prefix.substring(0, 27);
+    final digest = sha256.convert(utf8.encode(value)).toString().substring(0, 32);
+    return '${boundedPrefix}_$digest';
+  }
 
   static String providerServerToolName(McpServer server) =>
       'mcp_${_providerEncode(server.canonicalId)}';
