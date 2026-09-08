@@ -157,15 +157,19 @@ Future<PluginInstallResult?> startPluginInstallForTest(
   }
 
   PluginItem row = plugin ?? _catalogRowFor(inspection.manifest);
-  // Task 11: pass the already-approved inspection through — installPlugin
-  // re-inspecting the source would double-resolve and discard this staging.
+  // Single-inspection flow (review C1): the approved inspection passes
+  // straight through — no re-resolve, no second staging. The manager
+  // consumes staging on success and discards it on failure, so there is
+  // nothing left here to discard either way; a null result (no derivable
+  // source) cannot happen for an already-inspected flow.
   final result = await app.installPlugin(
     row,
-    source: source,
+    inspection: inspection,
     origin: PluginInstallOrigin.pluginsScreen,
   );
   if (result == null) {
     // No row to sync — remember the runtime install anyway.
+    inspection.discard();
     return PluginInstallResult.failed(
       error: 'install failed: no catalog row could be derived',
     );
@@ -1384,7 +1388,10 @@ class PluginDetailScreen extends StatelessWidget {
                     },
                   ),
           ),
-          if (plugin.installed && plugin.runtimeId != null) ...[
+          if (plugin.installed &&
+              plugin.runtimeId != null &&
+              (plugin.activation == PluginActivation.failed ||
+                  plugin.activation == PluginActivation.degraded)) ...[
             const SizedBox(height: 8),
             Row(
               children: [
@@ -1760,6 +1767,9 @@ class _EffectiveGrantRow extends StatelessWidget {
   final PluginItem plugin;
   const _EffectiveGrantRow({required this.plugin});
 
+  static String digestSnippetForTest(String digest) =>
+      digest.length <= 19 ? digest : digest.substring(0, 19);
+
   Future<void> _openEditor(BuildContext context) async {
     PluginRuntimeCallRecorderForTest.record?.call('edit-grants');
     final app = AppState.I;
@@ -1776,7 +1786,7 @@ class _EffectiveGrantRow extends StatelessWidget {
               : 'Granted capabilities:\n'
                     '${grant.capabilities.map((c) => c.name).join(', ')}\n\n'
                     'Approved ${grant.approvedAt.toIso8601String().substring(0, 10)} '
-                    'for digest ${grant.manifestDigest.substring(0, 19)}…',
+                    'for digest ${_EffectiveGrantRow.digestSnippetForTest(grant.manifestDigest)}…',
           style: const TextStyle(fontSize: 12.5, height: 1.5),
         ),
         actions: [

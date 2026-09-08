@@ -19942,6 +19942,11 @@ cwd = 'tools'
         });
         expect(row.runtimeId, 'p11org/action-kit');
 
+        // Retry only renders for failed/degraded (review I1), so pin the
+        // row failed for the retry half — the production retry path is
+        // identical (re-probe + re-mount through the manager).
+        row.activation = PluginActivation.failed;
+
         final calls = <String>[];
         PluginRuntimeCallRecorderForTest.record = calls.add;
 
@@ -20157,20 +20162,202 @@ cwd = 'tools'
     );
 
     test(
+      'PLUGIN11 REVIEW C1: approved screen install resolves once and leaves no staging residue',
+      () async {
+        final app = AppState.createForTest();
+        addTearDown(AppState.resetTestInstance);
+
+        final src = p11PluginDir(name: 'Single Resolve Kit');
+        final row = PluginItem(
+          name: 'P11 Single Resolve Kit',
+          author: 'p11org',
+          description: 'P11 fixture',
+          version: '1.0.0',
+          category: 'Tool',
+        );
+        app.plugins.add(row);
+        await p11Approve(src);
+
+        // Count REAL resolver calls: every resolve creates exactly one
+        // staging child, so staging-child count after install <= 1 means
+        // single-resolve; zero children means no leak.
+        var resolveCount = 0;
+        PluginInspectRecorderForTest.record = (s, m) {
+          resolveCount++;
+        };
+        addTearDown(() => PluginInspectRecorderForTest.record = null);
+
+        final stagingParent = Directory('${p11Staging.path}/plugin-staging');
+        List<String> staged() => stagingParent.existsSync()
+            ? stagingParent.listSync().map((e) => e.path).toList()
+            : <String>[];
+
+        final result = await startPluginInstallForTest(
+          app,
+          row,
+          source: LocalFolderPluginSource(src.path),
+        );
+        expect(result, isNotNull);
+        expect(result!.status, PluginInstallStatus.ok);
+        expect(
+          resolveCount,
+          1,
+          reason: 'one install must inspect exactly once',
+        );
+        expect(
+          staged(),
+          isEmpty,
+          reason: 'approved install must consume its staging, never leak it',
+        );
+      },
+    );
+
+    test(
+      'PLUGIN11 REVIEW C2: exactly one boot-activation site; epoch advances once per boot',
+      () async {
+        String codeOnly(String src) => src
+            .split('\n')
+            .where((l) => !l.trimLeft().startsWith('//'))
+            .join('\n');
+        final mainSrc = codeOnly(File('lib/main.dart').readAsStringSync());
+        final stateSrc = codeOnly(
+          File('lib/core/state.dart').readAsStringSync(),
+        );
+        final call = RegExp(r'PluginRuntimeManager\.I\.activateForBoot\(\)');
+        final total =
+            call.allMatches(mainSrc).length +
+            call.allMatches(stateSrc).length;
+        expect(
+          total,
+          1,
+          reason: 'boot promotion must have exactly one production call site',
+        );
+
+        // Epoch advances exactly +1 per boot through initialize().
+        final prefs = await SharedPreferences.getInstance();
+        AppState.resetTestInstance();
+        await AppState.createForTest().initialize();
+        final e1 = prefs.getInt('ovid_plugin_boot_epoch_v1') ?? -1;
+        AppState.resetTestInstance();
+        await AppState.createForTest().initialize();
+        final e2 = prefs.getInt('ovid_plugin_boot_epoch_v1') ?? -1;
+        addTearDown(AppState.resetTestInstance);
+        expect(e1, greaterThanOrEqualTo(0));
+        expect(
+          e2 - e1,
+          1,
+          reason: 'one boot must advance the epoch exactly once',
+        );
+      },
+    );
+
+    testWidgets(
+      'PLUGIN11 REVIEW I1: retry renders only for failed or degraded installs',
+      (tester) async {
+        AgentService.I.debugPauseScheduleTimerForTest(true);
+        addTearDown(() {
+          AgentService.I.debugPauseScheduleTimerForTest(false);
+          AppState.resetTestInstance();
+        });
+        AppState.createForTest();
+
+        PluginItem row(String suffix, PluginActivation activation) =>
+            PluginItem(
+              name: 'P11 Retry $suffix',
+              author: 'p11org',
+              description: 'd',
+              version: '1.0.0',
+              category: 'Tool',
+              installed: true,
+              enabled: true,
+              runtimeId: 'p11org/retry-$suffix',
+              activation: activation,
+            );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: Aether.theme(),
+            home: PluginDetailScreen(
+              plugin: row('healthy', PluginActivation.globalActive),
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(
+          find.text('Retry activation'),
+          findsNothing,
+          reason: 'healthy installs must not offer retry',
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: Aether.theme(),
+            home: PluginDetailScreen(
+              plugin: row('degraded', PluginActivation.degraded),
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(find.text('Retry activation'), findsOneWidget);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: Aether.theme(),
+            home: PluginDetailScreen(
+              plugin: row('failed', PluginActivation.failed),
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(find.text('Retry activation'), findsOneWidget);
+      },
+    );
+
+    test(
+      'PLUGIN11 REVIEW M3: short grant digests render without throwing',
+      () async {
+        // The production digest render is a min-length guard now: the
+        // source must carry no unguarded digest substring(0, 19).
+        final srcText = File(
+          'lib/ui/plugins_screen.dart',
+        ).readAsStringSync();
+        expect(srcText, isNot(contains('manifestDigest.substring(0, 19)')));
+        expect(srcText, contains('digestSnippetForTest'));
+      },
+    );
+
+    test(
       'PLUGIN11: main.dart boot activation is single and before reconnects',
       () async {
+        // Ownership (review C2): AppState._initialize is the single
+        // production owner of boot promotion; main() must NOT call it
+        // (a second call would advance the epoch +2 per boot).
+        for (final path in ['lib/main.dart', 'lib/core/state.dart']) {
+          final text = File(path).readAsStringSync();
+          final codeOnly = text
+              .split('\n')
+              .where((l) => !l.trimLeft().startsWith('//'))
+              .join('\n');
+          final n = RegExp(
+            r'PluginRuntimeManager\.I\.activateForBoot\(\)',
+          ).allMatches(codeOnly).length;
+          if (path == 'lib/main.dart') {
+            expect(
+              n,
+              0,
+              reason: 'main() must not promote; _initialize owns it',
+            );
+          } else {
+            expect(
+              n,
+              1,
+              reason: '_initialize must promote exactly once',
+            );
+          }
+        }
         final src = File('lib/main.dart').readAsStringSync();
-        // activateForBoot must be called in main() exactly once…
-        expect(
-          RegExp('activateForBoot').allMatches(src).length,
-          1,
-          reason: 'boot activation must be called exactly once in main()',
-        );
-        // …AFTER persisted state loads (initialize)…
         final initIdx = src.indexOf('await AppState.I.initialize();');
-        final actIdx = src.indexOf('activateForBoot');
         expect(initIdx, greaterThan(-1));
-        expect(actIdx, greaterThan(initIdx));
         // …and reconnectServices stays out of main() itself (it belongs
         // to the shell, which runs once at startup + on resume). The
         // word appears in main()'s explanatory COMMENTS, so strip line

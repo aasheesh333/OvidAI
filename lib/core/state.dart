@@ -1053,40 +1053,62 @@ class AppState extends ChangeNotifier {
   /// registry activation → atomic rename. On success the runtime
   /// identity/activation fields are applied to [plugin] and persisted.
   ///
-  /// Returns null when no typed [PluginSource] is derivable (source-less
-  /// legacy catalog rows keep the flag-flip path); a failed result (or a
-  /// [PluginRuntimeException]) means the transaction rolled back and
-  /// nothing changed.
+  /// Pass an already-approved [inspection] (the UI's single-resolve flow)
+  /// to install with ZERO re-resolve — exactly one inspection per
+  /// install, no leaked staging. When omitted the source is inspected
+  /// here (agent path). Returns null when no typed [PluginSource] is
+  /// derivable (source-less legacy catalog rows keep the flag-flip
+  /// path); a failed result (or a [PluginRuntimeException]) means the
+  /// transaction rolled back and nothing changed.
   Future<PluginInstallResult?> installPlugin(
     PluginItem plugin, {
     PluginSource? source,
+    PluginInspection? inspection,
     required PluginInstallOrigin origin,
     String? sessionId,
     void Function(String line)? onProgress,
   }) async {
-    final src =
-        source ??
-        (plugin.source != null
-            ? githubPluginSourceFromSourceString(plugin.source!)
-            : null);
-    if (src == null) return null;
-    PluginInspection inspection;
-    try {
-      inspection = await PluginRuntimeManager.I.inspect(src);
-    } catch (e) {
-      return PluginInstallResult.failed(error: 'source resolution failed: $e');
+    final PluginInspection owned;
+    if (inspection != null) {
+      owned = inspection;
+    } else {
+      final src =
+          source ??
+          (plugin.source != null
+              ? githubPluginSourceFromSourceString(plugin.source!)
+              : null);
+      if (src == null) return null;
+      try {
+        owned = await PluginRuntimeManager.I.inspect(src);
+      } catch (e) {
+        return PluginInstallResult.failed(
+          error: 'source resolution failed: $e',
+        );
+      }
     }
     final grant = await pluginPermissions.effectiveGrant(
-      pluginId: inspection.manifest.id,
-      manifest: inspection.manifest,
+      pluginId: owned.manifest.id,
+      manifest: owned.manifest,
     );
-    final result = await PluginRuntimeManager.I.install(
-      inspection,
-      grant: grant,
-      origin: origin,
-      sessionId: sessionId,
-      onProgress: onProgress,
-    );
+    // Fail-closed WITHOUT touching the passed inspection on the no-grant
+    // path: the caller (UI flow) still owns its staging and discards it
+    // (cancel leaves NO state; exactly one inspect total).
+    PluginInstallResult result;
+    try {
+      result = await PluginRuntimeManager.I.install(
+        owned,
+        grant: grant,
+        origin: origin,
+        sessionId: sessionId,
+        onProgress: onProgress,
+      );
+    } on PluginRuntimeException catch (e) {
+      if (e.code == PluginRuntimeErrorCode.capabilityApprovalRequired ||
+          e.code == PluginRuntimeErrorCode.digestMismatch) {
+        return PluginInstallResult.failed(error: e.message);
+      }
+      rethrow;
+    }
     if (result.status != PluginInstallStatus.failed) {
       plugin.installed = true;
       plugin.enabled = true;
@@ -1290,9 +1312,10 @@ class AppState extends ChangeNotifier {
     await _loadPluginState();
     await syncMarketplaceCatalogs();
     await _applyPluginState();
-    // Task 7 (spec §7): exactly one boot epoch per initialize, then
-    // promote session-scoped/pending installs into global activation.
-    // Rows must be restored from catalog + plugin-state first.
+    // Boot promotion lives ONLY here (review C2): every boot path flows
+    // through _initialize, so the epoch advances exactly +1 per boot.
+    // main() must NOT call activateForBoot itself — the PLUGIN11
+    // boot-order test pins that the single call site is this method.
     try {
       await PluginRuntimeManager.I.activateForBoot();
     } catch (_) {}
