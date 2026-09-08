@@ -17378,15 +17378,12 @@ cwd = 'tools'
       final svc = HookService.I;
       var depth = 0;
       var maxDepth = 0;
-      String? recurred;
       svc.executorForTest = (cmd, env) async {
         depth++;
         maxDepth = depth > maxDepth ? depth : maxDepth;
         if (depth == 1) {
           // The hook tries to re-fire its own event mid-execution.
-          recurred = await svc
-              .fire('notification', 'p8-sess-recursion')
-              .toString();
+          unawaited(svc.fire('notification', 'p8-sess-recursion'));
         }
         depth--;
         return 'ok';
@@ -17581,7 +17578,7 @@ cwd = 'tools'
       var requestCount = 0;
       final serverTask = () async {
         await for (final request in server) {
-          final body = await utf8.decoder.bind(request).join();
+          await utf8.decoder.bind(request).join();
           requestCount++;
           request.response.headers.chunkedTransferEncoding = true;
           if (requestCount == 1) {
@@ -17839,6 +17836,8 @@ cwd = 'tools'
       await Future<void>.delayed(const Duration(milliseconds: 300));
       expect(events, contains('subagent_start'));
       expect(events, contains('subagent_end'));
+      expect(requestCount, greaterThanOrEqualTo(1));
+      expect(out, isNotEmpty);
     }, timeout: const Timeout(Duration(seconds: 60)));
 
     test('session_end fires when a session is deleted', () async {
