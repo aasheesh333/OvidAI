@@ -1044,6 +1044,24 @@ class PluginCard extends StatelessWidget {
   final PluginItem plugin;
   const PluginCard({super.key, required this.plugin});
 
+  /// Task 11 (spec §11) + Task 10 copy pass: honest install/availability
+  /// state for rows with NO runtime activation. `installed && !enabled`
+  /// (the Web Fetch & Reader half-state) reads "Installed · disabled" —
+  /// never "Available", never a broken-looking error.
+  static String availabilityLabel(PluginItem p) => p.installed
+      ? (p.enabled ? 'Installed · enabled' : 'Installed · disabled')
+      : 'Available';
+
+  /// Task 11 (spec §11): source/format badge — Claude Code, Codex, MCP,
+  /// or Ovid built-in. Catalog rows derive it from `marketplaceId` /
+  /// category; MCP-category rows are always MCP.
+  static String sourceFormatLabel(PluginItem p) {
+    if (p.category == 'MCP') return 'MCP';
+    if (p.author == 'ovidai' || p.author == 'you') return 'Ovid built-in';
+    if (p.marketplace != null || p.source != null) return 'Claude Code';
+    return 'Codex';
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = AppState.I;
@@ -1098,6 +1116,15 @@ class PluginCard extends StatelessWidget {
                       ),
                       const SizedBox(width: 8),
                       Tag(plugin.category.toUpperCase(), filled: true),
+                      // Task 11 (spec §11): source/format badge —
+                      // Claude Code / Codex / MCP / Ovid built-in.
+                      Padding(
+                        padding: const EdgeInsets.only(left: 4),
+                        child: Tag(
+                          PluginCard.sourceFormatLabel(plugin),
+                          filled: false,
+                        ),
+                      ),
                       // Task 11 (spec §11): activation badge beside the
                       // category tag (This session / Restart to enable
                       // everywhere / Global / Degraded / Failed).
@@ -1117,6 +1144,13 @@ class PluginCard extends StatelessWidget {
                     plugin.installsKnown && plugin.installs > 0
                         ? '${plugin.author} · v${plugin.version} · ${app.fmtInstalls(plugin.installs)} installs'
                         : '${plugin.author} · v${plugin.version}',
+                    style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                  ),
+                  // Task 10 copy pass (spec §10): honest availability —
+                  // installed-but-disabled rows (Web Fetch & Reader) read
+                  // "Installed · disabled"; uninstalled rows "Available".
+                  Text(
+                    PluginCard.availabilityLabel(plugin),
                     style: TextStyle(fontSize: 11, color: Aether.textFaint),
                   ),
                   const SizedBox(height: 6),
@@ -1226,6 +1260,30 @@ class PluginDetailScreen extends StatelessWidget {
                           ? '${plugin.author} · v${plugin.version} · ${app.fmtInstalls(plugin.installs)} installs'
                           : '${plugin.author} · v${plugin.version}',
                       style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                    ),
+                    // Task 10 copy pass (spec §10): honest availability on
+                    // the detail header too — installed-but-disabled rows
+                    // (Web Fetch & Reader) read "Installed · disabled";
+                    // uninstalled rows read "Available".
+                    Text(
+                      PluginCard.availabilityLabel(plugin),
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: Aether.textFaint,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        // Task 11 (spec §11): source/format badge beside
+                        // the category tag on the detail header.
+                        Tag(plugin.category.toUpperCase(), filled: true),
+                        const SizedBox(width: 4),
+                        Tag(
+                          PluginCard.sourceFormatLabel(plugin),
+                          filled: false,
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 6),
                     // Task 11 (spec §11): the activation badge — This
@@ -1472,17 +1530,21 @@ class _PluginDiagnostics extends StatelessWidget {
     final app = AppState.I;
     final runtimeId = plugin.runtimeId!;
     final manifest = PluginContributionRegistry.I.manifestFor(runtimeId);
+    // Roster-tool contributions of THIS plugin (honest install report).
     final tools = PluginContributionRegistry.I.toolContributionsForPlugin(
       runtimeId,
     );
-    // Alias view: each roster tool's bare name → how it resolves
-    // (unique → canonical id; ambiguous → conflict list).
+    // §4.4 honest alias view: each roster contribution's bare name →
+    // how it resolves roster-wide (unique → canonical id; ambiguous →
+    // the exact option list; never a silent shadow).
     final aliases = <Widget>[];
     for (final c in tools) {
       final res = PluginContributionRegistry.I.resolveAlias(c.name);
       final line = res.isAmbiguous
           ? '${c.name} → ambiguous: ${res.options.join(', ')}'
-          : '${c.name} → ${res.unique?.canonicalId ?? c.canonicalId}';
+          : res.isUnique
+          ? '${c.name} → ${res.unique!.canonicalId}'
+          : '${c.name} → ${c.canonicalId} (unregistered)';
       aliases.add(_DiagRow(line, warn: res.isAmbiguous));
     }
     if (aliases.isEmpty) {
@@ -1490,25 +1552,35 @@ class _PluginDiagnostics extends StatelessWidget {
         const _DiagRow('No commands, skills, or agents contributed.'),
       );
     }
-    // Alias conflicts anywhere in the roster that mention this plugin.
+    // Alias conflicts roster-wide that mention this plugin's canonical
+    // ids — the exact chooser list, not a silent overwrite.
+    final conflictIds = <String>{};
     for (final c in tools) {
       final res = PluginContributionRegistry.I.resolveAlias(c.name);
       if (res.isAmbiguous) {
         for (final m in res.matches) {
-          aliases.add(
-            _DiagRow('conflict: ${m.canonicalId} shares the name '
-                '"${c.name}" — use the canonical id'),
+          conflictIds.add(
+            'conflict: ${m.canonicalId} shares the name "${c.name}" '
+            '(${res.options.length} claimants) — call by canonical id',
           );
         }
       }
     }
+    final conflicts = conflictIds.map((t) => _DiagRow(t)).toList();
 
-    // Plugin-owned MCP rows (Task 9 canonical ids).
-    final owned = app.mcpServers
-        .where((s) => s.ownerPluginId == runtimeId)
-        .toList();
+    // Plugin-owned MCP rows (Task 9 canonical ids `plugin:<id>/mcp:<name>`
+    // owned via `ownerPluginId`; legacy `plugin:<name>` rows included).
+    final owned = app.mcpServers.where((s) {
+      if (s.ownerPluginId == runtimeId) return true;
+      if (s.ownerPluginId != null) return false;
+      return s.source == 'plugin:$runtimeId' ||
+          s.source == 'plugin:${plugin.name}';
+    }).toList();
 
-    // Hook section data.
+    // Hook section data: the ordered normalized hook list plus the
+    // manifest's declared rows (event · type · payload/matcher), and the
+    // Task 8 breaker/failure state (boot-global counters for this boot
+    // plus per-session settled breakers note).
     final hooks = manifest?.hooks ?? const <PluginHook>[];
 
     // Compatibility: manifest findings (required findings can never
@@ -1532,34 +1604,83 @@ class _PluginDiagnostics extends StatelessWidget {
             _DiagRow('${c.canonicalId} (${c.kindLabel})'),
         const SectionHeader('Aliases'),
         ...aliases,
+        if (conflicts.isNotEmpty) ...[
+          const SectionHeader(
+            'Alias conflicts',
+            subtitle: 'Shared bare names — call by canonical id',
+          ),
+          ...conflicts,
+        ],
         const SectionHeader('MCP servers'),
-        if (owned.isEmpty) const _DiagRow('No MCP servers declared.'),
+        if (owned.isEmpty && (manifest == null || manifest.mcpServers.isEmpty))
+          const _DiagRow('No MCP servers declared.'),
         for (final s in owned) ...[
           _DiagRow(
             '${s.canonicalId} · ${s.transport} · '
             '${s.connected ? 'Connected' : 'Not connected'}',
           ),
-          if (s.envHint != null || s.requiredEnvNames.isNotEmpty)
+          if (s.envHint != null ||
+              s.requiredEnvNames.isNotEmpty ||
+              s.requiredHeaderNames.isNotEmpty)
             _DiagRow(
               'Needs setup: '
-              '${s.requiredEnvNames.isNotEmpty ? s.requiredEnvNames.join(', ') : s.envHint} '
+              '${s.requiredEnvNames.isNotEmpty ? s.requiredEnvNames.join(', ') : s.envHint ?? s.requiredHeaderNames.join(', ')} '
               'must be configured (secure storage)',
               warn: true,
             ),
+          if (mcpUnsupportedReason(s) != null)
+            _DiagRow(
+              'Unsupported on this device: ${mcpUnsupportedReason(s)}',
+              warn: true,
+            ),
         ],
+        // Declared-but-not-mounted servers (mount deferred/failed):
+        // the manifest is the source of truth, never silent.
+        if (manifest != null)
+          for (final d in manifest.mcpServers)
+            if (!owned.any((s) => s.canonicalId == d.canonicalId))
+              _DiagRow(
+                '${d.canonicalId} · ${d.transport} · '
+                'declared (not mounted)',
+                warn: true,
+              ),
+        if (manifest != null)
+          for (final d in manifest.mcpServers)
+            if (!owned.any((s) => s.canonicalId == d.canonicalId) &&
+                (d.envNames.isNotEmpty || d.headerNames.isNotEmpty))
+              _DiagRow(
+                'Needs setup: '
+                '${[...d.envNames, ...d.headerNames].join(', ')} '
+                'must be configured (secure storage)',
+                warn: true,
+              ),
         const SectionHeader('Hooks'),
         if (hooks.isEmpty)
           const _DiagRow('No hooks declared.')
         else
           for (final h in hooks)
             _DiagRow(
-              '${h.event} · ${h.type} · ${h.payload.isEmpty ? '' : h.payload}',
+              '${h.event} · ${h.type} · '
+              '${h.matcher != null ? 'matcher ${h.matcher} · ' : ''}'
+              '${h.payload.isEmpty ? '' : h.payload}',
             ),
+        if (plugin.pluginHooks.isNotEmpty &&
+            (manifest == null || manifest.hooks.isEmpty))
+          for (final h in plugin.pluginHooks)
+            _DiagRow(
+              '${h.event} · ${h.type} · '
+              '${h.matcher != null ? 'matcher ${h.matcher} · ' : ''}'
+              '${h.payload.isEmpty ? '' : h.payload}',
+            ),
+        _DiagRow(
+          'Last result: '
+          '${HookService.I.failed > 0 ? 'failures seen this boot' : 'no failures this boot'} '
+          '(fired ${HookService.I.fired}, failed ${HookService.I.failed} this boot)',
+        ),
         _DiagRow(
           'Circuit breaker: ${HookService.breakerThreshold} consecutive '
           'failures in a session disable this plugin\'s hooks '
-          '(fired ${HookService.I.fired}, failed ${HookService.I.failed} '
-          'this boot)',
+          '(fail-open — the run continues)',
         ),
         const SectionHeader('Dependencies'),
         if (manifest == null || manifest.dependencies.packages.isEmpty)
@@ -1570,7 +1691,10 @@ class _PluginDiagnostics extends StatelessWidget {
               '${d.name} ${d.versionSpec} (${d.kind.name}'
               '${d.required ? '' : ', optional'})',
             ),
-        const SectionHeader('Compatibility'),
+        SectionHeader(
+          'Compatibility',
+          subtitle: 'Required failures block install · optional degrades',
+        ),
         if (compat.isEmpty)
           const _DiagRow('No compatibility findings.')
         else
