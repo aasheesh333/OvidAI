@@ -18,14 +18,19 @@ import 'ui/sandbox_setup.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await AppState.I.initialize();
-  // Task 11 (spec §7): one boot epoch per app start — promote
-  // session-scoped/pending installs into global activation EXACTLY
-  // once, after persisted plugin state has loaded (initialize) and
-  // before any service reconnects (the shell's reconnectServices runs
-  // at startup AND on resume — never hook activation there).
+  // Task 11 (spec §7 + §11 boot activation): one boot epoch per app
+  // start — promote session-scoped/pending installs into global
+  // activation EXACTLY once, after persisted plugin state has loaded
+  // (initialize) and before any service reconnects (the shell's
+  // reconnectServices runs at startup AND on resume — never hook the
+  // boot promotion there).
   try {
     await PluginRuntimeManager.I.activateForBoot();
-  } catch (_) {}
+  } catch (_) {
+    // A corrupt activation record must never brick the boot: the
+    // manager already guards internally; this belt-and-braces keeps
+    // startup alive even if the manager itself throws.
+  }
   // PR24: plugin-hook kill-switch restore (Settings toggle).
   await HookService.I.loadEnabled();
   // Restore run checkpoints if restarted via START_STICKY or app rebirth.

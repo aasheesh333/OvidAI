@@ -875,37 +875,60 @@ class PluginRuntimeManager extends ChangeNotifier {
     final entries = await _loadEntries();
     final entry = entries[pluginId];
     if (entry == null) return PluginActivation.failed;
-    if (!Directory(entry.contentDir).existsSync()) {
-      // Committed content vanished — retry cannot invent it.
-      _clearRowRuntime(pluginId);
-      PluginContributionRegistry.I.unregisterPlugin(pluginId);
-      await _saveEntries(entries..remove(pluginId));
-      notifyListeners();
-      return PluginActivation.failed;
-    }
-    var rec = entry.activation;
     if (entry.disabled) {
       return PluginActivation.disabled;
     }
+    if (!Directory(entry.contentDir).existsSync()) {
+      // Committed content vanished — retry cannot invent it and never
+      // re-runs the install transaction: persist honest `failed` and
+      // keep the record so the row stays Failed (retry stays available).
+      final rec = PluginActivationRecord(
+        pluginId: pluginId,
+        state: PluginActivation.failed,
+        immediateSessionId: null,
+        installedBootEpoch: entry.activation.installedBootEpoch,
+        promoteOnNextBoot: false,
+      );
+      entries[pluginId] = PluginInstallEntry(
+        activation: rec,
+        manifest: entry.manifest,
+        contentDir: entry.contentDir,
+        version: entry.version,
+        degradedNames: entry.degradedNames,
+        probeFailures: entry.probeFailures,
+        disabled: entry.disabled,
+      );
+      await _saveEntries(entries);
+      PluginContributionRegistry.I.unregisterPlugin(pluginId);
+      _syncRow(rec);
+      notifyListeners();
+      return PluginActivation.failed;
+    }
+    // Re-probe the COMMITTED content (spec §5.2 step 5) — never
+    // re-resolve the source, never reinstall dependencies. Fresh probe
+    // failures persist as degraded honesty; scope transitions below.
+    final probeFailures = _probeContent(entry.manifest);
+    final degraded =
+        entry.degradedNames.isNotEmpty || probeFailures.isNotEmpty;
+    var rec = entry.activation;
     if (rec.promoteOnNextBoot && rec.installedBootEpoch < await _readEpoch()) {
       rec = PluginActivationRecord(
         pluginId: pluginId,
-        state: entry.isDegraded
-            ? PluginActivation.degraded
-            : PluginActivation.globalActive,
+        state: degraded ? PluginActivation.degraded : PluginActivation.globalActive,
         immediateSessionId: null,
         installedBootEpoch: rec.installedBootEpoch,
         promoteOnNextBoot: false,
       );
     } else if (rec.state == PluginActivation.failed) {
+      // Content exists again (restored/external fix): promote to the
+      // honest active state. A failed record never carries a session —
+      // promotion clears any stale session binding and the flag.
       rec = PluginActivationRecord(
         pluginId: pluginId,
-        state: entry.isDegraded
-            ? PluginActivation.degraded
-            : PluginActivation.globalActive,
-        immediateSessionId: rec.immediateSessionId,
+        state: degraded ? PluginActivation.degraded : PluginActivation.globalActive,
+        immediateSessionId: null,
         installedBootEpoch: rec.installedBootEpoch,
-        promoteOnNextBoot: rec.promoteOnNextBoot,
+        promoteOnNextBoot: false,
       );
     }
     entries[pluginId] = PluginInstallEntry(
@@ -914,7 +937,7 @@ class PluginRuntimeManager extends ChangeNotifier {
       contentDir: entry.contentDir,
       version: entry.version,
       degradedNames: entry.degradedNames,
-      probeFailures: entry.probeFailures,
+      probeFailures: probeFailures,
       disabled: entry.disabled,
     );
     await _saveEntries(entries);
@@ -961,24 +984,45 @@ class PluginRuntimeManager extends ChangeNotifier {
   }
 
   /// Re-activates a disabled install, applying any promotion that came
-  /// due while it was disabled (spec §7's one-restart rule).
+  /// due while it was disabled (spec §7's one-restart rule). A missing
+  /// committed content directory persists honest `failed` (never drops
+  /// the record, never invents content); content is re-probed so fresh
+  /// deletions degrade honestly instead of mounting dead contributions.
   Future<void> enable(String pluginId) async {
     final entries = await _loadEntries();
     final entry = entries[pluginId];
     if (entry == null) return;
     if (!Directory(entry.contentDir).existsSync()) {
-      entries.remove(pluginId);
+      final rec = PluginActivationRecord(
+        pluginId: pluginId,
+        state: PluginActivation.failed,
+        immediateSessionId: null,
+        installedBootEpoch: entry.activation.installedBootEpoch,
+        promoteOnNextBoot: false,
+      );
+      entries[pluginId] = PluginInstallEntry(
+        activation: rec,
+        manifest: entry.manifest,
+        contentDir: entry.contentDir,
+        version: entry.version,
+        degradedNames: entry.degradedNames,
+        probeFailures: entry.probeFailures,
+        disabled: false,
+      );
       await _saveEntries(entries);
-      _clearRowRuntime(pluginId);
+      PluginContributionRegistry.I.unregisterPlugin(pluginId);
+      _syncRow(rec);
+      notifyListeners();
       return;
     }
+    final probeFailures = _probeContent(entry.manifest);
+    final degraded =
+        entry.degradedNames.isNotEmpty || probeFailures.isNotEmpty;
     var rec = entry.activation;
     if (rec.promoteOnNextBoot && rec.installedBootEpoch < await _readEpoch()) {
       rec = PluginActivationRecord(
         pluginId: pluginId,
-        state: entry.isDegraded
-            ? PluginActivation.degraded
-            : PluginActivation.globalActive,
+        state: degraded ? PluginActivation.degraded : PluginActivation.globalActive,
         immediateSessionId: null,
         installedBootEpoch: rec.installedBootEpoch,
         promoteOnNextBoot: false,
@@ -990,7 +1034,7 @@ class PluginRuntimeManager extends ChangeNotifier {
       contentDir: entry.contentDir,
       version: entry.version,
       degradedNames: entry.degradedNames,
-      probeFailures: entry.probeFailures,
+      probeFailures: probeFailures,
       disabled: false,
     );
     await _saveEntries(entries);
