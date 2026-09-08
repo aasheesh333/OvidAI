@@ -263,6 +263,15 @@ class PluginRuntimeManager extends ChangeNotifier {
   @visibleForTesting
   static PluginDependencyService? depsForTest;
 
+  /// Task 11 test seams: GitHub / npm base overrides forwarded to the
+  /// source resolver so remote source routes (marketplace/GitHub/npm)
+  /// resolve against a loopback mock in tests — never the live network.
+  @visibleForTesting
+  static String? githubBaseOverrideForTest;
+
+  @visibleForTesting
+  static String? npmRegistryBaseOverrideForTest;
+
   /// Test seam: when true, the atomic commit rename (spec §5.2 step 8)
   /// fails on the next install — pins the upgrade rollback path. The
   /// version directory is shared with the dependency sandbox, so no
@@ -423,6 +432,8 @@ class PluginRuntimeManager extends ChangeNotifier {
   }) async {
     final resolver = PluginSourceResolver(
       stagingRootOverride: stagingRootOverrideForTest,
+      githubBaseOverride: githubBaseOverrideForTest,
+      npmRegistryBaseOverride: npmRegistryBaseOverrideForTest,
     );
     final resolved = await resolver.resolve(source, onProgress: onProgress);
     try {
@@ -853,6 +864,74 @@ class PluginRuntimeManager extends ChangeNotifier {
   }
 
   // ── disable / enable / uninstall ──────────────────────────────────
+
+  /// Task 11 (spec §11 Retry action): retry the activation of a plugin
+  /// whose last transaction ended `failed` or left it stuck pending.
+  /// Re-probes the committed content and re-mounts what exists — a
+  /// retry NEVER re-runs the install transaction (that is a fresh
+  /// install) and never fabricates success: missing content stays
+  /// `failed`.
+  Future<PluginActivation> retry(String pluginId) async {
+    final entries = await _loadEntries();
+    final entry = entries[pluginId];
+    if (entry == null) return PluginActivation.failed;
+    if (!Directory(entry.contentDir).existsSync()) {
+      // Committed content vanished — retry cannot invent it.
+      _clearRowRuntime(pluginId);
+      PluginContributionRegistry.I.unregisterPlugin(pluginId);
+      await _saveEntries(entries..remove(pluginId));
+      notifyListeners();
+      return PluginActivation.failed;
+    }
+    var rec = entry.activation;
+    if (entry.disabled) {
+      return PluginActivation.disabled;
+    }
+    if (rec.promoteOnNextBoot && rec.installedBootEpoch < await _readEpoch()) {
+      rec = PluginActivationRecord(
+        pluginId: pluginId,
+        state: entry.isDegraded
+            ? PluginActivation.degraded
+            : PluginActivation.globalActive,
+        immediateSessionId: null,
+        installedBootEpoch: rec.installedBootEpoch,
+        promoteOnNextBoot: false,
+      );
+    } else if (rec.state == PluginActivation.failed) {
+      rec = PluginActivationRecord(
+        pluginId: pluginId,
+        state: entry.isDegraded
+            ? PluginActivation.degraded
+            : PluginActivation.globalActive,
+        immediateSessionId: rec.immediateSessionId,
+        installedBootEpoch: rec.installedBootEpoch,
+        promoteOnNextBoot: rec.promoteOnNextBoot,
+      );
+    }
+    entries[pluginId] = PluginInstallEntry(
+      activation: rec,
+      manifest: entry.manifest,
+      contentDir: entry.contentDir,
+      version: entry.version,
+      degradedNames: entry.degradedNames,
+      probeFailures: entry.probeFailures,
+      disabled: entry.disabled,
+    );
+    await _saveEntries(entries);
+    PluginContributionRegistry.I.register(
+      entry.manifest,
+      activation: rec.state,
+      immediateSessionId: rec.immediateSessionId,
+    );
+    if (rec.state == PluginActivation.globalActive ||
+        rec.state == PluginActivation.degraded ||
+        rec.state == PluginActivation.sessionActive) {
+      await AppState.I.mountPluginOwnedMcpServers(entry.manifest);
+    }
+    _syncRow(rec);
+    notifyListeners();
+    return rec.state;
+  }
 
   /// Unregisters the plugin's contributions and marks the persisted
   /// install disabled (the record survives; [enable] restores it).

@@ -39,7 +39,18 @@ import 'package:ovid_ai/ui/chat_screen.dart';
 import 'package:ovid_ai/ui/health_screen.dart';
 import 'package:ovid_ai/ui/plugin_permission_sheet.dart';
 import 'package:ovid_ai/ui/plugins_screen.dart'
-    show McpCard, parseMcpConfigForTest, toolGainsForTest, mcpUnsupportedReason;
+    show
+        McpCard,
+        parseMcpConfigForTest,
+        toolGainsForTest,
+        mcpUnsupportedReason,
+        PluginDetailScreen,
+        startPluginInstallForTest,
+        PluginInspectRecorderForTest,
+        inspectResultsForTest,
+        PluginRuntimeCallRecorderForTest,
+        pluginPickDirectoryForTest,
+        pluginPickZipFileForTest;
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
 import 'package:ovid_ai/core/sandbox_pkg.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
@@ -19234,6 +19245,761 @@ cwd = 'tools'
         );
       }
     });
+  });
+
+  group('PLUGIN11: production install UI, entry points, and diagnostics', () {
+    Directory p11PluginDir({String name = 'Diag Kit'}) {
+      final dir = Directory.systemTemp.createTempSync('p11-plugin-src-');
+      Directory('${dir.path}/.claude-plugin').createSync(recursive: true);
+      File('${dir.path}/.claude-plugin/plugin.json').writeAsStringSync(
+        jsonEncode({'name': name, 'author': 'p11org', 'version': '1.0.0'}),
+      );
+      Directory('${dir.path}/commands').createSync(recursive: true);
+      File('${dir.path}/commands/review.md').writeAsStringSync(
+        '---\ndescription: P11 command\n---\nP11 BODY',
+      );
+      return dir;
+    }
+
+    /// A fixture exercising every §11 diagnostics surface: contributions
+    /// (command + skill), an MCP server with an env name, a supported
+    /// hook, an UNSUPPORTED hook event (→ optional compatibility
+    /// finding), and an npm dependency.
+    Directory p11FullFixture() {
+      final dir = p11PluginDir(name: 'Full Kit');
+      Directory('${dir.path}/skills/gather').createSync(recursive: true);
+      File('${dir.path}/skills/gather/SKILL.md').writeAsStringSync(
+        '---\nname: gather\ndescription: gather\n---\nGather things.',
+      );
+      File('${dir.path}/hooks/hooks.json').writeAsStringSync(
+        jsonEncode({
+          'hooks': {
+            'pre_tool': [
+              {
+                'hooks': [
+                  {'type': 'command', 'command': 'echo gate'},
+                ],
+              },
+            ],
+            'totally_unknown_event': 'echo skip',
+          },
+        }),
+      );
+      File('${dir.path}/.mcp.json').writeAsStringSync(
+        jsonEncode({
+          'mcpServers': {
+            'diag-db': {
+              'command': 'npx',
+              'args': ['-y', 'diag-db'],
+              'env': {'DIAG_DB_TOKEN': 'secret-value'},
+            },
+          },
+        }),
+      );
+      File('${dir.path}/package.json').writeAsStringSync(
+        jsonEncode({
+          'dependencies': {'left-pad': '^1.0.0'},
+        }),
+      );
+      return dir;
+    }
+
+    File p11ZipOf(Directory src, String fileLabel) {
+      final a = Archive();
+      for (final e in src.listSync(recursive: true)) {
+        if (e is! File) continue;
+        a.addFile(
+          ArchiveFile(
+            e.path.substring(src.path.length + 1),
+            e.lengthSync(),
+            e.readAsBytesSync(),
+          ),
+        );
+      }
+      final f = File(
+        '${Directory.systemTemp.createTempSync('p11-zip-$fileLabel-').path}/'
+        '$fileLabel.zip',
+      );
+      f.writeAsBytesSync(ZipEncoder().encodeBytes(a));
+      return f;
+    }
+
+    Future<void> p11Approve(Directory src) async {
+      final manifest = await const PluginAdapterRegistry().inspect(src);
+      await AppState.pluginPermissions.save(
+        PluginPermissionGrant(
+          pluginId: manifest.id,
+          manifestDigest: pluginManifestDigest(manifest),
+          capabilities: manifest.requestedCapabilities.isNotEmpty
+              ? manifest.requestedCapabilities
+              : inferRequestedCapabilities(manifest),
+          approvedAt: DateTime.now(),
+        ),
+      );
+    }
+
+    late Directory p11Staging;
+    late Directory p11Runtime;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      FlutterSecureStorage.setMockInitialValues({});
+      p11Staging = Directory.systemTemp.createTempSync('p11-staging-');
+      p11Runtime = Directory.systemTemp.createTempSync('p11-runtime-');
+      PluginRuntimeManager.stagingRootOverrideForTest = p11Staging;
+      PluginRuntimeManager.runtimeRootOverrideForTest = p11Runtime;
+      inspectResultsForTest.clear();
+    });
+
+    tearDown(() async {
+      AgentService.setRunSessionForTest('');
+      PluginRuntimeManager.stagingRootOverrideForTest = null;
+      PluginRuntimeManager.runtimeRootOverrideForTest = null;
+      PluginRuntimeManager.depsForTest = null;
+      PluginRuntimeManager.failRenameForTest = false;
+      PluginRuntimeManager.githubBaseOverrideForTest = null;
+      PluginRuntimeManager.npmRegistryBaseOverrideForTest = null;
+      PluginInspectRecorderForTest.record = null;
+      PluginRuntimeCallRecorderForTest.record = null;
+      pluginPickDirectoryForTest = null;
+      pluginPickZipFileForTest = null;
+      inspectResultsForTest.clear();
+      for (final id in PluginContributionRegistry.I.registeredPluginIds
+          .toList()) {
+        if (id.startsWith('p11org/') || id.startsWith('mcp/')) {
+          PluginContributionRegistry.I.unregisterPlugin(id);
+        }
+      }
+      AppState.resetTestInstance();
+      try {
+        p11Staging.deleteSync(recursive: true);
+      } catch (_) {}
+      try {
+        p11Runtime.deleteSync(recursive: true);
+      } catch (_) {}
+      SharedPreferences.setMockInitialValues({});
+    });
+
+    test(
+      'PLUGIN11: every source route funnels through one inspection flow and fails closed without approval',
+      () async {
+        final app = AppState.createForTest();
+        addTearDown(AppState.resetTestInstance);
+
+        // Mock GitHub + npm endpoints so the remote routes resolve
+        // offline (the PLUGIN3 loopback-server pattern).
+        final ghJson = utf8.encode(
+          jsonEncode({
+            'name': 'Gh Kit',
+            'author': 'p11org',
+            'version': '1.0.0',
+          }),
+        );
+        final reviewMd = utf8.encode('---\ndescription: gh\n---\nGH BODY');
+        final requested = <String>[];
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        final npmTarball = GZipEncoder().encodeBytes(
+          TarEncoder().encodeBytes(
+            Archive()
+              ..addFile(
+                ArchiveFile.string(
+                  'package/.mcp.json',
+                  '{"mcpServers":{"npm-kit-db":{"command":"npx",'
+                  '"args":["-y","npm-kit-db"]}}}',
+                ),
+              ),
+          ),
+        );
+        server.listen((request) async {
+          final path = request.uri.path;
+          requested.add(path);
+          List<int>? body;
+          if (path == '/tree/main') {
+            body = utf8.encode(
+              jsonEncode({
+                'tree': [
+                  {'type': 'blob', 'path': '.claude-plugin/plugin.json'},
+                  {'type': 'blob', 'path': 'commands/review.md'},
+                ],
+              }),
+            );
+          } else if (path == '/raw/.claude-plugin/plugin.json') {
+            body = ghJson;
+          } else if (path == '/raw/commands/review.md') {
+            body = reviewMd;
+          } else if (path == '/@p11org/npm-kit') {
+            body = utf8.encode(
+              jsonEncode({
+                'dist-tags': {'latest': '1.0.0'},
+                'versions': {
+                  '1.0.0': {
+                    'dist': {'tarball': 'p11org-npm-kit-1.0.0.tgz'},
+                  },
+                },
+              }),
+            );
+          } else if (path == '/p11org-npm-kit-1.0.0.tgz') {
+            body = npmTarball;
+          }
+          if (body == null) {
+            request.response.statusCode = 404;
+          } else {
+            request.response
+              ..statusCode = 200
+              ..contentLength = body.length
+              ..add(body);
+          }
+          await request.response.close();
+        });
+        addTearDown(() => server.close(force: true));
+        final base = 'http://127.0.0.1:${server.port}';
+        PluginRuntimeManager.githubBaseOverrideForTest = base;
+        PluginRuntimeManager.npmRegistryBaseOverrideForTest = base;
+
+        final folderSrc = p11PluginDir(name: 'Folder Kit');
+        final zipFile = p11ZipOf(p11PluginDir(name: 'Zip Kit'), 'zip-kit');
+
+        final routes = <String, PluginSource>{
+          'marketplace': const MarketplacePluginSource(
+            catalogName: 'P11 catalog',
+            declaredSource: 'p11org/gh-kit',
+          ),
+          'github': const GithubPluginSource(owner: 'p11org', repo: 'gh-kit'),
+          'folder': LocalFolderPluginSource(folderSrc.path),
+          'zip': ZipPluginSource(zipFile.path),
+          'npm': const NpmPluginSource(package: '@p11org/npm-kit'),
+          'pasted json': PastedConfigPluginSource(
+            label: 'pasted json kit',
+            rawConfig: jsonEncode({
+              'mcpServers': {
+                'pasted-db': {'command': 'npx', 'args': ['-y', 'pasted-db']},
+              },
+            }),
+          ),
+          'pasted toml': const PastedConfigPluginSource(
+            label: 'pasted toml kit',
+            rawConfig: 'name = "Pasted Kit"\npublisher = "p11org"\n\n'
+                '[mcp_servers.pasted-toml-db]\ncommand = "npx"\n',
+          ),
+          'stdio': const DirectMcpPluginSource.stdio(
+            name: 'direct stdio kit',
+            command: 'npx',
+            args: ['-y', 'direct-stdio-kit'],
+          ),
+          'http': const DirectMcpPluginSource.http(
+            name: 'direct http kit',
+            url: 'https://example.test/mcp',
+          ),
+        };
+
+        for (final e in routes.entries) {
+          final seen = <(PluginSource, NormalizedPluginManifest?)>[];
+          PluginInspectRecorderForTest.record = (s, m) => seen.add((s, m));
+          final result = await startPluginInstallForTest(app, null,
+              source: e.value);
+          expect(seen, hasLength(1), reason: '${e.key} never reached inspect');
+          expect(seen.first.$1, isA<PluginSource>());
+          expect(
+            seen.first.$2,
+            isNotNull,
+            reason: '${e.key} inspection produced no manifest',
+          );
+          expect(
+            seen.first.$2!.id,
+            isNotEmpty,
+            reason: '${e.key} manifest has no identity',
+          );
+          // No grant was approved: the flow must fail CLOSED — no
+          // install, no registry state, no row.
+          expect(result, isNotNull);
+          expect(result!.status, PluginInstallStatus.failed);
+          expect(result.error, contains('approv'));
+          expect(
+            PluginContributionRegistry.I.isRegistered(seen.first.$2!.id),
+            isFalse,
+            reason: '${e.key}: unapproved install must not register',
+          );
+        }
+        PluginInspectRecorderForTest.record = null;
+        expect(inspectResultsForTest, hasLength(routes.length));
+        expect(requested, contains('/tree/main'));
+        expect(requested, contains('/@p11org/npm-kit'));
+
+        // Staging is clean — every refused inspection discarded itself.
+        final stagingParent = Directory('${p11Staging.path}/plugin-staging');
+        expect(
+          stagingParent.existsSync() ? stagingParent.listSync() : [],
+          isEmpty,
+          reason: 'refused installs must leave no staging residue',
+        );
+        expect(
+          Directory('${p11Runtime.path}/plugin-runtime').existsSync(),
+          isFalse,
+          reason: 'refused installs must commit no runtime content',
+        );
+      },
+    );
+
+    testWidgets(
+      'PLUGIN11: permission cancel on the inspection flow leaves no state',
+      (tester) async {
+        AgentService.I.debugPauseScheduleTimerForTest(true);
+        addTearDown(() {
+          AgentService.I.debugPauseScheduleTimerForTest(false);
+          AppState.resetTestInstance();
+        });
+        final app = AppState.createForTest();
+
+        final src = p11PluginDir(name: 'Cancel Kit');
+        final row = PluginItem(
+          name: 'P11 Cancel Kit',
+          author: 'p11org',
+          description: 'P11 fixture',
+          version: '1.0.0',
+          category: 'Tool',
+        );
+        app.plugins.add(row);
+        pluginPickDirectoryForTest = () async => src.path;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: Aether.theme(),
+            home: PluginDetailScreen(plugin: row),
+          ),
+        );
+        await tester.pump();
+
+        // Source-less non-seed rows open the ONE source chooser. The
+        // inspection hop does real file IO — runAsync turns let the
+        // real event loop advance it, pumps render the sheet.
+        await tester.tap(find.text('Install'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Local folder'));
+        var sheetFound = false;
+        for (var i = 0; i < 50 && !sheetFound; i++) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 100)),
+          );
+          await tester.pump();
+          sheetFound = find.text('Grant plugin access').evaluate().isNotEmpty;
+        }
+        expect(sheetFound, isTrue, reason: 'inspection sheet never opened');
+
+        // The single inspection/approval flow reached inspect and shows
+        // the consolidated permission sheet for the staged manifest.
+        expect(find.text('Grant plugin access'), findsOneWidget);
+        expect(find.textContaining('p11org/cancel-kit'), findsOneWidget);
+        await tester.ensureVisible(find.text('Cancel'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+
+        // Cancel leaves NO state: flags, grant, registry, content.
+        expect(row.installed, isFalse);
+        expect(row.runtimeId, isNull);
+        expect(row.activation, PluginActivation.disabled);
+        expect(
+          PluginContributionRegistry.I.isRegistered('p11org/cancel-kit'),
+          isFalse,
+        );
+        final grant = await AppState.pluginPermissions.effectiveGrant(
+          pluginId: 'p11org/cancel-kit',
+          manifest: await const PluginAdapterRegistry().inspect(src),
+        );
+        expect(grant, isNull, reason: 'cancel must persist no grant');
+        final stagingParent = Directory('${p11Staging.path}/plugin-staging');
+        expect(
+          stagingParent.existsSync() ? stagingParent.listSync() : [],
+          isEmpty,
+          reason: 'cancelled install must discard its staging',
+        );
+        expect(
+          Directory('${p11Runtime.path}/plugin-runtime').existsSync(),
+          isFalse,
+        );
+      },
+    );
+
+    testWidgets(
+      'PLUGIN11: screen install is pendingGlobal with badge and honest report',
+      (tester) async {
+        AgentService.I.debugPauseScheduleTimerForTest(true);
+        addTearDown(() {
+          AgentService.I.debugPauseScheduleTimerForTest(false);
+          AppState.resetTestInstance();
+        });
+        final app = AppState.createForTest();
+
+        final src = p11PluginDir(name: 'Screen Kit');
+        final row = PluginItem(
+          name: 'P11 Screen Kit',
+          author: 'p11org',
+          description: 'P11 fixture',
+          version: '1.0.0',
+          category: 'Tool',
+        );
+        app.plugins.add(row);
+        await p11Approve(src);
+        pluginPickDirectoryForTest = () async => src.path;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: Aether.theme(),
+            home: PluginDetailScreen(plugin: row),
+          ),
+        );
+        await tester.pump();
+
+        await tester.tap(find.text('Install'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Local folder'));
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 5));
+
+        expect(row.installed, isTrue);
+        expect(row.runtimeId, 'p11org/screen-kit');
+        expect(
+          row.activation,
+          PluginActivation.pendingGlobal,
+          reason: 'Plugins-screen origin installs are pendingGlobal',
+        );
+        expect(row.promoteOnNextBoot, isTrue);
+        expect(
+          PluginContributionRegistry.I.isPluginActiveForSession(
+            'p11org/screen-kit',
+            'any-session',
+          ),
+          isFalse,
+          reason: 'pendingGlobal contributes to no session',
+        );
+        // Honest scope report.
+        expect(find.textContaining('restart'), findsWidgets);
+
+        // The activation badge renders on the rebuilt detail screen.
+        await tester.pump();
+        expect(find.text('Restart to enable everywhere'), findsOneWidget);
+        expect(find.byTooltip('Retry activation'), findsOneWidget);
+      },
+    );
+
+    test(
+      'PLUGIN11: agent install carries the session id and reports exact scope',
+      () async {
+        final app = AppState.createForTest();
+        await app.initialize();
+        addTearDown(AppState.resetTestInstance);
+
+        final src = p11PluginDir(name: 'Agent Kit');
+        final row = PluginItem(
+          name: 'P11 Agent Kit',
+          author: 'p11org',
+          description: 'P11 fixture',
+          version: '1.0.0',
+          category: 'Tool',
+        );
+        app.plugins.add(row);
+
+        final s1 = ChatSession(
+          id: 'p11-s1',
+          title: 'S1',
+          model: 'm',
+          mode: 'auto',
+        );
+        app.sessions.insert(0, s1);
+        AgentService.setRunSessionForTest(s1.id);
+        await p11Approve(src);
+
+        final reply = await AgentService.I.dispatchForTest(
+          'agent_install_plugin',
+          {'plugin_name': 'P11 Agent Kit', 'local_path': src.path},
+        );
+        expect(reply, contains('installed'));
+        expect(reply, contains('this session'));
+        expect(reply, isNot(contains('failed')));
+
+        final record = await PluginRuntimeManager.I.recordFor(
+          'p11org/agent-kit',
+        );
+        expect(record!.state, PluginActivation.sessionActive);
+        expect(record.immediateSessionId, s1.id,
+            reason: 'agent origin must carry the session id');
+        expect(record.promoteOnNextBoot, isTrue);
+
+        // The typed zip source variant reports the exact same scope.
+        final zipSrc = p11PluginDir(name: 'Agent Zip Kit');
+        final zipFile = p11ZipOf(zipSrc, 'agent-zip-kit');
+        final row2 = PluginItem(
+          name: 'P11 Agent Zip Kit',
+          author: 'p11org',
+          description: 'P11 fixture',
+          version: '1.0.0',
+          category: 'Tool',
+        );
+        app.plugins.add(row2);
+        await p11Approve(zipSrc);
+        final reply2 = await AgentService.I.dispatchForTest(
+          'agent_install_plugin',
+          {'plugin_name': 'P11 Agent Zip Kit', 'local_zip_path': zipFile.path},
+        );
+        expect(reply2, contains('installed'));
+        expect(reply2, contains('this session'));
+        expect(row2.runtimeId, 'p11org/agent-zip-kit');
+        expect(row2.activation, PluginActivation.sessionActive);
+        expect(row2.immediateSessionId, s1.id);
+        AgentService.setRunSessionForTest('');
+      },
+    );
+
+    testWidgets(
+      'PLUGIN11: badges render for every activation state',
+      (tester) async {
+        AgentService.I.debugPauseScheduleTimerForTest(true);
+        addTearDown(() {
+          AgentService.I.debugPauseScheduleTimerForTest(false);
+          AppState.resetTestInstance();
+        });
+        AppState.createForTest();
+
+        PluginItem row(String suffix, PluginActivation activation) =>
+            PluginItem(
+              name: 'P11 Badge $suffix',
+              author: 'p11org',
+              description: 'd',
+              version: '1.0.0',
+              category: 'Tool',
+              installed: true,
+              enabled: true,
+              runtimeId: 'p11org/badge-$suffix',
+              activation: activation,
+              immediateSessionId: activation == PluginActivation.sessionActive
+                  ? 'p11-s1'
+                  : null,
+            );
+
+        final cases = <PluginActivation, String>{
+          PluginActivation.sessionActive: 'This session',
+          PluginActivation.pendingGlobal: 'Restart to enable everywhere',
+          PluginActivation.globalActive: 'Global',
+          PluginActivation.degraded: 'Degraded',
+          PluginActivation.failed: 'Failed',
+        };
+        for (final e in cases.entries) {
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: Aether.theme(),
+              home: PluginDetailScreen(plugin: row(e.key.name, e.key)),
+            ),
+          );
+          await tester.pump();
+          expect(
+            find.text(e.value),
+            findsOneWidget,
+            reason: '${e.key} badge must render',
+          );
+        }
+      },
+    );
+
+    testWidgets(
+      'PLUGIN11: detail sections render contributions, aliases, MCP, hooks, deps, compatibility, grants, and logs',
+      (tester) async {
+        AgentService.I.debugPauseScheduleTimerForTest(true);
+        addTearDown(() {
+          AgentService.I.debugPauseScheduleTimerForTest(false);
+          AppState.resetTestInstance();
+        });
+        final app = AppState.createForTest();
+
+        // The dependency stage runs through the injected runner (no
+        // sandbox in tests) and succeeds.
+        PluginRuntimeManager.depsForTest = PluginDependencyService(
+          runtimeRootOverride: p11Runtime,
+          runner: (args, {cwd, env}) async => (0, 'ok'),
+          ensureRuntime: (_) async => true,
+        );
+
+        final src = p11FullFixture();
+        final row = PluginItem(
+          name: 'P11 Full Kit',
+          author: 'p11org',
+          description: 'P11 fixture',
+          version: '1.0.0',
+          category: 'Tool',
+        );
+        app.plugins.add(row);
+        await p11Approve(src);
+
+        final result = await startPluginInstallForTest(
+          app,
+          row,
+          source: LocalFolderPluginSource(src.path),
+        );
+        expect(result, isNotNull);
+        expect(
+          result!.status,
+          anyOf(PluginInstallStatus.ok, PluginInstallStatus.degraded),
+        );
+        expect(row.runtimeId, 'p11org/full-kit');
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: Aether.theme(),
+            home: PluginDetailScreen(plugin: row),
+          ),
+        );
+        await tester.pump();
+
+        expect(find.text('CONTRIBUTIONS'), findsOneWidget);
+        expect(
+          find.textContaining('plugin:p11org/full-kit/command:review'),
+          findsOneWidget,
+        );
+        expect(
+          find.textContaining('plugin:p11org/full-kit/skill:gather'),
+          findsOneWidget,
+        );
+        expect(find.text('ALIASES'), findsOneWidget);
+        expect(
+          find.textContaining('review →'),
+          findsOneWidget,
+          reason: 'alias section lists the bare-name mapping',
+        );
+        // MCP section lists the declared server with its canonical id
+        // and the credential name it needs.
+        expect(find.text('MCP SERVERS'), findsOneWidget);
+        expect(find.textContaining('p11org/full-kit/diag-db'), findsOneWidget);
+        expect(find.textContaining('DIAG_DB_TOKEN'), findsOneWidget);
+        // Hook section: event list + breaker state.
+        expect(find.text('HOOKS'), findsOneWidget);
+        expect(find.textContaining('pre_tool'), findsWidgets);
+        expect(find.textContaining('breaker'), findsOneWidget);
+        // Dependency section.
+        expect(find.text('DEPENDENCIES'), findsOneWidget);
+        expect(find.textContaining('left-pad'), findsOneWidget);
+        // Compatibility: optional findings are labeled as optional.
+        expect(find.text('COMPATIBILITY'), findsOneWidget);
+        expect(find.textContaining('optional'), findsWidgets);
+        // Grants + edit-permissions entry.
+        expect(find.text('PERMISSIONS'), findsOneWidget);
+        expect(find.byTooltip('Edit permissions'), findsOneWidget);
+        // Install/runtime log section with the transaction lines.
+        expect(find.text('INSTALL LOG'), findsOneWidget);
+        expect(find.textContaining('staged'), findsWidgets);
+      },
+    );
+
+    testWidgets(
+      'PLUGIN11: retry, disable, uninstall, and edit-grants call the runtime manager',
+      (tester) async {
+        AgentService.I.debugPauseScheduleTimerForTest(true);
+        addTearDown(() {
+          AgentService.I.debugPauseScheduleTimerForTest(false);
+          AppState.resetTestInstance();
+        });
+        final app = AppState.createForTest();
+
+        final src = p11PluginDir(name: 'Action Kit');
+        final row = PluginItem(
+          name: 'P11 Action Kit',
+          author: 'p11org',
+          description: 'P11 fixture',
+          version: '1.0.0',
+          category: 'Tool',
+        );
+        app.plugins.add(row);
+        await p11Approve(src);
+        final result = await app.installPlugin(
+          row,
+          source: LocalFolderPluginSource(src.path),
+          origin: PluginInstallOrigin.pluginsScreen,
+        );
+        expect(result!.status, PluginInstallStatus.ok);
+        expect(row.runtimeId, 'p11org/action-kit');
+
+        final calls = <String>[];
+        PluginRuntimeCallRecorderForTest.record = calls.add;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: Aether.theme(),
+            home: PluginDetailScreen(plugin: row),
+          ),
+        );
+        await tester.pump();
+
+        // Retry activation routes through the runtime manager.
+        await tester.tap(find.byTooltip('Retry activation'));
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(calls, contains('retry'));
+
+        // Disable routes through the runtime manager.
+        await tester.tap(find.text('Disable'));
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(calls, contains('disable'));
+        expect(row.enabled, isFalse);
+        expect(
+          PluginContributionRegistry.I.isRegistered('p11org/action-kit'),
+          isFalse,
+          reason: 'manager disable must unregister contributions',
+        );
+
+        // Edit permissions: revoke routes through the grant store and
+        // the manager's disable path.
+        await tester.ensureVisible(find.byTooltip('Edit permissions'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('Edit permissions'));
+        await tester.pumpAndSettle();
+        expect(calls, contains('edit-grants'));
+        await tester.tap(find.text('Revoke permissions'));
+        await tester.pump(const Duration(milliseconds: 300));
+        final grant = await AppState.pluginPermissions.load(
+          'p11org/action-kit',
+          row.manifestDigest!,
+        );
+        expect(grant, isNull, reason: 'revoke must clear the stored grant');
+
+        // Uninstall routes through the runtime manager.
+        await tester.ensureVisible(find.text('Uninstall'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Uninstall'));
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(calls, contains('uninstall'));
+        expect(row.installed, isFalse);
+        expect(row.runtimeId, isNull);
+        expect(
+          Directory(
+            '${p11Runtime.path}/plugin-runtime/p11org/action-kit',
+          ).existsSync(),
+          isFalse,
+          reason: 'manager uninstall must delete committed content',
+        );
+      },
+    );
+
+    test(
+      'PLUGIN11: main.dart boot activation is single and before reconnects',
+      () async {
+        final src = File('lib/main.dart').readAsStringSync();
+        // activateForBoot must be called in main() exactly once…
+        expect(
+          RegExp('activateForBoot').allMatches(src).length,
+          1,
+          reason: 'boot activation must be called exactly once in main()',
+        );
+        // …AFTER persisted state loads (initialize)…
+        final initIdx = src.indexOf('await AppState.I.initialize();');
+        final actIdx = src.indexOf('activateForBoot');
+        expect(initIdx, greaterThan(-1));
+        expect(actIdx, greaterThan(initIdx));
+        // …and reconnectServices stays out of main() itself (it belongs
+        // to the shell, which runs once at startup + on resume).
+        final mainBody = src.substring(
+          src.indexOf('Future<void> main()'),
+          src.indexOf('class OvidApp'),
+        );
+        expect(mainBody.contains('reconnectServices'), isFalse);
+      },
+    );
   });
 }
 

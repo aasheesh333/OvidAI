@@ -1,13 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../core/agent_service.dart';
+import '../core/hook_service.dart';
 import '../core/mcp_config_parse.dart';
-import '../core/mcp_service.dart';
-import '../core/plugin_adapters.dart';
+import '../core/plugin_manifest.dart';
 import '../core/plugin_registry.dart';
+import '../core/plugin_runtime.dart';
+import '../core/plugin_source_resolver.dart';
 import '../core/sandbox_service.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
@@ -66,47 +68,605 @@ String? mcpUnsupportedReason(McpServer s) {
   return null;
 }
 
-/// Task 5 (spec §5.1): the consolidated permission gate for Install.
+// ── Task 11 test seams ──────────────────────────────────────────────
+
+/// Test seam: observes every (source, manifest) pair the UI's single
+/// install flow inspects. Null in production.
+@visibleForTesting
+class PluginInspectRecorderForTest {
+  /// Recorded by the production install flow's inspection hop:
+  /// (source, manifest) per call.
+  static void Function(PluginSource source, NormalizedPluginManifest? manifest)?
+  record;
+}
+
+/// Inspected manifests captured by the production flow for test
+/// assertions (cleared per test in setUp/tearDown).
+@visibleForTesting
+final List<NormalizedPluginManifest> inspectResultsForTest = [];
+
+/// Test seam: records runtime-manager operations invoked from the
+/// Plugins UI ('retry' / 'disable' / 'uninstall' / 'edit-grants').
+@visibleForTesting
+class PluginRuntimeCallRecorderForTest {
+  static void Function(String op)? record;
+}
+
+/// Test seams replacing the file picker (no platform channel in tests).
+@visibleForTesting
+Future<String?> Function()? pluginPickDirectoryForTest;
+
+@visibleForTesting
+Future<String?> Function()? pluginPickZipFileForTest;
+
+/// Task 11 (spec §11): the ONE production install flow behind every
+/// entry point (marketplace row, GitHub repo, local folder, ZIP, npm,
+/// pasted JSON/TOML, stdio, HTTP). Inspect → consolidated approval
+/// sheet → atomic install transaction via [AppState.installPlugin].
 ///
-/// Builds the normalized manifest for the plugin's cached content (if
-/// any was fetched/registered) and shows the one-time capability +
-/// dependency approval sheet — unless the exact manifest digest is
-/// already granted (re-install/re-enable reuses the stored grant; only
-/// a capability-delta update re-prompts — approval is per-install, NOT
-/// per tool call).
-///
-/// Returns true when the install may proceed (accepted, or nothing to
-/// approve — a catalog row with no normalized manifest keeps the legacy
-/// behavior); false when the user cancelled (no state was changed).
-Future<bool> _gateInstallWithPermissionSheet(
-  BuildContext context,
-  PluginItem plugin,
-) async {
-  // The registered runtime manifest (Task 4) is the authoritative shape;
-  // fall back to inspecting the fetched content cache.
-  var manifest = plugin.runtimeId != null
-      ? PluginContributionRegistry.I.manifestFor(plugin.runtimeId!)
-      : null;
-  if (manifest == null && plugin.source != null) {
-    try {
-      final cache = await AppState.I.pluginCacheDirFor(plugin.source!);
-      if (Directory(cache.path).existsSync()) {
-        manifest = await const PluginAdapterRegistry().inspect(cache);
-      }
-    } catch (_) {
-      manifest = null;
-    }
+/// Pass a catalog [plugin] row to sync it with the install, or null to
+/// install a source the catalog has no row for (the row is created).
+/// Returns the transaction result, or null when the user cancelled /
+/// no approval (nothing changed — cancel leaves NO state).
+Future<PluginInstallResult?> startPluginInstallForTest(
+  AppState app,
+  PluginItem? plugin, {
+  required PluginSource source,
+}) async {
+  PluginInspection inspection;
+  try {
+    inspection = await PluginRuntimeManager.I.inspect(source);
+  } catch (e) {
+    return PluginInstallResult.failed(error: 'source resolution failed: $e');
   }
-  if (manifest == null || manifest.id.isEmpty) return true;
+  PluginInspectRecorderForTest.record?.call(source, inspection.manifest);
+  inspectResultsForTest.add(inspection.manifest);
 
-  final grant = await AppState.pluginPermissions.effectiveGrant(
-    pluginId: manifest.id,
-    manifest: manifest,
+  // One consolidated capability + dependency approval (Task 5 sheet).
+  // An unchanged-digest grant reuses silently; anything else prompts.
+  var grant = await AppState.pluginPermissions.effectiveGrant(
+    pluginId: inspection.manifest.id,
+    manifest: inspection.manifest,
   );
-  if (grant != null) return true; // unchanged digest → grant reused
+  final scaffoldContext = _pluginInstallSheetContext;
+  if (grant == null) {
+    if (scaffoldContext == null) {
+      // No UI context (agent/test path): fail closed, never auto-approve.
+      inspection.discard();
+      return PluginInstallResult.failed(
+        error: 'capability approval required before install',
+      );
+    }
+    if (!scaffoldContext.mounted) {
+      inspection.discard();
+      return null;
+    }
+    // ignore: use_build_context_synchronously
+    final accepted = await showPluginPermissionSheet(
+      scaffoldContext,
+      manifest: inspection.manifest,
+    );
+    if (accepted != true) {
+      inspection.discard();
+      return null; // cancelled — no state
+    }
+    grant = await AppState.pluginPermissions.effectiveGrant(
+      pluginId: inspection.manifest.id,
+      manifest: inspection.manifest,
+    );
+  }
 
-  if (!context.mounted) return false;
-  return await showPluginPermissionSheet(context, manifest: manifest) == true;
+  PluginItem row = plugin ?? _catalogRowFor(inspection.manifest);
+  final result = await app.installPlugin(
+    row,
+    inspection: inspection,
+    origin: PluginInstallOrigin.pluginsScreen,
+  );
+  if (result == null) {
+    // No row to sync — remember the runtime install anyway.
+    return PluginInstallResult.failed(
+      error: 'install failed: no catalog row could be derived',
+    );
+  }
+  return result;
+}
+
+/// The BuildContext hosting the install flow's approval sheet. Assigned
+/// by the detail-screen install button before starting the flow (the
+/// sheet needs a context that outlives the button's onPressed frame).
+BuildContext? _pluginInstallSheetContext;
+
+/// Find (or create) the catalog row for an inspected manifest so the
+/// runtime install is visible in the Plugins list.
+PluginItem _catalogRowFor(NormalizedPluginManifest manifest) {
+  final app = AppState.I;
+  final existing = app.plugins
+      .where((p) => p.runtimeId == manifest.id)
+      .firstOrNull;
+  if (existing != null) return existing;
+  final row = PluginItem(
+    name: manifest.name.isEmpty ? manifest.id : manifest.name,
+    author: manifest.id.contains('/') ? manifest.id.split('/').first : '',
+    description: 'Installed from ${manifest.format.name} source',
+    version: manifest.version,
+    category: 'Tool',
+    source: null,
+  );
+  app.plugins.add(row);
+  return row;
+}
+
+/// Task 11 (spec §11): the activation badge — This session, Restart to
+/// enable everywhere, Global, Degraded, Failed, Disabled. Returns null
+/// when the row carries no runtime activation (legacy flag-flip rows
+/// keep their existing chips).
+Widget? pluginActivationBadge(PluginItem plugin) {
+  if (plugin.runtimeId == null) return null;
+  final (String?, Color?) badgeSpec = switch (plugin.activation) {
+    PluginActivation.sessionActive => ('This session', Aether.accent),
+    PluginActivation.pendingGlobal => (
+      'Restart to enable everywhere',
+      Aether.warn,
+    ),
+    PluginActivation.globalActive => ('Global', Aether.success),
+    PluginActivation.degraded => ('Degraded', Aether.warn),
+    PluginActivation.failed => ('Failed', Aether.danger),
+    PluginActivation.disabled => (null, null),
+  };
+  final label = badgeSpec.$1;
+  if (label == null) return null;
+  return Tag(label, color: badgeSpec.$2 ?? Aether.textFaint, filled: true);
+}
+
+/// Task 11 (spec §11): one source chooser for ALL install entry points
+/// — marketplace/GitHub repos, local folder, ZIP, npm, pasted JSON/TOML
+/// MCP config, direct stdio command, direct HTTP URL. Every route
+/// funnels into the single inspection/approval flow above.
+Future<void> showPluginSourceChooser(BuildContext context) {
+  final repoC = TextEditingController();
+  final npmC = TextEditingController();
+  final pasteC = TextEditingController();
+  final nameC = TextEditingController();
+  final cmdC = TextEditingController(text: 'npx');
+  final argsC = TextEditingController();
+  final urlC = TextEditingController();
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Aether.surface,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+    ),
+    builder: (ctx) => Padding(
+      padding: EdgeInsets.fromLTRB(
+        16,
+        16,
+        16,
+        MediaQuery.of(ctx).viewInsets.bottom + 16,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: Aether.accentSoft,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(
+                    Icons.extension_outlined,
+                    size: 19,
+                    color: Aether.accent,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    'Install plugin from source',
+                    style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700),
+                  ),
+                ),
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  icon: Icon(Icons.close, size: 18, color: Aether.textFaint),
+                  onPressed: () => Navigator.pop(ctx),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Every source is inspected and asks for one capability '
+              'approval before anything installs: [CC], Codex, and MCP '
+              'formats all work.',
+              style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+            ),
+            const SizedBox(height: 14),
+            // ── Local folder / ZIP (device picker) ──
+            _SourceTile(
+              icon: Icons.folder_outlined,
+              title: 'Local folder',
+              subtitle: 'A plugin directory on this device',
+              onTap: () async {
+                final hostContext = context;
+                Navigator.pop(ctx);
+                final path = await (pluginPickDirectoryForTest ??
+                        () => FilePicker.platform.getDirectoryPath(
+                          dialogTitle: 'Pick plugin folder',
+                        ))();
+                if (path == null || path.isEmpty) return;
+                if (!hostContext.mounted) return;
+                _runSourceInstall(
+                  hostContext,
+                  LocalFolderPluginSource(path),
+                  null,
+                );
+              },
+            ),
+            _SourceTile(
+              icon: Icons.folder_zip_outlined,
+              title: 'ZIP archive',
+              subtitle: 'A .zip plugin package on this device',
+              onTap: () async {
+                final hostContext = context;
+                Navigator.pop(ctx);
+                final path = await (pluginPickZipFileForTest ??
+                        () async {
+                          final r = await FilePicker.platform.pickFiles(
+                            type: FileType.custom,
+                            allowedExtensions: ['zip'],
+                          );
+                          return r?.files.single.path;
+                        })();
+                if (path == null || path.isEmpty) return;
+                if (!hostContext.mounted) return;
+                _runSourceInstall(hostContext, ZipPluginSource(path), null);
+              },
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'GITHUB / MARKETPLACE',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.4,
+                color: Aether.textFaint,
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: repoC,
+              style: const TextStyle(
+                fontSize: 13.5,
+                fontFamily: Aether.mono,
+              ),
+              decoration: const InputDecoration(
+                hintText: 'owner/repo or https://github.com/owner/repo',
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Aether.accent,
+                  side: BorderSide(color: Aether.accent.withValues(alpha: .4)),
+                  padding: const EdgeInsets.symmetric(vertical: 11),
+                ),
+                icon: const Icon(Icons.code, size: 16),
+                label: const Text('Fetch from GitHub'),
+                onPressed: () {
+                  final txt = repoC.text.trim();
+                  if (txt.isEmpty) return;
+                  Navigator.pop(ctx);
+                  final src = _githubSourceFromInput(txt);
+                  if (src == null) return;
+                  _runSourceInstall(context, src, null);
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'NPM',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.4,
+                color: Aether.textFaint,
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: npmC,
+              style: const TextStyle(
+                fontSize: 13.5,
+                fontFamily: Aether.mono,
+              ),
+              decoration: const InputDecoration(
+                hintText: '@scope/plugin-name or plugin-name',
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Aether.accent,
+                  side: BorderSide(color: Aether.accent.withValues(alpha: .4)),
+                  padding: const EdgeInsets.symmetric(vertical: 11),
+                ),
+                icon: const Icon(Icons.download_outlined, size: 16),
+                label: const Text('Install from npm'),
+                onPressed: () {
+                  final txt = npmC.text.trim();
+                  if (txt.isEmpty) return;
+                  Navigator.pop(ctx);
+                  _runSourceInstall(
+                    context,
+                    NpmPluginSource(package: txt),
+                    null,
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'PASTE MCP CONFIG (JSON / TOML)',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.4,
+                color: Aether.textFaint,
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: pasteC,
+              maxLines: 4,
+              style: const TextStyle(
+                fontSize: 12,
+                fontFamily: Aether.mono,
+              ),
+              decoration: const InputDecoration(
+                hintText:
+                    '{"mcpServers": {"name": {"command": "npx", …}}} or a '
+                    'Codex config.toml block',
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Aether.accent,
+                  side: BorderSide(color: Aether.accent.withValues(alpha: .4)),
+                  padding: const EdgeInsets.symmetric(vertical: 11),
+                ),
+                icon: const Icon(Icons.content_paste, size: 16),
+                label: const Text('Inspect pasted config'),
+                onPressed: () {
+                  final txt = pasteC.text.trim();
+                  if (txt.isEmpty) return;
+                  Navigator.pop(ctx);
+                  _runSourceInstall(
+                    context,
+                    PastedConfigPluginSource(
+                      label: 'pasted-${DateTime.now().millisecondsSinceEpoch}',
+                      rawConfig: txt,
+                    ),
+                    null,
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'DIRECT MCP SERVER',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.4,
+                color: Aether.textFaint,
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: nameC,
+              style: const TextStyle(fontSize: 13.5),
+              decoration: const InputDecoration(hintText: 'Server name'),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: urlC,
+              style: const TextStyle(
+                fontSize: 13.5,
+                fontFamily: Aether.mono,
+              ),
+              decoration: const InputDecoration(
+                hintText: 'https://remote.example/mcp (Streamable HTTP)',
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: cmdC,
+              style: const TextStyle(
+                fontSize: 13.5,
+                fontFamily: Aether.mono,
+              ),
+              decoration: const InputDecoration(
+                hintText: 'stdio command (npx / uvx / node …)',
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: argsC,
+              style: const TextStyle(
+                fontSize: 13.5,
+                fontFamily: Aether.mono,
+              ),
+              decoration: const InputDecoration(
+                hintText: 'Args, space separated',
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Aether.accent,
+                  side: BorderSide(color: Aether.accent.withValues(alpha: .4)),
+                  padding: const EdgeInsets.symmetric(vertical: 11),
+                ),
+                icon: const Icon(Icons.usb_outlined, size: 16),
+                label: const Text('Add MCP server'),
+                onPressed: () {
+                  final name = nameC.text.trim();
+                  if (name.isEmpty) return;
+                  final url = urlC.text.trim();
+                  final cmd = cmdC.text.trim();
+                  Navigator.pop(ctx);
+                  if (url.isNotEmpty) {
+                    _runSourceInstall(
+                      context,
+                      DirectMcpPluginSource.http(name: name, url: url),
+                      null,
+                    );
+                  } else if (cmd.isNotEmpty) {
+                    _runSourceInstall(
+                      context,
+                      DirectMcpPluginSource.stdio(
+                        name: name,
+                        command: cmd,
+                        args: argsC.text.trim().isEmpty
+                            ? const []
+                            : argsC.text.trim().split(RegExp(r'\s+')),
+                      ),
+                      null,
+                    );
+                  }
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// `owner/repo` / full GitHub URL → [GithubPluginSource]. Null when the
+/// input names no usable repo.
+GithubPluginSource? _githubSourceFromInput(String input) {
+  var txt = input.trim();
+  final m = RegExp(
+    r'^https?://github\.com/([^/]+)/([^/#?]+)',
+  ).firstMatch(txt);
+  if (m != null) {
+    return GithubPluginSource(owner: m.group(1)!, repo: m.group(2)!);
+  }
+  final parts = txt.split('/');
+  if (parts.length < 2 || parts[0].isEmpty || parts[1].isEmpty) return null;
+  return GithubPluginSource(owner: parts[0], repo: parts[1]);
+}
+
+/// Runs one source install to completion with progress + honest result
+/// reporting (never a silent failure).
+Future<void> _runSourceInstall(
+  BuildContext context,
+  PluginSource source,
+  PluginItem? row,
+) async {
+  final messenger = ScaffoldMessenger.of(context);
+  messenger.showSnackBar(
+    const SnackBar(
+      content: Text('Inspecting plugin source…'),
+      behavior: SnackBarBehavior.floating,
+    ),
+  );
+  _pluginInstallSheetContext = context;
+  final result = await startPluginInstallForTest(AppState.I, row,
+      source: source);
+  _pluginInstallSheetContext = null;
+  final msg = result == null
+      ? 'Install cancelled — nothing was changed.'
+      : switch (result.status) {
+          PluginInstallStatus.ok =>
+            'Installed ✓ — restart Ovid to enable it everywhere '
+            '(this session: contributions pending restart).',
+          PluginInstallStatus.degraded =>
+            'Installed with degraded dependencies: '
+            '${result.degradedNames.join(', ')} — restart to enable.',
+          PluginInstallStatus.failed =>
+            'Install failed: ${result.error ?? 'unknown error'}',
+        };
+  messenger.showSnackBar(
+    SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+  );
+  AppState.I.refresh();
+}
+
+class _SourceTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+  const _SourceTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(11),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: Aether.surfaceAlt,
+            borderRadius: BorderRadius.circular(11),
+            border: Border.all(color: Aether.hairline),
+          ),
+          child: Row(
+            children: [
+              Icon(icon, size: 18, color: Aether.accent),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: Aether.textFaint,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right, size: 18, color: Aether.textFaint),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// Plugins library — Claude-Code-extensions style: trending banner carousel,
@@ -187,6 +747,15 @@ class _PluginsScreenState extends State<PluginsScreen> {
             visualDensity: VisualDensity.compact,
             icon: const Icon(Icons.add, size: 22),
             onPressed: () => _addMarketplaceDialog(context),
+          ),
+          // Task 11 (spec §11): the ONE install entry point for every
+          // source the catalog doesn't already cover — GitHub repo,
+          // local folder, ZIP, npm, pasted JSON/TOML, stdio, HTTP.
+          IconButton(
+            tooltip: 'Install plugin from source',
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.extension_outlined, size: 21),
+            onPressed: () => showPluginSourceChooser(context),
           ),
           const SizedBox(width: 4),
         ],
@@ -529,6 +1098,11 @@ class PluginCard extends StatelessWidget {
                       ),
                       const SizedBox(width: 8),
                       Tag(plugin.category.toUpperCase(), filled: true),
+                      // Task 11 (spec §11): activation badge beside the
+                      // category tag (This session / Restart to enable
+                      // everywhere / Global / Degraded / Failed).
+                      if (pluginActivationBadge(plugin) case final b?)
+                        Padding(padding: const EdgeInsets.only(left: 4), child: b),
                       // PR24: hook chips — a plugin with hooks shows which
                       // events it fires (e.g. ON_TURN_START).
                       for (final ev in plugin.hooks.keys)
@@ -653,6 +1227,14 @@ class PluginDetailScreen extends StatelessWidget {
                           : '${plugin.author} · v${plugin.version}',
                       style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
                     ),
+                    const SizedBox(height: 6),
+                    // Task 11 (spec §11): the activation badge — This
+                    // session / Restart to enable everywhere / Global /
+                    // Degraded / Failed. Legacy flag-flip rows (no
+                    // runtimeId) render no badge.
+                    if (pluginActivationBadge(plugin) case final badge?) ...[
+                      badge,
+                    ],
                   ],
                 ),
               ),
@@ -683,6 +1265,9 @@ class PluginDetailScreen extends StatelessWidget {
                       style: const TextStyle(fontSize: 13.5),
                     ),
                     onPressed: () async {
+                      PluginRuntimeCallRecorderForTest.record?.call(
+                        plugin.enabled ? 'disable' : 'enable',
+                      );
                       if (plugin.enabled) {
                         await app.disablePlugin(plugin);
                         app.serviceStatus.remove('plugin:${plugin.name}');
@@ -723,142 +1308,53 @@ class PluginDetailScreen extends StatelessWidget {
                       style: TextStyle(fontSize: 13.5),
                     ),
                     onPressed: () async {
-                      // Task 5 (spec §5.1): one consolidated capability +
-                      // dependency approval before anything flips. Cancel
-                      // leaves NO state — no flags, no grant, no fetch.
-                      // (The full install transaction is Task 7; here the
-                      // sheet gates the existing install path minimally.)
-                      if (!await _gateInstallWithPermissionSheet(
-                        context,
-                        plugin,
-                      )) {
-                        return;
-                      }
-                      if (!context.mounted) return;
-                      plugin.installed = true;
-                      plugin.enabled = true;
-                      // Task 10: probe-derived, not hardcoded — only
-                      // stamp working when real capability resolves.
-                      final gainedTools = AgentService.I.pluginToolNames(plugin);
-                      if (gainedTools.isNotEmpty) {
-                        app.updateServiceStatus(
-                          'plugin:${plugin.name}',
-                          ServiceHealth.working,
-                          detail: 'probe ok · tools: ${gainedTools.join(', ')}',
-                        );
+                      // Task 11 (spec §11): ONE inspection/approval flow
+                      // for every source. Catalog rows with a derivable
+                      // source install straight through it; everything
+                      // else opens the single source chooser.
+                      final derived = plugin.source != null
+                          ? githubPluginSourceFromSourceString(plugin.source!)
+                          : null;
+                      if (derived != null) {
+                        await _runSourceInstall(context, derived, plugin);
                       } else {
-                        app.updateServiceStatus(
-                          'plugin:${plugin.name}',
-                          ServiceHealth.failed,
-                          detail:
-                              'probe failed: contributes no agent tools, '
-                              'skills, hooks, or MCP servers',
-                        );
-                      }
-                      app.persistPluginState();
-                      app.refresh();
-                      // Realtime install (the plugin manager parity): an MCP-category
-                      // plugin connects its server right away, and the
-                      // snackbar reports the tools the model gains —
-                      // no restart, no dead flag flips.
-                      final messenger =
-                          ScaffoldMessenger.of(context);
-                      if (plugin.category == 'MCP') {
-                        final server = app.mcpServers
-                            .where((s) => s.name == plugin.name)
-                            .firstOrNull;
-                        if (server != null) {
-                          messenger.showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                'Connecting ${server.name}…',
-                              ),
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                           app.updateServiceStatus('mcp:${server.canonicalId}', ServiceHealth.connecting, detail: 'connecting…');
-                          final msg =
-                              await McpService.I.connect(server);
-                           final isOk = McpService.I.isConnected(server.canonicalId);
-                          server.connected = isOk;
-                          app.updateServiceStatus(
-                             'mcp:${server.canonicalId}',
-                            isOk ? ServiceHealth.working : ServiceHealth.failed,
-                            detail: msg,
-                          );
-                          app.refresh();
-                          messenger.showSnackBar(
-                            SnackBar(
-                              content: Text(msg),
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                        }
-                      } else {
-                        // PR40: fetch the plugin's OWN commands/skills
-                        // content (Claude Code marketplace `source:
-                        // owner/repo`) so install adds real capability —
-                        // not just a catalog-row flag flip. Best-effort:
-                        // offline/no-source degrades to the old message.
-                        var fetchedFiles = 0;
-                        if (plugin.source != null) {
-                          messenger.showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                'Fetching ${plugin.name} content…',
-                              ),
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                          fetchedFiles = await AppState.I.fetchPluginContent(
-                            plugin.source!,
-                          );
-                          if (fetchedFiles > 0) {
-                            await AgentService.I.refreshSkills();
-                          }
-                          // P3: an installed plugin can carry a .mcp.json —
-                          // register its declared MCP servers so the agent
-                          // gets them as connected-intent (they then
-                          // respawn on the next launch/persist).
-                          if (fetchedFiles > 0) {
-                            final mounted = await AppState.I
-                                .mountPluginMcpServers(plugin.source!);
-                            await AppState.I.registerPluginHooks(plugin);
-                            if (mounted > 0) {
-                              messenger.showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    'Mounted $mounted MCP server(s) from '
-                                    '${plugin.name}\'s .mcp.json',
-                                  ),
-                                  behavior: SnackBarBehavior.floating,
-                                ),
-                              );
-                            }
-                          }
-                        }
-                        final gained = _toolGainsFor(plugin);
-                        final parts = <String>[
-                          if (gained != null) 'agent tools: $gained',
-                          if (fetchedFiles > 0)
-                            '$fetchedFiles command/skill file(s) — see '
-                                'the /-menu',
-                        ];
-                        messenger.showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              parts.isEmpty
-                                  ? 'Installed ${plugin.name}'
-                                  : 'Installed ${plugin.name} · '
-                                      '${parts.join(' · ')}',
-                            ),
-                            behavior: SnackBarBehavior.floating,
-                          ),
-                        );
+                        await showPluginSourceChooser(context);
                       }
                     },
                   ),
           ),
+          if (plugin.installed && plugin.runtimeId != null) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Aether.textMuted,
+                      side: BorderSide(color: Aether.hairlineStrong),
+                      padding: const EdgeInsets.symmetric(vertical: 11),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    icon: const Icon(Icons.refresh, size: 15),
+                    label: const Text(
+                      'Retry activation',
+                      style: TextStyle(fontSize: 12.5),
+                    ),
+                    onPressed: () async {
+                      // Task 11 (spec §11 Retry action) — re-probe and
+                      // re-mount through the runtime manager; a retry
+                      // never re-runs the install transaction.
+                      PluginRuntimeCallRecorderForTest.record?.call('retry');
+                      await PluginRuntimeManager.I.retry(plugin.runtimeId!);
+                      app.refresh();
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ],
           if (plugin.installed) ...[
             const SizedBox(height: 8),
             Row(
@@ -909,6 +1405,10 @@ class PluginDetailScreen extends StatelessWidget {
                       style: TextStyle(fontSize: 12.5),
                     ),
                     onPressed: () async {
+                      // Task 11: uninstall routes through the runtime
+                      // manager (registry + content + deps + record +
+                      // grant + secrets) via AppState.uninstallPlugin.
+                      PluginRuntimeCallRecorderForTest.record?.call('uninstall');
                       await app.uninstallPlugin(plugin);
                     },
                   ),
@@ -916,6 +1416,7 @@ class PluginDetailScreen extends StatelessWidget {
               ],
             ),
           ],
+
           const SizedBox(height: 18),
           const SectionHeader('Overview'),
           Padding(
@@ -925,11 +1426,18 @@ class PluginDetailScreen extends StatelessWidget {
               style: TextStyle(fontSize: 13.5, height: 1.6, color: Aether.text),
             ),
           ),
-          const SectionHeader('Permissions'),
-          if (plugin.hooks.isNotEmpty)
-            _Perm('Declared hooks: ${plugin.hooks.keys.join(', ')}')
-          else
-            const _Perm('Declared by plugin manifest'),
+          // ── Task 11 (spec §11): the diagnostics sections. Runtime
+          // rows (runtimeId set) render the full production surface;
+          // legacy flag-flip rows keep the minimal sections only.
+          if (plugin.runtimeId != null) ...[
+            _PluginDiagnostics(plugin: plugin),
+          ] else ...[
+            const SectionHeader('Permissions'),
+            if (plugin.hooks.isNotEmpty)
+              _Perm('Declared hooks: ${plugin.hooks.keys.join(', ')}')
+            else
+              const _Perm('Declared by plugin manifest'),
+          ],
           const SectionHeader('Changelog'),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -945,6 +1453,287 @@ class PluginDetailScreen extends StatelessWidget {
           const SizedBox(height: 30),
         ],
       ),
+    );
+  }
+}
+
+/// Task 11 (spec §11): the production diagnostics surface for a
+/// runtime-installed plugin — namespaced contributions, alias
+/// conflicts, MCP connection state + credentials, hook events with
+/// breaker state, dependencies, compatibility warnings (required vs
+/// optional), the effective capability grant (+ edit), and the
+/// install/runtime log.
+class _PluginDiagnostics extends StatelessWidget {
+  final PluginItem plugin;
+  const _PluginDiagnostics({required this.plugin});
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    final runtimeId = plugin.runtimeId!;
+    final manifest = PluginContributionRegistry.I.manifestFor(runtimeId);
+    final tools = PluginContributionRegistry.I.toolContributionsForPlugin(
+      runtimeId,
+    );
+    // Alias view: each roster tool's bare name → how it resolves
+    // (unique → canonical id; ambiguous → conflict list).
+    final aliases = <Widget>[];
+    for (final c in tools) {
+      final res = PluginContributionRegistry.I.resolveAlias(c.name);
+      final line = res.isAmbiguous
+          ? '${c.name} → ambiguous: ${res.options.join(', ')}'
+          : '${c.name} → ${res.unique?.canonicalId ?? c.canonicalId}';
+      aliases.add(_DiagRow(line, warn: res.isAmbiguous));
+    }
+    if (aliases.isEmpty) {
+      aliases.add(
+        const _DiagRow('No commands, skills, or agents contributed.'),
+      );
+    }
+    // Alias conflicts anywhere in the roster that mention this plugin.
+    for (final c in tools) {
+      final res = PluginContributionRegistry.I.resolveAlias(c.name);
+      if (res.isAmbiguous) {
+        for (final m in res.matches) {
+          aliases.add(
+            _DiagRow('conflict: ${m.canonicalId} shares the name '
+                '"${c.name}" — use the canonical id'),
+          );
+        }
+      }
+    }
+
+    // Plugin-owned MCP rows (Task 9 canonical ids).
+    final owned = app.mcpServers
+        .where((s) => s.ownerPluginId == runtimeId)
+        .toList();
+
+    // Hook section data.
+    final hooks = manifest?.hooks ?? const <PluginHook>[];
+
+    // Compatibility: manifest findings (required findings can never
+    // reach an install — inspect fails them — so persisted rows show
+    // optional ones; row-level warnings carry over too).
+    final compat = <CompatibilityIssue>[
+      ...?manifest?.compatibility.where(
+        (c) => c.severity == CompatibilitySeverity.optional,
+      ),
+      ...plugin.compatibilityWarnings,
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SectionHeader('Contributions'),
+        if (tools.isEmpty)
+          const _DiagRow('This plugin contributes no roster tools.')
+        else
+          for (final c in tools)
+            _DiagRow('${c.canonicalId} (${c.kindLabel})'),
+        const SectionHeader('Aliases'),
+        ...aliases,
+        const SectionHeader('MCP servers'),
+        if (owned.isEmpty) const _DiagRow('No MCP servers declared.'),
+        for (final s in owned) ...[
+          _DiagRow(
+            '${s.canonicalId} · ${s.transport} · '
+            '${s.connected ? 'Connected' : 'Not connected'}',
+          ),
+          if (s.envHint != null || s.requiredEnvNames.isNotEmpty)
+            _DiagRow(
+              'Needs setup: '
+              '${s.requiredEnvNames.isNotEmpty ? s.requiredEnvNames.join(', ') : s.envHint} '
+              'must be configured (secure storage)',
+              warn: true,
+            ),
+        ],
+        const SectionHeader('Hooks'),
+        if (hooks.isEmpty)
+          const _DiagRow('No hooks declared.')
+        else
+          for (final h in hooks)
+            _DiagRow(
+              '${h.event} · ${h.type} · ${h.payload.isEmpty ? '' : h.payload}',
+            ),
+        _DiagRow(
+          'Circuit breaker: ${HookService.breakerThreshold} consecutive '
+          'failures in a session disable this plugin\'s hooks '
+          '(fired ${HookService.I.fired}, failed ${HookService.I.failed} '
+          'this boot)',
+        ),
+        const SectionHeader('Dependencies'),
+        if (manifest == null || manifest.dependencies.packages.isEmpty)
+          const _DiagRow('No dependencies declared.')
+        else
+          for (final d in manifest.dependencies.packages)
+            _DiagRow(
+              '${d.name} ${d.versionSpec} (${d.kind.name}'
+              '${d.required ? '' : ', optional'})',
+            ),
+        const SectionHeader('Compatibility'),
+        if (compat.isEmpty)
+          const _DiagRow('No compatibility findings.')
+        else
+          for (final c in compat)
+            _DiagRow(
+              '${c.severity.name}: ${c.message} '
+              '[${c.fields.join(', ')}]',
+              warn: c.severity != CompatibilitySeverity.optional,
+            ),
+        SectionHeader(
+          'Permissions',
+          subtitle: 'Granted capabilities for this exact version',
+        ),
+        _EffectiveGrantRow(plugin: plugin),
+        const SectionHeader('Install log'),
+        _InstallLogRow(plugin: plugin),
+      ],
+    );
+  }
+}
+
+class _DiagRow extends StatelessWidget {
+  final String text;
+  final bool warn;
+  const _DiagRow(this.text, {this.warn = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            warn ? Icons.warning_amber_outlined : Icons.check_circle_outline,
+            size: 14,
+            color: warn ? Aether.warn : Aether.textFaint,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                fontSize: 12.5,
+                fontFamily: Aether.mono,
+                color: warn ? Aether.text : Aether.textMuted,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The effective grant with the Task 11 Edit-permissions entry: shows
+/// the granted capabilities (or the honest "no grant") and opens the
+/// revoke/refresh sheet.
+class _EffectiveGrantRow extends StatelessWidget {
+  final PluginItem plugin;
+  const _EffectiveGrantRow({required this.plugin});
+
+  Future<void> _openEditor(BuildContext context) async {
+    PluginRuntimeCallRecorderForTest.record?.call('edit-grants');
+    final app = AppState.I;
+    final grant = await app.effectivePluginGrant(plugin);
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Plugin permissions', style: TextStyle(fontSize: 15)),
+        content: Text(
+          grant == null
+              ? 'No grant is currently effective for this plugin. It will '
+                    'request approval on the next install or update.'
+              : 'Granted capabilities:\n'
+                    '${grant.capabilities.map((c) => c.name).join(', ')}\n\n'
+                    'Approved ${grant.approvedAt.toIso8601String().substring(0, 10)} '
+                    'for digest ${grant.manifestDigest.substring(0, 19)}…',
+          style: const TextStyle(fontSize: 12.5, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          if (grant != null)
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: Aether.danger),
+              onPressed: () async {
+                Navigator.pop(ctx);
+                // Revoke: grant + owned secrets removed, plugin
+                // disabled immediately (Task 5 semantics).
+                await app.revokePluginGrant(plugin);
+                app.refresh();
+              },
+              child: const Text('Revoke permissions'),
+            ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Row(
+        children: [
+          Expanded(
+            child: FutureBuilder<PluginPermissionGrant?>(
+              future: AppState.I.effectivePluginGrant(plugin),
+              builder: (_, snap) {
+                final g = snap.data;
+                return Text(
+                  g == null
+                      ? 'No effective grant (approval required on next '
+                            'install)'
+                      : 'Granted: ${g.capabilities.map((c) => c.name).join(', ')}',
+                  style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+                );
+              },
+            ),
+          ),
+          IconButton(
+            tooltip: 'Edit permissions',
+            icon: Icon(Icons.lock_outline, size: 16, color: Aether.textMuted),
+            onPressed: () => _openEditor(context),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The install/runtime log: the persisted activation record's provenance
+/// plus the transaction log lines captured at install time.
+class _InstallLogRow extends StatelessWidget {
+  final PluginItem plugin;
+  const _InstallLogRow({required this.plugin});
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<PluginActivationRecord?>(
+      future: PluginRuntimeManager.I.recordFor(plugin.runtimeId!),
+      builder: (_, snap) {
+        final rec = snap.data;
+        if (rec == null) {
+          return const _DiagRow('No install record found.');
+        }
+        final lines = <String>[
+          'installed at boot epoch ${rec.installedBootEpoch}',
+          'staged → committed → probed (activation ${rec.state.name})',
+          if (rec.promoteOnNextBoot)
+            'promotes globally on next restart'
+          else
+            'activation settled',
+        ];
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [for (final l in lines) _DiagRow(l)],
+        );
+      },
     );
   }
 }

@@ -7,6 +7,7 @@ import 'core/firebase_service.dart';
 import 'core/github_service.dart';
 import 'core/hook_service.dart';
 import 'core/mcp_service.dart';
+import 'core/plugin_runtime.dart';
 import 'core/sandbox_service.dart';
 import 'core/state.dart';
 import 'core/theme.dart';
@@ -17,6 +18,14 @@ import 'ui/sandbox_setup.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await AppState.I.initialize();
+  // Task 11 (spec §7): one boot epoch per app start — promote
+  // session-scoped/pending installs into global activation EXACTLY
+  // once, after persisted plugin state has loaded (initialize) and
+  // before any service reconnects (the shell's reconnectServices runs
+  // at startup AND on resume — never hook activation there).
+  try {
+    await PluginRuntimeManager.I.activateForBoot();
+  } catch (_) {}
   // PR24: plugin-hook kill-switch restore (Settings toggle).
   await HookService.I.loadEnabled();
   // Restore run checkpoints if restarted via START_STICKY or app rebirth.

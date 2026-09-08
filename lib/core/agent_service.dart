@@ -4269,6 +4269,12 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
                   'Optional: install from a local plugin folder instead of '
                   'the catalog row\'s GitHub source.',
             },
+            'local_zip_path': {
+              'type': 'string',
+              'description':
+                  'Optional: install from a local .zip plugin archive '
+                  'instead of the catalog row\'s GitHub source.',
+            },
           },
           'required': ['plugin_name'],
         },
@@ -7412,11 +7418,15 @@ ${await _agentsMdBlock()}
           // atomic runtime manager with the agent origin + the RUNNING
           // session — the plugin is immediately usable ONLY in this
           // session and promotes globally after exactly one restart.
+          // Task 11: typed source variants (local folder / local zip).
           final localPath = args['local_path'] as String?;
+          final localZipPath = args['local_zip_path'] as String?;
           final runtimeResult = await app.installPlugin(
             match,
             source: localPath != null && localPath.isNotEmpty
                 ? LocalFolderPluginSource(localPath)
+                : localZipPath != null && localZipPath.isNotEmpty
+                ? ZipPluginSource(localZipPath)
                 : null,
             origin: PluginInstallOrigin.agent,
             sessionId: _runSession?.id,
