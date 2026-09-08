@@ -1060,32 +1060,28 @@ class AppState extends ChangeNotifier {
   Future<PluginInstallResult?> installPlugin(
     PluginItem plugin, {
     PluginSource? source,
-    PluginInspection? inspection,
     required PluginInstallOrigin origin,
     String? sessionId,
     void Function(String line)? onProgress,
   }) async {
-    PluginInspection? insp = inspection;
-    if (insp == null) {
-      final src =
-          source ??
-          (plugin.source != null
-              ? githubPluginSourceFromSourceString(plugin.source!)
-              : null);
-      if (src == null) return null;
-      try {
-        insp = await PluginRuntimeManager.I.inspect(src);
-      } catch (e) {
-        return PluginInstallResult.failed(error: 'source resolution failed: $e');
-      }
+    final src =
+        source ??
+        (plugin.source != null
+            ? githubPluginSourceFromSourceString(plugin.source!)
+            : null);
+    if (src == null) return null;
+    PluginInspection inspection;
+    try {
+      inspection = await PluginRuntimeManager.I.inspect(src);
+    } catch (e) {
+      return PluginInstallResult.failed(error: 'source resolution failed: $e');
     }
-    final inspection_ = insp;
     final grant = await pluginPermissions.effectiveGrant(
-      pluginId: inspection_.manifest.id,
-      manifest: inspection_.manifest,
+      pluginId: inspection.manifest.id,
+      manifest: inspection.manifest,
     );
     final result = await PluginRuntimeManager.I.install(
-      inspection_,
+      inspection,
       grant: grant,
       origin: origin,
       sessionId: sessionId,
@@ -1294,6 +1290,12 @@ class AppState extends ChangeNotifier {
     await _loadPluginState();
     await syncMarketplaceCatalogs();
     await _applyPluginState();
+    // Task 7 (spec §7): exactly one boot epoch per initialize, then
+    // promote session-scoped/pending installs into global activation.
+    // Rows must be restored from catalog + plugin-state first.
+    try {
+      await PluginRuntimeManager.I.activateForBoot();
+    } catch (_) {}
     // Check if the sandbox was installed on a previous launch so the
     // user is never asked to re-install the ~200 MB rootfs.
     if (await SandboxService.I.checkExisting()) {

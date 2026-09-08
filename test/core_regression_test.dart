@@ -19709,6 +19709,7 @@ cwd = 'tools'
           mode: 'auto',
         );
         app.sessions.insert(0, s1);
+        app.activeSessionId = s1.id;
         AgentService.setRunSessionForTest(s1.id);
         await p11Approve(src);
 
@@ -19907,6 +19908,15 @@ cwd = 'tools'
           AppState.resetTestInstance();
         });
         final app = AppState.createForTest();
+
+        // The dependency stage runs through the injected runner (no
+        // sandbox in tests) and succeeds — without it the install
+        // would attempt real sandbox provisioning under the widget clock.
+        PluginRuntimeManager.depsForTest = PluginDependencyService(
+          runtimeRootOverride: p11Runtime,
+          runner: (args, {cwd, env}) async => (0, 'ok'),
+          ensureRuntime: (_) async => true,
+        );
 
         final src = p11PluginDir(name: 'Action Kit');
         final row = PluginItem(
@@ -20130,8 +20140,6 @@ cwd = 'tools'
         // content assertion targets what uninstall owns: the leaf
         // version dir recorded in the activation entry is gone OR the
         // manager reports no entry for the id.
-        final pluginDir =
-            Directory('${p11Runtime.path}/plugin-runtime/p11org/action-kit');
         final recordAfter = await tester.runAsync(
           () => PluginRuntimeManager.I.recordFor('p11org/action-kit'),
         );
@@ -20140,6 +20148,11 @@ cwd = 'tools'
           isNull,
           reason: 'uninstall must drop the activation record',
         );
+        // NOTE: no committed-bytes assertion here — the row was installed
+        // under FakeAsync real-IO constraints (deps ran against the shared
+        // p11Runtime override) and the manager owns the whole versioned
+        // subtree; on-disk removal is pinned by the PLUGIN7 uninstall
+        // tests against the real manager path.
       },
     );
 

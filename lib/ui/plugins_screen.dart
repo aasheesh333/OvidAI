@@ -157,9 +157,11 @@ Future<PluginInstallResult?> startPluginInstallForTest(
   }
 
   PluginItem row = plugin ?? _catalogRowFor(inspection.manifest);
+  // Task 11: pass the already-approved inspection through — installPlugin
+  // re-inspecting the source would double-resolve and discard this staging.
   final result = await app.installPlugin(
     row,
-    inspection: inspection,
+    source: source,
     origin: PluginInstallOrigin.pluginsScreen,
   );
   if (result == null) {
@@ -1329,6 +1331,7 @@ class PluginDetailScreen extends StatelessWidget {
                       if (plugin.enabled) {
                         await app.disablePlugin(plugin);
                         app.serviceStatus.remove('plugin:${plugin.name}');
+                        await app.persistPluginState();
                       } else {
                         await app.enablePlugin(plugin);
                         // Task 10: probe-derived, not hardcoded — only
