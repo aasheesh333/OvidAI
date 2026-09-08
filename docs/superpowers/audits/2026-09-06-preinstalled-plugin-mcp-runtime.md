@@ -106,3 +106,38 @@ Add server / mcp.json import.
 - [x] Android-incompatible desktop servers show `Unsupported on this device`
       with the missing runtime reason.
 - [x] Startup health derived from probes, never hardcoded.
+
+## 6. Task 12 smoke gate — 2026-09-08
+
+Static/unit gates (run on branch `hoplite/gortyn-77773150`):
+
+- `flutter analyze` — **0 issues** (HEAD, after removing 4 test-file
+  lint nits flagged during this gate).
+- `flutter test` — **550/550 passing** (all PLUGIN1–PLUGIN11 groups plus the
+  full regression suite; 539 cases in `test/core_regression_test.dart` alone).
+- `flutter build apk --debug` — **builds** the artifacts under
+  `build/app/outputs/flutter-apk/app-debug.apk`.
+
+Device smoke checklist (spec §12.10, plan Task 12 Step 3). Each item has
+automated coverage in the named PLUGIN group; the interactive on-device pass
+(one fixture [CC] plugin with command+skill+hook+stdio MCP, plus one
+Streamable-HTTP MCP) is **recorded below as not executed in this
+environment** — the harness has no attached Android device/emulator. Status of
+each criterion as verified by tests:
+
+| Smoke item | Evidence | Status |
+|---|---|---|
+| Approve once (consolidated sheet, first approval / reapproval on delta) | PLUGIN5 | covered by tests |
+| Current-session activation for agent install | PLUGIN7/PLUGIN11 | covered by tests |
+| No other-session access before restart | PLUGIN4/PLUGIN7/PLUGIN9 (session-scoped alias + owner gating) | covered by tests |
+| One-restart global promotion (exactly once per boot) | PLUGIN7, PLUGIN11 boot-single-owner pin | covered by tests |
+| Hook firing per request/tool | PLUGIN8 (all lifecycle points, ordering) | covered by tests |
+| Dependencies (runtime provisioning, degraded signals) | PLUGIN6/PLUGIN7 | covered by tests |
+| Namespaced tools and alias resolution | PLUGIN4/PLUGIN9 | covered by tests |
+| Disable/uninstall cleanup (registrations, MCP servers, secrets) | PLUGIN7/PLUGIN9 | covered by tests |
+| Accurate health (probe-derived, never hardcoded) | PLUGIN10 | covered by tests |
+
+Residual risk: the physical on-device pass remains outstanding for the
+release owner with hardware attached; nothing in static/unit gates covers
+device-specific ABI facts beyond the `Unsupported on this device` reporting
+path (itself test-pinned).
