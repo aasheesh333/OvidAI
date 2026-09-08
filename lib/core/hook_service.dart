@@ -149,19 +149,61 @@ class HookService extends ChangeNotifier {
     }
   }
 
+  /// Legacy/CC-native alias keys per canonical event — the reverse of the
+  /// frozen `canonicalHookEvent` map (plugin_adapters.dart). A legacy
+  /// `PluginItem` hook map keyed by any of these still fires when the
+  /// canonical event is requested (migration ruling: old installs keep
+  /// firing). `on_turn_start` is deliberately NOT an alias of
+  /// `user_prompt_submit` here: legacy on_turn_start keeps its historical
+  /// per-turn firing site, while canonical user_prompt_submit fires once
+  /// per prompt at run entry (double-fire otherwise).
+  static const Map<String, List<String>> _legacyEventAliases = {
+    'session_start': ['on_session_start', 'SessionStart'],
+    'session_end': ['SessionEnd'],
+    'pre_request': ['on_pre_request'],
+    'post_request': [],
+    'pre_tool': ['on_pre_tool', 'PreToolUse'],
+    'post_tool': ['on_post_tool', 'PostToolUse', 'PostToolUseFailure'],
+    'user_prompt_submit': ['UserPromptSubmit'],
+    'stop': ['on_turn_end', 'Stop'],
+    'notification': ['Notification'],
+    'pre_compact': ['PreCompact'],
+    'post_compact': ['PostCompact'],
+    'permission_request': ['PermissionRequest'],
+    'subagent_start': ['SubagentStart'],
+    'subagent_end': ['SubagentStop'],
+  };
+
+  /// Candidate legacy-map keys for [eventRaw]/[canonical], in priority
+  /// order (canonical declaration wins over aliases).
+  static List<String> _eventKeyCandidates(String eventRaw, String canonical) {
+    final out = <String>[canonical];
+    if (eventRaw != canonical) out.add(eventRaw);
+    for (final a in _legacyEventAliases[canonical] ?? const <String>[]) {
+      if (!out.contains(a)) out.add(a);
+    }
+    return out;
+  }
+
+  /// Display name for a plugin id — strips the internal `legacy:` prefix
+  /// so deny reasons and env vars never leak it.
+  static String _displayName(String pluginId) =>
+      pluginId.startsWith('legacy:') ? pluginId.substring(7) : pluginId;
+
   /// All hooks listening for [eventRaw] (canonical or legacy alias),
   /// visible to [sessionId], in install order then manifest order.
   /// Legacy `PluginItem` map hooks are appended (mapped through the
   /// frozen alias map) after registered normalized hooks, keyed by
   /// `legacy:<plugin-name>` so install order across sources stays
   /// deterministic (registry registrations first, then plugin-list
-  /// order).
-  List<(String pluginId, PluginHook hook)> _resolveHooks(
+  /// order). Each entry carries the event name the hook was DECLARED
+  /// with (legacy hooks keep their legacy name in `OVID_HOOK_EVENT`).
+  List<(String pluginId, PluginHook hook, String declaredEvent)> _resolveHooks(
     String eventRaw,
     String sessionId,
   ) {
     final canonical = canonicalHookEvent(eventRaw) ?? eventRaw;
-    final out = <(String, PluginHook)>[];
+    final out = <(String, PluginHook, String)>[];
     for (final pid in PluginContributionRegistry.I.registeredPluginIds) {
       final m = PluginContributionRegistry.I.manifestFor(pid);
       if (m == null) continue;
@@ -173,20 +215,32 @@ class HookService extends ChangeNotifier {
       }
       for (final h in m.hooks) {
         if (h.event != canonical) continue;
-        out.add((pid, h));
+        out.add((pid, h, canonical));
       }
     }
     for (final p in AppState.I.plugins) {
       if (!p.installed || !p.enabled) continue;
-      // Legacy map form — one command per (event, plugin).
-      final cmd = p.hooks[eventRaw] ?? p.hooks[canonical];
-      if (cmd == null || cmd.trim().isEmpty) continue;
       if (p.runtimeId != null &&
           PluginContributionRegistry.I.isRegistered(p.runtimeId!)) {
         // A REGISTERED plugin fires its ordered manifest hooks above —
         // never the legacy map too (double-fire).
         continue;
       }
+      // Legacy map form — one command per (event, plugin). The map may be
+      // keyed by the canonical name, the fired name, or any legacy/CC
+      // alias of the canonical event; first key present wins.
+      String? cmd;
+      String? matcher;
+      var declared = canonical;
+      for (final key in _eventKeyCandidates(eventRaw, canonical)) {
+        final c = p.hooks[key];
+        if (c == null || c.trim().isEmpty) continue;
+        cmd = c;
+        matcher = p.hookMatchers[key] ?? p.hookMatchers[canonical];
+        declared = key;
+        break;
+      }
+      if (cmd == null) continue;
       out.add((
         'legacy:${p.name}',
         PluginHook(
@@ -195,9 +249,10 @@ class HookService extends ChangeNotifier {
           ordinal: 0,
           type: 'command',
           payload: cmd,
-          matcher: p.hookMatchers[eventRaw] ?? p.hookMatchers[canonical],
+          matcher: matcher,
           timeoutS: defaultTimeoutS,
         ),
+        declared,
       ));
     }
     return out;
@@ -277,21 +332,23 @@ class HookService extends ChangeNotifier {
     required String pluginId,
     required PluginHook hook,
     required String canonical,
+    required String declaredEvent,
     required String sessionId,
     required String payloadJson,
     required String workspace,
     required String storage,
     String? model,
   }) {
-    final pluginName = pluginId.startsWith('legacy:')
-        ? pluginId.substring(7)
-        : pluginId;
+    final pluginName = _displayName(pluginId);
     return {
-      'OVID_HOOK_EVENT': canonical,
+      // Legacy env contract: the DECLARED name (a hook that registered
+      // on_turn_start sees "on_turn_start"), never the internal prefix.
+      'OVID_HOOK_EVENT': declaredEvent,
       'OVID_HOOK_PLUGIN': pluginName,
       'OVID_HOOK_SESSION': sessionId,
       'OVID_HOOK_PAYLOAD': cleanHookJson(payloadJson),
-      'PLUGIN_ID': pluginId,
+      'PLUGIN_ID': pluginName,
+      // New canonical env contract (§8.1) — always the canonical name.
       'PLUGIN_EVENT': canonical,
       'PLUGIN_SESSION': sessionId,
       'PLUGIN_MODEL': model ?? '',
@@ -377,7 +434,7 @@ class HookService extends ChangeNotifier {
     final cwd = await _sessionWorkDir(sessionId);
     final collected = <String>[];
     try {
-      for (final (pluginId, hook) in hooks) {
+      for (final (pluginId, hook, declaredEvent) in hooks) {
         if (!_matcherApplies(hook.matcher, payload)) continue;
         if (_tripped.contains('$pluginId|$sessionId')) continue;
         if (hook.type != 'command') {
@@ -400,6 +457,7 @@ class HookService extends ChangeNotifier {
           pluginId: pluginId,
           hook: hook,
           canonical: canonical,
+          declaredEvent: declaredEvent,
           sessionId: sessionId,
           payloadJson: payloadJson,
           workspace: cwd?.path ?? '',
@@ -536,7 +594,7 @@ class HookService extends ChangeNotifier {
     });
     final cwd = await _sessionWorkDir(sessionId);
     try {
-      for (final (pluginId, hook) in hooks) {
+      for (final (pluginId, hook, declaredEvent) in hooks) {
         if (!_matcherApplies(hook.matcher, payload)) continue;
         if (_tripped.contains('$pluginId|$sessionId')) continue;
         if (hook.type != 'command') continue;
@@ -545,6 +603,7 @@ class HookService extends ChangeNotifier {
           pluginId: pluginId,
           hook: hook,
           canonical: canonical,
+          declaredEvent: declaredEvent,
           sessionId: sessionId,
           payloadJson: payloadJson,
           workspace: cwd?.path ?? '',
@@ -569,9 +628,10 @@ class HookService extends ChangeNotifier {
           final blockReason = jsonBlockReason(out);
           if (code == 2 || blockReason != null) {
             failed++;
+            final displayName = _displayName(pluginId);
             final reason = blockReason ??
                 (out.trim().isEmpty
-                    ? '$pluginId denied this action'
+                    ? '$displayName denied this action'
                     : cleanHookJson(out.trim()));
             try {
               await _ledger(sessionId, 'hook/result', {
@@ -583,7 +643,7 @@ class HookService extends ChangeNotifier {
                 'reason': reason,
               });
             } catch (_) {}
-            return HookGateResult.deny(pluginId, reason);
+            return HookGateResult.deny(displayName, reason);
           }
           _recordSuccess(pluginId, sessionId);
           try {
