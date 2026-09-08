@@ -574,7 +574,21 @@ class AgentService extends ChangeNotifier {
     // every second, no-ops when no schedules exist.
     _startScheduleTimer();
     // Deleted sessions lose their run; all others keep running in parallel.
-    AppState.I.onSessionDeleted = dropSessionRun;
+    // Task 8: session_end hooks fire here too (deleteSession calls this
+    // for every doomed session) — state.dart stays free of a
+    // hook_service import (circular).
+    AppState.I.onSessionDeleted = (sessionId) {
+      dropSessionRun(sessionId);
+      if (HookService.I.hasHookListeners('session_end')) {
+        unawaited(
+          HookService.I.fire(
+            'session_end',
+            sessionId,
+            payload: {'deleted': true},
+          ),
+        );
+      }
+    };
     // Per-session browser tabs: lazy-restore on session switch.
     AppState.I.onSessionSwitched = onSessionSwitched;
     AppState.onRefreshSkills = refreshSkills;
@@ -587,12 +601,13 @@ class AgentService extends ChangeNotifier {
       // session (loaders, environment probes). Fire-and-forget.
       final active = AppState.I.activeSession;
       if (active != null &&
-          HookService.I.hasHookListeners('on_session_start')) {
+          HookService.I.hasHookListeners('session_start')) {
         unawaited(
           HookService.I.fire(
-            'on_session_start',
+            'session_start',
             active.id,
             payload: {'restored': AppState.I.sessions.length},
+            model: active.model,
           ),
         );
       }
@@ -4946,6 +4961,18 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     String summary, {
     required bool forced,
   }) {
+    // Task 8 (spec §8.1): compaction hooks — pre_compact before the span
+    // is folded, post_compact after (fire-and-forget observe).
+    if (HookService.I.hasHookListeners('pre_compact')) {
+      unawaited(
+        HookService.I.fire(
+          'pre_compact',
+          s.id,
+          payload: {'from': from, 'cutoff': cutoff, 'forced': forced},
+          model: s.model,
+        ),
+      );
+    }
     final shadowed = cutoff - from;
     final shadowedTok = s.messages
         .sublist(from, cutoff)
@@ -4973,6 +5000,21 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       ),
     );
     AppState.I.persistSessions();
+    if (HookService.I.hasHookListeners('post_compact')) {
+      unawaited(
+        HookService.I.fire(
+          'post_compact',
+          s.id,
+          payload: {
+            'from': from,
+            'cutoff': cutoff,
+            'folded': shadowed,
+            'forced': forced,
+          },
+          model: s.model,
+        ),
+      );
+    }
     return forced
         ? 'force-pruned $shadowed message(s) (~${_fmtK(shadowedTok)} tokens)'
         : 'compacted $shadowed message(s) (~${_fmtK(shadowedTok)} tokens '
@@ -5273,6 +5315,20 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       return;
     }
 
+    // Task 8 (spec §8.1): user_prompt_submit — ONCE per user prompt, at
+    // run entry (canonical replacement for the per-turn on_turn_start).
+    // Observe-only, fire-and-forget.
+    if (HookService.I.hasHookListeners('user_prompt_submit')) {
+      unawaited(
+        HookService.I.fire(
+          'user_prompt_submit',
+          s.id,
+          payload: {'prompt': cleanTruncate(originalPrompt, 400)},
+          model: s.model,
+        ),
+      );
+    }
+
     // Parallel-session safety: the ENTIRE run body runs inside a Zone
     // carrying this run's context (bucket + session + provider). Every
     // async continuation — SSE stream handlers, tool dispatch, subagent
@@ -5546,7 +5602,10 @@ ${await _agentsMdBlock()}
         // injection). on_pre_request: stdout (≤2 KB) joins THIS request
         // as a system note — a plugin can inject live context (the plugin hook runner
         // agent/pre-step message-injection parity, shell flavor).
-        if (HookService.I.hasHookListeners('on_turn_start')) {
+        // Task 8: canonical user_prompt_submit fires ONCE per user prompt
+        // (at runTask entry) — the per-turn firing is kept ONLY for
+        // plugins that declared the legacy on_turn_start map hook.
+        if (HookService.I.hasLegacyMapHookListeners('on_turn_start')) {
           unawaited(
             HookService.I.fire(
               'on_turn_start',
@@ -5555,14 +5614,16 @@ ${await _agentsMdBlock()}
                 'turn': turn,
                 'prompt': cleanTruncate(originalPrompt, 400),
               },
+              model: s.model,
             ),
           );
         }
-        if (HookService.I.hasHookListeners('on_pre_request')) {
+        if (HookService.I.hasHookListeners('pre_request')) {
           final hookCtx = await HookService.I.fire(
-            'on_pre_request',
+            'pre_request',
             s.id,
             payload: {'turn': turn},
+            model: s.model,
           );
           if (hookCtx.isNotEmpty) {
             msgs.insert(0, {
@@ -5572,6 +5633,24 @@ ${await _agentsMdBlock()}
           }
         }
         var msg = await _callLlm(p, msgs, s);
+        // Task 8 (spec §8.1): post_request — observe-only hook after every
+        // LLM response (fire-and-forget; output is never injected).
+        if (msg != null && HookService.I.hasHookListeners('post_request')) {
+          unawaited(
+            HookService.I.fire(
+              'post_request',
+              s.id,
+              payload: {
+                'turn': turn,
+                'reply': cleanTruncate(
+                  (msg['content'] as String?) ?? '',
+                  400,
+                ),
+              },
+              model: s.model,
+            ),
+          );
+        }
         if (msg == null && _looksLikeContextOverflow(lastError)) {
           // context-overflow recovery (C1 fixed): the provider rejected
           // the request as too long → force-prune the oldest span, then
@@ -5939,12 +6018,13 @@ ${await _agentsMdBlock()}
       );
       // PR24: on_turn_end fire-and-forget — post-run bookkeeping plugins
       // (indexers, notifiers, cleanup) never block the UI.
-      if (HookService.I.hasHookListeners('on_turn_end')) {
+      if (HookService.I.hasHookListeners('stop')) {
         unawaited(
           HookService.I.fire(
-            'on_turn_end',
+            'stop',
             pinnedSessionId,
             payload: {'steps': pinned.steps, 'turns': pinned.turns},
+            model: ctx.session.model,
           ),
         );
       }
@@ -6524,11 +6604,12 @@ ${await _agentsMdBlock()}
     // plugin may DENY the call outright; exit code 2 short-circuits the
     // whole dispatch before _dispatchInner ever runs, same enforcement
     // point a real security-relevant hook needs.
-    if (HookService.I.hasHookListeners('on_pre_tool')) {
+    if (HookService.I.hasHookListeners('pre_tool')) {
       final gate = await HookService.I.fireGate(
-        'on_pre_tool',
+        'pre_tool',
         ledgerSid ?? '',
         payload: {'tool': name, 'args': args},
+        model: _runSession?.model,
       );
       if (!gate.allowed) {
         // Reuses the existing "DENIED" prefix contract (same UI 'stopped'
@@ -6564,10 +6645,10 @@ ${await _agentsMdBlock()}
       }
       // PR24: on_post_tool — fire-and-forget after every tool completes
       // (indexers, loggers). Never blocks the loop.
-      if (HookService.I.hasHookListeners('on_post_tool')) {
+      if (HookService.I.hasHookListeners('post_tool')) {
         unawaited(
           HookService.I.fire(
-            'on_post_tool',
+            'post_tool',
             ledgerSid ?? '',
             payload: {
               'tool': name,
@@ -6575,6 +6656,7 @@ ${await _agentsMdBlock()}
               'ok': !res.startsWith('DENIED'),
               'result': cleanTruncate(res, 400),
             },
+            model: _runSession?.model,
           ),
         );
       }
@@ -8478,6 +8560,34 @@ ${await _agentsMdBlock()}
     final running = _runSession;
     final sessionId = running?.id ?? AppState.I.activeSession?.id;
 
+    // Task 8 (spec §8.2): permission_request is a BLOCKING hook event —
+    // a plugin may deny the approval before the user is ever asked
+    // (exit 2 / JSON block). Fail-open on any hook failure: a broken
+    // hook must never wedge the run (same stance as the pre_tool gate).
+    if (HookService.I.hasHookListeners('permission_request')) {
+      final gate = await HookService.I.fireGate(
+        'permission_request',
+        sessionId ?? '',
+        payload: {'tool': tool, 'summary': summary, 'detail': detail},
+        model: running?.model,
+      );
+      if (!gate.allowed) {
+        if (sessionId != null) {
+          await SessionLedger.I.append(sessionId, 'approval', {
+            'tool': tool,
+            'ok': false,
+            'deniedBy': 'hook',
+            'plugin': gate.deniedByPlugin,
+          });
+        }
+        _emit(
+          'think',
+          'DENIED by hook (${gate.deniedByPlugin}): ${gate.reason}',
+        );
+        return false;
+      }
+    }
+
     Future<bool> askAndAudit(String t, String s, String d) async {
       final ok = await _askUser(t, s, d);
       if (sessionId != null) {
@@ -8636,6 +8746,22 @@ ${await _agentsMdBlock()}
     );
     pendingApproval = req;
     notifyListeners();
+    // Task 8 (spec §8.1): notification — observe hook for user-facing
+    // prompts (approval docks, questions, plan reviews).
+    if (HookService.I.hasHookListeners('notification')) {
+      unawaited(
+        HookService.I.fire(
+          'notification',
+          _runSession?.id ?? '',
+          payload: {
+            'kind': 'approval',
+            'tool': t,
+            'summary': cleanTruncate(s, 200),
+          },
+          model: _runSession?.model,
+        ),
+      );
+    }
     // The approval dock is a small non-modal card above the input — easy
     // to miss while reading the chat stream. A missed approval used to
     // wedge the run (and lock the composer) for the tool's full budget
@@ -11421,6 +11547,22 @@ ${await _agentsMdBlock()}
     child.agentId = id;
     AppState.I.persistSessions();
     _emit('think', 'dispatched $id → ${cleanTruncate(label, 40)}');
+    // Task 8 (spec §8.1): subagent_start — observe hook at child spawn.
+    if (HookService.I.hasHookListeners('subagent_start')) {
+      unawaited(
+        HookService.I.fire(
+          'subagent_start',
+          child.id,
+          payload: {
+            'subagentId': id,
+            'parentSessionId': parent.id,
+            'label': label,
+            'background': background,
+          },
+          model: child.model,
+        ),
+      );
+    }
 
     // The parent's tool card mirrors the child's progress live and links to
     // the full child transcript.
@@ -11485,6 +11627,23 @@ ${await _agentsMdBlock()}
     child.agentId = id;
     AppState.I.persistSessions();
     _emit('think', 'spawned $id → ${cleanTruncate(label, 40)}');
+    // Task 8 (spec §8.1): subagent_start for fresh foreground children
+    // (workflow/ralph rounds) — same observe hook as dispatch_agent.
+    if (HookService.I.hasHookListeners('subagent_start')) {
+      unawaited(
+        HookService.I.fire(
+          'subagent_start',
+          child.id,
+          payload: {
+            'subagentId': id,
+            'parentSessionId': parent.id,
+            'label': label,
+            'background': false,
+          },
+          model: child.model,
+        ),
+      );
+    }
     await _runSubagentSession(sub, prompt);
     return (sub, sub.result.trim());
   }
@@ -11735,6 +11894,24 @@ ${await _agentsMdBlock()}
       AppState.I.setAgentState(child.id, 'failed', result: sub.result);
     } finally {
       mirror?.cancel();
+      // Task 8 (spec §8.1): subagent_end — observe hook at settlement
+      // (finished, interrupted, or failed — one fire per settled child).
+      if (HookService.I.hasHookListeners('subagent_end')) {
+        unawaited(
+          HookService.I.fire(
+            'subagent_end',
+            child.id,
+            payload: {
+              'subagentId': sub.id,
+              'parentSessionId': sub.parentSessionId,
+              'state': sub.state,
+              'interrupted': sub.interrupted,
+              'result': cleanTruncate(sub.result, 400),
+            },
+            model: child.model,
+          ),
+        );
+      }
       if (card != null) {
         card.toolSummary = cleanTruncate(
           '${sub.id} · ${sub.state} · ${sub.elapsed.inSeconds}s',

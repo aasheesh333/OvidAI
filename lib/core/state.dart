@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'agent_notification_service.dart';
 import 'mcp_service.dart';
+import 'plugin_adapters.dart';
 import 'plugin_manifest.dart';
 import 'plugin_permissions.dart';
 import 'plugin_registry.dart';
@@ -193,6 +194,13 @@ class PluginItem {
   /// hook fires for every tool.
   Map<String, String> hookMatchers;
 
+  /// Task 8 (spec §8): the normalized ordered hook list (canonical event
+  /// names, per-hook matcher/timeout). Legacy rows persisted only the
+  /// `hooks` map — those migrate into this list on parse (via the frozen
+  /// alias map in plugin_adapters), and the map itself stays populated so
+  /// old readers keep working. Empty when the plugin declares no hooks.
+  List<PluginHook> pluginHooks;
+
   /// Production-plugin compatibility (design spec §4.3/§7): runtime identity
   /// and activation state persisted alongside the catalog row.
   ///
@@ -238,6 +246,7 @@ class PluginItem {
     this.installsKnown = false,
     this.hooks = const {},
     this.hookMatchers = const {},
+    this.pluginHooks = const [],
     this.source,
     this.marketplace,
     this.runtimeId,
@@ -262,6 +271,18 @@ class PluginItem {
     if (marketplace != null) 'marketplace': marketplace,
     if (hooks.isNotEmpty) 'hooks': hooks,
     if (hookMatchers.isNotEmpty) 'hookMatchers': hookMatchers,
+    // Task 8 (spec §8): the ordered normalized hook list — emitted only
+    // when non-empty so untouched rows serialize byte-identical to the
+    // pre-existing shape (old readers never see unexpected keys). A row
+    // still carrying only the legacy map derives its ordered list here
+    // (migration: map → ordered PluginHook list on write).
+    if (pluginHooks.isNotEmpty || hooks.isNotEmpty)
+      'pluginHooks': _effectivePluginHooks(
+        pluginHooks,
+        hooks,
+        hookMatchers,
+        name,
+      ).map((h) => h.toJson()).toList(),
     // Runtime fields are emitted only when non-default, so untouched rows
     // serialize byte-identical to the pre-existing shape (old readers never
     // see unexpected keys; old rows parse with honest inert defaults).
@@ -290,6 +311,12 @@ class PluginItem {
     marketplace: j['marketplace'] as String?,
     hooks: (j['hooks'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())) ?? const {},
     hookMatchers: (j['hookMatchers'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())) ?? const {},
+    pluginHooks: _effectivePluginHooks(
+      _pluginHooksFromJson(j),
+      (j['hooks'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())) ?? const {},
+      (j['hookMatchers'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())) ?? const {},
+      j['name'] as String? ?? '',
+    ),
     runtimeId: j['runtimeId'] as String?,
     activation:
         pluginActivationFromName(j['activation']) ?? PluginActivation.disabled,
@@ -305,7 +332,7 @@ class PluginItem {
   );
 
   /// Valid hook event names (mirrors the wired points in AgentService).
-  /// PR39: `on_pre_tool` is a GATING event (Claude Code PreToolUse
+  /// PR39: `on_pre_tool` is a GATING event ([CC] PreToolUse
   /// parity) — its command's exit code can DENY the tool call, not just
   /// observe it. Every other event is fire-and-observe only.
   static const hookEvents = [
@@ -316,6 +343,77 @@ class PluginItem {
     'on_pre_request',
     'on_post_tool',
   ];
+
+  /// Task 8 (spec §8): parse the ordered hook list from row JSON. New
+  /// rows carry `pluginHooks` (normalized [PluginHook] JSON); legacy rows
+  /// carry only the `hooks` map (+ optional `hookMatchers`) — those
+  /// migrate through the frozen alias map so old installs keep firing,
+  /// with the map's insertion order preserved as hook order.
+  static List<PluginHook> _pluginHooksFromJson(Map<String, dynamic> j) {
+    final raw = j['pluginHooks'];
+    if (raw is List) {
+      final out = <PluginHook>[];
+      for (final h in raw) {
+        if (h is Map) {
+          try {
+            out.add(PluginHook.fromJson(h.cast<String, dynamic>()));
+          } catch (_) {}
+        }
+      }
+      return out;
+    }
+    // Legacy migration: `hooks` map (+ `hookMatchers`).
+    return _migrateLegacyHooks(
+      j['hooks'],
+      j['hookMatchers'],
+      (j['name'] as String? ?? '').isEmpty
+          ? 'legacy-plugin'
+          : (j['name'] as String),
+    );
+  }
+
+  /// Legacy `hooks` map (+ optional matchers) → ordered canonical list.
+  /// Unmapped event names are dropped; empty commands are dropped.
+  static List<PluginHook> _migrateLegacyHooks(
+    dynamic rawHooks,
+    dynamic rawMatchers,
+    String pluginId,
+  ) {
+    if (rawHooks is! Map) return const [];
+    final matchers = rawMatchers is Map
+        ? rawMatchers.map((k, v) => MapEntry(k.toString(), v.toString()))
+        : const <String, String>{};
+    final out = <PluginHook>[];
+    for (final e in rawHooks.entries) {
+      final canonical = canonicalHookEvent(e.key.toString());
+      if (canonical == null) continue;
+      final cmd = e.value.toString().trim();
+      if (cmd.isEmpty) continue;
+      out.add(PluginHook(
+        pluginId: pluginId,
+        event: canonical,
+        ordinal: out.length,
+        type: 'command',
+        payload: cmd,
+        matcher: matchers[e.key.toString()],
+        timeoutS: 30,
+      ));
+    }
+    return out;
+  }
+
+  /// The ordered hook list a row FIRES with: the normalized list when
+  /// present, else the migrated legacy map (spec §8 migration ruling —
+  /// old JSON must still parse and fire).
+  static List<PluginHook> _effectivePluginHooks(
+    List<PluginHook> normalized,
+    Map<String, String> legacyHooks,
+    Map<String, String> legacyMatchers,
+    String pluginId,
+  ) {
+    if (normalized.isNotEmpty) return normalized;
+    return _migrateLegacyHooks(legacyHooks, legacyMatchers, pluginId);
+  }
 }
 
 /// MCP server entry — separate from plugins because lifecycle is different

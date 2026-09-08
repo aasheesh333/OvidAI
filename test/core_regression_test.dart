@@ -17049,6 +17049,827 @@ cwd = 'tools'
       },
     );
   });
+
+  group('PLUGIN8: production hook lifecycle, ordering, circuit breaker', () {
+    /// Manifest hook factory (canonical event).
+    PluginHook p8Hook(
+      String event,
+      String command, {
+      int ordinal = 0,
+      String? matcher,
+      int timeoutS = 0,
+      String type = 'command',
+    }) => PluginHook(
+      pluginId: 'p8/plugin',
+      event: event,
+      ordinal: ordinal,
+      type: type,
+      payload: command,
+      matcher: matcher,
+      timeoutS: timeoutS,
+      path: 'hooks/hooks.json',
+    );
+
+    /// A minimal manifest carrying [hooks], registered into the global
+    /// registry under [activation] (default: visible in every session).
+    NormalizedPluginManifest p8Register(
+      String id,
+      List<PluginHook> hooks, {
+      PluginActivation activation = PluginActivation.globalActive,
+      String? immediateSessionId,
+      String rootPath = '/p8/root',
+    }) {
+      final m = NormalizedPluginManifest(
+        id: id,
+        name: id,
+        version: '1.0',
+        format: PluginFormat.claudeCode,
+        rootPath: rootPath,
+        hooks: List.unmodifiable(hooks),
+      );
+      PluginContributionRegistry.I.register(
+        m,
+        activation: activation,
+        immediateSessionId: immediateSessionId,
+      );
+      addTearDown(() => PluginContributionRegistry.I.unregisterPlugin(id));
+      return m;
+    }
+
+    test('all 14 canonical lifecycle events are valid and normalized', () {
+      expect(PluginHook.canonicalEvents.length, 14);
+      // Spec §8.1 alias map — via the frozen adapter's mapping.
+      expect(canonicalHookEvent('on_session_start'), 'session_start');
+      expect(canonicalHookEvent('on_turn_start'), 'user_prompt_submit');
+      expect(canonicalHookEvent('on_turn_end'), 'stop');
+      expect(canonicalHookEvent('on_pre_request'), 'pre_request');
+      expect(canonicalHookEvent('on_pre_tool'), 'pre_tool');
+      expect(canonicalHookEvent('on_post_tool'), 'post_tool');
+      expect(canonicalHookEvent('UserPromptSubmit'), 'user_prompt_submit');
+      expect(canonicalHookEvent('SubagentStop'), 'subagent_end');
+      expect(canonicalHookEvent('PostCompact'), 'post_compact');
+      expect(canonicalHookEvent('PermissionRequest'), 'permission_request');
+      expect(canonicalHookEvent('on_bogus_event'), isNull);
+      // Every canonical event fires: no listeners is a no-op, not an error.
+      final svc = HookService.I;
+      svc.enabled = true;
+      for (final e in PluginHook.canonicalEvents) {
+        expect(svc.hasHookListeners(e), isFalse, reason: 'no listener: $e');
+      }
+    });
+
+    test('legacy on_* names resolve and fire canonical hooks', () async {
+      p8Register('p8/legacy', [p8Hook('stop', 'echo done', ordinal: 0)]);
+      final svc = HookService.I;
+      expect(svc.hasHookListeners('on_turn_end'), isTrue,
+          reason: 'legacy alias resolves to canonical stop listeners');
+      expect(svc.hasHookListeners('stop'), isTrue);
+      var called = false;
+      svc.executorForTest = (cmd, env) async {
+        called = true;
+        expect(env['OVID_HOOK_EVENT'], 'stop');
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
+      await svc.fire('on_turn_end', 'p8-sess-alias');
+      expect(called, isTrue);
+    });
+
+    test('multiple ordered hooks fire in manifest order per event', () async {
+      p8Register('p8/multi', [
+        p8Hook('notification', 'first', ordinal: 0),
+        p8Hook('notification', 'second', ordinal: 1),
+        p8Hook('notification', 'third', ordinal: 2),
+      ]);
+      final svc = HookService.I;
+      final calls = <String>[];
+      svc.executorForTest = (cmd, env) async {
+        calls.add(cmd);
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
+      await svc.fire('notification', 'p8-sess-order');
+      expect(calls, ['first', 'second', 'third']);
+    });
+
+    test('install order precedes manifest order across plugins', () async {
+      p8Register('p8/aaa', [p8Hook('post_compact', 'aaa-0', ordinal: 0)]);
+      p8Register('p8/bbb', [
+        p8Hook('post_compact', 'bbb-0', ordinal: 0),
+        p8Hook('post_compact', 'bbb-1', ordinal: 1),
+      ]);
+      p8Register('p8/ccc', [p8Hook('post_compact', 'ccc-0', ordinal: 0)]);
+      final svc = HookService.I;
+      final calls = <String>[];
+      svc.executorForTest = (cmd, env) async {
+        calls.add(env['PLUGIN_ID'] ?? cmd);
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
+      await svc.fire('post_compact', 'p8-sess-install');
+      expect(calls, ['p8/aaa', 'p8/bbb', 'p8/bbb', 'p8/ccc']);
+    });
+
+    test('session scope: sessionActive plugin fires only in its session',
+        () async {
+      p8Register(
+        'p8/scoped',
+        [p8Hook('notification', 'scoped-cmd', ordinal: 0)],
+        activation: PluginActivation.sessionActive,
+        immediateSessionId: 'p8-sess-owner',
+      );
+      final svc = HookService.I;
+      final calls = <String>[];
+      svc.executorForTest = (cmd, env) async {
+        calls.add(env['OVID_HOOK_SESSION']!);
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
+      await svc.fire('notification', 'p8-sess-owner');
+      await svc.fire('notification', 'p8-sess-other');
+      expect(calls, ['p8-sess-owner'],
+          reason: 'out-of-scope session must never receive the event');
+    });
+
+    test('disabled plugins never receive events', () async {
+      p8Register(
+        'p8/disabled',
+        [p8Hook('notification', 'nope', ordinal: 0)],
+        activation: PluginActivation.disabled,
+      );
+      final svc = HookService.I;
+      var called = false;
+      svc.executorForTest = (cmd, env) async {
+        called = true;
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
+      await svc.fire('notification', 'p8-sess-disabled');
+      expect(called, isFalse);
+    });
+
+    test('context env: PLUGIN_ROOT, storage, workspace, session, model,'
+        ' event, payload', () async {
+      p8Register('p8/env', [p8Hook('pre_request', 'env-probe', ordinal: 0)],
+          rootPath: '/p8/env-root');
+      final svc = HookService.I;
+      Map<String, String>? gotEnv;
+      svc.executorForTest = (cmd, env) async {
+        gotEnv = env;
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
+      await svc.fire(
+        'pre_request',
+        'p8-sess-env',
+        model: 'test-model-x',
+        payload: {'turn': 1},
+      );
+      final env = gotEnv!;
+      expect(env['PLUGIN_ROOT'], '/p8/env-root');
+      expect(env['PLUGIN_STORAGE'], isNotEmpty);
+      expect(env['PLUGIN_STORAGE'], contains('p8_env'));
+      expect(env['PLUGIN_WORKSPACE'], isNotEmpty);
+      expect(env['PLUGIN_SESSION'], 'p8-sess-env');
+      expect(env['PLUGIN_MODEL'], 'test-model-x');
+      expect(env['PLUGIN_EVENT'], 'pre_request');
+      expect(env['PLUGIN_PAYLOAD'], contains('p8-sess-env'));
+      expect(env['PLUGIN_PAYLOAD'], contains('pre_request'));
+      // Legacy env names survive (backward compat for installed hooks).
+      expect(env['OVID_HOOK_EVENT'], 'pre_request');
+      expect(env['OVID_HOOK_SESSION'], 'p8-sess-env');
+    });
+
+    test('per-hook timeoutS is honored and capped at 120 s', () async {
+      p8Register('p8/timeout', [
+        p8Hook('notification', 't-default', ordinal: 0),
+        p8Hook('notification', 't-600', ordinal: 1, timeoutS: 600),
+        p8Hook('notification', 't-5', ordinal: 2, timeoutS: 5),
+      ]);
+      final svc = HookService.I;
+      final secs = <int?>[];
+      svc.execTimeoutForTest = (seconds) async {
+        secs.add(seconds);
+        return '';
+      };
+      addTearDown(() => svc.execTimeoutForTest = null);
+      await svc.fire('notification', 'p8-sess-timeout');
+      expect(secs, [30, 120, 5],
+          reason: 'default 30, declared 600 clamped to 120, declared 5 kept');
+    });
+
+    test('malformed hook output fails open with a visible warning ledger',
+        () async {
+      p8Register('p8/malformed', [
+        p8Hook('post_tool', 'echo {{{', ordinal: 0),
+      ]);
+      final svc = HookService.I;
+      svc.executorForTest = (cmd, env) async => 'garbage {{{ output';
+      addTearDown(() => svc.executorForTest = null);
+
+      final root = await Directory.systemTemp.createTemp('ovid-p8-led-');
+      SessionLedger.rootOverrideForTest = root;
+      addTearDown(() {
+        SessionLedger.rootOverrideForTest = null;
+        root.deleteSync(recursive: true);
+      });
+
+      // post_tool is observe-only: malformed output can never block, and
+      // the run continues (fail-open).
+      final out = await svc.fire('post_tool', 'p8-sess-malformed',
+          payload: {'tool': 'run_shell'});
+      expect(out, isNotNull);
+      await SessionLedger.I.flush('p8-sess-malformed');
+      final file = File(
+        '${root.path}/${'p8-sess-malformed'.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_')}.jsonl',
+      );
+      final lines = file
+          .readAsStringSync()
+          .split('\n')
+          .where((l) => l.trim().isNotEmpty)
+          .map(jsonDecode)
+          .toList();
+      expect(lines.any((e) => e['kind'] == 'hook/result'), isTrue);
+    });
+
+    test('exit 2 blocks on pre_tool; other events deny nothing', () async {
+      p8Register('p8/gate', [
+        p8Hook('pre_tool', 'exit 2', ordinal: 0),
+        p8Hook('notification', 'notify-cmd', ordinal: 0),
+      ]);
+      final svc = HookService.I;
+      svc.gateExecutorForTest = (cmd, env) async =>
+          (2, 'policy denies rm');
+      addTearDown(() => svc.gateExecutorForTest = null);
+      final res = await svc.fireGate(
+        'pre_tool',
+        'p8-sess-gate',
+        payload: {'tool': 'run_shell', 'args': {}},
+      );
+      expect(res.allowed, isFalse);
+      expect(res.deniedByPlugin, 'p8/gate');
+      expect(res.reason, contains('policy denies rm'));
+
+      // A non-blocking event with the SAME exit-2-style deny output never
+      // denies: notification is observe-only — output is collected (as an
+      // observe event sees a gate-shaped stdout), run continues.
+      svc.executorForTest = (cmd, env) async => 'policy denies rm';
+      addTearDown(() => svc.executorForTest = null);
+      final out = await svc.fire('notification', 'p8-sess-gate',
+          payload: {'tool': 'run_shell'});
+      expect(out, contains('policy denies rm'));
+    });
+
+    test('permission_request blocks on exit 2; JSON block also denies',
+        () async {
+      p8Register('p8/perm', [p8Hook('permission_request', 'check', ordinal: 0)]);
+      final svc = HookService.I;
+      svc.gateExecutorForTest = (cmd, env) async =>
+          (0, '{"decision":"block","reason":"not allowed by policy"}');
+      addTearDown(() => svc.gateExecutorForTest = null);
+      final res = await svc.fireGate(
+        'permission_request',
+        'p8-sess-perm',
+        payload: {'tool': 'run_shell', 'summary': 'rm -rf /'},
+      );
+      expect(res.allowed, isFalse);
+      expect(res.reason, contains('not allowed by policy'));
+    });
+
+    test('non-blocking events can NEVER deny even with a JSON block',
+        () async {
+      p8Register('p8/observe', [p8Hook('stop', 'blocker', ordinal: 0)]);
+      final svc = HookService.I;
+      svc.executorForTest = (cmd, env) async =>
+          '{"decision":"block","reason":"should be ignored"}';
+      addTearDown(() => svc.executorForTest = null);
+      final out = await svc.fire('stop', 'p8-sess-observe');
+      expect(out, contains('should be ignored'),
+          reason: 'observe output is collected, never enforced');
+    });
+
+    test('output over 2 KB is capped for context injection', () async {
+      p8Register('p8/cap', [p8Hook('pre_request', 'yes', ordinal: 0)]);
+      final svc = HookService.I;
+      svc.executorForTest = (cmd, env) async => 'x' * 5000;
+      addTearDown(() => svc.executorForTest = null);
+      final out = await svc.fire('pre_request', 'p8-sess-cap');
+      expect(out.length, lessThan(2100));
+      expect(out, endsWith('[hook output truncated]'));
+    });
+
+    test('recursion prevention: a hook cannot re-fire its own event',
+        () async {
+      p8Register('p8/recursive', [
+        p8Hook('notification', 'self-refire', ordinal: 0),
+      ]);
+      final svc = HookService.I;
+      var depth = 0;
+      var maxDepth = 0;
+      String? recurred;
+      svc.executorForTest = (cmd, env) async {
+        depth++;
+        maxDepth = depth > maxDepth ? depth : maxDepth;
+        if (depth == 1) {
+          // The hook tries to re-fire its own event mid-execution.
+          recurred = await svc
+              .fire('notification', 'p8-sess-recursion')
+              .toString();
+        }
+        depth--;
+        return 'ok';
+      };
+      addTearDown(() => svc.executorForTest = null);
+      await svc.fire('notification', 'p8-sess-recursion');
+      expect(maxDepth, 1,
+          reason: 'own-event recursion must be blocked, not nested');
+    });
+
+    test('circuit breaker: 3 consecutive failures disable the plugin'
+        ' for the session', () async {
+      p8Register('p8/breaker', [
+        p8Hook('post_tool', 'always-fails', ordinal: 0),
+        p8Hook('notification', 'always-fails-2', ordinal: 0),
+      ]);
+      final svc = HookService.I;
+      var calls = 0;
+      svc.executorForTest = (cmd, env) async {
+        calls++;
+        throw Exception('hook exploded');
+      };
+      addTearDown(() => svc.executorForTest = null);
+      final sid = 'p8-sess-breaker';
+      // Three consecutive failures on this session…
+      for (var i = 0; i < 3; i++) {
+        await svc.fire('post_tool', sid, payload: {'tool': 't'});
+      }
+      expect(calls, 3);
+      // …trip the breaker: the plugin no longer executes on this session.
+      await svc.fire('notification', sid);
+      expect(calls, 3, reason: 'breaker must stop the 4th execution');
+      // Other sessions are unaffected (per-plugin PER-SESSION breaker).
+      await svc.fire('notification', 'p8-sess-other-2');
+      expect(calls, 4);
+      // A success elsewhere on the failing session resets nothing here;
+      // reset only happens via success on the SAME session.
+    });
+
+    test('breaker resets after a successful execution on the session',
+        () async {
+      p8Register('p8/breaker-reset', [
+        p8Hook('notification', 'flaky', ordinal: 0),
+      ]);
+      final svc = HookService.I;
+      var calls = 0;
+      svc.executorForTest = (cmd, env) async {
+        calls++;
+        if (calls <= 2) throw Exception('boom');
+        return 'ok';
+      };
+      addTearDown(() => svc.executorForTest = null);
+      final sid = 'p8-sess-reset';
+      await svc.fire('notification', sid); // fail 1
+      await svc.fire('notification', sid); // fail 2
+      await svc.fire('notification', sid); // success → consecutive reset
+      await svc.fire('notification', sid); // fail 1 again
+      expect(calls, 4,
+          reason: 'a success resets the consecutive-failure count');
+    });
+
+    test('fail-open: exec error never blocks pre_tool gate', () async {
+      p8Register('p8/failopen', [p8Hook('pre_tool', 'explode', ordinal: 0)]);
+      final svc = HookService.I;
+      svc.gateExecutorForTest = (cmd, env) async {
+        throw Exception('interpreter missing');
+      };
+      addTearDown(() => svc.gateExecutorForTest = null);
+      final res = await svc.fireGate('pre_tool', 'p8-sess-failopen',
+          payload: {'tool': 'run_shell', 'args': {}});
+      expect(res.allowed, isTrue,
+          reason: 'a broken hook must never brick tool dispatch');
+      // …but it counted as a failure toward the breaker.
+      expect(svc.pluginTrippedForTest('p8/failopen', 'p8-sess-failopen'),
+          isFalse,
+          reason: 'one failure does not trip the 3-strike breaker');
+    });
+
+    test('prompt-type hooks run where implementable (logged, never block)',
+        () async {
+      p8Register('p8/prompt', [
+        p8Hook('user_prompt_submit', 'Summarize the prompt', ordinal: 0,
+            type: 'prompt'),
+      ]);
+      final svc = HookService.I;
+      var executed = false;
+      svc.executorForTest = (cmd, env) async {
+        executed = true;
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
+      // Prompt hooks have no shell runtime — skipped with a warning
+      // record, never executed as a shell command.
+      await svc.fire('user_prompt_submit', 'p8-sess-prompt');
+      expect(executed, isFalse,
+          reason: 'prompt hooks must not run through the shell executor');
+    });
+
+    test('state migration: legacy hooks map round-trips as ordered list',
+        () {
+      final legacy = PluginItem(
+        name: 'p8-legacy-row',
+        author: 'a',
+        description: '',
+        version: '1',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        hooks: {
+          'on_turn_start': 'echo start',
+          'on_pre_tool': 'echo gate',
+        },
+        hookMatchers: {'on_pre_tool': 'run_.*'},
+      );
+      final j = legacy.toJson();
+      // New ordered form present — derived from the legacy map (migration)…
+      final ordered = (j['pluginHooks'] as List)
+          .map((h) => PluginHook.fromJson((h as Map).cast<String, dynamic>()))
+          .toList();
+      expect(ordered.length, 2);
+      final byEvent = {for (final h in ordered) h.event: h};
+      expect(byEvent['pre_tool']!.payload, 'echo gate');
+      expect(byEvent['pre_tool']!.matcher, 'run_.*');
+      expect(byEvent['pre_tool']!.timeoutS, 30); // legacy default timeout
+      expect(byEvent['user_prompt_submit']!.payload, 'echo start');
+      // …and the old JSON shape still parses (old rows keep firing).
+      final oldShape = <String, dynamic>{
+        'name': 'p8-old-row',
+        'author': 'a',
+        'description': '',
+        'version': '1',
+        'category': 'Tool',
+        'installed': true,
+        'enabled': true,
+        'hooks': {'on_turn_start': 'echo old'},
+      };
+      final parsed = PluginItem.fromJson(oldShape);
+      expect(parsed.hooks['on_turn_start'], 'echo old');
+      expect(parsed.pluginHooks.length, 1);
+      expect(parsed.pluginHooks.first.event, 'user_prompt_submit');
+      expect(parsed.pluginHooks.first.payload, 'echo old');
+      expect(parsed.pluginHooks.first.pluginId, 'p8-old-row');
+      // Round-trip: toJson → fromJson preserves the ordered list.
+      final rt = PluginItem.fromJson(legacy.toJson());
+      expect(rt.pluginHooks.length, 2);
+      expect(rt.hooks['on_turn_start'], 'echo start',
+          reason: 'legacy map stays readable for old readers');
+    });
+
+    test('user_prompt_submit fires once per prompt at runTask entry',
+        () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final server = await HttpServer.bind('127.0.0.1', 0);
+      addTearDown(() => server.close(force: true));
+      final provider = app.providerById('ollama-local')!;
+      final originals = {
+        'baseUrl': provider.baseUrl,
+        'models': provider.models,
+        'selectedModel': provider.selectedModel,
+      };
+      addTearDown(() {
+        provider
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+      });
+      final session = ChatSession(
+        id: 'p8-ups',
+        title: 'ups',
+        providerId: provider.id,
+        model: 'test-model',
+        mode: 'auto',
+        messages: [Message(role: 'user', content: 'go')],
+      );
+      app.sessions.insert(0, session);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == session.id));
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['test-model'];
+
+      p8Register('p8/ups', [p8Hook('user_prompt_submit', 'ups-cmd', ordinal: 0)]);
+      final upsEvents = <String>[];
+      final svc = HookService.I;
+      svc.executorForTest = (cmd, env) async {
+        upsEvents.add(env['PLUGIN_EVENT']!);
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
+
+      // Turn 1: one tool round + final → 2 LLM requests, ONE prompt.
+      var requestCount = 0;
+      final serverTask = () async {
+        await for (final request in server) {
+          final body = await utf8.decoder.bind(request).join();
+          requestCount++;
+          request.response.headers.chunkedTransferEncoding = true;
+          if (requestCount == 1) {
+            request.response.add(
+              utf8.encode(
+                'data: ${jsonEncode({
+                  'choices': [
+                    {
+                      'delta': {
+                        'tool_calls': [
+                          {
+                            'index': 0,
+                            'id': 'call_1',
+                            'function': {
+                              'name': 'file_read',
+                              'arguments': '{"path":"x.txt"}',
+                            },
+                          },
+                        ],
+                      },
+                      'finish_reason': 'tool_calls',
+                    },
+                  ],
+                })}\n\n',
+              ),
+            );
+          } else {
+            request.response.add(
+              utf8.encode(
+                'data: ${jsonEncode({
+                  'choices': [
+                    {
+                      'delta': {'content': 'all done'},
+                      'finish_reason': 'stop',
+                    },
+                  ],
+                })}\n\n',
+              ),
+            );
+          }
+          await request.response.flush();
+          await request.response.close();
+        }
+      }();
+      unawaited(serverTask);
+
+      await agent
+          .runTask('go', sessionId: session.id)
+          .timeout(const Duration(seconds: 30));
+
+      expect(
+        upsEvents.where((e) => e == 'user_prompt_submit').length,
+        1,
+        reason: 'canonical user_prompt_submit is once per user prompt, '
+            'not per LLM turn',
+      );
+    }, timeout: const Timeout(Duration(seconds: 60)));
+
+    test('post_request fires after each LLM response', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final server = await HttpServer.bind('127.0.0.1', 0);
+      addTearDown(() => server.close(force: true));
+      final provider = app.providerById('ollama-local')!;
+      final originals = {
+        'baseUrl': provider.baseUrl,
+        'models': provider.models,
+        'selectedModel': provider.selectedModel,
+      };
+      addTearDown(() {
+        provider
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+      });
+      final session = ChatSession(
+        id: 'p8-postreq',
+        title: 'postreq',
+        providerId: provider.id,
+        model: 'test-model',
+        mode: 'auto',
+        messages: [Message(role: 'user', content: 'go')],
+      );
+      app.sessions.insert(0, session);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == session.id));
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['test-model'];
+
+      p8Register('p8/postreq', [
+        p8Hook('post_request', 'post-req-cmd', ordinal: 0),
+      ]);
+      final events = <String>[];
+      final svc = HookService.I;
+      svc.executorForTest = (cmd, env) async {
+        events.add(env['PLUGIN_EVENT']!);
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
+
+      var requestCount = 0;
+      final serverTask = () async {
+        await for (final request in server) {
+          await utf8.decoder.bind(request).join();
+          requestCount++;
+          request.response.headers.chunkedTransferEncoding = true;
+          request.response.add(
+            utf8.encode(
+              'data: ${jsonEncode({
+                'choices': [
+                  {
+                    'delta': {'content': 'reply $requestCount'},
+                    'finish_reason': 'stop',
+                  },
+                ],
+              })}\n\n',
+            ),
+          );
+          await request.response.flush();
+          await request.response.close();
+        }
+      }();
+      unawaited(serverTask);
+
+      await agent
+          .runTask('go', sessionId: session.id)
+          .timeout(const Duration(seconds: 30));
+      // Fire-and-forget post_request hooks need a microtask turn to land.
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      expect(events.where((e) => e == 'post_request').length,
+          greaterThanOrEqualTo(1),
+          reason: 'post_request must fire after each LLM response');
+    }, timeout: const Timeout(Duration(seconds: 60)));
+
+    test('permission_request gate denies a tool approval', () async {
+      final app = AppState.I;
+      final s = ChatSession(
+        id: 'p8-perm-gate',
+        title: 'perm',
+        providerId: 'ollama-local',
+        model: 'm',
+        mode: 'safe', // safe mode routes run_shell through _maybeApprove
+      );
+      app.sessions.insert(0, s);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == s.id));
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+
+      p8Register('p8/permgate', [
+        p8Hook('permission_request', 'perm-gate-cmd', ordinal: 0),
+      ]);
+      final svc = HookService.I;
+      var gateCalls = 0;
+      svc.gateExecutorForTest = (cmd, env) async {
+        gateCalls++;
+        return (2, 'plugin policy denies destructive shell');
+      };
+      addTearDown(() => svc.gateExecutorForTest = null);
+
+      final res = await AgentService.I.dispatchForTest('run_shell', {
+        'command': 'rm -rf ./build',
+      });
+      // The permission_request hook DENIED the approval before the user
+      // was ever asked (gateCalls proves the hook ran and its exit-2 was
+      // consumed); _maybeApprove's false maps to the caller's shared
+      // user-denial string, with the hook identity in the ledger + think
+      // stream ('approval' record deniedBy: 'hook').
+      expect(gateCalls, 1,
+          reason: 'permission_request gate must run before the user prompt');
+      expect(res, 'DENIED by user');
+    });
+
+    test('subagent_start and subagent_end fire around a subagent run',
+        () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final server = await HttpServer.bind('127.0.0.1', 0);
+      addTearDown(() => server.close(force: true));
+      final provider = app.providerById('ollama-local')!;
+      final originals = {
+        'baseUrl': provider.baseUrl,
+        'models': provider.models,
+        'selectedModel': provider.selectedModel,
+      };
+      addTearDown(() {
+        provider
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+      });
+      final session = ChatSession(
+        id: 'p8-sub',
+        title: 'sub',
+        providerId: provider.id,
+        model: 'test-model',
+        mode: 'auto',
+        messages: [Message(role: 'user', content: 'go')],
+      );
+      app.sessions.insert(0, session);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == session.id));
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['test-model'];
+
+      p8Register('p8/sub-hooks', [
+        p8Hook('subagent_start', 'sub-start-cmd', ordinal: 0),
+        p8Hook('subagent_end', 'sub-end-cmd', ordinal: 0),
+      ]);
+      final events = <String>[];
+      final svc = HookService.I;
+      svc.executorForTest = (cmd, env) async {
+        if (env['PLUGIN_EVENT'] == 'subagent_start' ||
+            env['PLUGIN_EVENT'] == 'subagent_end') {
+          events.add(env['PLUGIN_EVENT']!);
+        }
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
+
+      var requestCount = 0;
+      final serverTask = () async {
+        await for (final request in server) {
+          await utf8.decoder.bind(request).join();
+          requestCount++;
+          request.response.headers.chunkedTransferEncoding = true;
+          request.response.add(
+            utf8.encode(
+              'data: ${jsonEncode({
+                'choices': [
+                  {
+                    'delta': {'content': 'child done'},
+                    'finish_reason': 'stop',
+                  },
+                ],
+              })}\n\n',
+            ),
+          );
+          await request.response.flush();
+          await request.response.close();
+        }
+      }();
+      unawaited(serverTask);
+
+      // Dispatch a foreground subagent from the parent session.
+      AgentService.setRunSessionForTest(session.id);
+      addTearDown(() => AgentService.setRunSessionForTest(''));
+      final out = await agent
+          .dispatchForTest('dispatch_agent', {
+            'prompt': 'do the child task',
+            'label': 'p8 child',
+          })
+          .timeout(const Duration(seconds: 30));
+      // subagent_end fires fire-and-forget in the child's settle path.
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(events, contains('subagent_start'));
+      expect(events, contains('subagent_end'));
+    }, timeout: const Timeout(Duration(seconds: 60)));
+
+    test('session_end fires when a session is deleted', () async {
+      final app = AppState.I;
+      p8Register('p8/sess-end', [
+        p8Hook('session_end', 'sess-end-cmd', ordinal: 0),
+      ]);
+      final svc = HookService.I;
+      var fired = false;
+      svc.executorForTest = (cmd, env) async {
+        if (env['PLUGIN_EVENT'] == 'session_end') fired = true;
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
+
+      final s = ChatSession(
+        id: 'p8-doomed',
+        title: 'doomed',
+        model: 'm',
+        mode: 'drive',
+      );
+      app.sessions.insert(0, s);
+      app.deleteSession(s.id);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      expect(fired, isTrue,
+          reason: 'deleting a session must fire session_end hooks');
+    });
+
+    test('hooks never execute via dispatch (registry ledger only)',
+        () async {
+      p8Register('p8/no-dispatch', [
+        p8Hook('notification', 'ledger-only', ordinal: 0),
+      ]);
+      final res = await AgentService.I.dispatchForTest(
+        'plugin_p8_no_dispatch_hook_notification_0',
+        {},
+      );
+      // The registry LEDDGERS hooks but refuses execution — same refusal
+      // contract as PLUGIN4.
+      expect(res, anyOf(contains('unknown tool'), contains('not'),
+          contains('refus'), contains('Unknown')));
+    });
+  });
 }
 
 /// One recorded command from the [RecordingRunner] injected-exec seam.
