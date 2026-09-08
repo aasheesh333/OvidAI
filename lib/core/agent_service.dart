@@ -4620,7 +4620,11 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         .where((s) => _mcpOwnerVisible(s, sessionId ?? _runSession?.id ?? ''))
         .toList();
     final encoded = servers
-        .where((s) => McpService.providerServerToolName(s) == toolName)
+        .where(
+          (s) =>
+              s.ownerPluginId != null &&
+              McpService.providerServerToolName(s) == toolName,
+        )
         .toList();
     if (encoded.length == 1) return encoded.single;
     if (encoded.length > 1) return null;

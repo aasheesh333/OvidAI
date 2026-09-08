@@ -18148,6 +18148,57 @@ cwd = 'tools'
       expect(McpService.I.isConnected(server.canonicalId), isTrue);
     });
 
+    test('ownerless legacy stub cannot be captured by encoded lookup',
+        () async {
+      final encodedTarget = McpServer(
+        name: 'target_server',
+        author: 'you',
+        description: '',
+        category: 'Custom',
+        command: '',
+        transport: 'http',
+        url: 'https://wrong-target.example/mcp',
+        custom: true,
+      );
+      final advertisedName =
+          McpService.providerServerToolName(encodedTarget).substring(4);
+      final advertised = McpServer(
+        name: advertisedName,
+        author: 'you',
+        description: '',
+        category: 'Custom',
+        command: '',
+        transport: 'http',
+        url: 'https://actual-legacy.example/mcp',
+        custom: true,
+      );
+      app.mcpServers.addAll([advertised, encodedTarget]);
+      McpService.I.httpClientForTest = mcpHttpClient();
+      addTearDown(() async {
+        app.mcpServers.removeWhere(
+          (server) =>
+              identical(server, advertised) || identical(server, encodedTarget),
+        );
+        await McpService.I.disconnect(advertised.canonicalId);
+        await McpService.I.disconnect(encodedTarget.canonicalId);
+        McpService.I.httpClientForTest = null;
+      });
+      final advertisedTool = 'mcp_$advertisedName';
+      final names = AgentService.I.toolsForTest()
+          .map((tool) => ((tool['function'] as Map?) ?? {})['name'])
+          .whereType<String>();
+      expect(names, contains(advertisedTool));
+
+      final result = await AgentService.I.dispatchForTest(advertisedTool, {
+        'action': 'lookup',
+        'args': <String, dynamic>{},
+      });
+
+      expect(result, 'actual-legacy.example');
+      expect(McpService.I.isConnected(advertised.canonicalId), isTrue);
+      expect(McpService.I.isConnected(encodedTarget.canonicalId), isFalse);
+    });
+
     test('provider names are bounded stable distinct and dispatchable',
         () async {
       final longOwner = 'publisher/${'very-long-plugin-segment-' * 8}';
@@ -18177,6 +18228,7 @@ cwd = 'tools'
           (server) => identical(server, serverA) || identical(server, serverB),
         );
         await McpService.I.disconnect(serverA.canonicalId);
+        await McpService.I.disconnect(serverB.canonicalId);
         McpService.I.httpClientForTest = null;
       });
 
@@ -18204,6 +18256,17 @@ cwd = 'tools'
       expect(
         await AgentService.I.dispatchForTest(connected.canonicalToolName, {}),
         'publisher',
+      );
+
+      expect(await McpService.I.connect(serverB), contains('connected'));
+      final connectedB = McpService.I.connectedToolEntries.singleWhere(
+        (entry) => entry.server.canonicalId == serverB.canonicalId,
+      );
+      expect(connectedB.canonicalToolName.length, lessThanOrEqualTo(64));
+      expect(connectedB.canonicalToolName, isNot(connected.canonicalToolName));
+      expect(
+        McpService.I.resolveToolName(connectedB.canonicalToolName)?.canonicalId,
+        connectedB.canonicalId,
       );
     });
 
