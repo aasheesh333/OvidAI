@@ -17880,6 +17880,90 @@ cwd = 'tools'
       expect(res, anyOf(contains('unknown tool'), contains('not'),
           contains('refus'), contains('Unknown')));
     });
+
+    // Final-review I1: the dispatch-site guards must consult the REAL
+    // running session, so a sessionActive plugin's hooks (including the
+    // pre_tool gate) fire in the installing session in the SAME boot —
+    // no restart/promotion required. Driven through real dispatch
+    // (dispatchForTest → _dispatch → the same guard sites production
+    // uses), never a direct HookService.fire.
+    test(
+      'final-review I1: sessionActive plugin hooks fire pre-restart via real dispatch',
+      () async {
+        final app = AppState.I;
+        final svc = HookService.I;
+        final sessA = ChatSession(
+          id: 'p8-fr-a',
+          title: 'FR A',
+          model: 'm',
+          mode: 'drive', // drive: file_read needs no user approval
+        );
+        final sessB = ChatSession(
+          id: 'p8-fr-b',
+          title: 'FR B',
+          model: 'm',
+          mode: 'drive',
+        );
+        app.sessions.insert(0, sessA);
+        app.sessions.insert(0, sessB);
+        addTearDown(() => app.sessions.removeWhere(
+            (x) => x.id == 'p8-fr-a' || x.id == 'p8-fr-b'));
+
+        // The installing session's plugin: sessionActive for A, with a
+        // gating pre_tool hook AND an observe post_tool hook.
+        p8Register(
+          'p8/fr-scoped',
+          [
+            p8Hook('pre_tool', 'fr-gate', ordinal: 0),
+            p8Hook('post_tool', 'fr-observe', ordinal: 0),
+          ],
+          activation: PluginActivation.sessionActive,
+          immediateSessionId: sessA.id,
+        );
+
+        final events = <String>[];
+        svc.gateExecutorForTest = (cmd, env) async {
+          events.add('gate:${env['PLUGIN_EVENT']}');
+          return (0, '');
+        };
+        svc.executorForTest = (cmd, env) async {
+          events.add('obs:${env['PLUGIN_EVENT']}');
+          return '';
+        };
+        addTearDown(() {
+          svc.gateExecutorForTest = null;
+          svc.executorForTest = null;
+        });
+
+        // Session A dispatches a real tool: the pre_tool gate must run
+        // (guard passes, hooks resolve with the REAL session id) and the
+        // post_tool observe hook must fire after the tool completes.
+        AgentService.setRunSessionForTest(sessA.id);
+        final resA = await AgentService.I.dispatchForTest('file_read', {
+          'path': 'definitely-missing-fr.txt',
+        });
+        expect(resA, contains('file not found'));
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        expect(events, contains('gate:pre_tool'),
+            reason: 'the pre_tool gate must run in the installing session, '
+                'same boot, before one-restart promotion');
+        expect(events, contains('obs:post_tool'),
+            reason: 'the post_tool observe hook must fire in the installing '
+                'session, same boot');
+
+        // Session B dispatches the same tool: the session-A-active plugin
+        // must NOT fire there.
+        events.clear();
+        AgentService.setRunSessionForTest(sessB.id);
+        final resB = await AgentService.I.dispatchForTest('file_read', {
+          'path': 'definitely-missing-fr.txt',
+        });
+        expect(resB, contains('file not found'));
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        expect(events, isEmpty,
+            reason: 'a session-A-active plugin must not fire in session B');
+      },
+    );
   });
 
   group('PLUGIN9: plugin-owned namespaced MCP lifecycle', () {
@@ -19895,6 +19979,87 @@ cwd = 'tools'
         // Install/runtime log section with the transaction lines.
         expect(find.text('INSTALL LOG'), findsOneWidget);
         expect(find.textContaining('staged'), findsWidgets);
+      },
+    );
+
+    // Final-review I2: _PluginDiagnostics compared McpServer.canonicalId
+    // (`<ownerPluginId>/<name>`) against PluginMcpServer.canonicalId
+    // (`plugin:<id>/mcp:<name>`) — never equal, so every MOUNTED plugin
+    // server also rendered 'declared (not mounted)' plus a spurious
+    // 'Needs setup'. The mounted row must render Connected/Not connected
+    // only; the not-mounted row must stay reserved for genuinely
+    // unmounted declarations.
+    testWidgets(
+      'PLUGIN11 final-review I2: mounted plugin MCP server is not reported as declared-not-mounted',
+      (tester) async {
+        AgentService.I.debugPauseScheduleTimerForTest(true);
+        addTearDown(() {
+          AgentService.I.debugPauseScheduleTimerForTest(false);
+          AppState.resetTestInstance();
+        });
+        final app = AppState.createForTest();
+
+        PluginRuntimeManager.depsForTest = PluginDependencyService(
+          runtimeRootOverride: p11Runtime,
+          runner: (args, {cwd, env}) async => (0, 'ok'),
+          ensureRuntime: (_) async => true,
+        );
+
+        final src = p11FullFixture();
+        final row = PluginItem(
+          name: 'P11 Full Kit',
+          author: 'p11org',
+          description: 'P11 fixture',
+          version: '1.0.0',
+          category: 'Tool',
+        );
+        app.plugins.add(row);
+        await tester.runAsync(() async {
+          await p11Approve(src);
+          final result = await startPluginInstallForTest(
+            app,
+            row,
+            source: LocalFolderPluginSource(src.path),
+          );
+          expect(result, isNotNull);
+          // Screen-origin installs are pendingGlobal (no MCP mount until
+          // promotion) — simulate the one-restart boot promotion, which
+          // mounts the declared servers exactly like
+          // PluginRuntimeManager.activateForBoot does.
+          final manifest =
+              PluginContributionRegistry.I.manifestFor(row.runtimeId!);
+          expect(manifest, isNotNull);
+          await app.mountPluginOwnedMcpServers(manifest!, connect: false);
+        });
+        expect(row.runtimeId, 'p11org/full-kit');
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: Aether.theme(),
+            home: PluginDetailScreen(plugin: row),
+          ),
+        );
+        await tester.pump();
+
+        // The fixture's diag-db server IS mounted by the install — its
+        // canonical McpServer id is `p11org/full-kit/diag-db`.
+        expect(
+          app.mcpServers.any((s) => s.canonicalId == 'p11org/full-kit/diag-db'),
+          isTrue,
+          reason: 'fixture precondition: diag-db must be mounted',
+        );
+        expect(find.text('MCP SERVERS'), findsOneWidget);
+        expect(find.textContaining('diag-db'), findsWidgets);
+        expect(
+          find.textContaining('declared (not mounted)'),
+          findsNothing,
+          reason: 'a mounted server must never render the not-mounted row',
+        );
+        // The owned row's setup hint renders ONCE (from the mounted
+        // row) — the spurious duplicate from the not-mounted branch is
+        // gone.
+        expect(find.textContaining('DIAG_DB_TOKEN'), findsOneWidget);
+        expect(find.textContaining('Needs setup'), findsOneWidget);
       },
     );
 

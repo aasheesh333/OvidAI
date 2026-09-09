@@ -1645,10 +1645,13 @@ class _PluginDiagnostics extends StatelessWidget {
             ),
         ],
         // Declared-but-not-mounted servers (mount deferred/failed):
-        // the manifest is the source of truth, never silent.
+        // the manifest is the source of truth, never silent. A mounted
+        // plugin server's McpServer.canonicalId is `<ownerPluginId>/
+        // <name>` (state.dart), NOT the declaration's
+        // `plugin:<id>/mcp:<name>` — compare against the mounted form.
         if (manifest != null)
           for (final d in manifest.mcpServers)
-            if (!owned.any((s) => s.canonicalId == d.canonicalId))
+            if (!owned.any((s) => s.canonicalId == '${manifest.id}/${d.name}'))
               _DiagRow(
                 '${d.canonicalId} · ${d.transport} · '
                 'declared (not mounted)',
@@ -1656,7 +1659,7 @@ class _PluginDiagnostics extends StatelessWidget {
               ),
         if (manifest != null)
           for (final d in manifest.mcpServers)
-            if (!owned.any((s) => s.canonicalId == d.canonicalId) &&
+            if (!owned.any((s) => s.canonicalId == '${manifest.id}/${d.name}') &&
                 (d.envNames.isNotEmpty || d.headerNames.isNotEmpty))
               _DiagRow(
                 'Needs setup: '

@@ -579,7 +579,7 @@ class AgentService extends ChangeNotifier {
     // hook_service import (circular).
     AppState.I.onSessionDeleted = (sessionId) {
       dropSessionRun(sessionId);
-      if (HookService.I.hasHookListeners('session_end')) {
+      if (HookService.I.hasHookListeners('session_end', sessionId: sessionId)) {
         unawaited(
           HookService.I.fire(
             'session_end',
@@ -600,7 +600,9 @@ class AgentService extends ChangeNotifier {
       // PR24: on_session_start — boot-time hooks for the restored ACTIVE
       // session (loaders, environment probes). Fire-and-forget.
       final active = AppState.I.activeSession;
-      if (active != null && HookService.I.hasHookListeners('session_start')) {
+      if (active != null &&
+          HookService.I.hasHookListeners('session_start',
+              sessionId: active.id)) {
         unawaited(
           HookService.I.fire(
             'session_start',
@@ -5056,7 +5058,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   }) {
     // Task 8 (spec §8.1): compaction hooks — pre_compact before the span
     // is folded, post_compact after (fire-and-forget observe).
-    if (HookService.I.hasHookListeners('pre_compact')) {
+    if (HookService.I.hasHookListeners('pre_compact', sessionId: s.id)) {
       unawaited(
         HookService.I.fire(
           'pre_compact',
@@ -5093,7 +5095,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       ),
     );
     AppState.I.persistSessions();
-    if (HookService.I.hasHookListeners('post_compact')) {
+    if (HookService.I.hasHookListeners('post_compact', sessionId: s.id)) {
       unawaited(
         HookService.I.fire(
           'post_compact',
@@ -5411,7 +5413,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // Task 8 (spec §8.1): user_prompt_submit — ONCE per user prompt, at
     // run entry (canonical replacement for the per-turn on_turn_start).
     // Observe-only, fire-and-forget.
-    if (HookService.I.hasHookListeners('user_prompt_submit')) {
+    if (HookService.I.hasHookListeners('user_prompt_submit',
+        sessionId: s.id)) {
       unawaited(
         HookService.I.fire(
           'user_prompt_submit',
@@ -5711,7 +5714,7 @@ ${await _agentsMdBlock()}
             ),
           );
         }
-        if (HookService.I.hasHookListeners('pre_request')) {
+        if (HookService.I.hasHookListeners('pre_request', sessionId: s.id)) {
           final hookCtx = await HookService.I.fire(
             'pre_request',
             s.id,
@@ -5728,7 +5731,9 @@ ${await _agentsMdBlock()}
         var msg = await _callLlm(p, msgs, s);
         // Task 8 (spec §8.1): post_request — observe-only hook after every
         // LLM response (fire-and-forget; output is never injected).
-        if (msg != null && HookService.I.hasHookListeners('post_request')) {
+        if (msg != null &&
+            HookService.I.hasHookListeners('post_request',
+                sessionId: s.id)) {
           unawaited(
             HookService.I.fire(
               'post_request',
@@ -6108,7 +6113,8 @@ ${await _agentsMdBlock()}
       );
       // PR24: on_turn_end fire-and-forget — post-run bookkeeping plugins
       // (indexers, notifiers, cleanup) never block the UI.
-      if (HookService.I.hasHookListeners('stop')) {
+      if (HookService.I.hasHookListeners('stop',
+          sessionId: pinnedSessionId)) {
         unawaited(
           HookService.I.fire(
             'stop',
@@ -6694,7 +6700,8 @@ ${await _agentsMdBlock()}
     // plugin may DENY the call outright; exit code 2 short-circuits the
     // whole dispatch before _dispatchInner ever runs, same enforcement
     // point a real security-relevant hook needs.
-    if (HookService.I.hasHookListeners('pre_tool')) {
+    if (HookService.I.hasHookListeners('pre_tool',
+        sessionId: ledgerSid ?? '')) {
       final gate = await HookService.I.fireGate(
         'pre_tool',
         ledgerSid ?? '',
@@ -6735,7 +6742,8 @@ ${await _agentsMdBlock()}
       }
       // PR24: on_post_tool — fire-and-forget after every tool completes
       // (indexers, loggers). Never blocks the loop.
-      if (HookService.I.hasHookListeners('post_tool')) {
+      if (HookService.I.hasHookListeners('post_tool',
+          sessionId: ledgerSid ?? '')) {
         unawaited(
           HookService.I.fire(
             'post_tool',
@@ -8699,7 +8707,8 @@ ${await _agentsMdBlock()}
     // a plugin may deny the approval before the user is ever asked
     // (exit 2 / JSON block). Fail-open on any hook failure: a broken
     // hook must never wedge the run (same stance as the pre_tool gate).
-    if (HookService.I.hasHookListeners('permission_request')) {
+    if (HookService.I.hasHookListeners('permission_request',
+        sessionId: sessionId ?? '')) {
       final gate = await HookService.I.fireGate(
         'permission_request',
         sessionId ?? '',
@@ -8883,7 +8892,8 @@ ${await _agentsMdBlock()}
     notifyListeners();
     // Task 8 (spec §8.1): notification — observe hook for user-facing
     // prompts (approval docks, questions, plan reviews).
-    if (HookService.I.hasHookListeners('notification')) {
+    if (HookService.I.hasHookListeners('notification',
+        sessionId: _runSession?.id ?? '')) {
       unawaited(
         HookService.I.fire(
           'notification',
@@ -11696,7 +11706,8 @@ ${await _agentsMdBlock()}
     AppState.I.persistSessions();
     _emit('think', 'dispatched $id → ${cleanTruncate(label, 40)}');
     // Task 8 (spec §8.1): subagent_start — observe hook at child spawn.
-    if (HookService.I.hasHookListeners('subagent_start')) {
+    if (HookService.I.hasHookListeners('subagent_start',
+        sessionId: child.id)) {
       unawaited(
         HookService.I.fire(
           'subagent_start',
@@ -11777,7 +11788,8 @@ ${await _agentsMdBlock()}
     _emit('think', 'spawned $id → ${cleanTruncate(label, 40)}');
     // Task 8 (spec §8.1): subagent_start for fresh foreground children
     // (workflow/ralph rounds) — same observe hook as dispatch_agent.
-    if (HookService.I.hasHookListeners('subagent_start')) {
+    if (HookService.I.hasHookListeners('subagent_start',
+        sessionId: child.id)) {
       unawaited(
         HookService.I.fire(
           'subagent_start',
@@ -12044,7 +12056,8 @@ ${await _agentsMdBlock()}
       mirror?.cancel();
       // Task 8 (spec §8.1): subagent_end — observe hook at settlement
       // (finished, interrupted, or failed — one fire per settled child).
-      if (HookService.I.hasHookListeners('subagent_end')) {
+      if (HookService.I.hasHookListeners('subagent_end',
+          sessionId: child.id)) {
         unawaited(
           HookService.I.fire(
             'subagent_end',

@@ -259,14 +259,14 @@ class HookService extends ChangeNotifier {
   }
 
   /// Whether ANY installed+enabled or registered-active plugin listens to
-  /// [event] (canonical or legacy alias).
-  bool hasHookListeners(String event) {
+  /// [event] (canonical or legacy alias). Pass the REAL [sessionId] the
+  /// subsequent fire/fireGate will use — dispatch guards must consult the
+  /// running session so a `sessionActive` registration counts in its
+  /// owning session (empty/absent stays fail-closed: global/legacy
+  /// listeners only).
+  bool hasHookListeners(String event, {String sessionId = ''}) {
     if (!enabled) return false;
-    // Any session id works for the "is there a listener at all" question:
-    // globalActive listeners match every session. (Callers that need
-    // session-scoped firing pass the session id to fire/fireGate, which
-    // re-resolves per session.)
-    return _resolveHooks(event, '').isNotEmpty;
+    return _resolveHooks(event, sessionId).isNotEmpty;
   }
 
   /// Whether any LEGACY `PluginItem` map hook listens for [event] — the
