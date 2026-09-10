@@ -3286,18 +3286,7 @@ class AppState extends ChangeNotifier {
       mcpServers.remove(s);
     }
 
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_kPluginState);
-      if (raw != null) {
-        final m = jsonDecode(raw) as Map<String, dynamic>;
-        for (final p in toRemovePlugins) {
-          m.remove(p.name);
-        }
-        await prefs.setString(_kPluginState, jsonEncode(m));
-      }
-    } catch (_) {}
-
+    await _persistPluginState();
     await persistMergedMarketplaceCatalog();
     await _persistCustomMcpServers();
     refresh();
@@ -4509,12 +4498,13 @@ class AppState extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       final list = prefs.getStringList(_kCustomPlugins);
       if (list == null || list.isEmpty) return;
+      final loaded = <PluginItem>[];
+      final names = plugins.map((plugin) => plugin.name).toSet();
       for (final j in list) {
         final m = jsonDecode(j) as Map<String, dynamic>;
         final name = m['name'] as String;
-        if (plugins.any((p) => p.name == name)) continue;
-        plugins.insert(
-          0,
+        if (!names.add(name)) continue;
+        loaded.add(
           PluginItem(
             name: name,
             author: 'you',
@@ -4535,6 +4525,7 @@ class AppState extends ChangeNotifier {
           ),
         );
       }
+      plugins.insertAll(0, loaded);
       refresh();
     } catch (_) {}
   }

@@ -180,7 +180,9 @@ class CommandService {
         handler: (args) async {
           final app = AppState.I;
           final s = app.activeSession;
-          if (s == null) return const CommandResult(feedback: 'No active session.');
+          if (s == null) {
+            return const CommandResult(feedback: 'No active session.');
+          }
           final q = args.trim().toLowerCase();
           if (q.isEmpty) {
             // popupSelect (the command parser parity with /model and /permission): bare
@@ -203,7 +205,7 @@ class CommandService {
           // chat.
           final hadMessages = s.messages.isNotEmpty;
           s.presetId = match.id;
-          app.persistSessions();
+          await app.persistSessions();
           app.refresh();
           return CommandResult(
             feedback: 'Preset → ${match.id} (${match.label}) — '
@@ -222,7 +224,9 @@ class CommandService {
         handler: (args) async {
           final app = AppState.I;
           final s = app.activeSession;
-          if (s == null) return const CommandResult(feedback: 'No active session.');
+          if (s == null) {
+            return const CommandResult(feedback: 'No active session.');
+          }
           final q = args.trim();
           if (q.isEmpty) {
             // popupSelect: bare /model opens the picker overlay (the command parser behavior).

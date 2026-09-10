@@ -399,9 +399,6 @@ class PluginRuntimeManager extends ChangeNotifier {
     bool reportFailure = false,
   }) async {
     try {
-      if (failCanonicalRowsWriteForTest) {
-        throw StateError('Injected canonical plugin-row write failure');
-      }
       final prefs = await SharedPreferences.getInstance();
       final written = await prefs.setString(
         kPluginActivationPrefKey,
@@ -438,7 +435,10 @@ class PluginRuntimeManager extends ChangeNotifier {
   Future<PluginActivationRecord?> recordFor(String pluginId) async =>
       (await _loadEntries())[pluginId]?.activation;
 
-  Future<void> persistRuntimeRow(String pluginId) async {
+  Future<void> persistRuntimeRow(
+    String pluginId, {
+    bool reportFailure = false,
+  }) async {
     final entry = (await _loadEntries())[pluginId];
     if (entry == null) return;
     final rows = await _loadRows();
@@ -449,7 +449,7 @@ class PluginRuntimeManager extends ChangeNotifier {
       stored: current ?? rows[pluginId],
       catalog: rows[pluginId],
     );
-    await _saveRows(rows);
+    await _saveRows(rows, reportFailure: reportFailure);
   }
 
   Future<void> _removeRuntimeRow(String pluginId) async {
@@ -486,6 +486,9 @@ class PluginRuntimeManager extends ChangeNotifier {
     bool reportFailure = false,
   }) async {
     try {
+      if (failCanonicalRowsWriteForTest) {
+        throw StateError('Injected canonical plugin-row write failure');
+      }
       final prefs = await SharedPreferences.getInstance();
       final ids = rows.keys.toList()..sort();
       final written = await prefs.setString(
@@ -684,6 +687,29 @@ class PluginRuntimeManager extends ChangeNotifier {
     }
   }
 
+  Future<void> _failMissingContent(
+    String pluginId,
+    Map<String, PluginInstallEntry> entries,
+    PluginInstallEntry entry, {
+    PluginItem? projection,
+  }) async {
+    await _deactivateRuntime(
+      pluginId,
+      entries,
+      entry,
+      activation: PluginActivation.failed,
+    );
+    if (projection != null) {
+      projection
+        ..enabled = false
+        ..activation = PluginActivation.failed
+        ..immediateSessionId = null
+        ..promoteOnNextBoot = false
+        ..migrationRequired = false
+        ..runtimeReason = _kMissingContentReason;
+    }
+  }
+
   /// Rebuilds canonical rows before any activation, fails closed on missing
   /// grants/content, then disables executable legacy rows without deleting
   /// their caches or approval history.
@@ -723,15 +749,8 @@ class PluginRuntimeManager extends ChangeNotifier {
         catalog: _catalogRowFor(id),
       );
       if (!Directory(entry.contentDir).existsSync()) {
-        entry = _replaceEntry(entry, activation: _failedRecord(id, entry));
-        entries[id] = entry;
-        row
-          ..enabled = false
-          ..activation = PluginActivation.failed
-          ..migrationRequired = false
-          ..runtimeReason = _kMissingContentReason;
-        PluginContributionRegistry.I.unregisterPlugin(id);
-        await AppState.I.unmountPluginOwnedMcpServers(id, uninstall: false);
+        await _failMissingContent(id, entries, entry, projection: row);
+        entry = entries[id]!;
         statuses.add(
           StartupItemStatus.failed(
             id,
@@ -1300,6 +1319,7 @@ class PluginRuntimeManager extends ChangeNotifier {
       if (entries.isEmpty) return;
       var entriesChanged = false;
       var rowsChanged = false;
+      final runtimeRowsToPersist = <String>{};
       for (final id in entries.keys.toList()) {
         var entry = entries[id]!;
         if (entry.disabled) continue;
@@ -1337,15 +1357,10 @@ class PluginRuntimeManager extends ChangeNotifier {
             if (!Directory(entry.contentDir).existsSync()) {
               // Honest failure: committed content vanished (external
               // deletion, cleared storage) — never optimistically mount.
-              rec = PluginActivationRecord(
-                pluginId: id,
-                state: PluginActivation.failed,
-                immediateSessionId: null,
-                installedBootEpoch: rec.installedBootEpoch,
-                promoteOnNextBoot: false,
-              );
-              dirty = true;
-              PluginContributionRegistry.I.unregisterPlugin(id);
+              await _failMissingContent(id, entries, entry);
+              rec = entries[id]!.activation;
+              entriesChanged = true;
+              runtimeRowsToPersist.add(id);
             } else {
               PluginContributionRegistry.I.register(
                 entry.manifest,
@@ -1377,6 +1392,9 @@ class PluginRuntimeManager extends ChangeNotifier {
         rowsChanged |= _syncRow(rec);
       }
       if (entriesChanged) await _saveEntries(entries);
+      for (final id in runtimeRowsToPersist) {
+        await persistRuntimeRow(id);
+      }
       if (entriesChanged || rowsChanged) {
         await AppState.I.persistPluginState();
         await AppState.I.persistMergedMarketplaceCatalog();
@@ -1417,25 +1435,9 @@ class PluginRuntimeManager extends ChangeNotifier {
       // Committed content vanished — retry cannot invent it and never
       // re-runs the install transaction: persist honest `failed` and
       // keep the record so the row stays Failed (retry stays available).
-      final rec = PluginActivationRecord(
-        pluginId: pluginId,
-        state: PluginActivation.failed,
-        immediateSessionId: null,
-        installedBootEpoch: entry.activation.installedBootEpoch,
-        promoteOnNextBoot: false,
-      );
-      entries[pluginId] = PluginInstallEntry(
-        activation: rec,
-        manifest: entry.manifest,
-        contentDir: entry.contentDir,
-        version: entry.version,
-        degradedNames: entry.degradedNames,
-        probeFailures: entry.probeFailures,
-        disabled: entry.disabled,
-      );
-      await _saveEntries(entries);
-      PluginContributionRegistry.I.unregisterPlugin(pluginId);
-      _syncRow(rec);
+      await _failMissingContent(pluginId, entries, entry);
+      await _saveEntries(entries, reportFailure: true);
+      await persistRuntimeRow(pluginId, reportFailure: true);
       notifyListeners();
       return PluginActivation.failed;
     }
@@ -1566,25 +1568,9 @@ class PluginRuntimeManager extends ChangeNotifier {
       return;
     }
     if (!Directory(entry.contentDir).existsSync()) {
-      final rec = PluginActivationRecord(
-        pluginId: pluginId,
-        state: PluginActivation.failed,
-        immediateSessionId: null,
-        installedBootEpoch: entry.activation.installedBootEpoch,
-        promoteOnNextBoot: false,
-      );
-      entries[pluginId] = PluginInstallEntry(
-        activation: rec,
-        manifest: entry.manifest,
-        contentDir: entry.contentDir,
-        version: entry.version,
-        degradedNames: entry.degradedNames,
-        probeFailures: entry.probeFailures,
-        disabled: false,
-      );
-      await _saveEntries(entries);
-      PluginContributionRegistry.I.unregisterPlugin(pluginId);
-      _syncRow(rec);
+      await _failMissingContent(pluginId, entries, entry);
+      await _saveEntries(entries, reportFailure: true);
+      await persistRuntimeRow(pluginId, reportFailure: true);
       notifyListeners();
       return;
     }

@@ -3,10 +3,13 @@ import 'dart:io';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/hook_service.dart';
+import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/plugin_permissions.dart';
 import 'package:ovid_ai/core/plugin_registry.dart';
@@ -97,6 +100,10 @@ void main() {
     PluginRuntimeManager.failMigrationMarkerWriteForTest = false;
     PluginRuntimeManager.failCanonicalRowsWriteForTest = false;
     AppState.pluginCacheRootOverrideForTest = cacheRoot;
+    McpService.I.httpClientForTest = null;
+    McpService.reconnectInitialDelayForTest = const Duration(milliseconds: 500);
+    McpService.reconnectMaxDelayForTest = const Duration(seconds: 30);
+    McpService.reconnectMaxAttemptsForTest = 10;
     app = AppState.createForTest();
     HookService.I.enabled = true;
     SkillService.I.clearRoots();
@@ -113,6 +120,11 @@ void main() {
     PluginRuntimeManager.failMigrationMarkerWriteForTest = false;
     PluginRuntimeManager.failCanonicalRowsWriteForTest = false;
     AppState.pluginCacheRootOverrideForTest = null;
+    await McpService.I.disconnectAll();
+    McpService.I.httpClientForTest = null;
+    McpService.reconnectInitialDelayForTest = const Duration(milliseconds: 500);
+    McpService.reconnectMaxDelayForTest = const Duration(seconds: 30);
+    McpService.reconnectMaxAttemptsForTest = 10;
     AppState.resetTestInstance();
     if (runtimeRoot.existsSync()) runtimeRoot.deleteSync(recursive: true);
     if (cacheRoot.existsSync()) cacheRoot.deleteSync(recursive: true);
@@ -256,7 +268,22 @@ void main() {
       );
       final store = PluginPermissionStore();
 
-      await approve(runtime, storedPluginId: 'other/plugin');
+      final mismatched = PluginPermissionGrant(
+        pluginId: 'other/plugin',
+        manifestDigest: pluginManifestDigest(runtime),
+        capabilities: runtime.requestedCapabilities,
+        environmentReadNames: runtime.environmentReadNames,
+        approvedAt: DateTime.utc(2026, 9, 10),
+      );
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        kPluginGrantsPrefKey,
+        jsonEncode({runtime.id: jsonEncode(mismatched.toJson())}),
+      );
+      expect(
+        (await store.load(runtime.id, pluginManifestDigest(runtime)))!.pluginId,
+        'other/plugin',
+      );
       expect(
         await store.effectiveRuntimeGrant(
           pluginId: runtime.id,
@@ -365,6 +392,135 @@ void main() {
       expect(row.runtimeReason, 'Installed content is missing');
     },
   );
+
+  for (final operation in ['retry', 'enable']) {
+    test(
+      '$operation missing content fails closed and persists the runtime row',
+      () async {
+        final id = 'acme/missing-$operation';
+        final runtime = NormalizedPluginManifest(
+          id: id,
+          name: 'Missing $operation',
+          version: '1.0.0',
+          format: PluginFormat.genericMcp,
+          rootPath: contentPath(id),
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: id,
+              name: 'api',
+              transport: 'http',
+              url: 'https://missing-$operation.example/mcp',
+            ),
+            PluginMcpServer(
+              pluginId: id,
+              name: 'retrying',
+              transport: 'http',
+              url: 'https://retrying-$operation.example/mcp',
+            ),
+          ],
+          requestedCapabilities: const {PluginCapability.workspaceRead},
+        );
+        Directory(runtime.rootPath).createSync(recursive: true);
+        await seedEntries({
+          id: entryFor(runtime, disabled: operation == 'enable'),
+        });
+        await approve(runtime);
+        final row = PluginItem(
+          name: runtime.name,
+          author: 'acme',
+          description: '',
+          version: runtime.version,
+          category: 'Plugin',
+          installed: true,
+          enabled: true,
+          runtimeId: id,
+          activation: PluginActivation.globalActive,
+          migrationRequired: true,
+          runtimeReason: 'stale reason',
+        );
+        app.plugins.add(row);
+        PluginContributionRegistry.I.register(
+          runtime,
+          activation: PluginActivation.globalActive,
+        );
+        registeredIds.add(id);
+        await app.mountPluginOwnedMcpServers(runtime, connect: false);
+        final server = app.mcpServers.singleWhere(
+          (candidate) => candidate.canonicalId == '$id/api',
+        );
+        final retrying = app.mcpServers.singleWhere(
+          (candidate) => candidate.canonicalId == '$id/retrying',
+        );
+        McpService.I.httpClientForTest = MockClient((request) async {
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response(
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': body['id'],
+              'result': body['method'] == 'tools/list'
+                  ? {'tools': <Object>[]}
+                  : <String, Object>{},
+            }),
+            200,
+          );
+        });
+        expect(await McpService.I.connect(server), contains('connected'));
+        expect(await McpService.I.connect(retrying), contains('connected'));
+        expect(McpService.I.isConnected(server.canonicalId), isTrue);
+        McpService.reconnectInitialDelayForTest = const Duration(minutes: 1);
+        McpService.reconnectMaxDelayForTest = const Duration(minutes: 1);
+        McpService.I.httpClientForTest = MockClient((request) async {
+          throw http.ClientException('offline');
+        });
+        expect(
+          await McpService.I.callTool(retrying.canonicalId, 'lookup', {}),
+          contains('MCP error'),
+        );
+        expect(
+          McpService.I.hasPendingReconnectForTest(retrying.canonicalId),
+          isTrue,
+        );
+        Directory(runtime.rootPath).deleteSync(recursive: true);
+
+        final result = operation == 'retry'
+            ? await PluginRuntimeManager.I.retry(id)
+            : null;
+        if (operation == 'enable') {
+          await PluginRuntimeManager.I.enable(id);
+        }
+
+        if (operation == 'retry') {
+          expect(result, PluginActivation.failed);
+        }
+        expect(McpService.I.isConnected(server.canonicalId), isFalse);
+        expect(
+          McpService.I.hasPendingReconnectForTest(retrying.canonicalId),
+          isFalse,
+        );
+        expect(PluginContributionRegistry.I.isRegistered(id), isFalse);
+        expect(row.enabled, isFalse);
+        expect(row.activation, PluginActivation.failed);
+        expect(row.migrationRequired, isFalse);
+        expect(row.runtimeReason, 'Installed content is missing');
+        expect(
+          (await PluginRuntimeManager.I.recordFor(id))!.state,
+          PluginActivation.failed,
+        );
+        final prefs = await SharedPreferences.getInstance();
+        final persisted = PluginItem.fromJson(
+          jsonDecode(
+                decodeRows(prefs.getString(kPluginRowsV2PrefKey)!)[id]
+                    as String,
+              )
+              as Map<String, dynamic>,
+        );
+        expect(persisted.enabled, isFalse);
+        expect(persisted.activation, PluginActivation.failed);
+        expect(persisted.migrationRequired, isFalse);
+        expect(persisted.runtimeReason, 'Installed content is missing');
+      },
+    );
+  }
 
   test('persisted failed activation remains failed and disabled', () async {
     final runtime = manifest('acme/failed-state');
@@ -732,7 +888,7 @@ void main() {
     final runtime = manifest('acme/row-write-failure');
     Directory(runtime.rootPath).createSync(recursive: true);
     await seedEntries({runtime.id: entryFor(runtime)});
-    await approve(runtime);
+    // Missing approval changes the activation entry before canonical rows save.
     PluginRuntimeManager.failCanonicalRowsWriteForTest = true;
 
     await expectLater(
@@ -741,6 +897,17 @@ void main() {
     );
 
     final prefs = await SharedPreferences.getInstance();
+    final activation =
+        jsonDecode(
+              decodeRows(prefs.getString(kPluginActivationPrefKey)!)[runtime.id]
+                  as String,
+            )
+            as Map<String, dynamic>;
+    expect(
+      (activation['activation'] as Map<String, dynamic>)['state'],
+      PluginActivation.disabled.name,
+    );
+    expect(prefs.getString(kPluginRowsV2PrefKey), isNull);
     expect(prefs.getBool('ovid_plugin_rows_v2_migrated'), isNot(true));
   });
 
@@ -806,6 +973,89 @@ void main() {
       isNot(contains(runtime.name)),
     );
   });
+
+  test('custom legacy row order is stable across cold loads', () async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('ovid_custom_plugins_v1', [
+      jsonEncode({
+        'name': 'Custom First',
+        'description': 'first',
+        'category': 'Custom',
+        'installed': true,
+        'enabled': true,
+      }),
+      jsonEncode({
+        'name': 'Custom Second',
+        'description': 'second',
+        'category': 'Custom',
+        'installed': true,
+        'enabled': true,
+      }),
+    ]);
+
+    Future<List<String>> coldLoad() async {
+      AppState.resetTestInstance();
+      app = AppState.createForTest();
+      final tasks = await app.buildReadinessTasks();
+      await tasks.singleWhere((task) => task.id == 'local.hydrate').run();
+      await tasks.singleWhere((task) => task.id == 'localSafety.migrate').run();
+      return app.plugins
+          .where((row) => row.author == 'you')
+          .map((row) => row.name)
+          .toList();
+    }
+
+    expect(await coldLoad(), ['Custom First', 'Custom Second']);
+    expect(await coldLoad(), ['Custom First', 'Custom Second']);
+    expect(
+      prefs
+          .getStringList('ovid_custom_plugins_v1')!
+          .map((raw) => (jsonDecode(raw) as Map<String, dynamic>)['name']),
+      ['Custom First', 'Custom Second'],
+    );
+  });
+
+  test(
+    'removing same-name runtime marketplace row preserves legacy v1 state',
+    () async {
+      final runtime = PluginItem(
+        name: 'Shared Marketplace Name',
+        author: 'runtime',
+        description: '',
+        version: '1',
+        category: 'Plugin',
+        installed: true,
+        enabled: false,
+        source: 'market/repo',
+        marketplace: 'market/repo',
+        runtimeId: 'acme/shared-marketplace',
+      );
+      final legacy = PluginItem(
+        name: 'Shared Marketplace Name',
+        author: 'legacy',
+        description: '',
+        version: '1',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'legacy/unrelated',
+      );
+      app.plugins.addAll([runtime, legacy]);
+      await app.persistPluginState();
+
+      await app.removeMarketplace('market/repo');
+
+      expect(app.plugins, contains(legacy));
+      expect(app.plugins, isNot(contains(runtime)));
+      final prefs = await SharedPreferences.getInstance();
+      final state = decodeRows(prefs.getString('ovid_plugin_state_v1')!);
+      final persisted =
+          jsonDecode(state[legacy.name] as String) as Map<String, dynamic>;
+      expect(persisted['installed'], isTrue);
+      expect(persisted['enabled'], isTrue);
+      expect(persisted['source'], 'legacy/unrelated');
+    },
+  );
 
   test('v1 display-name state never mutates a normalized sibling', () async {
     final runtime = manifest('acme/collision', name: 'Collision');

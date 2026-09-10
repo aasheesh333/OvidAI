@@ -108,3 +108,65 @@ only `runtimeId == null` legacy/native rows.
   statuses for those consumers.
 - Flutter dependency resolution reports available package upgrades; no
   dependency changes were made.
+
+## Fix Round 1
+
+### RED Evidence
+
+- Focused retry and enable fixtures mounted two real plugin-owned HTTP MCP
+  rows, kept one connected, and forced the other into pending reconnect. After
+  committed content was deleted, both lifecycle paths left the live MCP
+  connected and the stale row enabled.
+- Two persisted custom legacy rows loaded as `Second, First`; safety
+  reconciliation serialized that reversal, causing the order to alternate on
+  each cold load.
+- Removing an installed normalized marketplace row erased the v1 state for an
+  unrelated runtimeId-null legacy row with the same display name.
+- The canonical-row failure test showed the activation remained
+  `globalActive`, proving `failCanonicalRowsWriteForTest` threw from
+  `_saveEntries` before canonical row persistence was reached.
+- The grant mismatch fixture originally stored the bad grant under
+  `other/plugin`, so strict validation rejected a missing outer key rather than
+  an `acme/strict` row whose encoded inner `pluginId` was wrong.
+- Full core also reproduced a suite-order persistence race introduced by the
+  longer Task 2 session write path: `/preset` returned before its unawaited
+  session persistence completed, and the next reload observed a null preset.
+
+### Fixes
+
+- Added one shared missing-content transition used by reconcile, boot, retry,
+  and enable. It writes `failed`, clears migration state, applies the exact
+  `Installed content is missing` reason, unregisters contributions, unmounts
+  owned MCP servers, cancels reconnects, and persists activation plus v2 row
+  state before returning.
+- Custom legacy loading now accumulates rows and inserts the batch once, keeping
+  persisted order stable across repeated cold loads and migration writes.
+- Marketplace removal now rebuilds v1 plugin state from surviving runtimeId-null
+  rows. Removing a normalized same-name row cannot delete an unrelated legacy
+  owner's state; removing the final legacy owner still removes the key.
+- Moved the canonical-row failure injection to `_saveRows`. The test now proves
+  the preceding activation transition was durably saved while v2 rows and the
+  migration marker remain absent.
+- Rebuilt the inner-ID grant fixture with outer key `acme/strict` and encoded
+  inner `pluginId: other/plugin`; permissive `load` finds it and
+  `effectiveRuntimeGrant` rejects it.
+- Awaited `/preset` session persistence at its existing async command boundary,
+  preserving Task 2 data ordering and eliminating the suite-order race without
+  changing startup or Stop behavior.
+
+### Verification
+
+- `flutter test test/plugin_runtime_migration_test.dart`: 34/34 passed.
+- `flutter test test/core_regression_test.dart --name "PLUGIN5|PLUGIN7|PLUGIN9|PLUGIN11"`: 55/55 passed.
+- `flutter test test/startup_first_frame_test.dart`: 26/26 passed.
+- `flutter test test/session_stop_isolation_test.dart`: 16/16 passed.
+- `flutter test test/core_regression_test.dart`: 552/552 passed.
+- `flutter analyze --no-pub`: no issues.
+- `git diff --check`: clean.
+
+### Remaining Concerns
+
+- The missing-content lifecycle tests use real `McpService` state and HTTP
+  handshake/reconnect behavior with an injected HTTP transport. They do not
+  spawn a stdio child process; both transports share the same disconnect and
+  reconnect-cancellation teardown path.
