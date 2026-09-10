@@ -499,6 +499,63 @@ void main() {
   );
 
   test(
+    'malformed descendant sandbox ids use the session id for cleanup once',
+    () async {
+      final parent = _sessionJson('parent', [
+        'parent',
+      ], sandboxId: 'parent-box');
+      final numericChild =
+          jsonDecode(
+                  _sessionJson('numeric-child', [
+                    'numeric',
+                  ], parentId: 'parent'),
+                )
+                as Map<String, dynamic>
+            ..['sandboxId'] = 42;
+      final mapChild =
+          jsonDecode(_sessionJson('map-child', ['map'], parentId: 'parent'))
+                as Map<String, dynamic>
+            ..['sandboxId'] = {'unexpected': true};
+      final deletedWorkspaces = <String>[];
+      final deletedSessions = <String>[];
+      SharedPreferences.setMockInitialValues({
+        'ovid_session_bootstrap_v1': _bootstrapJson(parent, parent),
+        'ovid_active_session': 'parent',
+        'ovid_sessions': [
+          parent,
+          jsonEncode(numericChild),
+          jsonEncode(mapChild),
+        ],
+      });
+      final app = AppState.createForTest(
+        workspaceDeleter: (sandboxId) async => deletedWorkspaces.add(sandboxId),
+      );
+      app.onSessionDeleted = deletedSessions.add;
+
+      await app.initializeForFirstFrame();
+      app.deleteSession('parent');
+      await app.persistSessions();
+
+      final prefs = await SharedPreferences.getInstance();
+      final persistedIds = prefs
+          .getStringList('ovid_sessions')!
+          .map((raw) => (jsonDecode(raw) as Map<String, dynamic>)['id']);
+      expect(persistedIds, isNot(contains('numeric-child')));
+      expect(persistedIds, isNot(contains('map-child')));
+      expect(
+        deletedSessions.where((id) => id == 'numeric-child'),
+        hasLength(1),
+      );
+      expect(deletedSessions.where((id) => id == 'map-child'), hasLength(1));
+      expect(
+        deletedWorkspaces.where((id) => id == 'numeric-child'),
+        hasLength(1),
+      );
+      expect(deletedWorkspaces.where((id) => id == 'map-child'), hasLength(1));
+    },
+  );
+
+  test(
     'first-frame fallback writes bootstrap cache for the next boot',
     () async {
       SharedPreferences.setMockInitialValues({
@@ -519,6 +576,87 @@ void main() {
       );
       await app.initializeForFirstFrame();
       expect(app.activeSession!.messages, hasLength(50));
+    },
+  );
+
+  test(
+    'fallback bootstrap follows the selected root instead of requested raw',
+    () async {
+      const malformedRequested = '{"id":"child","sandboxId":';
+      final child = _sessionJson('child', ['child'], parentId: 'root');
+      final root = _sessionJson('root', [
+        for (var i = 0; i < 80; i++) 'root-$i',
+      ]);
+      SharedPreferences.setMockInitialValues({
+        'ovid_active_session': 'child',
+        'ovid_sessions': [malformedRequested, child, root],
+      });
+      var app = AppState.createForTest();
+
+      await app.initializeForFirstFrame();
+
+      expect(app.activeSession!.id, 'root');
+      final prefs = await SharedPreferences.getInstance();
+      final bootstrap =
+          jsonDecode(prefs.getString('ovid_session_bootstrap_v1')!)
+              as Map<String, dynamic>;
+      expect(
+        bootstrap['sourceFingerprint'],
+        sha256.convert(utf8.encode(root)).toString(),
+      );
+      expect(prefs.getString('ovid_active_session'), 'root');
+
+      AppState.resetTestInstance();
+      var fallbackDecodes = 0;
+      app = AppState.createForTest(
+        persistedSessionDecoder: (raw) {
+          fallbackDecodes++;
+          return ChatSession.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+        },
+      );
+      await app.initializeForFirstFrame();
+
+      expect(fallbackDecodes, 0);
+      expect(app.activeSession!.id, 'root');
+      expect(app.activeSession!.messages, hasLength(50));
+    },
+  );
+
+  test(
+    'persist builds an exact bootstrap tail without decoding session JSON',
+    () async {
+      var bootstrapDecodes = 0;
+      final app = AppState.createForTest(
+        sessionBootstrapDecoder: (raw) {
+          bootstrapDecodes++;
+          return jsonDecode(raw) as Map<String, dynamic>;
+        },
+      );
+      final active = app.activeSession!;
+      active.messages.addAll([
+        for (var i = 0; i < 80; i++)
+          Message(role: 'user', content: 'message-$i'),
+      ]);
+
+      await app.persistSessions();
+
+      expect(bootstrapDecodes, 0);
+      final prefs = await SharedPreferences.getInstance();
+      final activeRaw = prefs
+          .getStringList('ovid_sessions')!
+          .singleWhere((raw) => raw.startsWith('{"id":"${active.id}",'));
+      final bootstrap =
+          jsonDecode(prefs.getString('ovid_session_bootstrap_v1')!)
+              as Map<String, dynamic>;
+      final tail =
+          (bootstrap['session'] as Map<String, dynamic>)['messages'] as List;
+      expect(
+        bootstrap['sourceFingerprint'],
+        sha256.convert(utf8.encode(activeRaw)).toString(),
+      );
+      expect(tail, hasLength(50));
+      expect((tail.first as Map<String, dynamic>)['content'], 'message-30');
+      expect((tail.last as Map<String, dynamic>)['content'], 'message-79');
     },
   );
 

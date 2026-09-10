@@ -249,3 +249,50 @@ from design sections 5.1, 5.3, 5.7, and 8.
   bootstrap record.
 - Task 6 still owns per-plugin and per-MCP startup items; Task 2 retains only the
   replaceable coarse bridge.
+
+## Fix Round 4
+
+### RED Evidence
+
+- A persisted active ID targeting a malformed/subagent row selected a valid root
+  fallback, but bootstrap generation reused the requested raw row and produced no
+  usable cache. The immediate next boot repeated fallback decoding.
+- Numeric and map-valued `sandboxId` fields on parseable deferred descendants
+  threw during cleanup projection after tombstoning, so transcript deletion
+  completed without the session callback or fallback workspace cleanup.
+- A bootstrap decode counter recorded one full active-row JSON decode during
+  `persistSessions()`, after that method had already encoded the same session row.
+
+### Changes
+
+- First-frame fallback now resolves bootstrap source bytes exclusively from the
+  selected root ID, and persists the corrected active ID when fallback changes
+  the selection. The resulting cache validates and is accepted on the next boot.
+- Deferred deletion validates `sandboxId` as a non-empty string and otherwise
+  uses the session ID. Existing session-ID deduplication keeps the lifecycle
+  callback and workspace cleanup at exactly one invocation.
+- `persistSessions()` retains the encoded rows and matching active object, then
+  builds the latest-50 bootstrap payload from that object while hashing the exact
+  raw row. It performs no second full transcript JSON decode.
+- Added a bootstrap decoder test seam used by cache reads, allowing persistence
+  tests to prove a zero-decode write while independently checking the exact
+  SHA-256 fingerprint and tail contents.
+- Task 3 migration and session-scoped stop behavior were not changed.
+
+### Verification
+
+- Startup first-frame tests: 29/29 passed.
+- Startup coordinator tests: 16/16 passed.
+- Boot-focused core tests: 7/7 passed.
+- Plugin runtime migration tests: 34/34 passed.
+- Full core regression: 552/552 passed.
+- `/home/ubuntu/sdk/flutter/bin/flutter analyze --no-pub` reported no issues.
+- `git diff --check` passed.
+
+### Remaining Dependencies and Concerns
+
+- Bootstrap persistence still computes SHA-256 over the full active raw row on
+  the caller isolate. It no longer reparses the transcript; moving hashing and
+  the underlying `StringList` storage off this path remains Project 2 scope.
+- Task 6 still owns per-plugin and per-MCP startup items; Task 2 retains only the
+  replaceable coarse bridge.
