@@ -11,6 +11,7 @@ import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
+import 'package:ovid_ai/ui/subagent_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -33,6 +34,7 @@ void main() {
     for (final sessionId in const [
       'stop-isolation-a',
       'stop-isolation-b',
+      'stop-isolation-c',
       'stop-tree-root',
       'stop-tree-parent',
       'stop-tree-child',
@@ -522,7 +524,7 @@ void main() {
     expect(runB.queue, isEmpty);
   });
 
-  test('interrupting a subagent cancels its descendants only', () {
+  test('model interrupt_agent cancels its descendants only', () async {
     final root = ChatSession(
       id: 'stop-tree-root',
       title: 'Root',
@@ -558,9 +560,31 @@ void main() {
       ..activeRunId = 'run-child';
     final unrelatedRun = agent.runBucketForTest(unrelated.id)
       ..activeRunId = 'run-unrelated';
+    final handle = SubagentInfo(
+      id: 'sub-tree-parent',
+      label: parent.title,
+      sessionId: parent.id,
+      parentSessionId: root.id,
+      parentMode: AgentMode.auto,
+      prompt: 'work',
+    );
+    agent.registerSubagentForTest(handle);
+    addTearDown(() => agent.removeSubagentForTest(handle.id));
 
-    agent.interruptSubagent(parent.id);
+    final result = await agent.dispatchForTest('interrupt_agent', {
+      'agent_id': handle.id,
+    });
+    final interruptSchema = agent.toolsForTest().firstWhere(
+      (tool) =>
+          ((tool['function'] as Map<String, dynamic>)['name'] as String) ==
+          'interrupt_agent',
+    );
+    final description =
+        (interruptSchema['function'] as Map<String, dynamic>)['description']
+            as String;
 
+    expect(result, contains('descendants'));
+    expect(description, contains('descendant'));
     expect(parentRun.activeRunId, isNull);
     expect(parentRun.cancelRequested, isTrue);
     expect(childRun.activeRunId, isNull);
@@ -570,6 +594,152 @@ void main() {
     expect(parent.agentState, 'stopped');
     expect(child.agentState, 'stopped');
   });
+
+  testWidgets('subagent app-bar Stop is local to the rendered session', (
+    tester,
+  ) async {
+    final tree = _seedSubagentTree(agent, app, continuable: true);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: Aether.theme(),
+        home: SubagentScreen(sessionId: tree.parent.id),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byTooltip('Stop this subagent'));
+    await tester.pump();
+
+    _expectOnlyParentStopped(tree);
+  });
+
+  testWidgets('subagent composer Stop is local to the rendered session', (
+    tester,
+  ) async {
+    final tree = _seedSubagentTree(agent, app, continuable: true);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: Aether.theme(),
+        home: SubagentScreen(sessionId: tree.parent.id),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byTooltip('Stop'));
+    await tester.pump();
+
+    _expectOnlyParentStopped(tree);
+  });
+
+  test('newer successful notification completion wins reverse order', () async {
+    final runs = _seedNotificationRuns(agent, app);
+    final bResult = Completer<bool>();
+    final cResult = Completer<bool>();
+    final bInvoked = Completer<void>();
+    final cInvoked = Completer<void>();
+    await _initNotificationMock((text) {
+      if (text.contains('display A')) return Future.value(true);
+      if (text.contains('pending B')) {
+        if (!bInvoked.isCompleted) bInvoked.complete();
+        return bResult.future;
+      }
+      if (text.contains('pending C')) {
+        if (!cInvoked.isCompleted) cInvoked.complete();
+        return cResult.future;
+      }
+      return Future.value(true);
+    });
+    final notification = AgentNotificationService.I;
+    await notification.agentWorking('display A', sessionId: runs.aId);
+    await _waitForDisplayedTarget(notification, runs.aId);
+    await notification.agentWorking('pending B', sessionId: runs.bId);
+    await bInvoked.future.timeout(const Duration(seconds: 2));
+    await notification.agentWorking('pending C', sessionId: runs.cId);
+    await cInvoked.future.timeout(const Duration(seconds: 2));
+
+    cResult.complete(true);
+    await _waitForDisplayedTarget(notification, runs.cId);
+    bResult.complete(true);
+    await Future<void>.delayed(Duration.zero);
+    await _sendNativeAction('onAgentStop');
+
+    expect(runs.a.activeRunId, 'run-a');
+    expect(runs.b.activeRunId, 'run-b');
+    expect(runs.c.activeRunId, isNull);
+  });
+
+  test('older success commits when newest notification update fails', () async {
+    final runs = _seedNotificationRuns(agent, app);
+    final bResult = Completer<bool>();
+    final cResult = Completer<bool>();
+    final bInvoked = Completer<void>();
+    final cInvoked = Completer<void>();
+    await _initNotificationMock((text) {
+      if (text.contains('display A')) return Future.value(true);
+      if (text.contains('pending B')) {
+        if (!bInvoked.isCompleted) bInvoked.complete();
+        return bResult.future;
+      }
+      if (text.contains('pending C')) {
+        if (!cInvoked.isCompleted) cInvoked.complete();
+        return cResult.future;
+      }
+      return Future.value(true);
+    });
+    final notification = AgentNotificationService.I;
+    await notification.agentWorking('display A', sessionId: runs.aId);
+    await _waitForDisplayedTarget(notification, runs.aId);
+    await notification.agentWorking('pending B', sessionId: runs.bId);
+    await bInvoked.future.timeout(const Duration(seconds: 2));
+    await notification.agentWorking('pending C', sessionId: runs.cId);
+    await cInvoked.future.timeout(const Duration(seconds: 2));
+
+    cResult.complete(false);
+    await Future<void>.delayed(Duration.zero);
+    bResult.complete(true);
+    await _waitForDisplayedTarget(notification, runs.bId);
+    await _sendNativeAction('onAgentStop');
+
+    expect(runs.a.activeRunId, 'run-a');
+    expect(runs.b.activeRunId, isNull);
+    expect(runs.c.activeRunId, 'run-c');
+  });
+
+  test(
+    'idle barrier rejects an older successful notification completion',
+    () async {
+      final runs = _seedNotificationRuns(agent, app);
+      final bResult = Completer<bool>();
+      final bInvoked = Completer<void>();
+      await _initNotificationMock((text) {
+        if (text.contains('display A')) return Future.value(true);
+        if (text.contains('pending B')) {
+          if (!bInvoked.isCompleted) bInvoked.complete();
+          return bResult.future;
+        }
+        return Future.value(true);
+      });
+      final notification = AgentNotificationService.I;
+      await notification.agentWorking('display A', sessionId: runs.aId);
+      await _waitForDisplayedTarget(notification, runs.aId);
+      await notification.agentWorking('pending B', sessionId: runs.bId);
+      await bInvoked.future.timeout(const Duration(seconds: 2));
+      runs.a.activeRunId = null;
+      runs.b.activeRunId = null;
+      runs.c.activeRunId = null;
+      AgentNotificationService.keepAliveOverrideForTest = false;
+      addTearDown(
+        () => AgentNotificationService.keepAliveOverrideForTest = null,
+      );
+
+      notification.agentIdle(sessionId: runs.aId);
+      bResult.complete(true);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(notification.activeForTest, isFalse);
+      expect(notification.displayedStopTargetForTest, isNull);
+    },
+  );
 
   test('targeted stop keeps the run event log capped', () {
     final session = ChatSession(
@@ -660,4 +830,127 @@ class _FakeHttpRequest implements HttpClientRequest {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+({
+  ChatSession parent,
+  ChatSession child,
+  ChatSession unrelated,
+  AgentRun parentRun,
+  AgentRun childRun,
+  AgentRun unrelatedRun,
+})
+_seedSubagentTree(
+  AgentService agent,
+  AppState app, {
+  required bool continuable,
+}) {
+  final root = ChatSession(
+    id: 'stop-tree-root',
+    title: 'Root',
+    model: 'm',
+    mode: 'auto',
+  );
+  final parent = ChatSession(
+    id: 'stop-tree-parent',
+    title: 'Parent subagent',
+    model: 'm',
+    mode: 'auto',
+    parentId: root.id,
+    agentState: 'running',
+    agentContinuable: continuable,
+  );
+  final child = ChatSession(
+    id: 'stop-tree-child',
+    title: 'Child subagent',
+    model: 'm',
+    mode: 'auto',
+    parentId: parent.id,
+    agentState: 'running',
+  );
+  final unrelated = ChatSession(
+    id: 'stop-tree-unrelated',
+    title: 'Unrelated',
+    model: 'm',
+    mode: 'auto',
+  );
+  app.sessions.addAll([root, parent, child, unrelated]);
+  return (
+    parent: parent,
+    child: child,
+    unrelated: unrelated,
+    parentRun: agent.runBucketForTest(parent.id)..activeRunId = 'run-parent',
+    childRun: agent.runBucketForTest(child.id)..activeRunId = 'run-child',
+    unrelatedRun: agent.runBucketForTest(unrelated.id)
+      ..activeRunId = 'run-unrelated',
+  );
+}
+
+void _expectOnlyParentStopped(
+  ({
+    ChatSession parent,
+    ChatSession child,
+    ChatSession unrelated,
+    AgentRun parentRun,
+    AgentRun childRun,
+    AgentRun unrelatedRun,
+  })
+  tree,
+) {
+  expect(tree.parentRun.activeRunId, isNull);
+  expect(tree.parentRun.cancelRequested, isTrue);
+  expect(tree.parent.agentState, 'stopped');
+  expect(tree.childRun.activeRunId, 'run-child');
+  expect(tree.childRun.cancelRequested, isFalse);
+  expect(tree.child.agentState, 'running');
+  expect(tree.unrelatedRun.activeRunId, 'run-unrelated');
+  expect(tree.unrelatedRun.cancelRequested, isFalse);
+}
+
+({String aId, String bId, String cId, AgentRun a, AgentRun b, AgentRun c})
+_seedNotificationRuns(AgentService agent, AppState app) {
+  const aId = 'stop-isolation-a';
+  const bId = 'stop-isolation-b';
+  const cId = 'stop-isolation-c';
+  app.sessions.addAll([
+    ChatSession(id: aId, title: 'A', model: 'm', mode: 'auto'),
+    ChatSession(id: bId, title: 'B', model: 'm', mode: 'auto'),
+    ChatSession(id: cId, title: 'C', model: 'm', mode: 'auto'),
+  ]);
+  return (
+    aId: aId,
+    bId: bId,
+    cId: cId,
+    a: agent.runBucketForTest(aId)..activeRunId = 'run-a',
+    b: agent.runBucketForTest(bId)..activeRunId = 'run-b',
+    c: agent.runBucketForTest(cId)..activeRunId = 'run-c',
+  );
+}
+
+Future<void> _initNotificationMock(
+  Future<bool> Function(String text) response,
+) async {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(const MethodChannel('ovid/native'), (call) {
+        if (call.method != 'agentServiceStart' &&
+            call.method != 'agentServiceUpdate') {
+          return Future.value(true);
+        }
+        final args = (call.arguments as Map?)?.cast<Object?, Object?>();
+        return response(args?['text'] as String? ?? '');
+      });
+  await AgentNotificationService.I.init();
+}
+
+Future<void> _waitForDisplayedTarget(
+  AgentNotificationService notification,
+  String sessionId,
+) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 2));
+  while (notification.displayedStopTargetForTest != sessionId) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('notification never displayed session $sessionId');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
 }

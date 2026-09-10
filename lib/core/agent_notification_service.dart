@@ -30,6 +30,8 @@ class AgentNotificationService {
   int _lastEventHash = 0;
   Timer? _debounce;
   String? _displayedStopTargetSessionId;
+  int _issuedGeneration = 0;
+  int _committedGeneration = 0;
 
   @visibleForTesting
   static bool? keepAliveOverrideForTest;
@@ -59,6 +61,9 @@ class AgentNotificationService {
   int get failCountForTest => _failCount;
 
   @visibleForTesting
+  String? get displayedStopTargetForTest => _displayedStopTargetSessionId;
+
+  @visibleForTesting
   void resetForTest() {
     _debounce?.cancel();
     _active = false;
@@ -66,6 +71,8 @@ class AgentNotificationService {
     _failCount = 0;
     _lastEventHash = 0;
     _displayedStopTargetSessionId = null;
+    _issuedGeneration = 0;
+    _committedGeneration = 0;
   }
 
   void Function()? _onExitCallback;
@@ -144,12 +151,14 @@ class AgentNotificationService {
     if (_active && h == _lastEventHash) return;
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 600), () {
+      final generation = ++_issuedGeneration;
       unawaited(
         _invoke(_active ? 'agentServiceUpdate' : 'agentServiceStart', {
           'title': 'Ovid AI',
           'text': 'Agent: $clean',
         }).then((ok) {
-          if (!ok) return;
+          if (!ok || generation <= _committedGeneration) return;
+          _committedGeneration = generation;
           _active = true;
           _lastEventHash = h;
           if (sessionId != null) {
@@ -163,9 +172,11 @@ class AgentNotificationService {
   /// Run finished / idle → notification either updates to Ready & Listening
   /// (if keep-alive enabled) or stops the foreground service.
   void agentIdle({String? sessionId}) {
-    if (!_supported || !_active) return;
+    if (!_supported) return;
     if (_isAnyRunActive()) {
-      if (sessionId != null && sessionId == _displayedStopTargetSessionId) {
+      if (_active &&
+          sessionId != null &&
+          sessionId == _displayedStopTargetSessionId) {
         final replacement = AgentService.I.nextRunningSessionForNotification(
           excludingSessionId: sessionId,
         );
@@ -181,8 +192,16 @@ class AgentNotificationService {
       }
       return;
     }
+    final hadNotificationWork =
+        _active ||
+        _issuedGeneration > _committedGeneration ||
+        (_debounce?.isActive ?? false);
+    final barrier = ++_issuedGeneration;
+    _committedGeneration = barrier;
     _lastEventHash = 0;
     _debounce?.cancel();
+    _active = _isKeepAlive;
+    _displayedStopTargetSessionId = null;
 
     if (_isKeepAlive) {
       // Keep foreground service active so scheduled tasks and message queue fire
@@ -190,15 +209,19 @@ class AgentNotificationService {
         _invoke('agentServiceUpdate', {
           'title': 'Ovid AI',
           'text': 'Ready & Listening',
+        }).then((ok) {
+          if (ok && _committedGeneration == barrier && !_isAnyRunActive()) {
+            _active = true;
+          }
         }),
       );
       return;
     }
 
-    _active = false;
-    _displayedStopTargetSessionId = null;
     serviceStopRequestedForTestFlag = true;
-    unawaited(_invoke('agentServiceStop', {}));
+    if (hadNotificationWork) {
+      unawaited(_invoke('agentServiceStop', {}));
+    }
   }
 
   Future<bool> _invoke(String method, Map<String, String> args) async {

@@ -104,3 +104,39 @@ The expanded focused suite initially failed in five places:
 - Global panic and real notification Exit both clear queues before cancelling all buckets.
 
 The required full `core_regression_test.dart` run was executed once. It completed 549 tests successfully and reported three failures in pre-existing plugin migration/install tests (`PLUGIN9 pendingGlobal`, `PLUGIN11 detail sections`, and `PLUGIN11 mounted MCP`). Those failures are outside session-stop ownership and reproduce in migration/runtime state that this fix round was explicitly prohibited from changing. STOP1, STOP2, and all focused isolation tests pass independently.
+
+## Final Fix Round
+
+Two high-severity review findings remained after the prior round:
+
+- SubagentScreen's user-facing Stop controls shared the recursive `interrupt_agent` path. A user stopping the rendered subagent therefore also stopped descendant sessions, contrary to UI session isolation.
+- Concurrent native notification updates had no completion ordering. If B and C updates completed out of order, an older successful B completion could overwrite the newer displayed C owner. Likewise, a successful completion after the no-runs idle transition could resurrect stale active/owner state.
+
+The final implementation separates the contracts:
+
+- `stopSubagentRun(sessionId)` marks and cancels only that subagent session. Both SubagentScreen app-bar and composer Stop controls call this local path.
+- `interruptSubagentTree(sessionId)` marks and cancels the selected subagent plus descendants. Only the model `interrupt_agent` handler calls this recursive path, and the tool schema/result explicitly state descendant behavior.
+- Notification updates now receive monotonically increasing issued generations and may commit active/target state only when newer than the committed generation.
+- A newer successful C completion prevents older B success from overwriting C. If C fails, older successful B may still commit because it remains newer than displayed A.
+- The no-runs idle transition installs a generation barrier, clears the Stop owner immediately, and prevents any older in-flight completion from restoring stale state.
+
+### Final RED Evidence
+
+Before implementation, the new focused tests did not compile because the required local/tree APIs and displayed-owner seam did not exist. The previous notification implementation also had no issued/committed generation state, and both SubagentScreen Stop callbacks called the recursive `interruptSubagent` method.
+
+### Final GREEN Evidence
+
+- `flutter test test/session_stop_isolation_test.dart`: 16 passed.
+- Both SubagentScreen Stop controls cancel only the rendered parent; child and unrelated sessions remain running.
+- Real `dispatchForTest('interrupt_agent', ...)` cancels the selected parent and descendant while preserving the unrelated root, and its description mentions descendants.
+- A displayed; B/C in flight; C succeeds then B succeeds: notification Stop cancels C.
+- A displayed; B/C in flight; C fails then B succeeds: notification Stop cancels B.
+- Idle barrier followed by an old successful completion: notification remains ownerless and inactive.
+- `flutter test test/core_regression_test.dart --plain-name STOP1`: 1 passed.
+- `flutter test test/core_regression_test.dart --plain-name STOP2`: 1 passed.
+- `flutter test test/core_regression_test.dart --plain-name KEEPALIVE1`: 1 passed.
+- `flutter test test/core_regression_test.dart`: 552 passed.
+- `flutter analyze lib/core/agent_service.dart lib/core/agent_notification_service.dart lib/ui/subagent_screen.dart test/session_stop_isolation_test.dart`: no issues found.
+- `git diff --check`: clean.
+
+The final full-core run completed with all 552 tests passing. The focused suite now contains 16 passing tests, including deterministic reverse-completion ordering, failed-newest fallback, idle invalidation, both local SubagentScreen controls, and real model-tool subtree interruption.

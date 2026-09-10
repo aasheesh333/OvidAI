@@ -4181,8 +4181,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'interrupt_agent',
         'description':
-            'Stop a running subagent. Its transcript is kept so you (and '
-            'the user) can still read what it did.',
+            'Stop a running subagent and every descendant below it. Their '
+            'transcripts are kept so you (and the user) can still read what '
+            'they did.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -11443,6 +11444,16 @@ ${await _agentsMdBlock()}
   SubagentInfo? subagentForSession(String sessionId) =>
       _subagents.values.where((s) => s.sessionId == sessionId).firstOrNull;
 
+  @visibleForTesting
+  void registerSubagentForTest(SubagentInfo subagent) {
+    _subagents[subagent.id] = subagent;
+  }
+
+  @visibleForTesting
+  void removeSubagentForTest(String subagentId) {
+    _subagents.remove(subagentId);
+  }
+
   /// Cold resume (the subagent handle manager durable-descriptor parity): rebuild the in-memory
   /// handle registry from persisted session lineage after an app restart.
   /// Each continuable subagent session carries its durable `agentId`; the
@@ -11526,8 +11537,20 @@ ${await _agentsMdBlock()}
     return 'resumed ${handle.id}';
   }
 
-  /// Stop a subagent's run (its own Stop button or `interrupt_agent`).
-  void interruptSubagent(String sessionId) {
+  /// User-facing Stop for one subagent session. Descendants stay independent.
+  void stopSubagentRun(String sessionId) {
+    final sub = subagentForSession(sessionId);
+    if (sub != null) sub.interrupted = true;
+    AppState.I.setAgentState(sessionId, 'stopped');
+    cancelRunFor(sessionId);
+    notifyListeners();
+  }
+
+  /// Legacy programmatic single-session stop; model tools use the tree API.
+  void interruptSubagent(String sessionId) => stopSubagentRun(sessionId);
+
+  /// Model-facing interruption: cancel a subagent and its whole subtree.
+  void interruptSubagentTree(String sessionId) {
     final sessions = <ChatSession>[
       ?AppState.I.sessionById(sessionId),
       ...AppState.I.descendantsOf(sessionId),
@@ -11646,9 +11669,10 @@ ${await _agentsMdBlock()}
     final sub = _subagents[id];
     if (sub == null) return 'Subagent $id not found.';
     if (sub.finished) return 'Subagent $id already finished.';
-    interruptSubagent(sub.sessionId);
+    interruptSubagentTree(sub.sessionId);
     _emit('think', 'interrupted subagent $id');
-    return 'interrupted subagent $id — its transcript is kept.';
+    return 'interrupted subagent $id and its descendants — their transcripts '
+        'are kept.';
   }
 
   String _handleListAgents(Map<String, dynamic> args) {
