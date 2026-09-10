@@ -913,6 +913,41 @@ void main() {
   );
 
   test(
+    'a thrown skill mount keeps session restore degraded and records a reason',
+    () async {
+      final calls = <String>[];
+      SharedPreferences.setMockInitialValues({
+        'ovid_sessions': [
+          _sessionJson('active', ['saved']),
+        ],
+        'ovid_active_session': 'active',
+      });
+      final app = AppState.createForTest(
+        startupStageRecorder: calls.add,
+        startupStageDelegates: _offlineStages()
+          ..remove('plugin.activate')
+          ..['skill.mount'] = () async => throw StateError('mount boom'),
+        pluginBootActivator: (_, _) async {},
+      );
+      AgentService.I;
+      app.onSessionsLoaded = () => calls.add('sessions.callback');
+
+      await app.initializeReadiness();
+
+      expect(calls, isNot(contains('sessions.callback')));
+      final mount = StartupCoordinator.I.snapshot.items.singleWhere(
+        (item) => item.id == 'skill.mount',
+      );
+      expect(mount.state, StartupItemState.failed);
+      final restore = StartupCoordinator.I.snapshot.items.singleWhere(
+        (item) => item.id == 'session.restore',
+      );
+      expect(restore.state, StartupItemState.degraded);
+      expect(restore.reason, contains('mounting failed'));
+    },
+  );
+
+  test(
     'coordinator timeout never runs restore before hydration settles',
     () async {
       final calls = <String>[];

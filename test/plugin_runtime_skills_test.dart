@@ -980,6 +980,71 @@ void main() {
       );
     },
   );
+
+  test(
+    'legacy lifecycle rebuild keeps the compatibility catalog dispatchable',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      FlutterSecureStorage.setMockInitialValues({});
+      AppState.resetTestInstance();
+      final cacheRoot = Directory.systemTemp.createTempSync(
+        'ovid-legacy-compat-',
+      );
+      AppState.pluginCacheRootOverrideForTest = cacheRoot;
+      final app = AppState.createForTest();
+      addTearDown(() {
+        AppState.pluginCacheRootOverrideForTest = null;
+        AppState.resetTestInstance();
+        if (cacheRoot.existsSync()) cacheRoot.deleteSync(recursive: true);
+      });
+      await app.initialize();
+      AgentService.I;
+      SkillService.I.clearRoots();
+
+      final row = PluginItem(
+        name: 'Legacy Compat Tools',
+        author: 'old',
+        description: '',
+        version: '1.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'old/legacy-compat',
+      );
+      app.plugins.add(row);
+      addTearDown(() {
+        app.plugins.remove(row);
+        SkillService.I.clearRoots();
+      });
+      final dir = await app.pluginCacheDirFor(row.source!);
+      File('${dir.path}/skills/legacy-skill/SKILL.md')
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync('---\nname: legacy-skill\n---\nLEGACY SKILL BODY');
+
+      // A legacy lifecycle change must rebuild the global compatibility
+      // catalog, not only the per-session runtime snapshots.
+      await app.disablePlugin(row);
+      await app.enablePlugin(row);
+
+      expect(
+        SkillService.I.resolveAlias('legacy-skill').isUnique,
+        isTrue,
+        reason: 'the legacy lifecycle rebuild repopulates the global catalog',
+      );
+      final dispatched = await AgentService.I.dispatchForTest(
+        'plugin_legacy_compat_tools',
+        {'action': 'legacy-skill'},
+      );
+      expect(dispatched, contains('LEGACY SKILL BODY'));
+
+      await app.disablePlugin(row);
+      expect(
+        SkillService.I.resolveAlias('legacy-skill').isAbsent,
+        isTrue,
+        reason: 'disabling the legacy plugin removes its cached skill',
+      );
+    },
+  );
 }
 
 void writeFixture(Directory source) {

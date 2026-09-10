@@ -1115,11 +1115,14 @@ class _SessionRestoreStartupTask implements StartupTask {
     app._sessionRestoreRequested = true;
     final restored = await app._maybeFinishSessionRestore();
     if (!restored) {
+      final failure = app._skillMountFailureReason;
       return StartupItemStatus.degraded(
         id,
         kind,
         label,
-        reason: 'Waiting for local hydration, plugin activation, and skills',
+        reason: failure == null
+            ? 'Waiting for local hydration, plugin activation, and skills'
+            : '$failure; session runtime not restored',
       );
     }
     return StartupItemStatus.ready(id, kind, label);
@@ -1146,10 +1149,17 @@ class _SkillMountStartupTask implements StartupTask {
   Future<StartupItemStatus> run() async {
     app._skillMountSettled = false;
     app._skillMountSucceeded = false;
+    app._skillMountFailureReason = null;
     try {
       await app._runStartupStage(id, app._mountRuntimeSkills);
       app._skillMountSucceeded = true;
       return StartupItemStatus.ready(id, kind, label);
+    } catch (_) {
+      // Scrubbed, non-secret reason: the raw error is already redacted by
+      // the coordinator's terminal status; this keeps the restore item
+      // honestly degraded and observable without leaking failure detail.
+      app._skillMountFailureReason = 'Session skill mounting failed';
+      rethrow;
     } finally {
       app._skillMountSettled = true;
       await app._maybeFinishSessionRestore();
@@ -1291,6 +1301,11 @@ class AppState extends ChangeNotifier {
       p.installed = true;
       p.enabled = enabled ?? true;
       await persistPluginState();
+      // Legacy (runtimeId-null) rows rebuild the global compatibility
+      // catalog; runtime rows invalidate their scoped snapshot.
+      try {
+        await onRefreshSkills?.call(p.runtimeId);
+      } catch (_) {}
       refresh();
     }
   }
@@ -1609,6 +1624,7 @@ class AppState extends ChangeNotifier {
   var _sessionRestoreRequested = false;
   var _skillMountSettled = false;
   var _skillMountSucceeded = false;
+  String? _skillMountFailureReason;
 
   List<StartupItemStatus> get pluginSafetyStatuses =>
       List.unmodifiable(_pluginSafetyStatuses);

@@ -158,3 +158,59 @@ file containment, and duplicate canonical IDs.
 - Task 5 remains responsible for exactly-once session lifecycle semantics; the
   restored-session callback is now correctly blocked on successful skill-mount
   settlement.
+
+## Fix Round 2
+
+### RED Evidence
+
+- After fix round 1, a legacy (`runtimeId == null`) enable/disable/uninstall
+  rebuilt only per-session snapshots. The legacy `plugin_<display>` dispatcher
+  resolves through the global `SkillService._skills` catalog, which is populated
+  solely by `_refreshCompatibilitySkillRoots()`, so an enabled legacy plugin's
+  cached skill was missing from the global catalog and the generic tool returned
+  "no executable skill" until a no-session Settings refresh.
+- A thrown `_mountRuntimeSkills` left `_skillMountSucceeded` false with no
+  recorded reason; `session.restore` stayed degraded but gave no observable
+  cause.
+
+### Fixes
+
+- `AgentService._skillsChanged(null)` now also calls
+  `_refreshCompatibilitySkillRoots()` in addition to invalidating every session
+  snapshot. Runtime (non-null) lifecycle behavior is unchanged, and no
+  runtime-manager listener was reintroduced.
+- `AppState.setPluginInstalled(installed: true)` now routes through
+  `onRefreshSkills?.call(p.runtimeId)`, so a legacy source-less install rebuilds
+  the global compatibility catalog and a runtime row invalidates its scoped
+  snapshot.
+- `_SkillMountStartupTask` records a scrubbed, non-secret
+  `_skillMountFailureReason` on a thrown mount; `session.restore` surfaces it in
+  its degraded reason. No retry loop was added.
+
+### Added Coverage
+
+- Legacy lifecycle rebuild: a legacy installed+enabled plugin with a cached
+  skill is dispatchable through `plugin_<display>` after enable, and disabling
+  removes it. The test drives the production `disablePlugin`/`enablePlugin`
+  lifecycle and the real dispatcher.
+- A thrown skill mount leaves `session.restore` degraded and records the
+  scrubbed reason while never firing the restored-session callback.
+
+### Verification
+
+- `flutter test test/plugin_runtime_skills_test.dart`: 18/18 passed.
+- `flutter test test/plugin_runtime_migration_test.dart`: 34/34 passed.
+- `flutter test test/core_regression_test.dart --name "PLUGIN4|PLUGIN7|PLUGIN8|PLUGIN11"`:
+  57/57 passed.
+- `flutter test test/startup_first_frame_test.dart`: 34/34 passed.
+- `flutter test test/session_stop_isolation_test.dart`: 16/16 passed.
+- `flutter test test/core_regression_test.dart`: 552/552 passed.
+- `flutter analyze --no-pub`: no issues.
+- `git diff --check`: clean.
+
+### Remaining Concerns
+
+- The legacy compatibility catalog still uses the active session's workspace
+  roots (existing behavior); runtime plugin content remains session-scoped.
+- No automatic retry is added for a failed skill mount; the user-visible
+  `Retry` on the startup dashboard owns recovery.

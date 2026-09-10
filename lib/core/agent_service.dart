@@ -11269,7 +11269,11 @@ ${await _agentsMdBlock()}
 
   Future<void> _skillsChanged(String? pluginId) async {
     if (pluginId == null) {
+      // A legacy (runtimeId-null) row changed: the global compatibility
+      // catalog feeds the legacy `plugin_<display>` dispatcher, so it must
+      // be rebuilt alongside the per-session runtime snapshots.
       SkillService.I.invalidateAllSessions();
+      await _refreshCompatibilitySkillRoots();
     } else {
       SkillService.I.invalidatePlugin(pluginId);
     }
