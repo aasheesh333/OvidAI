@@ -9259,8 +9259,6 @@ ${await _agentsMdBlock()}
     return m;
   }
 
-  void _toolStream(String chunk) => _toolStreamFor(_runResolved, chunk);
-
   void _toolStreamFor(AgentRun run, String chunk) {
     final m = run.activeToolMsg;
     if (m == null) return;
@@ -11531,7 +11529,7 @@ ${await _agentsMdBlock()}
   /// Stop a subagent's run (its own Stop button or `interrupt_agent`).
   void interruptSubagent(String sessionId) {
     final sessions = <ChatSession>[
-      if (AppState.I.sessionById(sessionId) case final session?) session,
+      ?AppState.I.sessionById(sessionId),
       ...AppState.I.descendantsOf(sessionId),
     ];
     for (final session in sessions) {

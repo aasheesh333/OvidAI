@@ -65,3 +65,42 @@ Focused coverage proves:
 ## Concerns
 
 No correctness blockers found. Generic lifecycle notification refreshes in `main.dart` do not carry a session ID; they intentionally do not replace the last concrete progress owner. If that owner has already stopped, notification Stop is a safe no-op rather than risking cancellation of another session.
+
+## Review Fix Round
+
+Review of `c8c5215..8107016` found four remaining lifecycle gaps. They were reproduced in `session_stop_isolation_test.dart` before the implementation was hardened:
+
+- Global panic cancelled active buckets without first clearing their queued continuations, allowing each run's `finally` block to start queued work again.
+- Notification ownership changed when an update was scheduled, before the native start/update succeeded, so its Stop action could target content not yet displayed.
+- `interrupt_agent` inherited ordinary session Stop isolation and therefore left descendant subagents running.
+- Targeted cancellation appended directly to `runEvents`, bypassing the event cap and shared session-event handling.
+
+The fix round now:
+
+- Clears every bucket queue before global cancellation and keeps notification Exit on that path.
+- Commits notification Stop ownership only after a successful native update. Pending or failed updates retain the displayed owner; a completed represented run deterministically schedules a surviving run for display, with ownership changing only after success.
+- Adds `cancelRunTreeFor` exclusively for explicit subagent interruption; ordinary chat Stop remains one-session-only.
+- Routes cancellation through bucket-aware `_emitToRun`, preserving the 120-event cap, status updates, session logging, and notification lifecycle without resolving through the caller's Zone.
+- Strengthens coverage with separate foreground/job processes, HTTP close/abort assertions, PTY termination and survival checks, a rendered `ChatScreen` Stop interaction, queued global panic and notification Exit tests, pending/failed/successful notification ownership tests, subtree interruption, and event-cap verification.
+
+### Review RED Evidence
+
+The expanded focused suite initially failed in five places:
+
+- Pending notification update left session A active because ownership had already switched to B.
+- `cancelAllRuns()` left `must not restart A` in session A's queue.
+- Notification Exit left `queued A` in session A's queue.
+- Interrupting a parent subagent left its child run active.
+- Targeted Stop grew a 120-entry event list to 121.
+
+### Review GREEN Evidence
+
+- `flutter test test/session_stop_isolation_test.dart`: 11 passed after implementation; the final run includes the rendered-chat widget path and independent HTTP/process/job/PTY assertions.
+- `flutter test test/core_regression_test.dart --plain-name STOP1`: 1 passed.
+- `flutter test test/core_regression_test.dart --plain-name STOP2`: 1 passed.
+- `flutter analyze lib/core/agent_service.dart lib/core/agent_notification_service.dart lib/ui/chat_screen.dart test/session_stop_isolation_test.dart test/core_regression_test.dart`: no issues found.
+- Targeted process, job, HTTP request/client, and PTY cleanup assertions pass while session B's equivalents remain alive.
+- Notification ownership tests cover A displayed while B is pending, B update failure, successful transfer to B, and deterministic transfer after A finishes.
+- Global panic and real notification Exit both clear queues before cancelling all buckets.
+
+The required full `core_regression_test.dart` run was executed once. It completed 549 tests successfully and reported three failures in pre-existing plugin migration/install tests (`PLUGIN9 pendingGlobal`, `PLUGIN11 detail sections`, and `PLUGIN11 mounted MCP`). Those failures are outside session-stop ownership and reproduce in migration/runtime state that this fix round was explicitly prohibited from changing. STOP1, STOP2, and all focused isolation tests pass independently.

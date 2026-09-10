@@ -92,8 +92,12 @@ void main() {
       ..started = true;
     final clientA = _FakeHttpClient();
     final requestA = _FakeHttpRequest();
+    final clientB = _FakeHttpClient();
+    final requestB = _FakeHttpRequest();
     runA.activeClient = clientA;
     runA.activeRequest = requestA;
+    runB.activeClient = clientB;
+    runB.activeRequest = requestB;
     late final Process ptyProcessA;
     late final Process ptyProcessB;
     final ptyA = await PtyPool.I.getOrCreate(
@@ -137,8 +141,22 @@ void main() {
     expect(runB.cancelRequested, isFalse);
     expect(runB.queue, ['keep working in B']);
     expect(runB.jobs[2]!.killed, isFalse);
+    expect(clientB.closedWithForce, isFalse);
+    expect(requestB.aborted, isFalse);
     expect(sandbox.runProcessesForTest[sessionB.id], contains(processB));
     expect(sandbox.liveProcessesForTest, contains(processB));
+    await expectLater(
+      processB.exitCode.timeout(const Duration(milliseconds: 50)),
+      throwsA(isA<TimeoutException>()),
+    );
+    await expectLater(
+      jobProcessB.exitCode.timeout(const Duration(milliseconds: 50)),
+      throwsA(isA<TimeoutException>()),
+    );
+    await expectLater(
+      ptyProcessB.exitCode.timeout(const Duration(milliseconds: 50)),
+      throwsA(isA<TimeoutException>()),
+    );
     var replacementSpawned = false;
     final samePtyB = await PtyPool.I.getOrCreate(sessionB.id, () async {
       replacementSpawned = true;
@@ -295,8 +313,18 @@ void main() {
       await invokedB.future.timeout(const Duration(seconds: 2));
 
       await _sendNativeAction('onAgentStop');
+
+      expect(runA.activeRunId, isNull);
+      expect(runA.cancelRequested, isTrue);
+      expect(runB.activeRunId, 'run-b');
+      expect(runB.cancelRequested, isFalse);
+
+      runA
+        ..activeRunId = 'run-a-after-failure'
+        ..cancelRequested = false;
       pendingB.complete(false);
       await Future<void>.delayed(Duration.zero);
+      await _sendNativeAction('onAgentStop');
 
       expect(runA.activeRunId, isNull);
       expect(runA.cancelRequested, isTrue);
