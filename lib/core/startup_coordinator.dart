@@ -366,29 +366,27 @@ class StartupCoordinator extends ChangeNotifier {
 
     final runToken = _runToken;
     _runningItemIds.add(itemId);
+    StartupItemStatus? result;
     try {
       await task.onDisable!();
-      if (runToken == _runToken && _runningItemIds.remove(itemId)) {
-        _replace(
-          StartupItemStatus.disabled(
-            task.id,
-            task.kind,
-            task.label,
-            attempt: current.attempt,
-          ),
-        );
-      }
+      result = StartupItemStatus.disabled(
+        task.id,
+        task.kind,
+        task.label,
+        attempt: current.attempt,
+      );
     } catch (error) {
-      if (runToken == _runToken && _runningItemIds.remove(itemId)) {
-        _replace(
-          StartupItemStatus.failed(
-            task.id,
-            task.kind,
-            task.label,
-            reason: _redactStartupError(error.toString()),
-            attempt: current.attempt,
-          ),
-        );
+      result = StartupItemStatus.failed(
+        task.id,
+        task.kind,
+        task.label,
+        reason: _redactStartupError(error.toString()),
+        attempt: current.attempt,
+      );
+    } finally {
+      final ownedLock = _runningItemIds.remove(itemId);
+      if (runToken == _runToken && ownedLock && result != null) {
+        _replace(result);
       }
     }
   }

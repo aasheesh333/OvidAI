@@ -89,3 +89,32 @@ design sections 5.2, 7, and 8.
 - Timed-out Dart futures remain non-cancellable; the coordinator prevents
   duplicate invocation but task owners still control resource cancellation.
 - Full regression remains outside this isolated leaf fix round.
+
+## Fix Round 2
+
+### RED Evidence
+
+- A deterministic stale-disable test failed because completing a disable after
+  a newer `start()` left the item lifetime lock held, so a subsequent Disable
+  callback was never invoked.
+
+### GREEN Evidence
+
+- `/home/ubuntu/sdk/flutter/bin/flutter test test/startup_coordinator_test.dart`
+  passed 15 tests.
+- `/home/ubuntu/sdk/flutter/bin/flutter analyze --no-pub` reported no issues.
+- `git diff --check` passed.
+
+### Changes and Self-Review
+
+- Disable callback settlement now removes its lifetime lock unconditionally in
+  `finally`, independent of the coordinator run token.
+- Publishing Disabled or Failed remains guarded by both the captured run token
+  and successful lock ownership removal, so a stale callback cannot overwrite
+  a newer run's status.
+- Added pins confirming task-returned null reasons remain null and ordinary
+  non-secret reasons remain unchanged.
+
+### Concerns
+
+- Full regression remains outside this isolated leaf fix round.

@@ -533,6 +533,58 @@ void main() {
     );
   });
 
+  test(
+    'stale disable settles without overwriting new run and releases lock',
+    () {
+      fakeAsync((async) {
+        var runs = 0;
+        var disables = 0;
+        final releaseDisable = Completer<void>();
+        final coordinator = StartupCoordinator.forTest(
+          deadline: const Duration(seconds: 120),
+        );
+        final task = FakeStartupTask(
+          'plugin',
+          kind: StartupItemKind.plugin,
+          label: 'Plugin',
+          onDisable: () async {
+            disables++;
+            if (disables == 1) await releaseDisable.future;
+          },
+          run: () async {
+            runs++;
+            return StartupItemStatus.failed(
+              'plugin',
+              StartupItemKind.plugin,
+              'Plugin',
+              reason: 'Still enabled',
+            );
+          },
+        );
+
+        coordinator.start([task]);
+        async.flushMicrotasks();
+        coordinator.disable('plugin');
+        async.flushMicrotasks();
+        expect(disables, 1);
+
+        coordinator.start([task]);
+        async.flushMicrotasks();
+        expect(runs, 1);
+        expect(_status(coordinator, 'plugin').state, StartupItemState.degraded);
+
+        releaseDisable.complete();
+        async.flushMicrotasks();
+        expect(_status(coordinator, 'plugin').state, StartupItemState.degraded);
+
+        coordinator.disable('plugin');
+        async.flushMicrotasks();
+        expect(disables, 2);
+        expect(_status(coordinator, 'plugin').state, StartupItemState.disabled);
+      });
+    },
+  );
+
   test('failure reasons are capped and scrub common secret forms', () async {
     final coordinator = StartupCoordinator.forTest(
       deadline: const Duration(seconds: 1),
@@ -608,6 +660,42 @@ void main() {
       }
     },
   );
+
+  test('task-returned null and ordinary reasons are preserved', () async {
+    final coordinator = StartupCoordinator.forTest(
+      deadline: const Duration(seconds: 120),
+    );
+
+    await coordinator.start([
+      FakeStartupTask(
+        'null-reason',
+        kind: StartupItemKind.plugin,
+        label: 'Null reason',
+        run: () async => StartupItemStatus.ready(
+          'null-reason',
+          StartupItemKind.plugin,
+          'Null reason',
+        ),
+      ),
+      FakeStartupTask(
+        'ordinary-reason',
+        kind: StartupItemKind.plugin,
+        label: 'Ordinary reason',
+        run: () async => StartupItemStatus.degraded(
+          'ordinary-reason',
+          StartupItemKind.plugin,
+          'Ordinary reason',
+          reason: 'Cached catalog is available',
+        ),
+      ),
+    ]);
+
+    expect(_status(coordinator, 'null-reason').reason, isNull);
+    expect(
+      _status(coordinator, 'ordinary-reason').reason,
+      'Cached catalog is available',
+    );
+  });
 
   test('a task cannot leave readiness in a non-terminal state', () async {
     final coordinator = StartupCoordinator.forTest(
