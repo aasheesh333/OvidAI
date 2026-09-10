@@ -296,3 +296,50 @@ from design sections 5.1, 5.3, 5.7, and 8.
   the underlying `StringList` storage off this path remains Project 2 scope.
 - Task 6 still owns per-plugin and per-MCP startup items; Task 2 retains only the
   replaceable coarse bridge.
+
+## Final Fix Round 5
+
+### Investigation
+
+- Verified the fallback data flow independently for a valid persisted subagent
+  active row and for a malformed requested-active row. In both cases the selected
+  root ID drives `_activeRawSession(raw, active.id)`, the corrected active ID is
+  persisted, and the next boot accepts the root bootstrap without invoking the
+  fallback transcript decoder.
+- Verified deferred descendant cleanup for every requested malformed shape:
+  integer, map, list, null, and empty string. Dynamic `sandboxId` values are
+  accepted only when they are non-empty strings; every other shape falls back to
+  the session ID, with callback and workspace cleanup deduplicated by session ID.
+- Traced persistence from `_sessionJsonForPersistence()` through
+  `_writeSessionBootstrapFromSession()`. The exact encoded active row supplies the
+  fingerprint, while the in-memory `ChatSession` supplies metadata and latest 50
+  messages; no active-row JSON decode occurs during the write.
+
+### Changes
+
+- Added separate cold-boot regressions for subagent-active fallback and malformed
+  requested-active fallback. This avoids one combined fixture masking either
+  branch and proves both generated caches are reusable on the immediate next boot.
+- Extended malformed descendant cleanup coverage to list, null, and empty-string
+  sandbox IDs in addition to the existing integer and map cases.
+- Retained the zero-bootstrap-decode persistence counter and exact raw fingerprint
+  plus literal first/last tail assertions from fix round 4.
+- No production changes were required after investigation. Task 3 migration,
+  session-scoped stop behavior, and Project 2 storage scope remain unchanged.
+
+### Verification
+
+- Startup first-frame tests: 32/32 passed.
+- Startup coordinator tests: 16/16 passed.
+- Boot-focused core tests: 7/7 passed.
+- Plugin runtime migration tests: 34/34 passed.
+- Full core regression: 552/552 passed.
+- `/home/ubuntu/sdk/flutter/bin/flutter analyze --no-pub` reported no issues.
+- `git diff --check` passed.
+
+### Remaining Concern
+
+- Bootstrap persistence still hashes the full exact active raw row on the caller
+  isolate. Avoiding that final O(n) operation, or replacing SharedPreferences
+  `StringList` transcript storage, remains Project 2 work; this final round does
+  not broaden that migration.

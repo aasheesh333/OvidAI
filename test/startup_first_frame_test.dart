@@ -556,6 +556,51 @@ void main() {
   );
 
   test(
+    'list null and empty descendant sandbox ids use session ids once',
+    () async {
+      final parent = _sessionJson('parent', ['parent']);
+      final malformedChildren = <String, Object?>{
+        'list-child': <Object?>['unexpected'],
+        'null-child': null,
+        'empty-child': '',
+      };
+      final childRows = [
+        for (final entry in malformedChildren.entries)
+          jsonEncode(
+            (jsonDecode(
+                    _sessionJson(entry.key, [entry.key], parentId: 'parent'),
+                  )
+                  as Map<String, dynamic>)
+              ..['sandboxId'] = entry.value,
+          ),
+      ];
+      final deletedWorkspaces = <String>[];
+      final deletedSessions = <String>[];
+      SharedPreferences.setMockInitialValues({
+        'ovid_session_bootstrap_v1': _bootstrapJson(parent, parent),
+        'ovid_active_session': 'parent',
+        'ovid_sessions': [parent, ...childRows],
+      });
+      final app = AppState.createForTest(
+        workspaceDeleter: (sandboxId) async => deletedWorkspaces.add(sandboxId),
+      );
+      app.onSessionDeleted = deletedSessions.add;
+
+      await app.initializeForFirstFrame();
+      app.deleteSession('parent');
+      await app.persistSessions();
+
+      for (final id in malformedChildren.keys) {
+        expect(deletedSessions.where((deleted) => deleted == id), hasLength(1));
+        expect(
+          deletedWorkspaces.where((deleted) => deleted == id),
+          hasLength(1),
+        );
+      }
+    },
+  );
+
+  test(
     'first-frame fallback writes bootstrap cache for the next boot',
     () async {
       SharedPreferences.setMockInitialValues({
@@ -621,6 +666,60 @@ void main() {
       expect(app.activeSession!.messages, hasLength(50));
     },
   );
+
+  test('persisted subagent active falls back to a cacheable root', () async {
+    final child = _sessionJson('child', ['child'], parentId: 'root');
+    final root = _sessionJson('root', [for (var i = 0; i < 80; i++) 'root-$i']);
+    SharedPreferences.setMockInitialValues({
+      'ovid_active_session': 'child',
+      'ovid_sessions': [child, root],
+    });
+    var app = AppState.createForTest();
+
+    await app.initializeForFirstFrame();
+
+    expect(app.activeSession!.id, 'root');
+    AppState.resetTestInstance();
+    var fallbackDecodes = 0;
+    app = AppState.createForTest(
+      persistedSessionDecoder: (raw) {
+        fallbackDecodes++;
+        return ChatSession.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+      },
+    );
+    await app.initializeForFirstFrame();
+
+    expect(fallbackDecodes, 0);
+    expect(app.activeSession!.id, 'root');
+    expect(app.activeSession!.messages, hasLength(50));
+  });
+
+  test('malformed requested active falls back to a cacheable root', () async {
+    const malformed = '{"id":"broken","sandboxId":';
+    final root = _sessionJson('root', [for (var i = 0; i < 80; i++) 'root-$i']);
+    SharedPreferences.setMockInitialValues({
+      'ovid_active_session': 'broken',
+      'ovid_sessions': [malformed, root],
+    });
+    var app = AppState.createForTest();
+
+    await app.initializeForFirstFrame();
+
+    expect(app.activeSession!.id, 'root');
+    AppState.resetTestInstance();
+    var fallbackDecodes = 0;
+    app = AppState.createForTest(
+      persistedSessionDecoder: (raw) {
+        fallbackDecodes++;
+        return ChatSession.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+      },
+    );
+    await app.initializeForFirstFrame();
+
+    expect(fallbackDecodes, 0);
+    expect(app.activeSession!.id, 'root');
+    expect(app.activeSession!.messages, hasLength(50));
+  });
 
   test(
     'persist builds an exact bootstrap tail without decoding session JSON',
