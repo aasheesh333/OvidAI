@@ -44,7 +44,7 @@ class Skill {
   /// [SkillService.addPluginRoot] when the owning root is scanned.
   final String? pluginId;
 
-  const Skill({
+  Skill({
     required this.name,
     required this.description,
     required this.whenToUse,
@@ -52,15 +52,17 @@ class Skill {
     required this.path,
     required this.modelInvocable,
     required this.userInvocable,
-    this.allowedTools = const [],
+    List<String> allowedTools = const [],
     this.argumentHint,
     this.model,
-    this.frontmatter = const {},
+    Map<String, String> frontmatter = const {},
     this.isAgent = false,
     this.kind = SkillContributionKind.skill,
-    this.supportingFiles = const [],
+    List<String> supportingFiles = const [],
     this.pluginId,
-  });
+  }) : allowedTools = List.unmodifiable(allowedTools),
+       frontmatter = Map.unmodifiable(frontmatter),
+       supportingFiles = List.unmodifiable(supportingFiles);
 
   /// Canonical contribution id (spec §4.4) for plugin content.
   String? get canonicalId =>
@@ -81,6 +83,24 @@ class PluginCatalogMount {
   final NormalizedPluginManifest manifest;
 
   const PluginCatalogMount(this.contentDir, this.manifest);
+}
+
+class SkillCatalogInputs {
+  final List<String> roots;
+  final List<PluginCatalogMount> mounts;
+
+  SkillCatalogInputs({
+    Iterable<String> roots = const [],
+    Iterable<PluginCatalogMount> mounts = const [],
+  }) : roots = List.unmodifiable(roots),
+       mounts = List.unmodifiable(mounts);
+}
+
+class SkillCatalogReservation {
+  final String sessionId;
+  final int generation;
+
+  const SkillCatalogReservation(this.sessionId, this.generation);
 }
 
 class SkillCatalogSnapshot {
@@ -160,14 +180,28 @@ class SkillService {
   String catalogBlockForSession(String sessionId, {int maxDescChars = 500}) =>
       snapshotForSession(sessionId).catalogBlock(maxDescChars: maxDescChars);
 
+  SkillCatalogReservation reserveSessionCatalog(String sessionId) {
+    final generation = (_sessionGenerations[sessionId] ?? 0) + 1;
+    _sessionGenerations[sessionId] = generation;
+    return SkillCatalogReservation(sessionId, generation);
+  }
+
   Future<void> publishSessionCatalog(
     String sessionId, {
+    SkillCatalogReservation? reservation,
     Iterable<String> roots = const [],
     Iterable<PluginCatalogMount> mounts = const [],
     Future<void> Function()? beforeScan,
   }) async {
-    final generation = (_sessionGenerations[sessionId] ?? 0) + 1;
-    _sessionGenerations[sessionId] = generation;
+    final reserved = reservation ?? reserveSessionCatalog(sessionId);
+    if (reserved.sessionId != sessionId) {
+      throw ArgumentError.value(
+        reserved.sessionId,
+        'reservation',
+        'Reservation belongs to another session',
+      );
+    }
+    final generation = reserved.generation;
     await beforeScan?.call();
 
     final candidate = <Skill>[];
@@ -209,6 +243,25 @@ class SkillService {
           (_sessionGenerations[sessionId] ?? 0) + 1;
     }
     _sessionSnapshots.clear();
+  }
+
+  void invalidatePlugin(String pluginId) {
+    for (final sessionId in {
+      ..._sessionGenerations.keys,
+      ..._sessionSnapshots.keys,
+    }) {
+      final generation = (_sessionGenerations[sessionId] ?? 0) + 1;
+      _sessionGenerations[sessionId] = generation;
+      final snapshot = _sessionSnapshots[sessionId];
+      if (snapshot == null) continue;
+      _sessionSnapshots[sessionId] = SkillCatalogSnapshot(
+        sessionId: sessionId,
+        generation: generation,
+        skills: snapshot.skills
+            .where((skill) => skill.pluginId != pluginId)
+            .toList(),
+      );
+    }
   }
 
   void dropSession(String sessionId) => invalidateSession(sessionId);

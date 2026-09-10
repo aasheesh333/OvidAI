@@ -1119,10 +1119,41 @@ class _SessionRestoreStartupTask implements StartupTask {
         id,
         kind,
         label,
-        reason: 'Waiting for local hydration and plugin activation',
+        reason: 'Waiting for local hydration, plugin activation, and skills',
       );
     }
     return StartupItemStatus.ready(id, kind, label);
+  }
+}
+
+class _SkillMountStartupTask implements StartupTask {
+  const _SkillMountStartupTask(this.app);
+
+  final AppState app;
+
+  @override
+  String get id => 'skill.mount';
+  @override
+  StartupItemKind get kind => StartupItemKind.skillMount;
+  @override
+  String get label => 'Mount session skills';
+  @override
+  Duration get timeout => app._startupTimeout(id, const Duration(seconds: 15));
+  @override
+  StartupDisable? get onDisable => null;
+
+  @override
+  Future<StartupItemStatus> run() async {
+    app._skillMountSettled = false;
+    app._skillMountSucceeded = false;
+    try {
+      await app._runStartupStage(id, app._mountRuntimeSkills);
+      app._skillMountSucceeded = true;
+      return StartupItemStatus.ready(id, kind, label);
+    } finally {
+      app._skillMountSettled = true;
+      await app._maybeFinishSessionRestore();
+    }
   }
 }
 
@@ -1282,7 +1313,7 @@ class AppState extends ChangeNotifier {
 
   /// Hook for AgentService to refresh skills on plugin install/uninstall/toggle
   /// without a circular import.
-  static Future<void> Function(String? sessionId)? onRefreshSkills;
+  static Future<void> Function(String? pluginId)? onRefreshSkills;
 
   /// Task 7 (spec §4.1/§5.2/§7): the production install transaction —
   /// resolve → inspect → grant → dependencies → probe → persist →
@@ -1363,7 +1394,7 @@ class AppState extends ChangeNotifier {
       await persistMergedMarketplaceCatalog();
       await PluginRuntimeManager.I.persistRuntimeRow(result.manifest!.id);
       try {
-        await onRefreshSkills?.call(sessionId);
+        await onRefreshSkills?.call(result.manifest!.id);
       } catch (_) {}
       refresh();
     }
@@ -1425,7 +1456,7 @@ class AppState extends ChangeNotifier {
     }
 
     try {
-      await onRefreshSkills?.call(null);
+      await onRefreshSkills?.call(runtimeId);
     } catch (_) {}
 
     refresh();
@@ -1471,13 +1502,14 @@ class AppState extends ChangeNotifier {
     }
 
     try {
-      await onRefreshSkills?.call(null);
+      await onRefreshSkills?.call(runtimeId);
     } catch (_) {}
 
     refresh();
   }
 
   Future<void> enablePlugin(PluginItem plugin) async {
+    final runtimeId = plugin.runtimeId;
     if (plugin.runtimeId != null) {
       // Task 7: runtime-managed rows re-register their contributions
       // (applying any promotion that came due while disabled).
@@ -1493,9 +1525,20 @@ class AppState extends ChangeNotifier {
     }
     await persistPluginState();
     try {
-      await onRefreshSkills?.call(null);
+      await onRefreshSkills?.call(runtimeId);
     } catch (_) {}
     refresh();
+  }
+
+  Future<PluginActivation> retryPlugin(PluginItem plugin) async {
+    final runtimeId = plugin.runtimeId;
+    if (runtimeId == null) return PluginActivation.failed;
+    final activation = await PluginRuntimeManager.I.retry(runtimeId);
+    try {
+      await onRefreshSkills?.call(runtimeId);
+    } catch (_) {}
+    refresh();
+    return activation;
   }
 
   // ── Plugin capability grants (spec §5.1 — Task 5) ──────────────────
@@ -1564,6 +1607,8 @@ class AppState extends ChangeNotifier {
   var _deferredSessionGeneration = 0;
   var _sessionRestoreFinished = false;
   var _sessionRestoreRequested = false;
+  var _skillMountSettled = false;
+  var _skillMountSucceeded = false;
 
   List<StartupItemStatus> get pluginSafetyStatuses =>
       List.unmodifiable(_pluginSafetyStatuses);
@@ -1595,13 +1640,7 @@ class AppState extends ChangeNotifier {
           timeout: const Duration(seconds: 15),
           body: _activatePluginsForBoot,
         ),
-        _startupTask(
-          id: 'skill.mount',
-          kind: StartupItemKind.skillMount,
-          label: 'Mount session skills',
-          timeout: const Duration(seconds: 15),
-          body: _mountRuntimeSkills,
-        ),
+        _SkillMountStartupTask(this),
         _SessionRestoreStartupTask(this),
         _startupTask(
           id: 'marketplace.refresh',
@@ -1748,7 +1787,9 @@ class AppState extends ChangeNotifier {
     if (!_sessionRestoreRequested ||
         !_localHydrationSettled ||
         !_localHydrationReady ||
-        !_pluginBootActivated) {
+        !_pluginBootActivated ||
+        !_skillMountSettled ||
+        !_skillMountSucceeded) {
       return false;
     }
     await AgentService.I.restoreRunCheckpoints();

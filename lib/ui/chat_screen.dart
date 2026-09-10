@@ -16,9 +16,9 @@ import '../core/agent_service.dart';
 import '../core/commands.dart';
 import '../core/device_control_service.dart';
 import '../core/mcp_service.dart';
+import '../core/plugin_registry.dart';
 import '../core/presets.dart';
 import '../core/skills.dart';
-import '../core/plugin_registry.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
@@ -1173,10 +1173,10 @@ class _ChatScreenState extends State<ChatScreen>
                         }
                         final skill = resolved.unique;
                         if (skill != null && skill.userInvocable) {
-                          final owner = skill.pluginId;
-                          if (owner != null &&
-                              !PluginContributionRegistry.I
-                                  .isPluginActiveForSession(owner, s.id)) {
+                          if (!AgentService.I.isSkillAvailableForSession(
+                            skill,
+                            s.id,
+                          )) {
                             return;
                           }
                           _input.clear();
@@ -3574,7 +3574,18 @@ class _InputBarState extends State<_InputBar> {
       }
     }
     // Installed + enabled plugins that add agent tools.
-    for (final p in AppState.I.plugins.where((p) => p.installed && p.enabled)) {
+    final sessionId = widget.sessionId ?? '';
+    for (final p in AppState.I.plugins.where((p) {
+      if (!p.installed || !p.enabled || p.migrationRequired) return false;
+      final runtimeId = p.runtimeId;
+      if (runtimeId != null) {
+        return PluginContributionRegistry.I.isPluginActiveForSession(
+          runtimeId,
+          sessionId,
+        );
+      }
+      return p.source == null || AppState.I.legacyPluginExecutionAllowed;
+    })) {
       add(
         3,
         p.name,

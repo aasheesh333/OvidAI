@@ -1415,8 +1415,7 @@ class PluginDetailScreen extends StatelessWidget {
                       // re-mount through the runtime manager; a retry
                       // never re-runs the install transaction.
                       PluginRuntimeCallRecorderForTest.record?.call('retry');
-                      await PluginRuntimeManager.I.retry(plugin.runtimeId!);
-                      app.refresh();
+                      await app.retryPlugin(plugin);
                     },
                   ),
                 ),

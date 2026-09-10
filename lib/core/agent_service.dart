@@ -593,7 +593,6 @@ class AgentService extends ChangeNotifier {
     // Per-session browser tabs: lazy-restore on session switch.
     AppState.I.onSessionSwitched = onSessionSwitched;
     AppState.onRefreshSkills = _skillsChanged;
-    PluginRuntimeManager.I.addListener(_onPluginRuntimeChanged);
     // Cold resume: rebuild subagent handles from the persisted lineage
     // after sessions load (the durable descriptor parity).
     AppState.I.onSessionsLoaded = () {
@@ -627,11 +626,8 @@ class AgentService extends ChangeNotifier {
   void dispose() {
     _scheduleTimer?.cancel();
     _scheduleTimer = null;
-    PluginRuntimeManager.I.removeListener(_onPluginRuntimeChanged);
     super.dispose();
   }
-
-  void _onPluginRuntimeChanged() => SkillService.I.invalidateAllSessions();
 
   static final AgentService I = AgentService._();
 
@@ -7463,6 +7459,16 @@ ${await _agentsMdBlock()}
             )) {
           return _registeredPluginScopeRefusal(name, legacyRuntimeId);
         }
+        if (legacyRuntimeId != null &&
+            PluginContributionRegistry.I.isRegistered(legacyRuntimeId)) {
+          final canonical = PluginContributionRegistry.I
+              .toolContributionsForPlugin(legacyRuntimeId)
+              .map((contribution) => contribution.canonicalId)
+              .join(', ');
+          return 'Plugin tool "$name" uses canonical contributions only: '
+              '${canonical.isEmpty ? '(none)' : canonical}. Nothing was '
+              'executed; call one exact canonical contribution.';
+        }
         final action =
             (args['action'] as String? ?? args['command'] as String? ?? '')
                 .trim();
@@ -7471,14 +7477,23 @@ ${await _agentsMdBlock()}
               'was executed. Provide the name of a skill or command this '
               'plugin mounts.';
         }
-        final runSid = _runSession?.id ?? '';
-        final resolved = SkillService.I.resolveForSession(runSid, action);
+        final resolved = SkillService.I.resolveAlias(action);
         if (resolved.isAmbiguous) {
           return 'Plugin action "$action" is ambiguous: '
               '${resolved.options.join(', ')}. Nothing was executed.';
         }
-        final skill = resolved.unique ??
-            (plugin.runtimeId == null ? SkillService.I.find(action) : null);
+        var skill = resolved.unique;
+        if (skill != null && plugin.source != null) {
+          final dir = await AppState.I.pluginCacheDirFor(plugin.source!);
+          final roots = [
+            '${dir.path}/commands/',
+            '${dir.path}/skills/',
+            '${dir.path}/agents/',
+          ];
+          if (!roots.any((root) => skill!.path.startsWith(root))) skill = null;
+        } else {
+          skill = null;
+        }
         if (skill != null) {
           _emit('think', 'plugin ${plugin.name} executing: ${skill.name}');
           final input = args['input'] ?? args['arguments'];
@@ -11145,10 +11160,25 @@ ${await _agentsMdBlock()}
 
   // ── Skills (reusable instruction bundles) ─────────────────────────────
   Future<void> _refreshSkillRoots(String sessionId) async {
+    final reservation = SkillService.I.reserveSessionCatalog(sessionId);
+    final override = skillCatalogInputsForTest;
+    if (override != null) {
+      final inputs = await override(sessionId);
+      await SkillService.I.publishSessionCatalog(
+        sessionId,
+        reservation: reservation,
+        roots: inputs.roots,
+        mounts: inputs.mounts,
+      );
+      return;
+    }
     final roots = <String>[];
     final session = AppState.I.sessionById(sessionId);
     if (session == null) {
-      await SkillService.I.publishSessionCatalog(sessionId);
+      await SkillService.I.publishSessionCatalog(
+        sessionId,
+        reservation: reservation,
+      );
       return;
     }
     // Global user skills (Settings → Skills upload) — visible in EVERY
@@ -11184,10 +11214,15 @@ ${await _agentsMdBlock()}
     }
     await SkillService.I.publishSessionCatalog(
       sessionId,
+      reservation: reservation,
       roots: roots,
       mounts: mounts,
     );
   }
+
+  @visibleForTesting
+  static Future<SkillCatalogInputs> Function(String sessionId)?
+  skillCatalogInputsForTest;
 
   Future<void> _refreshCompatibilitySkillRoots() async {
     SkillService.I.clearRoots();
@@ -11232,14 +11267,12 @@ ${await _agentsMdBlock()}
     await _refreshCompatibilitySkillRoots();
   }
 
-  Future<void> _skillsChanged(String? sessionId) async {
-    if (sessionId != null) {
-      SkillService.I.invalidateSession(sessionId);
-      await _refreshSkillRoots(sessionId);
-      return;
+  Future<void> _skillsChanged(String? pluginId) async {
+    if (pluginId == null) {
+      SkillService.I.invalidateAllSessions();
+    } else {
+      SkillService.I.invalidatePlugin(pluginId);
     }
-    SkillService.I.invalidateAllSessions();
-    await _refreshCompatibilitySkillRoots();
     for (final session in List<ChatSession>.of(AppState.I.sessions)) {
       await _refreshSkillRoots(session.id);
     }
@@ -11447,9 +11480,9 @@ ${await _agentsMdBlock()}
     }
     final skill = res.unique;
     if (skill != null) {
-      final owner = skill.pluginId;
-      if (owner != null && !registry.isPluginActiveForSession(owner, runSid)) {
-        return _pluginScopeRefusal(skill.canonicalId!, owner);
+      if (!isSkillAvailableForSession(skill, runSid)) {
+        return 'Plugin contribution "${skill.canonicalId}" is not active in '
+            'the current manifest for this session. Nothing was executed.';
       }
       _emit('think', 'skill loaded: ${skill.name}');
       return '<skill_content>\n${skill.content}\n</skill_content>';
@@ -11489,6 +11522,31 @@ ${await _agentsMdBlock()}
       'Its canonical contributions live under "plugin:$pluginId/…" and are '
       'scope-enforced. Nothing was executed.';
 
+  bool isSkillAvailableForSession(Skill skill, String sessionId) {
+    final pluginId = skill.pluginId;
+    if (pluginId == null) return true;
+    final canonicalId = skill.canonicalId;
+    if (canonicalId == null) return false;
+    final contribution = PluginContributionRegistry.I.contributionByCanonicalId(
+      canonicalId,
+    );
+    if (contribution == null ||
+        !PluginContributionRegistry.I.isPluginActiveForSession(
+          pluginId,
+          sessionId,
+        )) {
+      return false;
+    }
+    final expectedKind = switch (skill.kind) {
+      SkillContributionKind.command => PluginContributionKind.command,
+      SkillContributionKind.skill => PluginContributionKind.skill,
+      SkillContributionKind.agent => PluginContributionKind.agent,
+    };
+    if (contribution.kind != expectedKind) return false;
+    return File(skill.path).absolute.path ==
+        File('${contribution.rootPath}/${contribution.path}').absolute.path;
+  }
+
   /// Executes ONE canonical plugin contribution (spec §4.4): the declared
   /// markdown file's body is returned as agent instructions — commands,
   /// skills, and agents are prompt bundles, never shell payloads. Path
@@ -11499,16 +11557,28 @@ ${await _agentsMdBlock()}
     Map<String, dynamic> args,
   ) async {
     final runSid = _runSession?.id ?? '';
-    if (!PluginContributionRegistry.I.isPluginActiveForSession(
-      c.pluginId,
-      runSid,
-    )) {
+    final current = PluginContributionRegistry.I.contributionByCanonicalId(
+      c.canonicalId,
+    );
+    if (current == null ||
+        current.pluginId != c.pluginId ||
+        current.kind != c.kind ||
+        current.path != c.path ||
+        current.rootPath != c.rootPath ||
+        !PluginContributionRegistry.I.isPluginActiveForSession(
+          c.pluginId,
+          runSid,
+        )) {
       return _pluginScopeRefusal(c.canonicalId, c.pluginId);
     }
     final mounted = SkillService.I
         .resolveForSession(runSid, c.canonicalId)
         .unique;
     if (mounted != null) {
+      if (!isSkillAvailableForSession(mounted, runSid)) {
+        return 'Plugin contribution "${c.canonicalId}" is not mounted from '
+            'its current declaration. Nothing was executed.';
+      }
       _emit('think', 'plugin ${c.pluginId} ${c.kindLabel}: ${c.name}');
       final input = args['input'] ?? args['arguments'];
       final inputStr = input != null ? '\n\nArguments: $input' : '';

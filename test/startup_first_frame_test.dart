@@ -850,6 +850,7 @@ void main() {
           ..['local.hydrate'] = () => hydration.future,
         pluginBootActivator: (_, _) async {},
       );
+      AgentService.I;
       app.onSessionsLoaded = () => calls.add('sessions.callback');
       final tasks = await app.buildReadinessTasks();
       final hydrationTask = tasks.singleWhere(
@@ -858,10 +859,12 @@ void main() {
       final activation = tasks.singleWhere(
         (task) => task.id == 'plugin.activate',
       );
+      final skillMount = tasks.singleWhere((task) => task.id == 'skill.mount');
       final restore = tasks.singleWhere((task) => task.id == 'session.restore');
 
       final hydrationRun = hydrationTask.run();
       await activation.run();
+      await skillMount.run();
       final status = await restore.run();
 
       expect(status.state, StartupItemState.degraded);
@@ -869,6 +872,42 @@ void main() {
 
       hydration.complete();
       await hydrationRun;
+      expect(calls, contains('sessions.callback'));
+    },
+  );
+
+  test(
+    'restore stays pending until a timed-out skill mount settles successfully',
+    () async {
+      final calls = <String>[];
+      final mount = Completer<void>();
+      SharedPreferences.setMockInitialValues({
+        'ovid_sessions': [
+          _sessionJson('active', ['saved']),
+        ],
+        'ovid_active_session': 'active',
+      });
+      final app = AppState.createForTest(
+        startupStageRecorder: calls.add,
+        startupStageDelegates: _offlineStages()
+          ..remove('plugin.activate')
+          ..['skill.mount'] = () => mount.future,
+        startupStageTimeouts: {'skill.mount': const Duration(milliseconds: 1)},
+        pluginBootActivator: (_, _) async {},
+      );
+      AgentService.I;
+      app.onSessionsLoaded = () => calls.add('sessions.callback');
+
+      await app.initializeReadiness();
+
+      expect(calls, isNot(contains('sessions.callback')));
+      final restore = StartupCoordinator.I.snapshot.items.singleWhere(
+        (item) => item.id == 'session.restore',
+      );
+      expect(restore.state, StartupItemState.degraded);
+
+      mount.complete();
+      await StartupCoordinator.I.whenInvocationsSettled();
       expect(calls, contains('sessions.callback'));
     },
   );

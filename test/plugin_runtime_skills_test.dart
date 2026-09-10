@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -12,6 +13,8 @@ import 'package:ovid_ai/core/plugin_runtime.dart';
 import 'package:ovid_ai/core/plugin_source_resolver.dart';
 import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/state.dart';
+import 'package:ovid_ai/core/theme.dart';
+import 'package:ovid_ai/ui/chat_screen.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -20,9 +23,14 @@ void main() {
 
   setUp(() {
     root = Directory.systemTemp.createTempSync('ovid-runtime-skills-');
+    SkillService.I.invalidateAllSessions();
+    AgentService.skillCatalogInputsForTest = null;
   });
 
   tearDown(() {
+    AgentService.setRunSessionForTest('');
+    AgentService.skillCatalogInputsForTest = null;
+    SkillService.I.invalidateAllSessions();
     if (root.existsSync()) root.deleteSync(recursive: true);
   });
 
@@ -235,6 +243,48 @@ void main() {
     },
   );
 
+  test(
+    'production refresh reserves generation before asynchronous input collection',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      AppState.resetTestInstance();
+      final app = AppState.createForTest();
+      final session = ChatSession(id: 'generation-A', title: 'A', model: 'm');
+      app.sessions.add(session);
+      final oldRoot = Directory('${root.path}/old-input')
+        ..createSync(recursive: true);
+      final newRoot = Directory('${root.path}/new-input')
+        ..createSync(recursive: true);
+      File('${oldRoot.path}/old.md').writeAsStringSync('OLD');
+      File('${newRoot.path}/new.md').writeAsStringSync('NEW');
+      final oldInputs = SkillCatalogInputs(roots: [oldRoot.path]);
+      final newInputs = SkillCatalogInputs(roots: [newRoot.path]);
+      final oldGate = Completer<SkillCatalogInputs>();
+      var collections = 0;
+      AgentService.skillCatalogInputsForTest = (_) {
+        collections++;
+        return collections == 1 ? oldGate.future : Future.value(newInputs);
+      };
+      addTearDown(AppState.resetTestInstance);
+
+      final oldRefresh = AgentService.I.refreshSkills(sessionId: session.id);
+      await Future<void>.delayed(Duration.zero);
+      SkillService.I.invalidateSession(session.id);
+      await AgentService.I.refreshSkills(sessionId: session.id);
+      oldGate.complete(oldInputs);
+      await oldRefresh;
+
+      expect(
+        SkillService.I.resolveForSession(session.id, 'new').isUnique,
+        isTrue,
+      );
+      expect(
+        SkillService.I.resolveForSession(session.id, 'old').isAbsent,
+        isTrue,
+      );
+    },
+  );
+
   test('hostile and malformed declarations are excluded atomically', () async {
     final outside = File('${root.parent.path}/outside-${root.path.hashCode}.md')
       ..writeAsStringSync('OUTSIDE');
@@ -344,6 +394,38 @@ void main() {
       throwsStateError,
     );
     expect(service.skillsForSession('A'), isEmpty);
+  });
+
+  test('published skills deeply copy mutable collections', () {
+    final tools = <String>['read'];
+    final frontmatter = <String, String>{'description': 'original'};
+    final supporting = <String>['reference.md'];
+
+    final skill = Skill(
+      name: 'immutable',
+      description: '',
+      whenToUse: '',
+      content: 'body',
+      path: '/tmp/immutable.md',
+      modelInvocable: true,
+      userInvocable: true,
+      allowedTools: tools,
+      frontmatter: frontmatter,
+      supportingFiles: supporting,
+    );
+    tools.add('write');
+    frontmatter['description'] = 'mutated';
+    supporting.add('outside.md');
+
+    expect(skill.allowedTools, ['read']);
+    expect(skill.frontmatter, {'description': 'original'});
+    expect(skill.supportingFiles, ['reference.md']);
+    expect(() => skill.allowedTools.add('shell'), throwsUnsupportedError);
+    expect(
+      () => skill.frontmatter['description'] = 'changed',
+      throwsUnsupportedError,
+    );
+    expect(() => skill.supportingFiles.add('other.md'), throwsUnsupportedError);
   });
 
   test('canonical slash tokens preserve plugin punctuation and arguments', () {
@@ -463,6 +545,245 @@ void main() {
     },
   );
 
+  test(
+    'removed contribution cannot invoke from a stale same-id snapshot',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      AppState.resetTestInstance();
+      final app = AppState.createForTest();
+      final session = ChatSession(id: 'upgrade-A', title: 'A', model: 'm');
+      app.sessions.add(session);
+      final oldFile = File('${root.path}/skills/old/SKILL.md')
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync('REMOVED CONTENT MUST NOT EXECUTE');
+      expect(oldFile.existsSync(), isTrue);
+      final oldManifest = NormalizedPluginManifest(
+        id: 'acme/upgrade',
+        name: 'Upgrade',
+        version: '1.0.0',
+        format: PluginFormat.claudeCode,
+        rootPath: root.path,
+        skills: const [
+          PluginSkill(
+            pluginId: 'acme/upgrade',
+            name: 'old',
+            path: 'skills/old/SKILL.md',
+          ),
+        ],
+      );
+      final newManifest = NormalizedPluginManifest(
+        id: 'acme/upgrade',
+        name: 'Upgrade',
+        version: '2.0.0',
+        format: PluginFormat.claudeCode,
+        rootPath: root.path,
+      );
+      PluginContributionRegistry.I.register(
+        oldManifest,
+        activation: PluginActivation.globalActive,
+      );
+      AgentService.setRunSessionForTest(session.id);
+      addTearDown(() {
+        PluginContributionRegistry.I.unregisterPlugin(oldManifest.id);
+        AppState.resetTestInstance();
+      });
+      await SkillService.I.publishSessionCatalog(
+        session.id,
+        mounts: [PluginCatalogMount(root.path, oldManifest)],
+      );
+      PluginContributionRegistry.I.register(
+        newManifest,
+        activation: PluginActivation.globalActive,
+      );
+
+      final result = await AgentService.I.dispatchForTest('skill', {
+        'name': 'plugin:acme/upgrade/skill:old',
+      });
+
+      expect(result, contains('not active'));
+      expect(result, isNot(contains('REMOVED CONTENT MUST NOT EXECUTE')));
+    },
+  );
+
+  test(
+    'registered generic plugin tool never executes an unrelated skill',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      AppState.resetTestInstance();
+      final app = AppState.createForTest();
+      final session = ChatSession(id: 'generic-A', title: 'A', model: 'm');
+      app.sessions.add(session);
+      app.activeSessionId = session.id;
+      final workspace = Directory('${root.path}/workspace')
+        ..createSync(recursive: true);
+      File('${workspace.path}/foreign.md').writeAsStringSync(
+        '---\nname: foreign\n---\nFOREIGN CONTENT MUST NOT EXECUTE',
+      );
+      final manifest = NormalizedPluginManifest(
+        id: 'acme/runtime-plugin',
+        name: 'Runtime Plugin',
+        version: '1.0.0',
+        format: PluginFormat.claudeCode,
+        rootPath: root.path,
+        commands: const [
+          PluginCommand(
+            pluginId: 'acme/runtime-plugin',
+            name: 'owned',
+            path: 'commands/owned.md',
+          ),
+        ],
+      );
+      File('${root.path}/commands/owned.md')
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync('OWNED');
+      final row = PluginItem(
+        name: 'Runtime Plugin',
+        author: 'acme',
+        description: '',
+        version: '1.0.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        runtimeId: manifest.id,
+        activation: PluginActivation.globalActive,
+      );
+      app.plugins.add(row);
+      PluginContributionRegistry.I.register(
+        manifest,
+        activation: PluginActivation.globalActive,
+      );
+      AgentService.setRunSessionForTest(session.id);
+      addTearDown(() {
+        PluginContributionRegistry.I.unregisterPlugin(manifest.id);
+        AppState.resetTestInstance();
+      });
+      await SkillService.I.publishSessionCatalog(
+        session.id,
+        roots: [workspace.path],
+        mounts: [PluginCatalogMount(root.path, manifest)],
+      );
+
+      final result = await AgentService.I.dispatchForTest(
+        'plugin_runtime_plugin',
+        {'action': 'foreign'},
+      );
+
+      expect(result, contains('plugin:acme/runtime-plugin/command:owned'));
+      expect(result, contains('Nothing was executed'));
+      expect(result, isNot(contains('FOREIGN CONTENT MUST NOT EXECUTE')));
+    },
+  );
+
+  test(
+    'changed same-canonical contribution cannot execute stale content',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      AppState.resetTestInstance();
+      final app = AppState.createForTest();
+      final session = ChatSession(id: 'replace-A', title: 'A', model: 'm');
+      app.sessions.add(session);
+      File('${root.path}/commands/old.md')
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync('OLD CONTENT MUST NOT EXECUTE');
+      File('${root.path}/commands/new.md').writeAsStringSync('NEW CONTENT');
+      NormalizedPluginManifest manifest(String path) =>
+          NormalizedPluginManifest(
+            id: 'acme/replace',
+            name: 'Replace',
+            version: '1.0.0',
+            format: PluginFormat.claudeCode,
+            rootPath: root.path,
+            commands: [
+              PluginCommand(
+                pluginId: 'acme/replace',
+                name: 'review',
+                path: path,
+              ),
+            ],
+          );
+      final oldManifest = manifest('commands/old.md');
+      final newManifest = manifest('commands/new.md');
+      PluginContributionRegistry.I.register(
+        oldManifest,
+        activation: PluginActivation.globalActive,
+      );
+      AgentService.setRunSessionForTest(session.id);
+      addTearDown(() {
+        PluginContributionRegistry.I.unregisterPlugin(oldManifest.id);
+        AppState.resetTestInstance();
+      });
+      await SkillService.I.publishSessionCatalog(
+        session.id,
+        mounts: [PluginCatalogMount(root.path, oldManifest)],
+      );
+      PluginContributionRegistry.I.register(
+        newManifest,
+        activation: PluginActivation.globalActive,
+      );
+      final current = PluginContributionRegistry.I.contributionByCanonicalId(
+        'plugin:acme/replace/command:review',
+      )!;
+
+      final result = await AgentService.I.dispatchForTest(current.toolName, {});
+
+      expect(result, contains('not mounted'));
+      expect(result, isNot(contains('OLD CONTENT MUST NOT EXECUTE')));
+    },
+  );
+
+  testWidgets('composer hides runtime plugins outside the rendered session', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    AppState.resetTestInstance();
+    final app = AppState.createForTest();
+    final a = ChatSession(id: 'composer-A', title: 'A', model: 'm');
+    final b = ChatSession(id: 'composer-B', title: 'B', model: 'm');
+    app.sessions.addAll([a, b]);
+    app.activeSessionId = b.id;
+    final manifest = NormalizedPluginManifest(
+      id: 'acme/scoped-composer',
+      name: 'Scoped Composer Plugin',
+      version: '1.0.0',
+      format: PluginFormat.claudeCode,
+      rootPath: root.path,
+    );
+    app.plugins.add(
+      PluginItem(
+        name: 'Scoped Composer Plugin',
+        author: 'acme',
+        description: '',
+        version: '1.0.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        runtimeId: manifest.id,
+        activation: PluginActivation.sessionActive,
+        immediateSessionId: a.id,
+      ),
+    );
+    PluginContributionRegistry.I.register(
+      manifest,
+      activation: PluginActivation.sessionActive,
+      immediateSessionId: a.id,
+    );
+    AgentService.I.debugPauseScheduleTimerForTest(true);
+    addTearDown(() {
+      AgentService.I.debugPauseScheduleTimerForTest(false);
+      PluginContributionRegistry.I.unregisterPlugin(manifest.id);
+      AppState.resetTestInstance();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
+    );
+    await tester.pump();
+    await tester.enterText(find.byType(TextField).first, '/Scoped');
+    await tester.pump();
+
+    expect(find.text('Scoped Composer Plugin'), findsNothing);
+  });
+
   test('stale legacy cache cannot expose a pending runtime skill', () async {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
@@ -532,10 +853,32 @@ void main() {
       });
       writeFixture(source);
       final app = AppState.createForTest();
-      final a = ChatSession(id: 'A', title: 'A', model: 'm');
-      final b = ChatSession(id: 'B', title: 'B', model: 'm');
+      final aWork = Directory('${root.path}/a-work')
+        ..createSync(recursive: true);
+      final bWork = Directory('${root.path}/b-work')
+        ..createSync(recursive: true);
+      File('${aWork.path}/.dsh/skills/a-user/SKILL.md')
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync('---\nname: a-user\n---\nA USER');
+      File('${bWork.path}/.dsh/skills/b-user/SKILL.md')
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync('---\nname: b-user\n---\nB USER');
+      final a = ChatSession(
+        id: 'A',
+        title: 'A',
+        model: 'm',
+        workspaceFolder: aWork.path,
+      );
+      final b = ChatSession(
+        id: 'B',
+        title: 'B',
+        model: 'm',
+        workspaceFolder: bWork.path,
+      );
       app.sessions.addAll([a, b]);
-      app.activeSessionId = a.id;
+      app.activeSessionId = b.id;
+      await AgentService.I.refreshSkills(sessionId: a.id);
+      await AgentService.I.refreshSkills(sessionId: b.id);
       final row = PluginItem(
         name: 'Research Kit',
         author: 'acme',
@@ -563,9 +906,6 @@ void main() {
       );
       expect(result?.status, PluginInstallStatus.ok);
 
-      await AgentService.I.refreshSkills(sessionId: a.id);
-      await AgentService.I.refreshSkills(sessionId: b.id);
-
       expect(
         SkillService.I
             .resolveForSession(a.id, 'plugin:acme/research-kit/skill:research')
@@ -581,6 +921,8 @@ void main() {
         SkillService.I.resolveForSession(b.id, 'research').isAbsent,
         isTrue,
       );
+      expect(SkillService.I.resolveForSession(a.id, 'a-user').isUnique, isTrue);
+      expect(SkillService.I.resolveForSession(b.id, 'b-user').isUnique, isTrue);
 
       await PluginRuntimeManager.I.activateForBoot(
         bootToken: Object(),
@@ -589,6 +931,19 @@ void main() {
       );
       await AgentService.I.refreshSkills(sessionId: b.id);
 
+      expect(
+        SkillService.I.resolveForSession(b.id, 'research').isUnique,
+        isTrue,
+      );
+
+      SkillService.I.invalidateAllSessions();
+      await app.retryPlugin(row);
+      expect(SkillService.I.resolveForSession(a.id, 'a-user').isUnique, isTrue);
+      expect(SkillService.I.resolveForSession(b.id, 'b-user').isUnique, isTrue);
+      expect(
+        SkillService.I.resolveForSession(a.id, 'research').isUnique,
+        isTrue,
+      );
       expect(
         SkillService.I.resolveForSession(b.id, 'research').isUnique,
         isTrue,
