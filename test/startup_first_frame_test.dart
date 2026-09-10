@@ -6,7 +6,10 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/firebase_service.dart';
 import 'package:ovid_ai/core/state.dart';
+import 'package:ovid_ai/core/startup_coordinator.dart';
 
 const _optionalStages = <String>[
   'marketplace.refresh',
@@ -25,11 +28,13 @@ String _sessionJson(
   String id,
   List<String> messages, {
   String title = 'Saved chat',
+  String? parentId,
 }) => jsonEncode(
   ChatSession(
     id: id,
     title: title,
     model: 'saved-model',
+    parentId: parentId,
     messages: [
       for (final message in messages) Message(role: 'user', content: message),
     ],
@@ -74,14 +79,12 @@ void main() {
     () async {
       SharedPreferences.setMockInitialValues({
         'ovid_sessions': [
-          _sessionJson(
-            'active',
-            [
-              for (var i = 0; i < 5000; i++) 'history-$i ${'x' * 200}',
-            ],
-          ),
+          'not-json',
           for (var i = 0; i < 100; i++)
-            _sessionJson('archive-$i', ['archived-$i']),
+            _sessionJson('archive-$i', ['archived-$i ${'y' * 2000}']),
+          _sessionJson('active', [
+            for (var i = 0; i < 5000; i++) 'history-$i ${'x' * 200}',
+          ]),
         ],
         'ovid_active_session': 'active',
       });
@@ -99,6 +102,7 @@ void main() {
 
       expect(calls, ['local.firstFrame']);
       expect(app.sessions, hasLength(1));
+      expect(app.activeSession!.id, 'active');
       expect(app.activeSession!.messages, hasLength(50));
     },
   );
@@ -171,6 +175,218 @@ void main() {
   );
 
   test(
+    'deleting before hydration tombstones the session and descendants',
+    () async {
+      SharedPreferences.setMockInitialValues({
+        'ovid_sessions': [
+          _sessionJson('active', ['parent']),
+          _sessionJson('child', ['child'], parentId: 'active'),
+          _sessionJson('survivor', ['keep']),
+        ],
+        'ovid_active_session': 'active',
+      });
+      final app = AppState.createForTest(
+        startupStageDelegates: _offlineStages(),
+      );
+
+      await app.initializeForFirstFrame();
+      app.deleteSession('active');
+      await app.persistSessions();
+      await app.initializeReadiness();
+
+      expect(app.sessionById('active'), isNull);
+      expect(app.sessionById('child'), isNull);
+      expect(app.sessionById('survivor')!.messages.single.content, 'keep');
+    },
+  );
+
+  test('deleteAllData invalidates a pending deferred snapshot', () async {
+    SharedPreferences.setMockInitialValues({
+      'ovid_sessions': [
+        _sessionJson('active', ['old-active']),
+        _sessionJson('archived', ['old-archive']),
+      ],
+      'ovid_active_session': 'active',
+    });
+    final app = AppState.createForTest(startupStageDelegates: _offlineStages());
+
+    await app.initializeForFirstFrame();
+    await app.deleteAllData();
+    final freshId = app.activeSession!.id;
+    await app.initializeReadiness();
+
+    expect(app.sessions.map((session) => session.id), [freshId]);
+    expect(app.sessionById('active'), isNull);
+    expect(app.sessionById('archived'), isNull);
+  });
+
+  test(
+    'deleting during chunked hydration cannot resurrect the session',
+    () async {
+      SharedPreferences.setMockInitialValues({
+        'ovid_sessions': [
+          _sessionJson('active', ['active']),
+          for (var i = 0; i < 60; i++)
+            _sessionJson('archive-$i', ['message-$i']),
+        ],
+        'ovid_active_session': 'active',
+      });
+      final app = AppState.createForTest(
+        startupStageDelegates: _offlineStages(),
+      );
+
+      await app.initializeForFirstFrame();
+      final readiness = app.initializeReadiness();
+      await Future<void>.delayed(Duration.zero);
+      app.deleteSession('active');
+      await readiness;
+
+      expect(app.sessionById('active'), isNull);
+    },
+  );
+
+  test(
+    'a malformed deferred row cannot truncate valid persisted sessions',
+    () async {
+      final calls = <String>[];
+      SharedPreferences.setMockInitialValues({
+        'ovid_sessions': [
+          _sessionJson('active', [for (var i = 0; i < 80; i++) 'old-$i']),
+          '{malformed',
+          _sessionJson('archived', ['archive']),
+        ],
+        'ovid_active_session': 'active',
+      });
+      var app = AppState.createForTest(
+        startupStageRecorder: calls.add,
+        startupStageDelegates: _offlineStages(),
+      );
+
+      await app.initializeReadiness();
+      expect(calls, contains('local.hydrate.corrupt'));
+      expect(
+        StartupCoordinator.I.snapshot.items
+            .singleWhere((item) => item.id == 'local.hydrate')
+            .state,
+        StartupItemState.degraded,
+      );
+      expect(app.activeSession!.messages, hasLength(80));
+      expect(app.sessionById('archived')!.messages.single.content, 'archive');
+      await app.persistSessions();
+
+      AppState.resetTestInstance();
+      app = AppState.createForTest(startupStageDelegates: _offlineStages());
+      await app.initialize();
+      expect(app.activeSession!.messages, hasLength(80));
+      expect(app.sessionById('archived')!.messages.single.content, 'archive');
+    },
+  );
+
+  test('plugin activation retries with one boot token and one epoch', () async {
+    var attempts = 0;
+    final tokens = <Object>[];
+    final app = AppState.createForTest(
+      startupStageDelegates: _offlineStages()..remove('plugin.activate'),
+      pluginBootActivator: (bootToken, connectMcp) async {
+        attempts++;
+        tokens.add(bootToken);
+        expect(connectMcp, isFalse);
+        if (attempts == 1) throw StateError('activation failed');
+      },
+    );
+    final pluginTask = (await app.buildReadinessTasks()).singleWhere(
+      (task) => task.id == 'plugin.activate',
+    );
+
+    await expectLater(pluginTask.run(), throwsStateError);
+    await pluginTask.run();
+    await pluginTask.run();
+
+    expect(attempts, 2);
+    expect(identical(tokens[0], tokens[1]), isTrue);
+  });
+
+  test(
+    'Firebase initialization retries failure without duplicate setup',
+    () async {
+      var appAttempts = 0;
+      var setupAttempts = 0;
+      final firebase = FirebaseService.forTest(
+        initializeApp: () async => appAttempts++,
+        configure: () async {
+          setupAttempts++;
+          if (setupAttempts == 1) throw StateError('configuration failed');
+        },
+      );
+
+      await expectLater(firebase.initialize(), throwsStateError);
+      expect(firebase.isAvailable, isFalse);
+      await firebase.initialize();
+      await firebase.initialize();
+
+      expect(firebase.isAvailable, isTrue);
+      expect(appAttempts, 2);
+      expect(setupAttempts, 2);
+    },
+  );
+
+  test(
+    'restored-session callback runs after hydration and activation',
+    () async {
+      final calls = <String>[];
+      SharedPreferences.setMockInitialValues({
+        'ovid_sessions': [
+          _sessionJson('active', ['saved']),
+        ],
+        'ovid_active_session': 'active',
+      });
+      final app = AppState.createForTest(
+        startupStageRecorder: calls.add,
+        startupStageDelegates: _offlineStages(),
+      );
+      AgentService.I;
+      app.onSessionsLoaded = () => calls.add('sessions.callback');
+
+      await app.initializeReadiness();
+
+      expect(
+        calls,
+        containsAll(['local.hydrate', 'plugin.activate', 'sessions.callback']),
+      );
+      expect(
+        calls.indexOf('sessions.callback'),
+        greaterThan(calls.indexOf('plugin.activate')),
+      );
+    },
+  );
+
+  test('resume reconnect is gated until readiness completes', () async {
+    final calls = <String>[];
+    final releaseHydration = Completer<void>();
+    final delegates = _offlineStages()
+      ..['local.hydrate'] = () async {
+        await releaseHydration.future;
+      }
+      ..['mcp.resume'] = () async => calls.add('resume.connected');
+    final app = AppState.createForTest(
+      startupStageRecorder: calls.add,
+      startupStageDelegates: delegates,
+    );
+
+    final readiness = app.initializeReadiness();
+    while (!calls.contains('local.hydrate')) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    await app.reconnectServicesAfterResume();
+    expect(calls, isNot(contains('resume.connected')));
+
+    releaseHydration.complete();
+    await readiness;
+    await app.reconnectServicesAfterResume();
+    expect(calls.where((stage) => stage == 'resume.connected'), hasLength(1));
+  });
+
+  test(
     'readiness and boot activation run once for one AppState boot',
     () async {
       final calls = <String>[];
@@ -215,6 +431,24 @@ void main() {
         mainBody.substring(0, mainBody.indexOf('runApp(')),
         isNot(contains(forbidden)),
       );
+    }
+  });
+
+  test('first-frame method has no direct optional-service calls', () {
+    final source = File('lib/core/state.dart').readAsStringSync();
+    final firstFrameBody = source.substring(
+      source.indexOf('Future<void> _initializeForFirstFrame()'),
+      source.indexOf('Future<List<StartupTask>> buildReadinessTasks()'),
+    );
+
+    for (final forbidden in [
+      'syncMarketplaceCatalogs(',
+      'activateForBoot(',
+      'FirebaseService.I.initialize(',
+      'reconnectServices(',
+      'selfHealInBackground(',
+    ]) {
+      expect(firstFrameBody, isNot(contains(forbidden)));
     }
   });
 }

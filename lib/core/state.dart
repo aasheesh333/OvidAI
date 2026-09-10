@@ -1002,6 +1002,8 @@ class ChatSession {
 /// ---------- App state ----------
 
 typedef StartupStageDelegate = Future<void> Function();
+typedef PluginBootActivator =
+    Future<void> Function(Object bootToken, bool connectMcp);
 
 class _AppStartupTask implements StartupTask {
   const _AppStartupTask({
@@ -1032,6 +1034,37 @@ class _AppStartupTask implements StartupTask {
   }
 }
 
+class _LocalHydrationStartupTask implements StartupTask {
+  const _LocalHydrationStartupTask(this.app);
+
+  final AppState app;
+
+  @override
+  String get id => 'local.hydrate';
+  @override
+  StartupItemKind get kind => StartupItemKind.localState;
+  @override
+  String get label => 'Load local data';
+  @override
+  Duration get timeout => const Duration(seconds: 15);
+  @override
+  StartupDisable? get onDisable => null;
+
+  @override
+  Future<StartupItemStatus> run() async {
+    await app._runStartupStage(id, app._hydrateRemainingLocalState);
+    if (app._unparsedSessionJson.isNotEmpty) {
+      return StartupItemStatus.degraded(
+        id,
+        kind,
+        label,
+        reason: 'Some saved sessions could not be read and were preserved',
+      );
+    }
+    return StartupItemStatus.ready(id, kind, label);
+  }
+}
+
 class AppState extends ChangeNotifier {
   /// Singleton — everything is user-side / on-device.
   static AppState? _testInstance;
@@ -1046,10 +1079,12 @@ class AppState extends ChangeNotifier {
   factory AppState.createForTest({
     void Function(String stage)? startupStageRecorder,
     Map<String, StartupStageDelegate> startupStageDelegates = const {},
+    PluginBootActivator? pluginBootActivator,
   }) {
     final instance = AppState._(
       startupStageRecorder: startupStageRecorder,
       startupStageDelegates: startupStageDelegates,
+      pluginBootActivator: pluginBootActivator,
     );
     _testInstance = instance;
     return instance;
@@ -1063,13 +1098,22 @@ class AppState extends ChangeNotifier {
   AppState._({
     this._startupStageRecorder,
     Map<String, StartupStageDelegate> startupStageDelegates = const {},
+    PluginBootActivator? pluginBootActivator,
   }) : _startupStageDelegates = Map.unmodifiable(startupStageDelegates) {
+    _pluginBootActivator =
+        pluginBootActivator ??
+        ((bootToken, connectMcp) => PluginRuntimeManager.I.activateForBoot(
+          connectMcp: connectMcp,
+          bootToken: bootToken,
+          reportFailure: true,
+        ));
     _seed();
     _ensureActiveSession();
   }
 
   final void Function(String stage)? _startupStageRecorder;
   final Map<String, StartupStageDelegate> _startupStageDelegates;
+  late final PluginBootActivator _pluginBootActivator;
 
   Future<void> setPluginInstalled(
     String name,
@@ -1367,11 +1411,17 @@ class AppState extends ChangeNotifier {
   Future<void>? _readinessInitialization;
   Future<List<StartupItemStatus>>? _pluginSafetyReconciliation;
   Future<void>? _pluginBootActivation;
+  var _pluginBootActivated = false;
   final Object _bootToken = Object();
-  Object? _activatedBootToken;
+  var _readinessStarted = false;
+  var _readinessComplete = false;
   List<String>? _deferredSessionJson;
+  final List<String> _unparsedSessionJson = [];
+  final Set<String> _deferredDeletedSessionIds = {};
   String? _deferredActiveSessionId;
   int _deferredActiveTailLength = 0;
+  var _deferredSessionGeneration = 0;
+  var _sessionRestoreFinished = false;
 
   Future<void> initialize() => _initialization ??= initializeReadiness();
 
@@ -1389,13 +1439,7 @@ class AppState extends ChangeNotifier {
 
   Future<List<StartupTask>> buildReadinessTasks() =>
       _readinessTasks ??= Future.value([
-        _startupTask(
-          id: 'local.hydrate',
-          kind: StartupItemKind.localState,
-          label: 'Load local data',
-          timeout: const Duration(seconds: 15),
-          body: _hydrateRemainingLocalState,
-        ),
+        _LocalHydrationStartupTask(this),
         _startupTask(
           id: 'localSafety.migrate',
           kind: StartupItemKind.localState,
@@ -1409,6 +1453,13 @@ class AppState extends ChangeNotifier {
           label: 'Activate plugins',
           timeout: const Duration(seconds: 15),
           body: _activatePluginsForBoot,
+        ),
+        _startupTask(
+          id: 'session.restore',
+          kind: StartupItemKind.sessionHook,
+          label: 'Restore session runtime',
+          timeout: const Duration(seconds: 15),
+          body: _finishSessionRestore,
         ),
         _startupTask(
           id: 'marketplace.refresh',
@@ -1451,9 +1502,14 @@ class AppState extends ChangeNotifier {
       _readinessInitialization ??= _initializeReadiness();
 
   Future<void> _initializeReadiness() async {
+    _readinessStarted = true;
     await initializeForFirstFrame();
     final tasks = await buildReadinessTasks();
-    await StartupCoordinator.I.start(tasks);
+    try {
+      await StartupCoordinator.I.start(tasks);
+    } finally {
+      _readinessComplete = true;
+    }
   }
 
   StartupTask _startupTask({
@@ -1467,11 +1523,13 @@ class AppState extends ChangeNotifier {
     kind: kind,
     label: label,
     timeout: timeout,
-    runStage: () async {
-      _startupStageRecorder?.call(id);
-      await (_startupStageDelegates[id] ?? body)();
-    },
+    runStage: () => _runStartupStage(id, body),
   );
+
+  Future<void> _runStartupStage(String id, StartupStageDelegate body) async {
+    _startupStageRecorder?.call(id);
+    await (_startupStageDelegates[id] ?? body)();
+  }
 
   Future<void> _hydrateRemainingLocalState() async {
     await loadProviderCredentials();
@@ -1487,24 +1545,65 @@ class AppState extends ChangeNotifier {
     await _applyPluginState();
     await _loadMemories();
     await HookService.I.loadEnabled();
-    await AgentService.I.restoreRunCheckpoints();
   }
 
   Future<void> _reconcilePluginSafety() async {
-    await (_pluginSafetyReconciliation ??= PluginRuntimeManager.I
-        .reconcileRowsAndGrants());
+    final existing = _pluginSafetyReconciliation;
+    if (existing != null) {
+      await existing;
+      return;
+    }
+    late final Future<List<StartupItemStatus>> attempt;
+    attempt = PluginRuntimeManager.I.reconcileRowsAndGrants().catchError((
+      Object error,
+      StackTrace stack,
+    ) {
+      if (identical(_pluginSafetyReconciliation, attempt)) {
+        _pluginSafetyReconciliation = null;
+      }
+      Error.throwWithStackTrace(error, stack);
+    });
+    _pluginSafetyReconciliation = attempt;
+    await attempt;
   }
 
   Future<void> _activatePluginsForBoot() async {
     await _reconcilePluginSafety();
-    if (identical(_activatedBootToken, _bootToken)) {
-      await (_pluginBootActivation ?? Future<void>.value());
+    if (_pluginBootActivated) return;
+    final existing = _pluginBootActivation;
+    if (existing != null) {
+      await existing;
       return;
     }
-    _activatedBootToken = _bootToken;
-    await (_pluginBootActivation ??= PluginRuntimeManager.I.activateForBoot(
-      connectMcp: false,
-    ));
+    late final Future<void> attempt;
+    attempt = _pluginBootActivator(_bootToken, false)
+        .then<void>((_) => _pluginBootActivated = true)
+        .whenComplete(() {
+          if (identical(_pluginBootActivation, attempt)) {
+            _pluginBootActivation = null;
+          }
+        });
+    _pluginBootActivation = attempt;
+    await attempt;
+  }
+
+  Future<void> _finishSessionRestore() async {
+    if (_sessionRestoreFinished) return;
+    await AgentService.I.restoreRunCheckpoints();
+    onSessionsLoaded?.call();
+    _sessionRestoreFinished = true;
+  }
+
+  Future<void> reconnectServicesAfterResume() async {
+    if (!_readinessStarted || !_readinessComplete) return;
+    const stage = 'mcp.resume';
+    _startupStageRecorder?.call(stage);
+    final delegate = _startupStageDelegates[stage];
+    if (delegate != null) {
+      await delegate();
+    } else {
+      await reconnectServices();
+    }
   }
 
   Future<void> _runSandboxMaintenance() async {
@@ -1662,7 +1761,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> loadSessions() async {
     if (_deferredSessionJson != null) {
-      _hydrateDeferredSessions();
+      await _hydrateDeferredSessions();
       return;
     }
     try {
@@ -1690,10 +1789,6 @@ class AppState extends ChangeNotifier {
         session.providerId ??= _inferProviderId(session.model);
       }
       _restoreSelectedModel();
-      // Cold-resume hook (the session restore durable descriptor parity): let the agent
-      // service rebuild its subagent handle registry from the persisted
-      // lineage (agentId / parentId / state) before the UI reads it.
-      onSessionsLoaded?.call();
       notifyListeners();
     } catch (_) {
       _ensureActiveSession();
@@ -1715,22 +1810,39 @@ class AppState extends ChangeNotifier {
 
       _deferredSessionJson = List<String>.of(raw);
       Map<String, dynamic>? activeJson;
-      Map<String, dynamic>? firstRootJson;
-      for (final encoded in raw) {
-        final candidate = jsonDecode(encoded) as Map<String, dynamic>;
-        if (candidate['parentId'] == null) {
-          firstRootJson ??= candidate;
-          if (candidate['id'] == requestedActiveId) {
-            activeJson = candidate;
-            break;
+      if (requestedActiveId != null) {
+        final idPrefix = '{"id":${jsonEncode(requestedActiveId)},';
+        for (final encoded in raw) {
+          if (!encoded.startsWith(idPrefix)) continue;
+          try {
+            final candidate = jsonDecode(encoded) as Map<String, dynamic>;
+            if (candidate['id'] == requestedActiveId &&
+                candidate['parentId'] == null) {
+              activeJson = candidate;
+              break;
+            }
+          } catch (_) {
+            continue;
           }
         }
       }
-      activeJson ??= firstRootJson;
       if (activeJson == null) {
-        _deferredSessionJson = null;
-        await loadSessions();
-        return;
+        for (final encoded in raw) {
+          try {
+            final candidate = jsonDecode(encoded) as Map<String, dynamic>;
+            if (candidate['parentId'] == null) {
+              activeJson = candidate;
+              break;
+            }
+          } catch (_) {
+            continue;
+          }
+        }
+        if (activeJson == null) {
+          _clearDeferredSessions();
+          _ensureActiveSession();
+          return;
+        }
       }
       final messages = (activeJson['messages'] as List?) ?? const [];
       final tailStart = messages.length > _firstFrameMessageTailSize
@@ -1742,58 +1854,69 @@ class AppState extends ChangeNotifier {
       sessions
         ..clear()
         ..add(active);
-      activeSessionId = active.isSubagent ? null : active.id;
-      if (activeSessionId == null) {
-        _deferredSessionJson = null;
-        await loadSessions();
-        return;
-      }
+      activeSessionId = active.id;
       _deferredActiveSessionId = active.id;
       _deferredActiveTailLength = active.messages.length;
       notifyListeners();
     } catch (_) {
-      _deferredSessionJson = null;
+      _clearDeferredSessions();
       _ensureActiveSession();
     }
   }
 
-  void _hydrateDeferredSessions() {
+  Future<void> _hydrateDeferredSessions() async {
     final raw = _deferredSessionJson;
     if (raw == null) return;
-    try {
-      final current = {for (final session in sessions) session.id: session};
-      final loaded = <ChatSession>[];
-      for (final encoded in raw) {
+    final generation = _deferredSessionGeneration;
+    final current = {for (final session in sessions) session.id: session};
+    final loaded = <ChatSession>[];
+    final unparsed = <String>[];
+    for (var index = 0; index < raw.length; index++) {
+      if (generation != _deferredSessionGeneration) return;
+      final encoded = raw[index];
+      try {
         final fullJson = jsonDecode(encoded) as Map<String, dynamic>;
         final id = fullJson['id'] as String?;
-        final partial = id == null ? null : current.remove(id);
+        if (id == null || _deferredDeletedSessionIds.contains(id)) continue;
+        final partial = current.remove(id);
         if (partial != null && id == _deferredActiveSessionId) {
           loaded.add(_mergeDeferredActiveSession(fullJson, partial));
         } else {
           loaded.add(ChatSession.fromJson(fullJson));
         }
+      } catch (_) {
+        unparsed.add(encoded);
+        _startupStageRecorder?.call('local.hydrate.corrupt');
       }
-      loaded.addAll(current.values);
-      sessions
-        ..clear()
-        ..addAll(loaded);
-      _deferredSessionJson = null;
-      _deferredActiveSessionId = null;
-      _deferredActiveTailLength = 0;
-      final active = sessionById(activeSessionId);
-      if (active == null || active.isSubagent) {
-        activeSessionId = rootSessions.firstOrNull?.id;
+      if (index % 20 == 19) {
+        await Future<void>.delayed(Duration.zero);
       }
-      for (final session in sessions) {
-        session.providerId ??= _inferProviderId(session.model);
-      }
-      _restoreSelectedModel();
-      onSessionsLoaded?.call();
-      notifyListeners();
-    } catch (_) {
-      _deferredSessionJson = null;
-      _ensureActiveSession();
     }
+    if (generation != _deferredSessionGeneration) return;
+    loaded.removeWhere(
+      (session) => _deferredDeletedSessionIds.contains(session.id),
+    );
+    current.removeWhere((id, _) => _deferredDeletedSessionIds.contains(id));
+    loaded.addAll(current.values);
+    sessions
+      ..clear()
+      ..addAll(loaded);
+    _unparsedSessionJson
+      ..clear()
+      ..addAll(unparsed);
+    _deferredSessionJson = null;
+    _deferredActiveSessionId = null;
+    _deferredActiveTailLength = 0;
+    _deferredDeletedSessionIds.clear();
+    final active = sessionById(activeSessionId);
+    if (active == null || active.isSubagent) {
+      activeSessionId = rootSessions.firstOrNull?.id;
+    }
+    for (final session in sessions) {
+      session.providerId ??= _inferProviderId(session.model);
+    }
+    _restoreSelectedModel();
+    notifyListeners();
   }
 
   ChatSession _mergeDeferredActiveSession(
@@ -1831,7 +1954,10 @@ class AppState extends ChangeNotifier {
   List<String> _sessionJsonForPersistence() {
     final raw = _deferredSessionJson;
     if (raw == null) {
-      return sessions.map((session) => jsonEncode(session.toJson())).toList();
+      return [
+        ...sessions.map((session) => jsonEncode(session.toJson())),
+        ..._unparsedSessionJson,
+      ];
     }
     final current = {for (final session in sessions) session.id: session};
     final encoded = <String>[];
@@ -1839,6 +1965,7 @@ class AppState extends ChangeNotifier {
       try {
         final fullJson = jsonDecode(original) as Map<String, dynamic>;
         final id = fullJson['id'] as String?;
+        if (id != null && _deferredDeletedSessionIds.contains(id)) continue;
         final partial = id == null ? null : current.remove(id);
         if (partial != null && id == _deferredActiveSessionId) {
           encoded.add(
@@ -1857,6 +1984,15 @@ class AppState extends ChangeNotifier {
     return encoded;
   }
 
+  void _clearDeferredSessions() {
+    _deferredSessionGeneration++;
+    _deferredSessionJson = null;
+    _deferredActiveSessionId = null;
+    _deferredActiveTailLength = 0;
+    _deferredDeletedSessionIds.clear();
+    _unparsedSessionJson.clear();
+  }
+
   /// Delete all user data: sessions, workspaces, providers, keys, plugin
   /// state, usage log, memories, and app preferences. Resets in-memory
   /// state to defaults and seeds a fresh session.
@@ -1864,6 +2000,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.clear();
+      _clearDeferredSessions();
       // Secure-storage keys (API credentials, MCP env) are cleared below.
       for (final s in List.of(sessions)) {
         final sid = s.sandboxId;
@@ -2465,6 +2602,27 @@ class AppState extends ChangeNotifier {
     // A chat owns its subagents: deleting it deletes their transcripts and
     // workspaces too, otherwise orphan children linger invisibly forever.
     final doomed = <ChatSession>[?s, ...descendantsOf(id)];
+    if (_deferredSessionJson != null) {
+      final doomedIds = <String>{id};
+      var changed = true;
+      while (changed) {
+        changed = false;
+        for (final encoded in _deferredSessionJson!) {
+          try {
+            final json = jsonDecode(encoded) as Map<String, dynamic>;
+            final rawId = json['id'] as String?;
+            final parentId = json['parentId'] as String?;
+            if (rawId != null &&
+                parentId != null &&
+                doomedIds.contains(parentId) &&
+                doomedIds.add(rawId)) {
+              changed = true;
+            }
+          } catch (_) {}
+        }
+      }
+      _deferredDeletedSessionIds.addAll(doomedIds);
+    }
     sessions.removeWhere((x) => doomed.any((d) => d.id == x.id));
     if (activeSessionId == null || doomed.any((d) => d.id == activeSessionId)) {
       activeSessionId = rootSessions.isEmpty ? null : rootSessions.first.id;

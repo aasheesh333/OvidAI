@@ -280,6 +280,9 @@ class PluginRuntimeManager extends ChangeNotifier {
 
   static final PluginRuntimeManager I = PluginRuntimeManager._();
 
+  Object? _bootToken;
+  int? _bootEpoch;
+
   /// Test seams (resolver/dep-service injection), mirroring the
   /// `AppState.pluginCacheRootOverrideForTest` convention.
   @visibleForTesting
@@ -1152,10 +1155,23 @@ class PluginRuntimeManager extends ChangeNotifier {
   /// record (`installedBootEpoch < epoch && promoteOnNextBoot`) to
   /// globalActive/degraded exactly once. Corrupt records never propagate
   /// out of initialize.
-  Future<void> activateForBoot({bool connectMcp = true}) async {
+  Future<void> activateForBoot({
+    bool connectMcp = true,
+    Object? bootToken,
+    bool reportFailure = false,
+  }) async {
     try {
-      final epoch = (await _readEpoch()) + 1;
-      await _writeEpoch(epoch);
+      final int epoch;
+      if (bootToken != null && identical(_bootToken, bootToken)) {
+        epoch = _bootEpoch!;
+      } else {
+        epoch = (await _readEpoch()) + 1;
+        await _writeEpoch(epoch);
+      }
+      if (bootToken != null && !identical(_bootToken, bootToken)) {
+        _bootToken = bootToken;
+        _bootEpoch = epoch;
+      }
       final entries = await _loadEntries();
       if (entries.isEmpty) return;
       var entriesChanged = false;
@@ -1240,8 +1256,9 @@ class PluginRuntimeManager extends ChangeNotifier {
         await AppState.I.persistMergedMarketplaceCatalog();
         AppState.I.refresh();
       }
-    } catch (_) {
+    } catch (error, stack) {
       // A corrupt record must never brick the boot.
+      if (reportFailure) Error.throwWithStackTrace(error, stack);
     }
   }
 

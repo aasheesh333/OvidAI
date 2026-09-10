@@ -20409,7 +20409,7 @@ cwd = 'tools'
         );
         expect(
           stateSrc,
-          contains('connectMcp: false'),
+          contains('_pluginBootActivator(_bootToken, false)'),
           reason: 'boot activation may mount MCP declarations but not connect',
         );
 

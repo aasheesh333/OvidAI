@@ -401,7 +401,7 @@ void main() {
       );
       app.plugins.add(hookRow);
       var hookCalls = 0;
-      HookService.I.executorForTest = (_, __) async {
+      HookService.I.executorForTest = (_, _) async {
         hookCalls++;
         return '';
       };

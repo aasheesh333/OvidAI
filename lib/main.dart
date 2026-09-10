@@ -126,7 +126,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // service keeps the process + Dart alive while backgrounded.
     switch (state) {
       case AppLifecycleState.resumed:
-        unawaited(AppState.I.reconnectServices());
+        unawaited(AppState.I.reconnectServicesAfterResume());
         // PR32: a run that survived the background must keep its
         // notification (some OEMs drop it on pause).
         if (AgentService.I.anyRunActive) {
@@ -224,8 +224,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     showDialog<void>(
       context: context,
       builder: (d) => AlertDialog(
-        title: const Text('Welcome to Ovid AI',
-            style: TextStyle(fontSize: 16)),
+        title: const Text('Welcome to Ovid AI', style: TextStyle(fontSize: 16)),
         content: const Text(
           'An on-device coding agent: chat, run real Linux commands in the '
           'sandbox, browse the web, and sync with GitHub. '

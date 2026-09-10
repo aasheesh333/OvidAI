@@ -15,11 +15,19 @@ import 'package:shared_preferences/shared_preferences.dart';
 ///    (Play-policy: data collection requires consent). Consent is persisted.
 ///  • google-services.json is injected at build time via the
 ///    GOOGLE_SERVICES_JSON CI secret — never committed to the repo.
-///  • If Firebase is not configured (debug/local without the file), every
-///    method degrades to a safe no-op.
+///  • If Firebase is not configured (debug/local without the file), readiness
+///    reports initialization failure while all feature methods stay safe.
 class FirebaseService extends ChangeNotifier {
-  FirebaseService._();
+  FirebaseService._({this._initializeApp, Future<void> Function()? configure})
+    : _configureForTest = configure;
+
   static final FirebaseService I = FirebaseService._();
+
+  @visibleForTesting
+  FirebaseService.forTest({
+    required Future<void> Function() initializeApp,
+    required Future<void> Function() configure,
+  }) : this._(initializeApp: initializeApp, configure: configure);
 
   static const _consentKey = 'ovid_telemetry_consent'; // 'yes' | 'no' | null
 
@@ -38,32 +46,63 @@ class FirebaseService extends ChangeNotifier {
 
   StreamSubscription<User?>? _authSub;
   Future<void>? _initialization;
+  final Future<void> Function()? _initializeApp;
+  final Future<void> Function()? _configureForTest;
 
   /// Initialize Firebase if a config is present. Safe to call on all builds.
-  Future<void> initialize() => _initialization ??= _initialize();
+  Future<void> initialize() {
+    final existing = _initialization;
+    if (existing != null) return existing;
+    late final Future<void> attempt;
+    attempt = _initialize().catchError((Object error, StackTrace stack) {
+      if (identical(_initialization, attempt)) _initialization = null;
+      Error.throwWithStackTrace(error, stack);
+    });
+    _initialization = attempt;
+    return attempt;
+  }
 
   Future<void> _initialize() async {
     try {
-      await Firebase.initializeApp();
+      if (_initializeApp != null) {
+        await _initializeApp();
+      } else {
+        await Firebase.initializeApp();
+      }
       _available = true;
     } catch (e) {
-      // No google-services.json (local debug) or init failure — run offline.
+      // Readiness reports the failure and may retry; the app remains usable.
       _available = false;
       debugPrint('Firebase unavailable: $e');
-      return;
+      rethrow;
     }
 
-    await _restoreConsent();
+    if (_configureForTest != null) {
+      try {
+        await _configureForTest();
+        notifyListeners();
+        return;
+      } catch (_) {
+        _available = false;
+        rethrow;
+      }
+    }
+    try {
+      await _restoreConsent();
 
-    _authSub = FirebaseAuth.instance.authStateChanges().listen((user) {
-      _user = user;
+      _authSub ??= FirebaseAuth.instance.authStateChanges().listen((user) {
+        _user = user;
+        notifyListeners();
+      });
+      _user = FirebaseAuth.instance.currentUser;
+
+      // Route Flutter + platform errors to Crashlytics only when consented.
+      if (_consentGiven) _attachCrashHandlers();
       notifyListeners();
-    });
-    _user = FirebaseAuth.instance.currentUser;
-
-    // Route Flutter + platform errors to Crashlytics only when consented.
-    if (_consentGiven) _attachCrashHandlers();
-    notifyListeners();
+    } catch (_) {
+      _available = false;
+      rethrow;
+    }
   }
 
   Future<void> _restoreConsent() async {
