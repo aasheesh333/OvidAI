@@ -5,6 +5,9 @@ import 'package:http/http.dart' as http;
 import '../core/theme.dart';
 import '../core/state.dart';
 
+@visibleForTesting
+Future<String?> Function(String providerId)? removeCustomProviderForTest;
+
 /// Providers screen — BYOK list with search. Opened from Settings.
 class ProvidersScreen extends StatefulWidget {
   const ProvidersScreen({super.key});
@@ -214,6 +217,7 @@ class _ProviderCardState extends State<ProviderCard> {
   void didUpdateWidget(covariant ProviderCard oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.provider.id != provider.id) {
+      _deleting = false;
       _keyController.text = provider.apiKey;
       _urlController.text = provider.baseUrl;
     }
@@ -286,7 +290,9 @@ class _ProviderCardState extends State<ProviderCard> {
     _keyPersistTimer?.cancel();
     _urlPersistTimer?.cancel();
     _deleting = true;
-    final error = await AppState.I.removeCustomProvider(provider.id);
+    final error =
+        await (removeCustomProviderForTest?.call(provider.id) ??
+            AppState.I.removeCustomProvider(provider.id));
     if (!mounted) return;
     if (error != null) {
       _deleting = false;
@@ -361,15 +367,20 @@ class _ProviderCardState extends State<ProviderCard> {
               style: TextStyle(fontSize: 11, color: Aether.textFaint),
             ),
             trailing: provider.custom
-                ? IconButton(
-                    tooltip: 'Delete provider',
-                    visualDensity: VisualDensity.compact,
-                    icon: const Icon(
-                      Icons.delete_outline,
-                      size: 18,
-                      color: Aether.danger,
+                ? Semantics(
+                    label: 'Delete provider',
+                    button: true,
+                    excludeSemantics: true,
+                    child: IconButton(
+                      tooltip: 'Delete provider',
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(
+                        Icons.delete_outline,
+                        size: 18,
+                        color: Aether.danger,
+                      ),
+                      onPressed: _confirmDelete,
                     ),
-                    onPressed: _confirmDelete,
                   )
                 : null,
             children: [

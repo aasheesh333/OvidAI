@@ -19,7 +19,10 @@ void main() {
     app = AppState.createForTest();
   });
 
-  tearDown(AppState.resetTestInstance);
+  tearDown(() {
+    removeCustomProviderForTest = null;
+    AppState.resetTestInstance();
+  });
 
   setUpAll(() {
     AgentService.I.debugPauseScheduleTimerForTest(true);
@@ -47,11 +50,15 @@ void main() {
     );
   }
 
-  Future<void> pumpSidebar(WidgetTester tester, ChatSession session) {
+  Future<void> pumpSidebar(
+    WidgetTester tester, {
+    required List<ChatSession> sessions,
+    required String activeSessionId,
+  }) {
     app.sessions
       ..clear()
-      ..add(session);
-    app.activeSessionId = session.id;
+      ..addAll(sessions);
+    app.activeSessionId = activeSessionId;
     return tester.pumpWidget(
       MaterialApp(
         theme: Aether.theme(),
@@ -66,19 +73,36 @@ void main() {
     );
   }
 
+  Finder deleteChatFor(String title) => find.descendant(
+    of: find.ancestor(of: find.text(title), matching: find.byType(Dismissible)),
+    matching: find.byTooltip('Delete chat'),
+  );
+
   group('provider row delete action', () {
-    testWidgets('is visible for custom providers', (tester) async {
+    testWidgets('has an accessible label only for custom providers', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
       addCustomProvider();
 
       await pumpProviders(tester);
 
       expect(find.byTooltip('Delete provider'), findsOneWidget);
-    });
-
-    testWidgets('is absent for built-in providers', (tester) async {
-      await pumpProviders(tester);
-
-      expect(find.byTooltip('Delete provider'), findsNothing);
+      expect(
+        find.bySemanticsLabel(RegExp(r'(^|\n)Delete provider($|\n)')),
+        findsOneWidget,
+      );
+      final builtIn = app.providers.firstWhere((provider) => !provider.custom);
+      expect(
+        find.descendant(
+          of: find.byKey(ValueKey(builtIn.id)),
+          matching: find.bySemanticsLabel(
+            RegExp(r'(^|\n)Delete provider($|\n)'),
+          ),
+        ),
+        findsNothing,
+      );
+      semantics.dispose();
     });
 
     testWidgets('cancel keeps the named custom provider', (tester) async {
@@ -110,49 +134,109 @@ void main() {
       expect(app.providerById(provider.id), isNull);
       expect(find.text(provider.name), findsNothing);
     });
+
+    testWidgets('failed removal keeps provider and shows returned error', (
+      tester,
+    ) async {
+      final provider = addCustomProvider();
+      String? requestedProviderId;
+      removeCustomProviderForTest = (providerId) async {
+        requestedProviderId = providerId;
+        return 'Provider removal failed.';
+      };
+      await pumpProviders(tester);
+
+      await tester.tap(find.byTooltip('Delete provider'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+      await tester.pumpAndSettle();
+
+      expect(app.providerById(provider.id), same(provider));
+      expect(find.text(provider.name), findsOneWidget);
+      expect(find.text('Provider removal failed.'), findsOneWidget);
+      expect(requestedProviderId, provider.id);
+    });
   });
 
   group('session row delete action', () {
-    ChatSession session() => ChatSession(
-      id: 'chat-to-delete',
-      title: 'Release planning',
-      model: 'test-model',
+    late ChatSession activeChat;
+    late ChatSession targetChat;
+
+    setUp(() {
+      activeChat = ChatSession(
+        id: 'active-chat',
+        title: 'Active planning',
+        model: 'test-model',
+      );
+      targetChat = ChatSession(
+        id: 'target-chat',
+        title: 'Release planning',
+        model: 'test-model',
+      );
+    });
+
+    Future<void> pumpChats(WidgetTester tester) => pumpSidebar(
+      tester,
+      sessions: [activeChat, targetChat],
+      activeSessionId: activeChat.id,
     );
 
     testWidgets('is visible on every session row', (tester) async {
-      await pumpSidebar(tester, session());
+      await pumpChats(tester);
 
-      expect(find.byTooltip('Delete chat'), findsOneWidget);
+      expect(find.byTooltip('Delete chat'), findsNWidgets(2));
+      expect(deleteChatFor(activeChat.title), findsOneWidget);
+      expect(deleteChatFor(targetChat.title), findsOneWidget);
     });
 
-    testWidgets('cancel keeps the named chat', (tester) async {
-      final chat = session();
-      await pumpSidebar(tester, chat);
+    testWidgets('cancel targets a row without selecting it', (tester) async {
+      await pumpChats(tester);
 
-      await tester.tap(find.byTooltip('Delete chat'));
+      await tester.tap(deleteChatFor(targetChat.title));
       await tester.pumpAndSettle();
 
-      expect(find.text('Delete ${chat.title}?'), findsOneWidget);
+      expect(find.text('Delete ${targetChat.title}?'), findsOneWidget);
+      expect(app.activeSessionId, activeChat.id);
       await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
       await tester.pumpAndSettle();
 
-      expect(app.sessionById(chat.id), same(chat));
-      expect(find.text(chat.title), findsOneWidget);
+      expect(app.sessionById(targetChat.id), same(targetChat));
+      expect(app.sessionById(activeChat.id), same(activeChat));
+      expect(app.activeSessionId, activeChat.id);
     });
 
-    testWidgets('confirm deletes the named chat', (tester) async {
-      final chat = session();
-      await pumpSidebar(tester, chat);
+    testWidgets('confirm deletes only the targeted inactive row', (
+      tester,
+    ) async {
+      await pumpChats(tester);
 
-      await tester.tap(find.byTooltip('Delete chat'));
+      await tester.tap(deleteChatFor(targetChat.title));
       await tester.pumpAndSettle();
-      expect(find.text('Delete ${chat.title}?'), findsOneWidget);
+      expect(find.text('Delete ${targetChat.title}?'), findsOneWidget);
+      expect(app.activeSessionId, activeChat.id);
 
       await tester.tap(find.widgetWithText(TextButton, 'Delete'));
       await tester.pumpAndSettle();
 
-      expect(app.sessionById(chat.id), isNull);
-      expect(find.text(chat.title), findsNothing);
+      expect(app.sessionById(targetChat.id), isNull);
+      expect(app.sessionById(activeChat.id), same(activeChat));
+      expect(app.activeSessionId, activeChat.id);
+      expect(find.text(targetChat.title), findsNothing);
+      expect(find.text(activeChat.title), findsOneWidget);
+    });
+
+    testWidgets('swipe deletes only the targeted row', (tester) async {
+      await pumpChats(tester);
+
+      await tester.drag(
+        find.byKey(ValueKey(targetChat.id)),
+        const Offset(-400, 0),
+      );
+      await tester.pumpAndSettle();
+
+      expect(app.sessionById(targetChat.id), isNull);
+      expect(app.sessionById(activeChat.id), same(activeChat));
+      expect(app.activeSessionId, activeChat.id);
     });
   });
 }
