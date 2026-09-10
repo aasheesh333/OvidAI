@@ -719,6 +719,46 @@ void main() {
     expect(_status(coordinator, 'invalid').state, StartupItemState.failed);
     expect(coordinator.snapshot.readinessComplete, isTrue);
   });
+
+  test('timed-out source invocation remains observable until it settles', () {
+    fakeAsync((async) {
+      final source = Completer<StartupItemStatus>();
+      final coordinator = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      var settled = false;
+
+      coordinator.start([
+        FakeStartupTask(
+          'slow-local',
+          kind: StartupItemKind.localState,
+          label: 'Slow local state',
+          timeout: const Duration(seconds: 15),
+          run: () => source.future,
+        ),
+      ]);
+      async.flushMicrotasks();
+      expect(coordinator.hasActiveInvocations, isTrue);
+      coordinator.whenInvocationsSettled().then((_) => settled = true);
+
+      async.elapse(const Duration(seconds: 15));
+      async.flushMicrotasks();
+      expect(coordinator.snapshot.readinessComplete, isTrue);
+      expect(coordinator.hasActiveInvocations, isTrue);
+      expect(settled, isFalse);
+
+      source.complete(
+        StartupItemStatus.ready(
+          'slow-local',
+          StartupItemKind.localState,
+          'Slow local state',
+        ),
+      );
+      async.flushMicrotasks();
+      expect(coordinator.hasActiveInvocations, isFalse);
+      expect(settled, isTrue);
+    });
+  });
 }
 
 StartupItemStatus _status(StartupCoordinator coordinator, String id) =>

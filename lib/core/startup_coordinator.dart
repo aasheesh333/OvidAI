@@ -220,8 +220,14 @@ class StartupCoordinator extends ChangeNotifier {
   final Map<String, StartupTask> _tasks = {};
   final List<StartupItemStatus> _items = [];
   final Set<String> _runningItemIds = {};
+  Completer<void>? _invocationsSettled;
   var _runToken = 0;
   var _deadlineExceeded = false;
+
+  bool get hasActiveInvocations => _runningItemIds.isNotEmpty;
+
+  Future<void> whenInvocationsSettled() =>
+      _invocationsSettled?.future ?? Future<void>.value();
 
   StartupSnapshot get snapshot => StartupSnapshot(
     shellReady: true,
@@ -365,7 +371,7 @@ class StartupCoordinator extends ChangeNotifier {
     }
 
     final runToken = _runToken;
-    _runningItemIds.add(itemId);
+    _markInvocationStarted(itemId);
     StartupItemStatus? result;
     try {
       await task.onDisable!();
@@ -384,7 +390,7 @@ class StartupCoordinator extends ChangeNotifier {
         attempt: current.attempt,
       );
     } finally {
-      final ownedLock = _runningItemIds.remove(itemId);
+      final ownedLock = _markInvocationSettled(itemId);
       if (runToken == _runToken && ownedLock && result != null) {
         _replace(result);
       }
@@ -437,17 +443,33 @@ class StartupCoordinator extends ChangeNotifier {
   }
 
   Future<StartupItemStatus> _invoke(StartupTask task, {required int attempt}) {
-    _runningItemIds.add(task.id);
+    _markInvocationStarted(task.id);
     final invocation = Future<StartupItemStatus>.sync(task.run);
     unawaited(
       invocation.then<void>(
-        (_) => _runningItemIds.remove(task.id),
+        (_) => _markInvocationSettled(task.id),
         onError: (Object _, StackTrace _) {
-          _runningItemIds.remove(task.id);
+          _markInvocationSettled(task.id);
         },
       ),
     );
     return _runOne(task, attempt: attempt, invocation: invocation);
+  }
+
+  void _markInvocationStarted(String itemId) {
+    if (_runningItemIds.isEmpty) {
+      _invocationsSettled = Completer<void>();
+    }
+    _runningItemIds.add(itemId);
+  }
+
+  bool _markInvocationSettled(String itemId) {
+    final removed = _runningItemIds.remove(itemId);
+    if (removed && _runningItemIds.isEmpty) {
+      _invocationsSettled?.complete();
+      _invocationsSettled = null;
+    }
+    return removed;
   }
 
   void _replace(StartupItemStatus status) {

@@ -140,3 +140,62 @@ from design sections 5.1, 5.3, 5.7, and 8.
   controller ledger (`PLUGIN9` pending-global enable and two `PLUGIN11` install
   diagnostics fixtures). Task 2 focused, boot, coordinator, and migration suites
   are green.
+
+## Fix Round 2
+
+### RED Evidence
+
+- A no-root fixture with one malformed root and valid child rows showed that
+  clearing the deferred snapshot allowed later persistence to overwrite opaque
+  persisted data with the transient safe session.
+- A bootstrap-path deletion fixture showed descendants could survive because
+  their raw rows had not yet been loaded when the delete tombstone was created.
+- A coordinator timeout fixture showed terminal startup status did not mean the
+  source invocation had settled; restored-session recovery and resume reconnect
+  could therefore run while local hydration still owned mutable state.
+- A worst-order fixture showed first frame still depended on scanning and
+  decoding the full active transcript when no lightweight cache was available.
+
+### Changes
+
+- First-frame decode failure no longer clears the raw snapshot. Opaque malformed
+  rows and valid child/other rows remain mergeable and persist unchanged until
+  explicit deletion or a future migration handles them.
+- Bootstrap-path deletes record the selected ID immediately and expand descendant
+  tombstones after the deferred raw list is loaded, before hydration or writes.
+- Added `ovid_session_bootstrap_v1`, a bounded active-session metadata/latest-50
+  cache maintained by `persistSessions()`. Normal first-frame startup reads this
+  small record without materializing or decoding `ovid_sessions`; legacy installs
+  use the safe fallback once and write the cache for subsequent boots.
+- Added `StartupCoordinator.hasActiveInvocations` and
+  `whenInvocationsSettled()`. Published timeout/deadline status remains bounded,
+  while AppState can separately wait for source futures that still mutate state.
+- Local hydration records actual source settlement and success. `session.restore`
+  remains degraded/pending after timeout or degraded hydration and only runs
+  checkpoint/handle recovery after successful hydration and plugin activation.
+- Resume reconnect now coalesces repeated requests and waits for both coordinator
+  completion and all source invocations to settle before reconnecting once.
+- Existing chunked hydration yields every 20 rows; tests cover deletion during a
+  yield and callback/reconnect behavior around a timed-out invocation.
+- Task 3 reconciliation and migration status behavior were preserved unchanged.
+
+### Verification
+
+- Startup first-frame tests: 22/22 passed.
+- Startup coordinator tests: 16/16 passed, including the original 15 tests.
+- Boot-focused core tests: 7/7 passed.
+- Plugin runtime migration tests: 19/19 passed.
+- Full core regression: 546/552 passed. The six failures are the existing Task 3
+  WIP `PLUGIN9` projection/activation fixtures: punctuation collision names,
+  bounded provider names, pending-global enable, same-name identities, legacy
+  connect alias, and missing-owner-credentials degradation.
+- `/home/ubuntu/sdk/flutter/bin/flutter analyze --no-pub` reported no issues.
+- `git diff --check` passed.
+
+### Remaining Dependencies and Concerns
+
+- SharedPreferences still materializes the full `StringList` during deferred
+  hydration. The bootstrap cache removes it from the normal first-frame path;
+  Project 2 remains responsible for replacing the underlying transcript store.
+- Task 6 still owns per-plugin and per-MCP startup items. The coarse bridge stages
+  remain intentionally replaceable and are not reported as per-item compliance.

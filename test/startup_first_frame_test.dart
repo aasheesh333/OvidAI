@@ -200,6 +200,35 @@ void main() {
     },
   );
 
+  test(
+    'bootstrap-path deletion tombstones raw descendants before hydration',
+    () async {
+      final active = _sessionJson('active', ['parent']);
+      final child = _sessionJson('child', ['child'], parentId: 'active');
+      SharedPreferences.setMockInitialValues({
+        'ovid_session_bootstrap_v1': active,
+        'ovid_sessions': [
+          active,
+          child,
+          _sessionJson('survivor', ['keep']),
+        ],
+        'ovid_active_session': 'active',
+      });
+      final app = AppState.createForTest(
+        startupStageDelegates: _offlineStages(),
+      );
+
+      await app.initializeForFirstFrame();
+      app.deleteSession('active');
+      await app.persistSessions();
+      await app.initializeReadiness();
+
+      expect(app.sessionById('active'), isNull);
+      expect(app.sessionById('child'), isNull);
+      expect(app.sessionById('survivor'), isNotNull);
+    },
+  );
+
   test('deleteAllData invalidates a pending deferred snapshot', () async {
     SharedPreferences.setMockInitialValues({
       'ovid_sessions': [
@@ -282,6 +311,108 @@ void main() {
     },
   );
 
+  test(
+    'no decodable root preserves every opaque and valid deferred row',
+    () async {
+      const malformedRoot = '{"id":"broken-root","parentId":null';
+      final child = _sessionJson('child', [
+        'child-message',
+      ], parentId: 'broken-root');
+      final other = _sessionJson('other', [
+        'other-message',
+      ], parentId: 'missing-root');
+      SharedPreferences.setMockInitialValues({
+        'ovid_sessions': [malformedRoot, child, other],
+        'ovid_active_session': 'broken-root',
+      });
+      var app = AppState.createForTest(startupStageDelegates: _offlineStages());
+
+      await app.initializeForFirstFrame();
+      await app.persistSessions();
+      await app.initializeReadiness();
+
+      var prefs = await SharedPreferences.getInstance();
+      var persisted = prefs.getStringList('ovid_sessions')!;
+      expect(persisted, contains(malformedRoot));
+      expect(persisted, contains(child));
+      expect(persisted, contains(other));
+
+      AppState.resetTestInstance();
+      app = AppState.createForTest(startupStageDelegates: _offlineStages());
+      await app.initialize();
+      await app.persistSessions();
+      prefs = await SharedPreferences.getInstance();
+      persisted = prefs.getStringList('ovid_sessions')!;
+      expect(persisted, contains(malformedRoot));
+      expect(
+        persisted.map((raw) {
+          try {
+            return (jsonDecode(raw) as Map<String, dynamic>)['id'];
+          } catch (_) {
+            return null;
+          }
+        }),
+        containsAll(['child', 'other']),
+      );
+    },
+  );
+
+  test(
+    'first frame uses bootstrap cache without decoding full sessions',
+    () async {
+      final bootstrap = _sessionJson('active', [
+        for (var i = 0; i < 50; i++) 'tail-$i',
+      ]);
+      SharedPreferences.setMockInitialValues({
+        'ovid_session_bootstrap_v1': bootstrap,
+        'ovid_active_session': 'active',
+        'ovid_sessions': [
+          for (var i = 0; i < 100; i++)
+            _sessionJson('archive-$i', ['${'x' * 2000}-$i']),
+          _sessionJson('active', [for (var i = 0; i < 5000; i++) 'full-$i']),
+        ],
+      });
+      var fullSessionDecodes = 0;
+      final app = AppState.createForTest(
+        startupStageDelegates: _offlineStages(),
+        persistedSessionDecoder: (raw) {
+          fullSessionDecodes++;
+          return ChatSession.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+        },
+      );
+
+      await app.initializeForFirstFrame();
+
+      expect(fullSessionDecodes, 0);
+      expect(app.activeSession!.messages, hasLength(50));
+      expect(app.activeSession!.messages.last.content, 'tail-49');
+    },
+  );
+
+  test(
+    'first-frame fallback writes bootstrap cache for the next boot',
+    () async {
+      SharedPreferences.setMockInitialValues({
+        'ovid_active_session': 'active',
+        'ovid_sessions': [
+          _sessionJson('active', [for (var i = 0; i < 80; i++) 'message-$i']),
+        ],
+      });
+      var app = AppState.createForTest();
+
+      await app.initializeForFirstFrame();
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('ovid_session_bootstrap_v1'), isNotNull);
+
+      AppState.resetTestInstance();
+      app = AppState.createForTest(
+        persistedSessionDecoder: (_) => throw StateError('must use cache'),
+      );
+      await app.initializeForFirstFrame();
+      expect(app.activeSession!.messages, hasLength(50));
+    },
+  );
+
   test('plugin activation retries with one boot token and one epoch', () async {
     var attempts = 0;
     final tokens = <Object>[];
@@ -342,7 +473,8 @@ void main() {
       });
       final app = AppState.createForTest(
         startupStageRecorder: calls.add,
-        startupStageDelegates: _offlineStages(),
+        startupStageDelegates: _offlineStages()..remove('plugin.activate'),
+        pluginBootActivator: (_, _) async {},
       );
       AgentService.I;
       app.onSessionsLoaded = () => calls.add('sessions.callback');
@@ -357,6 +489,70 @@ void main() {
         calls.indexOf('sessions.callback'),
         greaterThan(calls.indexOf('plugin.activate')),
       );
+    },
+  );
+
+  test(
+    'restore stays pending while timed-out hydration invocation is active',
+    () async {
+      final calls = <String>[];
+      final hydration = Completer<void>();
+      final app = AppState.createForTest(
+        startupStageRecorder: calls.add,
+        startupStageDelegates: _offlineStages()
+          ..remove('plugin.activate')
+          ..['local.hydrate'] = () => hydration.future,
+        pluginBootActivator: (_, _) async {},
+      );
+      app.onSessionsLoaded = () => calls.add('sessions.callback');
+      final tasks = await app.buildReadinessTasks();
+      final hydrationTask = tasks.singleWhere(
+        (task) => task.id == 'local.hydrate',
+      );
+      final activation = tasks.singleWhere(
+        (task) => task.id == 'plugin.activate',
+      );
+      final restore = tasks.singleWhere((task) => task.id == 'session.restore');
+
+      final hydrationRun = hydrationTask.run();
+      await activation.run();
+      final status = await restore.run();
+
+      expect(status.state, StartupItemState.degraded);
+      expect(calls, isNot(contains('sessions.callback')));
+
+      hydration.complete();
+      await hydrationRun;
+      expect(calls, contains('sessions.callback'));
+    },
+  );
+
+  test(
+    'coordinator timeout never runs restore before hydration settles',
+    () async {
+      final calls = <String>[];
+      final hydration = Completer<void>();
+      final app = AppState.createForTest(
+        startupStageRecorder: calls.add,
+        startupStageDelegates: _offlineStages()
+          ..remove('plugin.activate')
+          ..['local.hydrate'] = () => hydration.future,
+        startupStageTimeouts: {
+          'local.hydrate': const Duration(milliseconds: 1),
+        },
+        pluginBootActivator: (_, _) async {},
+      );
+      app.onSessionsLoaded = () => calls.add('sessions.callback');
+
+      await app.initializeReadiness();
+
+      expect(calls, isNot(contains('sessions.callback')));
+      expect(app.startupSafeToReconnect, isFalse);
+
+      hydration.complete();
+      await StartupCoordinator.I.whenInvocationsSettled();
+      expect(calls, contains('sessions.callback'));
+      expect(app.startupSafeToReconnect, isTrue);
     },
   );
 
@@ -377,12 +573,14 @@ void main() {
     while (!calls.contains('local.hydrate')) {
       await Future<void>.delayed(Duration.zero);
     }
-    await app.reconnectServicesAfterResume();
+    final pendingReconnect = app.reconnectServicesAfterResume();
+    final duplicateReconnect = app.reconnectServicesAfterResume();
+    expect(identical(pendingReconnect, duplicateReconnect), isTrue);
     expect(calls, isNot(contains('resume.connected')));
 
     releaseHydration.complete();
     await readiness;
-    await app.reconnectServicesAfterResume();
+    await pendingReconnect;
     expect(calls.where((stage) => stage == 'resume.connected'), hasLength(1));
   });
 
