@@ -170,10 +170,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                     return Center(
                       child: Text(
                         'No sessions match "$_query"',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Aether.textFaint,
-                        ),
+                        style: TextStyle(fontSize: 12, color: Aether.textFaint),
                       ),
                     );
                   }
@@ -185,7 +182,10 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                     final wf = (s.workspaceFolder ?? '').trim();
                     final key = wf.isEmpty
                         ? '(no workspace)'
-                        : wf.split(RegExp(r'[/\\]')).where((p) => p.isNotEmpty).last;
+                        : wf
+                              .split(RegExp(r'[/\\]'))
+                              .where((p) => p.isNotEmpty)
+                              .last;
                     groups.putIfAbsent(key, () => []).add(s);
                   }
                   final keys = groups.keys.toList()..sort();
@@ -346,95 +346,136 @@ class _SessionTile extends StatelessWidget {
               size: 18,
             ),
           ),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(10),
-            onTap: () {
-              app.selectSession(session.id);
-              Navigator.maybePop(context);
-            },
-            onLongPress: () => _rename(context),
-            child: Container(
-              margin: const EdgeInsets.symmetric(vertical: 1.5),
-              padding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 11,
-              ),
-              decoration: BoxDecoration(
-                color: active ? Aether.surfaceRaised : Colors.transparent,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    session.messages.any((m) => m.kind == MsgKind.imageGen)
-                        ? Icons.image_outlined
-                        : Icons.chat_bubble_outline,
-                    size: 14,
-                    color: active ? Aether.accent : Aether.textFaint,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          session.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: active
-                                ? FontWeight.w600
-                                : FontWeight.w400,
-                            color: active ? Aether.text : Aether.textMuted,
+          child: Container(
+            margin: const EdgeInsets.symmetric(vertical: 1.5),
+            decoration: BoxDecoration(
+              color: active ? Aether.surfaceRaised : Colors.transparent,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(10),
+                    onTap: () {
+                      app.selectSession(session.id);
+                      Navigator.maybePop(context);
+                    },
+                    onLongPress: () => _rename(context),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 11, 4, 11),
+                      child: Row(
+                        children: [
+                          Icon(
+                            session.messages.any(
+                                  (m) => m.kind == MsgKind.imageGen,
+                                )
+                                ? Icons.image_outlined
+                                : Icons.chat_bubble_outline,
+                            size: 14,
+                            color: active ? Aether.accent : Aether.textFaint,
                           ),
-                        ),
-                        const SizedBox(height: 2),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                session.model,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 10.5,
-                                  color: Aether.textFaint,
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  session.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: active
+                                        ? FontWeight.w600
+                                        : FontWeight.w400,
+                                    color: active
+                                        ? Aether.text
+                                        : Aether.textMuted,
+                                  ),
                                 ),
-                              ),
+                                const SizedBox(height: 2),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        session.model,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 10.5,
+                                          color: Aether.textFaint,
+                                        ),
+                                      ),
+                                    ),
+                                    if (running) ...[
+                                      const SizedBox(width: 4),
+                                      Container(
+                                        width: 6,
+                                        height: 6,
+                                        decoration: const BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: Aether.accent,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 3),
+                                      Text(
+                                        'running',
+                                        style: TextStyle(
+                                          fontSize: 9.5,
+                                          color: Aether.accent,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ],
                             ),
-                            if (running) ...[
-                              const SizedBox(width: 4),
-                              Container(
-                                width: 6,
-                                height: 6,
-                                decoration: const BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: Aether.accent,
-                                ),
-                              ),
-                              const SizedBox(width: 3),
-                              Text(
-                                'running',
-                                style: TextStyle(
-                                  fontSize: 9.5,
-                                  color: Aether.accent,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ],
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ],
-              ),
+                ),
+                IconButton(
+                  tooltip: 'Delete chat',
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(
+                    Icons.delete_outline,
+                    size: 17,
+                    color: Aether.danger,
+                  ),
+                  onPressed: () => _confirmDelete(context),
+                ),
+                const SizedBox(width: 4),
+              ],
             ),
           ),
         );
       },
     );
+  }
+
+  Future<void> _confirmDelete(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Delete ${session.title}?'),
+        content: const Text('This chat cannot be recovered.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Delete', style: TextStyle(color: Aether.danger)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) AppState.I.deleteSession(session.id);
   }
 
   void _rename(BuildContext context) {
