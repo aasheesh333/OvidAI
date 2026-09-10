@@ -1,5 +1,8 @@
 import 'dart:async';
 
+// fake_async is available through flutter_test and keeps deadline tests exact.
+// ignore: depend_on_referenced_packages
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/startup_coordinator.dart';
 
@@ -50,106 +53,223 @@ void main() {
     expect(coordinator.snapshot.readinessComplete, isTrue);
   });
 
-  test(
-    'item timeout is reported as degraded and does not stop queue',
-    () async {
+  test('item timeout is reported as degraded and does not stop queue', () {
+    fakeAsync((async) {
       final never = Completer<StartupItemStatus>();
       final coordinator = StartupCoordinator.forTest(
-        deadline: const Duration(seconds: 1),
+        deadline: const Duration(seconds: 120),
       );
 
-      await coordinator.start([
-        FakeStartupTask(
-          'slow',
-          kind: StartupItemKind.plugin,
-          label: 'Slow plugin',
-          timeout: const Duration(milliseconds: 10),
-          run: () => never.future,
-        ),
-        FakeStartupTask(
-          'next',
-          kind: StartupItemKind.plugin,
-          label: 'Next plugin',
-          run: () async => StartupItemStatus.ready(
-            'next',
-            StartupItemKind.plugin,
-            'Next plugin',
-          ),
-        ),
-      ]);
+      var complete = false;
+      coordinator
+          .start([
+            FakeStartupTask(
+              'slow',
+              kind: StartupItemKind.plugin,
+              label: 'Slow plugin',
+              timeout: const Duration(seconds: 30),
+              run: () => never.future,
+            ),
+            FakeStartupTask(
+              'next',
+              kind: StartupItemKind.plugin,
+              label: 'Next plugin',
+              run: () async => StartupItemStatus.ready(
+                'next',
+                StartupItemKind.plugin,
+                'Next plugin',
+              ),
+            ),
+          ])
+          .then((_) => complete = true);
+
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 30));
+      async.flushMicrotasks();
 
       final slow = coordinator.snapshot.items.first;
       expect(slow.state, StartupItemState.degraded);
-      expect(slow.reason, 'Timed out after 10ms');
+      expect(slow.reason, 'Timed out after 30s');
       expect(coordinator.snapshot.items.last.state, StartupItemState.ready);
+      expect(complete, isTrue);
+    });
+  });
+
+  test(
+    'local safety work runs before external work and deadline returns exactly at 120 seconds',
+    () {
+      fakeAsync((async) {
+        final blocked = Completer<StartupItemStatus>();
+        final calls = <String>[];
+        var localRuns = 0;
+        var queuedExternalRuns = 0;
+        final coordinator = StartupCoordinator.forTest(
+          deadline: const Duration(seconds: 120),
+        );
+
+        var complete = false;
+        coordinator
+            .start([
+              FakeStartupTask(
+                'blocked',
+                kind: StartupItemKind.mcp,
+                label: 'Blocked MCP',
+                timeout: const Duration(seconds: 300),
+                run: () async {
+                  calls.add('external');
+                  return blocked.future;
+                },
+              ),
+              FakeStartupTask(
+                'migration',
+                kind: StartupItemKind.localState,
+                label: 'Migration',
+                run: () async {
+                  localRuns++;
+                  calls.add('local');
+                  return StartupItemStatus.ready(
+                    'migration',
+                    StartupItemKind.localState,
+                    'Migration',
+                  );
+                },
+              ),
+              FakeStartupTask(
+                'queued-external',
+                kind: StartupItemKind.marketplace,
+                label: 'Queued marketplace',
+                run: () async {
+                  queuedExternalRuns++;
+                  return StartupItemStatus.ready(
+                    'queued-external',
+                    StartupItemKind.marketplace,
+                    'Queued marketplace',
+                  );
+                },
+              ),
+            ])
+            .then((_) => complete = true);
+
+        async.flushMicrotasks();
+        expect(calls, ['local', 'external']);
+        async.elapse(const Duration(seconds: 119));
+        async.elapse(const Duration(milliseconds: 999));
+        expect(complete, isFalse);
+        async.elapse(const Duration(milliseconds: 1));
+        async.flushMicrotasks();
+
+        expect(localRuns, 1);
+        expect(queuedExternalRuns, 0);
+        expect(complete, isTrue);
+        expect(coordinator.snapshot.deadlineExceeded, isTrue);
+        expect(coordinator.snapshot.readinessComplete, isTrue);
+        expect(
+          _status(coordinator, 'blocked').state,
+          StartupItemState.degraded,
+        );
+        expect(
+          _status(coordinator, 'blocked').reason,
+          'Startup readiness deadline exceeded',
+        );
+        expect(_status(coordinator, 'migration').state, StartupItemState.ready);
+        expect(
+          _status(coordinator, 'queued-external').state,
+          StartupItemState.skipped,
+        );
+
+        blocked.complete(
+          StartupItemStatus.ready(
+            'blocked',
+            StartupItemKind.mcp,
+            'Blocked MCP',
+          ),
+        );
+        async.flushMicrotasks();
+        expect(
+          _status(coordinator, 'blocked').state,
+          StartupItemState.degraded,
+        );
+      });
     },
   );
 
   test(
-    'deadline degrades running task, skips external queue, and runs local safety work',
-    () async {
-      final blocked = Completer<StartupItemStatus>();
-      var skippedRuns = 0;
-      var localRuns = 0;
-      final coordinator = StartupCoordinator.forTest(
-        deadline: const Duration(milliseconds: 20),
-      );
+    'deadline terminalizes a hanging local task and its queued local task',
+    () {
+      fakeAsync((async) {
+        final blocked = Completer<StartupItemStatus>();
+        var queuedRuns = 0;
+        final coordinator = StartupCoordinator.forTest(
+          deadline: const Duration(seconds: 120),
+        );
 
-      await coordinator.start([
+        var complete = false;
+        coordinator
+            .start([
+              FakeStartupTask(
+                'hanging-local',
+                kind: StartupItemKind.localState,
+                label: 'Hanging migration',
+                timeout: const Duration(seconds: 300),
+                run: () => blocked.future,
+              ),
+              FakeStartupTask(
+                'queued-local',
+                kind: StartupItemKind.localState,
+                label: 'Queued migration',
+                run: () async {
+                  queuedRuns++;
+                  return StartupItemStatus.ready(
+                    'queued-local',
+                    StartupItemKind.localState,
+                    'Queued migration',
+                  );
+                },
+              ),
+            ])
+            .then((_) => complete = true);
+
+        async.flushMicrotasks();
+        async.elapse(const Duration(seconds: 120));
+        async.flushMicrotasks();
+
+        expect(complete, isTrue);
+        expect(queuedRuns, 0);
+        expect(coordinator.snapshot.readinessComplete, isTrue);
+        expect(
+          coordinator.snapshot.items.map((item) => item.state),
+          everyElement(StartupItemState.degraded),
+        );
+      });
+    },
+  );
+
+  test('global deadline wins when item timeout has the same boundary', () {
+    fakeAsync((async) {
+      final coordinator = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      coordinator.start([
         FakeStartupTask(
-          'blocked',
+          'same-boundary',
           kind: StartupItemKind.mcp,
-          label: 'Blocked MCP',
-          timeout: const Duration(seconds: 1),
-          run: () => blocked.future,
-        ),
-        FakeStartupTask(
-          'external',
-          kind: StartupItemKind.marketplace,
-          label: 'Marketplace',
-          run: () async {
-            skippedRuns++;
-            return StartupItemStatus.ready(
-              'external',
-              StartupItemKind.marketplace,
-              'Marketplace',
-            );
-          },
-        ),
-        FakeStartupTask(
-          'migration',
-          kind: StartupItemKind.localState,
-          label: 'Migration',
-          run: () async {
-            localRuns++;
-            return StartupItemStatus.ready(
-              'migration',
-              StartupItemKind.localState,
-              'Migration',
-            );
-          },
+          label: 'Same boundary',
+          timeout: const Duration(seconds: 120),
+          run: () => Completer<StartupItemStatus>().future,
         ),
       ]);
 
-      expect(skippedRuns, 0);
-      expect(localRuns, 1);
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 120));
+      async.flushMicrotasks();
+
       expect(coordinator.snapshot.deadlineExceeded, isTrue);
-      expect(coordinator.snapshot.readinessComplete, isTrue);
-      expect(_status(coordinator, 'blocked').state, StartupItemState.degraded);
       expect(
-        _status(coordinator, 'blocked').reason,
+        _status(coordinator, 'same-boundary').reason,
         'Startup readiness deadline exceeded',
       );
-      expect(_status(coordinator, 'external').state, StartupItemState.skipped);
-      expect(_status(coordinator, 'migration').state, StartupItemState.ready);
-
-      blocked.complete(
-        StartupItemStatus.ready('blocked', StartupItemKind.mcp, 'Blocked MCP'),
-      );
-      await Future<void>.delayed(Duration.zero);
-      expect(_status(coordinator, 'blocked').state, StartupItemState.degraded);
-    },
-  );
+    });
+  });
 
   test(
     'retry reruns only a terminal item and rejects a duplicate retry',
@@ -208,6 +328,152 @@ void main() {
       expect(_status(coordinator, 'first').attempt, 2);
     },
   );
+
+  test(
+    'deadline keeps retry locked until the timed-out invocation settles',
+    () {
+      fakeAsync((async) {
+        var runs = 0;
+        final firstRun = Completer<StartupItemStatus>();
+        final coordinator = StartupCoordinator.forTest(
+          deadline: const Duration(seconds: 120),
+        );
+        coordinator.start([
+          FakeStartupTask(
+            'locked',
+            kind: StartupItemKind.plugin,
+            label: 'Locked plugin',
+            timeout: const Duration(seconds: 300),
+            run: () {
+              runs++;
+              if (runs == 1) return firstRun.future;
+              return Future.value(
+                StartupItemStatus.ready(
+                  'locked',
+                  StartupItemKind.plugin,
+                  'Locked plugin',
+                ),
+              );
+            },
+          ),
+        ]);
+
+        async.flushMicrotasks();
+        async.elapse(const Duration(seconds: 120));
+        async.flushMicrotasks();
+        coordinator.retry('locked');
+        async.flushMicrotasks();
+        expect(runs, 1);
+
+        firstRun.complete(
+          StartupItemStatus.ready(
+            'locked',
+            StartupItemKind.plugin,
+            'Locked plugin',
+          ),
+        );
+        async.flushMicrotasks();
+        expect(_status(coordinator, 'locked').state, StartupItemState.degraded);
+
+        coordinator.retry('locked');
+        async.flushMicrotasks();
+        expect(runs, 2);
+        expect(_status(coordinator, 'locked').state, StartupItemState.ready);
+      });
+    },
+  );
+
+  test(
+    'item timeout keeps retry and disable locked until invocation settles',
+    () {
+      fakeAsync((async) {
+        var runs = 0;
+        var disables = 0;
+        final firstRun = Completer<StartupItemStatus>();
+        final coordinator = StartupCoordinator.forTest(
+          deadline: const Duration(seconds: 120),
+        );
+        coordinator.start([
+          FakeStartupTask(
+            'timed-out',
+            kind: StartupItemKind.plugin,
+            label: 'Timed-out plugin',
+            timeout: const Duration(seconds: 30),
+            onDisable: () async => disables++,
+            run: () {
+              runs++;
+              if (runs == 1) return firstRun.future;
+              return Future.value(
+                StartupItemStatus.ready(
+                  'timed-out',
+                  StartupItemKind.plugin,
+                  'Timed-out plugin',
+                ),
+              );
+            },
+          ),
+        ]);
+
+        async.flushMicrotasks();
+        async.elapse(const Duration(seconds: 30));
+        async.flushMicrotasks();
+        expect(
+          _status(coordinator, 'timed-out').state,
+          StartupItemState.degraded,
+        );
+
+        coordinator.retry('timed-out');
+        coordinator.disable('timed-out');
+        async.flushMicrotasks();
+        expect(runs, 1);
+        expect(disables, 0);
+
+        firstRun.complete(
+          StartupItemStatus.ready(
+            'timed-out',
+            StartupItemKind.plugin,
+            'Timed-out plugin',
+          ),
+        );
+        async.flushMicrotasks();
+        coordinator.retry('timed-out');
+        async.flushMicrotasks();
+        expect(runs, 2);
+      });
+    },
+  );
+
+  test('a second start does not duplicate an unresolved invocation', () {
+    fakeAsync((async) {
+      var runs = 0;
+      final firstRun = Completer<StartupItemStatus>();
+      final coordinator = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      final task = FakeStartupTask(
+        'shared',
+        kind: StartupItemKind.plugin,
+        label: 'Shared plugin',
+        timeout: const Duration(seconds: 300),
+        run: () {
+          runs++;
+          return firstRun.future;
+        },
+      );
+
+      var firstComplete = false;
+      coordinator.start([task]).then((_) => firstComplete = true);
+      async.flushMicrotasks();
+      coordinator.start([task]);
+      async.flushMicrotasks();
+
+      expect(runs, 1);
+      expect(_status(coordinator, 'shared').state, StartupItemState.degraded);
+      async.elapse(const Duration(seconds: 120));
+      async.flushMicrotasks();
+      expect(firstComplete, isTrue);
+    });
+  });
 
   test('disable invokes only supplied plugin or MCP callback once', () async {
     var pluginDisables = 0;
@@ -296,6 +562,52 @@ void main() {
     expect(reason, contains('[REDACTED]'));
     expect(reason.length, lessThanOrEqualTo(500));
   });
+
+  test(
+    'task-returned reasons are capped and scrubbed for every state',
+    () async {
+      final coordinator = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      final tail = List.filled(600, 'x').join();
+      const states = [
+        StartupItemState.ready,
+        StartupItemState.needsSetup,
+        StartupItemState.migrationRequired,
+        StartupItemState.degraded,
+        StartupItemState.failed,
+        StartupItemState.disabled,
+        StartupItemState.skipped,
+      ];
+
+      await coordinator.start([
+        for (var i = 0; i < states.length; i++)
+          FakeStartupTask(
+            'returned-$i',
+            kind: StartupItemKind.plugin,
+            label: 'Returned $i',
+            run: () async => StartupItemStatus(
+              id: 'returned-$i',
+              kind: StartupItemKind.plugin,
+              label: 'Returned $i',
+              state: states[i],
+              reason:
+                  'token=token-$i api_key=key-$i '
+                  'Authorization: Bearer auth-$i password=pass-$i $tail',
+            ),
+          ),
+      ]);
+
+      for (final item in coordinator.snapshot.items) {
+        expect(item.reason, contains('[REDACTED]'));
+        expect(item.reason, isNot(contains('token-')));
+        expect(item.reason, isNot(contains('key-')));
+        expect(item.reason, isNot(contains('auth-')));
+        expect(item.reason, isNot(contains('pass-')));
+        expect(item.reason!.length, lessThanOrEqualTo(500));
+      }
+    },
+  );
 
   test('a task cannot leave readiness in a non-terminal state', () async {
     final coordinator = StartupCoordinator.forTest(

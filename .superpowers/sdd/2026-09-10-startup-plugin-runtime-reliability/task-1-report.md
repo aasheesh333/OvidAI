@@ -48,3 +48,44 @@ design sections 5.2, 7, and 8.
   running-ID lock prevent stale completion from changing coordinator state,
   but task implementations remain responsible for releasing their resources.
 - Full regression was not run, as permitted for this isolated leaf task.
+
+## Fix Round 1
+
+### RED Evidence
+
+- Deterministic `fake_async` deadline tests showed external work ran before a
+  queued local migration and that queued local work could begin after expiry.
+- A stale-invocation test showed Retry invoked the same task a second time while
+  its deadline-expired source future was still unresolved.
+- Direct task-result tests showed secret-bearing reasons were published without
+  redaction or the 500-character cap.
+- A concurrent `start()` test showed the superseded start future did not return
+  at its own deadline.
+
+### GREEN Evidence
+
+- `/home/ubuntu/sdk/flutter/bin/flutter test test/startup_coordinator_test.dart`
+  passed 13 tests, including exact 120-second boundary, hanging local task,
+  competing timeout/deadline, and stale-future retry cases under `fake_async`.
+- `/home/ubuntu/sdk/flutter/bin/flutter analyze --no-pub` reported no issues.
+- `git diff --check` passed.
+
+### Changes and Self-Review
+
+- Local safety tasks are ordered ahead of external readiness tasks. At the
+  global deadline all unfinished statuses become terminal and `start()` returns
+  without waiting for task timeout or source-future completion.
+- Raw task invocation lifetime remains locked independently of published
+  timeout/deadline state. Retry, Disable, and a repeated Start cannot duplicate
+  an unresolved task invocation; settlement clears the lock without replacing
+  stale terminal status.
+- Every task-returned reason is privately scrubbed and capped before it enters
+  the snapshot. No hook runtime dependency was introduced.
+- Real 10/20 ms waits were replaced with deterministic fake time, using the
+  `fake_async` package already available through `flutter_test`.
+
+### Concerns
+
+- Timed-out Dart futures remain non-cancellable; the coordinator prevents
+  duplicate invocation but task owners still control resource cancellation.
+- Full regression remains outside this isolated leaf fix round.

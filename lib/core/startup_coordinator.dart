@@ -234,15 +234,18 @@ class StartupCoordinator extends ChangeNotifier {
 
   Future<void> start(List<StartupTask> tasks) async {
     final runToken = ++_runToken;
-    _runningItemIds.clear();
     _deadlineExceeded = false;
+    final orderedTasks = [
+      ...tasks.where((task) => task.kind == StartupItemKind.localState),
+      ...tasks.where((task) => task.kind != StartupItemKind.localState),
+    ];
     _tasks
       ..clear()
       ..addEntries(tasks.map((task) => MapEntry(task.id, task)));
     _items
       ..clear()
       ..addAll(
-        tasks.map(
+        orderedTasks.map(
           (task) => StartupItemStatus.queued(task.id, task.kind, task.label),
         ),
       );
@@ -250,47 +253,60 @@ class StartupCoordinator extends ChangeNotifier {
 
     final deadlineReached = Completer<void>();
     final deadlineTimer = Timer(_deadline, () {
-      if (runToken != _runToken) return;
-      _deadlineExceeded = true;
-      for (var i = 0; i < _items.length; i++) {
-        final item = _items[i];
-        if (item.state == StartupItemState.running) {
-          _items[i] = StartupItemStatus.degraded(
-            item.id,
-            item.kind,
-            item.label,
-            reason: 'Startup readiness deadline exceeded',
-            attempt: item.attempt,
-          );
-          _runningItemIds.remove(item.id);
-        } else if (item.state == StartupItemState.queued &&
-            item.kind != StartupItemKind.localState) {
-          _items[i] = StartupItemStatus.skipped(
-            item.id,
-            item.kind,
-            item.label,
-            reason: 'Startup readiness deadline exceeded',
-            attempt: item.attempt,
-          );
+      if (runToken == _runToken) {
+        _deadlineExceeded = true;
+        for (var i = 0; i < _items.length; i++) {
+          final item = _items[i];
+          if (item.state == StartupItemState.running ||
+              (item.state == StartupItemState.queued &&
+                  item.kind == StartupItemKind.localState)) {
+            _items[i] = StartupItemStatus.degraded(
+              item.id,
+              item.kind,
+              item.label,
+              reason: 'Startup readiness deadline exceeded',
+              attempt: item.attempt,
+            );
+          } else if (item.state == StartupItemState.queued &&
+              item.kind != StartupItemKind.localState) {
+            _items[i] = StartupItemStatus.skipped(
+              item.id,
+              item.kind,
+              item.label,
+              reason: 'Startup readiness deadline exceeded',
+              attempt: item.attempt,
+            );
+          }
         }
+        notifyListeners();
       }
-      notifyListeners();
       deadlineReached.complete();
     });
 
-    for (final task in tasks) {
+    for (final task in orderedTasks) {
       if (runToken != _runToken) {
         deadlineTimer.cancel();
         return;
       }
       final current = _item(task.id);
       if (current.state.isTerminal) continue;
+      if (_runningItemIds.contains(task.id)) {
+        _replace(
+          StartupItemStatus.degraded(
+            task.id,
+            task.kind,
+            task.label,
+            reason: 'Startup task is still running',
+            attempt: current.attempt,
+          ),
+        );
+        continue;
+      }
 
-      _runningItemIds.add(task.id);
       _replace(
         StartupItemStatus.running(task.id, task.kind, task.label, attempt: 1),
       );
-      final run = _runOne(task, attempt: 1);
+      final run = _invoke(task, attempt: 1);
       final StartupItemStatus? result;
       if (_deadlineExceeded) {
         result = await run;
@@ -300,9 +316,11 @@ class StartupCoordinator extends ChangeNotifier {
           deadlineReached.future.then<StartupItemStatus?>((_) => null),
         ]);
       }
-      if (result != null &&
-          runToken == _runToken &&
-          _runningItemIds.remove(task.id)) {
+      if (result == null) {
+        deadlineTimer.cancel();
+        return;
+      }
+      if (runToken == _runToken) {
         _replace(result);
       }
     }
@@ -317,7 +335,6 @@ class StartupCoordinator extends ChangeNotifier {
 
     final attempt = current.attempt + 1;
     final runToken = _runToken;
-    _runningItemIds.add(itemId);
     _replace(
       StartupItemStatus.running(
         task.id,
@@ -326,8 +343,8 @@ class StartupCoordinator extends ChangeNotifier {
         attempt: attempt,
       ),
     );
-    final result = await _runOne(task, attempt: attempt);
-    if (runToken == _runToken && _runningItemIds.remove(itemId)) {
+    final result = await _invoke(task, attempt: attempt);
+    if (runToken == _runToken) {
       _replace(result);
     }
   }
@@ -379,9 +396,10 @@ class StartupCoordinator extends ChangeNotifier {
   Future<StartupItemStatus> _runOne(
     StartupTask task, {
     required int attempt,
+    required Future<StartupItemStatus> invocation,
   }) async {
     try {
-      final result = await task.run().timeout(task.timeout);
+      final result = await invocation.timeout(task.timeout);
       if (!result.state.isTerminal) {
         return StartupItemStatus.failed(
           task.id,
@@ -396,7 +414,9 @@ class StartupCoordinator extends ChangeNotifier {
         kind: task.kind,
         label: task.label,
         state: result.state,
-        reason: result.reason,
+        reason: result.reason == null
+            ? null
+            : _redactStartupError(result.reason!),
         attempt: attempt,
       );
     } on TimeoutException {
@@ -416,6 +436,20 @@ class StartupCoordinator extends ChangeNotifier {
         attempt: attempt,
       );
     }
+  }
+
+  Future<StartupItemStatus> _invoke(StartupTask task, {required int attempt}) {
+    _runningItemIds.add(task.id);
+    final invocation = Future<StartupItemStatus>.sync(task.run);
+    unawaited(
+      invocation.then<void>(
+        (_) => _runningItemIds.remove(task.id),
+        onError: (Object _, StackTrace _) {
+          _runningItemIds.remove(task.id);
+        },
+      ),
+    );
+    return _runOne(task, attempt: attempt, invocation: invocation);
   }
 
   void _replace(StartupItemStatus status) {
