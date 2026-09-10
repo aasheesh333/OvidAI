@@ -199,3 +199,53 @@ from design sections 5.1, 5.3, 5.7, and 8.
   Project 2 remains responsible for replacing the underlying transcript store.
 - Task 6 still owns per-plugin and per-MCP startup items. The coarse bridge stages
   remain intentionally replaceable and are not reported as per-item compliance.
+
+## Fix Round 3
+
+### RED Evidence
+
+- Same-ID stale-cache fixtures reproduced both interrupted write orders: newer
+  sessions with an older cache, and a newer cache with older session truth.
+- A large active transcript cache-miss fixture showed fallback decoding could
+  occupy the root isolate instead of yielding to a scheduled UI ticker.
+- A bootstrap-path parent deletion fixture showed deferred child lifecycle and
+  workspace cleanup were missing because the child was not materialized yet.
+
+### Changes
+
+- Bootstrap records now contain a SHA-256 fingerprint of the exact persisted
+  active-session raw row. Startup materializes the unavoidable StringList,
+  locates the active row lexically, and accepts cached metadata/tail only when
+  the fingerprint matches. Either interrupted write order therefore falls back
+  to persisted truth instead of merging stale positional tails.
+- Persistence derives cache content and fingerprint from the exact active raw
+  row it is about to write. Cache write failure does not block the session-list
+  write; an old or prematurely written cache cannot match the other generation.
+- Cache-miss active-session decoding now runs through `Isolate.run` in
+  production. The fallback still counts toward the three-second wall budget,
+  but no longer monopolizes the UI isolate while decoding a large transcript.
+- Deferred deletion projects raw descendants into the existing lifecycle and
+  workspace cleanup paths. Session callbacks and sandbox deletion are
+  deduplicated, and pending workspace deletions settle before persistence
+  completes.
+- No-root opaque preservation, hydration settlement gates, activation/Firebase
+  retries, resume coalescing, and Task 3 migration behavior remain intact.
+
+### Verification
+
+- Startup first-frame tests: 26/26 passed.
+- Startup coordinator tests: 16/16 passed.
+- Boot-focused core tests: 7/7 passed.
+- Plugin runtime migration tests: 30/30 passed.
+- Full core regression: 552/552 passed.
+- `/home/ubuntu/sdk/flutter/bin/flutter analyze --no-pub` reported no issues.
+- `git diff --check` passed.
+
+### Remaining Dependencies and Concerns
+
+- Fingerprint validation still materializes the SharedPreferences StringList;
+  Project 2 remains responsible for replacing this storage shape. The expensive
+  JSON decode is isolated, and the normal cached path decodes only the bounded
+  bootstrap record.
+- Task 6 still owns per-plugin and per-MCP startup items; Task 2 retains only the
+  replaceable coarse bridge.

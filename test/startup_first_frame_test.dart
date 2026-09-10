@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -29,17 +30,25 @@ String _sessionJson(
   List<String> messages, {
   String title = 'Saved chat',
   String? parentId,
+  String? sandboxId,
 }) => jsonEncode(
   ChatSession(
     id: id,
     title: title,
     model: 'saved-model',
     parentId: parentId,
+    sandboxId: sandboxId,
     messages: [
       for (final message in messages) Message(role: 'user', content: message),
     ],
   ).toJson(),
 );
+
+String _bootstrapJson(String source, String tail) => jsonEncode({
+  'version': 1,
+  'sourceFingerprint': sha256.convert(utf8.encode(source)).toString(),
+  'session': jsonDecode(tail),
+});
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -206,7 +215,7 @@ void main() {
       final active = _sessionJson('active', ['parent']);
       final child = _sessionJson('child', ['child'], parentId: 'active');
       SharedPreferences.setMockInitialValues({
-        'ovid_session_bootstrap_v1': active,
+        'ovid_session_bootstrap_v1': _bootstrapJson(active, active),
         'ovid_sessions': [
           active,
           child,
@@ -363,13 +372,16 @@ void main() {
       final bootstrap = _sessionJson('active', [
         for (var i = 0; i < 50; i++) 'tail-$i',
       ]);
+      final full = _sessionJson('active', [
+        for (var i = 0; i < 5000; i++) 'full-$i',
+      ]);
       SharedPreferences.setMockInitialValues({
-        'ovid_session_bootstrap_v1': bootstrap,
+        'ovid_session_bootstrap_v1': _bootstrapJson(full, bootstrap),
         'ovid_active_session': 'active',
         'ovid_sessions': [
           for (var i = 0; i < 100; i++)
             _sessionJson('archive-$i', ['${'x' * 2000}-$i']),
-          _sessionJson('active', [for (var i = 0; i < 5000; i++) 'full-$i']),
+          full,
         ],
       });
       var fullSessionDecodes = 0;
@@ -386,6 +398,103 @@ void main() {
       expect(fullSessionDecodes, 0);
       expect(app.activeSession!.messages, hasLength(50));
       expect(app.activeSession!.messages.last.content, 'tail-49');
+    },
+  );
+
+  test(
+    'stale same-id bootstrap falls back to the newer persisted transcript',
+    () async {
+      final oldRaw = _sessionJson('active', ['old-0', 'old-1']);
+      final newMessages = [for (var i = 0; i < 80; i++) 'new-$i'];
+      final newRaw = _sessionJson('active', newMessages);
+      SharedPreferences.setMockInitialValues({
+        'ovid_session_bootstrap_v1': _bootstrapJson(oldRaw, oldRaw),
+        'ovid_active_session': 'active',
+        'ovid_sessions': [newRaw],
+      });
+      final app = AppState.createForTest(
+        startupStageDelegates: _offlineStages(),
+      );
+
+      await app.initializeForFirstFrame();
+      await app.initializeReadiness();
+
+      expect(
+        app.activeSession!.messages.map((message) => message.content),
+        newMessages,
+      );
+    },
+  );
+
+  test(
+    'cache-first interrupted write falls back to the older persisted truth',
+    () async {
+      final oldRaw = _sessionJson('active', ['old-truth']);
+      final nextRaw = _sessionJson('active', ['uncommitted-next']);
+      SharedPreferences.setMockInitialValues({
+        'ovid_session_bootstrap_v1': _bootstrapJson(nextRaw, nextRaw),
+        'ovid_active_session': 'active',
+        'ovid_sessions': [oldRaw],
+      });
+      final app = AppState.createForTest();
+
+      await app.initializeForFirstFrame();
+
+      expect(app.activeSession!.messages.single.content, 'old-truth');
+    },
+  );
+
+  test('cache-miss fallback yields to the UI isolate while decoding', () async {
+    final huge = _sessionJson('active', [
+      for (var i = 0; i < 10000; i++) 'message-$i ${'x' * 200}',
+    ]);
+    SharedPreferences.setMockInitialValues({
+      'ovid_active_session': 'active',
+      'ovid_sessions': [huge],
+    });
+    var tickerRan = false;
+    Timer.run(() => tickerRan = true);
+    final app = AppState.createForTest();
+
+    await app.initializeForFirstFrame();
+
+    expect(tickerRan, isTrue);
+    expect(app.activeSession!.messages, hasLength(50));
+  });
+
+  test(
+    'deferred descendants receive lifecycle and workspace cleanup once',
+    () async {
+      final parent = _sessionJson('parent', [
+        'parent',
+      ], sandboxId: 'parent-box');
+      final child = _sessionJson(
+        'child',
+        ['child'],
+        parentId: 'parent',
+        sandboxId: 'child-box',
+      );
+      final deletedWorkspaces = <String>[];
+      final deletedSessions = <String>[];
+      SharedPreferences.setMockInitialValues({
+        'ovid_session_bootstrap_v1': _bootstrapJson(parent, parent),
+        'ovid_active_session': 'parent',
+        'ovid_sessions': [parent, child],
+      });
+      final app = AppState.createForTest(
+        workspaceDeleter: (sandboxId) async => deletedWorkspaces.add(sandboxId),
+      );
+      app.onSessionDeleted = deletedSessions.add;
+
+      await app.initializeForFirstFrame();
+      app.deleteSession('parent');
+      await app.persistSessions();
+      await app.initializeReadiness();
+
+      expect(deletedSessions.where((id) => id == 'parent'), hasLength(1));
+      expect(deletedSessions.where((id) => id == 'child'), hasLength(1));
+      expect(deletedWorkspaces.where((id) => id == 'parent-box'), hasLength(1));
+      expect(deletedWorkspaces.where((id) => id == 'child-box'), hasLength(1));
     },
   );
 

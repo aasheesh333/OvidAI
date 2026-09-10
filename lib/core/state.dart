@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
@@ -1005,6 +1007,25 @@ typedef StartupStageDelegate = Future<void> Function();
 typedef PluginBootActivator =
     Future<void> Function(Object bootToken, bool connectMcp);
 typedef PersistedSessionDecoder = ChatSession Function(String encoded);
+typedef WorkspaceDeleter = Future<void> Function(String sandboxId);
+const _sessionBootstrapTailSize = 50;
+
+ChatSession _decodePersistedSession(String encoded) =>
+    ChatSession.fromJson(jsonDecode(encoded) as Map<String, dynamic>);
+
+ChatSession _decodePersistedSessionTail(String encoded) {
+  final json = jsonDecode(encoded) as Map<String, dynamic>;
+  final messages = (json['messages'] as List?) ?? const [];
+  final start = messages.length > _sessionBootstrapTailSize
+      ? messages.length - _sessionBootstrapTailSize
+      : 0;
+  return ChatSession.fromJson(
+    Map<String, dynamic>.from(json)..['messages'] = messages.sublist(start),
+  );
+}
+
+String _sessionSourceFingerprint(String encoded) =>
+    sha256.convert(utf8.encode(encoded)).toString();
 
 class _AppStartupTask implements StartupTask {
   const _AppStartupTask({
@@ -1170,6 +1191,7 @@ class AppState extends ChangeNotifier {
     Map<String, Duration> startupStageTimeouts = const {},
     PluginBootActivator? pluginBootActivator,
     PersistedSessionDecoder? persistedSessionDecoder,
+    WorkspaceDeleter? workspaceDeleter,
   }) {
     final instance = AppState._(
       startupStageRecorder: startupStageRecorder,
@@ -1177,6 +1199,7 @@ class AppState extends ChangeNotifier {
       startupStageTimeouts: startupStageTimeouts,
       pluginBootActivator: pluginBootActivator,
       persistedSessionDecoder: persistedSessionDecoder,
+      workspaceDeleter: workspaceDeleter,
     );
     _testInstance = instance;
     return instance;
@@ -1193,6 +1216,7 @@ class AppState extends ChangeNotifier {
     Map<String, Duration> startupStageTimeouts = const {},
     PluginBootActivator? pluginBootActivator,
     PersistedSessionDecoder? persistedSessionDecoder,
+    WorkspaceDeleter? workspaceDeleter,
   }) : _startupStageDelegates = Map.unmodifiable(startupStageDelegates),
        _startupStageTimeouts = Map.unmodifiable(startupStageTimeouts) {
     _pluginBootActivator =
@@ -1202,10 +1226,8 @@ class AppState extends ChangeNotifier {
           bootToken: bootToken,
           reportFailure: true,
         ));
-    _persistedSessionDecoder =
-        persistedSessionDecoder ??
-        (encoded) =>
-            ChatSession.fromJson(jsonDecode(encoded) as Map<String, dynamic>);
+    _persistedSessionDecoderForTest = persistedSessionDecoder;
+    _workspaceDeleter = workspaceDeleter ?? SandboxService.I.deleteWorkspace;
     _seed();
     _ensureActiveSession();
   }
@@ -1214,7 +1236,8 @@ class AppState extends ChangeNotifier {
   final Map<String, StartupStageDelegate> _startupStageDelegates;
   final Map<String, Duration> _startupStageTimeouts;
   late final PluginBootActivator _pluginBootActivator;
-  late final PersistedSessionDecoder _persistedSessionDecoder;
+  PersistedSessionDecoder? _persistedSessionDecoderForTest;
+  late final WorkspaceDeleter _workspaceDeleter;
 
   Future<void> setPluginInstalled(
     String name,
@@ -1526,6 +1549,8 @@ class AppState extends ChangeNotifier {
   var _deferredSessionsPending = false;
   final List<String> _unparsedSessionJson = [];
   final Set<String> _deferredDeletedSessionIds = {};
+  final Set<String> _notifiedDeletedSessionIds = {};
+  final List<Future<void>> _pendingWorkspaceDeletions = [];
   String? _deferredActiveSessionId;
   int _deferredActiveTailLength = 0;
   var _deferredSessionGeneration = 0;
@@ -1906,7 +1931,7 @@ class AppState extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getStringList(_kSessions);
       if (raw != null && raw.isNotEmpty) {
-        final loaded = raw.map(_persistedSessionDecoder).toList();
+        final loaded = raw.map(_decodeSessionSync).toList();
         sessions
           ..clear()
           ..addAll(loaded);
@@ -1927,22 +1952,52 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  static const _firstFrameMessageTailSize = 50;
+  static const _firstFrameMessageTailSize = _sessionBootstrapTailSize;
+
+  ChatSession _decodeSessionSync(String encoded) =>
+      (_persistedSessionDecoderForTest ?? _decodePersistedSession)(encoded);
+
+  Future<ChatSession> _decodeSessionForFirstFrame(String encoded) {
+    final override = _persistedSessionDecoderForTest;
+    if (override != null) return Future.value(override(encoded));
+    return Isolate.run(() => _decodePersistedSessionTail(encoded));
+  }
+
+  String? _activeRawSession(List<String> raw, String? activeId) {
+    if (activeId == null) return null;
+    final prefix = '{"id":${jsonEncode(activeId)},';
+    return raw.where((encoded) => encoded.startsWith(prefix)).firstOrNull;
+  }
 
   Future<void> _loadSessionsForFirstFrame() async {
     List<String>? raw;
     try {
       final prefs = await SharedPreferences.getInstance();
       final requestedActiveId = prefs.getString(_kActive);
+      raw = prefs.getStringList(_kSessions);
+      final requestedActiveRaw = _activeRawSession(
+        raw ?? const [],
+        requestedActiveId,
+      );
       final cached = prefs.getString(_kSessionBootstrap);
-      if (cached != null && requestedActiveId != null) {
+      if (cached != null &&
+          requestedActiveId != null &&
+          requestedActiveRaw != null) {
         try {
+          final envelope = jsonDecode(cached) as Map<String, dynamic>;
+          final fingerprint = await Isolate.run(
+            () => _sessionSourceFingerprint(requestedActiveRaw),
+          );
+          if (envelope['version'] != 1 ||
+              envelope['sourceFingerprint'] != fingerprint) {
+            throw const FormatException('stale session bootstrap');
+          }
           final active = ChatSession.fromJson(
-            jsonDecode(cached) as Map<String, dynamic>,
+            (envelope['session'] as Map).cast<String, dynamic>(),
           );
           if (active.id == requestedActiveId && !active.isSubagent) {
             _setFirstFrameActiveSession(active);
-            _deferredSessionsPending = true;
+            _deferredSessionJson = List<String>.of(raw!);
             return;
           }
         } catch (_) {
@@ -1950,7 +2005,6 @@ class AppState extends ChangeNotifier {
         }
       }
 
-      raw = prefs.getStringList(_kSessions);
       if (raw == null || raw.isEmpty) {
         activeSessionId = requestedActiveId;
         _ensureActiveSession();
@@ -1964,7 +2018,7 @@ class AppState extends ChangeNotifier {
         for (final encoded in raw) {
           if (!encoded.startsWith(idPrefix)) continue;
           try {
-            final candidate = _persistedSessionDecoder(encoded);
+            final candidate = await _decodeSessionForFirstFrame(encoded);
             if (candidate.id == requestedActiveId && !candidate.isSubagent) {
               activeJson = candidate.toJson();
               break;
@@ -1977,7 +2031,7 @@ class AppState extends ChangeNotifier {
       if (activeJson == null) {
         for (final encoded in raw) {
           try {
-            final candidate = _persistedSessionDecoder(encoded);
+            final candidate = await _decodeSessionForFirstFrame(encoded);
             if (!candidate.isSubagent) {
               activeJson = candidate.toJson();
               break;
@@ -2000,7 +2054,10 @@ class AppState extends ChangeNotifier {
         ..['messages'] = messages.sublist(tailStart);
       final active = ChatSession.fromJson(tailJson);
       _setFirstFrameActiveSession(active);
-      await _writeSessionBootstrap(prefs);
+      await _writeSessionBootstrap(
+        prefs,
+        requestedActiveRaw ?? _activeRawSession(raw, active.id),
+      );
     } catch (_) {
       if (raw != null) {
         _deferredSessionJson ??= List<String>.of(raw);
@@ -2045,14 +2102,34 @@ class AppState extends ChangeNotifier {
           final json = jsonDecode(encoded) as Map<String, dynamic>;
           final id = json['id'] as String?;
           final parentId = json['parentId'] as String?;
-          if (id != null &&
-              parentId != null &&
-              _deferredDeletedSessionIds.contains(parentId) &&
-              _deferredDeletedSessionIds.add(id)) {
-            changed = true;
+          if (id != null) {
+            if (parentId != null &&
+                _deferredDeletedSessionIds.contains(parentId) &&
+                _deferredDeletedSessionIds.add(id)) {
+              changed = true;
+            }
+            if (_deferredDeletedSessionIds.contains(id)) {
+              _scheduleSessionDeletion(id, json['sandboxId'] as String? ?? id);
+            }
           }
         } catch (_) {}
       }
+    }
+  }
+
+  void _scheduleSessionDeletion(String id, String? sandboxId) {
+    if (!_notifiedDeletedSessionIds.add(id)) return;
+    onSessionDeleted?.call(id);
+    if (sandboxId != null) {
+      _pendingWorkspaceDeletions.add(_workspaceDeleter(sandboxId));
+    }
+  }
+
+  Future<void> _awaitWorkspaceDeletions() async {
+    while (_pendingWorkspaceDeletions.isNotEmpty) {
+      final pending = List<Future<void>>.of(_pendingWorkspaceDeletions);
+      _pendingWorkspaceDeletions.removeRange(0, pending.length);
+      await Future.wait(pending);
     }
   }
 
@@ -2136,29 +2213,45 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await _loadDeferredSessionSnapshot();
-      await prefs.setStringList(_kSessions, _sessionJsonForPersistence());
+      final encoded = _sessionJsonForPersistence();
+      final activeRaw = _activeRawSession(encoded, activeSessionId);
+      // The cache is a derivative of exact session-list truth. Either interrupted
+      // write order produces a fingerprint mismatch and a safe fallback.
+      try {
+        await _writeSessionBootstrap(prefs, activeRaw);
+      } catch (_) {}
+      await prefs.setStringList(_kSessions, encoded);
       if (activeSessionId != null) {
         await prefs.setString(_kActive, activeSessionId!);
       } else {
         await prefs.remove(_kActive);
       }
-      await _writeSessionBootstrap(prefs);
+      await _awaitWorkspaceDeletions();
     } catch (_) {}
   }
 
-  Future<void> _writeSessionBootstrap(SharedPreferences prefs) async {
-    final active = activeSession;
-    if (active == null || active.isSubagent) {
+  Future<void> _writeSessionBootstrap(
+    SharedPreferences prefs,
+    String? activeRaw,
+  ) async {
+    if (activeRaw == null) {
       await prefs.remove(_kSessionBootstrap);
       return;
     }
-    final json = active.toJson();
+    final json = jsonDecode(activeRaw) as Map<String, dynamic>;
     final messages = (json['messages'] as List?) ?? const [];
     final tailStart = messages.length > _firstFrameMessageTailSize
         ? messages.length - _firstFrameMessageTailSize
         : 0;
     json['messages'] = messages.sublist(tailStart);
-    await prefs.setString(_kSessionBootstrap, jsonEncode(json));
+    await prefs.setString(
+      _kSessionBootstrap,
+      jsonEncode({
+        'version': 1,
+        'sourceFingerprint': _sessionSourceFingerprint(activeRaw),
+        'session': json,
+      }),
+    );
   }
 
   List<String> _sessionJsonForPersistence() {
@@ -2822,12 +2915,7 @@ class AppState extends ChangeNotifier {
       activeSessionId = rootSessions.isEmpty ? null : rootSessions.first.id;
     }
     for (final dead in doomed) {
-      // The deleted session's run dies with it (its jobs, queue, stream).
-      onSessionDeleted?.call(dead.id);
-      // Its workspace dies with it too — files dir was never cleaned
-      // before, so deleted sessions leaked their ws_<id> dirs forever.
-      final sid = dead.sandboxId;
-      if (sid != null) unawaited(SandboxService.I.deleteWorkspace(sid));
+      _scheduleSessionDeletion(dead.id, dead.sandboxId);
     }
     notifyListeners();
     persistSessions();
