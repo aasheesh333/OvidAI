@@ -10975,7 +10975,7 @@ url = "https://api.example.com/mcp"
 
         var skillsRefreshed = false;
         final prevRefresh = AppState.onRefreshSkills;
-        AppState.onRefreshSkills = () async {
+        AppState.onRefreshSkills = (_) async {
           skillsRefreshed = true;
         };
         addTearDown(() => AppState.onRefreshSkills = prevRefresh);
@@ -11025,7 +11025,7 @@ url = "https://api.example.com/mcp"
 
         var skillsRefreshed = false;
         final prevRefresh = AppState.onRefreshSkills;
-        AppState.onRefreshSkills = () async {
+        AppState.onRefreshSkills = (_) async {
           skillsRefreshed = true;
         };
         addTearDown(() => AppState.onRefreshSkills = prevRefresh);
@@ -14780,18 +14780,31 @@ cwd = 'tools'
           SkillService.I.clearRoots();
         });
 
-        reg.register(
-          p4Manifest(
-            id: 'acme/review-kit',
-            name: 'Review Kit',
-            rootPath: normRoot.path,
-            commands: [
-              p4Command('acme/review-kit', 'review', 'commands/review.md'),
-            ],
-          ),
-          activation: PluginActivation.globalActive,
+        final manifest = p4Manifest(
+          id: 'acme/review-kit',
+          name: 'Review Kit',
+          rootPath: normRoot.path,
+          commands: [
+            p4Command('acme/review-kit', 'review', 'commands/review.md'),
+          ],
         );
-        await agent.refreshSkills();
+        reg.register(manifest, activation: PluginActivation.globalActive);
+        final session = ChatSession(
+          id: 'p4-mounted-session',
+          title: 'Mounted',
+          model: 'm',
+        );
+        app.sessions.add(session);
+        AgentService.setRunSessionForTest(session.id);
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          app.sessions.remove(session);
+          SkillService.I.dropSession(session.id);
+        });
+        await SkillService.I.publishSessionCatalog(
+          session.id,
+          mounts: [PluginCatalogMount(normRoot.path, manifest)],
+        );
 
         final names = agent
             .toolsForTest()
@@ -14988,7 +15001,16 @@ cwd = 'tools'
           source: 'bold/two',
         );
         app.plugins.addAll([pA, pB]);
+        final session = ChatSession(
+          id: 'p4-skill-session',
+          title: 'Skill session',
+          model: 'm',
+        );
+        app.sessions.add(session);
+        AgentService.setRunSessionForTest(session.id);
         addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          app.sessions.remove(session);
           app.plugins.remove(pA);
           app.plugins.remove(pB);
           reg.unregisterPlugin('acme/one');

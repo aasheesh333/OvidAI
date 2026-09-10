@@ -1282,7 +1282,7 @@ class AppState extends ChangeNotifier {
 
   /// Hook for AgentService to refresh skills on plugin install/uninstall/toggle
   /// without a circular import.
-  static Future<void> Function()? onRefreshSkills;
+  static Future<void> Function(String? sessionId)? onRefreshSkills;
 
   /// Task 7 (spec §4.1/§5.2/§7): the production install transaction —
   /// resolve → inspect → grant → dependencies → probe → persist →
@@ -1363,7 +1363,7 @@ class AppState extends ChangeNotifier {
       await persistMergedMarketplaceCatalog();
       await PluginRuntimeManager.I.persistRuntimeRow(result.manifest!.id);
       try {
-        await onRefreshSkills?.call();
+        await onRefreshSkills?.call(sessionId);
       } catch (_) {}
       refresh();
     }
@@ -1425,7 +1425,7 @@ class AppState extends ChangeNotifier {
     }
 
     try {
-      await onRefreshSkills?.call();
+      await onRefreshSkills?.call(null);
     } catch (_) {}
 
     refresh();
@@ -1471,7 +1471,7 @@ class AppState extends ChangeNotifier {
     }
 
     try {
-      await onRefreshSkills?.call();
+      await onRefreshSkills?.call(null);
     } catch (_) {}
 
     refresh();
@@ -1493,7 +1493,7 @@ class AppState extends ChangeNotifier {
     }
     await persistPluginState();
     try {
-      await onRefreshSkills?.call();
+      await onRefreshSkills?.call(null);
     } catch (_) {}
     refresh();
   }
@@ -1594,6 +1594,13 @@ class AppState extends ChangeNotifier {
           label: 'Activate plugins',
           timeout: const Duration(seconds: 15),
           body: _activatePluginsForBoot,
+        ),
+        _startupTask(
+          id: 'skill.mount',
+          kind: StartupItemKind.skillMount,
+          label: 'Mount session skills',
+          timeout: const Duration(seconds: 15),
+          body: _mountRuntimeSkills,
         ),
         _SessionRestoreStartupTask(this),
         _startupTask(
@@ -1728,6 +1735,12 @@ class AppState extends ChangeNotifier {
     _pluginBootActivation = attempt;
     await attempt;
     await _maybeFinishSessionRestore();
+  }
+
+  Future<void> _mountRuntimeSkills() async {
+    for (final session in List<ChatSession>.of(sessions)) {
+      await AgentService.I.refreshSkills(sessionId: session.id);
+    }
   }
 
   Future<bool> _maybeFinishSessionRestore() async {

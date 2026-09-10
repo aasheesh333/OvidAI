@@ -1,5 +1,8 @@
 import 'dart:io';
 
+import 'plugin_manifest.dart';
+import 'plugin_registry.dart';
+
 /// ── Skills system ────────────────────────────────────────────────────────
 /// A skill is a markdown instruction bundle the agent can load on demand.
 /// Layout:
@@ -12,6 +15,8 @@ import 'dart:io';
 /// The agent sees a compact catalog in its system context and can call the
 /// `skill` tool to load the full content when a task needs it. Users can
 /// also invoke a skill directly from the composer with `/skill-name`.
+
+enum SkillContributionKind { command, skill, agent }
 
 class Skill {
   final String name;
@@ -26,6 +31,7 @@ class Skill {
   final String? model;
   final Map<String, String> frontmatter;
   final bool isAgent;
+  final SkillContributionKind kind;
 
   /// Bundle-relative paths of every non-SKILL.md file that ships beside a
   /// bundled skill (templates, references, scripts). Empty for flat skills.
@@ -51,14 +57,14 @@ class Skill {
     this.model,
     this.frontmatter = const {},
     this.isAgent = false,
+    this.kind = SkillContributionKind.skill,
     this.supportingFiles = const [],
     this.pluginId,
   });
 
-  /// Canonical contribution id (spec §4.4) for plugin-contributed skills:
-  /// `plugin:<plugin-id>/skill:<name>`; null for non-plugin skills.
+  /// Canonical contribution id (spec §4.4) for plugin content.
   String? get canonicalId =>
-      pluginId == null ? null : 'plugin:$pluginId/skill:$name';
+      pluginId == null ? null : 'plugin:$pluginId/${kind.name}:$name';
 
   /// The exact id an ambiguous-alias chooser lists: the canonical §4.4 id
   /// for plugin skills, the declaring path otherwise.
@@ -68,6 +74,38 @@ class Skill {
   String get catalogLine =>
       '- `$name`: ${description.isEmpty ? '(no description)' : description}'
       '${whenToUse.isEmpty ? '' : ' — use when: $whenToUse'}';
+}
+
+class PluginCatalogMount {
+  final String contentDir;
+  final NormalizedPluginManifest manifest;
+
+  const PluginCatalogMount(this.contentDir, this.manifest);
+}
+
+class SkillCatalogSnapshot {
+  final String sessionId;
+  final int generation;
+  final List<Skill> skills;
+
+  SkillCatalogSnapshot({
+    required this.sessionId,
+    required this.generation,
+    required List<Skill> skills,
+  }) : skills = List.unmodifiable(skills);
+
+  List<Skill> get userSkills =>
+      List.unmodifiable(skills.where((skill) => skill.userInvocable));
+
+  List<Skill> get agents => List.unmodifiable(
+    skills.where((skill) => skill.kind == SkillContributionKind.agent),
+  );
+
+  SkillAliasResolution resolveAlias(String alias) =>
+      _resolveSkillAlias(skills, alias);
+
+  String catalogBlock({int maxDescChars = 500}) =>
+      _catalogBlock(skills, maxDescChars: maxDescChars);
 }
 
 /// Loads skills from the filesystem with optional hot reload.
@@ -83,6 +121,8 @@ class SkillService {
 
   /// Root path → owning plugin canonical id ([addPluginRoot]).
   final Map<String, String> _pluginRoots = {};
+  final Map<String, SkillCatalogSnapshot> _sessionSnapshots = {};
+  final Map<String, int> _sessionGenerations = {};
 
   List<Skill> get skills => List.unmodifiable(_skills);
 
@@ -92,8 +132,86 @@ class SkillService {
       List.unmodifiable(_skills.where((s) => s.userInvocable));
 
   /// Discovered agent persona definitions.
-  List<Skill> get agents =>
-      List.unmodifiable(_skills.where((s) => s.isAgent));
+  List<Skill> get agents => List.unmodifiable(_skills.where((s) => s.isAgent));
+
+  bool hasSnapshotForSession(String sessionId) =>
+      _sessionSnapshots.containsKey(sessionId);
+
+  SkillCatalogSnapshot snapshotForSession(String sessionId) =>
+      _sessionSnapshots[sessionId] ??
+      SkillCatalogSnapshot(
+        sessionId: sessionId,
+        generation: 0,
+        skills: const [],
+      );
+
+  List<Skill> skillsForSession(String sessionId) =>
+      snapshotForSession(sessionId).skills;
+
+  List<Skill> userSkillsForSession(String sessionId) =>
+      snapshotForSession(sessionId).userSkills;
+
+  List<Skill> agentsForSession(String sessionId) =>
+      snapshotForSession(sessionId).agents;
+
+  SkillAliasResolution resolveForSession(String sessionId, String alias) =>
+      snapshotForSession(sessionId).resolveAlias(alias);
+
+  String catalogBlockForSession(String sessionId, {int maxDescChars = 500}) =>
+      snapshotForSession(sessionId).catalogBlock(maxDescChars: maxDescChars);
+
+  Future<void> publishSessionCatalog(
+    String sessionId, {
+    Iterable<String> roots = const [],
+    Iterable<PluginCatalogMount> mounts = const [],
+    Future<void> Function()? beforeScan,
+  }) async {
+    final generation = (_sessionGenerations[sessionId] ?? 0) + 1;
+    _sessionGenerations[sessionId] = generation;
+    await beforeScan?.call();
+
+    final candidate = <Skill>[];
+    for (final root in roots) {
+      final dir = Directory(root);
+      if (!dir.existsSync()) continue;
+      await _scanDir(dir, output: candidate);
+    }
+    for (final mount in mounts) {
+      await _scanPluginMount(mount, candidate);
+    }
+    if (_sessionGenerations[sessionId] != generation) return;
+    candidate.sort((a, b) => a.providerId.compareTo(b.providerId));
+    final canonical = <String>{};
+    for (final skill in candidate) {
+      final id = skill.canonicalId;
+      if (id != null && !canonical.add(id)) {
+        throw StateError('Duplicate plugin contribution id: $id');
+      }
+    }
+    _sessionSnapshots[sessionId] = SkillCatalogSnapshot(
+      sessionId: sessionId,
+      generation: generation,
+      skills: candidate,
+    );
+  }
+
+  void invalidateSession(String sessionId) {
+    _sessionGenerations[sessionId] = (_sessionGenerations[sessionId] ?? 0) + 1;
+    _sessionSnapshots.remove(sessionId);
+  }
+
+  void invalidateAllSessions() {
+    for (final sessionId in {
+      ..._sessionGenerations.keys,
+      ..._sessionSnapshots.keys,
+    }) {
+      _sessionGenerations[sessionId] =
+          (_sessionGenerations[sessionId] ?? 0) + 1;
+    }
+    _sessionSnapshots.clear();
+  }
+
+  void dropSession(String sessionId) => invalidateSession(sessionId);
 
   /// Register a search root (workspace, custom dirs, etc).
   void addRoot(String path) {
@@ -131,7 +249,9 @@ class SkillService {
     Directory dir, {
     int depth = 0,
     String? pluginId,
+    List<Skill>? output,
   }) async {
+    final target = output ?? _skills;
     if (depth > kBundleScanMaxDepth) return;
     try {
       await for (final entity in dir.list(followLinks: false)) {
@@ -141,7 +261,7 @@ class SkillService {
           final skillMd = File('${entity.path}/SKILL.md');
           if (skillMd.existsSync()) {
             final s = await _parse(skillMd, entity.path, pluginId: pluginId);
-            if (s != null) _skills.add(s);
+            if (s != null) target.add(s);
             continue;
           }
           final agentMd = File('${entity.path}/AGENT.md');
@@ -152,19 +272,30 @@ class SkillService {
               isAgent: true,
               pluginId: pluginId,
             );
-            if (s != null) _skills.add(s);
+            if (s != null) target.add(s);
             continue;
           }
           if (_basename(entity.path) == 'agents') {
-            await _scanDir(entity, depth: depth + 1, pluginId: pluginId);
+            await _scanDir(
+              entity,
+              depth: depth + 1,
+              pluginId: pluginId,
+              output: target,
+            );
             continue;
           }
           // Plugin bundles may nest below the conventional top-level
           // directory. Recurse safely; a directory containing SKILL.md was
           // already consumed as one bundle above.
-          await _scanDir(entity, depth: depth + 1, pluginId: pluginId);
+          await _scanDir(
+            entity,
+            depth: depth + 1,
+            pluginId: pluginId,
+            output: target,
+          );
         } else if (entity is File && entity.path.endsWith('.md')) {
-          final isAgent = entity.path.contains('/agents/') ||
+          final isAgent =
+              entity.path.contains('/agents/') ||
               entity.path.contains('\\agents\\') ||
               _basename(dir.path) == 'agents';
           final s = await _parse(
@@ -173,7 +304,7 @@ class SkillService {
             isAgent: isAgent,
             pluginId: pluginId,
           );
-          if (s != null) _skills.add(s);
+          if (s != null) target.add(s);
         }
       }
     } catch (_) {}
@@ -184,6 +315,9 @@ class SkillService {
     String path, {
     bool isAgent = false,
     String? pluginId,
+    String? declaredName,
+    SkillContributionKind? kind,
+    List<String>? declaredSupportingFiles,
   }) async {
     try {
       final raw = await file.readAsString();
@@ -232,7 +366,9 @@ class SkillService {
                 }
                 allowedTools = s
                     .split(',')
-                    .map((e) => e.trim().replaceAll('"', '').replaceAll("'", ""))
+                    .map(
+                      (e) => e.trim().replaceAll('"', '').replaceAll("'", ""),
+                    )
                     .where((e) => e.isNotEmpty)
                     .toList();
               case 'argument-hint' || 'argument_hint':
@@ -245,17 +381,21 @@ class SkillService {
       }
 
       if (content.trim().isEmpty) return null;
-      final resolvedIsAgent = isAgent ||
+      final resolvedIsAgent =
+          isAgent ||
           path.contains('/agents/') ||
           path.contains('\\agents\\') ||
           _basename(file.parent.path) == 'agents';
       // A bundle (<dir>/SKILL.md) also ships supporting files; a flat
       // `<name>.md` skill has none.
-      final bundleDir = _basename(file.path) == 'SKILL'
-          ? file.parent
-          : null;
+      final bundleDir = _basename(file.path) == 'SKILL' ? file.parent : null;
+      final resolvedKind =
+          kind ??
+          (resolvedIsAgent
+              ? SkillContributionKind.agent
+              : SkillContributionKind.skill);
       return Skill(
-        name: name,
+        name: declaredName ?? name,
         description: description,
         whenToUse: whenToUse,
         content: content,
@@ -265,10 +405,12 @@ class SkillService {
         allowedTools: allowedTools,
         argumentHint: argumentHint,
         model: model,
-        frontmatter: frontmatter,
-        isAgent: resolvedIsAgent,
+        frontmatter: Map.unmodifiable(frontmatter),
+        isAgent: resolvedKind == SkillContributionKind.agent,
+        kind: resolvedKind,
         supportingFiles:
-            bundleDir == null ? const [] : scanBundleFiles(bundleDir),
+            declaredSupportingFiles ??
+            (bundleDir == null ? const [] : scanBundleFiles(bundleDir)),
         pluginId: pluginId,
       );
     } catch (_) {
@@ -276,12 +418,145 @@ class SkillService {
     }
   }
 
+  Future<void> _scanPluginMount(
+    PluginCatalogMount mount,
+    List<Skill> output,
+  ) async {
+    final manifest = mount.manifest;
+    if (!isCanonicalPluginId(manifest.id)) return;
+    final root = Directory(mount.contentDir);
+    final manifestRoot = Directory(manifest.rootPath);
+    final String rootReal;
+    final String manifestReal;
+    try {
+      if (FileSystemEntity.typeSync(root.path, followLinks: false) !=
+          FileSystemEntityType.directory) {
+        return;
+      }
+      rootReal = root.resolveSymbolicLinksSync();
+      manifestReal = manifestRoot.resolveSymbolicLinksSync();
+    } catch (_) {
+      return;
+    }
+    if (rootReal != manifestReal) return;
+
+    Future<void> add(
+      String owner,
+      String name,
+      String path,
+      SkillContributionKind kind, {
+      List<String> supportingFiles = const [],
+    }) async {
+      if (owner != manifest.id ||
+          name.isEmpty ||
+          !_pathMatchesKind(path, kind)) {
+        return;
+      }
+      final file = _containedRegularFile(rootReal, path);
+      if (file == null) return;
+      final declaredSupporting = <String>[];
+      if (kind == SkillContributionKind.skill) {
+        final bundle = path.substring(0, path.lastIndexOf('/'));
+        for (final supporting in supportingFiles) {
+          if (supporting == path ||
+              !supporting.startsWith('$bundle/') ||
+              _containedRegularFile(rootReal, supporting) == null) {
+            return;
+          }
+          declaredSupporting.add(supporting.substring(bundle.length + 1));
+        }
+      } else if (supportingFiles.isNotEmpty) {
+        return;
+      }
+      final parsed = await _parse(
+        file,
+        file.path,
+        isAgent: kind == SkillContributionKind.agent,
+        pluginId: manifest.id,
+        declaredName: name,
+        kind: kind,
+        declaredSupportingFiles: List.unmodifiable(declaredSupporting),
+      );
+      if (parsed != null) output.add(parsed);
+    }
+
+    for (final command in manifest.commands) {
+      await add(
+        command.pluginId,
+        command.name,
+        command.path,
+        SkillContributionKind.command,
+      );
+    }
+    for (final skill in manifest.skills) {
+      await add(
+        skill.pluginId,
+        skill.name,
+        skill.path,
+        SkillContributionKind.skill,
+        supportingFiles: skill.supportingFiles,
+      );
+    }
+    for (final agent in manifest.agents) {
+      await add(
+        agent.pluginId,
+        agent.name,
+        agent.path,
+        SkillContributionKind.agent,
+      );
+    }
+  }
+
+  bool _pathMatchesKind(String path, SkillContributionKind kind) {
+    if (!_strictRelativePath(path)) return false;
+    return switch (kind) {
+      SkillContributionKind.command =>
+        path.startsWith('commands/') &&
+            path.endsWith('.md') &&
+            !path.endsWith('/SKILL.md') &&
+            !path.endsWith('/AGENT.md'),
+      SkillContributionKind.skill =>
+        path.startsWith('skills/') && path.endsWith('/SKILL.md'),
+      SkillContributionKind.agent =>
+        path.startsWith('agents/') && path.endsWith('.md'),
+    };
+  }
+
+  File? _containedRegularFile(String rootReal, String relative) {
+    if (!_strictRelativePath(relative)) return null;
+    var current = rootReal;
+    final parts = relative.split('/').where((part) => part.isNotEmpty);
+    for (final part in parts) {
+      current = '$current/$part';
+      final type = FileSystemEntity.typeSync(current, followLinks: false);
+      if (type == FileSystemEntityType.link ||
+          type == FileSystemEntityType.notFound) {
+        return null;
+      }
+    }
+    if (FileSystemEntity.typeSync(current, followLinks: false) !=
+        FileSystemEntityType.file) {
+      return null;
+    }
+    try {
+      final real = File(current).resolveSymbolicLinksSync();
+      if (!real.startsWith('$rootReal/')) return null;
+      return File(real);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool _strictRelativePath(String path) =>
+      isLexicallySafeRelPath(path) && !path.split('/').contains('..');
+
   String _basename(String path) {
-    final noExt = path.endsWith('.md') ? path.substring(0, path.length - 3) : path;
+    final noExt = path.endsWith('.md')
+        ? path.substring(0, path.length - 3)
+        : path;
     final idx = noExt.lastIndexOf('/');
     return idx < 0 ? noExt : noExt.substring(idx + 1);
   }
-
 
   Skill? find(String name) {
     for (final s in _skills) {
@@ -314,27 +589,11 @@ class SkillService {
     String alias, {
     Set<String> hiddenPluginIds = const {},
   }) {
-    final query = alias.trim();
-    if (query.isEmpty) return const SkillAliasResolution([]);
-    List<Skill> visible() => [
+    final visible = [
       for (final s in _skills)
         if (s.pluginId == null || !hiddenPluginIds.contains(s.pluginId)) s,
     ];
-    // Exact provider id (canonical plugin id or path) wins outright.
-    for (final s in visible()) {
-      if (s.providerId == query) {
-        return SkillAliasResolution([s]);
-      }
-    }
-    var bare = query;
-    if (bare.startsWith('/')) bare = bare.substring(1);
-    if (bare.isEmpty) return const SkillAliasResolution([]);
-    final lower = bare.toLowerCase();
-    final matches = [
-      for (final s in visible())
-        if (s.name.toLowerCase() == lower) s,
-    ]..sort((a, b) => a.providerId.compareTo(b.providerId));
-    return SkillAliasResolution(matches);
+    return _resolveSkillAlias(visible, alias);
   }
 
   /// Test seam: parse a single SKILL.md file through the real frontmatter
@@ -343,18 +602,54 @@ class SkillService {
 
   /// Catalog block injected into the system prompt.
   String catalogBlock({int maxDescChars = 500}) {
-    if (_skills.isEmpty) return '';
-    final buf = StringBuffer()
-      ..writeln('AVAILABLE SKILLS (call the `skill` tool with a name to load full instructions):');
-    for (final s in _skills.where((s) => s.modelInvocable)) {
-      final desc = s.description.length > maxDescChars
-          ? '${s.description.substring(0, maxDescChars)}…'
-          : s.description;
-      buf.writeln('- `${s.name}`: $desc'
-          '${s.whenToUse.isEmpty ? '' : ' — ${s.whenToUse}'}');
-    }
-    return buf.toString();
+    return _catalogBlock(_skills, maxDescChars: maxDescChars);
   }
+}
+
+SkillAliasResolution _resolveSkillAlias(List<Skill> skills, String alias) {
+  final query = alias.trim();
+  if (query.isEmpty) return const SkillAliasResolution([]);
+  for (final skill in skills) {
+    if (skill.providerId == query) return SkillAliasResolution([skill]);
+  }
+  var bare = query;
+  if (bare.startsWith('/')) bare = bare.substring(1);
+  if (bare.isEmpty) return const SkillAliasResolution([]);
+  final lower = bare.toLowerCase();
+  final matches = [
+    for (final skill in skills)
+      if (skill.name.toLowerCase() == lower) skill,
+  ]..sort((a, b) => a.providerId.compareTo(b.providerId));
+  return SkillAliasResolution(matches);
+}
+
+String _catalogBlock(List<Skill> skills, {required int maxDescChars}) {
+  final modelSkills = skills.where((skill) => skill.modelInvocable).toList();
+  if (modelSkills.isEmpty) return '';
+  final buf = StringBuffer()
+    ..writeln(
+      'AVAILABLE SKILLS (call the `skill` tool with a name to load full instructions):',
+    );
+  for (final skill in modelSkills) {
+    final desc = skill.description.length > maxDescChars
+        ? '${skill.description.substring(0, maxDescChars)}…'
+        : skill.description;
+    buf.writeln(
+      '- `${skill.canonicalId ?? skill.name}`: $desc'
+      '${skill.whenToUse.isEmpty ? '' : ' — ${skill.whenToUse}'}',
+    );
+  }
+  return buf.toString();
+}
+
+({String token, String args})? parseSkillInvocation(String line) {
+  if (!line.startsWith('/')) return null;
+  final body = line.substring(1);
+  final boundary = body.indexOf(RegExp(r'\s'));
+  final token = (boundary < 0 ? body : body.substring(0, boundary)).trim();
+  if (token.isEmpty) return null;
+  final args = boundary < 0 ? '' : body.substring(boundary).trim();
+  return (token: token, args: args);
 }
 
 /// Result of a bare-skill-alias resolution (spec §4.4: an alias exists only

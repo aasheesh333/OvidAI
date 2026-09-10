@@ -579,6 +579,7 @@ class AgentService extends ChangeNotifier {
     // hook_service import (circular).
     AppState.I.onSessionDeleted = (sessionId) {
       dropSessionRun(sessionId);
+      SkillService.I.dropSession(sessionId);
       if (HookService.I.hasHookListeners('session_end', sessionId: sessionId)) {
         unawaited(
           HookService.I.fire(
@@ -591,7 +592,8 @@ class AgentService extends ChangeNotifier {
     };
     // Per-session browser tabs: lazy-restore on session switch.
     AppState.I.onSessionSwitched = onSessionSwitched;
-    AppState.onRefreshSkills = refreshSkills;
+    AppState.onRefreshSkills = _skillsChanged;
+    PluginRuntimeManager.I.addListener(_onPluginRuntimeChanged);
     // Cold resume: rebuild subagent handles from the persisted lineage
     // after sessions load (the durable descriptor parity).
     AppState.I.onSessionsLoaded = () {
@@ -625,8 +627,11 @@ class AgentService extends ChangeNotifier {
   void dispose() {
     _scheduleTimer?.cancel();
     _scheduleTimer = null;
+    PluginRuntimeManager.I.removeListener(_onPluginRuntimeChanged);
     super.dispose();
   }
+
+  void _onPluginRuntimeChanged() => SkillService.I.invalidateAllSessions();
 
   static final AgentService I = AgentService._();
 
@@ -1234,7 +1239,7 @@ class AgentService extends ChangeNotifier {
   /// tabs to life (lazy restore) so switching is instant and isolated.
   Future<void> onSessionSwitched(String sessionId) async {
     await _restoreSessionTabsIfNeeded(sessionId);
-    await _refreshSkillRoots();
+    await _refreshSkillRoots(sessionId);
     notifyListeners();
   }
 
@@ -2477,7 +2482,11 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         ? p.source!.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_')
         : '';
     final safeName = _normTool(p.name);
-    for (final s in SkillService.I.skills) {
+    final sessionId = _runSession?.id;
+    final mounted = sessionId == null
+        ? SkillService.I.skills
+        : SkillService.I.skillsForSession(sessionId);
+    for (final s in mounted) {
       if (safeSource.isNotEmpty && s.path.contains(safeSource)) return true;
       if (s.path.contains(safeName) || s.name.contains(safeName)) return true;
     }
@@ -2642,6 +2651,15 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     for (final c in PluginContributionRegistry.I.toolsForSession(
       runSessionId,
     )) {
+      final snapshotReady = SkillService.I.hasSnapshotForSession(runSessionId);
+      final testCompatibility = _runSessionOverrideForTest != null;
+      if ((snapshotReady || !testCompatibility) &&
+          SkillService.I
+                  .resolveForSession(runSessionId, c.canonicalId)
+                  .unique ==
+              null) {
+        continue;
+      }
       final already = tools.any((t) {
         final fn = t['function'];
         return fn is Map && fn['name'] == c.toolName;
@@ -5576,7 +5594,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
 
     // Ensure skills are scanned for this session's workspace BEFORE the
     // system prompt is assembled.
-    await _refreshSkillRoots();
+    await _refreshSkillRoots(s.id);
 
     // ── Staged attachments (chatbox upload) ──
     // Files are already in the session workspace; capture them so we can
@@ -5695,7 +5713,7 @@ or commands that matter. Keep it tight — the parent reads only that message.
 For mid-task updates that should not wait (an early finding, a blocker), call
 report(content) — it reaches the parent as its next-step context.''' : ''}
 ${_presetPersona(s).isEmpty ? '' : '\nAGENT PRESET (${s.presetId}): ${_presetPersona(s)}\n'}
-${SkillService.I.catalogBlock().isEmpty ? '' : '\n${SkillService.I.catalogBlock()}'}
+${SkillService.I.catalogBlockForSession(s.id).isEmpty ? '' : '\n${SkillService.I.catalogBlockForSession(s.id)}'}
 Current time: ${_nowLine()} (the prompt builder time-context: interpret unqualified dates/times in the user's zone).
 ${AppState.I.replyLanguageHint().isEmpty ? '' : '${AppState.I.replyLanguageHint()}\n'}
 ${await _agentsMdBlock()}
@@ -7453,7 +7471,14 @@ ${await _agentsMdBlock()}
               'was executed. Provide the name of a skill or command this '
               'plugin mounts.';
         }
-        final skill = SkillService.I.find(action);
+        final runSid = _runSession?.id ?? '';
+        final resolved = SkillService.I.resolveForSession(runSid, action);
+        if (resolved.isAmbiguous) {
+          return 'Plugin action "$action" is ambiguous: '
+              '${resolved.options.join(', ')}. Nothing was executed.';
+        }
+        final skill = resolved.unique ??
+            (plugin.runtimeId == null ? SkillService.I.find(action) : null);
         if (skill != null) {
           _emit('think', 'plugin ${plugin.name} executing: ${skill.name}');
           final input = args['input'] ?? args['arguments'];
@@ -7556,7 +7581,7 @@ ${await _agentsMdBlock()}
           if (match.source != null) {
             fetchedFiles = await AppState.I.fetchPluginContent(match.source!);
             if (fetchedFiles > 0) {
-              await refreshSkills();
+              await refreshSkills(sessionId: _runSession?.id);
               // P3: a plugin can ship .mcp.json — register its declared
               // MCP servers so they auto-connect on next launch.
               mountedMcps = await AppState.I.mountPluginMcpServers(
@@ -11119,16 +11144,57 @@ ${await _agentsMdBlock()}
   static const _maxSubagentDepth = 2;
 
   // ── Skills (reusable instruction bundles) ─────────────────────────────
-  Future<void> _refreshSkillRoots() async {
-    SkillService.I.clearRoots();
+  Future<void> _refreshSkillRoots(String sessionId) async {
+    final roots = <String>[];
+    final session = AppState.I.sessionById(sessionId);
+    if (session == null) {
+      await SkillService.I.publishSessionCatalog(sessionId);
+      return;
+    }
     // Global user skills (Settings → Skills upload) — visible in EVERY
     // session so the agent can use them in any chat.
     try {
       final docs = await getApplicationDocumentsDirectory();
+      roots.add('${docs.path}/skills');
+    } catch (_) {}
+    try {
+      final pinned = session.workspaceFolder;
+      final work =
+          pinned != null &&
+              pinned.trim().isNotEmpty &&
+              Directory(pinned).existsSync()
+          ? Directory(pinned)
+          : await SandboxService.I.workDirFor(session.sandboxId ?? session.id);
+      roots.addAll([
+        '${work.path}/.dsh/skills',
+        '${work.path}/.agents/skills',
+        '${work.path}/agents',
+        '${work.path}/.agents',
+      ]);
+    } catch (_) {}
+    final mounts = <PluginCatalogMount>[];
+    for (final runtime in await PluginRuntimeManager.I.activeRuntimes()) {
+      if (!PluginContributionRegistry.I.isPluginActiveForSession(
+        runtime.pluginId,
+        sessionId,
+      )) {
+        continue;
+      }
+      mounts.add(PluginCatalogMount(runtime.contentDir, runtime.manifest));
+    }
+    await SkillService.I.publishSessionCatalog(
+      sessionId,
+      roots: roots,
+      mounts: mounts,
+    );
+  }
+
+  Future<void> _refreshCompatibilitySkillRoots() async {
+    SkillService.I.clearRoots();
+    try {
+      final docs = await getApplicationDocumentsDirectory();
       SkillService.I.addRoot('${docs.path}/skills');
     } catch (_) {}
-    // Workspace roots: current session's sandbox (or pinned folder) so
-    // project-local skills also show up.
     try {
       final work = await _sessionWorkDir();
       SkillService.I.addRoot('${work.path}/.dsh/skills');
@@ -11136,32 +11202,48 @@ ${await _agentsMdBlock()}
       SkillService.I.addRoot('${work.path}/agents');
       SkillService.I.addRoot('${work.path}/.agents');
     } catch (_) {}
-    // PR40/Task2: installed+enabled plugin content — a plugin's fetched
-    // commands, skills, and agents become available to the agent runtime.
-    if (!AppState.I.legacyPluginExecutionAllowed) {
-      await SkillService.I.reload();
-      return;
-    }
-    for (final p in AppState.I.plugins) {
-      if (!p.installed ||
-          !p.enabled ||
-          p.runtimeId != null ||
-          p.migrationRequired ||
-          p.source == null) {
-        continue;
+    if (AppState.I.legacyPluginExecutionAllowed ||
+        _runSessionOverrideForTest != null) {
+      for (final p in AppState.I.plugins) {
+        if (!p.installed ||
+            !p.enabled ||
+            p.runtimeId != null ||
+            p.migrationRequired ||
+            p.source == null) {
+          continue;
+        }
+        try {
+          final dir = await AppState.I.pluginCacheDirFor(p.source!);
+          SkillService.I.addRoot('${dir.path}/commands');
+          SkillService.I.addRoot('${dir.path}/skills');
+          SkillService.I.addRoot('${dir.path}/agents');
+        } catch (_) {}
       }
-      try {
-        final dir = await AppState.I.pluginCacheDirFor(p.source!);
-        SkillService.I.addRoot('${dir.path}/commands');
-        SkillService.I.addRoot('${dir.path}/skills');
-        SkillService.I.addRoot('${dir.path}/agents');
-      } catch (_) {}
     }
     await SkillService.I.reload();
   }
 
   /// Public test/UI seam: re-scan skill roots now (Settings → Skills).
-  Future<void> refreshSkills() => _refreshSkillRoots();
+  Future<void> refreshSkills({String? sessionId}) async {
+    if (sessionId != null) {
+      await _refreshSkillRoots(sessionId);
+      return;
+    }
+    await _refreshCompatibilitySkillRoots();
+  }
+
+  Future<void> _skillsChanged(String? sessionId) async {
+    if (sessionId != null) {
+      SkillService.I.invalidateSession(sessionId);
+      await _refreshSkillRoots(sessionId);
+      return;
+    }
+    SkillService.I.invalidateAllSessions();
+    await _refreshCompatibilitySkillRoots();
+    for (final session in List<ChatSession>.of(AppState.I.sessions)) {
+      await _refreshSkillRoots(session.id);
+    }
+  }
 
   /// True when the app holds All Files Access (Android 11+ MANAGE_EXTERNAL
   /// STORAGE) — needed to write inside arbitrary user-pinned folders.
@@ -11342,20 +11424,22 @@ ${await _agentsMdBlock()}
   Future<String> _handleSkill(Map<String, dynamic> args) async {
     final name = (args['name'] as String).trim();
     if (name.isEmpty) return 'skill name is required';
-    await _refreshSkillRoots();
     final registry = PluginContributionRegistry.I;
     final runSid = _runSession?.id ?? '';
-    // Plugin ids registered but NOT visible to the RUNNING session are
-    // hidden from alias resolution, so a session-scoped plugin can neither
-    // be loaded nor make an alias ambiguous in another session (spec §7).
-    final hidden = {
-      for (final id in registry.registeredPluginIds)
-        if (!registry.isPluginActiveForSession(id, runSid)) id,
-    };
+    final compatibilityMode =
+        _runSessionOverrideForTest != null &&
+        !SkillService.I.hasSnapshotForSession(runSid);
+    if (compatibilityMode) {
+      await _refreshCompatibilitySkillRoots();
+    } else if (!SkillService.I.hasSnapshotForSession(runSid)) {
+      await _refreshSkillRoots(runSid);
+    }
     // Unique-alias resolution (spec §4.4): an exact provider id (canonical
     // plugin skill id or path) or a globally-unique bare name loads; an
     // ambiguous bare name lists the exact providers and loads NOTHING.
-    final res = SkillService.I.resolveAlias(name, hiddenPluginIds: hidden);
+    final res = compatibilityMode
+        ? SkillService.I.resolveAlias(name)
+        : SkillService.I.resolveForSession(runSid, name);
     if (res.isAmbiguous) {
       return 'Skill "$name" is ambiguous — ${res.matches.length} providers '
           'share this alias: ${res.options.join(', ')}. Nothing was loaded. '
@@ -11363,12 +11447,14 @@ ${await _agentsMdBlock()}
     }
     final skill = res.unique;
     if (skill != null) {
+      final owner = skill.pluginId;
+      if (owner != null && !registry.isPluginActiveForSession(owner, runSid)) {
+        return _pluginScopeRefusal(skill.canonicalId!, owner);
+      }
       _emit('think', 'skill loaded: ${skill.name}');
       return '<skill_content>\n${skill.content}\n</skill_content>';
     }
-    // Canonical §4.4 id with no scanned skill yet — the registry ledger is
-    // the fallback source (session scope enforced before any read).
-    if (name.startsWith('plugin:')) {
+    if (compatibilityMode && name.startsWith('plugin:')) {
       final contribution = registry.contributionByCanonicalId(name);
       if (contribution != null && contribution.isRosterTool) {
         if (!registry.isPluginActiveForSession(contribution.pluginId, runSid)) {
@@ -11380,7 +11466,7 @@ ${await _agentsMdBlock()}
         return await _runPluginContribution(contribution, args);
       }
     }
-    final catalog = SkillService.I.catalogBlock();
+    final catalog = SkillService.I.catalogBlockForSession(runSid);
     return 'Skill "$name" not found.\n\n'
         '${catalog.isEmpty ? 'No skills are installed yet.' : catalog}';
   }
@@ -11412,6 +11498,27 @@ ${await _agentsMdBlock()}
     PluginContribution c,
     Map<String, dynamic> args,
   ) async {
+    final runSid = _runSession?.id ?? '';
+    if (!PluginContributionRegistry.I.isPluginActiveForSession(
+      c.pluginId,
+      runSid,
+    )) {
+      return _pluginScopeRefusal(c.canonicalId, c.pluginId);
+    }
+    final mounted = SkillService.I
+        .resolveForSession(runSid, c.canonicalId)
+        .unique;
+    if (mounted != null) {
+      _emit('think', 'plugin ${c.pluginId} ${c.kindLabel}: ${c.name}');
+      final input = args['input'] ?? args['arguments'];
+      final inputStr = input != null ? '\n\nArguments: $input' : '';
+      return '<skill_content>\n${mounted.content}\n</skill_content>$inputStr';
+    }
+    if (_runSessionOverrideForTest == null ||
+        SkillService.I.hasSnapshotForSession(runSid)) {
+      return 'Plugin contribution "${c.canonicalId}" is not mounted for this '
+          'session. Nothing was executed.';
+    }
     _emit('think', 'plugin ${c.pluginId} ${c.kindLabel}: ${c.name}');
     if (c.path.isEmpty || c.rootPath.isEmpty) {
       return 'Plugin contribution "${c.canonicalId}" declares no readable '

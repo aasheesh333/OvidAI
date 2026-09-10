@@ -18,6 +18,7 @@ import '../core/device_control_service.dart';
 import '../core/mcp_service.dart';
 import '../core/presets.dart';
 import '../core/skills.dart';
+import '../core/plugin_registry.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
@@ -1150,10 +1151,34 @@ class _ChatScreenState extends State<ChatScreen>
                         return;
                       }
                       // Skill direct invocation: /skill-name [args].
-                      final parsed = CommandService.parse(t);
-                      if (parsed != null) {
-                        final skill = SkillService.I.find(parsed.name);
+                      final parsed = parseSkillInvocation(t);
+                      if (parsed != null && s != null) {
+                        final resolved = SkillService.I.resolveForSession(
+                          s.id,
+                          parsed.token,
+                        );
+                        if (resolved.isAmbiguous) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  'Ambiguous skill. Choose exactly one: '
+                                  '${resolved.options.join(', ')}',
+                                ),
+                                behavior: SnackBarBehavior.floating,
+                              ),
+                            );
+                          }
+                          return;
+                        }
+                        final skill = resolved.unique;
                         if (skill != null && skill.userInvocable) {
+                          final owner = skill.pluginId;
+                          if (owner != null &&
+                              !PluginContributionRegistry.I
+                                  .isPluginActiveForSession(owner, s.id)) {
+                            return;
+                          }
                           _input.clear();
                           final argsText = parsed.args.isEmpty
                               ? ''
@@ -3511,13 +3536,16 @@ class _InputBarState extends State<_InputBar> {
         ),
       );
     }
-    for (final s in SkillService.I.userSkills) {
+    for (final s in SkillService.I.userSkillsForSession(
+      widget.sessionId ?? '',
+    )) {
+      final invocation = s.canonicalId ?? s.name;
       add(
         1,
-        s.name,
+        '$invocation ${s.name}',
         _SlashSuggestion(
           icon: Icons.auto_fix_high_outlined,
-          name: '/${s.name}',
+          name: '/$invocation',
           description: s.description.isEmpty ? 'Skill' : s.description,
           hint: '',
           group: 'Skills',
