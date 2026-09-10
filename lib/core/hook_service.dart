@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -106,11 +107,16 @@ class HookService extends ChangeNotifier {
   /// Settled breakers: `pluginId|sessionId` → true once tripped.
   final Set<String> _tripped = {};
 
-  /// Events currently executing (recursion prevention — §8.2).
+  /// Events currently executing (recursion prevention — §8.2), keyed by
+  /// `sessionId|canonicalEvent`. Distinct concurrent sessions are independent;
+  /// a session cannot re-fire its own in-flight event.
   final Set<String> _firingEvents = {};
 
-  /// Current hook nesting depth (outer fire → nested fire).
-  int _depth = 0;
+  /// Per-invocation-chain hook nesting depth (Zone value). Concurrent sibling
+  /// fires each own their chain budget instead of sharing one global cap.
+  static final Object _depthKey = Object();
+
+  static int _chainDepth() => Zone.current[_depthKey] as int? ?? 0;
 
   /// Whether [pluginId]'s hooks are disabled for [sessionId] (breaker).
   bool pluginTrippedForTest(String pluginId, String sessionId) =>
@@ -417,14 +423,40 @@ class HookService extends ChangeNotifier {
   }) async {
     if (!enabled) return '';
     final canonical = canonicalHookEvent(event) ?? event;
-    // Recursion prevention: never re-fire an event already executing.
-    if (_firingEvents.contains(canonical)) return '';
-    if (_depth >= maxDepth) return '';
+    // Recursion prevention: never re-fire the SAME event for the SAME session
+    // while it is executing. Concurrent DISTINCT sessions are independent and
+    // must both run (workflow child fan-out).
+    final guardKey = '$sessionId|$canonical';
+    if (_firingEvents.contains(guardKey)) return '';
+    final chainDepth = _chainDepth();
+    if (chainDepth >= maxDepth) return '';
     final hooks = _resolveHooks(event, sessionId);
     if (hooks.isEmpty) return '';
 
-    _firingEvents.add(canonical);
-    _depth++;
+    _firingEvents.add(guardKey);
+    try {
+      return await runZoned(
+        () => _runHooks(
+          sessionId: sessionId,
+          canonical: canonical,
+          hooks: hooks,
+          payload: payload,
+          model: model,
+        ),
+        zoneValues: {_depthKey: chainDepth + 1},
+      );
+    } finally {
+      _firingEvents.remove(guardKey);
+    }
+  }
+
+  Future<String> _runHooks({
+    required String sessionId,
+    required String canonical,
+    required List<(String, PluginHook, String)> hooks,
+    required Map<String, dynamic> payload,
+    required String? model,
+  }) async {
     final payloadJson = jsonEncode({
       'event': canonical,
       'session': sessionId,
@@ -432,93 +464,88 @@ class HookService extends ChangeNotifier {
     });
     final cwd = await _sessionWorkDir(sessionId);
     final collected = <String>[];
-    try {
-      for (final (pluginId, hook, declaredEvent) in hooks) {
-        if (!_matcherApplies(hook.matcher, payload)) continue;
-        if (_tripped.contains('$pluginId|$sessionId')) continue;
-        if (hook.type != 'command') {
-          // Prompt hooks have no shell runtime ("where implementable",
-          // §8.1) — skipped with a visible ledger note, never executed.
-          fired++;
-          try {
-            await _ledger(sessionId, 'hook/result', {
-              'plugin': pluginId,
-              'event': canonical,
-              'type': hook.type,
-              'ok': false,
-              'reason': 'prompt-type hook has no shell runtime — skipped',
-            });
-          } catch (_) {}
-          continue;
-        }
-        final storage = await _pluginStorageDir(pluginId);
-        final env = _envFor(
-          pluginId: pluginId,
-          hook: hook,
-          canonical: canonical,
-          declaredEvent: declaredEvent,
-          sessionId: sessionId,
-          payloadJson: payloadJson,
-          workspace: cwd?.path ?? '',
-          storage: storage,
-          model: model,
-        );
-        final record = {
-          'plugin': pluginId,
-          'event': canonical,
-          'command': hook.payload,
-        };
+    for (final (pluginId, hook, declaredEvent) in hooks) {
+      if (!_matcherApplies(hook.matcher, payload)) continue;
+      if (_tripped.contains('$pluginId|$sessionId')) continue;
+      if (hook.type != 'command') {
+        // Prompt hooks have no shell runtime ("where implementable",
+        // §8.1) — skipped with a visible ledger note, never executed.
         fired++;
         try {
-          await _ledger(
-            sessionId,
-            'hook/invoked',
-            Map<String, dynamic>.from(record),
-          );
+          await _ledger(sessionId, 'hook/result', {
+            'plugin': pluginId,
+            'event': canonical,
+            'type': hook.type,
+            'ok': false,
+            'reason': 'prompt-type hook has no shell runtime — skipped',
+          });
         } catch (_) {}
-        try {
-          final (code, out) = await _exec(hook, env, cwd);
-          if (code != 0) {
-            failed++;
-            _recordFailure(pluginId, sessionId);
-            try {
-              await _ledger(sessionId, 'hook/result', {
-                ...record,
-                'ok': false,
-                'exit': code,
-                'warning': 'hook failed (fail-open) — output ignored',
-                'stdout': cleanHookJson(out),
-              });
-            } catch (_) {}
-            continue;
-          }
-          _recordSuccess(pluginId, sessionId);
-          if (out.trim().isNotEmpty) {
-            collected.add(out.trim());
-            try {
-              await _ledger(sessionId, 'hook/result', {
-                ...record,
-                'ok': true,
-                'stdout': cleanHookJson(out),
-              });
-            } catch (_) {}
-          }
-        } catch (e) {
+        continue;
+      }
+      final storage = await _pluginStorageDir(pluginId);
+      final env = _envFor(
+        pluginId: pluginId,
+        hook: hook,
+        canonical: canonical,
+        declaredEvent: declaredEvent,
+        sessionId: sessionId,
+        payloadJson: payloadJson,
+        workspace: cwd?.path ?? '',
+        storage: storage,
+        model: model,
+      );
+      final record = {
+        'plugin': pluginId,
+        'event': canonical,
+        'command': hook.payload,
+      };
+      fired++;
+      try {
+        await _ledger(
+          sessionId,
+          'hook/invoked',
+          Map<String, dynamic>.from(record),
+        );
+      } catch (_) {}
+      try {
+        final (code, out) = await _exec(hook, env, cwd);
+        if (code != 0) {
           failed++;
           _recordFailure(pluginId, sessionId);
           try {
             await _ledger(sessionId, 'hook/result', {
               ...record,
               'ok': false,
-              'error': e.toString(),
-              'warning': 'hook failed (fail-open) — run continues',
+              'exit': code,
+              'warning': 'hook failed (fail-open) — output ignored',
+              'stdout': cleanHookJson(out),
+            });
+          } catch (_) {}
+          continue;
+        }
+        _recordSuccess(pluginId, sessionId);
+        if (out.trim().isNotEmpty) {
+          collected.add(out.trim());
+          try {
+            await _ledger(sessionId, 'hook/result', {
+              ...record,
+              'ok': true,
+              'stdout': cleanHookJson(out),
             });
           } catch (_) {}
         }
+      } catch (e) {
+        failed++;
+        _recordFailure(pluginId, sessionId);
+        try {
+          await _ledger(sessionId, 'hook/result', {
+            ...record,
+            'ok': false,
+            'error': e.toString(),
+            'warning': 'hook failed (fail-open) — run continues',
+          });
+        } catch (_) {}
       }
-    } finally {
-      _firingEvents.remove(canonical);
-      _depth--;
     }
     final joined = collected.join('\n');
     if (joined.length > 2048) {
@@ -577,103 +604,125 @@ class HookService extends ChangeNotifier {
       // fail open, never deny from an observe event.
       return const HookGateResult.allow();
     }
-    if (_firingEvents.contains(canonical)) {
+    final guardKey = '$sessionId|$canonical';
+    if (_firingEvents.contains(guardKey)) {
       return const HookGateResult.allow();
     }
-    if (_depth >= maxDepth) return const HookGateResult.allow();
+    final chainDepth = _chainDepth();
+    if (chainDepth >= maxDepth) return const HookGateResult.allow();
     final hooks = _resolveHooks(event, sessionId);
     if (hooks.isEmpty) return const HookGateResult.allow();
 
-    _firingEvents.add(canonical);
-    _depth++;
+    _firingEvents.add(guardKey);
+    try {
+      final denied = await runZoned(
+        () => _runGateHooks(
+          sessionId: sessionId,
+          canonical: canonical,
+          hooks: hooks,
+          payload: payload,
+          model: model,
+        ),
+        zoneValues: {_depthKey: chainDepth + 1},
+      );
+      return denied ?? const HookGateResult.allow();
+    } finally {
+      _firingEvents.remove(guardKey);
+    }
+  }
+
+  /// Runs the resolved gating hooks; returns a deny result or null when the
+  /// action is allowed. Callers own the recursion guard/zone wrapping.
+  Future<HookGateResult?> _runGateHooks({
+    required String sessionId,
+    required String canonical,
+    required List<(String, PluginHook, String)> hooks,
+    required Map<String, dynamic> payload,
+    required String? model,
+  }) async {
     final payloadJson = jsonEncode({
       'event': canonical,
       'session': sessionId,
       ...payload,
     });
     final cwd = await _sessionWorkDir(sessionId);
-    try {
-      for (final (pluginId, hook, declaredEvent) in hooks) {
-        if (!_matcherApplies(hook.matcher, payload)) continue;
-        if (_tripped.contains('$pluginId|$sessionId')) continue;
-        if (hook.type != 'command') continue;
-        final storage = await _pluginStorageDir(pluginId);
-        final env = _envFor(
-          pluginId: pluginId,
-          hook: hook,
-          canonical: canonical,
-          declaredEvent: declaredEvent,
-          sessionId: sessionId,
-          payloadJson: payloadJson,
-          workspace: cwd?.path ?? '',
-          storage: storage,
-          model: model,
+    for (final (pluginId, hook, declaredEvent) in hooks) {
+      if (!_matcherApplies(hook.matcher, payload)) continue;
+      if (_tripped.contains('$pluginId|$sessionId')) continue;
+      if (hook.type != 'command') continue;
+      final storage = await _pluginStorageDir(pluginId);
+      final env = _envFor(
+        pluginId: pluginId,
+        hook: hook,
+        canonical: canonical,
+        declaredEvent: declaredEvent,
+        sessionId: sessionId,
+        payloadJson: payloadJson,
+        workspace: cwd?.path ?? '',
+        storage: storage,
+        model: model,
+      );
+      final record = {
+        'plugin': pluginId,
+        'event': canonical,
+        'command': hook.payload,
+      };
+      fired++;
+      try {
+        await _ledger(
+          sessionId,
+          'hook/invoked',
+          Map<String, dynamic>.from(record),
         );
-        final record = {
-          'plugin': pluginId,
-          'event': canonical,
-          'command': hook.payload,
-        };
-        fired++;
-        try {
-          await _ledger(
-            sessionId,
-            'hook/invoked',
-            Map<String, dynamic>.from(record),
-          );
-        } catch (_) {}
-        try {
-          final (code, out) = await _exec(hook, env, cwd, gate: true);
-          final blockReason = jsonBlockReason(out);
-          if (code == 2 || blockReason != null) {
-            failed++;
-            final displayName = _displayName(pluginId);
-            final reason =
-                blockReason ??
-                (out.trim().isEmpty
-                    ? '$displayName denied this action'
-                    : cleanHookJson(out.trim()));
-            try {
-              await _ledger(sessionId, 'hook/result', {
-                ...record,
-                'ok': false,
-                'exit': code,
-                'decision': 'deny',
-                'blockReason': ?blockReason,
-                'reason': reason,
-              });
-            } catch (_) {}
-            return HookGateResult.deny(displayName, reason);
-          }
-          _recordSuccess(pluginId, sessionId);
-          try {
-            await _ledger(sessionId, 'hook/result', {
-              ...record,
-              'ok': true,
-              'decision': 'allow',
-              if (out.trim().isNotEmpty) 'stdout': cleanHookJson(out),
-            });
-          } catch (_) {}
-        } catch (e) {
-          // Exec error/timeout/missing sandbox — fail-open, but count
-          // toward the breaker and record the visible warning.
+      } catch (_) {}
+      try {
+        final (code, out) = await _exec(hook, env, cwd, gate: true);
+        final blockReason = jsonBlockReason(out);
+        if (code == 2 || blockReason != null) {
           failed++;
-          _recordFailure(pluginId, sessionId);
+          final displayName = _displayName(pluginId);
+          final reason =
+              blockReason ??
+              (out.trim().isEmpty
+                  ? '$displayName denied this action'
+                  : cleanHookJson(out.trim()));
           try {
             await _ledger(sessionId, 'hook/result', {
               ...record,
               'ok': false,
-              'error': e.toString(),
-              'reason': 'gate fails open on error',
+              'exit': code,
+              'decision': 'deny',
+              'blockReason': ?blockReason,
+              'reason': reason,
             });
           } catch (_) {}
+          return HookGateResult.deny(displayName, reason);
         }
+        _recordSuccess(pluginId, sessionId);
+        try {
+          await _ledger(sessionId, 'hook/result', {
+            ...record,
+            'ok': true,
+            'decision': 'allow',
+            if (out.trim().isNotEmpty) 'stdout': cleanHookJson(out),
+          });
+        } catch (_) {}
+      } catch (e) {
+        // Exec error/timeout/missing sandbox — fail-open, but count
+        // toward the breaker and record the visible warning.
+        failed++;
+        _recordFailure(pluginId, sessionId);
+        try {
+          await _ledger(sessionId, 'hook/result', {
+            ...record,
+            'ok': false,
+            'error': e.toString(),
+            'reason': 'gate fails open on error',
+          });
+        } catch (_) {}
       }
-    } finally {
-      _firingEvents.remove(canonical);
-      _depth--;
     }
-    return const HookGateResult.allow();
+    return null;
   }
 }
 

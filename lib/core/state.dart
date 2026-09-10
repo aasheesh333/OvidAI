@@ -22,6 +22,7 @@ import 'plugin_runtime.dart';
 import 'plugin_source_resolver.dart';
 import 'theme.dart';
 import 'sandbox_service.dart';
+import 'session_lifecycle_service.dart';
 import 'presets.dart';
 import 'startup_coordinator.dart';
 
@@ -1605,6 +1606,7 @@ class AppState extends ChangeNotifier {
   Future<void>? _pluginBootActivation;
   var _pluginBootActivated = false;
   final Object _bootToken = Object();
+  final Completer<void> _bootActivationSettled = Completer<void>();
   var _readinessStarted = false;
   var _readinessComplete = false;
   final Completer<void> _readinessStartedSignal = Completer<void>();
@@ -1625,6 +1627,47 @@ class AppState extends ChangeNotifier {
   var _skillMountSettled = false;
   var _skillMountSucceeded = false;
   String? _skillMountFailureReason;
+  var _pendingActiveRootReason = SessionStartReason.implicit;
+  final List<Future<void>> _pendingSessionLifecycles = [];
+
+  /// Process-local boot identity (Task 2). The session lifecycle service keys
+  /// its exactly-once reservations by this token; a resume/reconnect reuses it.
+  Object get bootToken => _bootToken;
+
+  /// Completes once boot activation has settled (success, failure, or skip).
+  /// Session creation awaits this barrier before firing `session_start` so a
+  /// restored session never observes an unactivated runtime.
+  Future<void> get bootActivationSettled => _bootActivationSettled.future;
+
+  /// Track a fire-and-forget session lifecycle dispatch (test seam).
+  @visibleForTesting
+  Future<void> drainSessionLifecycleForTest() async {
+    while (_pendingSessionLifecycles.isNotEmpty) {
+      await Future.wait(List<Future<void>>.of(_pendingSessionLifecycles));
+    }
+  }
+
+  void _trackSessionLifecycle(Future<void> future) {
+    _pendingSessionLifecycles.add(future);
+    future.whenComplete(() {
+      _pendingSessionLifecycles.remove(future);
+    });
+  }
+
+  /// Persist [session] then dispatch its exactly-once `session_start`.
+  Future<void> _dispatchSessionStart(
+    ChatSession session,
+    SessionStartReason reason,
+  ) {
+    final future = () async {
+      try {
+        await persistSessions();
+      } catch (_) {}
+      await SessionLifecycleService.I.sessionStarted(session, reason: reason);
+    }();
+    _trackSessionLifecycle(future);
+    return future;
+  }
 
   List<StartupItemStatus> get pluginSafetyStatuses =>
       List.unmodifiable(_pluginSafetyStatuses);
@@ -1772,23 +1815,29 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _activatePluginsForBoot() async {
-    await _reconcilePluginSafety();
-    if (_pluginBootActivated) return;
-    final existing = _pluginBootActivation;
-    if (existing != null) {
-      await existing;
-      return;
+    try {
+      await _reconcilePluginSafety();
+      if (_pluginBootActivated) return;
+      final existing = _pluginBootActivation;
+      if (existing != null) {
+        await existing;
+        return;
+      }
+      late final Future<void> attempt;
+      attempt = _pluginBootActivator(_bootToken, false)
+          .then<void>((_) => _pluginBootActivated = true)
+          .whenComplete(() {
+            if (identical(_pluginBootActivation, attempt)) {
+              _pluginBootActivation = null;
+            }
+          });
+      _pluginBootActivation = attempt;
+      await attempt;
+    } finally {
+      if (!_bootActivationSettled.isCompleted) {
+        _bootActivationSettled.complete();
+      }
     }
-    late final Future<void> attempt;
-    attempt = _pluginBootActivator(_bootToken, false)
-        .then<void>((_) => _pluginBootActivated = true)
-        .whenComplete(() {
-          if (identical(_pluginBootActivation, attempt)) {
-            _pluginBootActivation = null;
-          }
-        });
-    _pluginBootActivation = attempt;
-    await attempt;
     await _maybeFinishSessionRestore();
   }
 
@@ -1811,6 +1860,13 @@ class AppState extends ChangeNotifier {
     await AgentService.I.restoreRunCheckpoints();
     onSessionsLoaded?.call();
     _sessionRestoreFinished = true;
+    final active = activeSession;
+    if (active != null && !active.isSubagent) {
+      await SessionLifecycleService.I.sessionStarted(
+        active,
+        reason: _pendingActiveRootReason,
+      );
+    }
     return true;
   }
 
@@ -2156,6 +2212,9 @@ class AppState extends ChangeNotifier {
     activeSessionId = active.id;
     _deferredActiveSessionId = active.id;
     _deferredActiveTailLength = active.messages.length;
+    // A persisted root replaces the provisional constructor session: its
+    // lifecycle reason is `restored`, never `implicit`.
+    _pendingActiveRootReason = SessionStartReason.restored;
     notifyListeners();
   }
 
@@ -2902,6 +2961,16 @@ class AppState extends ChangeNotifier {
     activeSessionId = session.id;
     // PR23/M1: workspace exists from the first moment (see newSession).
     _warmWorkspace(session.id);
+    if (_localHydrationSettled) {
+      // A real root created after hydration is an implicit session start.
+      _dispatchSessionStart(session, SessionStartReason.implicit);
+    } else {
+      // Constructor/hydration provisional root: only the surviving active
+      // root fires, once local hydration confirms no persisted root replaced
+      // it (`_maybeFinishSessionRestore`). This prevents ghost events for a
+      // discarded provisional ID.
+      _pendingActiveRootReason = SessionStartReason.implicit;
+    }
     return session;
   }
 
@@ -2977,7 +3046,9 @@ class AppState extends ChangeNotifier {
     // shared. Session A's in-flight run must never observe a model
     // selection that came from creating/switching to session B.
     notifyListeners();
-    persistSessions();
+    // Persist first, then dispatch exactly-once `created` lifecycle. The
+    // method stays synchronous; the tracked future owns persistence.
+    _dispatchSessionStart(s, SessionStartReason.created);
   }
 
   /// Ensure a session's workspace dir exists (mention menu + agent runs

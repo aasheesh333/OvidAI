@@ -284,6 +284,12 @@ class PluginRuntimeManager extends ChangeNotifier {
   Object? _bootToken;
   int? _bootEpoch;
 
+  /// In-flight activation shared by concurrent callers carrying the same
+  /// boot token. Cleared on completion so retry/re-activation with the same
+  /// token re-runs while still reusing [_bootEpoch] (no extra increment).
+  Future<void>? _bootActivation;
+  Object? _bootActivationToken;
+
   /// Test seams (resolver/dep-service injection), mirroring the
   /// `AppState.pluginCacheRootOverrideForTest` convention.
   @visibleForTesting
@@ -1302,6 +1308,35 @@ class PluginRuntimeManager extends ChangeNotifier {
     bool connectMcp = true,
     Object? bootToken,
     bool reportFailure = false,
+  }) {
+    final inFlight = _bootActivation;
+    if (bootToken != null &&
+        inFlight != null &&
+        identical(_bootActivationToken, bootToken)) {
+      return inFlight;
+    }
+    late final Future<void> attempt;
+    attempt = _runBootActivation(
+      connectMcp: connectMcp,
+      bootToken: bootToken,
+      reportFailure: reportFailure,
+    ).whenComplete(() {
+      if (identical(_bootActivation, attempt)) {
+        _bootActivation = null;
+        _bootActivationToken = null;
+      }
+    });
+    if (bootToken != null) {
+      _bootActivation = attempt;
+      _bootActivationToken = bootToken;
+    }
+    return attempt;
+  }
+
+  Future<void> _runBootActivation({
+    required bool connectMcp,
+    required Object? bootToken,
+    required bool reportFailure,
   }) async {
     try {
       final int epoch;

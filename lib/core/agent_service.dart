@@ -21,6 +21,7 @@ import 'repo_cache.dart';
 import 'mcp_service.dart';
 import 'session_ledger.dart';
 import 'session_search.dart';
+import 'session_lifecycle_service.dart';
 import 'presets.dart';
 import 'hook_service.dart';
 import 'plugin_manifest.dart';
@@ -598,23 +599,6 @@ class AgentService extends ChangeNotifier {
     AppState.I.onSessionsLoaded = () {
       restoreSubagentHandles();
       _recoverInterruptedRuns();
-      // PR24: on_session_start — boot-time hooks for the restored ACTIVE
-      // session (loaders, environment probes). Fire-and-forget.
-      final active = AppState.I.activeSession;
-      if (active != null &&
-          HookService.I.hasHookListeners(
-            'session_start',
-            sessionId: active.id,
-          )) {
-        unawaited(
-          HookService.I.fire(
-            'session_start',
-            active.id,
-            payload: {'restored': AppState.I.sessions.length},
-            model: active.model,
-          ),
-        );
-      }
     };
     // Composer commands + skills catalog.
     CommandService.I.registerBuiltins();
@@ -11920,6 +11904,38 @@ ${await _agentsMdBlock()}
     return childMode == AgentMode.control ? AgentMode.drive : childMode;
   }
 
+  /// Canonical child-start announcement shared by `dispatch_agent` and
+  /// workflow/Ralph spawns: make the child durable, fire the exactly-once
+  /// general `session_start` (reason `subagent`), then the existing
+  /// `subagent_start` observe event. Both are awaited so the ordering is
+  /// observable; both remain fail-open.
+  Future<void> _announceSubagentStart({
+    required ChatSession parent,
+    required ChatSession child,
+    required SubagentInfo sub,
+    required bool background,
+  }) async {
+    // Durable handle id on the session — lets the registry be rebuilt after
+    // an app restart (cold resume). Persisted with the session JSON.
+    child.agentId = sub.id;
+    await AppState.I.persistSessions();
+    await SessionLifecycleService.I.sessionStarted(
+      child,
+      reason: SessionStartReason.subagent,
+    );
+    await HookService.I.fire(
+      'subagent_start',
+      child.id,
+      payload: {
+        'subagentId': sub.id,
+        'parentSessionId': parent.id,
+        'label': sub.label,
+        'background': background,
+      },
+      model: child.model,
+    );
+  }
+
   Future<String> _handleDispatchAgent(Map<String, dynamic> args) async {
     final prompt = (args['prompt'] as String).trim();
     if (prompt.isEmpty) return 'prompt is required';
@@ -11974,27 +11990,15 @@ ${await _agentsMdBlock()}
       background: background,
     );
     _subagents[id] = sub;
-    // Durable handle id on the session — lets the registry be rebuilt after
-    // an app restart (cold resume). Persisted with the session JSON.
-    child.agentId = id;
-    AppState.I.persistSessions();
     _emit('think', 'dispatched $id → ${cleanTruncate(label, 40)}');
-    // Task 8 (spec §8.1): subagent_start — observe hook at child spawn.
-    if (HookService.I.hasHookListeners('subagent_start', sessionId: child.id)) {
-      unawaited(
-        HookService.I.fire(
-          'subagent_start',
-          child.id,
-          payload: {
-            'subagentId': id,
-            'parentSessionId': parent.id,
-            'label': label,
-            'background': background,
-          },
-          model: child.model,
-        ),
-      );
-    }
+    // Exactly-once child lifecycle: session_start then subagent_start, after
+    // the child and its agentId are durable.
+    await _announceSubagentStart(
+      parent: parent,
+      child: child,
+      sub: sub,
+      background: background,
+    );
 
     // The parent's tool card mirrors the child's progress live and links to
     // the full child transcript.
@@ -12013,6 +12017,10 @@ ${await _agentsMdBlock()}
 
     if (background) {
       unawaited(_runSubagentSession(sub, prompt, card: card));
+      // Yield one event-loop turn so a background child that settles
+      // immediately (e.g. missing provider) has already delivered its
+      // settlement notice before the dispatch acknowledgement returns.
+      await Future<void>.delayed(Duration.zero);
       return 'Started background subagent $id (session ${child.id}). '
           'Open it from the subagent card to watch it work. Use '
           'send_message / interrupt_agent / list_agents to manage it.';
@@ -12056,26 +12064,14 @@ ${await _agentsMdBlock()}
       prompt: prompt,
     );
     _subagents[id] = sub;
-    child.agentId = id;
-    AppState.I.persistSessions();
     _emit('think', 'spawned $id → ${cleanTruncate(label, 40)}');
-    // Task 8 (spec §8.1): subagent_start for fresh foreground children
-    // (workflow/ralph rounds) — same observe hook as dispatch_agent.
-    if (HookService.I.hasHookListeners('subagent_start', sessionId: child.id)) {
-      unawaited(
-        HookService.I.fire(
-          'subagent_start',
-          child.id,
-          payload: {
-            'subagentId': id,
-            'parentSessionId': parent.id,
-            'label': label,
-            'background': false,
-          },
-          model: child.model,
-        ),
-      );
-    }
+    // Same child lifecycle ordering as dispatch_agent (workflow/Ralph rounds).
+    await _announceSubagentStart(
+      parent: parent,
+      child: child,
+      sub: sub,
+      background: false,
+    );
     await _runSubagentSession(sub, prompt);
     return (sub, sub.result.trim());
   }
