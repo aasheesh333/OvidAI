@@ -313,6 +313,9 @@ class PluginRuntimeManager extends ChangeNotifier {
   @visibleForTesting
   static bool failRenameForTest = false;
 
+  @visibleForTesting
+  static bool failMigrationMarkerWriteForTest = false;
+
   PluginDependencyService _deps() =>
       depsForTest ??
       PluginDependencyService(runtimeRootOverride: runtimeRootOverrideForTest);
@@ -387,7 +390,10 @@ class PluginRuntimeManager extends ChangeNotifier {
     }
   }
 
-  Future<void> _saveEntries(Map<String, PluginInstallEntry> entries) async {
+  Future<void> _saveEntries(
+    Map<String, PluginInstallEntry> entries, {
+    bool reportFailure = false,
+  }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
@@ -397,7 +403,9 @@ class PluginRuntimeManager extends ChangeNotifier {
             key: jsonEncode(entries[key]!.toJson()),
         }),
       );
-    } catch (_) {}
+    } catch (error, stack) {
+      if (reportFailure) Error.throwWithStackTrace(error, stack);
+    }
   }
 
   Future<int> _readEpoch() async {
@@ -463,7 +471,10 @@ class PluginRuntimeManager extends ChangeNotifier {
     }
   }
 
-  Future<void> _saveRows(Map<String, PluginItem> rows) async {
+  Future<void> _saveRows(
+    Map<String, PluginItem> rows, {
+    bool reportFailure = false,
+  }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final ids = rows.keys.toList()..sort();
@@ -471,7 +482,9 @@ class PluginRuntimeManager extends ChangeNotifier {
         kPluginRowsV2PrefKey,
         jsonEncode({for (final id in ids) id: jsonEncode(rows[id]!.toJson())}),
       );
-    } catch (_) {}
+    } catch (error, stack) {
+      if (reportFailure) Error.throwWithStackTrace(error, stack);
+    }
   }
 
   PluginItem? _catalogRowFor(String pluginId) =>
@@ -483,27 +496,28 @@ class PluginRuntimeManager extends ChangeNotifier {
     PluginItem? stored,
     PluginItem? catalog,
   }) {
-    final metadata = stored ?? catalog;
     final manifest = entry.manifest;
     final publisher = pluginId.split('/').first;
+    String? text(String? storedValue, String? catalogValue) {
+      if (storedValue?.isNotEmpty == true) return storedValue;
+      if (catalogValue?.isNotEmpty == true) return catalogValue;
+      return null;
+    }
+
     return PluginItem(
-      name: metadata?.name.isNotEmpty == true
-          ? metadata!.name
-          : (manifest.name.isNotEmpty ? manifest.name : pluginId),
-      author: metadata?.author.isNotEmpty == true
-          ? metadata!.author
-          : publisher,
-      description: metadata?.description ?? '',
+      name:
+          text(stored?.name, catalog?.name) ??
+          (manifest.name.isNotEmpty ? manifest.name : pluginId),
+      author: text(stored?.author, catalog?.author) ?? publisher,
+      description: text(stored?.description, catalog?.description) ?? '',
       version: entry.version.isNotEmpty ? entry.version : manifest.version,
-      category: metadata?.category.isNotEmpty == true
-          ? metadata!.category
-          : 'Plugin',
+      category: text(stored?.category, catalog?.category) ?? 'Plugin',
       installed: true,
       enabled: !entry.disabled,
-      installs: metadata?.installs ?? 0,
-      installsKnown: metadata?.installsKnown ?? false,
-      source: metadata?.source,
-      marketplace: metadata?.marketplace,
+      installs: stored?.installs ?? catalog?.installs ?? 0,
+      installsKnown: stored?.installsKnown ?? catalog?.installsKnown ?? false,
+      source: text(stored?.source, catalog?.source),
+      marketplace: text(stored?.marketplace, catalog?.marketplace),
       runtimeId: pluginId,
       activation: entry.disabled
           ? PluginActivation.disabled
@@ -515,8 +529,9 @@ class PluginRuntimeManager extends ChangeNotifier {
         for (final issue in manifest.compatibility)
           if (issue.severity == CompatibilitySeverity.optional) issue,
       ],
-      migrationRequired: stored?.migrationRequired ?? false,
-      runtimeReason: stored?.runtimeReason,
+      migrationRequired:
+          stored?.migrationRequired ?? catalog?.migrationRequired ?? false,
+      runtimeReason: stored?.runtimeReason ?? catalog?.runtimeReason,
     );
   }
 
@@ -525,7 +540,6 @@ class PluginRuntimeManager extends ChangeNotifier {
       row.enabled &&
       row.runtimeId == null &&
       (row.source != null ||
-          row.category.toLowerCase() == 'external' ||
           row.hooks.isNotEmpty ||
           row.pluginHooks.isNotEmpty);
 
@@ -553,7 +567,9 @@ class PluginRuntimeManager extends ChangeNotifier {
     String pluginId,
     PluginInstallEntry entry,
   ) async {
-    if (pluginId.isEmpty || entry.version.isEmpty || entry.contentDir.isEmpty) {
+    if (!isCanonicalPluginId(pluginId) ||
+        entry.version.isEmpty ||
+        entry.contentDir.isEmpty) {
       return false;
     }
     final expected = await _contentDirFor(pluginId, entry.version);
@@ -595,6 +611,36 @@ class PluginRuntimeManager extends ChangeNotifier {
     installedBootEpoch: entry.activation.installedBootEpoch,
   );
 
+  Future<void> _deactivateRuntime(
+    String pluginId,
+    Map<String, PluginInstallEntry> entries,
+    PluginInstallEntry entry, {
+    required PluginActivation activation,
+  }) async {
+    final record = activation == PluginActivation.failed
+        ? _failedRecord(pluginId, entry)
+        : _disabledRecord(pluginId, entry);
+    entries[pluginId] = _replaceEntry(
+      entry,
+      activation: record,
+      disabled: activation == PluginActivation.disabled,
+    );
+    PluginContributionRegistry.I.unregisterPlugin(pluginId);
+    await AppState.I.unmountPluginOwnedMcpServers(pluginId, uninstall: false);
+    for (final row in AppState.I.plugins) {
+      if (row.runtimeId != pluginId) continue;
+      row
+        ..enabled = false
+        ..activation = activation
+        ..immediateSessionId = null
+        ..promoteOnNextBoot = false
+        ..migrationRequired = activation == PluginActivation.disabled
+        ..runtimeReason = activation == PluginActivation.disabled
+            ? _kPluginReapprovalReason
+            : _kMissingContentReason;
+    }
+  }
+
   /// Rebuilds canonical rows before any activation, fails closed on missing
   /// grants/content, then disables executable legacy rows without deleting
   /// their caches or approval history.
@@ -607,18 +653,16 @@ class PluginRuntimeManager extends ChangeNotifier {
 
     for (final id in ids) {
       var entry = entries[id]!;
-      if (id.isEmpty ||
+      if (!isCanonicalPluginId(id) ||
           id != entry.activation.pluginId ||
           id != entry.manifest.id ||
           !await _isContainedEntry(id, entry)) {
-        entry = _replaceEntry(
+        await _deactivateRuntime(
+          id,
+          entries,
           entry,
-          activation: _disabledRecord(id, entry),
-          disabled: true,
+          activation: PluginActivation.disabled,
         );
-        entries[id] = entry;
-        PluginContributionRegistry.I.unregisterPlugin(id);
-        await AppState.I.unmountPluginOwnedMcpServers(id, uninstall: false);
         statuses.add(
           StartupItemStatus.failed(
             id,
@@ -654,12 +698,13 @@ class PluginRuntimeManager extends ChangeNotifier {
           ),
         );
       } else if (!await _hasEffectiveGrant(id, entry)) {
-        entry = _replaceEntry(
+        await _deactivateRuntime(
+          id,
+          entries,
           entry,
-          activation: _disabledRecord(id, entry),
-          disabled: true,
+          activation: PluginActivation.disabled,
         );
-        entries[id] = entry;
+        entry = entries[id]!;
         row
           ..enabled = false
           ..activation = PluginActivation.disabled
@@ -667,8 +712,6 @@ class PluginRuntimeManager extends ChangeNotifier {
           ..promoteOnNextBoot = false
           ..migrationRequired = true
           ..runtimeReason = _kPluginReapprovalReason;
-        PluginContributionRegistry.I.unregisterPlugin(id);
-        await AppState.I.unmountPluginOwnedMcpServers(id, uninstall: false);
         statuses.add(
           StartupItemStatus.migrationRequired(
             id,
@@ -692,37 +735,55 @@ class PluginRuntimeManager extends ChangeNotifier {
 
     var legacyOrdinal = 0;
     for (final row in AppState.I.plugins) {
-      if (!_isExecutableLegacyRow(row)) continue;
-      row
-        ..enabled = false
-        ..activation = PluginActivation.disabled
-        ..migrationRequired = true
-        ..runtimeReason = _kLegacyReapprovalReason;
-      statuses.add(
-        StartupItemStatus.migrationRequired(
-          _legacyStatusId(row, legacyOrdinal++),
-          StartupItemKind.plugin,
-          row.name,
-          reason: _kLegacyReapprovalReason,
-        ),
-      );
+      if (_isExecutableLegacyRow(row)) {
+        row
+          ..enabled = false
+          ..activation = PluginActivation.disabled
+          ..migrationRequired = true
+          ..runtimeReason = _kLegacyReapprovalReason;
+      }
+      if (row.runtimeId == null && row.migrationRequired) {
+        statuses.add(
+          StartupItemStatus.migrationRequired(
+            _legacyStatusId(row, legacyOrdinal++),
+            StartupItemKind.plugin,
+            row.name,
+            reason: row.runtimeReason ?? _kLegacyReapprovalReason,
+          ),
+        );
+      }
     }
 
-    await _saveEntries(entries);
-    await _saveRows(rows);
+    await _saveEntries(entries, reportFailure: true);
+    await _saveRows(rows, reportFailure: true);
     final canonicalIds = rows.keys.toSet();
-    AppState.I.plugins.removeWhere(
-      (row) => row.runtimeId != null && canonicalIds.contains(row.runtimeId),
-    );
+    final staleRuntimeIds = <String>{
+      for (final row in AppState.I.plugins)
+        if (row.runtimeId != null && !canonicalIds.contains(row.runtimeId))
+          row.runtimeId!,
+      for (final id in storedRows.keys)
+        if (!canonicalIds.contains(id)) id,
+    };
+    for (final id in staleRuntimeIds) {
+      PluginContributionRegistry.I.unregisterPlugin(id);
+      await AppState.I.unmountPluginOwnedMcpServers(id, uninstall: false);
+    }
+    AppState.I.plugins.removeWhere((row) => row.runtimeId != null);
     AppState.I.plugins.addAll([
       for (final id in (rows.keys.toList()..sort())) rows[id]!,
     ]);
-    await AppState.I.persistPluginState();
-    await AppState.I.persistMergedMarketplaceCatalog();
-    await (await SharedPreferences.getInstance()).setBool(
+    await AppState.I.persistLegacyPluginMigrationState();
+    final prefs = await SharedPreferences.getInstance();
+    if (failMigrationMarkerWriteForTest) {
+      throw StateError('Injected plugin migration marker write failure');
+    }
+    final markerWritten = await prefs.setBool(
       _kPluginRowsV2MigratedPrefKey,
       true,
     );
+    if (!markerWritten) {
+      throw StateError('Failed to persist plugin migration marker');
+    }
     AppState.I.refresh();
     return statuses;
   }
@@ -811,10 +872,10 @@ class PluginRuntimeManager extends ChangeNotifier {
       final manifest = await const PluginAdapterRegistry().inspect(
         resolved.stagingDir,
       );
-      if (manifest.id.isEmpty) {
+      if (!isCanonicalPluginId(manifest.id)) {
         throw const PluginRuntimeException(
           PluginRuntimeErrorCode.identity,
-          'plugin manifest has no canonical publisher/name identity — '
+          'plugin manifest has an invalid canonical publisher/name identity - '
           'install refused',
         );
       }
@@ -1181,13 +1242,15 @@ class PluginRuntimeManager extends ChangeNotifier {
         if (entry.disabled) continue;
         if (!await _isContainedEntry(id, entry) ||
             !await _hasEffectiveGrant(id, entry)) {
-          final rec = _disabledRecord(id, entry);
-          entry = _replaceEntry(entry, activation: rec, disabled: true);
-          entries[id] = entry;
+          await _deactivateRuntime(
+            id,
+            entries,
+            entry,
+            activation: PluginActivation.disabled,
+          );
+          final rec = entries[id]!.activation;
           entriesChanged = true;
           rowsChanged |= _syncRow(rec);
-          PluginContributionRegistry.I.unregisterPlugin(id);
-          await AppState.I.unmountPluginOwnedMcpServers(id, uninstall: false);
           continue;
         }
         var rec = entry.activation;
@@ -1277,12 +1340,14 @@ class PluginRuntimeManager extends ChangeNotifier {
     if (entry.disabled) return PluginActivation.disabled;
     if (!await _isContainedEntry(pluginId, entry) ||
         !await _hasEffectiveGrant(pluginId, entry)) {
-      final rec = _disabledRecord(pluginId, entry);
-      entries[pluginId] = _replaceEntry(entry, activation: rec, disabled: true);
+      await _deactivateRuntime(
+        pluginId,
+        entries,
+        entry,
+        activation: PluginActivation.disabled,
+      );
       await _saveEntries(entries);
-      PluginContributionRegistry.I.unregisterPlugin(pluginId);
-      await AppState.I.unmountPluginOwnedMcpServers(pluginId, uninstall: false);
-      _syncRow(rec);
+      await persistRuntimeRow(pluginId);
       return PluginActivation.disabled;
     }
     if (!Directory(entry.contentDir).existsSync()) {
@@ -1426,19 +1491,13 @@ class PluginRuntimeManager extends ChangeNotifier {
     if (entry == null) return;
     if (!await _isContainedEntry(pluginId, entry) ||
         !await _hasEffectiveGrant(pluginId, entry)) {
-      final rec = _disabledRecord(pluginId, entry);
-      entries[pluginId] = _replaceEntry(entry, activation: rec, disabled: true);
+      await _deactivateRuntime(
+        pluginId,
+        entries,
+        entry,
+        activation: PluginActivation.disabled,
+      );
       await _saveEntries(entries);
-      PluginContributionRegistry.I.unregisterPlugin(pluginId);
-      await AppState.I.unmountPluginOwnedMcpServers(pluginId, uninstall: false);
-      for (final row in AppState.I.plugins) {
-        if (row.runtimeId != pluginId) continue;
-        row
-          ..enabled = false
-          ..activation = PluginActivation.disabled
-          ..migrationRequired = true
-          ..runtimeReason = _kPluginReapprovalReason;
-      }
       await persistRuntimeRow(pluginId);
       notifyListeners();
       return;

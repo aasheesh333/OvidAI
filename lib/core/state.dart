@@ -1065,6 +1065,55 @@ class _LocalHydrationStartupTask implements StartupTask {
   }
 }
 
+class _PluginSafetyStartupTask implements StartupTask {
+  const _PluginSafetyStartupTask(this.app);
+
+  final AppState app;
+
+  @override
+  String get id => 'localSafety.migrate';
+  @override
+  StartupItemKind get kind => StartupItemKind.localState;
+  @override
+  String get label => 'Check local plugin safety';
+  @override
+  Duration get timeout => const Duration(seconds: 15);
+  @override
+  StartupDisable? get onDisable => null;
+
+  @override
+  Future<StartupItemStatus> run() async {
+    await app._runStartupStage(id, app._reconcilePluginSafety);
+    final statuses = app.pluginSafetyStatuses;
+    if (statuses.isEmpty) return StartupItemStatus.ready(id, kind, label);
+    var aggregate = StartupItemState.ready;
+    for (final status in statuses) {
+      if (status.state == StartupItemState.failed) {
+        aggregate = StartupItemState.failed;
+        break;
+      }
+      if (status.state == StartupItemState.migrationRequired) {
+        aggregate = StartupItemState.migrationRequired;
+      } else if (status.state == StartupItemState.degraded &&
+          aggregate == StartupItemState.ready) {
+        aggregate = StartupItemState.degraded;
+      }
+    }
+    return StartupItemStatus(
+      id: id,
+      kind: kind,
+      label: label,
+      state: aggregate,
+      reason: statuses
+          .where((status) => status.state == aggregate)
+          .map((status) => status.reason)
+          .whereType<String>()
+          .firstOrNull,
+      attempt: 1,
+    );
+  }
+}
+
 class AppState extends ChangeNotifier {
   /// Singleton — everything is user-side / on-device.
   static AppState? _testInstance;
@@ -1410,6 +1459,7 @@ class AppState extends ChangeNotifier {
   Future<List<StartupTask>>? _readinessTasks;
   Future<void>? _readinessInitialization;
   Future<List<StartupItemStatus>>? _pluginSafetyReconciliation;
+  List<StartupItemStatus> _pluginSafetyStatuses = const [];
   Future<void>? _pluginBootActivation;
   var _pluginBootActivated = false;
   final Object _bootToken = Object();
@@ -1422,6 +1472,9 @@ class AppState extends ChangeNotifier {
   int _deferredActiveTailLength = 0;
   var _deferredSessionGeneration = 0;
   var _sessionRestoreFinished = false;
+
+  List<StartupItemStatus> get pluginSafetyStatuses =>
+      List.unmodifiable(_pluginSafetyStatuses);
 
   Future<void> initialize() => _initialization ??= initializeReadiness();
 
@@ -1440,13 +1493,7 @@ class AppState extends ChangeNotifier {
   Future<List<StartupTask>> buildReadinessTasks() =>
       _readinessTasks ??= Future.value([
         _LocalHydrationStartupTask(this),
-        _startupTask(
-          id: 'localSafety.migrate',
-          kind: StartupItemKind.localState,
-          label: 'Check local plugin safety',
-          timeout: const Duration(seconds: 15),
-          body: _reconcilePluginSafety,
-        ),
+        _PluginSafetyStartupTask(this),
         _startupTask(
           id: 'plugin.activate',
           kind: StartupItemKind.plugin,
@@ -1542,7 +1589,6 @@ class AppState extends ChangeNotifier {
     await _loadMarketplaces();
     await restoreMergedMarketplaceCatalog();
     await _loadPluginState();
-    await _applyPluginState();
     await _loadMemories();
     await HookService.I.loadEnabled();
   }
@@ -1564,7 +1610,7 @@ class AppState extends ChangeNotifier {
       Error.throwWithStackTrace(error, stack);
     });
     _pluginSafetyReconciliation = attempt;
-    await attempt;
+    _pluginSafetyStatuses = await attempt;
   }
 
   Future<void> _activatePluginsForBoot() async {
@@ -3030,7 +3076,9 @@ class AppState extends ChangeNotifier {
 
   static const _kMarketplaceMerged = 'ovid_marketplace_merged_v1';
 
-  Future<void> persistMergedMarketplaceCatalog() async {
+  Future<void> persistMergedMarketplaceCatalog({
+    bool reportFailure = false,
+  }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final rows = plugins
@@ -3040,7 +3088,9 @@ class AppState extends ChangeNotifier {
         _kMarketplaceMerged,
         jsonEncode(rows.map((e) => e.toJson()).toList()),
       );
-    } catch (_) {}
+    } catch (error, stack) {
+      if (reportFailure) Error.throwWithStackTrace(error, stack);
+    }
   }
 
   Future<void> restoreMergedMarketplaceCatalog() async {
@@ -3319,8 +3369,11 @@ class AppState extends ChangeNotifier {
   }) async {
     var mounted = 0;
     final declaredIds = {
-      for (final server in manifest.mcpServers) '${manifest.id}/${server.name}',
+      if (isCanonicalPluginId(manifest.id))
+        for (final server in manifest.mcpServers)
+          '${manifest.id}/${server.name}',
     };
+    if (!isCanonicalPluginId(manifest.id)) return 0;
     final removed = mcpServers
         .where(
           (server) =>
@@ -3674,8 +3727,10 @@ class AppState extends ChangeNotifier {
         if (p is! Map) continue;
         final pname = p['name'] as String?;
         if (pname == null || pname.isEmpty) continue;
-        if (plugins.any((e) => e.name == pname)) {
-          final existing = plugins.firstWhere((e) => e.name == pname);
+        if (plugins.any((e) => e.runtimeId == null && e.name == pname)) {
+          final existing = plugins.firstWhere(
+            (e) => e.runtimeId == null && e.name == pname,
+          );
           if (existing.source == null && p['source'] != null) {
             existing.source = _githubPluginSource(
               p['source'] as String?,
@@ -4101,6 +4156,12 @@ class AppState extends ChangeNotifier {
   /// mutating PluginItem.installed / .enabled so state survives restarts.
   Future<void> persistPluginState() => _persistPluginState();
 
+  Future<void> persistLegacyPluginMigrationState() async {
+    await _persistPluginState(reportFailure: true);
+    await _persistCustomPlugins(reportFailure: true);
+    await persistMergedMarketplaceCatalog(reportFailure: true);
+  }
+
   /// Add a custom plugin (agent-created or user-defined).  Custom plugins
   /// persist across restarts (full definition, not just enabled state)
   /// and can add tools to the agent.
@@ -4132,7 +4193,7 @@ class AppState extends ChangeNotifier {
 
   static const _kCustomPlugins = 'ovid_custom_plugins_v1';
 
-  Future<void> _persistCustomPlugins() async {
+  Future<void> _persistCustomPlugins({bool reportFailure = false}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final customs = plugins
@@ -4151,7 +4212,9 @@ class AppState extends ChangeNotifier {
           )
           .toList();
       await prefs.setStringList(_kCustomPlugins, customs);
-    } catch (_) {}
+    } catch (error, stack) {
+      if (reportFailure) Error.throwWithStackTrace(error, stack);
+    }
   }
 
   Future<void> _loadCustomPlugins() async {
@@ -4189,7 +4252,7 @@ class AppState extends ChangeNotifier {
     } catch (_) {}
   }
 
-  Future<void> _persistPluginState() async {
+  Future<void> _persistPluginState({bool reportFailure = false}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final state = <String, String>{};
@@ -4224,7 +4287,9 @@ class AppState extends ChangeNotifier {
         });
       }
       await prefs.setString(_kPluginState, jsonEncode(state));
-    } catch (_) {}
+    } catch (error, stack) {
+      if (reportFailure) Error.throwWithStackTrace(error, stack);
+    }
   }
 
   Future<void> _loadPluginState() async {
@@ -4234,6 +4299,7 @@ class AppState extends ChangeNotifier {
       if (raw == null) return;
       final m = jsonDecode(raw) as Map<String, dynamic>;
       for (final p in plugins) {
+        if (p.runtimeId != null) continue;
         final v = m[p.name];
         if (v == null) continue;
         final ps = jsonDecode(v as String) as Map<String, dynamic>;
@@ -4253,41 +4319,12 @@ class AppState extends ChangeNotifier {
             p.source = s;
           }
         }
-        // Task 7: runtime fields restore alongside the flags (tolerant —
-        // legacy rows and corrupt values keep honest defaults).
-        final runtimeId = ps['runtimeId'] as String?;
-        if (runtimeId != null && runtimeId.isNotEmpty) {
-          p.runtimeId = runtimeId;
-        }
-        final activation = pluginActivationFromName(ps['activation']);
-        if (activation != null) {
-          p.activation = activation;
-        }
-        final immediate = ps['immediateSessionId'] as String?;
-        if (immediate != null && immediate.isNotEmpty) {
-          p.immediateSessionId = immediate;
-        }
-        p.promoteOnNextBoot = ps['promoteOnNextBoot'] as bool? ?? false;
-        final digest = ps['manifestDigest'] as String?;
-        if (digest != null && digest.isNotEmpty) {
-          p.manifestDigest = digest;
-        }
-        final warnings = ps['compatibilityWarnings'];
-        if (warnings is List) {
-          p.compatibilityWarnings = [
-            for (final w in warnings)
-              if (w is Map)
-                CompatibilityIssue.fromJson(w.cast<String, dynamic>()),
-          ];
-        }
         p.migrationRequired = ps['migrationRequired'] as bool? ?? false;
         p.runtimeReason = ps['runtimeReason'] as String?;
       }
       refresh();
     } catch (_) {}
   }
-
-  Future<void> _applyPluginState() => _loadPluginState();
 
   // ── Custom Presets ──────────────────────────────────────────────────
   Future<void> _persistCustomPresets() async {

@@ -94,6 +94,7 @@ void main() {
     runtimeRoot = Directory.systemTemp.createTempSync('ovid-runtime-v2-');
     cacheRoot = Directory.systemTemp.createTempSync('ovid-legacy-cache-');
     PluginRuntimeManager.runtimeRootOverrideForTest = runtimeRoot;
+    PluginRuntimeManager.failMigrationMarkerWriteForTest = false;
     AppState.pluginCacheRootOverrideForTest = cacheRoot;
     app = AppState.createForTest();
     HookService.I.enabled = true;
@@ -108,12 +109,45 @@ void main() {
     HookService.I.executorForTest = null;
     SkillService.I.clearRoots();
     PluginRuntimeManager.runtimeRootOverrideForTest = null;
+    PluginRuntimeManager.failMigrationMarkerWriteForTest = false;
     AppState.pluginCacheRootOverrideForTest = null;
     AppState.resetTestInstance();
     if (runtimeRoot.existsSync()) runtimeRoot.deleteSync(recursive: true);
     if (cacheRoot.existsSync()) cacheRoot.deleteSync(recursive: true);
     SharedPreferences.setMockInitialValues({});
   });
+
+  test(
+    'AgentService constructor does not mount plugin roots before safety reconciliation',
+    () async {
+      final row = PluginItem(
+        name: 'Pre-reconcile cache',
+        author: 'legacy',
+        description: '',
+        version: '1',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'legacy/pre-reconcile',
+      );
+      app.plugins.add(row);
+      final cache = await app.pluginCacheDirFor(row.source!);
+      Directory('${cache.path}/skills/unsafe').createSync(recursive: true);
+      File(
+        '${cache.path}/skills/unsafe/SKILL.md',
+      ).writeAsStringSync('---\nname: pre-reconcile-unsafe\n---\nUnsafe.');
+
+      AgentService.I;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(
+        SkillService.I.skills.any(
+          (skill) => skill.name == 'pre-reconcile-unsafe',
+        ),
+        isFalse,
+      );
+    },
+  );
 
   test(
     'reconciliation reconstructs missing rows by canonical runtime id',
@@ -328,7 +362,7 @@ void main() {
 
       final statuses = await PluginRuntimeManager.I.reconcileRowsAndGrants();
 
-      for (final row in [hookRow, cacheRow, externalRow]) {
+      for (final row in [hookRow, cacheRow]) {
         expect(row.enabled, isFalse);
         expect(row.activation, PluginActivation.disabled);
         expect(row.migrationRequired, isTrue);
@@ -338,8 +372,10 @@ void main() {
         statuses.where(
           (status) => status.state == StartupItemState.migrationRequired,
         ),
-        hasLength(3),
+        hasLength(2),
       );
+      expect(externalRow.enabled, isTrue);
+      expect(externalRow.migrationRequired, isFalse);
       expect(native.installed, isTrue);
       expect(native.enabled, isTrue);
       expect(native.migrationRequired, isFalse);
@@ -422,6 +458,231 @@ void main() {
       );
     },
   );
+
+  test(
+    'persisted enabled legacy row is reconciled before hooks and skills run',
+    () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList('ovid_custom_plugins_v1', [
+        jsonEncode({
+          'name': 'Persisted Unsafe',
+          'description': '',
+          'category': 'Tool',
+          'installed': true,
+          'enabled': true,
+          'hooks': {'on_turn_start': 'echo unsafe'},
+        }),
+      ]);
+      await prefs.setString(
+        'ovid_plugin_state_v1',
+        jsonEncode({
+          'Persisted Unsafe': jsonEncode({
+            'installed': true,
+            'enabled': true,
+            'source': 'legacy/persisted',
+            'hooks': {'on_turn_start': 'echo unsafe'},
+          }),
+        }),
+      );
+      AppState.resetTestInstance();
+      app = AppState.createForTest();
+      final tasks = await app.buildReadinessTasks();
+      await tasks.singleWhere((task) => task.id == 'local.hydrate').run();
+      final safety = await tasks
+          .singleWhere((task) => task.id == 'localSafety.migrate')
+          .run();
+      final row = app.plugins.singleWhere(
+        (item) => item.name == 'Persisted Unsafe',
+      );
+      final cache = await app.pluginCacheDirFor(row.source!);
+      Directory('${cache.path}/skills/unsafe').createSync(recursive: true);
+      File(
+        '${cache.path}/skills/unsafe/SKILL.md',
+      ).writeAsStringSync('---\nname: persisted-unsafe\n---\nUnsafe.');
+      var hookCalls = 0;
+      HookService.I.executorForTest = (_, _) async {
+        hookCalls++;
+        return '';
+      };
+
+      await HookService.I.fire('on_turn_start', 'migration-session');
+      await AgentService.I.refreshSkills();
+
+      expect(safety.state, StartupItemState.migrationRequired);
+      expect(app.pluginSafetyStatuses.single.label, 'Persisted Unsafe');
+      expect(row.enabled, isFalse);
+      expect(row.migrationRequired, isTrue);
+      expect(hookCalls, 0);
+      expect(
+        SkillService.I.skills.any((skill) => skill.name == 'persisted-unsafe'),
+        isFalse,
+      );
+      final custom =
+          jsonDecode(prefs.getStringList('ovid_custom_plugins_v1')!.single)
+              as Map<String, dynamic>;
+      expect(custom['enabled'], isFalse);
+      expect(custom['migrationRequired'], isTrue);
+    },
+  );
+
+  test(
+    'corrupt and orphan normalized rows are removed from the live projection',
+    () async {
+      final valid = manifest('acme/valid-orphan-test');
+      Directory(valid.rootPath).createSync(recursive: true);
+      await seedEntries({valid.id: entryFor(valid)});
+      await approve(valid);
+      final orphan = PluginItem(
+        name: 'Orphan',
+        author: 'old',
+        description: '',
+        version: '1',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        runtimeId: 'orphan/runtime',
+        activation: PluginActivation.globalActive,
+      );
+      app.plugins.add(orphan);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        kPluginRowsV2PrefKey,
+        jsonEncode({
+          'orphan/runtime': jsonEncode(orphan.toJson()),
+          'mismatch/runtime': jsonEncode({
+            ...orphan.toJson(),
+            'runtimeId': 'other/runtime',
+          }),
+          'malformed': jsonEncode({
+            ...orphan.toJson(),
+            'runtimeId': 'malformed',
+          }),
+        }),
+      );
+      PluginContributionRegistry.I.register(
+        manifest('orphan/runtime'),
+        activation: PluginActivation.globalActive,
+      );
+      registeredIds.add('orphan/runtime');
+
+      await PluginRuntimeManager.I.reconcileRowsAndGrants();
+
+      expect(
+        app.plugins
+            .where((row) => row.runtimeId != null)
+            .map((row) => row.runtimeId),
+        [valid.id],
+      );
+      expect(
+        PluginContributionRegistry.I.isRegistered('orphan/runtime'),
+        isFalse,
+      );
+      expect(decodeRows(prefs.getString(kPluginRowsV2PrefKey)!).keys, [
+        valid.id,
+      ]);
+    },
+  );
+
+  test(
+    'malformed canonical activation ids fail closed without blocking siblings',
+    () async {
+      final valid = manifest('acme/valid-id');
+      Directory(valid.rootPath).createSync(recursive: true);
+      await approve(valid);
+      final malformed = manifest('Acme/Bad');
+      await seedEntries({
+        valid.id: entryFor(valid),
+        malformed.id: entryFor(malformed),
+      });
+
+      final statuses = await PluginRuntimeManager.I.reconcileRowsAndGrants();
+
+      expect(
+        statuses.singleWhere((status) => status.id == malformed.id).state,
+        StartupItemState.failed,
+      );
+      expect(app.plugins.any((row) => row.runtimeId == malformed.id), isFalse);
+      expect(app.plugins.any((row) => row.runtimeId == valid.id), isTrue);
+    },
+  );
+
+  test(
+    'disabled migration rows report deterministically after restart',
+    () async {
+      final runtime = manifest('acme/restart-migration');
+      Directory(runtime.rootPath).createSync(recursive: true);
+      await seedEntries({runtime.id: entryFor(runtime)});
+
+      final first = await PluginRuntimeManager.I.reconcileRowsAndGrants();
+      AppState.resetTestInstance();
+      app = AppState.createForTest();
+      final second = await PluginRuntimeManager.I.reconcileRowsAndGrants();
+
+      expect(first.single.state, StartupItemState.migrationRequired);
+      expect(second.single.state, StartupItemState.migrationRequired);
+      expect(second.single.reason, first.single.reason);
+      expect(
+        app.plugins
+            .singleWhere((row) => row.runtimeId == runtime.id)
+            .migrationRequired,
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'migration marker write failure is reported after durable stores',
+    () async {
+      final runtime = manifest('acme/marker-failure');
+      Directory(runtime.rootPath).createSync(recursive: true);
+      await seedEntries({runtime.id: entryFor(runtime)});
+      await approve(runtime);
+      PluginRuntimeManager.failMigrationMarkerWriteForTest = true;
+
+      await expectLater(
+        PluginRuntimeManager.I.reconcileRowsAndGrants(),
+        throwsA(isA<StateError>()),
+      );
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString(kPluginRowsV2PrefKey), isNotNull);
+      expect(prefs.getBool('ovid_plugin_rows_v2_migrated'), isNot(true));
+    },
+  );
+
+  test('v1 display-name state never mutates a normalized sibling', () async {
+    final runtime = manifest('acme/collision', name: 'Collision');
+    Directory(runtime.rootPath).createSync(recursive: true);
+    await seedEntries({runtime.id: entryFor(runtime)});
+    await approve(runtime);
+    app.plugins.add(
+      PluginItem(
+        name: 'Collision',
+        author: 'legacy',
+        description: '',
+        version: '1',
+        category: 'Tool',
+        runtimeId: runtime.id,
+      ),
+    );
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      'ovid_plugin_state_v1',
+      jsonEncode({
+        'Collision': jsonEncode({'installed': false, 'enabled': false}),
+      }),
+    );
+    final hydrate = (await app.buildReadinessTasks()).singleWhere(
+      (task) => task.id == 'local.hydrate',
+    );
+
+    await hydrate.run();
+    await PluginRuntimeManager.I.reconcileRowsAndGrants();
+
+    final row = app.plugins.singleWhere((item) => item.runtimeId == runtime.id);
+    expect(row.installed, isTrue);
+    expect(row.enabled, isTrue);
+  });
 
   test(
     'active runtimes are sorted and include only valid active grants',

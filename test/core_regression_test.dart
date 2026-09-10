@@ -4150,34 +4150,39 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(File(existingPath!).readAsBytesSync(), [9]);
     });
 
-    test('CTRL6j: untyped exceptions in Dart do not unlink unowned paths', () async {
-      final work = Directory.systemTemp.createTempSync('ovid-copy-untyped-fail');
-      final source = File('${work.path}/source.png')
-        ..writeAsBytesSync([1, 2, 3]);
-      String? existingPath;
-      DeviceControlService.setScreenshotCopyForTest((
-        sourcePath,
-        directoryPath,
-        fileName,
-      ) async {
-        existingPath = '$directoryPath/$fileName';
-        File(existingPath!).writeAsBytesSync([9]);
-        throw StateError('untyped failure during copy');
-      });
-      addTearDown(() {
-        DeviceControlService.setScreenshotCopyForTest(null);
-        if (work.existsSync()) work.deleteSync(recursive: true);
-      });
+    test(
+      'CTRL6j: untyped exceptions in Dart do not unlink unowned paths',
+      () async {
+        final work = Directory.systemTemp.createTempSync(
+          'ovid-copy-untyped-fail',
+        );
+        final source = File('${work.path}/source.png')
+          ..writeAsBytesSync([1, 2, 3]);
+        String? existingPath;
+        DeviceControlService.setScreenshotCopyForTest((
+          sourcePath,
+          directoryPath,
+          fileName,
+        ) async {
+          existingPath = '$directoryPath/$fileName';
+          File(existingPath!).writeAsBytesSync([9]);
+          throw StateError('untyped failure during copy');
+        });
+        addTearDown(() {
+          DeviceControlService.setScreenshotCopyForTest(null);
+          if (work.existsSync()) work.deleteSync(recursive: true);
+        });
 
-      await expectLater(
-        DeviceControlService.I.copyScreenshotIntoWorkspaceForTest(
-          source.path,
-          work,
-        ),
-        throwsA(isA<StateError>()),
-      );
-      expect(File(existingPath!).readAsBytesSync(), [9]);
-    });
+        await expectLater(
+          DeviceControlService.I.copyScreenshotIntoWorkspaceForTest(
+            source.path,
+            work,
+          ),
+          throwsA(isA<StateError>()),
+        );
+        expect(File(existingPath!).readAsBytesSync(), [9]);
+      },
+    );
 
     testWidgets(
       'CTRL7: Control disclosure permits decline and opens settings only on accept',
@@ -7644,10 +7649,7 @@ block</pre>
     test('run start immediately raises the foreground service', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       // No debounce window at runTask start.
-      expect(
-        src,
-        contains("agentWorking('starting task…', sessionId: s.id)"),
-      );
+      expect(src, contains("agentWorking('starting task…', sessionId: s.id)"));
       // Lifecycle paused re-asserts the notification while any run is on.
       final main = File('lib/main.dart').readAsStringSync();
       expect(main, contains('anyRunActive'));
@@ -12386,65 +12388,71 @@ You are an expert security auditor reviewing code for vulnerabilities.
       },
     );
 
-    test('PLUGIN1c: raw MCP declaration blocks never serialize secret values', () {
-      final server = PluginMcpServer.scrubbedRaw(
-        pluginId: 'acme-inc/reviewer-pro',
-        name: 'fetch',
-        rawDeclaration: const {
-          'type': 'http',
-          'url': 'https://example.com/mcp',
-          'env': {'API_KEY': 'sk-secret-1'},
-          'headers': {'Authorization': 'Bearer t'},
-        },
-        transport: 'http',
-        url: 'https://example.com/mcp',
-        path: '.mcp.json',
-      );
-      // Secret-bearing env/header VALUES become NAMES only (spec §5.1).
-      expect(server.envNames, ['API_KEY']);
-      expect(server.headerNames, ['Authorization']);
-      final encoded = json.encode(server.toJson());
-      expect(encoded, isNot(contains('sk-secret-1')));
-      expect(encoded, isNot(contains('Bearer t')));
-
-      // Non-secret raw fields survive the scrub verbatim.
-      expect(server.frontmatter['url'], 'https://example.com/mcp');
-      expect(server.frontmatter.containsKey('env'), isFalse);
-      expect(server.frontmatter.containsKey('headers'), isFalse);
-
-      // Round-trip stays scrubbed.
-      final back = PluginMcpServer.fromJson(server.toJson());
-      expect(back.envNames, ['API_KEY']);
-      expect(back.headerNames, ['Authorization']);
-      expect(json.encode(back.toJson()), isNot(contains('sk-secret-1')));
-      expect(json.encode(back.toJson()), isNot(contains('Bearer t')));
-
-      // Hostile/stale persisted JSON is scrubbed on read: env/headers blocks
-      // at ANY depth lose their values, their names are absorbed instead.
-      final hostile = PluginMcpServer.fromJson(<String, dynamic>{
-        'pluginId': 'acme-inc/reviewer-pro',
-        'name': 'fetch',
-        'envNames': ['DECLARED_TOKEN'],
-        'frontmatter': {
-          'command': 'uvx',
-          'env': {'API_KEY': 'sk-secret-1'},
-        },
-        'unknownFields': {
-          'vendor': {
+    test(
+      'PLUGIN1c: raw MCP declaration blocks never serialize secret values',
+      () {
+        final server = PluginMcpServer.scrubbedRaw(
+          pluginId: 'acme-inc/reviewer-pro',
+          name: 'fetch',
+          rawDeclaration: const {
+            'type': 'http',
+            'url': 'https://example.com/mcp',
+            'env': {'API_KEY': 'sk-secret-1'},
             'headers': {'Authorization': 'Bearer t'},
           },
-        },
-      });
-      expect(hostile.envNames, ['DECLARED_TOKEN', 'API_KEY']);
-      expect(hostile.headerNames, ['Authorization']);
-      final hostileEncoded = json.encode(hostile.toJson());
-      expect(hostileEncoded, isNot(contains('sk-secret-1')));
-      expect(hostileEncoded, isNot(contains('Bearer t')));
+          transport: 'http',
+          url: 'https://example.com/mcp',
+          path: '.mcp.json',
+        );
+        // Secret-bearing env/header VALUES become NAMES only (spec §5.1).
+        expect(server.envNames, ['API_KEY']);
+        expect(server.headerNames, ['Authorization']);
+        final encoded = json.encode(server.toJson());
+        expect(encoded, isNot(contains('sk-secret-1')));
+        expect(encoded, isNot(contains('Bearer t')));
 
-      // Immutability contract: scrubbed record fields are frozen.
-      expect(() => server.envNames.add('X'), throwsUnsupportedError);
-      expect(() => server.frontmatter['command'] = 'sh', throwsUnsupportedError);
-    });
+        // Non-secret raw fields survive the scrub verbatim.
+        expect(server.frontmatter['url'], 'https://example.com/mcp');
+        expect(server.frontmatter.containsKey('env'), isFalse);
+        expect(server.frontmatter.containsKey('headers'), isFalse);
+
+        // Round-trip stays scrubbed.
+        final back = PluginMcpServer.fromJson(server.toJson());
+        expect(back.envNames, ['API_KEY']);
+        expect(back.headerNames, ['Authorization']);
+        expect(json.encode(back.toJson()), isNot(contains('sk-secret-1')));
+        expect(json.encode(back.toJson()), isNot(contains('Bearer t')));
+
+        // Hostile/stale persisted JSON is scrubbed on read: env/headers blocks
+        // at ANY depth lose their values, their names are absorbed instead.
+        final hostile = PluginMcpServer.fromJson(<String, dynamic>{
+          'pluginId': 'acme-inc/reviewer-pro',
+          'name': 'fetch',
+          'envNames': ['DECLARED_TOKEN'],
+          'frontmatter': {
+            'command': 'uvx',
+            'env': {'API_KEY': 'sk-secret-1'},
+          },
+          'unknownFields': {
+            'vendor': {
+              'headers': {'Authorization': 'Bearer t'},
+            },
+          },
+        });
+        expect(hostile.envNames, ['DECLARED_TOKEN', 'API_KEY']);
+        expect(hostile.headerNames, ['Authorization']);
+        final hostileEncoded = json.encode(hostile.toJson());
+        expect(hostileEncoded, isNot(contains('sk-secret-1')));
+        expect(hostileEncoded, isNot(contains('Bearer t')));
+
+        // Immutability contract: scrubbed record fields are frozen.
+        expect(() => server.envNames.add('X'), throwsUnsupportedError);
+        expect(
+          () => server.frontmatter['command'] = 'sh',
+          throwsUnsupportedError,
+        );
+      },
+    );
 
     test(
       'PLUGIN1d: corrupt approvedAt round-trips to the epoch-0 sentinel, never now',
@@ -12477,8 +12485,14 @@ You are an expert security auditor reviewing code for vulnerabilities.
         expect(valid.approvedAt, DateTime.utc(2026));
 
         // Round-tripped collections are frozen (immutability contract).
-        expect(() => valid.capabilities.add(PluginCapability.shellExecute), throwsUnsupportedError);
-        expect(() => missing.environmentReadNames.add('X'), throwsUnsupportedError);
+        expect(
+          () => valid.capabilities.add(PluginCapability.shellExecute),
+          throwsUnsupportedError,
+        );
+        expect(
+          () => missing.environmentReadNames.add('X'),
+          throwsUnsupportedError,
+        );
       },
     );
 
@@ -12603,35 +12617,26 @@ You are an expert security auditor reviewing code for vulnerabilities.
             'futureTopLevel': {'enabled': true},
           }),
         );
-        write(
-          'commands/review/deep.md',
-          '''---
+        write('commands/review/deep.md', '''---
 name: Deep Review
 description: Review a change
 x-command-field: retained
 ---
-Review the workspace.''',
-        );
-        write(
-          'skills/research/SKILL.md',
-          '''---
+Review the workspace.''');
+        write('skills/research/SKILL.md', '''---
 name: Research
 description: Research a topic
 x-skill-field: retained
 ---
-Read the workspace before answering.''',
-        );
+Read the workspace before answering.''');
         write('skills/research/templates/prompt.txt', 'supporting prompt');
         write('skills/research/references/guide.md', '# Guide');
-        write(
-          'agents/reviewer/security.md',
-          '''---
+        write('agents/reviewer/security.md', '''---
 name: Security Reviewer
 model: inherit
 x-agent-field: retained
 ---
-Find security defects.''',
-        );
+Find security defects.''');
         write(
           'hooks/hooks.json',
           jsonEncode({
@@ -12699,25 +12704,32 @@ Find security defects.''',
           }),
         );
         write('requirements.txt', 'requests==2.32.0\n# ignored\n');
-        write(
-          'pyproject.toml',
-          '[project]\ndependencies = ["httpx>=0.27"]\n',
-        );
+        write('pyproject.toml', '[project]\ndependencies = ["httpx>=0.27"]\n');
 
         final manifest = await ClaudePluginAdapter().inspect(root);
 
         expect(manifest.id, 'acme-labs/reviewer-pro');
         expect(manifest.format, PluginFormat.claudeCode);
-        expect(manifest.commands.single.canonicalId,
-            'plugin:acme-labs/reviewer-pro/command:deep-review');
-        expect(manifest.commands.single.unknownFields['x-command-field'], 'retained');
+        expect(
+          manifest.commands.single.canonicalId,
+          'plugin:acme-labs/reviewer-pro/command:deep-review',
+        );
+        expect(
+          manifest.commands.single.unknownFields['x-command-field'],
+          'retained',
+        );
         expect(manifest.skills.single.supportingFiles, [
           'skills/research/references/guide.md',
           'skills/research/templates/prompt.txt',
         ]);
-        expect(manifest.skills.single.unknownFields['x-skill-field'], 'retained');
-        expect(manifest.agents.single.canonicalId,
-            'plugin:acme-labs/reviewer-pro/agent:security-reviewer');
+        expect(
+          manifest.skills.single.unknownFields['x-skill-field'],
+          'retained',
+        );
+        expect(
+          manifest.agents.single.canonicalId,
+          'plugin:acme-labs/reviewer-pro/agent:security-reviewer',
+        );
         expect(manifest.hooks.map((hook) => hook.event), [
           'pre_tool',
           'pre_tool',
@@ -12738,7 +12750,10 @@ Find security defects.''',
         expect(manifest.mcpServers.first.frontmatter['futureServerField'], 7);
         expect(
           manifest.dependencies.packages
-              .map((dependency) => '${dependency.kind.name}:${dependency.name}:${dependency.required}')
+              .map(
+                (dependency) =>
+                    '${dependency.kind.name}:${dependency.name}:${dependency.required}',
+              )
               .toSet(),
           containsAll({
             'npm:left-pad:true',
@@ -12762,8 +12777,10 @@ Find security defects.''',
         expect(manifest.unknownFields['mcp.futureMcpWrapper'], {
           'enabled': true,
         });
-        expect(jsonEncode(manifest.unknownFields),
-            isNot(contains('wrapper-secret')));
+        expect(
+          jsonEncode(manifest.unknownFields),
+          isNot(contains('wrapper-secret')),
+        );
         expect(manifest.unknownFields['hooks.futureHooksTopLevel'], 'retained');
         expect(
           manifest.compatibility.any(
@@ -12805,26 +12822,18 @@ Find security defects.''',
 
         write('AGENTS.md', '# Root instructions');
         write('packages/api/AGENTS.md', '# API instructions');
-        write(
-          '.agents/skills/migrate/SKILL.md',
-          '''---
+        write('.agents/skills/migrate/SKILL.md', '''---
 name: DB Migrate
 description: Plan database migrations
 ---
-Inspect schema files.''',
-        );
+Inspect schema files.''');
         write('.agents/skills/migrate/examples/schema.sql', 'select 1;');
-        write(
-          '.agents/personas/architect.md',
-          '''---
+        write('.agents/personas/architect.md', '''---
 name: System Architect
 description: Reviews architecture
 ---
-Review boundaries.''',
-        );
-        write(
-          'config.toml',
-          '''name = "Codex Toolkit"
+Review boundaries.''');
+        write('config.toml', '''name = "Codex Toolkit"
 version = "3.0.0"
 publisher = "Codex Org"
 future_setting = "retained"
@@ -12842,8 +12851,7 @@ url = "https://codex.test/mcp"
 
 [environment]
 WORKSPACE_PROFILE = "secret-profile"
-''',
-        );
+''');
         write('requirements.txt', 'rich~=13.0\n');
 
         final manifest = await CodexPluginAdapter().inspect(root);
@@ -12856,8 +12864,9 @@ WORKSPACE_PROFILE = "secret-profile"
         ]);
         expect(manifest.unknownFields['config.future_setting'], 'retained');
         expect(manifest.skills.single.name, 'db-migrate');
-        expect(manifest.skills.single.supportingFiles,
-            ['.agents/skills/migrate/examples/schema.sql']);
+        expect(manifest.skills.single.supportingFiles, [
+          '.agents/skills/migrate/examples/schema.sql',
+        ]);
         expect(manifest.agents.single.name, 'system-architect');
         expect(manifest.mcpServers.map((server) => server.transport), [
           'stdio',
@@ -12870,7 +12879,10 @@ WORKSPACE_PROFILE = "secret-profile"
           'WORKSPACE_PROFILE',
         });
         expect(jsonEncode(manifest.toJson()), isNot(contains('secret-value')));
-        expect(jsonEncode(manifest.toJson()), isNot(contains('secret-profile')));
+        expect(
+          jsonEncode(manifest.toJson()),
+          isNot(contains('secret-profile')),
+        );
         expect(manifest.requestedCapabilities, {
           PluginCapability.workspaceRead,
           PluginCapability.mcpRegister,
@@ -12878,10 +12890,7 @@ WORKSPACE_PROFILE = "secret-profile"
           PluginCapability.networkConnect,
           PluginCapability.environmentRead,
         });
-        expect(
-          manifest.dependencies.python.single.versionSpec,
-          '~=13.0',
-        );
+        expect(manifest.dependencies.python.single.versionSpec, '~=13.0');
       },
     );
 
@@ -12911,7 +12920,10 @@ WORKSPACE_PROFILE = "secret-profile"
           sourceId: 'Paste / Example',
         );
         final direct = adapter.inspectConfig(
-          jsonEncode({'command': 'uvx', 'args': ['direct-server']}),
+          jsonEncode({
+            'command': 'uvx',
+            'args': ['direct-server'],
+          }),
           sourceId: 'Paste / Example',
         );
         final sse = adapter.inspectConfig(
@@ -12934,8 +12946,10 @@ WORKSPACE_PROFILE = "secret-profile"
         expect(mapped.id, 'mcp/paste-example');
         expect(mapped.mcpServers.single.envNames, ['TOKEN']);
         expect(mapped.unknownFields['mcp.futureWrapper'], <String, dynamic>{});
-        expect(jsonEncode(mapped.unknownFields),
-            isNot(contains('wrapper-secret')));
+        expect(
+          jsonEncode(mapped.unknownFields),
+          isNot(contains('wrapper-secret')),
+        );
         expect(listed.mcpServers.single.transport, 'http');
         expect(direct.mcpServers.single.command, 'uvx');
         expect(rawCommand.mcpServers.single.command, 'npx');
@@ -12953,150 +12967,196 @@ WORKSPACE_PROFILE = "secret-profile"
       },
     );
 
-    test('PLUGIN2: registry selects formats and SkillService scans safely', () async {
-      final claude = Directory.systemTemp.createTempSync('ovid-plugin2-registry');
-      final outside = Directory.systemTemp.createTempSync('ovid-plugin2-outside');
-      addTearDown(() => claude.deleteSync(recursive: true));
-      addTearDown(() => outside.deleteSync(recursive: true));
-      File('${claude.path}/.claude-plugin/plugin.json')
-        ..parent.createSync(recursive: true)
-        ..writeAsStringSync('{"name":"Registry","author":"Acme"}');
-      final nested = File('${claude.path}/skills/a/nested/SKILL.md');
-      nested.parent.createSync(recursive: true);
-      nested.writeAsStringSync('''---
+    test(
+      'PLUGIN2: registry selects formats and SkillService scans safely',
+      () async {
+        final claude = Directory.systemTemp.createTempSync(
+          'ovid-plugin2-registry',
+        );
+        final outside = Directory.systemTemp.createTempSync(
+          'ovid-plugin2-outside',
+        );
+        addTearDown(() => claude.deleteSync(recursive: true));
+        addTearDown(() => outside.deleteSync(recursive: true));
+        File('${claude.path}/.claude-plugin/plugin.json')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync('{"name":"Registry","author":"Acme"}');
+        final nested = File('${claude.path}/skills/a/nested/SKILL.md');
+        nested.parent.createSync(recursive: true);
+        nested.writeAsStringSync('''---
 name: Nested
 ---
 Nested skill.''');
-      File('${nested.parent.path}/asset.txt').writeAsStringSync('asset');
-      File('${outside.path}/escaped.md').writeAsStringSync('outside');
-      Link('${nested.parent.path}/escaped.md').createSync(
-        '${outside.path}/escaped.md',
-      );
-      var deep = '${claude.path}/skills';
-      for (var i = 0; i < 13; i++) {
-        deep = '$deep/d$i';
-      }
-      File('$deep/SKILL.md')
-        ..parent.createSync(recursive: true)
-        ..writeAsStringSync('too deep');
+        File('${nested.parent.path}/asset.txt').writeAsStringSync('asset');
+        File('${outside.path}/escaped.md').writeAsStringSync('outside');
+        Link(
+          '${nested.parent.path}/escaped.md',
+        ).createSync('${outside.path}/escaped.md');
+        var deep = '${claude.path}/skills';
+        for (var i = 0; i < 13; i++) {
+          deep = '$deep/d$i';
+        }
+        File('$deep/SKILL.md')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync('too deep');
 
-      final manifest = await PluginAdapterRegistry().inspect(claude);
-      final service = SkillService.forTest()..addRoot('${claude.path}/skills');
-      await service.reload();
+        final manifest = await PluginAdapterRegistry().inspect(claude);
+        final service = SkillService.forTest()
+          ..addRoot('${claude.path}/skills');
+        await service.reload();
 
-      expect(manifest.format, PluginFormat.claudeCode);
-      expect(service.skills.map((skill) => skill.name), ['Nested']);
-      expect(service.skills.single.supportingFiles, ['asset.txt']);
-    });
+        expect(manifest.format, PluginFormat.claudeCode);
+        expect(service.skills.map((skill) => skill.name), ['Nested']);
+        expect(service.skills.single.supportingFiles, ['asset.txt']);
+      },
+    );
 
-    test('PLUGIN2: adapter output freezes nested manifest collections', () async {
-      final root = Directory.systemTemp.createTempSync('ovid-plugin2-frozen');
-      addTearDown(() => root.deleteSync(recursive: true));
-      void write(String path, String content) {
-        final file = File('${root.path}/$path');
-        file.parent.createSync(recursive: true);
-        file.writeAsStringSync(content);
-      }
+    test(
+      'PLUGIN2: adapter output freezes nested manifest collections',
+      () async {
+        final root = Directory.systemTemp.createTempSync('ovid-plugin2-frozen');
+        addTearDown(() => root.deleteSync(recursive: true));
+        void write(String path, String content) {
+          final file = File('${root.path}/$path');
+          file.parent.createSync(recursive: true);
+          file.writeAsStringSync(content);
+        }
 
-      write(
-        '.claude-plugin/plugin.json',
-        '{"name":"Frozen","author":"Acme","future":true}',
-      );
-      write(
-        'commands/run.md',
-        '''---
+        write(
+          '.claude-plugin/plugin.json',
+          '{"name":"Frozen","author":"Acme","future":true}',
+        );
+        write('commands/run.md', '''---
 name: Run
 x-command: retained
 ---
-Run.''',
-      );
-      write(
-        'skills/one/SKILL.md',
-        '''---
+Run.''');
+        write('skills/one/SKILL.md', '''---
 name: One
 ---
-Skill.''',
-      );
-      write(
-        'agents/one.md',
-        '''---
+Skill.''');
+        write('agents/one.md', '''---
 name: Agent
 ---
-Agent.''',
-      );
-      write(
-        'hooks/hooks.json',
-        jsonEncode({
-          'hooks': {
-            'PreToolUse': 'scripts/check.sh',
-            'FutureEvent': 'echo future',
-          },
-        }),
-      );
-      write(
-        '.mcp.json',
-        jsonEncode({
-          'mcpServers': {
-            'server': {'command': 'npx', 'args': ['server']},
-          },
-        }),
-      );
-      write('package.json', '{"dependencies":{"pkg":"^1.0.0"}}');
+Agent.''');
+        write(
+          'hooks/hooks.json',
+          jsonEncode({
+            'hooks': {
+              'PreToolUse': 'scripts/check.sh',
+              'FutureEvent': 'echo future',
+            },
+          }),
+        );
+        write(
+          '.mcp.json',
+          jsonEncode({
+            'mcpServers': {
+              'server': {
+                'command': 'npx',
+                'args': ['server'],
+              },
+            },
+          }),
+        );
+        write('package.json', '{"dependencies":{"pkg":"^1.0.0"}}');
 
-      final manifest = await ClaudePluginAdapter().inspect(root);
+        final manifest = await ClaudePluginAdapter().inspect(root);
 
-      expect(() => manifest.commands.add(manifest.commands.single),
-          throwsUnsupportedError);
-      expect(() => manifest.commands.single.frontmatter['x'] = 'changed',
-          throwsUnsupportedError);
-      expect(() => manifest.skills.add(manifest.skills.single),
-          throwsUnsupportedError);
-      expect(() => manifest.skills.single.supportingFiles.add('x'),
-          throwsUnsupportedError);
-      expect(() => manifest.agents.add(manifest.agents.single),
-          throwsUnsupportedError);
-      expect(() => manifest.hooks.add(manifest.hooks.single),
-          throwsUnsupportedError);
-      expect(() => manifest.dependencies.packages.add(
-          manifest.dependencies.packages.single), throwsUnsupportedError);
-      expect(() => manifest.mcpServers.add(manifest.mcpServers.single),
-          throwsUnsupportedError);
-      expect(() => manifest.mcpServers.single.args.add('x'),
-          throwsUnsupportedError);
-      expect(() => manifest.requestedCapabilities.add(PluginCapability.deviceControl),
-          throwsUnsupportedError);
-      expect(() => manifest.environmentReadNames.add('X'),
-          throwsUnsupportedError);
-      expect(() => manifest.unknownFields['x'] = true, throwsUnsupportedError);
-      expect(() => manifest.compatibility.add(manifest.compatibility.single),
-          throwsUnsupportedError);
-      expect(() => manifest.compatibility.single.fields.add('x'),
-          throwsUnsupportedError);
-    });
+        expect(
+          () => manifest.commands.add(manifest.commands.single),
+          throwsUnsupportedError,
+        );
+        expect(
+          () => manifest.commands.single.frontmatter['x'] = 'changed',
+          throwsUnsupportedError,
+        );
+        expect(
+          () => manifest.skills.add(manifest.skills.single),
+          throwsUnsupportedError,
+        );
+        expect(
+          () => manifest.skills.single.supportingFiles.add('x'),
+          throwsUnsupportedError,
+        );
+        expect(
+          () => manifest.agents.add(manifest.agents.single),
+          throwsUnsupportedError,
+        );
+        expect(
+          () => manifest.hooks.add(manifest.hooks.single),
+          throwsUnsupportedError,
+        );
+        expect(
+          () => manifest.dependencies.packages.add(
+            manifest.dependencies.packages.single,
+          ),
+          throwsUnsupportedError,
+        );
+        expect(
+          () => manifest.mcpServers.add(manifest.mcpServers.single),
+          throwsUnsupportedError,
+        );
+        expect(
+          () => manifest.mcpServers.single.args.add('x'),
+          throwsUnsupportedError,
+        );
+        expect(
+          () => manifest.requestedCapabilities.add(
+            PluginCapability.deviceControl,
+          ),
+          throwsUnsupportedError,
+        );
+        expect(
+          () => manifest.environmentReadNames.add('X'),
+          throwsUnsupportedError,
+        );
+        expect(
+          () => manifest.unknownFields['x'] = true,
+          throwsUnsupportedError,
+        );
+        expect(
+          () => manifest.compatibility.add(manifest.compatibility.single),
+          throwsUnsupportedError,
+        );
+        expect(
+          () => manifest.compatibility.single.fields.add('x'),
+          throwsUnsupportedError,
+        );
+      },
+    );
 
-    test('PLUGIN2: invalid adapter identity is reported as required issue', () async {
-      final root = Directory.systemTemp.createTempSync('ovid-plugin2-identity');
-      addTearDown(() => root.deleteSync(recursive: true));
-      final file = File('${root.path}/.claude-plugin/plugin.json');
-      file.parent.createSync(recursive: true);
-      file.writeAsStringSync('{"name":"No Publisher"}');
+    test(
+      'PLUGIN2: invalid adapter identity is reported as required issue',
+      () async {
+        final root = Directory.systemTemp.createTempSync(
+          'ovid-plugin2-identity',
+        );
+        addTearDown(() => root.deleteSync(recursive: true));
+        final file = File('${root.path}/.claude-plugin/plugin.json');
+        file.parent.createSync(recursive: true);
+        file.writeAsStringSync('{"name":"No Publisher"}');
 
-      final manifest = await ClaudePluginAdapter().inspect(root);
+        final manifest = await ClaudePluginAdapter().inspect(root);
 
-      expect(
-        manifest.compatibility.any(
-          (issue) =>
-              issue.severity == CompatibilitySeverity.required &&
-              issue.message.contains('identity'),
-        ),
-        isTrue,
-      );
-    });
+        expect(
+          manifest.compatibility.any(
+            (issue) =>
+                issue.severity == CompatibilitySeverity.required &&
+                issue.message.contains('identity'),
+          ),
+          isTrue,
+        );
+      },
+    );
 
     test('PLUGIN2: nested SKILL.md is not a supporting file', () {
-      final root = Directory.systemTemp.createTempSync('ovid-plugin2-skill-files');
+      final root = Directory.systemTemp.createTempSync(
+        'ovid-plugin2-skill-files',
+      );
       addTearDown(() => root.deleteSync(recursive: true));
-      final outer = Directory('${root.path}/bundle')..createSync(recursive: true);
+      final outer = Directory('${root.path}/bundle')
+        ..createSync(recursive: true);
       File('${outer.path}/SKILL.md').writeAsStringSync('outer');
       File('${outer.path}/asset.txt').writeAsStringSync('asset');
       File('${outer.path}/nested/SKILL.md')
@@ -13187,9 +13247,7 @@ cwd = 'tools'
 
         final stagingRoot = Directory('${root.path}/app-private')
           ..createSync(recursive: true);
-        final resolver = PluginSourceResolver(
-          stagingRootOverride: stagingRoot,
-        );
+        final resolver = PluginSourceResolver(stagingRootOverride: stagingRoot);
         final resolved = await resolver.resolve(
           LocalFolderPluginSource(src.path),
         );
@@ -13202,13 +13260,15 @@ cwd = 'tools'
         );
         expect(resolved.fileCount, 3);
         expect(
-          File('${resolved.stagingDir.path}/commands/hello.md')
-              .readAsStringSync(),
+          File(
+            '${resolved.stagingDir.path}/commands/hello.md',
+          ).readAsStringSync(),
           'Say hi.',
         );
         expect(
-          File('${resolved.stagingDir.path}/skills/r/ref/guide.md')
-              .readAsStringSync(),
+          File(
+            '${resolved.stagingDir.path}/skills/r/ref/guide.md',
+          ).readAsStringSync(),
           'Guide.',
           reason: 'supporting files come along (selective-fetch gap)',
         );
@@ -13236,9 +13296,7 @@ cwd = 'tools'
         });
         final stagingRoot = Directory('${root.path}/app-private')
           ..createSync(recursive: true);
-        final resolver = PluginSourceResolver(
-          stagingRootOverride: stagingRoot,
-        );
+        final resolver = PluginSourceResolver(stagingRootOverride: stagingRoot);
 
         final traversal = File('${root.path}/traversal.zip')
           ..writeAsBytesSync(
@@ -13275,8 +13333,12 @@ cwd = 'tools'
 
         expectStagingClean(stagingRoot);
         expect(
-          root.listSync(recursive: true).where(
-                (e) => e.path.endsWith('escape.txt') || e.path.endsWith('evil.txt'),
+          root
+              .listSync(recursive: true)
+              .where(
+                (e) =>
+                    e.path.endsWith('escape.txt') ||
+                    e.path.endsWith('evil.txt'),
               ),
           isEmpty,
           reason: 'hostile entries never reach disk',
@@ -13294,9 +13356,7 @@ cwd = 'tools'
         });
         final stagingRoot = Directory('${root.path}/app-private')
           ..createSync(recursive: true);
-        final resolver = PluginSourceResolver(
-          stagingRootOverride: stagingRoot,
-        );
+        final resolver = PluginSourceResolver(stagingRootOverride: stagingRoot);
 
         // A zip entry carrying the unix symlink mode bits (0xa000 nibble)
         // with an escaping target.
@@ -13332,7 +13392,9 @@ cwd = 'tools'
         addTearDown(resolved.discard);
         expect(resolved.fileCount, 2);
         expect(
-          File('${resolved.stagingDir.path}/commands/run.md').readAsStringSync(),
+          File(
+            '${resolved.stagingDir.path}/commands/run.md',
+          ).readAsStringSync(),
           'Run.',
         );
         expect(
@@ -13381,8 +13443,7 @@ cwd = 'tools'
           ..createSync(recursive: true);
         final resolver = PluginSourceResolver(
           stagingRootOverride: stagingRoot,
-          githubBaseOverride:
-              'http://${server.address.host}:${server.port}',
+          githubBaseOverride: 'http://${server.address.host}:${server.port}',
         );
 
         final progress = <(int, int?)>[];
@@ -13402,15 +13463,15 @@ cwd = 'tools'
         expect(resolved.fileCount, contents.length);
         for (final entry in contents.entries) {
           expect(
-            File('${resolved.stagingDir.path}/${entry.key}')
-                .readAsStringSync(),
+            File('${resolved.stagingDir.path}/${entry.key}').readAsStringSync(),
             entry.value,
             reason: 'full tree staged byte-identical: ${entry.key}',
           );
         }
         expect(
-          File('${resolved.stagingDir.path}/skills/r/references/guide.md')
-              .existsSync(),
+          File(
+            '${resolved.stagingDir.path}/skills/r/references/guide.md',
+          ).existsSync(),
           isTrue,
           reason: 'skill supporting files are no longer left behind',
         );
@@ -13451,8 +13512,7 @@ cwd = 'tools'
           ..createSync(recursive: true);
         final resolver = PluginSourceResolver(
           stagingRootOverride: stagingRoot,
-          githubBaseOverride:
-              'http://${server.address.host}:${server.port}',
+          githubBaseOverride: 'http://${server.address.host}:${server.port}',
         );
 
         final resolved = await resolver.resolve(
@@ -13465,8 +13525,9 @@ cwd = 'tools'
         expect(requested.first, '/tree/main');
         expect(resolved.sourceId, 'acme/shippy');
         expect(
-          File('${resolved.stagingDir.path}/commands/ship.md')
-              .readAsStringSync(),
+          File(
+            '${resolved.stagingDir.path}/commands/ship.md',
+          ).readAsStringSync(),
           'Ship it.',
         );
       },
@@ -13476,7 +13537,9 @@ cwd = 'tools'
       'PLUGIN3: npm metadata and tarball resolve into staging and verify sha512 integrity',
       () async {
         final tar = Archive()
-          ..addFile(ArchiveFile.string('package/index.js', 'module.exports = 1;'))
+          ..addFile(
+            ArchiveFile.string('package/index.js', 'module.exports = 1;'),
+          )
           ..addFile(
             ArchiveFile.string(
               'package/package.json',
@@ -13575,66 +13638,67 @@ cwd = 'tools'
       },
     );
 
-    test(
-      'PLUGIN3: npm integrity mismatch throws and deletes staging',
-      () async {
-        final tar = Archive()
-          ..addFile(ArchiveFile.string('package/index.js', 'module.exports = 1;'));
-        final tgz = GZipEncoder().encodeBytes(TarEncoder().encodeBytes(tar));
-        final tampered =
-            'sha512-${base64.encode(sha512.convert(utf8.encode('other')).bytes)}';
+    test('PLUGIN3: npm integrity mismatch throws and deletes staging', () async {
+      final tar = Archive()
+        ..addFile(
+          ArchiveFile.string('package/index.js', 'module.exports = 1;'),
+        );
+      final tgz = GZipEncoder().encodeBytes(TarEncoder().encodeBytes(tar));
+      final tampered =
+          'sha512-${base64.encode(sha512.convert(utf8.encode('other')).bytes)}';
 
-        final root = Directory.systemTemp.createTempSync('ovid-plugin3-npmbad');
-        addTearDown(() {
-          if (root.existsSync()) root.deleteSync(recursive: true);
-        });
-        late String base;
-        final server = await startMock(<String>[], (path) {
-          if (path == '/demo-mcp') {
-            return utf8.encode(
-              jsonEncode({
-                'dist-tags': {'latest': '1.0.0'},
-                'versions': {
-                  '1.0.0': {
-                    'dist': {
-                      'tarball': '$base/demo-mcp/-/demo-mcp-1.0.0.tgz',
-                      'integrity': tampered,
-                    },
+      final root = Directory.systemTemp.createTempSync('ovid-plugin3-npmbad');
+      addTearDown(() {
+        if (root.existsSync()) root.deleteSync(recursive: true);
+      });
+      late String base;
+      final server = await startMock(<String>[], (path) {
+        if (path == '/demo-mcp') {
+          return utf8.encode(
+            jsonEncode({
+              'dist-tags': {'latest': '1.0.0'},
+              'versions': {
+                '1.0.0': {
+                  'dist': {
+                    'tarball': '$base/demo-mcp/-/demo-mcp-1.0.0.tgz',
+                    'integrity': tampered,
                   },
                 },
-              }),
-            );
-          }
-          if (path == '/demo-mcp/-/demo-mcp-1.0.0.tgz') return tgz;
-          return null;
-        });
-        base = 'http://${server.address.host}:${server.port}';
-        addTearDown(() => server.close(force: true));
+              },
+            }),
+          );
+        }
+        if (path == '/demo-mcp/-/demo-mcp-1.0.0.tgz') return tgz;
+        return null;
+      });
+      base = 'http://${server.address.host}:${server.port}';
+      addTearDown(() => server.close(force: true));
 
-        final stagingRoot = Directory('${root.path}/app-private')
-          ..createSync(recursive: true);
-        final resolver = PluginSourceResolver(
-          stagingRootOverride: stagingRoot,
-          npmRegistryBaseOverride: base,
-        );
-        await expectLater(
-          resolver.resolve(NpmPluginSource(package: 'demo-mcp')),
-          throwsA(
-            isA<PluginSourceException>().having(
-              (e) => e.message,
-              'message',
-              contains('integrity'),
-            ),
+      final stagingRoot = Directory('${root.path}/app-private')
+        ..createSync(recursive: true);
+      final resolver = PluginSourceResolver(
+        stagingRootOverride: stagingRoot,
+        npmRegistryBaseOverride: base,
+      );
+      await expectLater(
+        resolver.resolve(NpmPluginSource(package: 'demo-mcp')),
+        throwsA(
+          isA<PluginSourceException>().having(
+            (e) => e.message,
+            'message',
+            contains('integrity'),
           ),
-        );
-        expectStagingClean(stagingRoot);
-        expect(
-          root.listSync(recursive: true).where((e) => e.path.endsWith('index.js')),
-          isEmpty,
-          reason: 'an unverified payload is never extracted',
-        );
-      },
-    );
+        ),
+      );
+      expectStagingClean(stagingRoot);
+      expect(
+        root
+            .listSync(recursive: true)
+            .where((e) => e.path.endsWith('index.js')),
+        isEmpty,
+        reason: 'an unverified payload is never extracted',
+      );
+    });
 
     test(
       'PLUGIN3: pasted JSON and TOML configs become ephemeral MCP-only sources',
@@ -13645,9 +13709,7 @@ cwd = 'tools'
         });
         final stagingRoot = Directory('${root.path}/app-private')
           ..createSync(recursive: true);
-        final resolver = PluginSourceResolver(
-          stagingRootOverride: stagingRoot,
-        );
+        final resolver = PluginSourceResolver(stagingRootOverride: stagingRoot);
 
         const jsonCfg =
             '{"mcpServers":{"demo":{"command":"uvx","args":["demo","--flag"]}}}';
@@ -13656,7 +13718,11 @@ cwd = 'tools'
         );
         addTearDown(rj.discard);
         final stagedJson = File('${rj.stagingDir.path}/.mcp.json');
-        expect(stagedJson.readAsStringSync(), jsonCfg, reason: 'stored verbatim');
+        expect(
+          stagedJson.readAsStringSync(),
+          jsonCfg,
+          reason: 'stored verbatim',
+        );
         expect(rj.sourceId, 'demo-paste');
         final mj = await const PluginAdapterRegistry().inspect(rj.stagingDir);
         expect(mj.format, PluginFormat.genericMcp);
@@ -13670,7 +13736,11 @@ cwd = 'tools'
         );
         addTearDown(rt.discard);
         final stagedToml = File('${rt.stagingDir.path}/.mcp.json');
-        expect(stagedToml.readAsStringSync(), tomlCfg, reason: 'stored verbatim');
+        expect(
+          stagedToml.readAsStringSync(),
+          tomlCfg,
+          reason: 'stored verbatim',
+        );
         final mt = await const PluginAdapterRegistry().inspect(rt.stagingDir);
         expect(mt.format, PluginFormat.genericMcp);
         expect(mt.mcpServers.single.name, 'demo');
@@ -13687,20 +13757,24 @@ cwd = 'tools'
         });
         final stagingRoot = Directory('${root.path}/app-private')
           ..createSync(recursive: true);
-        final resolver = PluginSourceResolver(
-          stagingRootOverride: stagingRoot,
-        );
+        final resolver = PluginSourceResolver(stagingRootOverride: stagingRoot);
 
         final rs = await resolver.resolve(
           DirectMcpPluginSource.stdio(
             name: 'local-fs',
             command: 'npx',
-            args: const ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+            args: const [
+              '-y',
+              '@modelcontextprotocol/server-filesystem',
+              '/tmp',
+            ],
           ),
         );
         addTearDown(rs.discard);
         final cfg =
-            jsonDecode(File('${rs.stagingDir.path}/.mcp.json').readAsStringSync())
+            jsonDecode(
+                  File('${rs.stagingDir.path}/.mcp.json').readAsStringSync(),
+                )
                 as Map<String, dynamic>;
         final server = (cfg['mcpServers'] as Map)['local-fs'] as Map;
         expect(server['command'], 'npx');
@@ -13767,8 +13841,7 @@ cwd = 'tools'
           ..createSync(recursive: true);
         final resolver = PluginSourceResolver(
           stagingRootOverride: stagingRoot,
-          githubBaseOverride:
-              'http://${server.address.host}:${server.port}',
+          githubBaseOverride: 'http://${server.address.host}:${server.port}',
         );
 
         // Install mode: a pinned ref is the ONLY candidate (spec §4.2) —
@@ -13785,11 +13858,9 @@ cwd = 'tools'
             ),
           ),
         );
-        expect(
-          requested,
-          ['/tree/v1.2.3'],
-          reason: 'a pinned ref must never fall back to main/master',
-        );
+        expect(requested, [
+          '/tree/v1.2.3',
+        ], reason: 'a pinned ref must never fall back to main/master');
         expectStagingClean(stagingRoot);
 
         // Install mode: pin resolves to an empty tree → loud failure,
@@ -13834,7 +13905,8 @@ cwd = 'tools'
         expect(
           legacyEmpty.fileCount,
           1,
-          reason: 'legacy contract falls back to main when the pinned tree '
+          reason:
+              'legacy contract falls back to main when the pinned tree '
               'has no matching entries — install mode above refuses this',
         );
         legacyEmpty.discard();
@@ -13860,7 +13932,9 @@ cwd = 'tools'
         });
         addTearDown(() => server.close(force: true));
 
-        final root = Directory.systemTemp.createTempSync('ovid-plugin3-partial');
+        final root = Directory.systemTemp.createTempSync(
+          'ovid-plugin3-partial',
+        );
         addTearDown(() {
           if (root.existsSync()) root.deleteSync(recursive: true);
         });
@@ -13868,8 +13942,7 @@ cwd = 'tools'
           ..createSync(recursive: true);
         final resolver = PluginSourceResolver(
           stagingRootOverride: stagingRoot,
-          githubBaseOverride:
-              'http://${server.address.host}:${server.port}',
+          githubBaseOverride: 'http://${server.address.host}:${server.port}',
         );
 
         await expectLater(
@@ -13921,7 +13994,9 @@ cwd = 'tools'
         });
         addTearDown(() => server.close(force: true));
 
-        final root = Directory.systemTemp.createTempSync('ovid-plugin3-hostile');
+        final root = Directory.systemTemp.createTempSync(
+          'ovid-plugin3-hostile',
+        );
         addTearDown(() {
           if (root.existsSync()) root.deleteSync(recursive: true);
         });
@@ -13929,8 +14004,7 @@ cwd = 'tools'
           ..createSync(recursive: true);
         final resolver = PluginSourceResolver(
           stagingRootOverride: stagingRoot,
-          githubBaseOverride:
-              'http://${server.address.host}:${server.port}',
+          githubBaseOverride: 'http://${server.address.host}:${server.port}',
         );
 
         final resolved = await resolver.resolve(
@@ -13943,9 +14017,9 @@ cwd = 'tools'
           'safe',
         );
         expect(
-          stagingRoot.listSync(recursive: true).where(
-                (e) => e.path.contains('evil'),
-              ),
+          stagingRoot
+              .listSync(recursive: true)
+              .where((e) => e.path.contains('evil')),
           isEmpty,
           reason: 'remote tree metadata never writes outside staging',
         );
@@ -14014,7 +14088,9 @@ cwd = 'tools'
         base = 'http://${server.address.host}:${server.port}';
         addTearDown(() => server.close(force: true));
 
-        final root = Directory.systemTemp.createTempSync('ovid-plugin3-npmshape');
+        final root = Directory.systemTemp.createTempSync(
+          'ovid-plugin3-npmshape',
+        );
         addTearDown(() {
           if (root.existsSync()) root.deleteSync(recursive: true);
         });
@@ -14048,7 +14124,9 @@ cwd = 'tools'
     test(
       'PLUGIN3: marketplace entries declaring local paths are rejected, not imported',
       () async {
-        final root = Directory.systemTemp.createTempSync('ovid-plugin3-mktlocal');
+        final root = Directory.systemTemp.createTempSync(
+          'ovid-plugin3-mktlocal',
+        );
         addTearDown(() {
           if (root.existsSync()) root.deleteSync(recursive: true);
         });
@@ -14058,9 +14136,7 @@ cwd = 'tools'
 
         final stagingRoot = Directory('${root.path}/app-private')
           ..createSync(recursive: true);
-        final resolver = PluginSourceResolver(
-          stagingRootOverride: stagingRoot,
-        );
+        final resolver = PluginSourceResolver(stagingRootOverride: stagingRoot);
 
         // A declared source comes from a REMOTE catalog document — it
         // must never address the local filesystem.
@@ -14394,7 +14470,10 @@ cwd = 'tools'
 
         // globalActive + degraded mount everywhere (degraded is honestly
         // reported elsewhere, never hidden); pending/failed/disabled never.
-        expect(reg.isPluginActiveForSession('acme/global-kit', 'sess-b'), isTrue);
+        expect(
+          reg.isPluginActiveForSession('acme/global-kit', 'sess-b'),
+          isTrue,
+        );
         expect(reg.isPluginActiveForSession('acme/global-kit', ''), isTrue);
         expect(
           reg.isPluginActiveForSession('acme/degraded-kit', 'sess-b'),
@@ -14417,21 +14496,25 @@ cwd = 'tools'
           isFalse,
         );
 
-        expect(
-          reg.toolsForSession('sess-a').map((c) => c.pluginId).toList(),
-          ['acme/session-kit', 'acme/global-kit', 'acme/degraded-kit'],
-        );
-        expect(
-          reg.toolsForSession('sess-b').map((c) => c.pluginId).toList(),
-          ['acme/global-kit', 'acme/degraded-kit'],
-        );
+        expect(reg.toolsForSession('sess-a').map((c) => c.pluginId).toList(), [
+          'acme/session-kit',
+          'acme/global-kit',
+          'acme/degraded-kit',
+        ]);
+        expect(reg.toolsForSession('sess-b').map((c) => c.pluginId).toList(), [
+          'acme/global-kit',
+          'acme/degraded-kit',
+        ]);
 
         // Aliases respect session scope when queried with a session.
         expect(
           reg.resolveAlias('sess-cmd', sessionId: 'sess-a').isUnique,
           isTrue,
         );
-        expect(reg.resolveAlias('sess-cmd', sessionId: 'sess-b').isAbsent, isTrue);
+        expect(
+          reg.resolveAlias('sess-cmd', sessionId: 'sess-b').isAbsent,
+          isTrue,
+        );
 
         // Promotion replaces in place — exactly one entry per plugin id.
         reg.register(
@@ -14465,67 +14548,74 @@ cwd = 'tools'
       },
     );
 
-    test('PLUGIN4: SkillService canonical lookup and unique alias resolution', () async {
-      final rootA = Directory.systemTemp.createTempSync('ovid-plugin4-skillA');
-      final rootB = Directory.systemTemp.createTempSync('ovid-plugin4-skillB');
-      addTearDown(() {
-        rootA.deleteSync(recursive: true);
-        rootB.deleteSync(recursive: true);
-      });
-      File('${rootA.path}/review/SKILL.md')
-        ..parent.createSync(recursive: true)
-        ..writeAsStringSync(
-          '---\nname: review\ndescription: A review\n---\nReview body A.',
+    test(
+      'PLUGIN4: SkillService canonical lookup and unique alias resolution',
+      () async {
+        final rootA = Directory.systemTemp.createTempSync(
+          'ovid-plugin4-skillA',
         );
-      File('${rootA.path}/deploy/SKILL.md')
-        ..parent.createSync(recursive: true)
-        ..writeAsStringSync('---\nname: deploy\n---\nDeploy body A.');
-      File('${rootB.path}/review/SKILL.md')
-        ..parent.createSync(recursive: true)
-        ..writeAsStringSync('---\nname: review\n---\nReview body B.');
+        final rootB = Directory.systemTemp.createTempSync(
+          'ovid-plugin4-skillB',
+        );
+        addTearDown(() {
+          rootA.deleteSync(recursive: true);
+          rootB.deleteSync(recursive: true);
+        });
+        File('${rootA.path}/review/SKILL.md')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync(
+            '---\nname: review\ndescription: A review\n---\nReview body A.',
+          );
+        File('${rootA.path}/deploy/SKILL.md')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync('---\nname: deploy\n---\nDeploy body A.');
+        File('${rootB.path}/review/SKILL.md')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync('---\nname: review\n---\nReview body B.');
 
-      final svc = SkillService.forTest()
-        ..addPluginRoot(rootA.path, 'acme/one')
-        ..addPluginRoot(rootB.path, 'bold/two');
-      await svc.reload();
+        final svc = SkillService.forTest()
+          ..addPluginRoot(rootA.path, 'acme/one')
+          ..addPluginRoot(rootB.path, 'bold/two');
+        await svc.reload();
 
-      // Canonical §4.4 lookup hits exactly the owning plugin's skill.
-      final a = svc.findCanonical('plugin:acme/one/skill:review');
-      expect(a, isNotNull);
-      expect(a!.pluginId, 'acme/one');
-      expect(a.content, 'Review body A.');
-      expect(a.canonicalId, 'plugin:acme/one/skill:review');
-      expect(
-        svc.findCanonical('plugin:bold/two/skill:review')?.content,
-        'Review body B.',
-      );
-      expect(
-        svc.findCanonical('plugin:acme/one/skill:deploy')?.content,
-        'Deploy body A.',
-      );
-      expect(svc.findCanonical('plugin:wrong/skill:review'), isNull);
+        // Canonical §4.4 lookup hits exactly the owning plugin's skill.
+        final a = svc.findCanonical('plugin:acme/one/skill:review');
+        expect(a, isNotNull);
+        expect(a!.pluginId, 'acme/one');
+        expect(a.content, 'Review body A.');
+        expect(a.canonicalId, 'plugin:acme/one/skill:review');
+        expect(
+          svc.findCanonical('plugin:bold/two/skill:review')?.content,
+          'Review body B.',
+        );
+        expect(
+          svc.findCanonical('plugin:acme/one/skill:deploy')?.content,
+          'Deploy body A.',
+        );
+        expect(svc.findCanonical('plugin:wrong/skill:review'), isNull);
 
-      // A shared name is ambiguous with the exact canonical options; a
-      // unique name resolves.
-      final ambiguous = svc.resolveAlias('review');
-      expect(ambiguous.isAmbiguous, isTrue);
-      expect(ambiguous.unique, isNull);
-      expect(ambiguous.options, [
-        'plugin:acme/one/skill:review',
-        'plugin:bold/two/skill:review',
-      ]);
-      final unique = svc.resolveAlias('/deploy');
-      expect(unique.isUnique, isTrue);
-      expect(unique.unique?.canonicalId, 'plugin:acme/one/skill:deploy');
+        // A shared name is ambiguous with the exact canonical options; a
+        // unique name resolves.
+        final ambiguous = svc.resolveAlias('review');
+        expect(ambiguous.isAmbiguous, isTrue);
+        expect(ambiguous.unique, isNull);
+        expect(ambiguous.options, [
+          'plugin:acme/one/skill:review',
+          'plugin:bold/two/skill:review',
+        ]);
+        final unique = svc.resolveAlias('/deploy');
+        expect(unique.isUnique, isTrue);
+        expect(unique.unique?.canonicalId, 'plugin:acme/one/skill:deploy');
 
-      // Session-hidden plugin ids drop out: the alias becomes unique.
-      final scoped = svc.resolveAlias(
-        'review',
-        hiddenPluginIds: {'bold/two'},
-      );
-      expect(scoped.isUnique, isTrue);
-      expect(scoped.unique?.pluginId, 'acme/one');
-    });
+        // Session-hidden plugin ids drop out: the alias becomes unique.
+        final scoped = svc.resolveAlias(
+          'review',
+          hiddenPluginIds: {'bold/two'},
+        );
+        expect(scoped.isUnique, isTrue);
+        expect(scoped.unique?.pluginId, 'acme/one');
+      },
+    );
 
     test(
       'PLUGIN4: roster lists canonical tools for the RUNNING session — not the foreground — and unregister removes them',
@@ -14559,9 +14649,7 @@ cwd = 'tools'
         AgentService.setRunSessionForTest(s1.id); // … but s1 is RUNNING.
         addTearDown(() {
           AgentService.setRunSessionForTest('');
-          app.sessions.removeWhere(
-            (x) => x.id == 'p4-s1' || x.id == 'p4-s2',
-          );
+          app.sessions.removeWhere((x) => x.id == 'p4-s1' || x.id == 'p4-s2');
           reg.unregisterPlugin('acme/global-kit');
           reg.unregisterPlugin('bold/session-kit');
         });
@@ -14595,7 +14683,10 @@ cwd = 'tools'
             .map((t) => ((t['function'] as Map)['name']).toString())
             .toList();
 
-        expect(rosterNames(), contains('plugin_acme_global-kit_command_review'));
+        expect(
+          rosterNames(),
+          contains('plugin_acme_global-kit_command_review'),
+        );
         expect(
           rosterNames(),
           contains('plugin_bold_session-kit_command_sess-only'),
@@ -14619,7 +14710,10 @@ cwd = 'tools'
           rosterNames(),
           isNot(contains('plugin_bold_session-kit_command_sess-only')),
         );
-        expect(rosterNames(), contains('plugin_acme_global-kit_command_review'));
+        expect(
+          rosterNames(),
+          contains('plugin_acme_global-kit_command_review'),
+        );
         AgentService.setRunSessionForTest(s1.id);
         expect(
           rosterNames(),
@@ -14728,6 +14822,7 @@ cwd = 'tools'
             ..parent.createSync(recursive: true)
             ..writeAsStringSync('---\ndescription: d\n---\n$body');
         }
+
         writeCmd('commands/review-a.md', 'REVIEW BODY A');
         writeCmd('commands/review-b.md', 'REVIEW BODY B');
         writeCmd('commands/deploy-a.md', 'DEPLOY BODY A');
@@ -14750,9 +14845,7 @@ cwd = 'tools'
         AgentService.setRunSessionForTest(s1.id);
         addTearDown(() {
           AgentService.setRunSessionForTest('');
-          app.sessions.removeWhere(
-            (x) => x.id == 'p4-d1' || x.id == 'p4-d2',
-          );
+          app.sessions.removeWhere((x) => x.id == 'p4-d1' || x.id == 'p4-d2');
           reg.unregisterPlugin('acme/kit-a');
           reg.unregisterPlugin('bold/kit-b');
           reg.unregisterPlugin('acme/sess-c');
@@ -14914,7 +15007,9 @@ cwd = 'tools'
         expect(ambiguous, isNot(contains('REVIEW CACHE B')));
 
         // A unique name loads its content.
-        final unique = await agent.dispatchForTest('skill', {'name': 'ship-it'});
+        final unique = await agent.dispatchForTest('skill', {
+          'name': 'ship-it',
+        });
         expect(unique, contains('SHIP CACHE A'));
 
         // A canonical §4.4 skill id loads exactly the owning plugin's skill.
@@ -15066,15 +15161,11 @@ cwd = 'tools'
         final app = AppState.I;
         final agent = AgentService.I;
         final reg = PluginContributionRegistry.I;
-        final root = Directory.systemTemp.createTempSync(
-          'ovid-plugin4-gates',
-        );
+        final root = Directory.systemTemp.createTempSync('ovid-plugin4-gates');
         addTearDown(() => root.deleteSync(recursive: true));
         File('${root.path}/commands/review.md')
           ..parent.createSync(recursive: true)
-          ..writeAsStringSync(
-            '---\ndescription: d\n---\nGATED REVIEW BODY',
-          );
+          ..writeAsStringSync('---\ndescription: d\n---\nGATED REVIEW BODY');
 
         final s = ChatSession(
           id: 'p4-g1',
@@ -15096,9 +15187,7 @@ cwd = 'tools'
             id: 'acme/kit-g',
             name: 'Kit G',
             rootPath: root.path,
-            commands: [
-              p4Command('acme/kit-g', 'review', 'commands/review.md'),
-            ],
+            commands: [p4Command('acme/kit-g', 'review', 'commands/review.md')],
           ),
           activation: PluginActivation.globalActive,
         );
@@ -15184,9 +15273,7 @@ cwd = 'tools'
             id: 'acme/pend-kit',
             name: 'Pend Kit',
             rootPath: cacheDir.path,
-            commands: [
-              p4Command('acme/pend-kit', 'pend', 'commands/pend.md'),
-            ],
+            commands: [p4Command('acme/pend-kit', 'pend', 'commands/pend.md')],
           ),
           activation: PluginActivation.pendingGlobal,
         );
@@ -15318,8 +15405,7 @@ cwd = 'tools'
           name: manifest.name,
           version: manifest.version,
           format: manifest.format,
-          rootPath:
-              '/opt/ovid/install-locations/elsewhere/${manifest.id}',
+          rootPath: '/opt/ovid/install-locations/elsewhere/${manifest.id}',
           commands: manifest.commands,
           skills: manifest.skills,
           agents: manifest.agents,
@@ -15335,9 +15421,8 @@ cwd = 'tools'
         expect(pluginManifestDigest(elsewhere), digest);
 
         // …while any real CONTENT change still yields a DIFFERENT digest.
-        final changedJson = jsonDecode(
-          jsonEncode(manifest.toJson()),
-        ) as Map<String, dynamic>;
+        final changedJson =
+            jsonDecode(jsonEncode(manifest.toJson())) as Map<String, dynamic>;
         changedJson['version'] = '1.0.1';
         final changed = NormalizedPluginManifest.fromJson(changedJson);
         expect(pluginManifestDigest(changed), isNot(digest));
@@ -15362,15 +15447,14 @@ cwd = 'tools'
         expect(loaded, isNotNull);
         expect(loaded!.pluginId, 'acme/grant-kit');
         expect(loaded.manifestDigest, digest);
+        expect(loaded.capabilities, {
+          PluginCapability.workspaceRead,
+          PluginCapability.hooksObserve,
+        });
         expect(
-          loaded.capabilities,
-          {
-            PluginCapability.workspaceRead,
-            PluginCapability.hooksObserve,
-          },
+          loaded.approvedAt,
+          DateTime.fromMillisecondsSinceEpoch(1735689600000, isUtc: true),
         );
-        expect(loaded.approvedAt,
-            DateTime.fromMillisecondsSinceEpoch(1735689600000, isUtc: true));
 
         // A grant is scoped to (plugin id, digest) — a different digest
         // (an update) has no grant yet and must not return the old one.
@@ -15437,9 +15521,7 @@ cwd = 'tools'
           ],
         );
         final v1Digest = pluginManifestDigest(v1);
-        expect(v1.requestedCapabilities, {
-          PluginCapability.workspaceRead,
-        });
+        expect(v1.requestedCapabilities, {PluginCapability.workspaceRead});
 
         final store = PluginPermissionStore();
         await store.save(
@@ -15477,10 +15559,7 @@ cwd = 'tools'
 
         // No grant for the new digest → paused until delta approval.
         expect(
-          await store.effectiveGrant(
-            pluginId: 'acme/grant-kit',
-            manifest: v2,
-          ),
+          await store.effectiveGrant(pluginId: 'acme/grant-kit', manifest: v2),
           isNull,
         );
 
@@ -15488,14 +15567,11 @@ cwd = 'tools'
           granted: await store.load('acme/grant-kit', v1Digest),
           requested: v2.requestedCapabilities,
         );
-        expect(
-          delta,
-          {
-            PluginCapability.shellExecute,
-            PluginCapability.hooksObserve,
-            PluginCapability.hooksBlock,
-          },
-        );
+        expect(delta, {
+          PluginCapability.shellExecute,
+          PluginCapability.hooksObserve,
+          PluginCapability.hooksBlock,
+        });
 
         // After delta approval the new digest is effective.
         await store.save(
@@ -15551,8 +15627,7 @@ cwd = 'tools'
         final secure = const FlutterSecureStorage();
         await secure.write(key: secretKey, value: 'sk-super-secret-value');
         // A sibling plugin's secret must SURVIVE this plugin's revocation.
-        const otherKey =
-            'ovid_plugin_secret_other/kit/env/API_TOKEN';
+        const otherKey = 'ovid_plugin_secret_other/kit/env/API_TOKEN';
         await secure.write(key: otherKey, value: 'sk-other-plugin');
 
         final prefs = await SharedPreferences.getInstance();
@@ -15567,7 +15642,10 @@ cwd = 'tools'
         expect(await secure.read(key: secretKey), isNull);
         expect(await secure.read(key: otherKey), 'sk-other-plugin');
         // Every prefs entry is gone for the revoked plugin.
-        expect(prefs.getKeys().where((k) => k.contains('acme/grant-kit')), isEmpty);
+        expect(
+          prefs.getKeys().where((k) => k.contains('acme/grant-kit')),
+          isEmpty,
+        );
       },
     );
 
@@ -15651,10 +15729,16 @@ cwd = 'tools'
         for (final k in prefs.getKeys()) {
           final v = prefs.get(k);
           final encoded = v is String ? v : jsonEncode(v);
-          expect(encoded.contains('API_TOKEN'), isTrue,
-              reason: 'names may appear; key=$k');
-          expect(encoded.contains(secretValue), isFalse,
-              reason: 'SECRET VALUE leaked into prefs key=$k');
+          expect(
+            encoded.contains('API_TOKEN'),
+            isTrue,
+            reason: 'names may appear; key=$k',
+          );
+          expect(
+            encoded.contains(secretValue),
+            isFalse,
+            reason: 'SECRET VALUE leaked into prefs key=$k',
+          );
         }
         final raw = jsonEncode(
           (await store.load('acme/grant-kit', digest))!.toJson(),
@@ -15728,13 +15812,14 @@ cwd = 'tools'
         final explain = explainCapabilities(manifest);
 
         PluginCapability cap(PluginCapability c) => c;
-        String sourceOf(PluginCapability c) => explain
-            .firstWhere((e) => e.capability == c)
-            .sourcePath;
+        String sourceOf(PluginCapability c) =>
+            explain.firstWhere((e) => e.capability == c).sourcePath;
 
         // workspaceRead ← command (first contributing file).
-        expect(sourceOf(cap(PluginCapability.workspaceRead)),
-            'commands/review.md');
+        expect(
+          sourceOf(cap(PluginCapability.workspaceRead)),
+          'commands/review.md',
+        );
         // hooksObserve ← first hook, shellExecute ← command hook,
         // hooksBlock ← pre_tool is blocking.
         expect(sourceOf(PluginCapability.hooksObserve), 'hooks/hooks.json');
@@ -15775,10 +15860,7 @@ cwd = 'tools'
         // Revoking an id that never had a grant is a no-op, never throws.
         await store.revoke('nobody/nothing');
         // Loading a digest that was never saved returns null.
-        expect(
-          await store.load('acme/grant-kit', 'sha256:deadbeef'),
-          isNull,
-        );
+        expect(await store.load('acme/grant-kit', 'sha256:deadbeef'), isNull);
       },
     );
 
@@ -15806,20 +15888,21 @@ cwd = 'tools'
           MaterialApp(
             theme: Aether.theme(),
             home: Scaffold(
-                body: Builder(
-                  builder: (context) => Center(
-                    child: FilledButton(
-                      onPressed: () async {
-                        accepted = await showPluginPermissionSheet(
-                              context,
-                              manifest: manifest,
-                            ) ==
-                            true;
-                      },
-                      child: const Text('Open'),
-                    ),
+              body: Builder(
+                builder: (context) => Center(
+                  child: FilledButton(
+                    onPressed: () async {
+                      accepted =
+                          await showPluginPermissionSheet(
+                            context,
+                            manifest: manifest,
+                          ) ==
+                          true;
+                    },
+                    child: const Text('Open'),
                   ),
                 ),
+              ),
             ),
           ),
         );
@@ -15904,13 +15987,12 @@ cwd = 'tools'
           runner: runner.call,
           ensureRuntime: (_) async => true,
         );
-        final manifest = p6Manifest(deps: [
-          const PluginDependency(name: 'left-pad', versionSpec: '^1.3.0'),
-          const PluginDependency(
-            name: 'opt-thing',
-            required: false,
-          ),
-        ]);
+        final manifest = p6Manifest(
+          deps: [
+            const PluginDependency(name: 'left-pad', versionSpec: '^1.3.0'),
+            const PluginDependency(name: 'opt-thing', required: false),
+          ],
+        );
 
         runner.queue((0, 'added 2 packages'));
         // Version-capture pass (npm ls) — the resolved versions come
@@ -15967,9 +16049,7 @@ cwd = 'tools'
         // versions, checksums, capped logs.
         expect(result.status, PluginDependencyStatus.ok);
         expect(result.entries, isNotEmpty);
-        final entry = result.entries.firstWhere(
-          (e) => e.name == 'left-pad',
-        );
+        final entry = result.entries.firstWhere((e) => e.name == 'left-pad');
         expect(entry.status, PluginDependencyStatus.ok);
         expect(entry.command, contains('npm install'));
         expect(entry.exitCode, 0);
@@ -16045,13 +16125,15 @@ cwd = 'tools'
           runner: runner.call,
           ensureRuntime: (_) async => true,
         );
-        final manifest = p6Manifest(deps: [
-          const PluginDependency(
-            name: 'requests',
-            versionSpec: '==2.31.0',
-            kind: PluginDependencyKind.python,
-          ),
-        ]);
+        final manifest = p6Manifest(
+          deps: [
+            const PluginDependency(
+              name: 'requests',
+              versionSpec: '==2.31.0',
+              kind: PluginDependencyKind.python,
+            ),
+          ],
+        );
 
         runner.queue((0, 'Successfully installed requests-2.31.0'));
         final result = await svc.install(manifest, null);
@@ -16091,17 +16173,19 @@ cwd = 'tools'
           runner: runner.call,
           ensureRuntime: (_) async => true,
         );
-        final manifest = p6Manifest(deps: [
-          const PluginDependency(
-            name: 'ripgrep',
-            kind: PluginDependencyKind.native,
-          ),
-          const PluginDependency(
-            name: 'unsupported-desktop-bin',
-            kind: PluginDependencyKind.native,
-            required: false,
-          ),
-        ]);
+        final manifest = p6Manifest(
+          deps: [
+            const PluginDependency(
+              name: 'ripgrep',
+              kind: PluginDependencyKind.native,
+            ),
+            const PluginDependency(
+              name: 'unsupported-desktop-bin',
+              kind: PluginDependencyKind.native,
+              required: false,
+            ),
+          ],
+        );
 
         // ovid-pkg install ripgrep succeeds; the desktop-only package
         // is not in the index (exit 1 + "not found").
@@ -16148,19 +16232,25 @@ cwd = 'tools'
           runner: runner.call,
           ensureRuntime: (_) async => true,
         );
-        final manifest = p6Manifest(deps: [
-          const PluginDependency(name: 'must-have'),
-          const PluginDependency(name: 'nice-to-have', required: false),
-        ]);
+        final manifest = p6Manifest(
+          deps: [
+            const PluginDependency(name: 'must-have'),
+            const PluginDependency(name: 'nice-to-have', required: false),
+          ],
+        );
 
         // npm batch fails (both in one command) → required dep failed.
         runner.queue((1, 'npm ERR! network unreachable'));
         final result = await svc.install(manifest, null);
         expect(result.status, PluginDependencyStatus.failed);
-        expect(result.entries.firstWhere((e) => e.name == 'must-have').status,
-            PluginDependencyStatus.failed);
-        expect(result.entries.firstWhere((e) => e.name == 'nice-to-have').status,
-            PluginDependencyStatus.failed);
+        expect(
+          result.entries.firstWhere((e) => e.name == 'must-have').status,
+          PluginDependencyStatus.failed,
+        );
+        expect(
+          result.entries.firstWhere((e) => e.name == 'nice-to-have').status,
+          PluginDependencyStatus.failed,
+        );
 
         // A second manifest where ONLY the optional one fails: separate
         // python optional dep on its own pip command.
@@ -16170,17 +16260,19 @@ cwd = 'tools'
           runner: runner2.call,
           ensureRuntime: (_) async => true,
         );
-        final manifest2 = p6Manifest(deps: [
-          const PluginDependency(
-            name: 'core-lib',
-            kind: PluginDependencyKind.python,
-          ),
-          const PluginDependency(
-            name: 'fancy-extra',
-            kind: PluginDependencyKind.python,
-            required: false,
-          ),
-        ]);
+        final manifest2 = p6Manifest(
+          deps: [
+            const PluginDependency(
+              name: 'core-lib',
+              kind: PluginDependencyKind.python,
+            ),
+            const PluginDependency(
+              name: 'fancy-extra',
+              kind: PluginDependencyKind.python,
+              required: false,
+            ),
+          ],
+        );
         // Optional pip packages install one-per-command (so an optional
         // failure is attributable to exactly that package).
         runner2.queue((0, 'Successfully installed core-lib-1.0.0'));
@@ -16211,9 +16303,9 @@ cwd = 'tools'
           runner: runner.call,
           ensureRuntime: (_) async => true,
         );
-        final manifest = p6Manifest(deps: [
-          const PluginDependency(name: 'left-pad'),
-        ]);
+        final manifest = p6Manifest(
+          deps: [const PluginDependency(name: 'left-pad')],
+        );
         runner.queue((0, 'added 1 package'));
         await svc.install(manifest, null);
 
@@ -16224,9 +16316,13 @@ cwd = 'tools'
         for (final c in runner.cmds) {
           expect(c.cwd, isNotNull);
           expect(SandboxService.isPathContained(rt, c.cwd!), isTrue);
-          expect(c.args.first.startsWith('/'), isFalse,
-              reason: 'binaries resolve via sandbox PREFIX/bin, never '
-                  'absolute host paths');
+          expect(
+            c.args.first.startsWith('/'),
+            isFalse,
+            reason:
+                'binaries resolve via sandbox PREFIX/bin, never '
+                'absolute host paths',
+          );
         }
         // env overrides never point outside the runtime root.
         for (final c in runner.cmds) {
@@ -16240,8 +16336,11 @@ cwd = 'tools'
           ]) {
             final v = e[k];
             if (v != null) {
-              expect(SandboxService.isPathContained(rt, v), isTrue,
-                  reason: '$k=$v escapes the runtime root');
+              expect(
+                SandboxService.isPathContained(rt, v),
+                isTrue,
+                reason: '$k=$v escapes the runtime root',
+              );
             }
           }
         }
@@ -16296,23 +16395,33 @@ cwd = 'tools'
             runner: runner.call,
             ensureRuntime: (_) async => true,
           );
-          final manifest = p6Manifest(version: v, deps: [
-            const PluginDependency(name: 'left-pad'),
-          ]);
+          final manifest = p6Manifest(
+            version: v,
+            deps: [const PluginDependency(name: 'left-pad')],
+          );
           runner.queue((0, 'added 1 package'));
           final result = await svc.install(manifest, null);
 
           final idDir = '${dir.path}/plugin-runtime/acme/dep-kit';
           final publisherDir = '${dir.path}/plugin-runtime/acme';
           final rt = result.runtimeRoot.path;
-          expect(rt, isNot(idDir),
-              reason: 'version "$v" must not collapse to the id dir');
-          expect(rt, isNot(publisherDir),
-              reason: 'version "$v" must not escape to the publisher dir');
+          expect(
+            rt,
+            isNot(idDir),
+            reason: 'version "$v" must not collapse to the id dir',
+          );
+          expect(
+            rt,
+            isNot(publisherDir),
+            reason: 'version "$v" must not escape to the publisher dir',
+          );
           // Strictly one level below the id dir (a real version slot).
           expect(SandboxService.isPathContained(idDir, rt), isTrue);
-          expect(rt.split('/').length, idDir.split('/').length + 1,
-              reason: 'runtime root is exactly one version segment deep');
+          expect(
+            rt.split('/').length,
+            idDir.split('/').length + 1,
+            reason: 'runtime root is exactly one version segment deep',
+          );
           // And never the raw hostile segment itself.
           expect(rt.split('/').last, isNot(anyOf('', '.', '..')));
         }
@@ -16331,12 +16440,21 @@ cwd = 'tools'
         await svc.removeVersion('acme/dep-kit', '..');
         await svc.removeVersion('acme/dep-kit', '');
         await svc.removeVersion('acme/dep-kit', '.');
-        expect(Directory('${idDir.path}/1.0.0').existsSync(), isTrue,
-            reason: 'removeVersion(..) must not delete sibling versions');
-        expect(Directory('${idDir.path}/2.0.0').existsSync(), isTrue,
-            reason: 'removeVersion("") must not delete every version');
-        expect(idDir.existsSync(), isTrue,
-            reason: 'the plugin id dir must survive hostile removeVersion');
+        expect(
+          Directory('${idDir.path}/1.0.0').existsSync(),
+          isTrue,
+          reason: 'removeVersion(..) must not delete sibling versions',
+        );
+        expect(
+          Directory('${idDir.path}/2.0.0').existsSync(),
+          isTrue,
+          reason: 'removeVersion("") must not delete every version',
+        );
+        expect(
+          idDir.existsSync(),
+          isTrue,
+          reason: 'the plugin id dir must survive hostile removeVersion',
+        );
       },
     );
 
@@ -16353,10 +16471,12 @@ cwd = 'tools'
           runner: runner.call,
           ensureRuntime: (_) async => true,
         );
-        final manifest = p6Manifest(deps: [
-          const PluginDependency(name: 'left-pad', versionSpec: '^1.3.0'),
-          const PluginDependency(name: 'opt-thing'),
-        ]);
+        final manifest = p6Manifest(
+          deps: [
+            const PluginDependency(name: 'left-pad', versionSpec: '^1.3.0'),
+            const PluginDependency(name: 'opt-thing'),
+          ],
+        );
         runner.queue((0, 'added 2 packages'));
         runner.queue((
           0,
@@ -16381,12 +16501,14 @@ cwd = 'tools'
 
         // REAL manager-resolved versions, not the requested specs.
         expect(
-          result.entries.firstWhere((e) => e.name == 'left-pad')
+          result.entries
+              .firstWhere((e) => e.name == 'left-pad')
               .resolvedVersion,
           '1.3.11',
         );
         expect(
-          result.entries.firstWhere((e) => e.name == 'opt-thing')
+          result.entries
+              .firstWhere((e) => e.name == 'opt-thing')
               .resolvedVersion,
           '2.0.0',
         );
@@ -16404,7 +16526,8 @@ cwd = 'tools'
         final result2 = await svc2.install(manifest, null);
         expect(result2.status, PluginDependencyStatus.ok);
         expect(
-          result2.entries.firstWhere((e) => e.name == 'left-pad')
+          result2.entries
+              .firstWhere((e) => e.name == 'left-pad')
               .resolvedVersion,
           '^1.3.0',
           reason: 'ls failure falls back to the REQUESTED spec, honestly',
@@ -16412,7 +16535,8 @@ cwd = 'tools'
         // An unpinned package under a failed ls pass resolves to null —
         // never a fabricated "latest".
         expect(
-          result2.entries.firstWhere((e) => e.name == 'opt-thing')
+          result2.entries
+              .firstWhere((e) => e.name == 'opt-thing')
               .resolvedVersion,
           isNull,
         );
@@ -16466,9 +16590,9 @@ cwd = 'tools'
         '---\ndescription: P7 command\n---\nP7 BODY $version',
       );
       if (deps.isNotEmpty) {
-        File('${dir.path}/package.json').writeAsStringSync(
-          jsonEncode({'dependencies': deps}),
-        );
+        File(
+          '${dir.path}/package.json',
+        ).writeAsStringSync(jsonEncode({'dependencies': deps}));
       }
       return dir;
     }
@@ -16572,8 +16696,14 @@ cwd = 'tools'
         expect(row.manifestDigest, isNotNull);
 
         final reg = PluginContributionRegistry.I;
-        expect(reg.isPluginActiveForSession('p7org/runtime-kit', s1.id), isTrue);
-        expect(reg.isPluginActiveForSession('p7org/runtime-kit', s2.id), isFalse);
+        expect(
+          reg.isPluginActiveForSession('p7org/runtime-kit', s1.id),
+          isTrue,
+        );
+        expect(
+          reg.isPluginActiveForSession('p7org/runtime-kit', s2.id),
+          isFalse,
+        );
         expect(
           PluginRuntimeManager.I.isActiveForSession('p7org/runtime-kit', s1.id),
           isTrue,
@@ -16583,12 +16713,16 @@ cwd = 'tools'
           isFalse,
         );
         expect(
-          reg.toolsForSession(s2.id).any((c) => c.pluginId == 'p7org/runtime-kit'),
+          reg
+              .toolsForSession(s2.id)
+              .any((c) => c.pluginId == 'p7org/runtime-kit'),
           isFalse,
           reason: 'another session cannot resolve the pending plugin',
         );
         expect(
-          reg.toolsForSession(s1.id).any((c) => c.pluginId == 'p7org/runtime-kit'),
+          reg
+              .toolsForSession(s1.id)
+              .any((c) => c.pluginId == 'p7org/runtime-kit'),
           isTrue,
         );
 
@@ -16841,8 +16975,10 @@ cwd = 'tools'
           isFalse,
         );
         expect(reg.isRegistered('p7org/runtime-kit'), isTrue);
-        expect(reg.activationFor('p7org/runtime-kit'),
-            PluginActivation.pendingGlobal);
+        expect(
+          reg.activationFor('p7org/runtime-kit'),
+          PluginActivation.pendingGlobal,
+        );
         final rec = await PluginRuntimeManager.I.recordFor('p7org/runtime-kit');
         expect(rec!.state, PluginActivation.pendingGlobal);
         expect(rec.promoteOnNextBoot, isTrue);
@@ -16994,7 +17130,8 @@ cwd = 'tools'
         expect(
           app.mcpServers.any((s) => s.name == 'p7-runtime-owned-mcp'),
           isFalse,
-          reason: 'plugin:<runtimeId>-owned MCP rows must not survive '
+          reason:
+              'plugin:<runtimeId>-owned MCP rows must not survive '
               'uninstall',
         );
         expect(row.runtimeId, isNull);
@@ -17026,9 +17163,11 @@ cwd = 'tools'
         final v1Root =
             '${p7Runtime.path}/plugin-runtime/p7org/runtime-kit/1.0.0/content';
         expect(
-          reg.contributionByCanonicalId(
-            'plugin:p7org/runtime-kit/command:review',
-          )!.rootPath,
+          reg
+              .contributionByCanonicalId(
+                'plugin:p7org/runtime-kit/command:review',
+              )!
+              .rootPath,
           v1Root,
         );
 
@@ -17059,14 +17198,14 @@ cwd = 'tools'
         );
         expect(restored, isNotNull);
         expect(restored!.rootPath, v1Root);
-        expect(reg.activationFor('p7org/runtime-kit'),
-            PluginActivation.pendingGlobal);
+        expect(
+          reg.activationFor('p7org/runtime-kit'),
+          PluginActivation.pendingGlobal,
+        );
 
         // Prior version content + record untouched by the failed upgrade.
         expect(File('$v1Root/commands/review.md').existsSync(), isTrue);
-        final rec = await PluginRuntimeManager.I.recordFor(
-          'p7org/runtime-kit',
-        );
+        final rec = await PluginRuntimeManager.I.recordFor('p7org/runtime-kit');
         expect(rec!.state, PluginActivation.pendingGlobal);
         expect(rec.promoteOnNextBoot, isTrue);
       },
@@ -17144,8 +17283,11 @@ cwd = 'tools'
     test('legacy on_* names resolve and fire canonical hooks', () async {
       p8Register('p8/legacy', [p8Hook('stop', 'echo done', ordinal: 0)]);
       final svc = HookService.I;
-      expect(svc.hasHookListeners('on_turn_end'), isTrue,
-          reason: 'legacy alias resolves to canonical stop listeners');
+      expect(
+        svc.hasHookListeners('on_turn_end'),
+        isTrue,
+        reason: 'legacy alias resolves to canonical stop listeners',
+      );
       expect(svc.hasHookListeners('stop'), isTrue);
       var called = false;
       svc.executorForTest = (cmd, env) async {
@@ -17193,33 +17335,34 @@ cwd = 'tools'
       expect(calls, ['p8/aaa', 'p8/bbb', 'p8/bbb', 'p8/ccc']);
     });
 
-    test('session scope: sessionActive plugin fires only in its session',
-        () async {
-      p8Register(
-        'p8/scoped',
-        [p8Hook('notification', 'scoped-cmd', ordinal: 0)],
-        activation: PluginActivation.sessionActive,
-        immediateSessionId: 'p8-sess-owner',
-      );
-      final svc = HookService.I;
-      final calls = <String>[];
-      svc.executorForTest = (cmd, env) async {
-        calls.add(env['OVID_HOOK_SESSION']!);
-        return '';
-      };
-      addTearDown(() => svc.executorForTest = null);
-      await svc.fire('notification', 'p8-sess-owner');
-      await svc.fire('notification', 'p8-sess-other');
-      expect(calls, ['p8-sess-owner'],
-          reason: 'out-of-scope session must never receive the event');
-    });
+    test(
+      'session scope: sessionActive plugin fires only in its session',
+      () async {
+        p8Register(
+          'p8/scoped',
+          [p8Hook('notification', 'scoped-cmd', ordinal: 0)],
+          activation: PluginActivation.sessionActive,
+          immediateSessionId: 'p8-sess-owner',
+        );
+        final svc = HookService.I;
+        final calls = <String>[];
+        svc.executorForTest = (cmd, env) async {
+          calls.add(env['OVID_HOOK_SESSION']!);
+          return '';
+        };
+        addTearDown(() => svc.executorForTest = null);
+        await svc.fire('notification', 'p8-sess-owner');
+        await svc.fire('notification', 'p8-sess-other');
+        expect(calls, [
+          'p8-sess-owner',
+        ], reason: 'out-of-scope session must never receive the event');
+      },
+    );
 
     test('disabled plugins never receive events', () async {
-      p8Register(
-        'p8/disabled',
-        [p8Hook('notification', 'nope', ordinal: 0)],
-        activation: PluginActivation.disabled,
-      );
+      p8Register('p8/disabled', [
+        p8Hook('notification', 'nope', ordinal: 0),
+      ], activation: PluginActivation.disabled);
       final svc = HookService.I;
       var called = false;
       svc.executorForTest = (cmd, env) async {
@@ -17233,8 +17376,9 @@ cwd = 'tools'
 
     test('context env: PLUGIN_ROOT, storage, workspace, session, model,'
         ' event, payload', () async {
-      p8Register('p8/env', [p8Hook('pre_request', 'env-probe', ordinal: 0)],
-          rootPath: '/p8/env-root');
+      p8Register('p8/env', [
+        p8Hook('pre_request', 'env-probe', ordinal: 0),
+      ], rootPath: '/p8/env-root');
       final svc = HookService.I;
       Map<String, String>? gotEnv;
       svc.executorForTest = (cmd, env) async {
@@ -17277,43 +17421,51 @@ cwd = 'tools'
       };
       addTearDown(() => svc.execTimeoutForTest = null);
       await svc.fire('notification', 'p8-sess-timeout');
-      expect(secs, [30, 120, 5],
-          reason: 'default 30, declared 600 clamped to 120, declared 5 kept');
+      expect(secs, [
+        30,
+        120,
+        5,
+      ], reason: 'default 30, declared 600 clamped to 120, declared 5 kept');
     });
 
-    test('malformed hook output fails open with a visible warning ledger',
-        () async {
-      p8Register('p8/malformed', [
-        p8Hook('post_tool', 'echo {{{', ordinal: 0),
-      ]);
-      final svc = HookService.I;
-      svc.executorForTest = (cmd, env) async => 'garbage {{{ output';
-      addTearDown(() => svc.executorForTest = null);
+    test(
+      'malformed hook output fails open with a visible warning ledger',
+      () async {
+        p8Register('p8/malformed', [
+          p8Hook('post_tool', 'echo {{{', ordinal: 0),
+        ]);
+        final svc = HookService.I;
+        svc.executorForTest = (cmd, env) async => 'garbage {{{ output';
+        addTearDown(() => svc.executorForTest = null);
 
-      final root = await Directory.systemTemp.createTemp('ovid-p8-led-');
-      SessionLedger.rootOverrideForTest = root;
-      addTearDown(() {
-        SessionLedger.rootOverrideForTest = null;
-        root.deleteSync(recursive: true);
-      });
+        final root = await Directory.systemTemp.createTemp('ovid-p8-led-');
+        SessionLedger.rootOverrideForTest = root;
+        addTearDown(() {
+          SessionLedger.rootOverrideForTest = null;
+          root.deleteSync(recursive: true);
+        });
 
-      // post_tool is observe-only: malformed output can never block, and
-      // the run continues (fail-open).
-      final out = await svc.fire('post_tool', 'p8-sess-malformed',
-          payload: {'tool': 'run_shell'});
-      expect(out, isNotNull);
-      await SessionLedger.I.flush('p8-sess-malformed');
-      final file = File(
-        '${root.path}/${'p8-sess-malformed'.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_')}.jsonl',
-      );
-      final lines = file
-          .readAsStringSync()
-          .split('\n')
-          .where((l) => l.trim().isNotEmpty)
-          .map(jsonDecode)
-          .toList();
-      expect(lines.any((e) => e['kind'] == 'hook/result'), isTrue);
-    });
+        // post_tool is observe-only: malformed output can never block, and
+        // the run continues (fail-open).
+        final out = await svc.fire(
+          'post_tool',
+          'p8-sess-malformed',
+          payload: {'tool': 'run_shell'},
+        );
+        expect(out, isNotNull);
+        await SessionLedger.I.flush('p8-sess-malformed');
+        final file = File(
+          '${root.path}/${'p8-sess-malformed'.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_')}.jsonl',
+        );
+        final lines = file
+            .readAsStringSync()
+            .split('\n')
+            .where((l) => l.trim().isNotEmpty)
+            .map(jsonDecode)
+            .toList();
+        expect(lines.any((e) => e['kind'] == 'hook/result'), isTrue);
+      },
+    );
 
     test('exit 2 blocks on pre_tool; other events deny nothing', () async {
       p8Register('p8/gate', [
@@ -17321,8 +17473,7 @@ cwd = 'tools'
         p8Hook('notification', 'notify-cmd', ordinal: 0),
       ]);
       final svc = HookService.I;
-      svc.gateExecutorForTest = (cmd, env) async =>
-          (2, 'policy denies rm');
+      svc.gateExecutorForTest = (cmd, env) async => (2, 'policy denies rm');
       addTearDown(() => svc.gateExecutorForTest = null);
       final res = await svc.fireGate(
         'pre_tool',
@@ -17338,37 +17489,46 @@ cwd = 'tools'
       // observe event sees a gate-shaped stdout), run continues.
       svc.executorForTest = (cmd, env) async => 'policy denies rm';
       addTearDown(() => svc.executorForTest = null);
-      final out = await svc.fire('notification', 'p8-sess-gate',
-          payload: {'tool': 'run_shell'});
+      final out = await svc.fire(
+        'notification',
+        'p8-sess-gate',
+        payload: {'tool': 'run_shell'},
+      );
       expect(out, contains('policy denies rm'));
     });
 
-    test('permission_request blocks on exit 2; JSON block also denies',
-        () async {
-      p8Register('p8/perm', [p8Hook('permission_request', 'check', ordinal: 0)]);
-      final svc = HookService.I;
-      svc.gateExecutorForTest = (cmd, env) async =>
-          (0, '{"decision":"block","reason":"not allowed by policy"}');
-      addTearDown(() => svc.gateExecutorForTest = null);
-      final res = await svc.fireGate(
-        'permission_request',
-        'p8-sess-perm',
-        payload: {'tool': 'run_shell', 'summary': 'rm -rf /'},
-      );
-      expect(res.allowed, isFalse);
-      expect(res.reason, contains('not allowed by policy'));
-    });
+    test(
+      'permission_request blocks on exit 2; JSON block also denies',
+      () async {
+        p8Register('p8/perm', [
+          p8Hook('permission_request', 'check', ordinal: 0),
+        ]);
+        final svc = HookService.I;
+        svc.gateExecutorForTest = (cmd, env) async =>
+            (0, '{"decision":"block","reason":"not allowed by policy"}');
+        addTearDown(() => svc.gateExecutorForTest = null);
+        final res = await svc.fireGate(
+          'permission_request',
+          'p8-sess-perm',
+          payload: {'tool': 'run_shell', 'summary': 'rm -rf /'},
+        );
+        expect(res.allowed, isFalse);
+        expect(res.reason, contains('not allowed by policy'));
+      },
+    );
 
-    test('non-blocking events can NEVER deny even with a JSON block',
-        () async {
+    test('non-blocking events can NEVER deny even with a JSON block', () async {
       p8Register('p8/observe', [p8Hook('stop', 'blocker', ordinal: 0)]);
       final svc = HookService.I;
       svc.executorForTest = (cmd, env) async =>
           '{"decision":"block","reason":"should be ignored"}';
       addTearDown(() => svc.executorForTest = null);
       final out = await svc.fire('stop', 'p8-sess-observe');
-      expect(out, contains('should be ignored'),
-          reason: 'observe output is collected, never enforced');
+      expect(
+        out,
+        contains('should be ignored'),
+        reason: 'observe output is collected, never enforced',
+      );
     });
 
     test('output over 2 KB is capped for context injection', () async {
@@ -17381,8 +17541,7 @@ cwd = 'tools'
       expect(out, endsWith('[hook output truncated]'));
     });
 
-    test('recursion prevention: a hook cannot re-fire its own event',
-        () async {
+    test('recursion prevention: a hook cannot re-fire its own event', () async {
       p8Register('p8/recursive', [
         p8Hook('notification', 'self-refire', ordinal: 0),
       ]);
@@ -17401,8 +17560,11 @@ cwd = 'tools'
       };
       addTearDown(() => svc.executorForTest = null);
       await svc.fire('notification', 'p8-sess-recursion');
-      expect(maxDepth, 1,
-          reason: 'own-event recursion must be blocked, not nested');
+      expect(
+        maxDepth,
+        1,
+        reason: 'own-event recursion must be blocked, not nested',
+      );
     });
 
     test('circuit breaker: 3 consecutive failures disable the plugin'
@@ -17434,27 +17596,32 @@ cwd = 'tools'
       // reset only happens via success on the SAME session.
     });
 
-    test('breaker resets after a successful execution on the session',
-        () async {
-      p8Register('p8/breaker-reset', [
-        p8Hook('notification', 'flaky', ordinal: 0),
-      ]);
-      final svc = HookService.I;
-      var calls = 0;
-      svc.executorForTest = (cmd, env) async {
-        calls++;
-        if (calls <= 2) throw Exception('boom');
-        return 'ok';
-      };
-      addTearDown(() => svc.executorForTest = null);
-      final sid = 'p8-sess-reset';
-      await svc.fire('notification', sid); // fail 1
-      await svc.fire('notification', sid); // fail 2
-      await svc.fire('notification', sid); // success → consecutive reset
-      await svc.fire('notification', sid); // fail 1 again
-      expect(calls, 4,
-          reason: 'a success resets the consecutive-failure count');
-    });
+    test(
+      'breaker resets after a successful execution on the session',
+      () async {
+        p8Register('p8/breaker-reset', [
+          p8Hook('notification', 'flaky', ordinal: 0),
+        ]);
+        final svc = HookService.I;
+        var calls = 0;
+        svc.executorForTest = (cmd, env) async {
+          calls++;
+          if (calls <= 2) throw Exception('boom');
+          return 'ok';
+        };
+        addTearDown(() => svc.executorForTest = null);
+        final sid = 'p8-sess-reset';
+        await svc.fire('notification', sid); // fail 1
+        await svc.fire('notification', sid); // fail 2
+        await svc.fire('notification', sid); // success → consecutive reset
+        await svc.fire('notification', sid); // fail 1 again
+        expect(
+          calls,
+          4,
+          reason: 'a success resets the consecutive-failure count',
+        );
+      },
+    );
 
     test('fail-open: exec error never blocks pre_tool gate', () async {
       p8Register('p8/failopen', [p8Hook('pre_tool', 'explode', ordinal: 0)]);
@@ -17463,38 +17630,54 @@ cwd = 'tools'
         throw Exception('interpreter missing');
       };
       addTearDown(() => svc.gateExecutorForTest = null);
-      final res = await svc.fireGate('pre_tool', 'p8-sess-failopen',
-          payload: {'tool': 'run_shell', 'args': {}});
-      expect(res.allowed, isTrue,
-          reason: 'a broken hook must never brick tool dispatch');
+      final res = await svc.fireGate(
+        'pre_tool',
+        'p8-sess-failopen',
+        payload: {'tool': 'run_shell', 'args': {}},
+      );
+      expect(
+        res.allowed,
+        isTrue,
+        reason: 'a broken hook must never brick tool dispatch',
+      );
       // …but it counted as a failure toward the breaker.
-      expect(svc.pluginTrippedForTest('p8/failopen', 'p8-sess-failopen'),
+      expect(
+        svc.pluginTrippedForTest('p8/failopen', 'p8-sess-failopen'),
+        isFalse,
+        reason: 'one failure does not trip the 3-strike breaker',
+      );
+    });
+
+    test(
+      'prompt-type hooks run where implementable (logged, never block)',
+      () async {
+        p8Register('p8/prompt', [
+          p8Hook(
+            'user_prompt_submit',
+            'Summarize the prompt',
+            ordinal: 0,
+            type: 'prompt',
+          ),
+        ]);
+        final svc = HookService.I;
+        var executed = false;
+        svc.executorForTest = (cmd, env) async {
+          executed = true;
+          return '';
+        };
+        addTearDown(() => svc.executorForTest = null);
+        // Prompt hooks have no shell runtime — skipped with a warning
+        // record, never executed as a shell command.
+        await svc.fire('user_prompt_submit', 'p8-sess-prompt');
+        expect(
+          executed,
           isFalse,
-          reason: 'one failure does not trip the 3-strike breaker');
-    });
+          reason: 'prompt hooks must not run through the shell executor',
+        );
+      },
+    );
 
-    test('prompt-type hooks run where implementable (logged, never block)',
-        () async {
-      p8Register('p8/prompt', [
-        p8Hook('user_prompt_submit', 'Summarize the prompt', ordinal: 0,
-            type: 'prompt'),
-      ]);
-      final svc = HookService.I;
-      var executed = false;
-      svc.executorForTest = (cmd, env) async {
-        executed = true;
-        return '';
-      };
-      addTearDown(() => svc.executorForTest = null);
-      // Prompt hooks have no shell runtime — skipped with a warning
-      // record, never executed as a shell command.
-      await svc.fire('user_prompt_submit', 'p8-sess-prompt');
-      expect(executed, isFalse,
-          reason: 'prompt hooks must not run through the shell executor');
-    });
-
-    test('state migration: legacy hooks map round-trips as ordered list',
-        () {
+    test('state migration: legacy hooks map round-trips as ordered list', () {
       final legacy = PluginItem(
         name: 'p8-legacy-row',
         author: 'a',
@@ -17503,10 +17686,7 @@ cwd = 'tools'
         category: 'Tool',
         installed: true,
         enabled: true,
-        hooks: {
-          'on_turn_start': 'echo start',
-          'on_pre_tool': 'echo gate',
-        },
+        hooks: {'on_turn_start': 'echo start', 'on_pre_tool': 'echo gate'},
         hookMatchers: {'on_pre_tool': 'run_.*'},
       );
       final j = legacy.toJson();
@@ -17540,190 +17720,202 @@ cwd = 'tools'
       // Round-trip: toJson → fromJson preserves the ordered list.
       final rt = PluginItem.fromJson(legacy.toJson());
       expect(rt.pluginHooks.length, 2);
-      expect(rt.hooks['on_turn_start'], 'echo start',
-          reason: 'legacy map stays readable for old readers');
+      expect(
+        rt.hooks['on_turn_start'],
+        'echo start',
+        reason: 'legacy map stays readable for old readers',
+      );
     });
 
-    test('user_prompt_submit fires once per prompt at runTask entry',
-        () async {
-      final app = AppState.I;
-      final agent = AgentService.I;
-      final server = await HttpServer.bind('127.0.0.1', 0);
-      addTearDown(() => server.close(force: true));
-      final provider = app.providerById('ollama-local')!;
-      final originals = {
-        'baseUrl': provider.baseUrl,
-        'models': provider.models,
-        'selectedModel': provider.selectedModel,
-      };
-      addTearDown(() {
+    test(
+      'user_prompt_submit fires once per prompt at runTask entry',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final server = await HttpServer.bind('127.0.0.1', 0);
+        addTearDown(() => server.close(force: true));
+        final provider = app.providerById('ollama-local')!;
+        final originals = {
+          'baseUrl': provider.baseUrl,
+          'models': provider.models,
+          'selectedModel': provider.selectedModel,
+        };
+        addTearDown(() {
+          provider
+            ..baseUrl = originals['baseUrl'] as String
+            ..models = originals['models'] as List<String>
+            ..selectedModel = originals['selectedModel'] as String?;
+        });
+        final session = ChatSession(
+          id: 'p8-ups',
+          title: 'ups',
+          providerId: provider.id,
+          model: 'test-model',
+          mode: 'auto',
+          messages: [Message(role: 'user', content: 'go')],
+        );
+        app.sessions.insert(0, session);
+        addTearDown(() => app.sessions.removeWhere((x) => x.id == session.id));
         provider
-          ..baseUrl = originals['baseUrl'] as String
-          ..models = originals['models'] as List<String>
-          ..selectedModel = originals['selectedModel'] as String?;
-      });
-      final session = ChatSession(
-        id: 'p8-ups',
-        title: 'ups',
-        providerId: provider.id,
-        model: 'test-model',
-        mode: 'auto',
-        messages: [Message(role: 'user', content: 'go')],
-      );
-      app.sessions.insert(0, session);
-      addTearDown(() => app.sessions.removeWhere((x) => x.id == session.id));
-      provider
-        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
-        ..models = ['test-model'];
+          ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+          ..models = ['test-model'];
 
-      p8Register('p8/ups', [p8Hook('user_prompt_submit', 'ups-cmd', ordinal: 0)]);
-      final upsEvents = <String>[];
-      final svc = HookService.I;
-      svc.executorForTest = (cmd, env) async {
-        upsEvents.add(env['PLUGIN_EVENT']!);
-        return '';
-      };
-      addTearDown(() => svc.executorForTest = null);
+        p8Register('p8/ups', [
+          p8Hook('user_prompt_submit', 'ups-cmd', ordinal: 0),
+        ]);
+        final upsEvents = <String>[];
+        final svc = HookService.I;
+        svc.executorForTest = (cmd, env) async {
+          upsEvents.add(env['PLUGIN_EVENT']!);
+          return '';
+        };
+        addTearDown(() => svc.executorForTest = null);
 
-      // Turn 1: one tool round + final → 2 LLM requests, ONE prompt.
-      var requestCount = 0;
-      final serverTask = () async {
-        await for (final request in server) {
-          await utf8.decoder.bind(request).join();
-          requestCount++;
-          request.response.headers.chunkedTransferEncoding = true;
-          if (requestCount == 1) {
-            request.response.add(
-              utf8.encode(
-                'data: ${jsonEncode({
-                  'choices': [
-                    {
-                      'delta': {
-                        'tool_calls': [
-                          {
-                            'index': 0,
-                            'id': 'call_1',
-                            'function': {
-                              'name': 'file_read',
-                              'arguments': '{"path":"x.txt"}',
+        // Turn 1: one tool round + final → 2 LLM requests, ONE prompt.
+        var requestCount = 0;
+        final serverTask = () async {
+          await for (final request in server) {
+            await utf8.decoder.bind(request).join();
+            requestCount++;
+            request.response.headers.chunkedTransferEncoding = true;
+            if (requestCount == 1) {
+              request.response.add(
+                utf8.encode(
+                  'data: ${jsonEncode({
+                    'choices': [
+                      {
+                        'delta': {
+                          'tool_calls': [
+                            {
+                              'index': 0,
+                              'id': 'call_1',
+                              'function': {'name': 'file_read', 'arguments': '{"path":"x.txt"}'},
                             },
-                          },
-                        ],
+                          ],
+                        },
+                        'finish_reason': 'tool_calls',
                       },
-                      'finish_reason': 'tool_calls',
-                    },
-                  ],
-                })}\n\n',
-              ),
-            );
-          } else {
+                    ],
+                  })}\n\n',
+                ),
+              );
+            } else {
+              request.response.add(
+                utf8.encode(
+                  'data: ${jsonEncode({
+                    'choices': [
+                      {
+                        'delta': {'content': 'all done'},
+                        'finish_reason': 'stop',
+                      },
+                    ],
+                  })}\n\n',
+                ),
+              );
+            }
+            await request.response.flush();
+            await request.response.close();
+          }
+        }();
+        unawaited(serverTask);
+
+        await agent
+            .runTask('go', sessionId: session.id)
+            .timeout(const Duration(seconds: 30));
+
+        expect(
+          upsEvents.where((e) => e == 'user_prompt_submit').length,
+          1,
+          reason:
+              'canonical user_prompt_submit is once per user prompt, '
+              'not per LLM turn',
+        );
+      },
+      timeout: const Timeout(Duration(seconds: 60)),
+    );
+
+    test(
+      'post_request fires after each LLM response',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final server = await HttpServer.bind('127.0.0.1', 0);
+        addTearDown(() => server.close(force: true));
+        final provider = app.providerById('ollama-local')!;
+        final originals = {
+          'baseUrl': provider.baseUrl,
+          'models': provider.models,
+          'selectedModel': provider.selectedModel,
+        };
+        addTearDown(() {
+          provider
+            ..baseUrl = originals['baseUrl'] as String
+            ..models = originals['models'] as List<String>
+            ..selectedModel = originals['selectedModel'] as String?;
+        });
+        final session = ChatSession(
+          id: 'p8-postreq',
+          title: 'postreq',
+          providerId: provider.id,
+          model: 'test-model',
+          mode: 'auto',
+          messages: [Message(role: 'user', content: 'go')],
+        );
+        app.sessions.insert(0, session);
+        addTearDown(() => app.sessions.removeWhere((x) => x.id == session.id));
+        provider
+          ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+          ..models = ['test-model'];
+
+        p8Register('p8/postreq', [
+          p8Hook('post_request', 'post-req-cmd', ordinal: 0),
+        ]);
+        final events = <String>[];
+        final svc = HookService.I;
+        svc.executorForTest = (cmd, env) async {
+          events.add(env['PLUGIN_EVENT']!);
+          return '';
+        };
+        addTearDown(() => svc.executorForTest = null);
+
+        var requestCount = 0;
+        final serverTask = () async {
+          await for (final request in server) {
+            await utf8.decoder.bind(request).join();
+            requestCount++;
+            request.response.headers.chunkedTransferEncoding = true;
             request.response.add(
               utf8.encode(
                 'data: ${jsonEncode({
                   'choices': [
                     {
-                      'delta': {'content': 'all done'},
+                      'delta': {'content': 'reply $requestCount'},
                       'finish_reason': 'stop',
                     },
                   ],
                 })}\n\n',
               ),
             );
+            await request.response.flush();
+            await request.response.close();
           }
-          await request.response.flush();
-          await request.response.close();
-        }
-      }();
-      unawaited(serverTask);
+        }();
+        unawaited(serverTask);
 
-      await agent
-          .runTask('go', sessionId: session.id)
-          .timeout(const Duration(seconds: 30));
+        await agent
+            .runTask('go', sessionId: session.id)
+            .timeout(const Duration(seconds: 30));
+        // Fire-and-forget post_request hooks need a microtask turn to land.
+        await Future<void>.delayed(const Duration(milliseconds: 200));
 
-      expect(
-        upsEvents.where((e) => e == 'user_prompt_submit').length,
-        1,
-        reason: 'canonical user_prompt_submit is once per user prompt, '
-            'not per LLM turn',
-      );
-    }, timeout: const Timeout(Duration(seconds: 60)));
-
-    test('post_request fires after each LLM response', () async {
-      final app = AppState.I;
-      final agent = AgentService.I;
-      final server = await HttpServer.bind('127.0.0.1', 0);
-      addTearDown(() => server.close(force: true));
-      final provider = app.providerById('ollama-local')!;
-      final originals = {
-        'baseUrl': provider.baseUrl,
-        'models': provider.models,
-        'selectedModel': provider.selectedModel,
-      };
-      addTearDown(() {
-        provider
-          ..baseUrl = originals['baseUrl'] as String
-          ..models = originals['models'] as List<String>
-          ..selectedModel = originals['selectedModel'] as String?;
-      });
-      final session = ChatSession(
-        id: 'p8-postreq',
-        title: 'postreq',
-        providerId: provider.id,
-        model: 'test-model',
-        mode: 'auto',
-        messages: [Message(role: 'user', content: 'go')],
-      );
-      app.sessions.insert(0, session);
-      addTearDown(() => app.sessions.removeWhere((x) => x.id == session.id));
-      provider
-        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
-        ..models = ['test-model'];
-
-      p8Register('p8/postreq', [
-        p8Hook('post_request', 'post-req-cmd', ordinal: 0),
-      ]);
-      final events = <String>[];
-      final svc = HookService.I;
-      svc.executorForTest = (cmd, env) async {
-        events.add(env['PLUGIN_EVENT']!);
-        return '';
-      };
-      addTearDown(() => svc.executorForTest = null);
-
-      var requestCount = 0;
-      final serverTask = () async {
-        await for (final request in server) {
-          await utf8.decoder.bind(request).join();
-          requestCount++;
-          request.response.headers.chunkedTransferEncoding = true;
-          request.response.add(
-            utf8.encode(
-              'data: ${jsonEncode({
-                'choices': [
-                  {
-                    'delta': {'content': 'reply $requestCount'},
-                    'finish_reason': 'stop',
-                  },
-                ],
-              })}\n\n',
-            ),
-          );
-          await request.response.flush();
-          await request.response.close();
-        }
-      }();
-      unawaited(serverTask);
-
-      await agent
-          .runTask('go', sessionId: session.id)
-          .timeout(const Duration(seconds: 30));
-      // Fire-and-forget post_request hooks need a microtask turn to land.
-      await Future<void>.delayed(const Duration(milliseconds: 200));
-
-      expect(events.where((e) => e == 'post_request').length,
+        expect(
+          events.where((e) => e == 'post_request').length,
           greaterThanOrEqualTo(1),
-          reason: 'post_request must fire after each LLM response');
-    }, timeout: const Timeout(Duration(seconds: 60)));
+          reason: 'post_request must fire after each LLM response',
+        );
+      },
+      timeout: const Timeout(Duration(seconds: 60)),
+    );
 
     test('permission_request gate denies a tool approval', () async {
       final app = AppState.I;
@@ -17758,98 +17950,104 @@ cwd = 'tools'
       // consumed); _maybeApprove's false maps to the caller's shared
       // user-denial string, with the hook identity in the ledger + think
       // stream ('approval' record deniedBy: 'hook').
-      expect(gateCalls, 1,
-          reason: 'permission_request gate must run before the user prompt');
+      expect(
+        gateCalls,
+        1,
+        reason: 'permission_request gate must run before the user prompt',
+      );
       expect(res, 'DENIED by user');
     });
 
-    test('subagent_start and subagent_end fire around a subagent run',
-        () async {
-      final app = AppState.I;
-      final agent = AgentService.I;
-      final server = await HttpServer.bind('127.0.0.1', 0);
-      addTearDown(() => server.close(force: true));
-      final provider = app.providerById('ollama-local')!;
-      final originals = {
-        'baseUrl': provider.baseUrl,
-        'models': provider.models,
-        'selectedModel': provider.selectedModel,
-      };
-      addTearDown(() {
+    test(
+      'subagent_start and subagent_end fire around a subagent run',
+      () async {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        final server = await HttpServer.bind('127.0.0.1', 0);
+        addTearDown(() => server.close(force: true));
+        final provider = app.providerById('ollama-local')!;
+        final originals = {
+          'baseUrl': provider.baseUrl,
+          'models': provider.models,
+          'selectedModel': provider.selectedModel,
+        };
+        addTearDown(() {
+          provider
+            ..baseUrl = originals['baseUrl'] as String
+            ..models = originals['models'] as List<String>
+            ..selectedModel = originals['selectedModel'] as String?;
+        });
+        final session = ChatSession(
+          id: 'p8-sub',
+          title: 'sub',
+          providerId: provider.id,
+          model: 'test-model',
+          mode: 'auto',
+          messages: [Message(role: 'user', content: 'go')],
+        );
+        app.sessions.insert(0, session);
+        addTearDown(() => app.sessions.removeWhere((x) => x.id == session.id));
         provider
-          ..baseUrl = originals['baseUrl'] as String
-          ..models = originals['models'] as List<String>
-          ..selectedModel = originals['selectedModel'] as String?;
-      });
-      final session = ChatSession(
-        id: 'p8-sub',
-        title: 'sub',
-        providerId: provider.id,
-        model: 'test-model',
-        mode: 'auto',
-        messages: [Message(role: 'user', content: 'go')],
-      );
-      app.sessions.insert(0, session);
-      addTearDown(() => app.sessions.removeWhere((x) => x.id == session.id));
-      provider
-        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
-        ..models = ['test-model'];
+          ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+          ..models = ['test-model'];
 
-      p8Register('p8/sub-hooks', [
-        p8Hook('subagent_start', 'sub-start-cmd', ordinal: 0),
-        p8Hook('subagent_end', 'sub-end-cmd', ordinal: 0),
-      ]);
-      final events = <String>[];
-      final svc = HookService.I;
-      svc.executorForTest = (cmd, env) async {
-        if (env['PLUGIN_EVENT'] == 'subagent_start' ||
-            env['PLUGIN_EVENT'] == 'subagent_end') {
-          events.add(env['PLUGIN_EVENT']!);
-        }
-        return '';
-      };
-      addTearDown(() => svc.executorForTest = null);
+        p8Register('p8/sub-hooks', [
+          p8Hook('subagent_start', 'sub-start-cmd', ordinal: 0),
+          p8Hook('subagent_end', 'sub-end-cmd', ordinal: 0),
+        ]);
+        final events = <String>[];
+        final svc = HookService.I;
+        svc.executorForTest = (cmd, env) async {
+          if (env['PLUGIN_EVENT'] == 'subagent_start' ||
+              env['PLUGIN_EVENT'] == 'subagent_end') {
+            events.add(env['PLUGIN_EVENT']!);
+          }
+          return '';
+        };
+        addTearDown(() => svc.executorForTest = null);
 
-      var requestCount = 0;
-      final serverTask = () async {
-        await for (final request in server) {
-          await utf8.decoder.bind(request).join();
-          requestCount++;
-          request.response.headers.chunkedTransferEncoding = true;
-          request.response.add(
-            utf8.encode(
-              'data: ${jsonEncode({
-                'choices': [
-                  {
-                    'delta': {'content': 'child done'},
-                    'finish_reason': 'stop',
-                  },
-                ],
-              })}\n\n',
-            ),
-          );
-          await request.response.flush();
-          await request.response.close();
-        }
-      }();
-      unawaited(serverTask);
+        var requestCount = 0;
+        final serverTask = () async {
+          await for (final request in server) {
+            await utf8.decoder.bind(request).join();
+            requestCount++;
+            request.response.headers.chunkedTransferEncoding = true;
+            request.response.add(
+              utf8.encode(
+                'data: ${jsonEncode({
+                  'choices': [
+                    {
+                      'delta': {'content': 'child done'},
+                      'finish_reason': 'stop',
+                    },
+                  ],
+                })}\n\n',
+              ),
+            );
+            await request.response.flush();
+            await request.response.close();
+          }
+        }();
+        unawaited(serverTask);
 
-      // Dispatch a foreground subagent from the parent session.
-      AgentService.setRunSessionForTest(session.id);
-      addTearDown(() => AgentService.setRunSessionForTest(''));
-      final out = await agent
-          .dispatchForTest('dispatch_agent', {
-            'prompt': 'do the child task',
-            'label': 'p8 child',
-          })
-          .timeout(const Duration(seconds: 30));
-      // subagent_end fires fire-and-forget in the child's settle path.
-      await Future<void>.delayed(const Duration(milliseconds: 300));
-      expect(events, contains('subagent_start'));
-      expect(events, contains('subagent_end'));
-      expect(requestCount, greaterThanOrEqualTo(1));
-      expect(out, isNotEmpty);
-    }, timeout: const Timeout(Duration(seconds: 60)));
+        // Dispatch a foreground subagent from the parent session.
+        AgentService.setRunSessionForTest(session.id);
+        addTearDown(() => AgentService.setRunSessionForTest(''));
+        final out = await agent
+            .dispatchForTest('dispatch_agent', {
+              'prompt': 'do the child task',
+              'label': 'p8 child',
+            })
+            .timeout(const Duration(seconds: 30));
+        // subagent_end fires fire-and-forget in the child's settle path.
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        expect(events, contains('subagent_start'));
+        expect(events, contains('subagent_end'));
+        expect(requestCount, greaterThanOrEqualTo(1));
+        expect(out, isNotEmpty);
+      },
+      timeout: const Timeout(Duration(seconds: 60)),
+    );
 
     test('session_end fires when a session is deleted', () async {
       final app = AppState.I;
@@ -17873,12 +18071,14 @@ cwd = 'tools'
       app.sessions.insert(0, s);
       app.deleteSession(s.id);
       await Future<void>.delayed(const Duration(milliseconds: 200));
-      expect(fired, isTrue,
-          reason: 'deleting a session must fire session_end hooks');
+      expect(
+        fired,
+        isTrue,
+        reason: 'deleting a session must fire session_end hooks',
+      );
     });
 
-    test('hooks never execute via dispatch (registry ledger only)',
-        () async {
+    test('hooks never execute via dispatch (registry ledger only)', () async {
       p8Register('p8/no-dispatch', [
         p8Hook('notification', 'ledger-only', ordinal: 0),
       ]);
@@ -17888,8 +18088,15 @@ cwd = 'tools'
       );
       // The registry LEDDGERS hooks but refuses execution — same refusal
       // contract as PLUGIN4.
-      expect(res, anyOf(contains('unknown tool'), contains('not'),
-          contains('refus'), contains('Unknown')));
+      expect(
+        res,
+        anyOf(
+          contains('unknown tool'),
+          contains('not'),
+          contains('refus'),
+          contains('Unknown'),
+        ),
+      );
     });
 
     // Final-review I1: the dispatch-site guards must consult the REAL
@@ -17917,8 +18124,11 @@ cwd = 'tools'
         );
         app.sessions.insert(0, sessA);
         app.sessions.insert(0, sessB);
-        addTearDown(() => app.sessions.removeWhere(
-            (x) => x.id == 'p8-fr-a' || x.id == 'p8-fr-b'));
+        addTearDown(
+          () => app.sessions.removeWhere(
+            (x) => x.id == 'p8-fr-a' || x.id == 'p8-fr-b',
+          ),
+        );
 
         // The installing session's plugin: sessionActive for A, with a
         // gating pre_tool hook AND an observe post_tool hook.
@@ -17955,12 +18165,20 @@ cwd = 'tools'
         });
         expect(resA, contains('file not found'));
         await Future<void>.delayed(const Duration(milliseconds: 200));
-        expect(events, contains('gate:pre_tool'),
-            reason: 'the pre_tool gate must run in the installing session, '
-                'same boot, before one-restart promotion');
-        expect(events, contains('obs:post_tool'),
-            reason: 'the post_tool observe hook must fire in the installing '
-                'session, same boot');
+        expect(
+          events,
+          contains('gate:pre_tool'),
+          reason:
+              'the pre_tool gate must run in the installing session, '
+              'same boot, before one-restart promotion',
+        );
+        expect(
+          events,
+          contains('obs:post_tool'),
+          reason:
+              'the post_tool observe hook must fire in the installing '
+              'session, same boot',
+        );
 
         // Session B dispatches the same tool: the session-A-active plugin
         // must NOT fire there.
@@ -17971,8 +18189,11 @@ cwd = 'tools'
         });
         expect(resB, contains('file not found'));
         await Future<void>.delayed(const Duration(milliseconds: 200));
-        expect(events, isEmpty,
-            reason: 'a session-A-active plugin must not fire in session B');
+        expect(
+          events,
+          isEmpty,
+          reason: 'a session-A-active plugin must not fire in session B',
+        );
       },
     );
   });
@@ -18000,9 +18221,7 @@ cwd = 'tools'
       version: '1',
       format: PluginFormat.genericMcp,
       rootPath: '/runtime/$owner/content',
-      mcpServers: [
-        PluginMcpServer(pluginId: owner, name: serverName),
-      ],
+      mcpServers: [PluginMcpServer(pluginId: owner, name: serverName)],
     );
 
     void registerOwner(
@@ -18016,94 +18235,102 @@ cwd = 'tools'
         activation: activation,
         immediateSessionId: immediateSessionId,
       );
-      addTearDown(
-        () => PluginContributionRegistry.I.unregisterPlugin(owner),
-      );
+      addTearDown(() => PluginContributionRegistry.I.unregisterPlugin(owner));
     }
 
-    MockClient mcpHttpClient({String toolName = 'lookup'}) => MockClient((
-      request,
-    ) async {
-      final body = jsonDecode(request.body) as Map<String, dynamic>;
-      return http.Response(
-        jsonEncode({
-          'jsonrpc': '2.0',
-          'id': body['id'],
-          'result': body['method'] == 'tools/list'
-              ? {
-                  'tools': [
-                    {'name': toolName},
-                  ],
-                }
-              : body['method'] == 'tools/call'
-              ? {
-                  'content': [
-                    {'type': 'text', 'text': request.url.host},
-                  ],
-                }
-              : {},
-        }),
-        200,
-      );
-    });
-
-    test('owned servers fail closed unless their registry owner is active',
-        () async {
-      final states = <PluginActivation>[
-        PluginActivation.pendingGlobal,
-        PluginActivation.failed,
-        PluginActivation.disabled,
-      ];
-      var requests = 0;
-      McpService.I.httpClientForTest = MockClient((request) async {
-        requests++;
-        return http.Response('{}', 200);
-      });
-      addTearDown(() => McpService.I.httpClientForTest = null);
-
-      final unregistered = ownedServer('inactive/unregistered');
-      app.mcpServers.add(unregistered);
-      addTearDown(() => app.mcpServers.remove(unregistered));
-      expect(await McpService.I.connect(unregistered), contains('not active'));
-      expect(McpService.I.isConnected(unregistered.canonicalId), isFalse);
-
-      for (final state in states) {
-        final owner = 'inactive/${state.name}';
-        final server = ownedServer(owner, name: state.name);
-        app.mcpServers.add(server);
-        PluginContributionRegistry.I.register(
-          ownedManifest(owner, server.name),
-          activation: state,
-        );
-        addTearDown(() {
-          PluginContributionRegistry.I.unregisterPlugin(owner);
-          app.mcpServers.remove(server);
+    MockClient mcpHttpClient({String toolName = 'lookup'}) =>
+        MockClient((request) async {
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response(
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': body['id'],
+              'result': body['method'] == 'tools/list'
+                  ? {
+                      'tools': [
+                        {'name': toolName},
+                      ],
+                    }
+                  : body['method'] == 'tools/call'
+                  ? {
+                      'content': [
+                        {'type': 'text', 'text': request.url.host},
+                      ],
+                    }
+                  : {},
+            }),
+            200,
+          );
         });
-        expect(await McpService.I.connect(server), contains('not active'));
-        expect(McpService.I.isConnected(server.canonicalId), isFalse);
-      }
-      expect(requests, 0, reason: 'inactive owners must never dial');
-    });
 
-    test('unregistered owned servers are absent from roster and guessed calls',
-        () async {
-      final server = ownedServer('disabled/plugin');
-      app.mcpServers.add(server);
-      addTearDown(() => app.mcpServers.remove(server));
-      final canonical = McpConnectedTool(
-        server,
-        McpToolDef(name: 'lookup'),
-      ).canonicalToolName;
+    test(
+      'owned servers fail closed unless their registry owner is active',
+      () async {
+        final states = <PluginActivation>[
+          PluginActivation.pendingGlobal,
+          PluginActivation.failed,
+          PluginActivation.disabled,
+        ];
+        var requests = 0;
+        McpService.I.httpClientForTest = MockClient((request) async {
+          requests++;
+          return http.Response('{}', 200);
+        });
+        addTearDown(() => McpService.I.httpClientForTest = null);
 
-      final names = AgentService.I.toolsForTest()
-          .map((t) => ((t['function'] as Map?) ?? {})['name'])
-          .whereType<String>();
-      expect(names, isNot(contains(canonical)));
-      expect(names, isNot(contains('mcp_disabled_plugin_shared')));
-      final guessed = await AgentService.I.dispatchForTest(canonical, {});
-      expect(guessed, isNot(contains('disabled/plugin.example')));
-      expect(guessed, anyOf(contains('not active'), contains('not configured')));
-    });
+        final unregistered = ownedServer('inactive/unregistered');
+        app.mcpServers.add(unregistered);
+        addTearDown(() => app.mcpServers.remove(unregistered));
+        expect(
+          await McpService.I.connect(unregistered),
+          contains('not active'),
+        );
+        expect(McpService.I.isConnected(unregistered.canonicalId), isFalse);
+
+        for (final state in states) {
+          final owner = 'inactive/${state.name}';
+          final server = ownedServer(owner, name: state.name);
+          app.mcpServers.add(server);
+          PluginContributionRegistry.I.register(
+            ownedManifest(owner, server.name),
+            activation: state,
+          );
+          addTearDown(() {
+            PluginContributionRegistry.I.unregisterPlugin(owner);
+            app.mcpServers.remove(server);
+          });
+          expect(await McpService.I.connect(server), contains('not active'));
+          expect(McpService.I.isConnected(server.canonicalId), isFalse);
+        }
+        expect(requests, 0, reason: 'inactive owners must never dial');
+      },
+    );
+
+    test(
+      'unregistered owned servers are absent from roster and guessed calls',
+      () async {
+        final server = ownedServer('disabled/plugin');
+        app.mcpServers.add(server);
+        addTearDown(() => app.mcpServers.remove(server));
+        final canonical = McpConnectedTool(
+          server,
+          McpToolDef(name: 'lookup'),
+        ).canonicalToolName;
+
+        final names = AgentService.I
+            .toolsForTest()
+            .map((t) => ((t['function'] as Map?) ?? {})['name'])
+            .whereType<String>();
+        expect(names, isNot(contains(canonical)));
+        expect(names, isNot(contains('mcp_disabled_plugin_shared')));
+        final guessed = await AgentService.I.dispatchForTest(canonical, {});
+        expect(guessed, isNot(contains('disabled/plugin.example')));
+        expect(
+          guessed,
+          anyOf(contains('not active'), contains('not configured')),
+        );
+      },
+    );
 
     test('canonical provider names do not flatten punctuation collisions', () {
       final dotted = ownedServer('collision/foo.bar', name: 'api');
@@ -18117,8 +18344,10 @@ cwd = 'tools'
         McpToolDef(name: 'read/file'),
       );
 
-      expect(dottedTool.canonicalToolName,
-          isNot(slashedTool.canonicalToolName));
+      expect(
+        dottedTool.canonicalToolName,
+        isNot(slashedTool.canonicalToolName),
+      );
       expect(
         McpService.providerServerToolName(dotted),
         isNot(McpService.providerServerToolName(slashed)),
@@ -18145,7 +18374,8 @@ cwd = 'tools'
         PluginContributionRegistry.I.unregisterPlugin('collision/foo.bar');
         PluginContributionRegistry.I.unregisterPlugin('collision/foo/bar');
       });
-      final stubs = AgentService.I.toolsForTest()
+      final stubs = AgentService.I
+          .toolsForTest()
           .map((t) => ((t['function'] as Map?) ?? {})['name'])
           .whereType<String>();
       expect(stubs, contains(McpService.providerServerToolName(dotted)));
@@ -18158,10 +18388,10 @@ cwd = 'tools'
       final toolA = McpConnectedTool(a, McpToolDef(name: 'lookup'));
       final toolB = McpConnectedTool(b, McpToolDef(name: 'lookup'));
       expect(
-        McpService.resolveToolEntriesForTest(
-          toolA.canonicalToolName,
-          [toolA, toolB],
-        ),
+        McpService.resolveToolEntriesForTest(toolA.canonicalToolName, [
+          toolA,
+          toolB,
+        ]),
         isNull,
       );
     });
@@ -18175,369 +18405,419 @@ cwd = 'tools'
         app.mcpServers.removeWhere((s) => identical(s, a) || identical(s, b));
       });
 
-      final names = AgentService.I.toolsForTest()
+      final names = AgentService.I
+          .toolsForTest()
           .map((t) => ((t['function'] as Map?) ?? {})['name'])
           .whereType<String>();
       expect(names, isNot(contains(McpService.providerServerToolName(a))));
     });
 
-    test('hidden disconnected provider does not suppress visible legacy alias',
-        () {
-      final visible = ownedServer('alias/visible');
-      final hidden = ownedServer('alias/hidden');
-      app.mcpServers.addAll([visible, hidden]);
-      registerOwner(
-        'alias/visible',
-        activation: PluginActivation.sessionActive,
-        immediateSessionId: 'p9-alias-visible',
-      );
-      registerOwner(
-        'alias/hidden',
-        activation: PluginActivation.sessionActive,
-        immediateSessionId: 'p9-alias-hidden',
-      );
-      final session = ChatSession(
-        id: 'p9-alias-visible',
-        title: 'visible',
-        model: 'm',
-      );
-      app.sessions.add(session);
-      AgentService.setRunSessionForTest(session.id);
-      addTearDown(() {
-        AgentService.setRunSessionForTest('');
-        app.sessions.remove(session);
-        app.mcpServers.removeWhere(
-          (server) => identical(server, visible) || identical(server, hidden),
+    test(
+      'hidden disconnected provider does not suppress visible legacy alias',
+      () {
+        final visible = ownedServer('alias/visible');
+        final hidden = ownedServer('alias/hidden');
+        app.mcpServers.addAll([visible, hidden]);
+        registerOwner(
+          'alias/visible',
+          activation: PluginActivation.sessionActive,
+          immediateSessionId: 'p9-alias-visible',
         );
-      });
-
-      final names = AgentService.I.toolsForTest()
-          .map((tool) => ((tool['function'] as Map?) ?? {})['name'])
-          .whereType<String>();
-
-      expect(names, contains('mcp_shared'));
-    });
-
-    test('advertised encoded disconnected stub connects intended server',
-        () async {
-      final server = ownedServer('encoded/plugin', name: 'remote');
-      registerOwner('encoded/plugin', serverName: 'remote');
-      app.mcpServers.add(server);
-      final session = ChatSession(
-        id: 'p9-encoded-session',
-        title: 'encoded',
-        model: 'm',
-      );
-      app.sessions.add(session);
-      AgentService.setRunSessionForTest(session.id);
-      McpService.I.httpClientForTest = mcpHttpClient(toolName: 'lookup');
-      addTearDown(() async {
-        AgentService.setRunSessionForTest('');
-        app.sessions.remove(session);
-        app.mcpServers.remove(server);
-        await McpService.I.disconnect(server.canonicalId);
-        McpService.I.httpClientForTest = null;
-      });
-      final names = AgentService.I.toolsForTest()
-          .map((tool) => ((tool['function'] as Map?) ?? {})['name'])
-          .whereType<String>()
-          .toList();
-      final stub = McpService.providerServerToolName(server);
-      expect(names, contains(stub));
-
-      final result = await AgentService.I.dispatchForTest(stub, {
-        'action': 'lookup',
-        'args': <String, dynamic>{},
-      });
-
-      expect(result, 'encoded');
-      expect(McpService.I.isConnected(server.canonicalId), isTrue);
-    });
-
-    test('ownerless legacy stub cannot be captured by encoded lookup',
-        () async {
-      final encodedTarget = McpServer(
-        name: 'target_server',
-        author: 'you',
-        description: '',
-        category: 'Custom',
-        command: '',
-        transport: 'http',
-        url: 'https://wrong-target.example/mcp',
-        custom: true,
-      );
-      final advertisedName =
-          McpService.providerServerToolName(encodedTarget).substring(4);
-      final advertised = McpServer(
-        name: advertisedName,
-        author: 'you',
-        description: '',
-        category: 'Custom',
-        command: '',
-        transport: 'http',
-        url: 'https://actual-legacy.example/mcp',
-        custom: true,
-      );
-      app.mcpServers.addAll([advertised, encodedTarget]);
-      McpService.I.httpClientForTest = mcpHttpClient();
-      addTearDown(() async {
-        app.mcpServers.removeWhere(
-          (server) =>
-              identical(server, advertised) || identical(server, encodedTarget),
+        registerOwner(
+          'alias/hidden',
+          activation: PluginActivation.sessionActive,
+          immediateSessionId: 'p9-alias-hidden',
         );
-        await McpService.I.disconnect(advertised.canonicalId);
-        await McpService.I.disconnect(encodedTarget.canonicalId);
-        McpService.I.httpClientForTest = null;
-      });
-      final advertisedTool = 'mcp_$advertisedName';
-      final names = AgentService.I.toolsForTest()
-          .map((tool) => ((tool['function'] as Map?) ?? {})['name'])
-          .whereType<String>();
-      expect(names, contains(advertisedTool));
-
-      final result = await AgentService.I.dispatchForTest(advertisedTool, {
-        'action': 'lookup',
-        'args': <String, dynamic>{},
-      });
-
-      expect(result, 'actual-legacy.example');
-      expect(McpService.I.isConnected(advertised.canonicalId), isTrue);
-      expect(McpService.I.isConnected(encodedTarget.canonicalId), isFalse);
-    });
-
-    test('provider names are bounded stable distinct and dispatchable',
-        () async {
-      final longOwner = 'publisher/${'very-long-plugin-segment-' * 8}';
-      final serverA = ownedServer(
-        longOwner,
-        name: '${'long-server-name-' * 8}a',
-      );
-      final serverB = ownedServer(
-        longOwner,
-        name: '${'long-server-name-' * 8}b',
-      );
-      final toolName = '${'very-long-tool-name-' * 8}lookup';
-      registerOwner(longOwner, serverName: serverA.name);
-      app.mcpServers.addAll([serverA, serverB]);
-      final session = ChatSession(
-        id: 'p9-long-name-session',
-        title: 'long names',
-        model: 'm',
-      );
-      app.sessions.add(session);
-      AgentService.setRunSessionForTest(session.id);
-      McpService.I.httpClientForTest = mcpHttpClient(toolName: toolName);
-      addTearDown(() async {
-        AgentService.setRunSessionForTest('');
-        app.sessions.remove(session);
-        app.mcpServers.removeWhere(
-          (server) => identical(server, serverA) || identical(server, serverB),
+        final session = ChatSession(
+          id: 'p9-alias-visible',
+          title: 'visible',
+          model: 'm',
         );
-        await McpService.I.disconnect(serverA.canonicalId);
-        await McpService.I.disconnect(serverB.canonicalId);
-        McpService.I.httpClientForTest = null;
-      });
+        app.sessions.add(session);
+        AgentService.setRunSessionForTest(session.id);
+        addTearDown(() {
+          AgentService.setRunSessionForTest('');
+          app.sessions.remove(session);
+          app.mcpServers.removeWhere(
+            (server) => identical(server, visible) || identical(server, hidden),
+          );
+        });
 
-      final stubA = McpService.providerServerToolName(serverA);
-      final stubAAgain = McpService.providerServerToolName(serverA);
-      final stubB = McpService.providerServerToolName(serverB);
-      expect(stubA.length, lessThanOrEqualTo(64));
-      expect(RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(stubA), isTrue);
-      expect(stubAAgain, stubA);
-      expect(stubB, isNot(stubA));
+        final names = AgentService.I
+            .toolsForTest()
+            .map((tool) => ((tool['function'] as Map?) ?? {})['name'])
+            .whereType<String>();
 
-      expect(await McpService.I.connect(serverA), contains('connected'));
-      final connected = McpService.I.connectedToolEntries.singleWhere(
-        (entry) => entry.server.canonicalId == serverA.canonicalId,
-      );
-      expect(connected.canonicalToolName.length, lessThanOrEqualTo(64));
-      expect(
-        RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(connected.canonicalToolName),
-        isTrue,
-      );
-      expect(
-        McpService.I.resolveToolName(connected.canonicalToolName)?.canonicalId,
-        connected.canonicalId,
-      );
-      expect(
-        await AgentService.I.dispatchForTest(connected.canonicalToolName, {}),
-        'publisher',
-      );
+        expect(names, contains('mcp_shared'));
+      },
+    );
 
-      expect(await McpService.I.connect(serverB), contains('connected'));
-      final connectedB = McpService.I.connectedToolEntries.singleWhere(
-        (entry) => entry.server.canonicalId == serverB.canonicalId,
-      );
-      expect(connectedB.canonicalToolName.length, lessThanOrEqualTo(64));
-      expect(connectedB.canonicalToolName, isNot(connected.canonicalToolName));
-      expect(
-        McpService.I.resolveToolName(connectedB.canonicalToolName)?.canonicalId,
-        connectedB.canonicalId,
-      );
-    });
+    test(
+      'advertised encoded disconnected stub connects intended server',
+      () async {
+        final server = ownedServer('encoded/plugin', name: 'remote');
+        registerOwner('encoded/plugin', serverName: 'remote');
+        app.mcpServers.add(server);
+        final session = ChatSession(
+          id: 'p9-encoded-session',
+          title: 'encoded',
+          model: 'm',
+        );
+        app.sessions.add(session);
+        AgentService.setRunSessionForTest(session.id);
+        McpService.I.httpClientForTest = mcpHttpClient(toolName: 'lookup');
+        addTearDown(() async {
+          AgentService.setRunSessionForTest('');
+          app.sessions.remove(session);
+          app.mcpServers.remove(server);
+          await McpService.I.disconnect(server.canonicalId);
+          McpService.I.httpClientForTest = null;
+        });
+        final names = AgentService.I
+            .toolsForTest()
+            .map((tool) => ((tool['function'] as Map?) ?? {})['name'])
+            .whereType<String>()
+            .toList();
+        final stub = McpService.providerServerToolName(server);
+        expect(names, contains(stub));
 
-    test('enabling pendingGlobal keeps owned MCP unmounted until restart',
-        () async {
-      final root = Directory.systemTemp.createTempSync('ovid-p9-pending-');
-      final owner = 'pending/plugin';
-      final manifest = NormalizedPluginManifest(
-        id: owner,
-        name: 'Pending',
-        version: '1',
-        format: PluginFormat.genericMcp,
-        rootPath: root.path,
-        mcpServers: [
-          PluginMcpServer(
-            pluginId: owner,
-            name: 'api',
-            transport: 'http',
-            url: 'https://pending.example/mcp',
-          ),
-        ],
-      );
+        final result = await AgentService.I.dispatchForTest(stub, {
+          'action': 'lookup',
+          'args': <String, dynamic>{},
+        });
+
+        expect(result, 'encoded');
+        expect(McpService.I.isConnected(server.canonicalId), isTrue);
+      },
+    );
+
+    test(
+      'ownerless legacy stub cannot be captured by encoded lookup',
+      () async {
+        final encodedTarget = McpServer(
+          name: 'target_server',
+          author: 'you',
+          description: '',
+          category: 'Custom',
+          command: '',
+          transport: 'http',
+          url: 'https://wrong-target.example/mcp',
+          custom: true,
+        );
+        final advertisedName = McpService.providerServerToolName(
+          encodedTarget,
+        ).substring(4);
+        final advertised = McpServer(
+          name: advertisedName,
+          author: 'you',
+          description: '',
+          category: 'Custom',
+          command: '',
+          transport: 'http',
+          url: 'https://actual-legacy.example/mcp',
+          custom: true,
+        );
+        app.mcpServers.addAll([advertised, encodedTarget]);
+        McpService.I.httpClientForTest = mcpHttpClient();
+        addTearDown(() async {
+          app.mcpServers.removeWhere(
+            (server) =>
+                identical(server, advertised) ||
+                identical(server, encodedTarget),
+          );
+          await McpService.I.disconnect(advertised.canonicalId);
+          await McpService.I.disconnect(encodedTarget.canonicalId);
+          McpService.I.httpClientForTest = null;
+        });
+        final advertisedTool = 'mcp_$advertisedName';
+        final names = AgentService.I
+            .toolsForTest()
+            .map((tool) => ((tool['function'] as Map?) ?? {})['name'])
+            .whereType<String>();
+        expect(names, contains(advertisedTool));
+
+        final result = await AgentService.I.dispatchForTest(advertisedTool, {
+          'action': 'lookup',
+          'args': <String, dynamic>{},
+        });
+
+        expect(result, 'actual-legacy.example');
+        expect(McpService.I.isConnected(advertised.canonicalId), isTrue);
+        expect(McpService.I.isConnected(encodedTarget.canonicalId), isFalse);
+      },
+    );
+
+    test(
+      'provider names are bounded stable distinct and dispatchable',
+      () async {
+        final longOwner = 'publisher/${'very-long-plugin-segment-' * 8}';
+        final serverA = ownedServer(
+          longOwner,
+          name: '${'long-server-name-' * 8}a',
+        );
+        final serverB = ownedServer(
+          longOwner,
+          name: '${'long-server-name-' * 8}b',
+        );
+        final toolName = '${'very-long-tool-name-' * 8}lookup';
+        registerOwner(longOwner, serverName: serverA.name);
+        app.mcpServers.addAll([serverA, serverB]);
+        final session = ChatSession(
+          id: 'p9-long-name-session',
+          title: 'long names',
+          model: 'm',
+        );
+        app.sessions.add(session);
+        AgentService.setRunSessionForTest(session.id);
+        McpService.I.httpClientForTest = mcpHttpClient(toolName: toolName);
+        addTearDown(() async {
+          AgentService.setRunSessionForTest('');
+          app.sessions.remove(session);
+          app.mcpServers.removeWhere(
+            (server) =>
+                identical(server, serverA) || identical(server, serverB),
+          );
+          await McpService.I.disconnect(serverA.canonicalId);
+          await McpService.I.disconnect(serverB.canonicalId);
+          McpService.I.httpClientForTest = null;
+        });
+
+        final stubA = McpService.providerServerToolName(serverA);
+        final stubAAgain = McpService.providerServerToolName(serverA);
+        final stubB = McpService.providerServerToolName(serverB);
+        expect(stubA.length, lessThanOrEqualTo(64));
+        expect(RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(stubA), isTrue);
+        expect(stubAAgain, stubA);
+        expect(stubB, isNot(stubA));
+
+        expect(await McpService.I.connect(serverA), contains('connected'));
+        final connected = McpService.I.connectedToolEntries.singleWhere(
+          (entry) => entry.server.canonicalId == serverA.canonicalId,
+        );
+        expect(connected.canonicalToolName.length, lessThanOrEqualTo(64));
+        expect(
+          RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(connected.canonicalToolName),
+          isTrue,
+        );
+        expect(
+          McpService.I
+              .resolveToolName(connected.canonicalToolName)
+              ?.canonicalId,
+          connected.canonicalId,
+        );
+        expect(
+          await AgentService.I.dispatchForTest(connected.canonicalToolName, {}),
+          'publisher',
+        );
+
+        expect(await McpService.I.connect(serverB), contains('connected'));
+        final connectedB = McpService.I.connectedToolEntries.singleWhere(
+          (entry) => entry.server.canonicalId == serverB.canonicalId,
+        );
+        expect(connectedB.canonicalToolName.length, lessThanOrEqualTo(64));
+        expect(
+          connectedB.canonicalToolName,
+          isNot(connected.canonicalToolName),
+        );
+        expect(
+          McpService.I
+              .resolveToolName(connectedB.canonicalToolName)
+              ?.canonicalId,
+          connectedB.canonicalId,
+        );
+      },
+    );
+
+    test(
+      'enabling pendingGlobal keeps owned MCP unmounted until restart',
+      () async {
+        final root = Directory.systemTemp.createTempSync('ovid-p9-pending-');
+        final owner = 'pending/plugin';
+        final manifest = NormalizedPluginManifest(
+          id: owner,
+          name: 'Pending',
+          version: '1',
+          format: PluginFormat.genericMcp,
+          rootPath: root.path,
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: owner,
+              name: 'api',
+              transport: 'http',
+              url: 'https://pending.example/mcp',
+            ),
+          ],
+        );
       final entry = PluginInstallEntry(
-        activation: PluginActivationRecord(
-          pluginId: owner,
-          state: PluginActivation.pendingGlobal,
-          installedBootEpoch: 999999,
-          promoteOnNextBoot: true,
-        ),
-        manifest: manifest,
-        contentDir: root.path,
-        version: '1',
-        disabled: true,
-      );
-      final prefs = await SharedPreferences.getInstance();
+          activation: PluginActivationRecord(
+            pluginId: owner,
+            state: PluginActivation.pendingGlobal,
+            installedBootEpoch: 999999,
+            promoteOnNextBoot: true,
+          ),
+          manifest: manifest,
+          contentDir: root.path,
+          version: '1',
+          disabled: true,
+        );
+        final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
         kPluginActivationPrefKey,
         jsonEncode({owner: jsonEncode(entry.toJson())}),
       );
-      var requests = 0;
-      McpService.I.httpClientForTest = MockClient((request) async {
-        requests++;
-        return http.Response('{}', 200);
-      });
-      addTearDown(() async {
-        await PluginRuntimeManager.I.uninstall(owner);
-        McpService.I.httpClientForTest = null;
-        if (root.existsSync()) root.deleteSync(recursive: true);
-      });
-
-      await PluginRuntimeManager.I.enable(owner);
-
-      expect(PluginContributionRegistry.I.activationFor(owner),
-          PluginActivation.pendingGlobal);
-      expect(app.mcpServers.any((s) => s.ownerPluginId == owner), isFalse);
-      expect(requests, 0);
-    });
-
-    test('upgrade prunes removed owned declarations and their secrets',
-        () async {
-      final keep = ownedServer('upgrade/prune', name: 'keep');
-      final removed = ownedServer('upgrade/prune', name: 'removed');
-      final unrelated = ownedServer('other/plugin', name: 'removed');
-      app.mcpServers.addAll([keep, removed, unrelated]);
-      await app.setMcpEnv(removed.canonicalId, {'TOKEN': 'secret'});
-      await app.setMcpHeaders(removed.canonicalId, {'Authorization': 'secret'});
-      final manifest = ownedManifest('upgrade/prune', 'keep');
-      addTearDown(() {
-        app.mcpServers.removeWhere(
-          (s) => identical(s, keep) || identical(s, unrelated),
-        );
-      });
-
-      await app.mountPluginOwnedMcpServers(manifest, connect: false);
-
-      expect(app.mcpServers, contains(keep));
-      expect(app.mcpServers, contains(unrelated));
-      expect(app.mcpServers, isNot(contains(removed)));
-      expect(await app.getMcpEnv(removed.canonicalId), isEmpty);
-      expect(await app.getMcpHeaders(removed.canonicalId), isEmpty);
-      expect(McpService.I.hasPendingReconnectForTest(removed.canonicalId),
-          isFalse);
-    });
-
-    test('owned cwd rejects absolute and symlink escapes at spawn boundary',
-        () {
-      final root = Directory.systemTemp.createTempSync('ovid-p9-cwd-root-');
-      final inside = Directory('${root.path}/inside')..createSync();
-      final outside = Directory.systemTemp.createTempSync('ovid-p9-outside-');
-      final link = Link('${root.path}/escape')..createSync(outside.path);
-      final server = ownedServer('cwd/plugin')
-        ..pluginRuntimeRoot = root.path;
-      PluginContributionRegistry.I.register(
-        NormalizedPluginManifest(
-          id: 'cwd/plugin',
-          name: 'cwd',
-          version: '1',
-          format: PluginFormat.genericMcp,
-          rootPath: '${root.path}/content',
+      await PluginPermissionStore().save(
+        PluginPermissionGrant(
+          pluginId: owner,
+          manifestDigest: pluginManifestDigest(manifest),
+          capabilities: inferRequestedCapabilities(manifest),
+          approvedAt: DateTime.now(),
         ),
-        activation: PluginActivation.globalActive,
       );
-      addTearDown(() {
-        PluginContributionRegistry.I.unregisterPlugin('cwd/plugin');
-        root.deleteSync(recursive: true);
-        outside.deleteSync(recursive: true);
-      });
+        var requests = 0;
+        McpService.I.httpClientForTest = MockClient((request) async {
+          requests++;
+          return http.Response('{}', 200);
+        });
+        addTearDown(() async {
+          await PluginRuntimeManager.I.uninstall(owner);
+          McpService.I.httpClientForTest = null;
+          if (root.existsSync()) root.deleteSync(recursive: true);
+        });
 
-      server.cwd = inside.path;
-      expect(McpService.resolveWorkingDirectoryForTest(server)?.path,
-          inside.resolveSymbolicLinksSync());
-      server.cwd = outside.path;
-      expect(() => McpService.resolveWorkingDirectoryForTest(server),
-          throwsStateError);
-      server.cwd = link.path;
-      expect(() => McpService.resolveWorkingDirectoryForTest(server),
-          throwsStateError);
-    });
+        await PluginRuntimeManager.I.enable(owner);
 
-    test('legacy alias resolves against visible providers for running session',
-        () async {
-      final a = ownedServer('alias/session-a');
-      final b = ownedServer('alias/session-b');
-      a.url = 'https://session-a.example/mcp';
-      b.url = 'https://session-b.example/mcp';
-      app.mcpServers.addAll([a, b]);
-      PluginContributionRegistry.I.register(
-        ownedManifest('alias/session-a', 'shared'),
-        activation: PluginActivation.sessionActive,
-        immediateSessionId: 'p9-alias-a',
-      );
-      PluginContributionRegistry.I.register(
-        ownedManifest('alias/session-b', 'shared'),
-        activation: PluginActivation.sessionActive,
-        immediateSessionId: 'p9-alias-b',
-      );
-      final sessions = [
-        ChatSession(id: 'p9-alias-a', title: 'a', model: 'm'),
-        ChatSession(id: 'p9-alias-b', title: 'b', model: 'm'),
-      ];
-      app.sessions.addAll(sessions);
-      McpService.I.httpClientForTest = mcpHttpClient();
-      await McpService.I.connect(a);
-      await McpService.I.connect(b);
-      addTearDown(() async {
-        AgentService.setRunSessionForTest('');
-        app.sessions.removeWhere((s) => sessions.contains(s));
-        app.mcpServers.removeWhere((s) => identical(s, a) || identical(s, b));
-        PluginContributionRegistry.I.unregisterPlugin('alias/session-a');
-        PluginContributionRegistry.I.unregisterPlugin('alias/session-b');
-        await McpService.I.disconnect(a.canonicalId);
-        await McpService.I.disconnect(b.canonicalId);
-        McpService.I.httpClientForTest = null;
-      });
+        expect(
+          PluginContributionRegistry.I.activationFor(owner),
+          PluginActivation.pendingGlobal,
+        );
+        expect(app.mcpServers.any((s) => s.ownerPluginId == owner), isFalse);
+        expect(requests, 0);
+      },
+    );
 
-      AgentService.setRunSessionForTest('p9-alias-a');
-      final result = await AgentService.I.dispatchForTest(
-        'mcp__shared__lookup',
-        {},
-      );
-      expect(result, 'session-a.example');
-    });
+    test(
+      'upgrade prunes removed owned declarations and their secrets',
+      () async {
+        final keep = ownedServer('upgrade/prune', name: 'keep');
+        final removed = ownedServer('upgrade/prune', name: 'removed');
+        final unrelated = ownedServer('other/plugin', name: 'removed');
+        app.mcpServers.addAll([keep, removed, unrelated]);
+        await app.setMcpEnv(removed.canonicalId, {'TOKEN': 'secret'});
+        await app.setMcpHeaders(removed.canonicalId, {
+          'Authorization': 'secret',
+        });
+        final manifest = ownedManifest('upgrade/prune', 'keep');
+        addTearDown(() {
+          app.mcpServers.removeWhere(
+            (s) => identical(s, keep) || identical(s, unrelated),
+          );
+        });
 
-    testWidgets('owned MCP UI status and editor use canonical keys',
-        (tester) async {
+        await app.mountPluginOwnedMcpServers(manifest, connect: false);
+
+        expect(app.mcpServers, contains(keep));
+        expect(app.mcpServers, contains(unrelated));
+        expect(app.mcpServers, isNot(contains(removed)));
+        expect(await app.getMcpEnv(removed.canonicalId), isEmpty);
+        expect(await app.getMcpHeaders(removed.canonicalId), isEmpty);
+        expect(
+          McpService.I.hasPendingReconnectForTest(removed.canonicalId),
+          isFalse,
+        );
+      },
+    );
+
+    test(
+      'owned cwd rejects absolute and symlink escapes at spawn boundary',
+      () {
+        final root = Directory.systemTemp.createTempSync('ovid-p9-cwd-root-');
+        final inside = Directory('${root.path}/inside')..createSync();
+        final outside = Directory.systemTemp.createTempSync('ovid-p9-outside-');
+        final link = Link('${root.path}/escape')..createSync(outside.path);
+        final server = ownedServer('cwd/plugin')..pluginRuntimeRoot = root.path;
+        PluginContributionRegistry.I.register(
+          NormalizedPluginManifest(
+            id: 'cwd/plugin',
+            name: 'cwd',
+            version: '1',
+            format: PluginFormat.genericMcp,
+            rootPath: '${root.path}/content',
+          ),
+          activation: PluginActivation.globalActive,
+        );
+        addTearDown(() {
+          PluginContributionRegistry.I.unregisterPlugin('cwd/plugin');
+          root.deleteSync(recursive: true);
+          outside.deleteSync(recursive: true);
+        });
+
+        server.cwd = inside.path;
+        expect(
+          McpService.resolveWorkingDirectoryForTest(server)?.path,
+          inside.resolveSymbolicLinksSync(),
+        );
+        server.cwd = outside.path;
+        expect(
+          () => McpService.resolveWorkingDirectoryForTest(server),
+          throwsStateError,
+        );
+        server.cwd = link.path;
+        expect(
+          () => McpService.resolveWorkingDirectoryForTest(server),
+          throwsStateError,
+        );
+      },
+    );
+
+    test(
+      'legacy alias resolves against visible providers for running session',
+      () async {
+        final a = ownedServer('alias/session-a');
+        final b = ownedServer('alias/session-b');
+        a.url = 'https://session-a.example/mcp';
+        b.url = 'https://session-b.example/mcp';
+        app.mcpServers.addAll([a, b]);
+        PluginContributionRegistry.I.register(
+          ownedManifest('alias/session-a', 'shared'),
+          activation: PluginActivation.sessionActive,
+          immediateSessionId: 'p9-alias-a',
+        );
+        PluginContributionRegistry.I.register(
+          ownedManifest('alias/session-b', 'shared'),
+          activation: PluginActivation.sessionActive,
+          immediateSessionId: 'p9-alias-b',
+        );
+        final sessions = [
+          ChatSession(id: 'p9-alias-a', title: 'a', model: 'm'),
+          ChatSession(id: 'p9-alias-b', title: 'b', model: 'm'),
+        ];
+        app.sessions.addAll(sessions);
+        McpService.I.httpClientForTest = mcpHttpClient();
+        await McpService.I.connect(a);
+        await McpService.I.connect(b);
+        addTearDown(() async {
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere((s) => sessions.contains(s));
+          app.mcpServers.removeWhere((s) => identical(s, a) || identical(s, b));
+          PluginContributionRegistry.I.unregisterPlugin('alias/session-a');
+          PluginContributionRegistry.I.unregisterPlugin('alias/session-b');
+          await McpService.I.disconnect(a.canonicalId);
+          await McpService.I.disconnect(b.canonicalId);
+          McpService.I.httpClientForTest = null;
+        });
+
+        AgentService.setRunSessionForTest('p9-alias-a');
+        final result = await AgentService.I.dispatchForTest(
+          'mcp__shared__lookup',
+          {},
+        );
+        expect(result, 'session-a.example');
+      },
+    );
+
+    testWidgets('owned MCP UI status and editor use canonical keys', (
+      tester,
+    ) async {
       final server = ownedServer('ui/plugin', name: 'shared');
       app.updateServiceStatus(
         'mcp:${server.canonicalId}',
@@ -18683,37 +18963,39 @@ cwd = 'tools'
       },
     );
 
-    test('owned HTTP connection reads headers from its canonical secret key',
-        () async {
-      final server = ownedServer('header/plugin', name: 'remote')
-        ..requiredHeaderNames = ['Authorization'];
-      registerOwner('header/plugin', serverName: 'remote');
-      await app.setMcpHeaders(server.canonicalId, {
-        'Authorization': 'Bearer owner-secret',
-      });
-      final seen = <String?>[];
-      McpService.I.httpClientForTest = MockClient((request) async {
-        seen.add(request.headers['Authorization']);
-        final body = jsonDecode(request.body) as Map<String, dynamic>;
-        return http.Response(
-          jsonEncode({
-            'jsonrpc': '2.0',
-            'id': body['id'],
-            'result': body['method'] == 'tools/list' ? {'tools': []} : {},
-          }),
-          200,
-        );
-      });
-      addTearDown(() async {
-        await McpService.I.disconnect(server.canonicalId);
-        await app.deleteMcpHeaders(server.canonicalId);
-        McpService.I.httpClientForTest = null;
-      });
+    test(
+      'owned HTTP connection reads headers from its canonical secret key',
+      () async {
+        final server = ownedServer('header/plugin', name: 'remote')
+          ..requiredHeaderNames = ['Authorization'];
+        registerOwner('header/plugin', serverName: 'remote');
+        await app.setMcpHeaders(server.canonicalId, {
+          'Authorization': 'Bearer owner-secret',
+        });
+        final seen = <String?>[];
+        McpService.I.httpClientForTest = MockClient((request) async {
+          seen.add(request.headers['Authorization']);
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response(
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': body['id'],
+              'result': body['method'] == 'tools/list' ? {'tools': []} : {},
+            }),
+            200,
+          );
+        });
+        addTearDown(() async {
+          await McpService.I.disconnect(server.canonicalId);
+          await app.deleteMcpHeaders(server.canonicalId);
+          McpService.I.httpClientForTest = null;
+        });
 
-      expect(await McpService.I.connect(server), contains('connected'));
-      expect(seen, isNotEmpty);
-      expect(seen.every((value) => value == 'Bearer owner-secret'), isTrue);
-    });
+        expect(await McpService.I.connect(server), contains('connected'));
+        expect(seen, isNotEmpty);
+        expect(seen.every((value) => value == 'Bearer owner-secret'), isTrue);
+      },
+    );
 
     test('activation mounts and connects a configured owned server', () async {
       final root = Directory.systemTemp.createTempSync('ovid-p9-runtime-');
@@ -18776,181 +19058,186 @@ cwd = 'tools'
       );
     });
 
-    test('remount replaces an owned server with the upgraded definition',
-        () async {
-      final old = ownedServer('upgrade/plugin', name: 'api')
-        ..command = 'old-command'
-        ..transport = 'stdio'
-        ..url = null;
-      app.mcpServers.add(old);
-      addTearDown(() => app.mcpServers.remove(old));
-      final manifest = NormalizedPluginManifest(
-        id: 'upgrade/plugin',
-        name: 'Upgrade',
-        version: '2',
-        format: PluginFormat.genericMcp,
-        rootPath: '/runtime/v2/content',
-        mcpServers: const [
-          PluginMcpServer(
-            pluginId: 'upgrade/plugin',
-            name: 'api',
-            transport: 'http',
-            url: 'https://v2.example/mcp',
-            headerNames: ['Authorization'],
-          ),
-        ],
-      );
+    test(
+      'remount replaces an owned server with the upgraded definition',
+      () async {
+        final old = ownedServer('upgrade/plugin', name: 'api')
+          ..command = 'old-command'
+          ..transport = 'stdio'
+          ..url = null;
+        app.mcpServers.add(old);
+        addTearDown(() => app.mcpServers.remove(old));
+        final manifest = NormalizedPluginManifest(
+          id: 'upgrade/plugin',
+          name: 'Upgrade',
+          version: '2',
+          format: PluginFormat.genericMcp,
+          rootPath: '/runtime/v2/content',
+          mcpServers: const [
+            PluginMcpServer(
+              pluginId: 'upgrade/plugin',
+              name: 'api',
+              transport: 'http',
+              url: 'https://v2.example/mcp',
+              headerNames: ['Authorization'],
+            ),
+          ],
+        );
 
-      expect(
-        await app.mountPluginOwnedMcpServers(manifest, connect: false),
-        0,
-      );
+        expect(
+          await app.mountPluginOwnedMcpServers(manifest, connect: false),
+          0,
+        );
 
-      expect(old.transport, 'http');
-      expect(old.command, '');
-      expect(old.url, 'https://v2.example/mcp');
-      expect(old.requiredHeaderNames, ['Authorization']);
-      expect(old.pluginRuntimeRoot, '/runtime/v2');
-    });
+        expect(old.transport, 'http');
+        expect(old.command, '');
+        expect(old.url, 'https://v2.example/mcp');
+        expect(old.requiredHeaderNames, ['Authorization']);
+        expect(old.pluginRuntimeRoot, '/runtime/v2');
+      },
+    );
 
-    test('stdio list_changed notification refreshes the canonical roster',
-        () async {
-      final server = ownedServer('refresh/plugin', name: 'catalog')
-        ..transport = 'stdio'
-        ..url = null;
-      registerOwner('refresh/plugin', serverName: 'catalog');
-      final process = Plugin9McpProcess('new-tool');
-      await McpService.I.attachStdioForTest(
-        server,
-        process,
-        initialTools: [McpToolDef(name: 'old-tool')],
-      );
-      addTearDown(() async {
-        await McpService.I.disconnect(server.canonicalId);
-      });
-      expect(
-        McpService.I.connectedTools[server.canonicalId]!.single.name,
-        'old-tool',
-      );
+    test(
+      'stdio list_changed notification refreshes the canonical roster',
+      () async {
+        final server = ownedServer('refresh/plugin', name: 'catalog')
+          ..transport = 'stdio'
+          ..url = null;
+        registerOwner('refresh/plugin', serverName: 'catalog');
+        final process = Plugin9McpProcess('new-tool');
+        await McpService.I.attachStdioForTest(
+          server,
+          process,
+          initialTools: [McpToolDef(name: 'old-tool')],
+        );
+        addTearDown(() async {
+          await McpService.I.disconnect(server.canonicalId);
+        });
+        expect(
+          McpService.I.connectedTools[server.canonicalId]!.single.name,
+          'old-tool',
+        );
 
-      process.notifyToolsChanged();
-      for (var i = 0;
+        process.notifyToolsChanged();
+        for (
+          var i = 0;
           i < 20 &&
               McpService.I.connectedTools[server.canonicalId]!.single.name !=
                   'new-tool';
-          i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 5));
-      }
+          i++
+        ) {
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
 
-      expect(
-        McpService.I.connectedTools[server.canonicalId]!.single.name,
-        'new-tool',
-      );
-      final names = AgentService.I
-          .toolsForTest()
-          .map((t) => ((t['function'] as Map?) ?? {})['name'])
-          .whereType<String>();
-      expect(
-        names,
-        contains(
-          McpConnectedTool(
-            server,
-            McpToolDef(name: 'new-tool'),
-          ).canonicalToolName,
-        ),
-      );
-      expect(
-        names,
-        isNot(
+        expect(
+          McpService.I.connectedTools[server.canonicalId]!.single.name,
+          'new-tool',
+        );
+        final names = AgentService.I
+            .toolsForTest()
+            .map((t) => ((t['function'] as Map?) ?? {})['name'])
+            .whereType<String>();
+        expect(
+          names,
           contains(
             McpConnectedTool(
               server,
-              McpToolDef(name: 'old-tool'),
+              McpToolDef(name: 'new-tool'),
             ).canonicalToolName,
           ),
-        ),
-      );
-    });
-
-    test('session-scoped owned tools stay out of other session rosters',
-        () async {
-      const owner = 'scope/plugin';
-      final manifest = NormalizedPluginManifest(
-        id: owner,
-        name: 'Scoped',
-        version: '1',
-        format: PluginFormat.genericMcp,
-        rootPath: '/scope',
-        mcpServers: const [
-          PluginMcpServer(pluginId: owner, name: 'api'),
-        ],
-      );
-      PluginContributionRegistry.I.register(
-        manifest,
-        activation: PluginActivation.sessionActive,
-        immediateSessionId: 'p9-owner-session',
-      );
-      final server = ownedServer(owner, name: 'api');
-      McpService.I.httpClientForTest = MockClient((request) async {
-        final body = jsonDecode(request.body) as Map<String, dynamic>;
-        return http.Response(
-          jsonEncode({
-            'jsonrpc': '2.0',
-            'id': body['id'],
-            'result': body['method'] == 'tools/list'
-                ? {
-                    'tools': [
-                      {'name': 'private-tool'},
-                    ],
-                  }
-                : {},
-          }),
-          200,
         );
-      });
-      await McpService.I.connect(server);
-      final ownerSession = ChatSession(
-        id: 'p9-owner-session',
-        title: 'owner',
-        model: 'm',
-      );
-      final otherSession = ChatSession(
-        id: 'p9-other-session',
-        title: 'other',
-        model: 'm',
-      );
-      app.sessions.addAll([ownerSession, otherSession]);
-      addTearDown(() async {
-        AgentService.setRunSessionForTest('');
-        app.sessions.removeWhere(
-          (s) => s.id == ownerSession.id || s.id == otherSession.id,
+        expect(
+          names,
+          isNot(
+            contains(
+              McpConnectedTool(
+                server,
+                McpToolDef(name: 'old-tool'),
+              ).canonicalToolName,
+            ),
+          ),
         );
-        PluginContributionRegistry.I.unregisterPlugin(owner);
-        await McpService.I.disconnect(server.canonicalId);
-        McpService.I.httpClientForTest = null;
-      });
+      },
+    );
 
-      AgentService.setRunSessionForTest('p9-owner-session');
-      final ownerNames = AgentService.I.toolsForTest()
-          .map((t) => ((t['function'] as Map?) ?? {})['name'])
-          .whereType<String>();
-      final canonicalName = McpConnectedTool(
-        server,
-        McpToolDef(name: 'private-tool'),
-      ).canonicalToolName;
-      expect(ownerNames, contains(canonicalName));
+    test(
+      'session-scoped owned tools stay out of other session rosters',
+      () async {
+        const owner = 'scope/plugin';
+        final manifest = NormalizedPluginManifest(
+          id: owner,
+          name: 'Scoped',
+          version: '1',
+          format: PluginFormat.genericMcp,
+          rootPath: '/scope',
+          mcpServers: const [PluginMcpServer(pluginId: owner, name: 'api')],
+        );
+        PluginContributionRegistry.I.register(
+          manifest,
+          activation: PluginActivation.sessionActive,
+          immediateSessionId: 'p9-owner-session',
+        );
+        final server = ownedServer(owner, name: 'api');
+        McpService.I.httpClientForTest = MockClient((request) async {
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response(
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': body['id'],
+              'result': body['method'] == 'tools/list'
+                  ? {
+                      'tools': [
+                        {'name': 'private-tool'},
+                      ],
+                    }
+                  : {},
+            }),
+            200,
+          );
+        });
+        await McpService.I.connect(server);
+        final ownerSession = ChatSession(
+          id: 'p9-owner-session',
+          title: 'owner',
+          model: 'm',
+        );
+        final otherSession = ChatSession(
+          id: 'p9-other-session',
+          title: 'other',
+          model: 'm',
+        );
+        app.sessions.addAll([ownerSession, otherSession]);
+        addTearDown(() async {
+          AgentService.setRunSessionForTest('');
+          app.sessions.removeWhere(
+            (s) => s.id == ownerSession.id || s.id == otherSession.id,
+          );
+          PluginContributionRegistry.I.unregisterPlugin(owner);
+          await McpService.I.disconnect(server.canonicalId);
+          McpService.I.httpClientForTest = null;
+        });
 
-      AgentService.setRunSessionForTest('p9-other-session');
-      final otherNames = AgentService.I.toolsForTest()
-          .map((t) => ((t['function'] as Map?) ?? {})['name'])
-          .whereType<String>();
-      expect(otherNames, isNot(contains(canonicalName)));
-      final guessed = await AgentService.I.dispatchForTest(
-        canonicalName,
-        {},
-      );
-      expect(guessed, contains('not active for this session'));
-    });
+        AgentService.setRunSessionForTest('p9-owner-session');
+        final ownerNames = AgentService.I
+            .toolsForTest()
+            .map((t) => ((t['function'] as Map?) ?? {})['name'])
+            .whereType<String>();
+        final canonicalName = McpConnectedTool(
+          server,
+          McpToolDef(name: 'private-tool'),
+        ).canonicalToolName;
+        expect(ownerNames, contains(canonicalName));
+
+        AgentService.setRunSessionForTest('p9-other-session');
+        final otherNames = AgentService.I
+            .toolsForTest()
+            .map((t) => ((t['function'] as Map?) ?? {})['name'])
+            .whereType<String>();
+        expect(otherNames, isNot(contains(canonicalName)));
+        final guessed = await AgentService.I.dispatchForTest(canonicalName, {});
+        expect(guessed, contains('not active for this session'));
+      },
+    );
 
     test(
       'owned disable disconnects only its servers and keeps unowned alive',
@@ -19050,173 +19337,205 @@ cwd = 'tools'
       return a;
     }
 
-    test('every preinstalled enabled plugin has real capability and no MCP is fake-connected', () async {
-      final a = await freshSeededApp();
-      addTearDown(() => AppState.resetTestInstance());
+    test(
+      'every preinstalled enabled plugin has real capability and no MCP is fake-connected',
+      () async {
+        final a = await freshSeededApp();
+        addTearDown(() => AppState.resetTestInstance());
 
-      for (final p in a.plugins.where((p) => p.installed && p.enabled)) {
-        expect(
-          AgentService.I.pluginToolNames(p),
-          isNotEmpty,
-          reason: '${p.name} is marked installed+enabled but contributes nothing',
-        );
-      }
-      for (final s in a.mcpServers.where((s) => s.connected)) {
-        expect(
-          McpService.I.isConnected(s.canonicalId),
-          isTrue,
-          reason: '${s.name} is marked connected without a handshake',
-        );
-      }
-    });
-
-    test('bundled MCP seeds carry only pinned, registry-verified coordinates', () async {
-      final a = await freshSeededApp();
-      addTearDown(() => AppState.resetTestInstance());
-
-      // The pinned tested manifest: every bundled stdio MCP seed row must
-      // appear here (package verified against the registry at audit time)
-      // with the exact package coordinate. Anything not in the manifest is
-      // a fictional coordinate and must not be seeded. User/marketplace-
-      // added rows (custom) are out of scope — only Ovid's own seeds.
-      const pinned = <String, String>{
-        'Filesystem': '@modelcontextprotocol/server-filesystem',
-        'GitHub': '@modelcontextprotocol/server-github',
-        'Fetch': 'mcp-server-fetch',
-        'Memory': '@modelcontextprotocol/server-memory',
-        'Puppeteer': '@modelcontextprotocol/server-puppeteer',
-        'Postgres': '@modelcontextprotocol/server-postgres',
-        'Playwright': '@playwright/mcp',
-      };
-      final seeds = a.mcpServers.where((s) => !s.custom).toList();
-      for (final s in seeds) {
-        // Hygiene (fix round 1): every bundled stdio seed with args must
-        // yield a package candidate — a silent skip here would let a
-        // coordinate-less seed evade the pinned-manifest check entirely.
-        if (s.transport == 'stdio' && s.args.isNotEmpty) {
-          final pkg = s.args
-              .where((x) => x.startsWith(RegExp(r'^@|mcp-')))
-              .firstOrNull;
+        for (final p in a.plugins.where((p) => p.installed && p.enabled)) {
           expect(
-            pkg,
-            isNotNull,
+            AgentService.I.pluginToolNames(p),
+            isNotEmpty,
             reason:
-                '${s.name} has stdio args ${s.args} but no package '
-                'candidate — the pinned-manifest extraction cannot check it',
-          );
-          expect(
-            pinned[s.name],
-            pkg,
-            reason:
-                '${s.name} seeds $pkg — not in the pinned tested manifest '
-                '(docs/superpowers/audits/2026-09-06-preinstalled-plugin-mcp-runtime.md)',
+                '${p.name} is marked installed+enabled but contributes nothing',
           );
         }
-      }
-      // Every pinned row must actually exist in the seed (no silent drops).
-      final names = seeds.map((s) => s.name).toSet();
-      for (final n in pinned.keys) {
-        expect(names, contains(n), reason: 'pinned server $n missing from seed');
-      }
-    });
+        for (final s in a.mcpServers.where((s) => s.connected)) {
+          expect(
+            McpService.I.isConnected(s.canonicalId),
+            isTrue,
+            reason: '${s.name} is marked connected without a handshake',
+          );
+        }
+      },
+    );
 
-    test('deprecated bundled MCPs are labeled so setup shows the caveat', () async {
-      final a = await freshSeededApp();
-      addTearDown(() => AppState.resetTestInstance());
-      // GitHub/Puppeteer/Postgres packages still resolve but are
-      // deprecated upstream — the seed description must say so.
-      for (final name in ['GitHub', 'Puppeteer', 'Postgres']) {
-        final s = a.mcpServers.firstWhere((s) => s.name == name);
+    test(
+      'bundled MCP seeds carry only pinned, registry-verified coordinates',
+      () async {
+        final a = await freshSeededApp();
+        addTearDown(() => AppState.resetTestInstance());
+
+        // The pinned tested manifest: every bundled stdio MCP seed row must
+        // appear here (package verified against the registry at audit time)
+        // with the exact package coordinate. Anything not in the manifest is
+        // a fictional coordinate and must not be seeded. User/marketplace-
+        // added rows (custom) are out of scope — only Ovid's own seeds.
+        const pinned = <String, String>{
+          'Filesystem': '@modelcontextprotocol/server-filesystem',
+          'GitHub': '@modelcontextprotocol/server-github',
+          'Fetch': 'mcp-server-fetch',
+          'Memory': '@modelcontextprotocol/server-memory',
+          'Puppeteer': '@modelcontextprotocol/server-puppeteer',
+          'Postgres': '@modelcontextprotocol/server-postgres',
+          'Playwright': '@playwright/mcp',
+        };
+        final seeds = a.mcpServers.where((s) => !s.custom).toList();
+        for (final s in seeds) {
+          // Hygiene (fix round 1): every bundled stdio seed with args must
+          // yield a package candidate — a silent skip here would let a
+          // coordinate-less seed evade the pinned-manifest check entirely.
+          if (s.transport == 'stdio' && s.args.isNotEmpty) {
+            final pkg = s.args
+                .where((x) => x.startsWith(RegExp(r'^@|mcp-')))
+                .firstOrNull;
+            expect(
+              pkg,
+              isNotNull,
+              reason:
+                  '${s.name} has stdio args ${s.args} but no package '
+                  'candidate — the pinned-manifest extraction cannot check it',
+            );
+            expect(
+              pinned[s.name],
+              pkg,
+              reason:
+                  '${s.name} seeds $pkg — not in the pinned tested manifest '
+                  '(docs/superpowers/audits/2026-09-06-preinstalled-plugin-mcp-runtime.md)',
+            );
+          }
+        }
+        // Every pinned row must actually exist in the seed (no silent drops).
+        final names = seeds.map((s) => s.name).toSet();
+        for (final n in pinned.keys) {
+          expect(
+            names,
+            contains(n),
+            reason: 'pinned server $n missing from seed',
+          );
+        }
+      },
+    );
+
+    test(
+      'deprecated bundled MCPs are labeled so setup shows the caveat',
+      () async {
+        final a = await freshSeededApp();
+        addTearDown(() => AppState.resetTestInstance());
+        // GitHub/Puppeteer/Postgres packages still resolve but are
+        // deprecated upstream — the seed description must say so.
+        for (final name in ['GitHub', 'Puppeteer', 'Postgres']) {
+          final s = a.mcpServers.firstWhere((s) => s.name == name);
+          expect(
+            s.description.toLowerCase(),
+            contains('deprecated'),
+            reason: '$name pins a deprecated upstream package and must say so',
+          );
+        }
+      },
+    );
+
+    test(
+      'credential-dependent MCPs never auto-spawn and show setup requirements',
+      () async {
+        final a = await freshSeededApp();
+        addTearDown(() => AppState.resetTestInstance());
+
+        final credentialed = a.mcpServers.where((s) => s.envHint != null);
+        expect(credentialed, isNotEmpty);
+        for (final s in credentialed) {
+          // Fresh seed: connected intent empty → reconnectServices must NOT
+          // dial any credential-dependent server without its secret.
+          expect(
+            s.connected,
+            isFalse,
+            reason: '${s.name} must seed disconnected',
+          );
+          expect(McpService.I.isConnected(s.canonicalId), isFalse);
+        }
+
+        // Fix round 1 (finding 2): a direct connect() on a BUNDLED
+        // credential-dependent server (ownerPluginId null, envHint declared)
+        // without its secret must NOT spawn — the credential gate must cover
+        // ownerless bundled servers too, not just plugin-owned ones. It
+        // reports the degraded/needs-configuration status instead.
+        final github = a.mcpServers.firstWhere((s) => s.name == 'GitHub');
         expect(
-          s.description.toLowerCase(),
-          contains('deprecated'),
-          reason: '$name pins a deprecated upstream package and must say so',
+          github.ownerPluginId,
+          isNull,
+          reason: 'bundled seed is ownerless',
         );
-      }
-    });
+        expect(github.envHint, 'GITHUB_TOKEN');
+        expect(
+          await McpService.I.connect(github),
+          contains('needs configuration'),
+          reason:
+              'bundled credential server must refuse to connect unconfigured',
+        );
+        expect(McpService.I.isConnected(github.canonicalId), isFalse);
 
-    test('credential-dependent MCPs never auto-spawn and show setup requirements', () async {
-      final a = await freshSeededApp();
-      addTearDown(() => AppState.resetTestInstance());
+        // And the refusal must not persist connected intent: a restart (or
+        // agent_install_mcp) must not auto-respawn it while unconfigured.
+        // Simulate the toggle/intent path the UI uses.
+        github.connected = true;
+        await a.persistMcpIntent();
+        final prefs = await SharedPreferences.getInstance();
+        final intent = prefs.getStringList('ovid_mcp_connected_v1') ?? [];
+        // The intent list records the user's wish; the spawn gate is the
+        // connect() refusal above. Reconnect on an unconfigured server must
+        // also refuse (reconnectServices → connect → degraded, no spawn).
+        expect(intent, contains(github.canonicalId));
+        await a.reconnectServices(targetServers: [github.canonicalId]);
+        expect(McpService.I.isConnected(github.canonicalId), isFalse);
+        expect(github.connected, isFalse);
+        final st = a.serviceStatus['mcp:${github.canonicalId}'];
+        expect(st, isNotNull);
+        expect(st!.health, ServiceHealth.failed);
+        expect(st.detail, contains('needs configuration'));
+      },
+    );
 
-      final credentialed = a.mcpServers.where((s) => s.envHint != null);
-      expect(credentialed, isNotEmpty);
-      for (final s in credentialed) {
-        // Fresh seed: connected intent empty → reconnectServices must NOT
-        // dial any credential-dependent server without its secret.
-        expect(s.connected, isFalse, reason: '${s.name} must seed disconnected');
-        expect(McpService.I.isConnected(s.canonicalId), isFalse);
-      }
+    test(
+      'bundled credential server connects once its secret is configured',
+      () async {
+        final a = await freshSeededApp();
+        addTearDown(() => AppState.resetTestInstance());
 
-      // Fix round 1 (finding 2): a direct connect() on a BUNDLED
-      // credential-dependent server (ownerPluginId null, envHint declared)
-      // without its secret must NOT spawn — the credential gate must cover
-      // ownerless bundled servers too, not just plugin-owned ones. It
-      // reports the degraded/needs-configuration status instead.
-      final github = a.mcpServers.firstWhere((s) => s.name == 'GitHub');
-      expect(github.ownerPluginId, isNull, reason: 'bundled seed is ownerless');
-      expect(github.envHint, 'GITHUB_TOKEN');
-      expect(
-        await McpService.I.connect(github),
-        contains('needs configuration'),
-        reason: 'bundled credential server must refuse to connect unconfigured',
-      );
-      expect(McpService.I.isConnected(github.canonicalId), isFalse);
+        final postgres = a.mcpServers.firstWhere((s) => s.name == 'Postgres');
+        expect(postgres.envHint, 'DATABASE_URL');
+        // With the secret stored in secure storage the credential gate
+        // passes and the connect proceeds (it then fails on the absent
+        // sandbox — the honest runtime failure — but NEVER on credentials).
+        await a.setMcpEnv(postgres.canonicalId, {'DATABASE_URL': 'pg://test'});
+        final res = await McpService.I.connect(postgres);
+        expect(
+          res,
+          isNot(contains('needs configuration')),
+          reason: 'configured credential server must pass the credential gate',
+        );
+        expect(McpService.I.isConnected(postgres.canonicalId), isFalse);
+      },
+    );
 
-      // And the refusal must not persist connected intent: a restart (or
-      // agent_install_mcp) must not auto-respawn it while unconfigured.
-      // Simulate the toggle/intent path the UI uses.
-      github.connected = true;
-      await a.persistMcpIntent();
-      final prefs = await SharedPreferences.getInstance();
-      final intent = prefs.getStringList('ovid_mcp_connected_v1') ?? [];
-      // The intent list records the user's wish; the spawn gate is the
-      // connect() refusal above. Reconnect on an unconfigured server must
-      // also refuse (reconnectServices → connect → degraded, no spawn).
-      expect(intent, contains(github.canonicalId));
-      await a.reconnectServices(targetServers: [github.canonicalId]);
-      expect(McpService.I.isConnected(github.canonicalId), isFalse);
-      expect(github.connected, isFalse);
-      final st = a.serviceStatus['mcp:${github.canonicalId}'];
-      expect(st, isNotNull);
-      expect(st!.health, ServiceHealth.failed);
-      expect(st.detail, contains('needs configuration'));
-    });
+    test(
+      'custom servers with no declared credentials connect as today',
+      () async {
+        final a = await freshSeededApp();
+        addTearDown(() => AppState.resetTestInstance());
 
-    test('bundled credential server connects once its secret is configured', () async {
-      final a = await freshSeededApp();
-      addTearDown(() => AppState.resetTestInstance());
-
-      final postgres = a.mcpServers.firstWhere((s) => s.name == 'Postgres');
-      expect(postgres.envHint, 'DATABASE_URL');
-      // With the secret stored in secure storage the credential gate
-      // passes and the connect proceeds (it then fails on the absent
-      // sandbox — the honest runtime failure — but NEVER on credentials).
-      await a.setMcpEnv(postgres.canonicalId, {'DATABASE_URL': 'pg://test'});
-      final res = await McpService.I.connect(postgres);
-      expect(
-        res,
-        isNot(contains('needs configuration')),
-        reason: 'configured credential server must pass the credential gate',
-      );
-      expect(McpService.I.isConnected(postgres.canonicalId), isFalse);
-    });
-
-    test('custom servers with no declared credentials connect as today', () async {
-      final a = await freshSeededApp();
-      addTearDown(() => AppState.resetTestInstance());
-
-      // A user-added server with no envHint and no requiredEnvNames must
-      // NOT be blocked by the credential gate (it fails later on the
-      // absent sandbox, the pre-existing honest behavior).
-      a.addCustomMcpServer(name: 'p10-bare', command: 'npx');
-      final bare = a.mcpServers.firstWhere((s) => s.name == 'p10-bare');
-      expect(bare.envHint, isNull);
-      final res = await McpService.I.connect(bare);
-      expect(res, isNot(contains('needs configuration')));
-      expect(McpService.I.isConnected(bare.canonicalId), isFalse);
-      a.removeMcpServer(bare);
-    });
+        // A user-added server with no envHint and no requiredEnvNames must
+        // NOT be blocked by the credential gate (it fails later on the
+        // absent sandbox, the pre-existing honest behavior).
+        a.addCustomMcpServer(name: 'p10-bare', command: 'npx');
+        final bare = a.mcpServers.firstWhere((s) => s.name == 'p10-bare');
+        expect(bare.envHint, isNull);
+        final res = await McpService.I.connect(bare);
+        expect(res, isNot(contains('needs configuration')));
+        expect(McpService.I.isConnected(bare.canonicalId), isFalse);
+        a.removeMcpServer(bare);
+      },
+    );
 
     test('stdio MCP seeds are Android-honest: they need the sandbox', () async {
       final a = await freshSeededApp();
@@ -19242,104 +19561,130 @@ cwd = 'tools'
       expect(mcpUnsupportedReason(http), isNull);
     });
 
-    test('reconnectServices derives plugin health from probes, never hardcoded', () async {
-      final a = await freshSeededApp();
-      addTearDown(() => AppState.resetTestInstance());
+    test(
+      'reconnectServices derives plugin health from probes, never hardcoded',
+      () async {
+        final a = await freshSeededApp();
+        addTearDown(() => AppState.resetTestInstance());
 
-      await a.reconnectServices();
+        await a.reconnectServices();
 
-      // Every installed+enabled plugin that resolves real tools is probed
-      // working with a probe-derived detail.
-      for (final p in a.plugins.where((p) => p.installed && p.enabled)) {
-        final st = a.serviceStatus['plugin:${p.name}'];
-        expect(st, isNotNull, reason: '${p.name} has no status after reconnect');
-        expect(st!.health, ServiceHealth.working, reason: '${p.name} not working');
-        expect(st.detail, contains('tools'), reason: '${p.name} detail not probe-derived');
-      }
+        // Every installed+enabled plugin that resolves real tools is probed
+        // working with a probe-derived detail.
+        for (final p in a.plugins.where((p) => p.installed && p.enabled)) {
+          final st = a.serviceStatus['plugin:${p.name}'];
+          expect(
+            st,
+            isNotNull,
+            reason: '${p.name} has no status after reconnect',
+          );
+          expect(
+            st!.health,
+            ServiceHealth.working,
+            reason: '${p.name} not working',
+          );
+          expect(
+            st.detail,
+            contains('tools'),
+            reason: '${p.name} detail not probe-derived',
+          );
+        }
 
-      // An installed+enabled plugin with NO real capability must NOT be
-      // stamped working — the old hardcoded 'enabled' stamp is gone.
-      final ghost = PluginItem(
-        name: 'PLUGIN10 Ghost',
-        author: 'test',
-        description: '',
-        version: '1',
-        category: 'Agent',
-        installed: true,
-        enabled: true,
-      );
-      a.plugins.add(ghost);
-      addTearDown(() => a.plugins.remove(ghost));
-      await a.reconnectServices();
-      final ghostStatus = a.serviceStatus['plugin:PLUGIN10 Ghost'];
-      expect(ghostStatus, isNotNull);
-      expect(
-        ghostStatus!.health,
-        ServiceHealth.failed,
-        reason: 'capability-less plugin must not be hardcoded working',
-      );
-      expect(ghostStatus.detail, contains('no agent tools'));
-    });
-
-    test('UI tool-gain claims match roster truth for MCP-category plugins', () async {
-      final a = await freshSeededApp();
-      addTearDown(() => AppState.resetTestInstance());
-
-      // Fix round 1 (finding 1): _toolGainsFor must not claim 'mcp
-      // (proxy)' for an MCP-category install with no matching server row
-      // — same gating the roster (_mcpProxyTool) and _pluginToolNames
-      // already apply. UI claims and roster truth must agree.
-      final ghostMcp = PluginItem(
-        name: 'PLUGIN10 Ghost MCP',
-        author: 'test',
-        description: '',
-        version: '1',
-        category: 'MCP',
-        installed: true,
-        enabled: true,
-      );
-      a.plugins.add(ghostMcp);
-      addTearDown(() => a.plugins.remove(ghostMcp));
-
-      // No server row named 'PLUGIN10 Ghost MCP' exists → no proxy tool.
-      expect(
-        a.mcpServers.any(
-          (s) => s.name.toLowerCase() == ghostMcp.name.toLowerCase(),
-        ),
-        isFalse,
-      );
-      expect(AgentService.I.pluginToolNames(ghostMcp), isEmpty);
-      expect(toolGainsForTest(ghostMcp), isNull,
-          reason: 'UI claimed a tool gain the roster does not mount');
-
-      // With the matching server row present, both claim the proxy.
-      a.mcpServers.add(
-        McpServer(
-          name: ghostMcp.name,
+        // An installed+enabled plugin with NO real capability must NOT be
+        // stamped working — the old hardcoded 'enabled' stamp is gone.
+        final ghost = PluginItem(
+          name: 'PLUGIN10 Ghost',
           author: 'test',
           description: '',
-          category: 'Custom',
-          command: 'npx',
-        ),
-      );
-      addTearDown(() => a.mcpServers.removeWhere((s) => s.name == ghostMcp.name));
-      expect(AgentService.I.pluginToolNames(ghostMcp), contains('mcp (proxy)'));
-      expect(toolGainsForTest(ghostMcp), contains('mcp (proxy)'));
-
-      // Parity across the whole seeded catalog: whenever the UI claims a
-      // gain, the roster-facing probe must resolve capability too.
-      for (final p in a.plugins.where((p) => p.installed && p.enabled)) {
-        final uiClaim = toolGainsForTest(p);
-        final roster = AgentService.I.pluginToolNames(p);
-        expect(
-          (uiClaim == null) == roster.isEmpty,
-          isTrue,
-          reason:
-              '${p.name}: UI claim=$uiClaim but roster=$roster — the two '
-              'must agree',
+          version: '1',
+          category: 'Agent',
+          installed: true,
+          enabled: true,
         );
-      }
-    });
+        a.plugins.add(ghost);
+        addTearDown(() => a.plugins.remove(ghost));
+        await a.reconnectServices();
+        final ghostStatus = a.serviceStatus['plugin:PLUGIN10 Ghost'];
+        expect(ghostStatus, isNotNull);
+        expect(
+          ghostStatus!.health,
+          ServiceHealth.failed,
+          reason: 'capability-less plugin must not be hardcoded working',
+        );
+        expect(ghostStatus.detail, contains('no agent tools'));
+      },
+    );
+
+    test(
+      'UI tool-gain claims match roster truth for MCP-category plugins',
+      () async {
+        final a = await freshSeededApp();
+        addTearDown(() => AppState.resetTestInstance());
+
+        // Fix round 1 (finding 1): _toolGainsFor must not claim 'mcp
+        // (proxy)' for an MCP-category install with no matching server row
+        // — same gating the roster (_mcpProxyTool) and _pluginToolNames
+        // already apply. UI claims and roster truth must agree.
+        final ghostMcp = PluginItem(
+          name: 'PLUGIN10 Ghost MCP',
+          author: 'test',
+          description: '',
+          version: '1',
+          category: 'MCP',
+          installed: true,
+          enabled: true,
+        );
+        a.plugins.add(ghostMcp);
+        addTearDown(() => a.plugins.remove(ghostMcp));
+
+        // No server row named 'PLUGIN10 Ghost MCP' exists → no proxy tool.
+        expect(
+          a.mcpServers.any(
+            (s) => s.name.toLowerCase() == ghostMcp.name.toLowerCase(),
+          ),
+          isFalse,
+        );
+        expect(AgentService.I.pluginToolNames(ghostMcp), isEmpty);
+        expect(
+          toolGainsForTest(ghostMcp),
+          isNull,
+          reason: 'UI claimed a tool gain the roster does not mount',
+        );
+
+        // With the matching server row present, both claim the proxy.
+        a.mcpServers.add(
+          McpServer(
+            name: ghostMcp.name,
+            author: 'test',
+            description: '',
+            category: 'Custom',
+            command: 'npx',
+          ),
+        );
+        addTearDown(
+          () => a.mcpServers.removeWhere((s) => s.name == ghostMcp.name),
+        );
+        expect(
+          AgentService.I.pluginToolNames(ghostMcp),
+          contains('mcp (proxy)'),
+        );
+        expect(toolGainsForTest(ghostMcp), contains('mcp (proxy)'));
+
+        // Parity across the whole seeded catalog: whenever the UI claims a
+        // gain, the roster-facing probe must resolve capability too.
+        for (final p in a.plugins.where((p) => p.installed && p.enabled)) {
+          final uiClaim = toolGainsForTest(p);
+          final roster = AgentService.I.pluginToolNames(p);
+          expect(
+            (uiClaim == null) == roster.isEmpty,
+            isTrue,
+            reason:
+                '${p.name}: UI claim=$uiClaim but roster=$roster — the two '
+                'must agree',
+          );
+        }
+      },
+    );
   });
 
   group('PLUGIN11: production install UI, entry points, and diagnostics', () {
@@ -19350,9 +19695,9 @@ cwd = 'tools'
         jsonEncode({'name': name, 'author': 'p11org', 'version': '1.0.0'}),
       );
       Directory('${dir.path}/commands').createSync(recursive: true);
-      File('${dir.path}/commands/review.md').writeAsStringSync(
-        '---\ndescription: P11 command\n---\nP11 BODY',
-      );
+      File(
+        '${dir.path}/commands/review.md',
+      ).writeAsStringSync('---\ndescription: P11 command\n---\nP11 BODY');
       return dir;
     }
 
@@ -19429,6 +19774,10 @@ cwd = 'tools'
           capabilities: manifest.requestedCapabilities.isNotEmpty
               ? manifest.requestedCapabilities
               : inferRequestedCapabilities(manifest),
+          environmentReadNames: {
+            ...manifest.environmentReadNames,
+            for (final server in manifest.mcpServers) ...server.envNames,
+          },
           approvedAt: DateTime.now(),
         ),
       );
@@ -19460,8 +19809,8 @@ cwd = 'tools'
       pluginPickDirectoryForTest = null;
       pluginPickZipFileForTest = null;
       inspectResultsForTest.clear();
-      for (final id in PluginContributionRegistry.I.registeredPluginIds
-          .toList()) {
+      for (final id
+          in PluginContributionRegistry.I.registeredPluginIds.toList()) {
         if (id.startsWith('p11org/') || id.startsWith('mcp/')) {
           PluginContributionRegistry.I.unregisterPlugin(id);
         }
@@ -19496,14 +19845,13 @@ cwd = 'tools'
         final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         final npmTarball = GZipEncoder().encodeBytes(
           TarEncoder().encodeBytes(
-            Archive()
-              ..addFile(
-                ArchiveFile.string(
-                  'package/.mcp.json',
-                  '{"mcpServers":{"npm-kit-db":{"command":"npx",'
-                  '"args":["-y","npm-kit-db"]}}}',
-                ),
+            Archive()..addFile(
+              ArchiveFile.string(
+                'package/.mcp.json',
+                '{"mcpServers":{"npm-kit-db":{"command":"npx",'
+                    '"args":["-y","npm-kit-db"]}}}',
               ),
+            ),
           ),
         );
         server.listen((request) async {
@@ -19568,13 +19916,17 @@ cwd = 'tools'
             label: 'pasted json kit',
             rawConfig: jsonEncode({
               'mcpServers': {
-                'pasted-db': {'command': 'npx', 'args': ['-y', 'pasted-db']},
+                'pasted-db': {
+                  'command': 'npx',
+                  'args': ['-y', 'pasted-db'],
+                },
               },
             }),
           ),
           'pasted toml': const PastedConfigPluginSource(
             label: 'pasted toml kit',
-            rawConfig: 'name = "Pasted Kit"\npublisher = "p11org"\n\n'
+            rawConfig:
+                'name = "Pasted Kit"\npublisher = "p11org"\n\n'
                 '[mcp_servers.pasted-toml-db]\ncommand = "npx"\n',
           ),
           'stdio': const DirectMcpPluginSource.stdio(
@@ -19591,8 +19943,11 @@ cwd = 'tools'
         for (final e in routes.entries) {
           final seen = <(PluginSource, NormalizedPluginManifest?)>[];
           PluginInspectRecorderForTest.record = (s, m) => seen.add((s, m));
-          final result = await startPluginInstallForTest(app, null,
-              source: e.value);
+          final result = await startPluginInstallForTest(
+            app,
+            null,
+            source: e.value,
+          );
           expect(seen, hasLength(1), reason: '${e.key} never reached inspect');
           expect(seen.first.$1, isA<PluginSource>());
           expect(
@@ -19819,8 +20174,11 @@ cwd = 'tools'
           'p11org/agent-kit',
         );
         expect(record!.state, PluginActivation.sessionActive);
-        expect(record.immediateSessionId, s1.id,
-            reason: 'agent origin must carry the session id');
+        expect(
+          record.immediateSessionId,
+          s1.id,
+          reason: 'agent origin must carry the session id',
+        );
         expect(record.promoteOnNextBoot, isTrue);
 
         // The typed zip source variant reports the exact same scope.
@@ -19848,55 +20206,53 @@ cwd = 'tools'
       },
     );
 
-    testWidgets(
-      'PLUGIN11: badges render for every activation state',
-      (tester) async {
-        AgentService.I.debugPauseScheduleTimerForTest(true);
-        addTearDown(() {
-          AgentService.I.debugPauseScheduleTimerForTest(false);
-          AppState.resetTestInstance();
-        });
-        AppState.createForTest();
+    testWidgets('PLUGIN11: badges render for every activation state', (
+      tester,
+    ) async {
+      AgentService.I.debugPauseScheduleTimerForTest(true);
+      addTearDown(() {
+        AgentService.I.debugPauseScheduleTimerForTest(false);
+        AppState.resetTestInstance();
+      });
+      AppState.createForTest();
 
-        PluginItem row(String suffix, PluginActivation activation) =>
-            PluginItem(
-              name: 'P11 Badge $suffix',
-              author: 'p11org',
-              description: 'd',
-              version: '1.0.0',
-              category: 'Tool',
-              installed: true,
-              enabled: true,
-              runtimeId: 'p11org/badge-$suffix',
-              activation: activation,
-              immediateSessionId: activation == PluginActivation.sessionActive
-                  ? 'p11-s1'
-                  : null,
-            );
+      PluginItem row(String suffix, PluginActivation activation) => PluginItem(
+        name: 'P11 Badge $suffix',
+        author: 'p11org',
+        description: 'd',
+        version: '1.0.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        runtimeId: 'p11org/badge-$suffix',
+        activation: activation,
+        immediateSessionId: activation == PluginActivation.sessionActive
+            ? 'p11-s1'
+            : null,
+      );
 
-        final cases = <PluginActivation, String>{
-          PluginActivation.sessionActive: 'This session',
-          PluginActivation.pendingGlobal: 'Restart to enable everywhere',
-          PluginActivation.globalActive: 'Global',
-          PluginActivation.degraded: 'Degraded',
-          PluginActivation.failed: 'Failed',
-        };
-        for (final e in cases.entries) {
-          await tester.pumpWidget(
-            MaterialApp(
-              theme: Aether.theme(),
-              home: PluginDetailScreen(plugin: row(e.key.name, e.key)),
-            ),
-          );
-          await tester.pump();
-          expect(
-            find.text(e.value),
-            findsOneWidget,
-            reason: '${e.key} badge must render',
-          );
-        }
-      },
-    );
+      final cases = <PluginActivation, String>{
+        PluginActivation.sessionActive: 'This session',
+        PluginActivation.pendingGlobal: 'Restart to enable everywhere',
+        PluginActivation.globalActive: 'Global',
+        PluginActivation.degraded: 'Degraded',
+        PluginActivation.failed: 'Failed',
+      };
+      for (final e in cases.entries) {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: Aether.theme(),
+            home: PluginDetailScreen(plugin: row(e.key.name, e.key)),
+          ),
+        );
+        await tester.pump();
+        expect(
+          find.text(e.value),
+          findsOneWidget,
+          reason: '${e.key} badge must render',
+        );
+      }
+    });
 
     testWidgets(
       'PLUGIN11: detail sections render contributions, aliases, MCP, hooks, deps, compatibility, grants, and logs',
@@ -20037,8 +20393,9 @@ cwd = 'tools'
           // promotion) — simulate the one-restart boot promotion, which
           // mounts the declared servers exactly like
           // PluginRuntimeManager.activateForBoot does.
-          final manifest =
-              PluginContributionRegistry.I.manifestFor(row.runtimeId!);
+          final manifest = PluginContributionRegistry.I.manifestFor(
+            row.runtimeId!,
+          );
           expect(manifest, isNotNull);
           await app.mountPluginOwnedMcpServers(manifest!, connect: false);
         });
@@ -20400,8 +20757,7 @@ cwd = 'tools'
         );
         final call = RegExp(r'PluginRuntimeManager\.I\.activateForBoot\(');
         final total =
-            call.allMatches(mainSrc).length +
-            call.allMatches(stateSrc).length;
+            call.allMatches(mainSrc).length + call.allMatches(stateSrc).length;
         expect(
           total,
           1,
@@ -20498,9 +20854,7 @@ cwd = 'tools'
       () async {
         // The production digest render is a min-length guard now: the
         // source must carry no unguarded digest substring(0, 19).
-        final srcText = File(
-          'lib/ui/plugins_screen.dart',
-        ).readAsStringSync();
+        final srcText = File('lib/ui/plugins_screen.dart').readAsStringSync();
         expect(srcText, isNot(contains('manifestDigest.substring(0, 19)')));
         expect(srcText, contains('digestSnippetForTest'));
       },

@@ -225,7 +225,7 @@ class PluginContributionRegistry {
     required PluginActivation activation,
     String? immediateSessionId,
   }) {
-    if (manifest.id.isEmpty) return;
+    if (!isCanonicalPluginId(manifest.id)) return;
     final contributions = <PluginContribution>[
       ...manifest.commands.map(
         (c) => PluginContribution.fromCommand(c, manifest.rootPath),

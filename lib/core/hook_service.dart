@@ -218,11 +218,10 @@ class HookService extends ChangeNotifier {
       }
     }
     for (final p in AppState.I.plugins) {
-      if (!p.installed || !p.enabled || p.migrationRequired) continue;
-      if (p.runtimeId != null &&
-          PluginContributionRegistry.I.isRegistered(p.runtimeId!)) {
-        // A REGISTERED plugin fires its ordered manifest hooks above —
-        // never the legacy map too (double-fire).
+      if (p.runtimeId != null ||
+          !p.installed ||
+          !p.enabled ||
+          p.migrationRequired) {
         continue;
       }
       // Legacy map form — one command per (event, plugin). The map may be
@@ -279,6 +278,7 @@ class HookService extends ChangeNotifier {
       (p) =>
           p.installed &&
           p.enabled &&
+          p.runtimeId == null &&
           !p.migrationRequired &&
           (p.hooks.containsKey(event) ||
               p.hooks.containsKey(canonicalHookEvent(event) ?? '')),

@@ -617,7 +617,6 @@ class AgentService extends ChangeNotifier {
     };
     // Composer commands + skills catalog.
     CommandService.I.registerBuiltins();
-    _refreshSkillRoots();
     // Warm the sync workspace root for the @file picker.
     unawaited(SandboxService.I.warmSyncRoot());
   }
@@ -11131,6 +11130,7 @@ ${await _agentsMdBlock()}
     for (final p in AppState.I.plugins) {
       if (!p.installed ||
           !p.enabled ||
+          p.runtimeId != null ||
           p.migrationRequired ||
           p.source == null) {
         continue;

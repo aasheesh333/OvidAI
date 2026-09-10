@@ -61,6 +61,23 @@ enum CompatibilitySeverity { optional, required }
 /// Dependency runtime kind (spec §6).
 enum PluginDependencyKind { npm, python, native }
 
+/// Canonical runtime identities have exactly two normalized path segments.
+/// Keeping this check shared prevents malformed IDs reaching persistence,
+/// filesystem paths, or the contribution registry through different seams.
+bool isCanonicalPluginId(String value) {
+  final parts = value.split('/');
+  if (parts.length != 2) return false;
+  return parts.every(
+    (part) =>
+        part.isNotEmpty &&
+        part ==
+            part
+                .toLowerCase()
+                .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+                .replaceAll(RegExp(r'^-+|-+$'), ''),
+  );
+}
+
 /// One compatibility finding against a normalized manifest (spec §4.3):
 /// unsupported proprietary host APIs and unrunnable contributions are
 /// reported with their EXACT offending manifest fields (spec §13); optional
@@ -833,24 +850,18 @@ Set<PluginCapability> pluginCapabilitiesFromNames(Object? raw) {
 /// constructors keep accepting caller collections as-is — adapters that need
 /// the frozen guarantee round-trip through `fromJson` or use [scrubMcpSecrets]
 /// / `PluginMcpServer.scrubbedRaw`, which freeze their results too.
-Map<String, dynamic> _asMap(
-  Object? raw,
-) => raw is Map
+Map<String, dynamic> _asMap(Object? raw) => raw is Map
     ? Map<String, dynamic>.unmodifiable(Map<String, dynamic>.from(raw))
     : const <String, dynamic>{};
 
-List<Map<String, dynamic>> _asMapList(
-  Object? raw,
-) => raw is List
+List<Map<String, dynamic>> _asMapList(Object? raw) => raw is List
     ? List<Map<String, dynamic>>.unmodifiable([
         for (final e in raw)
           if (e is Map) _asMap(e),
       ])
     : const <Map<String, dynamic>>[];
 
-List<String> _asStringList(
-  Object? raw,
-) => raw is List
+List<String> _asStringList(Object? raw) => raw is List
     ? List<String>.unmodifiable([for (final e in raw) e.toString()])
     : const <String>[];
 
