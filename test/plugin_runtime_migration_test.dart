@@ -95,6 +95,7 @@ void main() {
     cacheRoot = Directory.systemTemp.createTempSync('ovid-legacy-cache-');
     PluginRuntimeManager.runtimeRootOverrideForTest = runtimeRoot;
     PluginRuntimeManager.failMigrationMarkerWriteForTest = false;
+    PluginRuntimeManager.failCanonicalRowsWriteForTest = false;
     AppState.pluginCacheRootOverrideForTest = cacheRoot;
     app = AppState.createForTest();
     HookService.I.enabled = true;
@@ -110,6 +111,7 @@ void main() {
     SkillService.I.clearRoots();
     PluginRuntimeManager.runtimeRootOverrideForTest = null;
     PluginRuntimeManager.failMigrationMarkerWriteForTest = false;
+    PluginRuntimeManager.failCanonicalRowsWriteForTest = false;
     AppState.pluginCacheRootOverrideForTest = null;
     AppState.resetTestInstance();
     if (runtimeRoot.existsSync()) runtimeRoot.deleteSync(recursive: true);
@@ -143,6 +145,45 @@ void main() {
       expect(
         SkillService.I.skills.any(
           (skill) => skill.name == 'pre-reconcile-unsafe',
+        ),
+        isFalse,
+      );
+    },
+  );
+
+  test(
+    'legacy hooks and skill caches cannot execute before safety reconciliation',
+    () async {
+      final row = PluginItem(
+        name: 'Unreconciled Legacy',
+        author: 'legacy',
+        description: '',
+        version: '1',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'legacy/unreconciled',
+        hooks: const {'on_turn_start': 'echo unsafe'},
+      );
+      app.plugins.add(row);
+      final cache = await app.pluginCacheDirFor(row.source!);
+      Directory('${cache.path}/skills/unsafe').createSync(recursive: true);
+      File(
+        '${cache.path}/skills/unsafe/SKILL.md',
+      ).writeAsStringSync('---\nname: unreconciled-unsafe\n---\nUnsafe.');
+      var hookCalls = 0;
+      HookService.I.executorForTest = (_, _) async {
+        hookCalls++;
+        return '';
+      };
+
+      await HookService.I.fire('on_turn_start', 'migration-session');
+      await AgentService.I.refreshSkills();
+
+      expect(hookCalls, 0);
+      expect(
+        SkillService.I.skills.any(
+          (skill) => skill.name == 'unreconciled-unsafe',
         ),
         isFalse,
       );
@@ -324,6 +365,22 @@ void main() {
       expect(row.runtimeReason, 'Installed content is missing');
     },
   );
+
+  test('persisted failed activation remains failed and disabled', () async {
+    final runtime = manifest('acme/failed-state');
+    Directory(runtime.rootPath).createSync(recursive: true);
+    await seedEntries({
+      runtime.id: entryFor(runtime, activation: PluginActivation.failed),
+    });
+    await approve(runtime);
+
+    final statuses = await PluginRuntimeManager.I.reconcileRowsAndGrants();
+
+    expect(statuses.single.state, StartupItemState.failed);
+    final row = app.plugins.singleWhere((item) => item.runtimeId == runtime.id);
+    expect(row.enabled, isFalse);
+    expect(row.activation, PluginActivation.failed);
+  });
 
   test(
     'executable legacy rows require migration while native rows stay enabled',
@@ -584,6 +641,27 @@ void main() {
   );
 
   test(
+    'corrupt activation rows unregister stale runtime contributions',
+    () async {
+      final runtime = manifest('acme/corrupt-activation');
+      PluginContributionRegistry.I.register(
+        runtime,
+        activation: PluginActivation.globalActive,
+      );
+      registeredIds.add(runtime.id);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        kPluginActivationPrefKey,
+        jsonEncode({runtime.id: '{not-json'}),
+      );
+
+      await PluginRuntimeManager.I.reconcileRowsAndGrants();
+
+      expect(PluginContributionRegistry.I.isRegistered(runtime.id), isFalse);
+    },
+  );
+
+  test(
     'malformed canonical activation ids fail closed without blocking siblings',
     () async {
       final valid = manifest('acme/valid-id');
@@ -650,6 +728,85 @@ void main() {
     },
   );
 
+  test('canonical row write failure prevents migration completion', () async {
+    final runtime = manifest('acme/row-write-failure');
+    Directory(runtime.rootPath).createSync(recursive: true);
+    await seedEntries({runtime.id: entryFor(runtime)});
+    await approve(runtime);
+    PluginRuntimeManager.failCanonicalRowsWriteForTest = true;
+
+    await expectLater(
+      PluginRuntimeManager.I.reconcileRowsAndGrants(),
+      throwsA(isA<StateError>()),
+    );
+
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getBool('ovid_plugin_rows_v2_migrated'), isNot(true));
+  });
+
+  test('completed migration does not rewrite its marker', () async {
+    final runtime = manifest('acme/marker-idempotent');
+    Directory(runtime.rootPath).createSync(recursive: true);
+    await seedEntries({runtime.id: entryFor(runtime)});
+    await approve(runtime);
+
+    await PluginRuntimeManager.I.reconcileRowsAndGrants();
+    PluginRuntimeManager.failMigrationMarkerWriteForTest = true;
+
+    await PluginRuntimeManager.I.reconcileRowsAndGrants();
+  });
+
+  test('v1 stores persist only runtimeId-null rows', () async {
+    final legacy = PluginItem(
+      name: 'Legacy Custom',
+      author: 'you',
+      description: 'legacy metadata',
+      version: '1',
+      category: 'Tool',
+      installed: true,
+      enabled: false,
+      source: 'legacy/custom',
+      migrationRequired: true,
+      runtimeReason: 'Re-approve this legacy plugin before it can run',
+    );
+    final runtime = PluginItem(
+      name: 'Runtime Custom',
+      author: 'you',
+      description: 'canonical metadata',
+      version: '1',
+      category: 'Tool',
+      installed: true,
+      enabled: true,
+      source: 'runtime/custom',
+      runtimeId: 'acme/runtime-custom',
+      activation: PluginActivation.globalActive,
+    );
+    app.plugins.addAll([legacy, runtime]);
+
+    await app.persistLegacyPluginMigrationState();
+
+    final prefs = await SharedPreferences.getInstance();
+    final state = decodeRows(prefs.getString('ovid_plugin_state_v1')!);
+    expect(state, contains(legacy.name));
+    expect(state, isNot(contains(runtime.name)));
+    final customs = prefs
+        .getStringList('ovid_custom_plugins_v1')!
+        .map((raw) => jsonDecode(raw) as Map<String, dynamic>)
+        .toList();
+    expect(customs.map((row) => row['name']), contains(legacy.name));
+    expect(customs.map((row) => row['name']), isNot(contains(runtime.name)));
+    final marketplace =
+        jsonDecode(prefs.getString('ovid_marketplace_merged_v1')!) as List;
+    expect(
+      marketplace.whereType<Map>().map((row) => row['name']),
+      contains(legacy.name),
+    );
+    expect(
+      marketplace.whereType<Map>().map((row) => row['name']),
+      isNot(contains(runtime.name)),
+    );
+  });
+
   test('v1 display-name state never mutates a normalized sibling', () async {
     final runtime = manifest('acme/collision', name: 'Collision');
     Directory(runtime.rootPath).createSync(recursive: true);
@@ -682,6 +839,167 @@ void main() {
     final row = app.plugins.singleWhere((item) => item.runtimeId == runtime.id);
     expect(row.installed, isTrue);
     expect(row.enabled, isTrue);
+  });
+
+  test('runtime metadata merges field-by-field by canonical id', () async {
+    final runtime = manifest('acme/metadata', name: 'Manifest Name');
+    Directory(runtime.rootPath).createSync(recursive: true);
+    await seedEntries({runtime.id: entryFor(runtime)});
+    await approve(runtime);
+    final stored = PluginItem(
+      name: 'Stored Name',
+      author: '',
+      description: '',
+      version: 'old',
+      category: 'Stored Category',
+      installs: 7,
+      installsKnown: true,
+      runtimeId: runtime.id,
+    );
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      kPluginRowsV2PrefKey,
+      jsonEncode({runtime.id: jsonEncode(stored.toJson())}),
+    );
+    app.plugins.add(
+      PluginItem(
+        name: 'Catalog Name',
+        author: 'Catalog Author',
+        description: 'Catalog Description',
+        version: 'catalog',
+        category: 'Catalog Category',
+        source: 'catalog/source',
+        marketplace: 'catalog/marketplace',
+        runtimeId: runtime.id,
+      ),
+    );
+
+    await PluginRuntimeManager.I.reconcileRowsAndGrants();
+
+    final row = app.plugins.singleWhere((item) => item.runtimeId == runtime.id);
+    expect(row.name, 'Stored Name');
+    expect(row.author, 'Catalog Author');
+    expect(row.description, 'Catalog Description');
+    expect(row.category, 'Stored Category');
+    expect(row.source, 'catalog/source');
+    expect(row.marketplace, 'catalog/marketplace');
+    expect(row.installs, 7);
+    expect(row.version, runtime.version);
+    expect(row.activation, PluginActivation.globalActive);
+  });
+
+  test('marketplace name merge never mutates a runtime row', () {
+    final runtime = PluginItem(
+      name: 'Shared Listing',
+      author: 'runtime',
+      description: 'runtime description',
+      version: '1',
+      category: 'Tool',
+      installed: true,
+      enabled: true,
+      runtimeId: 'acme/shared-listing',
+    );
+    app.plugins.add(runtime);
+
+    app.mergeMarketplaceCatalogForTest(
+      {
+        'plugins': [
+          {
+            'name': 'Shared Listing',
+            'description': 'marketplace description',
+            'source': 'other/listing',
+          },
+        ],
+      },
+      'market',
+      'catalog',
+    );
+
+    expect(runtime.description, 'runtime description');
+    expect(runtime.source, isNull);
+    expect(
+      app.plugins.where(
+        (row) => row.name == 'Shared Listing' && row.runtimeId == null,
+      ),
+      hasLength(1),
+    );
+  });
+
+  test(
+    'local hydration reconstructs canonical rows before marketplace merge',
+    () async {
+      final runtime = manifest('acme/hydrated', name: 'Hydrated Runtime');
+      Directory(runtime.rootPath).createSync(recursive: true);
+      await seedEntries({runtime.id: entryFor(runtime)});
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        'ovid_marketplace_merged_v1',
+        jsonEncode([
+          PluginItem(
+            name: 'Hydrated Runtime',
+            author: 'catalog',
+            description: 'catalog description',
+            version: 'old',
+            category: 'Catalog',
+            source: 'catalog/hydrated',
+            marketplace: 'catalog/source',
+            runtimeId: runtime.id,
+          ).toJson(),
+          PluginItem(
+            name: 'Orphan Runtime',
+            author: 'catalog',
+            description: '',
+            version: '1',
+            category: 'Catalog',
+            source: 'catalog/orphan',
+            runtimeId: 'orphan/runtime',
+          ).toJson(),
+        ]),
+      );
+
+      final hydrate = (await app.buildReadinessTasks()).singleWhere(
+        (task) => task.id == 'local.hydrate',
+      );
+      await hydrate.run();
+
+      final row = app.plugins.singleWhere(
+        (item) => item.runtimeId == runtime.id,
+      );
+      expect(row.description, 'catalog description');
+      expect(row.source, 'catalog/hydrated');
+      expect(row.version, runtime.version);
+      expect(
+        app.plugins.any((item) => item.runtimeId == 'orphan/runtime'),
+        isFalse,
+      );
+    },
+  );
+
+  test('canonical plugin ids require exactly two normalized segments', () {
+    expect(isCanonicalPluginId('acme/reviewer'), isTrue);
+    expect(isCanonicalPluginId('acme/review-tools'), isTrue);
+    for (final invalid in [
+      '',
+      'reviewer',
+      'acme/reviewer/extra',
+      'Acme/reviewer',
+      'acme/reviewer_tools',
+      'acme/reviewer.tools',
+      'acme/-reviewer',
+    ]) {
+      expect(isCanonicalPluginId(invalid), isFalse, reason: invalid);
+    }
+  });
+
+  test('startup safety reconciliation precedes plugin activation', () async {
+    final ids = (await app.buildReadinessTasks())
+        .map((task) => task.id)
+        .toList();
+
+    expect(
+      ids.indexOf('localSafety.migrate'),
+      lessThan(ids.indexOf('plugin.activate')),
+    );
   });
 
   test(

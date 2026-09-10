@@ -1512,6 +1512,7 @@ class AppState extends ChangeNotifier {
   Future<void>? _readinessInitialization;
   Future<List<StartupItemStatus>>? _pluginSafetyReconciliation;
   List<StartupItemStatus> _pluginSafetyStatuses = const [];
+  var _pluginSafetyReconciled = false;
   Future<void>? _pluginBootActivation;
   var _pluginBootActivated = false;
   final Object _bootToken = Object();
@@ -1533,6 +1534,8 @@ class AppState extends ChangeNotifier {
 
   List<StartupItemStatus> get pluginSafetyStatuses =>
       List.unmodifiable(_pluginSafetyStatuses);
+
+  bool get legacyPluginExecutionAllowed => _pluginSafetyReconciled;
 
   Future<void> initialize() => _initialization ??= initializeReadiness();
 
@@ -1645,6 +1648,7 @@ class AppState extends ChangeNotifier {
     await _loadCustomPlugins();
     await _loadCustomPresets();
     await _loadMarketplaces();
+    await PluginRuntimeManager.I.restoreCanonicalRows();
     await restoreMergedMarketplaceCatalog();
     await _loadPluginState();
     await _loadMemories();
@@ -1669,6 +1673,7 @@ class AppState extends ChangeNotifier {
     });
     _pluginSafetyReconciliation = attempt;
     _pluginSafetyStatuses = await attempt;
+    _pluginSafetyReconciled = true;
   }
 
   Future<void> _activatePluginsForBoot() async {
@@ -3225,12 +3230,19 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       final rows = plugins
-          .where((p) => p.source != null || p.marketplace != null)
+          .where(
+            (p) =>
+                p.runtimeId == null &&
+                (p.source != null || p.marketplace != null),
+          )
           .toList();
-      await prefs.setString(
+      final written = await prefs.setString(
         _kMarketplaceMerged,
         jsonEncode(rows.map((e) => e.toJson()).toList()),
       );
+      if (!written && reportFailure) {
+        throw StateError('Failed to persist legacy marketplace rows');
+      }
     } catch (error, stack) {
       if (reportFailure) Error.throwWithStackTrace(error, stack);
     }
@@ -3246,10 +3258,15 @@ class AppState extends ChangeNotifier {
         for (final item in list) {
           if (item is! Map) continue;
           final p = PluginItem.fromJson(item.cast<String, dynamic>());
+          if (p.runtimeId != null) {
+            final idx = plugins.indexWhere((e) => e.runtimeId == p.runtimeId);
+            if (idx >= 0) {
+              plugins[idx] = _mergeRuntimeDisplayMetadata(plugins[idx], p);
+            }
+            continue;
+          }
           final idx = plugins.indexWhere(
-            (e) => p.runtimeId != null
-                ? e.runtimeId == p.runtimeId
-                : e.runtimeId == null && e.name == p.name,
+            (e) => e.runtimeId == null && e.name == p.name,
           );
           if (idx < 0) {
             plugins.add(p);
@@ -3262,6 +3279,42 @@ class AppState extends ChangeNotifier {
       }
       refresh();
     } catch (_) {}
+  }
+
+  static PluginItem _mergeRuntimeDisplayMetadata(
+    PluginItem runtime,
+    PluginItem metadata,
+  ) {
+    final useMetadataInstalls =
+        !runtime.installsKnown && metadata.installsKnown;
+    return PluginItem(
+      name: runtime.name.isNotEmpty ? runtime.name : metadata.name,
+      author: runtime.author.isNotEmpty ? runtime.author : metadata.author,
+      description: runtime.description.isNotEmpty
+          ? runtime.description
+          : metadata.description,
+      version: runtime.version,
+      category: runtime.category.isNotEmpty
+          ? runtime.category
+          : metadata.category,
+      installed: runtime.installed,
+      enabled: runtime.enabled,
+      installs: useMetadataInstalls ? metadata.installs : runtime.installs,
+      installsKnown: runtime.installsKnown || metadata.installsKnown,
+      hooks: runtime.hooks,
+      hookMatchers: runtime.hookMatchers,
+      pluginHooks: runtime.pluginHooks,
+      source: runtime.source ?? metadata.source,
+      marketplace: runtime.marketplace ?? metadata.marketplace,
+      runtimeId: runtime.runtimeId,
+      activation: runtime.activation,
+      immediateSessionId: runtime.immediateSessionId,
+      promoteOnNextBoot: runtime.promoteOnNextBoot,
+      manifestDigest: runtime.manifestDigest,
+      compatibilityWarnings: runtime.compatibilityWarnings,
+      migrationRequired: runtime.migrationRequired,
+      runtimeReason: runtime.runtimeReason,
+    );
   }
 
   Future<void> _loadMarketplaces() async {
@@ -4340,7 +4393,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       final customs = plugins
-          .where((p) => p.author == 'you')
+          .where((p) => p.author == 'you' && p.runtimeId == null)
           .map(
             (p) => jsonEncode({
               'name': p.name,
@@ -4354,7 +4407,10 @@ class AppState extends ChangeNotifier {
             }),
           )
           .toList();
-      await prefs.setStringList(_kCustomPlugins, customs);
+      final written = await prefs.setStringList(_kCustomPlugins, customs);
+      if (!written && reportFailure) {
+        throw StateError('Failed to persist custom legacy plugin rows');
+      }
     } catch (error, stack) {
       if (reportFailure) Error.throwWithStackTrace(error, stack);
     }
@@ -4429,7 +4485,10 @@ class AppState extends ChangeNotifier {
           if (p.runtimeReason != null) 'runtimeReason': p.runtimeReason,
         });
       }
-      await prefs.setString(_kPluginState, jsonEncode(state));
+      final written = await prefs.setString(_kPluginState, jsonEncode(state));
+      if (!written && reportFailure) {
+        throw StateError('Failed to persist legacy plugin state');
+      }
     } catch (error, stack) {
       if (reportFailure) Error.throwWithStackTrace(error, stack);
     }

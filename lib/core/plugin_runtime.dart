@@ -67,6 +67,7 @@ const String _kPluginReapprovalReason =
 const String _kLegacyReapprovalReason =
     'Re-approve this legacy plugin before it can run';
 const String _kMissingContentReason = 'Installed content is missing';
+const String _kFailedActivationReason = 'Plugin activation failed';
 
 /// Self-describing transaction artifacts written inside the committed
 /// content directory (spec §5.2 step 6).
@@ -316,6 +317,9 @@ class PluginRuntimeManager extends ChangeNotifier {
   @visibleForTesting
   static bool failMigrationMarkerWriteForTest = false;
 
+  @visibleForTesting
+  static bool failCanonicalRowsWriteForTest = false;
+
   PluginDependencyService _deps() =>
       depsForTest ??
       PluginDependencyService(runtimeRootOverride: runtimeRootOverrideForTest);
@@ -395,14 +399,20 @@ class PluginRuntimeManager extends ChangeNotifier {
     bool reportFailure = false,
   }) async {
     try {
+      if (failCanonicalRowsWriteForTest) {
+        throw StateError('Injected canonical plugin-row write failure');
+      }
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(
+      final written = await prefs.setString(
         kPluginActivationPrefKey,
         jsonEncode({
           for (final key in (entries.keys.toList()..sort()))
             key: jsonEncode(entries[key]!.toJson()),
         }),
       );
+      if (!written && reportFailure) {
+        throw StateError('Failed to persist plugin activation entries');
+      }
     } catch (error, stack) {
       if (reportFailure) Error.throwWithStackTrace(error, stack);
     }
@@ -478,10 +488,13 @@ class PluginRuntimeManager extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       final ids = rows.keys.toList()..sort();
-      await prefs.setString(
+      final written = await prefs.setString(
         kPluginRowsV2PrefKey,
         jsonEncode({for (final id in ids) id: jsonEncode(rows[id]!.toJson())}),
       );
+      if (!written && reportFailure) {
+        throw StateError('Failed to persist canonical plugin rows');
+      }
     } catch (error, stack) {
       if (reportFailure) Error.throwWithStackTrace(error, stack);
     }
@@ -489,6 +502,33 @@ class PluginRuntimeManager extends ChangeNotifier {
 
   PluginItem? _catalogRowFor(String pluginId) =>
       AppState.I.plugins.where((row) => row.runtimeId == pluginId).firstOrNull;
+
+  /// Restores only activation-backed canonical rows. This runs before legacy
+  /// marketplace data is merged, so v1 data can enrich an exact runtime ID
+  /// but can never create an orphan normalized row.
+  Future<void> restoreCanonicalRows() async {
+    final entries = await _loadEntries();
+    final storedRows = await _loadRows();
+    final rows = <String, PluginItem>{};
+    for (final id in (entries.keys.toList()..sort())) {
+      final entry = entries[id]!;
+      if (!isCanonicalPluginId(id) ||
+          id != entry.activation.pluginId ||
+          id != entry.manifest.id ||
+          !await _isContainedEntry(id, entry)) {
+        continue;
+      }
+      rows[id] = _runtimeRow(
+        id,
+        entry,
+        stored: storedRows[id],
+        catalog: _catalogRowFor(id),
+      );
+    }
+    AppState.I.plugins.removeWhere((row) => row.runtimeId != null);
+    AppState.I.plugins.addAll(rows.values);
+    AppState.I.refresh();
+  }
 
   PluginItem _runtimeRow(
     String pluginId,
@@ -513,7 +553,10 @@ class PluginRuntimeManager extends ChangeNotifier {
       version: entry.version.isNotEmpty ? entry.version : manifest.version,
       category: text(stored?.category, catalog?.category) ?? 'Plugin',
       installed: true,
-      enabled: !entry.disabled,
+      enabled:
+          !entry.disabled &&
+          entry.activation.state != PluginActivation.failed &&
+          entry.activation.state != PluginActivation.disabled,
       installs: stored?.installs ?? catalog?.installs ?? 0,
       installsKnown: stored?.installsKnown ?? catalog?.installsKnown ?? false,
       source: text(stored?.source, catalog?.source),
@@ -723,12 +766,28 @@ class PluginRuntimeManager extends ChangeNotifier {
       } else {
         row
           ..migrationRequired = false
-          ..runtimeReason = null;
-        statuses.add(
-          entry.disabled || entry.activation.state == PluginActivation.disabled
-              ? StartupItemStatus.disabled(id, StartupItemKind.plugin, row.name)
-              : StartupItemStatus.ready(id, StartupItemKind.plugin, row.name),
-        );
+          ..runtimeReason = entry.activation.state == PluginActivation.failed
+              ? _kFailedActivationReason
+              : null;
+        statuses.add(switch (entry.activation.state) {
+          PluginActivation.failed => StartupItemStatus.failed(
+            id,
+            StartupItemKind.plugin,
+            row.name,
+            reason: _kFailedActivationReason,
+          ),
+          PluginActivation.disabled => StartupItemStatus.disabled(
+            id,
+            StartupItemKind.plugin,
+            row.name,
+          ),
+          _ when entry.disabled => StartupItemStatus.disabled(
+            id,
+            StartupItemKind.plugin,
+            row.name,
+          ),
+          _ => StartupItemStatus.ready(id, StartupItemKind.plugin, row.name),
+        });
       }
       rows[id] = row;
     }
@@ -763,6 +822,8 @@ class PluginRuntimeManager extends ChangeNotifier {
           row.runtimeId!,
       for (final id in storedRows.keys)
         if (!canonicalIds.contains(id)) id,
+      for (final id in PluginContributionRegistry.I.registeredPluginIds)
+        if (!canonicalIds.contains(id)) id,
     };
     for (final id in staleRuntimeIds) {
       PluginContributionRegistry.I.unregisterPlugin(id);
@@ -774,15 +835,17 @@ class PluginRuntimeManager extends ChangeNotifier {
     ]);
     await AppState.I.persistLegacyPluginMigrationState();
     final prefs = await SharedPreferences.getInstance();
-    if (failMigrationMarkerWriteForTest) {
-      throw StateError('Injected plugin migration marker write failure');
-    }
-    final markerWritten = await prefs.setBool(
-      _kPluginRowsV2MigratedPrefKey,
-      true,
-    );
-    if (!markerWritten) {
-      throw StateError('Failed to persist plugin migration marker');
+    if (prefs.getBool(_kPluginRowsV2MigratedPrefKey) != true) {
+      if (failMigrationMarkerWriteForTest) {
+        throw StateError('Injected plugin migration marker write failure');
+      }
+      final markerWritten = await prefs.setBool(
+        _kPluginRowsV2MigratedPrefKey,
+        true,
+      );
+      if (!markerWritten) {
+        throw StateError('Failed to persist plugin migration marker');
+      }
     }
     AppState.I.refresh();
     return statuses;

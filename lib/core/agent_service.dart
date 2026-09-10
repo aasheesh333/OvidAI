@@ -2627,7 +2627,10 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         final registryGoverned =
             runtimeId != null &&
             PluginContributionRegistry.I.isRegistered(runtimeId);
-        if (!registryGoverned && _pluginHasMountedSkillsOrCommands(p)) {
+        if (runtimeId == null &&
+            AppState.I.legacyPluginExecutionAllowed &&
+            !registryGoverned &&
+            _pluginHasMountedSkillsOrCommands(p)) {
           tools.add(_pluginGenericTool(p));
         }
       }
@@ -7413,6 +7416,13 @@ ${await _agentsMdBlock()}
               (p) =>
                   p.installed &&
                   p.enabled &&
+                  ((p.runtimeId != null &&
+                          PluginContributionRegistry.I.isRegistered(
+                            p.runtimeId!,
+                          )) ||
+                      (p.runtimeId == null &&
+                          !p.migrationRequired &&
+                          AppState.I.legacyPluginExecutionAllowed)) &&
                   (_normTool(p.name) == toolKey ||
                       p.name.toLowerCase() == toolKey),
             )
@@ -11128,6 +11138,10 @@ ${await _agentsMdBlock()}
     } catch (_) {}
     // PR40/Task2: installed+enabled plugin content — a plugin's fetched
     // commands, skills, and agents become available to the agent runtime.
+    if (!AppState.I.legacyPluginExecutionAllowed) {
+      await SkillService.I.reload();
+      return;
+    }
     for (final p in AppState.I.plugins) {
       if (!p.installed ||
           !p.enabled ||

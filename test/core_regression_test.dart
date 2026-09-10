@@ -18333,8 +18333,8 @@ cwd = 'tools'
     );
 
     test('canonical provider names do not flatten punctuation collisions', () {
-      final dotted = ownedServer('collision/foo.bar', name: 'api');
-      final slashed = ownedServer('collision/foo/bar', name: 'api');
+      final dotted = ownedServer('collision/foo-bar', name: 'api');
+      final slashed = ownedServer('collision-foo/bar', name: 'api');
       final dottedTool = McpConnectedTool(
         dotted,
         McpToolDef(name: 'read.file'),
@@ -18363,16 +18363,16 @@ cwd = 'tools'
         );
       });
       PluginContributionRegistry.I.register(
-        ownedManifest('collision/foo.bar', 'api'),
+        ownedManifest('collision/foo-bar', 'api'),
         activation: PluginActivation.globalActive,
       );
       PluginContributionRegistry.I.register(
-        ownedManifest('collision/foo/bar', 'api'),
+        ownedManifest('collision-foo/bar', 'api'),
         activation: PluginActivation.globalActive,
       );
       addTearDown(() {
-        PluginContributionRegistry.I.unregisterPlugin('collision/foo.bar');
-        PluginContributionRegistry.I.unregisterPlugin('collision/foo/bar');
+        PluginContributionRegistry.I.unregisterPlugin('collision/foo-bar');
+        PluginContributionRegistry.I.unregisterPlugin('collision-foo/bar');
       });
       final stubs = AgentService.I
           .toolsForTest()
@@ -18550,7 +18550,7 @@ cwd = 'tools'
     test(
       'provider names are bounded stable distinct and dispatchable',
       () async {
-        final longOwner = 'publisher/${'very-long-plugin-segment-' * 8}';
+        final longOwner = 'publisher/${'very-long-plugin-segment-' * 8}plugin';
         final serverA = ownedServer(
           longOwner,
           name: '${'long-server-name-' * 8}a',
@@ -18633,12 +18633,16 @@ cwd = 'tools'
       () async {
         final root = Directory.systemTemp.createTempSync('ovid-p9-pending-');
         final owner = 'pending/plugin';
+        final content = Directory(
+          '${root.path}/plugin-runtime/$owner/1/content',
+        )..createSync(recursive: true);
+        PluginRuntimeManager.runtimeRootOverrideForTest = root;
         final manifest = NormalizedPluginManifest(
           id: owner,
           name: 'Pending',
           version: '1',
           format: PluginFormat.genericMcp,
-          rootPath: root.path,
+          rootPath: content.path,
           mcpServers: [
             PluginMcpServer(
               pluginId: owner,
@@ -18656,7 +18660,7 @@ cwd = 'tools'
             promoteOnNextBoot: true,
           ),
           manifest: manifest,
-          contentDir: root.path,
+          contentDir: content.path,
           version: '1',
           disabled: true,
         );
@@ -18680,6 +18684,7 @@ cwd = 'tools'
         });
         addTearDown(() async {
           await PluginRuntimeManager.I.uninstall(owner);
+          PluginRuntimeManager.runtimeRootOverrideForTest = null;
           McpService.I.httpClientForTest = null;
           if (root.existsSync()) root.deleteSync(recursive: true);
         });
@@ -18880,10 +18885,10 @@ cwd = 'tools'
             200,
           );
         });
-        final a = ownedServer('plug-a');
-        final b = ownedServer('plug-b');
-        registerOwner('plug-a');
-        registerOwner('plug-b');
+        final a = ownedServer('plug/a');
+        final b = ownedServer('plug/b');
+        registerOwner('plug/a');
+        registerOwner('plug/b');
         addTearDown(() async {
           await McpService.I.disconnect(a.canonicalId);
           await McpService.I.disconnect(b.canonicalId);
@@ -18891,8 +18896,8 @@ cwd = 'tools'
         });
 
         expect(a.name, 'shared');
-        expect(a.canonicalId, 'plug-a/shared');
-        expect(b.canonicalId, 'plug-b/shared');
+        expect(a.canonicalId, 'plug/a/shared');
+        expect(b.canonicalId, 'plug/b/shared');
         expect(await McpService.I.connect(a), contains('connected'));
         expect(await McpService.I.connect(b), contains('connected'));
         expect(McpService.I.connectedTools.keys, contains(a.canonicalId));
@@ -18924,10 +18929,10 @@ cwd = 'tools'
     );
 
     test('legacy MCP connect alias is advertised only when it is unique', () {
-      final a = ownedServer('alias-a');
-      final b = ownedServer('alias-b');
-      registerOwner('alias-a');
-      registerOwner('alias-b');
+      final a = ownedServer('alias/a');
+      final b = ownedServer('alias/b');
+      registerOwner('alias/a');
+      registerOwner('alias/b');
       app.mcpServers.addAll([a, b]);
       addTearDown(() {
         app.mcpServers.removeWhere((s) => identical(s, a) || identical(s, b));
@@ -18952,9 +18957,9 @@ cwd = 'tools'
     test(
       'missing owner credentials stays degraded and never connects',
       () async {
-        final server = ownedServer('needs-config')
+        final server = ownedServer('needs/config')
           ..requiredEnvNames = ['API_TOKEN'];
-        registerOwner('needs-config');
+        registerOwner('needs/config');
         final status = await McpService.I.connect(server);
         addTearDown(() => McpService.I.disconnect(server.canonicalId));
 

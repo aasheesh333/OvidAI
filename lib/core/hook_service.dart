@@ -217,6 +217,7 @@ class HookService extends ChangeNotifier {
         out.add((pid, h, canonical));
       }
     }
+    if (!AppState.I.legacyPluginExecutionAllowed) return out;
     for (final p in AppState.I.plugins) {
       if (p.runtimeId != null ||
           !p.installed ||
@@ -273,7 +274,7 @@ class HookService extends ChangeNotifier {
   /// user_prompt_submit firing per turn (canonical fires once at runTask
   /// entry instead).
   bool hasLegacyMapHookListeners(String event) {
-    if (!enabled) return false;
+    if (!enabled || !AppState.I.legacyPluginExecutionAllowed) return false;
     return AppState.I.plugins.any(
       (p) =>
           p.installed &&
