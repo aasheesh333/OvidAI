@@ -1315,12 +1315,20 @@ class PluginRuntimeManager extends ChangeNotifier {
         identical(_bootActivationToken, bootToken)) {
       return inFlight;
     }
+    // Serialize a genuinely new token behind any in-flight activation so the
+    // persisted boot-epoch read-modify-write cannot interleave and double/lose
+    // an increment (M5).
+    final prior = inFlight;
     late final Future<void> attempt;
-    attempt = _runBootActivation(
+    Future<void> run() => _runBootActivation(
       connectMcp: connectMcp,
       bootToken: bootToken,
       reportFailure: reportFailure,
-    ).whenComplete(() {
+    );
+    final chained = prior == null
+        ? run()
+        : prior.catchError((Object _) {}).then((_) => run());
+    attempt = chained.whenComplete(() {
       if (identical(_bootActivation, attempt)) {
         _bootActivation = null;
         _bootActivationToken = null;

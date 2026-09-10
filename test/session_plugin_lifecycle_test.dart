@@ -509,6 +509,25 @@ void main() {
       );
     });
 
+    test(
+      'M5: concurrent different boot tokens advance the epoch without racing',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        final before = prefs.getInt(kPluginBootEpochPrefKey) ?? 0;
+        final a = Object();
+        final b = Object();
+        await Future.wait([
+          PluginRuntimeManager.I.activateForBoot(bootToken: a),
+          PluginRuntimeManager.I.activateForBoot(bootToken: b),
+        ]);
+        expect(
+          prefs.getInt(kPluginBootEpochPrefKey),
+          before + 2,
+          reason: 'two genuinely distinct boots must each advance the epoch',
+        );
+      },
+    );
+
     test('a new boot token refires the same restored id once', () async {
       var token = Object();
       final fired = <String>[];
@@ -579,6 +598,138 @@ void main() {
         reason: 'switching/refresh/load/resume is never creation',
       );
     });
+  });
+
+  group('boot-active root capture and bounded activation', () {
+    test(
+      'C1: a switch/newSession during readiness cannot steal the restored event',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          'ovid_sessions': [
+            _sessionJson('root-a', ['a']),
+            _sessionJson('root-b', ['b']),
+          ],
+          'ovid_active_session': 'root-b',
+        });
+        final skillGate = Completer<void>();
+        var skillMountStarted = false;
+        final app = AppState.createForTest(
+          startupStageDelegates: {
+            ..._offlineStages(),
+            'skill.mount': () {
+              skillMountStarted = true;
+              return skillGate.future;
+            },
+          },
+          pluginBootActivator: (_, _) async {},
+        );
+        AgentService.skillCatalogInputsForTest =
+            (sessionId) async => SkillCatalogInputs();
+        final events = _injectDispatcher();
+
+        final init = app.initialize();
+        for (var i = 0; i < 3000 && !skillMountStarted; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+        }
+        expect(skillMountStarted, isTrue, reason: 'readiness window reached');
+
+        // The shell is interactive during the window: create and switch.
+        app.newSession();
+        final createdId = app.activeSession!.id;
+        app.selectSession('root-a');
+
+        skillGate.complete();
+        await init;
+        await app.drainSessionLifecycleForTest();
+
+        final starts = events
+            .where((event) => event.event == 'session_start')
+            .toList();
+        final restored = starts.where(
+          (event) => event.sessionId == 'root-b',
+        );
+        expect(
+          restored,
+          hasLength(1),
+          reason: 'the captured boot root fires even when no longer active',
+        );
+        expect(restored.single.payload['reason'], 'restored');
+        expect(
+          starts.where((event) => event.sessionId == 'root-a'),
+          isEmpty,
+          reason: 'switching is not creation and must not fire',
+        );
+        final created = starts.where(
+          (event) => event.sessionId == createdId,
+        );
+        expect(created, hasLength(1));
+        expect(created.single.payload['reason'], 'created');
+      },
+    );
+
+    test(
+      'I1: a hung activation still settles the barrier so session_start fires',
+      () async {
+        final never = Completer<void>();
+        final app = AppState.createForTest(
+          startupStageDelegates: _offlineStages(),
+          startupStageTimeouts: {
+            'plugin.activate': const Duration(milliseconds: 50),
+          },
+          pluginBootActivator: (_, _) => never.future,
+        );
+        AgentService.skillCatalogInputsForTest =
+            (sessionId) async => SkillCatalogInputs();
+        final events = _injectDispatcher();
+
+        final readiness = app.initialize();
+        await SessionLifecycleService.I
+            .sessionStarted(
+              _session('bounded'),
+              reason: SessionStartReason.created,
+            )
+            .timeout(const Duration(seconds: 5));
+
+        expect(
+          events.where((event) => event.sessionId == 'bounded'),
+          hasLength(1),
+          reason: 'the barrier must settle within the stage timeout, not hang',
+        );
+        await readiness.timeout(const Duration(seconds: 5));
+      },
+    );
+
+    test(
+      'M2: restored path fires through the real HookService registry',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          'ovid_sessions': [
+            _sessionJson('active', ['saved']),
+          ],
+          'ovid_active_session': 'active',
+        });
+        final events = _recordEvents(HookService.I);
+        final app = AppState.createForTest(
+          startupStageDelegates: _offlineStages(),
+          pluginBootActivator: (_, _) async {
+            // Register AFTER reconciliation prunes unpersisted rows, so the
+            // real HookService can resolve the hook for the restored session.
+            _registerHooks('lifecycle/real-restored');
+          },
+        );
+        AgentService.skillCatalogInputsForTest =
+            (sessionId) async => SkillCatalogInputs();
+
+        await app.initialize();
+
+        final starts = events.where(
+          (event) => event.event == 'session_start',
+        );
+        expect(starts, hasLength(1));
+        expect(starts.single.sessionId, 'active');
+        expect(starts.single.payload['reason'], 'restored');
+      },
+    );
   });
 
   group('HookService concurrency', () {
@@ -729,5 +880,37 @@ void main() {
       },
       timeout: const Timeout(Duration(seconds: 60)),
     );
+
+    test('M4: a dispatch cannot reuse a persisted durable agent id', () async {
+      final fixture = await _subagentFixture();
+      _noOpLifecycleWaits();
+      _registerHooks('lifecycle/collision', subagentStart: true);
+      final nextId = 'sub-${AgentService.I.subagentCounterForTest + 1}';
+      final persisted = ChatSession(
+        id: 'persisted-child',
+        title: 'persisted',
+        model: 'm',
+        parentId: fixture.parent.id,
+      )..agentId = nextId;
+      fixture.app.sessions.insert(0, persisted);
+
+      await AgentService.I.dispatchForTest('dispatch_agent', {
+        'prompt': 'do a thing',
+        'label': 'Collision probe',
+        'run_in_background': true,
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      final child = fixture.app.sessions.firstWhere(
+        (session) =>
+            session.parentId == fixture.parent.id &&
+            session.id != 'persisted-child',
+      );
+      expect(
+        child.agentId,
+        isNot(nextId),
+        reason: 'the next counter id is already durable on another session',
+      );
+    }, timeout: const Timeout(Duration(seconds: 60)));
   });
 }

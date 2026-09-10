@@ -1628,6 +1628,7 @@ class AppState extends ChangeNotifier {
   var _skillMountSucceeded = false;
   String? _skillMountFailureReason;
   var _pendingActiveRootReason = SessionStartReason.implicit;
+  String? _pendingActiveRootId;
   final List<Future<void>> _pendingSessionLifecycles = [];
 
   /// Process-local boot identity (Task 2). The session lifecycle service keys
@@ -1774,7 +1775,17 @@ class AppState extends ChangeNotifier {
 
   Future<void> _runStartupStage(String id, StartupStageDelegate body) async {
     _startupStageRecorder?.call(id);
-    await (_startupStageDelegates[id] ?? body)();
+    try {
+      await (_startupStageDelegates[id] ?? body)();
+    } finally {
+      // The activation barrier must settle when the `plugin.activate` STAGE
+      // reaches terminal, not only when the production body's own `finally`
+      // runs — a hung activation (or a test delegate) must never leave
+      // session creation awaiting this barrier forever.
+      if (id == 'plugin.activate' && !_bootActivationSettled.isCompleted) {
+        _bootActivationSettled.complete();
+      }
+    }
   }
 
   Future<void> _hydrateRemainingLocalState() async {
@@ -1815,12 +1826,20 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _activatePluginsForBoot() async {
+    // Bound the activation await to the stage timeout. The coordinator's own
+    // `invocation.timeout` does NOT cancel the underlying future, so without
+    // this a hung activation would leave `_bootActivationSettled` pending
+    // forever and every `sessionStarted` would hang.
+    final budget = _startupTimeout(
+      'plugin.activate',
+      const Duration(seconds: 15),
+    );
     try {
       await _reconcilePluginSafety();
       if (_pluginBootActivated) return;
       final existing = _pluginBootActivation;
       if (existing != null) {
-        await existing;
+        await existing.timeout(budget, onTimeout: () {});
         return;
       }
       late final Future<void> attempt;
@@ -1832,7 +1851,10 @@ class AppState extends ChangeNotifier {
             }
           });
       _pluginBootActivation = attempt;
-      await attempt;
+      // If the raw activation outlives its bounded await and later fails, the
+      // error would otherwise be unhandled (the timeout future detached).
+      unawaited(attempt.catchError((Object _) {}));
+      await attempt.timeout(budget, onTimeout: () {});
     } finally {
       if (!_bootActivationSettled.isCompleted) {
         _bootActivationSettled.complete();
@@ -1852,7 +1874,7 @@ class AppState extends ChangeNotifier {
     if (!_sessionRestoreRequested ||
         !_localHydrationSettled ||
         !_localHydrationReady ||
-        !_pluginBootActivated ||
+        !_bootActivationSettled.isCompleted ||
         !_skillMountSettled ||
         !_skillMountSucceeded) {
       return false;
@@ -1860,10 +1882,14 @@ class AppState extends ChangeNotifier {
     await AgentService.I.restoreRunCheckpoints();
     onSessionsLoaded?.call();
     _sessionRestoreFinished = true;
-    final active = activeSession;
-    if (active != null && !active.isSubagent) {
+    // Dispatch the CAPTURED boot-active root, not whatever is active now.
+    // Startup can take seconds while the shell is interactive; a user
+    // newSession()/selectSession() in that window must not steal the restored
+    // event or receive a mislabel.
+    final root = sessionById(_pendingActiveRootId);
+    if (root != null && !root.isSubagent) {
       await SessionLifecycleService.I.sessionStarted(
-        active,
+        root,
         reason: _pendingActiveRootReason,
       );
     }
@@ -2076,6 +2102,14 @@ class AppState extends ChangeNotifier {
       if (active == null || active.isSubagent) {
         activeSessionId = rootSessions.isEmpty ? null : rootSessions.first.id;
       }
+      if (raw != null && raw.isNotEmpty) {
+        final resolved = sessionById(activeSessionId);
+        if (resolved != null && !resolved.isSubagent) {
+          // A loaded persisted root is the boot-active root for restore.
+          _pendingActiveRootId = resolved.id;
+          _pendingActiveRootReason = SessionStartReason.restored;
+        }
+      }
       for (final session in sessions) {
         session.providerId ??= _inferProviderId(session.model);
       }
@@ -2212,8 +2246,10 @@ class AppState extends ChangeNotifier {
     activeSessionId = active.id;
     _deferredActiveSessionId = active.id;
     _deferredActiveTailLength = active.messages.length;
-    // A persisted root replaces the provisional constructor session: its
-    // lifecycle reason is `restored`, never `implicit`.
+    // A persisted root replaces the provisional constructor session: capture
+    // its id so restore dispatches THAT session (not a later active switch)
+    // with reason `restored`, never `implicit`.
+    _pendingActiveRootId = active.id;
     _pendingActiveRootReason = SessionStartReason.restored;
     notifyListeners();
   }
@@ -2964,11 +3000,13 @@ class AppState extends ChangeNotifier {
     if (_localHydrationSettled) {
       // A real root created after hydration is an implicit session start.
       _dispatchSessionStart(session, SessionStartReason.implicit);
-    } else {
-      // Constructor/hydration provisional root: only the surviving active
-      // root fires, once local hydration confirms no persisted root replaced
-      // it (`_maybeFinishSessionRestore`). This prevents ghost events for a
-      // discarded provisional ID.
+    } else if (_pendingActiveRootId == null) {
+      // Constructor/hydration provisional root: capture the id, but never
+      // clobber an already-captured restored marker (M3). Only the surviving
+      // active root fires, once local hydration confirms no persisted root
+      // replaced it (`_maybeFinishSessionRestore`); this prevents ghost events
+      // for a discarded provisional ID.
+      _pendingActiveRootId = session.id;
       _pendingActiveRootReason = SessionStartReason.implicit;
     }
     return session;

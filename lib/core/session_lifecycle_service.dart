@@ -105,6 +105,9 @@ class SessionLifecycleService {
     if (!identical(_bootToken, token)) {
       _bootToken = token;
       _bootGeneration++;
+      // Evict reservations from prior boots so the map cannot grow unbounded
+      // across resumes/restarts (M1).
+      _starts.removeWhere((key, _) => !key.startsWith('$_bootGeneration:'));
     }
     return _bootGeneration;
   }

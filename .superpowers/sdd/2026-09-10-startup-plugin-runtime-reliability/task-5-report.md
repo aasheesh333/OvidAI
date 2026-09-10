@@ -134,3 +134,83 @@ Focused:
   edge-only ordering case, not reachable through the normal boot sequence.
 - The HookService zone-depth change is a general fix; it keeps the existing
   16 coordinator tests and the PLUGIN8 recursion/subagent pins green.
+
+---
+
+## Fix round 1
+
+Review findings addressed: C1 (Critical), I1 (Important), M1, M4, M5, and M2
+test gap. M3 was already satisfied and is now explicitly guarded.
+
+### C1 — capture the boot-active root
+
+`_maybeFinishSessionRestore` no longer reads the mutable `activeSession`. A new
+`_pendingActiveRootId` captures the boot-active root:
+
+- `_setFirstFrameActiveSession` captures the persisted root id with reason
+  `restored`.
+- `_ensureActiveSession`'s pre-hydration provisional branch captures the
+  surviving root id with reason `implicit`, but only when no id is already
+  captured (M3 — it can never clobber a restored marker).
+- `loadSessions()` captures a loaded persisted root for the standalone path.
+- Restore dispatches `sessionById(_pendingActiveRootId)`, so a user
+  `newSession()`/`selectSession()` during the interactive readiness window can
+  no longer steal the restored event or receive a mislabel.
+
+RED test: `C1: a switch/newSession during readiness cannot steal the restored
+event` hangs `skill.mount` to hold the readiness window open, calls
+`newSession()` + `selectSession('root-a')`, then completes restore and asserts
+`root-b` fires `restored` exactly once, `root-a` never fires, and the new
+session fires `created`.
+
+### I1 — bound the activation barrier
+
+The coordinator's `invocation.timeout` does not cancel the underlying future,
+so a hung activation left `_bootActivationSettled` pending forever. Now:
+
+- `_activatePluginsForBoot` bounds its activation await with the
+  `plugin.activate` stage timeout (`onTimeout` degrades, does not throw) and
+  attaches a swallow listener so a late raw failure is not unhandled.
+- `_runStartupStage` completes the barrier in a `finally` when the
+  `plugin.activate` STAGE reaches terminal, covering test delegates too.
+- `_maybeFinishSessionRestore` gates on `_bootActivationSettled.isCompleted`
+  (activation attempted, possibly degraded) instead of the success-only
+  `_pluginBootActivated`, so restored still fires fail-open.
+
+RED test: `I1: a hung activation still settles the barrier so session_start
+fires` injects a never-completing activator with a 50 ms stage timeout and
+asserts `sessionStarted` completes and fires within 5 s.
+
+### Minor fixes
+
+- **M1**: `_generationFor` evicts prior-generation `_starts` reservations.
+- **M4**: `_nextSubagentId()` skips ids held by a live handle or persisted on a
+  session `agentId`, so a dispatch racing ahead of `restoreSubagentHandles`
+  cannot reuse a durable id. Test: `M4: a dispatch cannot reuse a persisted
+  durable agent id`.
+- **M5**: `activateForBoot` serializes a genuinely new token behind any
+  in-flight activation so the persisted boot-epoch read-modify-write cannot
+  interleave. Test: `M5: concurrent different boot tokens advance the epoch
+  without racing` (RED before, +2 after).
+- **M2**: `M2: restored path fires through the real HookService registry`
+  registers the hook manifest from inside the injected `pluginBootActivator`
+  (after reconciliation prunes unpersisted rows) and asserts the real
+  `HookService` executor observes the restored `session_start`.
+
+### Fix-round verification
+
+- `session_plugin_lifecycle_test.dart` — 21/21 (was 16, +5 fix-round tests).
+- PLUGIN8 26/26, PLUGIN7 8/8.
+- startup coordinator 16/16, startup first-frame 34/34.
+- runtime skills 18/18, migration 34/34, stop isolation 16/16.
+- Full `core_regression_test.dart` — 552/552.
+- `flutter analyze` — clean; `git diff --check` — clean.
+
+### Fix-round concerns
+
+- Out-of-scope observation: `AgentService.maybeGenerateSessionTitle` adds to
+  `static const _titledSessions = <String>{}`, which is unmodifiable and throws
+  `UnsupportedError` whenever a session reaches title generation. Pre-existing
+  and unrelated to Task 5; the M4 test avoids tripping it by using a label that
+  differs from the heuristic title. Not fixed here to respect task scope.
+

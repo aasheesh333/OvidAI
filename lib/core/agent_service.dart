@@ -11612,6 +11612,19 @@ ${await _agentsMdBlock()}
   final Map<String, SubagentInfo> _subagents = {};
   int _subagentCounter = 0;
 
+  /// Monotonic, collision-safe handle id. Skips ids already held by a live
+  /// handle OR persisted on a session (`agentId`), so a dispatch that races
+  /// ahead of [restoreSubagentHandles] cannot reuse a durable id (M4).
+  String _nextSubagentId() {
+    while (true) {
+      final id = 'sub-${++_subagentCounter}';
+      final collides =
+          _subagents.containsKey(id) ||
+          AppState.I.sessions.any((session) => session.agentId == id);
+      if (!collides) return id;
+    }
+  }
+
   /// Subagent handles whose parent is [sessionId] (newest first).
   List<SubagentInfo> subagentsOf(String sessionId) => _subagents.values
       .where((s) => s.parentSessionId == sessionId)
@@ -11699,7 +11712,7 @@ ${await _agentsMdBlock()}
     final handle =
         sub ??
         SubagentInfo(
-          id: 'sub-${++_subagentCounter}',
+          id: _nextSubagentId(),
           label: child.agentLabel ?? child.title,
           sessionId: child.id,
           parentSessionId: child.parentId ?? child.id,
@@ -11806,7 +11819,7 @@ ${await _agentsMdBlock()}
     if (sub == null) {
       // No live handle (e.g. restored session, or direct session use) —
       // mint one from the durable lineage so the report is attributable.
-      final durableId = child.agentId ?? 'sub-${++_subagentCounter}';
+      final durableId = child.agentId ?? _nextSubagentId();
       sub = SubagentInfo(
         id: durableId,
         label: child.agentLabel ?? child.title,
@@ -11979,7 +11992,7 @@ ${await _agentsMdBlock()}
     // parent is still planning.
     _runFor(child.id).planMode = planMode;
 
-    final id = 'sub-${++_subagentCounter}';
+    final id = _nextSubagentId();
     final sub = SubagentInfo(
       id: id,
       label: label,
@@ -12054,7 +12067,7 @@ ${await _agentsMdBlock()}
       outputSchemaHint: outputHint,
     );
     _runFor(child.id).planMode = planMode;
-    final id = 'sub-${++_subagentCounter}';
+    final id = _nextSubagentId();
     final sub = SubagentInfo(
       id: id,
       label: label,
