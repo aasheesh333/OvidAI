@@ -8,6 +8,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'agent_notification_service.dart';
 import 'agent_service.dart' show AgentService;
+import 'firebase_service.dart';
+import 'github_service.dart';
+import 'hook_service.dart';
 import 'mcp_service.dart';
 import 'plugin_adapters.dart';
 import 'plugin_manifest.dart';
@@ -18,6 +21,7 @@ import 'plugin_source_resolver.dart';
 import 'theme.dart';
 import 'sandbox_service.dart';
 import 'presets.dart';
+import 'startup_coordinator.dart';
 
 const kDeniedControlDomains = <String>[
   'paypal.com',
@@ -984,6 +988,37 @@ class ChatSession {
 
 /// ---------- App state ----------
 
+typedef StartupStageDelegate = Future<void> Function();
+
+class _AppStartupTask implements StartupTask {
+  const _AppStartupTask({
+    required this.id,
+    required this.kind,
+    required this.label,
+    required this.timeout,
+    required this.runStage,
+  });
+
+  @override
+  final String id;
+  @override
+  final StartupItemKind kind;
+  @override
+  final String label;
+  @override
+  final Duration timeout;
+  final StartupStageDelegate runStage;
+
+  @override
+  StartupDisable? get onDisable => null;
+
+  @override
+  Future<StartupItemStatus> run() async {
+    await runStage();
+    return StartupItemStatus.ready(id, kind, label);
+  }
+}
+
 class AppState extends ChangeNotifier {
   /// Singleton — everything is user-side / on-device.
   static AppState? _testInstance;
@@ -995,8 +1030,14 @@ class AppState extends ChangeNotifier {
   }
 
   @visibleForTesting
-  factory AppState.createForTest() {
-    final instance = AppState._();
+  factory AppState.createForTest({
+    void Function(String stage)? startupStageRecorder,
+    Map<String, StartupStageDelegate> startupStageDelegates = const {},
+  }) {
+    final instance = AppState._(
+      startupStageRecorder: startupStageRecorder,
+      startupStageDelegates: startupStageDelegates,
+    );
     _testInstance = instance;
     return instance;
   }
@@ -1006,10 +1047,16 @@ class AppState extends ChangeNotifier {
     _testInstance = null;
   }
 
-  AppState._() {
+  AppState._({
+    this._startupStageRecorder,
+    Map<String, StartupStageDelegate> startupStageDelegates = const {},
+  }) : _startupStageDelegates = Map.unmodifiable(startupStageDelegates) {
     _seed();
     _ensureActiveSession();
   }
+
+  final void Function(String stage)? _startupStageRecorder;
+  final Map<String, StartupStageDelegate> _startupStageDelegates;
 
   Future<void> setPluginInstalled(
     String name,
@@ -1294,14 +1341,119 @@ class AppState extends ChangeNotifier {
   static const _secureStorage = FlutterSecureStorage();
   static const _providerKeyPrefix = 'ovid_provider_key_';
   Future<void>? _initialization;
+  Future<void>? _firstFrameInitialization;
+  Future<List<StartupTask>>? _readinessTasks;
+  Future<void>? _readinessInitialization;
+  Future<void>? _pluginBootActivation;
+  final Object _bootToken = Object();
+  Object? _activatedBootToken;
+  List<String>? _deferredSessionJson;
+  String? _deferredActiveSessionId;
+  int _deferredActiveTailLength = 0;
 
-  Future<void> initialize() => _initialization ??= _initialize();
+  Future<void> initialize() => _initialization ??= initializeReadiness();
 
-  Future<void> _initialize() async {
+  Future<void> initializeForFirstFrame() =>
+      _firstFrameInitialization ??= _initializeForFirstFrame();
+
+  Future<void> _initializeForFirstFrame() async {
+    _startupStageRecorder?.call('local.firstFrame');
     await loadProviderState();
+    await _loadSessionsForFirstFrame();
+    await _loadLastSelection();
+    await _loadShellPreferences();
+    sandboxInstalled = await SandboxService.I.checkExisting();
+  }
+
+  Future<List<StartupTask>> buildReadinessTasks() =>
+      _readinessTasks ??= Future.value([
+        _startupTask(
+          id: 'local.hydrate',
+          kind: StartupItemKind.localState,
+          label: 'Load local data',
+          timeout: const Duration(seconds: 15),
+          body: _hydrateRemainingLocalState,
+        ),
+        _startupTask(
+          id: 'localSafety.migrate',
+          kind: StartupItemKind.localState,
+          label: 'Check local plugin safety',
+          timeout: const Duration(seconds: 15),
+          body: () async {},
+        ),
+        _startupTask(
+          id: 'plugin.activate',
+          kind: StartupItemKind.plugin,
+          label: 'Activate plugins',
+          timeout: const Duration(seconds: 15),
+          body: _activatePluginsForBoot,
+        ),
+        _startupTask(
+          id: 'marketplace.refresh',
+          kind: StartupItemKind.marketplace,
+          label: 'Refresh plugin marketplaces',
+          timeout: const Duration(seconds: 20),
+          body: () async => syncMarketplaceCatalogs(),
+        ),
+        _startupTask(
+          id: 'mcp.connect',
+          kind: StartupItemKind.mcp,
+          label: 'Connect services',
+          timeout: const Duration(seconds: 30),
+          body: reconnectServices,
+        ),
+        _startupTask(
+          id: 'firebase.initialize',
+          kind: StartupItemKind.firebase,
+          label: 'Initialize optional services',
+          timeout: const Duration(seconds: 10),
+          body: FirebaseService.I.initialize,
+        ),
+        _startupTask(
+          id: 'github.initialize',
+          kind: StartupItemKind.marketplace,
+          label: 'Restore GitHub connection',
+          timeout: const Duration(seconds: 20),
+          body: GitHubService.I.initialize,
+        ),
+        _startupTask(
+          id: 'sandbox.selfHeal',
+          kind: StartupItemKind.sandbox,
+          label: 'Maintain local sandbox',
+          timeout: const Duration(seconds: 30),
+          body: _runSandboxMaintenance,
+        ),
+      ]);
+
+  Future<void> initializeReadiness() =>
+      _readinessInitialization ??= _initializeReadiness();
+
+  Future<void> _initializeReadiness() async {
+    await initializeForFirstFrame();
+    final tasks = await buildReadinessTasks();
+    await StartupCoordinator.I.start(tasks);
+  }
+
+  StartupTask _startupTask({
+    required String id,
+    required StartupItemKind kind,
+    required String label,
+    required Duration timeout,
+    required StartupStageDelegate body,
+  }) => _AppStartupTask(
+    id: id,
+    kind: kind,
+    label: label,
+    timeout: timeout,
+    runStage: () async {
+      _startupStageRecorder?.call(id);
+      await (_startupStageDelegates[id] ?? body)();
+    },
+  );
+
+  Future<void> _hydrateRemainingLocalState() async {
     await loadProviderCredentials();
     await loadSessions();
-    await _loadLastSelection();
     await _loadUsage();
     // Custom MCP servers + plugin install state survive restarts.
     await _loadCustomMcpServers();
@@ -1310,20 +1462,38 @@ class AppState extends ChangeNotifier {
     await _loadMarketplaces();
     await restoreMergedMarketplaceCatalog();
     await _loadPluginState();
-    await syncMarketplaceCatalogs();
     await _applyPluginState();
-    // Boot promotion lives ONLY here (review C2): every boot path flows
-    // through _initialize, so the epoch advances exactly +1 per boot.
-    // main() must NOT call activateForBoot itself — the PLUGIN11
-    // boot-order test pins that the single call site is this method.
-    try {
-      await PluginRuntimeManager.I.activateForBoot();
-    } catch (_) {}
-    // Check if the sandbox was installed on a previous launch so the
-    // user is never asked to re-install the ~200 MB rootfs.
-    if (await SandboxService.I.checkExisting()) {
-      sandboxInstalled = true;
+    await _loadMemories();
+    await HookService.I.loadEnabled();
+    await AgentService.I.restoreRunCheckpoints();
+  }
+
+  Future<void> _activatePluginsForBoot() {
+    if (identical(_activatedBootToken, _bootToken)) {
+      return _pluginBootActivation ?? Future<void>.value();
     }
+    _activatedBootToken = _bootToken;
+    return _pluginBootActivation ??= PluginRuntimeManager.I.activateForBoot(
+      connectMcp: false,
+    );
+  }
+
+  Future<void> _runSandboxMaintenance() async {
+    if (!sandboxInstalled) return;
+    await SandboxService.I.selfHealInBackground();
+    unawaited(AgentService.I.prewarmBrowser());
+    if (!await SandboxService.I.runtimesVerified()) {
+      await SandboxService.I.installCoreRuntimes((_, _, _) {});
+    }
+    await SandboxService.I.enforceWorkspaceQuota(
+      activeSandboxIds: sessions
+          .map((session) => session.sandboxId)
+          .whereType<String>()
+          .toSet(),
+    );
+  }
+
+  Future<void> _loadShellPreferences() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final t = prefs.getInt(_kResponseTimeout);
@@ -1346,7 +1516,6 @@ class AppState extends ChangeNotifier {
         chatFontScaleMin,
         chatFontScaleMax,
       );
-      await _loadMemories();
     } catch (_) {}
   }
 
@@ -1463,6 +1632,10 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> loadSessions() async {
+    if (_deferredSessionJson != null) {
+      _hydrateDeferredSessions();
+      return;
+    }
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getStringList(_kSessions);
@@ -1498,19 +1671,161 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  static const _firstFrameMessageTailSize = 50;
+
+  Future<void> _loadSessionsForFirstFrame() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getStringList(_kSessions);
+      final requestedActiveId = prefs.getString(_kActive);
+      if (raw == null || raw.isEmpty) {
+        activeSessionId = requestedActiveId;
+        _ensureActiveSession();
+        return;
+      }
+
+      _deferredSessionJson = List<String>.of(raw);
+      Map<String, dynamic>? activeJson;
+      Map<String, dynamic>? firstRootJson;
+      for (final encoded in raw) {
+        final candidate = jsonDecode(encoded) as Map<String, dynamic>;
+        if (candidate['parentId'] == null) {
+          firstRootJson ??= candidate;
+          if (candidate['id'] == requestedActiveId) {
+            activeJson = candidate;
+            break;
+          }
+        }
+      }
+      activeJson ??= firstRootJson;
+      if (activeJson == null) {
+        _deferredSessionJson = null;
+        await loadSessions();
+        return;
+      }
+      final messages = (activeJson['messages'] as List?) ?? const [];
+      final tailStart = messages.length > _firstFrameMessageTailSize
+          ? messages.length - _firstFrameMessageTailSize
+          : 0;
+      final tailJson = Map<String, dynamic>.from(activeJson)
+        ..['messages'] = messages.sublist(tailStart);
+      final active = ChatSession.fromJson(tailJson);
+      sessions
+        ..clear()
+        ..add(active);
+      activeSessionId = active.isSubagent ? null : active.id;
+      if (activeSessionId == null) {
+        _deferredSessionJson = null;
+        await loadSessions();
+        return;
+      }
+      _deferredActiveSessionId = active.id;
+      _deferredActiveTailLength = active.messages.length;
+      notifyListeners();
+    } catch (_) {
+      _deferredSessionJson = null;
+      _ensureActiveSession();
+    }
+  }
+
+  void _hydrateDeferredSessions() {
+    final raw = _deferredSessionJson;
+    if (raw == null) return;
+    try {
+      final current = {for (final session in sessions) session.id: session};
+      final loaded = <ChatSession>[];
+      for (final encoded in raw) {
+        final fullJson = jsonDecode(encoded) as Map<String, dynamic>;
+        final id = fullJson['id'] as String?;
+        final partial = id == null ? null : current.remove(id);
+        if (partial != null && id == _deferredActiveSessionId) {
+          loaded.add(_mergeDeferredActiveSession(fullJson, partial));
+        } else {
+          loaded.add(ChatSession.fromJson(fullJson));
+        }
+      }
+      loaded.addAll(current.values);
+      sessions
+        ..clear()
+        ..addAll(loaded);
+      _deferredSessionJson = null;
+      _deferredActiveSessionId = null;
+      _deferredActiveTailLength = 0;
+      final active = sessionById(activeSessionId);
+      if (active == null || active.isSubagent) {
+        activeSessionId = rootSessions.firstOrNull?.id;
+      }
+      for (final session in sessions) {
+        session.providerId ??= _inferProviderId(session.model);
+      }
+      _restoreSelectedModel();
+      onSessionsLoaded?.call();
+      notifyListeners();
+    } catch (_) {
+      _deferredSessionJson = null;
+      _ensureActiveSession();
+    }
+  }
+
+  ChatSession _mergeDeferredActiveSession(
+    Map<String, dynamic> fullJson,
+    ChatSession partial,
+  ) {
+    final oldMessages = List<dynamic>.of(
+      (fullJson['messages'] as List?) ?? const [],
+    );
+    final prefixLength = (oldMessages.length - _deferredActiveTailLength).clamp(
+      0,
+      oldMessages.length,
+    );
+    final merged = Map<String, dynamic>.from(fullJson)
+      ..addAll(partial.toJson())
+      ..['messages'] = [
+        ...oldMessages.take(prefixLength),
+        ...partial.messages.map((message) => message.toJson()),
+      ];
+    return ChatSession.fromJson(merged);
+  }
+
   Future<void> persistSessions() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setStringList(
-        _kSessions,
-        sessions.map((s) => jsonEncode(s.toJson())).toList(),
-      );
+      await prefs.setStringList(_kSessions, _sessionJsonForPersistence());
       if (activeSessionId != null) {
         await prefs.setString(_kActive, activeSessionId!);
       } else {
         await prefs.remove(_kActive);
       }
     } catch (_) {}
+  }
+
+  List<String> _sessionJsonForPersistence() {
+    final raw = _deferredSessionJson;
+    if (raw == null) {
+      return sessions.map((session) => jsonEncode(session.toJson())).toList();
+    }
+    final current = {for (final session in sessions) session.id: session};
+    final encoded = <String>[];
+    for (final original in raw) {
+      try {
+        final fullJson = jsonDecode(original) as Map<String, dynamic>;
+        final id = fullJson['id'] as String?;
+        final partial = id == null ? null : current.remove(id);
+        if (partial != null && id == _deferredActiveSessionId) {
+          encoded.add(
+            jsonEncode(_mergeDeferredActiveSession(fullJson, partial).toJson()),
+          );
+        } else {
+          encoded.add(original);
+        }
+      } catch (_) {
+        encoded.add(original);
+      }
+    }
+    encoded.addAll(
+      current.values.map((session) => jsonEncode(session.toJson())),
+    );
+    return encoded;
   }
 
   /// Delete all user data: sessions, workspaces, providers, keys, plugin

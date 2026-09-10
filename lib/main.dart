@@ -4,10 +4,7 @@ import 'package:flutter/material.dart';
 import 'core/agent_service.dart';
 import 'core/agent_notification_service.dart';
 import 'core/firebase_service.dart';
-import 'core/github_service.dart';
-import 'core/hook_service.dart';
 import 'core/mcp_service.dart';
-import 'core/sandbox_service.dart';
 import 'core/state.dart';
 import 'core/theme.dart';
 import 'ui/sidebar.dart';
@@ -16,64 +13,20 @@ import 'ui/sandbox_setup.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await AppState.I.initialize();
-  // Boot promotion runs inside AppState._initialize (the single owner —
-  // review C2): every boot path flows through it, so the epoch advances
-  // exactly +1 per boot. Do NOT call activateForBoot here (a second call
-  // would advance the epoch +2 per boot).
-  // PR24: plugin-hook kill-switch restore (Settings toggle).
-  await HookService.I.loadEnabled();
-  // Restore run checkpoints if restarted via START_STICKY or app rebirth.
-  await AgentService.I.restoreRunCheckpoints();
+  await AppState.I.initializeForFirstFrame();
   // Apply persisted theme BEFORE first frame (no dark flash on light).
   Aether.dark = !AppState.I.lightTheme;
-  // Firebase is optional: if google-services.json isn't injected (local debug),
-  // FirebaseService degrades to offline no-ops and the app still runs.
-  await FirebaseService.I.initialize();
-  // PR32: checkExisting is now FAST (file-exists + config writes only —
-  // no bash). The PR22 self-heal moved OUT of the boot path: awaiting it
-  // here kept runApp blocked on multi-minute find+sed passes → the
-  // reported "black screen on every app open". It runs post-frame below.
-      final sandboxReady = await SandboxService.I.checkExisting();
-      AppState.I.sandboxInstalled = sandboxReady;
-      // A device that can't run the sandbox (Android 6, exec-blocked ROM)
-      // must not trap the user on the install gate — chat works without
-      // it. Post-frame hooks below still key off the REAL disk state.
-      runApp(
-        OvidApp(sandboxReady: sandboxReady || AppState.I.sandboxSkipped),
-      );
+  runApp(
+    OvidApp(
+      sandboxReady: AppState.I.sandboxInstalled || AppState.I.sandboxSkipped,
+    ),
+  );
   WidgetsBinding.instance.addPostFrameCallback((_) {
-    unawaited(GitHubService.I.initialize());
-    // PR32: background self-heal (usr symlink, shebangs, exec bits, libz)
-    // — AFTER first paint, never blocking it.
-    if (sandboxReady) unawaited(SandboxService.I.selfHealInBackground());
-    // Pre-warm the browser only after the sandbox gate is satisfied (the
-    // setup screen replaces the shell until install completes).
-    if (sandboxReady) unawaited(AgentService.I.prewarmBrowser());
-    // Self-heal runtime tools: if the sandbox is present but node/python/
-    // git/curl are missing (e.g. an earlier launch failed halfway through
-    // the runtime install), re-run the runtime installer in the
-    // background. Logged in Settings → Device health.
-    if (sandboxReady) {
-      unawaited(() async {
-        if (!await SandboxService.I.runtimesVerified()) {
-          await SandboxService.I.installCoreRuntimes((_, _, _) {});
-        }
-      }());
-    }
-    // Storage-quota housekeeping (storage-quota policy): orphaned ws_* dirs from
-    // deleted sessions are swept; over-quota workspaces LRU-evict with a
-    // 30-day grace window. Never blocks first paint.
-    unawaited(
-      SandboxService.I.enforceWorkspaceQuota(
-        activeSandboxIds: AppState.I.sessions
-            .map((s) => s.sandboxId)
-            .whereType<String>()
-            .toSet(),
-      ),
-    );
+    unawaited(_startReadiness());
   });
 }
+
+Future<void> _startReadiness() => AppState.I.initializeReadiness();
 
 class OvidApp extends StatefulWidget {
   const OvidApp({super.key, this.sandboxReady = true});
@@ -143,18 +96,24 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // Foreground-notification wiring (agent keep-alive): registers the
     // notification Stop-button handler.
     unawaited(AgentNotificationService.I.init());
+    FirebaseService.I.addListener(_onFirebaseReady);
     // Ask for telemetry consent once (Play policy) after first frame.
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAskConsent());
     // First-run welcome notice (the onboarding flow welcomeNoticeVersion):
     // one dialog per version, after the consent dialog settles.
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeWelcome());
-    // MCP & plugin auto-reconnect: respawn services the user had connected.
-    unawaited(AppState.I.reconnectServices());
+  }
+
+  void _onFirebaseReady() {
+    if (FirebaseService.I.isAvailable) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAskConsent());
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    FirebaseService.I.removeListener(_onFirebaseReady);
     super.dispose();
   }
 

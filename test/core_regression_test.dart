@@ -7571,13 +7571,19 @@ block</pre>
         );
         // The boot path must NOT await the multi-minute heal.
         expect(body, isNot(contains('await _selfHealSandbox')));
-        // ...and the heal must run from the post-frame background instead.
+        // ...and the heal must run from readiness after the first frame.
         expect(src, contains('Future<void> selfHealInBackground'));
         final main = File('lib/main.dart').readAsStringSync();
+        final state = File('lib/core/state.dart').readAsStringSync();
         expect(
-          main,
+          state,
           contains('selfHealInBackground'),
-          reason: 'heal runs AFTER runApp (post-frame), never before',
+          reason: 'readiness owns sandbox maintenance',
+        );
+        expect(
+          main.indexOf('runApp('),
+          lessThan(main.indexOf('_startReadiness()')),
+          reason: 'readiness starts only after runApp',
         );
       },
     );
@@ -20392,7 +20398,7 @@ cwd = 'tools'
         final stateSrc = codeOnly(
           File('lib/core/state.dart').readAsStringSync(),
         );
-        final call = RegExp(r'PluginRuntimeManager\.I\.activateForBoot\(\)');
+        final call = RegExp(r'PluginRuntimeManager\.I\.activateForBoot\(');
         final total =
             call.allMatches(mainSrc).length +
             call.allMatches(stateSrc).length;
@@ -20401,8 +20407,13 @@ cwd = 'tools'
           1,
           reason: 'boot promotion must have exactly one production call site',
         );
+        expect(
+          stateSrc,
+          contains('connectMcp: false'),
+          reason: 'boot activation may mount MCP declarations but not connect',
+        );
 
-        // Epoch advances exactly +1 per boot through initialize().
+        // Epoch advances exactly +1 per AppState boot through initialize().
         final prefs = await SharedPreferences.getInstance();
         AppState.resetTestInstance();
         await AppState.createForTest().initialize();
@@ -20498,7 +20509,7 @@ cwd = 'tools'
     test(
       'PLUGIN11: main.dart boot activation is single and before reconnects',
       () async {
-        // Ownership (review C2): AppState._initialize is the single
+        // Ownership (review C2): AppState readiness is the single
         // production owner of boot promotion; main() must NOT call it
         // (a second call would advance the epoch +2 per boot).
         for (final path in ['lib/main.dart', 'lib/core/state.dart']) {
@@ -20508,24 +20519,26 @@ cwd = 'tools'
               .where((l) => !l.trimLeft().startsWith('//'))
               .join('\n');
           final n = RegExp(
-            r'PluginRuntimeManager\.I\.activateForBoot\(\)',
+            r'PluginRuntimeManager\.I\.activateForBoot\(',
           ).allMatches(codeOnly).length;
           if (path == 'lib/main.dart') {
             expect(
               n,
               0,
-              reason: 'main() must not promote; _initialize owns it',
+              reason: 'main() must not promote; AppState readiness owns it',
             );
           } else {
             expect(
               n,
               1,
-              reason: '_initialize must promote exactly once',
+              reason: 'AppState readiness must promote exactly once',
             );
           }
         }
         final src = File('lib/main.dart').readAsStringSync();
-        final initIdx = src.indexOf('await AppState.I.initialize();');
+        final initIdx = src.indexOf(
+          'await AppState.I.initializeForFirstFrame();',
+        );
         expect(initIdx, greaterThan(-1));
         // …and reconnectServices stays out of main() itself (it belongs
         // to the shell, which runs once at startup + on resume). The

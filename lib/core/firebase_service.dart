@@ -37,9 +37,12 @@ class FirebaseService extends ChangeNotifier {
   String? get displayName => _user?.displayName;
 
   StreamSubscription<User?>? _authSub;
+  Future<void>? _initialization;
 
   /// Initialize Firebase if a config is present. Safe to call on all builds.
-  Future<void> initialize() async {
+  Future<void> initialize() => _initialization ??= _initialize();
+
+  Future<void> _initialize() async {
     try {
       await Firebase.initializeApp();
       _available = true;

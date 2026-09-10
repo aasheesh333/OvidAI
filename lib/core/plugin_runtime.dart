@@ -779,12 +779,12 @@ class PluginRuntimeManager extends ChangeNotifier {
 
   // ── boot activation (spec §7) ─────────────────────────────────────
 
-  /// Increments the boot epoch EXACTLY once per `AppState._initialize`,
+  /// Increments the boot epoch once per AppState-owned boot token,
   /// re-mounts persisted installs, and promotes every valid pending
   /// record (`installedBootEpoch < epoch && promoteOnNextBoot`) to
   /// globalActive/degraded exactly once. Corrupt records never propagate
   /// out of initialize.
-  Future<void> activateForBoot() async {
+  Future<void> activateForBoot({bool connectMcp = true}) async {
     try {
       final epoch = (await _readEpoch()) + 1;
       await _writeEpoch(epoch);
@@ -831,7 +831,10 @@ class PluginRuntimeManager extends ChangeNotifier {
                 activation: rec.state,
                 immediateSessionId: rec.immediateSessionId,
               );
-              await AppState.I.mountPluginOwnedMcpServers(entry.manifest);
+              await AppState.I.mountPluginOwnedMcpServers(
+                entry.manifest,
+                connect: connectMcp,
+              );
             }
           case PluginActivation.pendingGlobal:
           case PluginActivation.failed:
