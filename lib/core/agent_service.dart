@@ -738,6 +738,10 @@ class AgentService extends ChangeNotifier {
 
   /// UI view: the ACTIVE session's queue (per-session isolation test).
   List<String> get queuedMessages => List.unmodifiable(_run.queue);
+
+  /// Queue snapshot for an explicitly rendered session.
+  List<String> queuedMessagesFor(String sessionId) =>
+      List.unmodifiable(_runs[sessionId]?.queue ?? const <String>[]);
   Map<int, BgJob> get _jobs => _runResolved.jobs;
   int get _jobCounter => _runResolved.jobCounter;
   set _jobCounter(int v) => _runResolved.jobCounter = v;
@@ -825,27 +829,18 @@ class AgentService extends ChangeNotifier {
     }
   }
 
-  /// Queue-aware stop request:
-  /// - If the target session has queued messages: aborts the CURRENT turn only,
-  ///   leaving the queue intact so the next instruction runs immediately.
-  /// - If the queue is empty: performs a full panic stop (clears all queues,
-  ///   cancels all runs, kills all processes).
-  /// Returns `true` if a queued continuation was preserved, `false` on full panic stop.
-  bool stopRequested({String? sessionId}) {
-    final sid = sessionId ?? AppState.I.activeSessionId;
-    final r = _runs[sid];
-    if (r != null && r.queue.isNotEmpty) {
-      _cancelBucket(r);
-      return true;
-    }
-    for (final b in _runs.values) {
-      b.queue.clear();
-    }
-    cancelAllRuns();
-    return false;
+  /// Stops only [sessionId]. If it has queued messages, the current turn is
+  /// aborted while the queue remains available for immediate continuation.
+  /// Returns whether a queued continuation was preserved.
+  bool stopRequested({required String sessionId}) {
+    final r = _runs[sessionId];
+    if (r == null) return false;
+    final queuePreserved = r.queue.isNotEmpty;
+    _cancelBucket(r);
+    return queuePreserved;
   }
 
-  /// PR32: stop EVERYTHING (notification Stop button / panic stop) —
+  /// PR32: stop EVERYTHING (notification Exit / explicit panic stop) —
   /// every session's run, every subagent, every job, every spawned
   /// process. Instant, regardless of which session the UI is on.
   void cancelAllRuns() {
@@ -868,6 +863,16 @@ class AgentService extends ChangeNotifier {
 
   /// PR32: is ANY run active across all sessions (lifecycle keep-alive)?
   bool get anyRunActive => _runs.values.any((r) => r.activeRunId != null);
+
+  /// Resolve the running session represented by foreground-notification
+  /// progress. Never fall back to a different run: that would let a stale
+  /// notification stop an unrelated session.
+  String? runningSessionIdForNotification(String? preferredSessionId) {
+    if (preferredSessionId != null && busyFor(preferredSessionId)) {
+      return preferredSessionId;
+    }
+    return null;
+  }
 
   /// Stop the run that belongs to [sessionId] — used for subagent sessions
   /// (their Stop button and `interrupt_agent`), which are never the bucket
@@ -969,8 +974,8 @@ class AgentService extends ChangeNotifier {
     // to keep the run parked until its full 10-minute timeout. Kill
     // every process the sandbox spawned for THIS run (SIGKILL)
     // AND every background job of this run so the Stop button is
-    // immediate in every tier. Subagent children die with the parent
-    // (their sessions' buckets are cancelled below via lineage).
+    // immediate in every tier. Other sessions, including child sessions,
+    // remain independent and are never cancelled from this path.
     final runKey =
         r.runKey ??
         _runs.entries
@@ -990,15 +995,8 @@ class AgentService extends ChangeNotifier {
         j.process?.kill(ProcessSignal.sigkill);
       } catch (_) {}
     }
-    // Children of this run's session: stop their runs + processes too —
-    // a parent Stop must not leave orphaned subagents spinning.
-    final sid = runKey.isNotEmpty ? runKey : _runCtx?.session.id;
-    if (sid != null && sid.isNotEmpty) {
-      for (final kid in AppState.I.childrenOf(sid)) {
-        cancelRunFor(kid.id);
-      }
-    }
-    _emit('think', 'stopped — all commands and jobs killed');
+    r.runEvents.add(AgentEvent('think', 'stopped — all commands and jobs killed'));
+    r.statusLine = 'stopped — all commands and jobs killed';
     notifyListeners();
   }
 
@@ -2365,7 +2363,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // Foreground-notification mirror (agent keep-alive): progress events
     // update the ongoing notification; done/err retires it.
     if (kind == 'think' || kind == 'shell' || kind == 'file' || kind == 'nav') {
-      AgentNotificationService.I.agentWorking(text);
+      AgentNotificationService.I.agentWorking(text, sessionId: _pinnedRunId);
     } else if (kind == 'done' || kind == 'err') {
       AgentNotificationService.I.agentIdle();
     }
@@ -5438,7 +5436,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // where the user could background the app before the service ever
     // started, and Android froze the Dart isolate mid-run (the reported
     // "agent stops if I mistakenly open the app again").
-    AgentNotificationService.I.agentWorking('starting task…');
+    AgentNotificationService.I.agentWorking('starting task…', sessionId: s.id);
     final ctx = _RunCtx(bucket, s, p);
     return runZoned(
       () => _runTaskBody(prompt, ctx, freshTurn: freshTurn),

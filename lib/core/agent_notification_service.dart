@@ -29,6 +29,7 @@ class AgentNotificationService {
   int _failCount = 0; // 3 native failures → feature off for the session
   int _lastEventHash = 0;
   Timer? _debounce;
+  String? _stopTargetSessionId;
 
   @visibleForTesting
   static bool? keepAliveOverrideForTest;
@@ -80,7 +81,12 @@ class AgentNotificationService {
   Future<void> init() async {
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'onAgentStop') {
-        AgentService.I.stopRequested();
+        final sessionId = AgentService.I.runningSessionIdForNotification(
+          _stopTargetSessionId,
+        );
+        if (sessionId != null) {
+          AgentService.I.stopRequested(sessionId: sessionId);
+        }
       } else if (call.method == 'onAgentExit') {
         AgentService.I.cancelAllRuns();
         if (_onExitCallback != null) {
@@ -120,7 +126,8 @@ class AgentNotificationService {
   /// NEVER blocks or throws into the agent event stream — all failures
   /// are swallowed and after 3 consecutive native failures the feature
   /// disables itself for the session.
-  Future<void> agentWorking(String text) async {
+  Future<void> agentWorking(String text, {String? sessionId}) async {
+    if (sessionId != null) _stopTargetSessionId = sessionId;
     if (!_supported) return;
     unawaited(_ensurePermission());
     final clean = _clean(text);

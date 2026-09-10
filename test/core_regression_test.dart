@@ -7616,27 +7616,32 @@ block</pre>
       },
     );
 
-    test('cancelAllRuns kills jobs + spawned processes on every bucket', () {
+    test('global panic remains explicit while Stop stays session-scoped', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       expect(src, contains('void cancelAllRuns()'));
       expect(src, contains('killAllProcesses'));
       // Stop kills background jobs too (instant, not 10-min timeout).
       expect(src, contains('j.process?.kill(ProcessSignal.sigkill)'));
-      // Parent stop cascades to subagent children.
-      expect(src, contains('cancelRunFor(kid.id)'));
-      // Chat red button + notification Stop use the panic stop.
+      // Session Stop must not cascade to subagent children.
+      expect(src, isNot(contains('cancelRunFor(kid.id)')));
+      // Chat red button and notification Stop target one session.
       final chat = File('lib/ui/chat_screen.dart').readAsStringSync();
-      expect(chat, contains('cancelAllRuns'));
+      expect(chat, contains('stopRequested(sessionId: sessionId)'));
       final notif = File(
         'lib/core/agent_notification_service.dart',
       ).readAsStringSync();
+      expect(notif, contains('stopRequested(sessionId: sessionId)'));
+      // Notification Exit remains the explicit global panic path.
       expect(notif, contains('cancelAllRuns'));
     });
 
     test('run start immediately raises the foreground service', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       // No debounce window at runTask start.
-      expect(src, contains("agentWorking('starting task…')"));
+      expect(
+        src,
+        contains("agentWorking('starting task…', sessionId: s.id)"),
+      );
       // Lifecycle paused re-asserts the notification while any run is on.
       final main = File('lib/main.dart').readAsStringSync();
       expect(main, contains('anyRunActive'));
@@ -11972,7 +11977,7 @@ You are an expert security auditor reviewing code for vulnerabilities.
       );
 
       test(
-        'STOP2: stopRequested aborts turn only when queue is non-empty, panic stops when empty',
+        'STOP2: stopRequested preserves queued continuation only for its session',
         () async {
           final agent = AgentService.I;
           final app = AppState.I;
@@ -11989,11 +11994,11 @@ You are an expert security auditor reviewing code for vulnerabilities.
             app.sessions.removeWhere((x) => x.id == 'stop2_sess');
           });
 
-          // Empty queue -> panic stop across all runs
+          // Empty queue -> stop this session without a queued continuation.
           final didQueueResume = agent.stopRequested(sessionId: s.id);
           expect(didQueueResume, isFalse);
 
-          // Non-empty queue -> aborts current bucket only, preserves queued item
+          // Non-empty queue -> abort current turn and preserve its queued item.
           agent.queueMessageForTest('follow up prompt');
           final didQueueResume2 = agent.stopRequested(sessionId: s.id);
           expect(didQueueResume2, isTrue);

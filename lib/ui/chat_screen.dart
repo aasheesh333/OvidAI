@@ -1101,6 +1101,7 @@ class _ChatScreenState extends State<ChatScreen>
                 const _ApprovalDock(),
                 _InputBar(
                   controller: _input,
+                  sessionId: s?.id,
                   running: s == null ? false : AgentService.I.busyFor(s.id),
                   // approval takeover parity: a pending approval LOCKS
                   // the composer — the user answers the card, not the box.
@@ -3411,6 +3412,7 @@ class _AttachmentChip extends StatelessWidget {
 
 class _InputBar extends StatefulWidget {
   final TextEditingController controller;
+  final String? sessionId;
   final bool running;
 
   /// Approval takeover: when an approval/question card is pending, the
@@ -3419,6 +3421,7 @@ class _InputBar extends StatefulWidget {
   final VoidCallback onSend;
   const _InputBar({
     required this.controller,
+    required this.sessionId,
     required this.running,
     this.locked = false,
     required this.onSend,
@@ -4152,12 +4155,15 @@ class _InputBarState extends State<_InputBar> {
                     builder: (_, _) {
                       // Per-session run state (never leaked from other
                       // sessions — the multi-session blink fix).
-                      final runningNow = AgentService.I.busyFor(
-                        AppState.I.activeSession?.id ?? '',
-                      );
+                      final sessionId = widget.sessionId;
+                      final runningNow = sessionId != null &&
+                          AgentService.I.busyFor(sessionId);
                       final hasDraft = controller.text.trim().isNotEmpty;
                       final IconData icon;
-                      final hasQueued = AgentService.I.queuedMessages.isNotEmpty;
+                      final hasQueued = sessionId != null &&
+                          AgentService.I
+                              .queuedMessagesFor(sessionId)
+                              .isNotEmpty;
                       final Color bg;
                       final String tip;
                       if (runningNow && !hasDraft) {
@@ -4166,7 +4172,7 @@ class _InputBarState extends State<_InputBar> {
                         bg = Colors.redAccent;
                         tip = hasQueued
                             ? 'Stop current turn (next queued will run)'
-                            : 'Stop (panic stop)';
+                            : 'Stop this session';
                       } else if (runningNow && hasDraft) {
                         // Running + draft → SEND-TO-QUEUE (teal).
                         icon = Icons.arrow_upward;
@@ -4188,10 +4194,7 @@ class _InputBarState extends State<_InputBar> {
                           icon: Icon(icon, size: 18, color: Colors.white),
                           onPressed: () {
                             if (runningNow && !hasDraft) {
-                              // PR32 / STOP2: stopRequested delegates to cancelAllRuns for panic stop when queue is empty.
-                              AgentService.I.stopRequested(
-                                sessionId: AppState.I.activeSession?.id,
-                              );
+                              AgentService.I.stopRequested(sessionId: sessionId);
                             } else {
                               onSend();
                             }
