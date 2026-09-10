@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_service.dart';
@@ -91,6 +92,17 @@ void main() {
       expect(
         find.bySemanticsLabel(RegExp(r'(^|\n)Delete provider($|\n)')),
         findsOneWidget,
+      );
+      final deleteSemantics = tester.getSemantics(
+        find.byTooltip('Delete provider'),
+      );
+      expect(
+        deleteSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+        isTrue,
+      );
+      expect(
+        deleteSemantics.getSemanticsData().flagsCollection.isButton,
+        isTrue,
       );
       final builtIn = app.providers.firstWhere((provider) => !provider.custom);
       expect(

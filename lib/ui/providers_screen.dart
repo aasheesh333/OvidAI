@@ -370,6 +370,7 @@ class _ProviderCardState extends State<ProviderCard> {
                 ? Semantics(
                     label: 'Delete provider',
                     button: true,
+                    onTap: _confirmDelete,
                     excludeSemantics: true,
                     child: IconButton(
                       tooltip: 'Delete provider',
