@@ -285,6 +285,28 @@ class PluginPermissionStore {
     required NormalizedPluginManifest manifest,
   }) => load(pluginId, pluginManifestDigest(manifest));
 
+  /// Runtime activation requires a complete approval, not merely a stored
+  /// row for the current digest. Raw [load] remains intentionally permissive
+  /// so approval UIs can inspect partial grants.
+  Future<PluginPermissionGrant?> effectiveRuntimeGrant({
+    required String pluginId,
+    required NormalizedPluginManifest manifest,
+  }) async {
+    if (pluginId != manifest.id) return null;
+    final grant = await load(pluginId, pluginManifestDigest(manifest));
+    if (grant == null || grant.pluginId != pluginId) return null;
+    final requested = manifest.requestedCapabilities.isNotEmpty
+        ? manifest.requestedCapabilities
+        : inferRequestedCapabilities(manifest);
+    if (!grant.capabilities.containsAll(requested)) return null;
+    final environmentNames = <String>{...manifest.environmentReadNames};
+    for (final server in manifest.mcpServers) {
+      environmentNames.addAll(server.envNames);
+    }
+    if (!grant.environmentReadNames.containsAll(environmentNames)) return null;
+    return grant;
+  }
+
   /// Persists [grant] (replacing any previous record for its plugin id).
   Future<void> save(PluginPermissionGrant grant) async {
     try {

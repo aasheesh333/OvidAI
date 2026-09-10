@@ -601,8 +601,10 @@ class AgentService extends ChangeNotifier {
       // session (loaders, environment probes). Fire-and-forget.
       final active = AppState.I.activeSession;
       if (active != null &&
-          HookService.I.hasHookListeners('session_start',
-              sessionId: active.id)) {
+          HookService.I.hasHookListeners(
+            'session_start',
+            sessionId: active.id,
+          )) {
         unawaited(
           HookService.I.fire(
             'session_start',
@@ -844,12 +846,13 @@ class AgentService extends ChangeNotifier {
   /// every session's run, every subagent, every job, every spawned
   /// process. Instant, regardless of which session the UI is on.
   void cancelAllRuns() {
+    // Cancellation releases each run's finally block. Clear continuations
+    // first so no bucket can restart queued work during a global panic.
+    for (final r in _runs.values) {
+      r.queue.clear();
+    }
     for (final r in _runs.values.toList()) {
-      if (r.activeRunId != null ||
-          r.cancelRequested ||
-          r.activeClient != null) {
-        _cancelBucket(r);
-      }
+      _cancelBucket(r);
     }
     // Buckets outside the map (rare) + processes no run claims.
     try {
@@ -874,12 +877,39 @@ class AgentService extends ChangeNotifier {
     return null;
   }
 
+  /// Deterministic replacement when the notification's represented run ends.
+  String? nextRunningSessionForNotification({
+    required String excludingSessionId,
+  }) {
+    for (final entry in _runs.entries) {
+      if (entry.key != excludingSessionId && entry.value.activeRunId != null) {
+        return entry.key;
+      }
+    }
+    return null;
+  }
+
   /// Stop the run that belongs to [sessionId] — used for subagent sessions
   /// (their Stop button and `interrupt_agent`), which are never the bucket
   /// the caller's Zone resolves to.
   void cancelRunFor(String sessionId) {
     final r = _runs[sessionId];
     if (r != null) _cancelBucket(r);
+  }
+
+  /// Explicit subagent interruption cancels that session and its descendants.
+  /// Ordinary UI Stop deliberately does not use this path.
+  void cancelRunTreeFor(String sessionId) {
+    final sessionIds = <String>[
+      sessionId,
+      ...AppState.I.descendantsOf(sessionId).map((s) => s.id),
+    ];
+    for (final id in sessionIds) {
+      final r = _runs[id];
+      if (r == null) continue;
+      r.queue.clear();
+      _cancelBucket(r);
+    }
   }
 
   static const String _kActiveRunsCheckpointKey = 'ovid_active_runs_v1';
@@ -942,7 +972,12 @@ class AgentService extends ChangeNotifier {
   }
 
   void _cancelBucket(AgentRun r) {
-    if (r.activeRunId == null && !r.cancelRequested && r.activeClient == null) {
+    if (r.activeRunId == null &&
+        !r.cancelRequested &&
+        r.activeClient == null &&
+        r.activeRequest == null &&
+        r.pendingApproval == null &&
+        r.jobs.values.every((job) => job.finished)) {
       return;
     }
     if (r.runKey != null) {
@@ -995,9 +1030,12 @@ class AgentService extends ChangeNotifier {
         j.process?.kill(ProcessSignal.sigkill);
       } catch (_) {}
     }
-    r.runEvents.add(AgentEvent('think', 'stopped — all commands and jobs killed'));
-    r.statusLine = 'stopped — all commands and jobs killed';
-    notifyListeners();
+    _emitToRun(
+      r,
+      'think',
+      'stopped — all commands and jobs killed',
+      sessionId: runKey.isEmpty ? null : runKey,
+    );
   }
 
   /// Drop a session's run entirely (called from AppState.deleteSession).
@@ -2324,13 +2362,14 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     notifyListeners();
   }
 
-  void _emit(String kind, String text) {
-    _runResolved.runEvents.add(AgentEvent(kind, text));
-    if (_runResolved.runEvents.length > 120) {
-      _runResolved.runEvents.removeRange(
-        0,
-        _runResolved.runEvents.length - 120,
-      );
+  void _emit(String kind, String text) =>
+      _emitToRun(_runResolved, kind, text, sessionId: _pinnedRunId);
+
+  void _emitToRun(AgentRun run, String kind, String text, {String? sessionId}) {
+    final eventSessionId = sessionId ?? run.runKey;
+    run.runEvents.add(AgentEvent(kind, text));
+    if (run.runEvents.length > 120) {
+      run.runEvents.removeRange(0, run.runEvents.length - 120);
     }
     // Live status line for the composer (retry/backoff/compaction were
     // previously only in this log, which no UI ever read).
@@ -2339,9 +2378,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         kind == 'file' ||
         kind == 'nav' ||
         kind == 'err') {
-      _runResolved.statusLine = text;
+      run.statusLine = text;
     } else if (kind == 'done') {
-      _runResolved.statusLine = null;
+      run.statusLine = null;
     }
     // Mirror into the session event log (session_search queries this).
     // Tag with the RUNNING session so parallel sessions' events stay
@@ -2350,22 +2389,26 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       SessionEvent(
         type: kind,
         data: text,
-        sessionId: _pinnedRunId ?? AppState.I.activeSessionId,
+        sessionId: eventSessionId ?? AppState.I.activeSessionId,
       ),
     );
     if (_sessionEvents.length > 2000) {
       _sessionEvents.removeRange(0, _sessionEvents.length - 2000);
     }
     // ToolRow parity: shell output streams into the live tool card.
-    if (kind == 'shellOut' && _activeToolMsg != null) {
-      _toolStream('$text\n');
+    if (kind == 'shellOut' && run.activeToolMsg != null) {
+      _toolStreamFor(run, '$text\n');
     }
     // Foreground-notification mirror (agent keep-alive): progress events
     // update the ongoing notification; done/err retires it.
-    if (kind == 'think' || kind == 'shell' || kind == 'file' || kind == 'nav') {
-      AgentNotificationService.I.agentWorking(text, sessionId: _pinnedRunId);
+    if ((kind == 'think' ||
+            kind == 'shell' ||
+            kind == 'file' ||
+            kind == 'nav') &&
+        (eventSessionId == null || busyFor(eventSessionId))) {
+      AgentNotificationService.I.agentWorking(text, sessionId: eventSessionId);
     } else if (kind == 'done' || kind == 'err') {
-      AgentNotificationService.I.agentIdle();
+      AgentNotificationService.I.agentIdle(sessionId: eventSessionId);
     }
     notifyListeners();
   }
@@ -2633,17 +2676,15 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       if (entry.server.ownerPluginId != null) {
         tools.add(entry.toOpenAiTool(canonical: true));
       }
-      final aliasCount = connectedMcpTools
-          .where((e) {
-            if (e.legacyToolName != entry.legacyToolName) return false;
-            final candidateOwner = e.server.ownerPluginId;
-            return candidateOwner == null ||
-                PluginContributionRegistry.I.isPluginActiveForSession(
-                  candidateOwner,
-                  runSessionId,
-                );
-          })
-          .length;
+      final aliasCount = connectedMcpTools.where((e) {
+        if (e.legacyToolName != entry.legacyToolName) return false;
+        final candidateOwner = e.server.ownerPluginId;
+        return candidateOwner == null ||
+            PluginContributionRegistry.I.isPluginActiveForSession(
+              candidateOwner,
+              runSessionId,
+            );
+      }).length;
       if (aliasCount == 1) {
         tools.add(entry.toOpenAiTool(canonical: false));
       }
@@ -2677,8 +2718,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
                 candidate.custom &&
                 _mcpOwnerVisible(candidate, runSessionId) &&
                 (candidate.ownerPluginId == null
-                    ? 'mcp_${_normTool(candidate.name)}'
-                    : McpService.providerServerToolName(candidate)) ==
+                        ? 'mcp_${_normTool(candidate.name)}'
+                        : McpService.providerServerToolName(candidate)) ==
                     canonicalStub,
           )
           .length;
@@ -5411,8 +5452,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // Task 8 (spec §8.1): user_prompt_submit — ONCE per user prompt, at
     // run entry (canonical replacement for the per-turn on_turn_start).
     // Observe-only, fire-and-forget.
-    if (HookService.I.hasHookListeners('user_prompt_submit',
-        sessionId: s.id)) {
+    if (HookService.I.hasHookListeners('user_prompt_submit', sessionId: s.id)) {
       unawaited(
         HookService.I.fire(
           'user_prompt_submit',
@@ -5730,8 +5770,7 @@ ${await _agentsMdBlock()}
         // Task 8 (spec §8.1): post_request — observe-only hook after every
         // LLM response (fire-and-forget; output is never injected).
         if (msg != null &&
-            HookService.I.hasHookListeners('post_request',
-                sessionId: s.id)) {
+            HookService.I.hasHookListeners('post_request', sessionId: s.id)) {
           unawaited(
             HookService.I.fire(
               'post_request',
@@ -6111,8 +6150,7 @@ ${await _agentsMdBlock()}
       );
       // PR24: on_turn_end fire-and-forget — post-run bookkeeping plugins
       // (indexers, notifiers, cleanup) never block the UI.
-      if (HookService.I.hasHookListeners('stop',
-          sessionId: pinnedSessionId)) {
+      if (HookService.I.hasHookListeners('stop', sessionId: pinnedSessionId)) {
         unawaited(
           HookService.I.fire(
             'stop',
@@ -6127,7 +6165,7 @@ ${await _agentsMdBlock()}
       unawaited(maybeGenerateSessionTitle(ctx.session));
       // Foreground notification retires with the run (covers error paths
       // where no 'done'/'err' event ever fires).
-      AgentNotificationService.I.agentIdle();
+      AgentNotificationService.I.agentIdle(sessionId: pinnedSessionId);
       notifyListeners();
       // The queue auto-continue must run on the RUNNING session's queue,
       // not whatever session the UI switched to mid-run.
@@ -6698,8 +6736,10 @@ ${await _agentsMdBlock()}
     // plugin may DENY the call outright; exit code 2 short-circuits the
     // whole dispatch before _dispatchInner ever runs, same enforcement
     // point a real security-relevant hook needs.
-    if (HookService.I.hasHookListeners('pre_tool',
-        sessionId: ledgerSid ?? '')) {
+    if (HookService.I.hasHookListeners(
+      'pre_tool',
+      sessionId: ledgerSid ?? '',
+    )) {
       final gate = await HookService.I.fireGate(
         'pre_tool',
         ledgerSid ?? '',
@@ -6740,8 +6780,10 @@ ${await _agentsMdBlock()}
       }
       // PR24: on_post_tool — fire-and-forget after every tool completes
       // (indexers, loggers). Never blocks the loop.
-      if (HookService.I.hasHookListeners('post_tool',
-          sessionId: ledgerSid ?? '')) {
+      if (HookService.I.hasHookListeners(
+        'post_tool',
+        sessionId: ledgerSid ?? '',
+      )) {
         unawaited(
           HookService.I.fire(
             'post_tool',
@@ -8705,8 +8747,10 @@ ${await _agentsMdBlock()}
     // a plugin may deny the approval before the user is ever asked
     // (exit 2 / JSON block). Fail-open on any hook failure: a broken
     // hook must never wedge the run (same stance as the pre_tool gate).
-    if (HookService.I.hasHookListeners('permission_request',
-        sessionId: sessionId ?? '')) {
+    if (HookService.I.hasHookListeners(
+      'permission_request',
+      sessionId: sessionId ?? '',
+    )) {
       final gate = await HookService.I.fireGate(
         'permission_request',
         sessionId ?? '',
@@ -8890,8 +8934,10 @@ ${await _agentsMdBlock()}
     notifyListeners();
     // Task 8 (spec §8.1): notification — observe hook for user-facing
     // prompts (approval docks, questions, plan reviews).
-    if (HookService.I.hasHookListeners('notification',
-        sessionId: _runSession?.id ?? '')) {
+    if (HookService.I.hasHookListeners(
+      'notification',
+      sessionId: _runSession?.id ?? '',
+    )) {
       unawaited(
         HookService.I.fire(
           'notification',
@@ -9213,8 +9259,10 @@ ${await _agentsMdBlock()}
     return m;
   }
 
-  void _toolStream(String chunk) {
-    final m = _activeToolMsg;
+  void _toolStream(String chunk) => _toolStreamFor(_runResolved, chunk);
+
+  void _toolStreamFor(AgentRun run, String chunk) {
+    final m = run.activeToolMsg;
     if (m == null) return;
     m.toolDetail = '${m.toolDetail ?? ''}$chunk';
     if ((m.toolDetail?.length ?? 0) > 12000) {
@@ -11083,7 +11131,12 @@ ${await _agentsMdBlock()}
     // PR40/Task2: installed+enabled plugin content — a plugin's fetched
     // commands, skills, and agents become available to the agent runtime.
     for (final p in AppState.I.plugins) {
-      if (!p.installed || !p.enabled || p.source == null) continue;
+      if (!p.installed ||
+          !p.enabled ||
+          p.migrationRequired ||
+          p.source == null) {
+        continue;
+      }
       try {
         final dir = await AppState.I.pluginCacheDirFor(p.source!);
         SkillService.I.addRoot('${dir.path}/commands');
@@ -11477,10 +11530,16 @@ ${await _agentsMdBlock()}
 
   /// Stop a subagent's run (its own Stop button or `interrupt_agent`).
   void interruptSubagent(String sessionId) {
-    final sub = subagentForSession(sessionId);
-    if (sub != null) sub.interrupted = true;
-    cancelRunFor(sessionId);
-    AppState.I.setAgentState(sessionId, 'stopped');
+    final sessions = <ChatSession>[
+      if (AppState.I.sessionById(sessionId) case final session?) session,
+      ...AppState.I.descendantsOf(sessionId),
+    ];
+    for (final session in sessions) {
+      final sub = subagentForSession(session.id);
+      if (sub != null) sub.interrupted = true;
+      AppState.I.setAgentState(session.id, 'stopped');
+    }
+    cancelRunTreeFor(sessionId);
     notifyListeners();
   }
 
@@ -11704,8 +11763,7 @@ ${await _agentsMdBlock()}
     AppState.I.persistSessions();
     _emit('think', 'dispatched $id → ${cleanTruncate(label, 40)}');
     // Task 8 (spec §8.1): subagent_start — observe hook at child spawn.
-    if (HookService.I.hasHookListeners('subagent_start',
-        sessionId: child.id)) {
+    if (HookService.I.hasHookListeners('subagent_start', sessionId: child.id)) {
       unawaited(
         HookService.I.fire(
           'subagent_start',
@@ -11786,8 +11844,7 @@ ${await _agentsMdBlock()}
     _emit('think', 'spawned $id → ${cleanTruncate(label, 40)}');
     // Task 8 (spec §8.1): subagent_start for fresh foreground children
     // (workflow/ralph rounds) — same observe hook as dispatch_agent.
-    if (HookService.I.hasHookListeners('subagent_start',
-        sessionId: child.id)) {
+    if (HookService.I.hasHookListeners('subagent_start', sessionId: child.id)) {
       unawaited(
         HookService.I.fire(
           'subagent_start',
@@ -12054,8 +12111,7 @@ ${await _agentsMdBlock()}
       mirror?.cancel();
       // Task 8 (spec §8.1): subagent_end — observe hook at settlement
       // (finished, interrupted, or failed — one fire per settled child).
-      if (HookService.I.hasHookListeners('subagent_end',
-          sessionId: child.id)) {
+      if (HookService.I.hasHookListeners('subagent_end', sessionId: child.id)) {
         unawaited(
           HookService.I.fire(
             'subagent_end',

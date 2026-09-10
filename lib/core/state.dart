@@ -247,6 +247,13 @@ class PluginItem {
   /// fail install instead of landing here.
   List<CompatibilityIssue> compatibilityWarnings;
 
+  /// Fail-closed marker for installs that need normalized inspection and a
+  /// fresh explicit grant before they can execute again.
+  bool migrationRequired;
+
+  /// Actionable runtime/migration detail shown by startup and plugin UI.
+  String? runtimeReason;
+
   PluginItem({
     required this.name,
     required this.author,
@@ -268,6 +275,8 @@ class PluginItem {
     this.promoteOnNextBoot = false,
     this.manifestDigest,
     this.compatibilityWarnings = const [],
+    this.migrationRequired = false,
+    this.runtimeReason,
   });
 
   Map<String, dynamic> toJson() => {
@@ -308,6 +317,8 @@ class PluginItem {
       'compatibilityWarnings': compatibilityWarnings
           .map((i) => i.toJson())
           .toList(),
+    if (migrationRequired) 'migrationRequired': true,
+    if (runtimeReason != null) 'runtimeReason': runtimeReason,
   };
 
   factory PluginItem.fromJson(Map<String, dynamic> j) => PluginItem(
@@ -356,6 +367,8 @@ class PluginItem {
             .map((i) => CompatibilityIssue.fromJson(i.cast<String, dynamic>()))
             .toList() ??
         const [],
+    migrationRequired: j['migrationRequired'] as bool? ?? false,
+    runtimeReason: j['runtimeReason'] as String?,
   );
 
   /// Valid hook event names (mirrors the wired points in AgentService).
@@ -1133,7 +1146,7 @@ class AppState extends ChangeNotifier {
         );
       }
     }
-    final grant = await pluginPermissions.effectiveGrant(
+    final grant = await pluginPermissions.effectiveRuntimeGrant(
       pluginId: owned.manifest.id,
       manifest: owned.manifest,
     );
@@ -1164,12 +1177,15 @@ class AppState extends ChangeNotifier {
       plugin.immediateSessionId = result.record!.immediateSessionId;
       plugin.promoteOnNextBoot = result.record!.promoteOnNextBoot;
       plugin.manifestDigest = result.manifestDigest;
+      plugin.migrationRequired = false;
+      plugin.runtimeReason = null;
       plugin.compatibilityWarnings = [
         for (final c in result.manifest!.compatibility)
           if (c.severity == CompatibilitySeverity.optional) c,
       ];
       await persistPluginState();
       await persistMergedMarketplaceCatalog();
+      await PluginRuntimeManager.I.persistRuntimeRow(result.manifest!.id);
       try {
         await onRefreshSkills?.call();
       } catch (_) {}
@@ -1286,13 +1302,18 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> enablePlugin(PluginItem plugin) async {
-    plugin.enabled = true;
     if (plugin.runtimeId != null) {
       // Task 7: runtime-managed rows re-register their contributions
       // (applying any promotion that came due while disabled).
       try {
         await PluginRuntimeManager.I.enable(plugin.runtimeId!);
       } catch (_) {}
+      final current = plugins
+          .where((row) => row.runtimeId == plugin.runtimeId)
+          .firstOrNull;
+      plugin.enabled = current?.enabled ?? false;
+    } else if (!plugin.migrationRequired) {
+      plugin.enabled = true;
     }
     await persistPluginState();
     try {
@@ -1319,7 +1340,7 @@ class AppState extends ChangeNotifier {
     if (runtimeId == null) return null;
     final manifest = PluginContributionRegistry.I.manifestFor(runtimeId);
     if (manifest == null) return null;
-    return pluginPermissions.effectiveGrant(
+    return pluginPermissions.effectiveRuntimeGrant(
       pluginId: runtimeId,
       manifest: manifest,
     );
@@ -1344,6 +1365,7 @@ class AppState extends ChangeNotifier {
   Future<void>? _firstFrameInitialization;
   Future<List<StartupTask>>? _readinessTasks;
   Future<void>? _readinessInitialization;
+  Future<List<StartupItemStatus>>? _pluginSafetyReconciliation;
   Future<void>? _pluginBootActivation;
   final Object _bootToken = Object();
   Object? _activatedBootToken;
@@ -1379,7 +1401,7 @@ class AppState extends ChangeNotifier {
           kind: StartupItemKind.localState,
           label: 'Check local plugin safety',
           timeout: const Duration(seconds: 15),
-          body: () async {},
+          body: _reconcilePluginSafety,
         ),
         _startupTask(
           id: 'plugin.activate',
@@ -1468,14 +1490,21 @@ class AppState extends ChangeNotifier {
     await AgentService.I.restoreRunCheckpoints();
   }
 
-  Future<void> _activatePluginsForBoot() {
+  Future<void> _reconcilePluginSafety() async {
+    await (_pluginSafetyReconciliation ??= PluginRuntimeManager.I
+        .reconcileRowsAndGrants());
+  }
+
+  Future<void> _activatePluginsForBoot() async {
+    await _reconcilePluginSafety();
     if (identical(_activatedBootToken, _bootToken)) {
-      return _pluginBootActivation ?? Future<void>.value();
+      await (_pluginBootActivation ?? Future<void>.value());
+      return;
     }
     _activatedBootToken = _bootToken;
-    return _pluginBootActivation ??= PluginRuntimeManager.I.activateForBoot(
+    await (_pluginBootActivation ??= PluginRuntimeManager.I.activateForBoot(
       connectMcp: false,
-    );
+    ));
   }
 
   Future<void> _runSandboxMaintenance() async {
@@ -2866,7 +2895,11 @@ class AppState extends ChangeNotifier {
         for (final item in list) {
           if (item is! Map) continue;
           final p = PluginItem.fromJson(item.cast<String, dynamic>());
-          final idx = plugins.indexWhere((e) => e.name == p.name);
+          final idx = plugins.indexWhere(
+            (e) => p.runtimeId != null
+                ? e.runtimeId == p.runtimeId
+                : e.runtimeId == null && e.name == p.name,
+          );
           if (idx < 0) {
             plugins.add(p);
           } else {
@@ -3128,8 +3161,7 @@ class AppState extends ChangeNotifier {
   }) async {
     var mounted = 0;
     final declaredIds = {
-      for (final server in manifest.mcpServers)
-        '${manifest.id}/${server.name}',
+      for (final server in manifest.mcpServers) '${manifest.id}/${server.name}',
     };
     final removed = mcpServers
         .where(
@@ -3711,7 +3743,8 @@ class AppState extends ChangeNotifier {
         updateServiceStatus(
           'plugin:${p.name}',
           ServiceHealth.failed,
-          detail: 'probe failed: installed+enabled but contributes no agent '
+          detail:
+              'probe failed: installed+enabled but contributes no agent '
               'tools, skills, hooks, or MCP servers',
         );
       }
@@ -3954,6 +3987,8 @@ class AppState extends ChangeNotifier {
               'installed': p.installed,
               'enabled': p.enabled,
               if (p.hooks.isNotEmpty) 'hooks': p.hooks,
+              if (p.migrationRequired) 'migrationRequired': true,
+              if (p.runtimeReason != null) 'runtimeReason': p.runtimeReason,
             }),
           )
           .toList();
@@ -3987,6 +4022,8 @@ class AppState extends ChangeNotifier {
                   (k, v) => MapEntry(k as String, v as String),
                 ) ??
                 const {},
+            migrationRequired: m['migrationRequired'] as bool? ?? false,
+            runtimeReason: m['runtimeReason'] as String?,
           ),
         );
       }
@@ -3999,6 +4036,7 @@ class AppState extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       final state = <String, String>{};
       for (final p in plugins) {
+        if (p.runtimeId != null) continue;
         state[p.name] = jsonEncode({
           'installed': p.installed,
           'enabled': p.enabled,
@@ -4023,6 +4061,8 @@ class AppState extends ChangeNotifier {
             'compatibilityWarnings': p.compatibilityWarnings
                 .map((i) => i.toJson())
                 .toList(),
+          if (p.migrationRequired) 'migrationRequired': true,
+          if (p.runtimeReason != null) 'runtimeReason': p.runtimeReason,
         });
       }
       await prefs.setString(_kPluginState, jsonEncode(state));
@@ -4082,6 +4122,8 @@ class AppState extends ChangeNotifier {
                 CompatibilityIssue.fromJson(w.cast<String, dynamic>()),
           ];
         }
+        p.migrationRequired = ps['migrationRequired'] as bool? ?? false;
+        p.runtimeReason = ps['runtimeReason'] as String?;
       }
       refresh();
     } catch (_) {}

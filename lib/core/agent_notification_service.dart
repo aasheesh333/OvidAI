@@ -29,7 +29,7 @@ class AgentNotificationService {
   int _failCount = 0; // 3 native failures → feature off for the session
   int _lastEventHash = 0;
   Timer? _debounce;
-  String? _stopTargetSessionId;
+  String? _displayedStopTargetSessionId;
 
   @visibleForTesting
   static bool? keepAliveOverrideForTest;
@@ -58,6 +58,16 @@ class AgentNotificationService {
   @visibleForTesting
   int get failCountForTest => _failCount;
 
+  @visibleForTesting
+  void resetForTest() {
+    _debounce?.cancel();
+    _active = false;
+    _supported = true;
+    _failCount = 0;
+    _lastEventHash = 0;
+    _displayedStopTargetSessionId = null;
+  }
+
   void Function()? _onExitCallback;
 
   @visibleForTesting
@@ -69,12 +79,12 @@ class AgentNotificationService {
   }
 
   @visibleForTesting
-  Future<bool> invokeForTest(String method, Map<String, String> args) => _invoke(method, args);
+  Future<bool> invokeForTest(String method, Map<String, String> args) =>
+      _invoke(method, args);
 
-  bool _isAnyRunActive() =>
-      anyRunActiveOverrideForTest != null
-          ? anyRunActiveOverrideForTest!()
-          : AgentService.I.anyRunActive;
+  bool _isAnyRunActive() => anyRunActiveOverrideForTest != null
+      ? anyRunActiveOverrideForTest!()
+      : AgentService.I.anyRunActive;
 
   /// Wire the notification Stop button → agent cancel. Called once at
   /// app startup (main.dart).
@@ -82,7 +92,7 @@ class AgentNotificationService {
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'onAgentStop') {
         final sessionId = AgentService.I.runningSessionIdForNotification(
-          _stopTargetSessionId,
+          _displayedStopTargetSessionId,
         );
         if (sessionId != null) {
           AgentService.I.stopRequested(sessionId: sessionId);
@@ -127,21 +137,24 @@ class AgentNotificationService {
   /// are swallowed and after 3 consecutive native failures the feature
   /// disables itself for the session.
   Future<void> agentWorking(String text, {String? sessionId}) async {
-    if (sessionId != null) _stopTargetSessionId = sessionId;
     if (!_supported) return;
     unawaited(_ensurePermission());
     final clean = _clean(text);
-    final h = clean.hashCode;
+    final h = Object.hash(clean, sessionId);
     if (_active && h == _lastEventHash) return;
-    _lastEventHash = h;
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 600), () {
       unawaited(
-        _invoke(
-          _active ? 'agentServiceUpdate' : 'agentServiceStart',
-          {'title': 'Ovid AI', 'text': 'Agent: $clean'},
-        ).then((ok) {
-          if (ok) _active = true;
+        _invoke(_active ? 'agentServiceUpdate' : 'agentServiceStart', {
+          'title': 'Ovid AI',
+          'text': 'Agent: $clean',
+        }).then((ok) {
+          if (!ok) return;
+          _active = true;
+          _lastEventHash = h;
+          if (sessionId != null) {
+            _displayedStopTargetSessionId = sessionId;
+          }
         }),
       );
     });
@@ -149,22 +162,41 @@ class AgentNotificationService {
 
   /// Run finished / idle → notification either updates to Ready & Listening
   /// (if keep-alive enabled) or stops the foreground service.
-  void agentIdle() {
+  void agentIdle({String? sessionId}) {
     if (!_supported || !_active) return;
-    if (_isAnyRunActive()) return;
+    if (_isAnyRunActive()) {
+      if (sessionId != null && sessionId == _displayedStopTargetSessionId) {
+        final replacement = AgentService.I.nextRunningSessionForNotification(
+          excludingSessionId: sessionId,
+        );
+        if (replacement != null) {
+          unawaited(
+            agentWorking(
+              AgentService.I.statusFor(replacement) ??
+                  'working in another session…',
+              sessionId: replacement,
+            ),
+          );
+        }
+      }
+      return;
+    }
     _lastEventHash = 0;
     _debounce?.cancel();
 
     if (_isKeepAlive) {
       // Keep foreground service active so scheduled tasks and message queue fire
-      unawaited(_invoke('agentServiceUpdate', {
-        'title': 'Ovid AI',
-        'text': 'Ready & Listening',
-      }));
+      unawaited(
+        _invoke('agentServiceUpdate', {
+          'title': 'Ovid AI',
+          'text': 'Ready & Listening',
+        }),
+      );
       return;
     }
 
     _active = false;
+    _displayedStopTargetSessionId = null;
     serviceStopRequestedForTestFlag = true;
     unawaited(_invoke('agentServiceStop', {}));
   }
@@ -184,7 +216,8 @@ class AgentNotificationService {
       // Native side refused (permission/service policy). The native
       // service ALSO catches startForeground failures and stops itself —
       // so a failure here must never repeat forever or touch the run.
-      final isBgDenied = e.code == 'FGS_BACKGROUND_DENIED' ||
+      final isBgDenied =
+          e.code == 'FGS_BACKGROUND_DENIED' ||
           (e.message?.contains('ForegroundServiceStartNotAllowed') ?? false) ||
           (e.message?.contains('Background') ?? false);
       if (!isBgDenied) {

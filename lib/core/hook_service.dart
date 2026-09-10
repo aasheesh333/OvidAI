@@ -85,14 +85,13 @@ class HookService extends ChangeNotifier {
   /// Test seam: replace the executor (no sandbox in unit tests).
   /// Signature: (command, env) → stdout.
   @visibleForTesting
-  Future<String> Function(String cmd, Map<String, String> env)?
-      executorForTest;
+  Future<String> Function(String cmd, Map<String, String> env)? executorForTest;
 
   /// Test seam: replace the gate executor (no sandbox in unit tests).
   /// Signature: (command, env) → (exitCode, combinedOutput).
   @visibleForTesting
   Future<(int, String)> Function(String cmd, Map<String, String> env)?
-      gateExecutorForTest;
+  gateExecutorForTest;
 
   /// Test seam: capture the resolved per-hook timeout (seconds) without
   /// executing anything. Signature: (seconds) → stdout.
@@ -219,7 +218,7 @@ class HookService extends ChangeNotifier {
       }
     }
     for (final p in AppState.I.plugins) {
-      if (!p.installed || !p.enabled) continue;
+      if (!p.installed || !p.enabled || p.migrationRequired) continue;
       if (p.runtimeId != null &&
           PluginContributionRegistry.I.isRegistered(p.runtimeId!)) {
         // A REGISTERED plugin fires its ordered manifest hooks above —
@@ -280,6 +279,7 @@ class HookService extends ChangeNotifier {
       (p) =>
           p.installed &&
           p.enabled &&
+          !p.migrationRequired &&
           (p.hooks.containsKey(event) ||
               p.hooks.containsKey(canonicalHookEvent(event) ?? '')),
     );
@@ -291,9 +291,7 @@ class HookService extends ChangeNotifier {
     try {
       final s = sessionId.isEmpty
           ? null
-          : AppState.I.sessions
-                .where((x) => x.id == sessionId)
-                .firstOrNull;
+          : AppState.I.sessions.where((x) => x.id == sessionId).firstOrNull;
       final pinned = s?.workspaceFolder;
       if (pinned != null && pinned.trim().isNotEmpty) {
         final d = Directory(pinned);
@@ -629,7 +627,8 @@ class HookService extends ChangeNotifier {
           if (code == 2 || blockReason != null) {
             failed++;
             final displayName = _displayName(pluginId);
-            final reason = blockReason ??
+            final reason =
+                blockReason ??
                 (out.trim().isEmpty
                     ? '$displayName denied this action'
                     : cleanHookJson(out.trim()));
@@ -686,10 +685,9 @@ class HookGateResult {
   final String? reason;
 
   const HookGateResult.allow()
-      : allowed = true,
-        deniedByPlugin = null,
-        reason = null;
+    : allowed = true,
+      deniedByPlugin = null,
+      reason = null;
 
-  const HookGateResult.deny(this.deniedByPlugin, this.reason)
-      : allowed = false;
+  const HookGateResult.deny(this.deniedByPlugin, this.reason) : allowed = false;
 }

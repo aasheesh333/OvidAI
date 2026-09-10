@@ -45,6 +45,7 @@ import 'plugin_manifest.dart';
 import 'plugin_permissions.dart';
 import 'plugin_registry.dart';
 import 'plugin_source_resolver.dart';
+import 'startup_coordinator.dart';
 import 'state.dart';
 
 /// Preferences key for the persisted install map (plugin id → entry
@@ -55,6 +56,17 @@ const String kPluginActivationPrefKey = 'ovid_plugin_activation_v1';
 
 /// Preferences key for the monotonically increasing boot epoch.
 const String kPluginBootEpochPrefKey = 'ovid_plugin_boot_epoch_v1';
+
+/// Canonical UI projection of normalized runtime installs. Both the outer
+/// key and each row's runtimeId are the immutable publisher/name identity.
+const String kPluginRowsV2PrefKey = 'ovid_plugin_rows_v2';
+const String _kPluginRowsV2MigratedPrefKey = 'ovid_plugin_rows_v2_migrated';
+
+const String _kPluginReapprovalReason =
+    'Re-approve this plugin before it can run';
+const String _kLegacyReapprovalReason =
+    'Re-approve this legacy plugin before it can run';
+const String _kMissingContentReason = 'Installed content is missing';
 
 /// Self-describing transaction artifacts written inside the committed
 /// content directory (spec §5.2 step 6).
@@ -218,6 +230,24 @@ class PluginInstallEntry {
       : const [];
 }
 
+/// Immutable, validated runtime projection used by skill and lifecycle
+/// consumers without exposing the manager's persisted mutable maps.
+class ActivePluginRuntime {
+  final String pluginId;
+  final String contentDir;
+  final PluginActivation activation;
+  final String? immediateSessionId;
+  final NormalizedPluginManifest manifest;
+
+  const ActivePluginRuntime({
+    required this.pluginId,
+    required this.contentDir,
+    required this.activation,
+    required this.immediateSessionId,
+    required this.manifest,
+  });
+}
+
 /// Builds a GitHub source from a catalog row's `source` string
 /// (`owner/repo`, optionally `owner/repo/raw/<ref>/<subpath>`). Null when
 /// the string is not a GitHub coordinate — callers fall back to their
@@ -360,7 +390,8 @@ class PluginRuntimeManager extends ChangeNotifier {
       await prefs.setString(
         kPluginActivationPrefKey,
         jsonEncode({
-          for (final e in entries.entries) e.key: jsonEncode(e.value.toJson()),
+          for (final key in (entries.keys.toList()..sort()))
+            key: jsonEncode(entries[key]!.toJson()),
         }),
       );
     } catch (_) {}
@@ -385,6 +416,343 @@ class PluginRuntimeManager extends ChangeNotifier {
   /// The activation record persisted for [pluginId], or null.
   Future<PluginActivationRecord?> recordFor(String pluginId) async =>
       (await _loadEntries())[pluginId]?.activation;
+
+  Future<void> persistRuntimeRow(String pluginId) async {
+    final entry = (await _loadEntries())[pluginId];
+    if (entry == null) return;
+    final rows = await _loadRows();
+    final current = _catalogRowFor(pluginId);
+    rows[pluginId] = _runtimeRow(
+      pluginId,
+      entry,
+      stored: current ?? rows[pluginId],
+      catalog: rows[pluginId],
+    );
+    await _saveRows(rows);
+  }
+
+  Future<void> _removeRuntimeRow(String pluginId) async {
+    final rows = await _loadRows();
+    if (rows.remove(pluginId) != null) await _saveRows(rows);
+  }
+
+  Future<Map<String, PluginItem>> _loadRows() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(kPluginRowsV2PrefKey);
+      if (raw == null || raw.isEmpty) return {};
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return {};
+      final rows = <String, PluginItem>{};
+      for (final item in decoded.entries) {
+        if (item.value is! String) continue;
+        try {
+          final rowJson = jsonDecode(item.value as String);
+          if (rowJson is! Map) continue;
+          final row = PluginItem.fromJson(rowJson.cast<String, dynamic>());
+          final id = item.key.toString();
+          if (row.runtimeId == id) rows[id] = row;
+        } catch (_) {}
+      }
+      return rows;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Future<void> _saveRows(Map<String, PluginItem> rows) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final ids = rows.keys.toList()..sort();
+      await prefs.setString(
+        kPluginRowsV2PrefKey,
+        jsonEncode({for (final id in ids) id: jsonEncode(rows[id]!.toJson())}),
+      );
+    } catch (_) {}
+  }
+
+  PluginItem? _catalogRowFor(String pluginId) =>
+      AppState.I.plugins.where((row) => row.runtimeId == pluginId).firstOrNull;
+
+  PluginItem _runtimeRow(
+    String pluginId,
+    PluginInstallEntry entry, {
+    PluginItem? stored,
+    PluginItem? catalog,
+  }) {
+    final metadata = stored ?? catalog;
+    final manifest = entry.manifest;
+    final publisher = pluginId.split('/').first;
+    return PluginItem(
+      name: metadata?.name.isNotEmpty == true
+          ? metadata!.name
+          : (manifest.name.isNotEmpty ? manifest.name : pluginId),
+      author: metadata?.author.isNotEmpty == true
+          ? metadata!.author
+          : publisher,
+      description: metadata?.description ?? '',
+      version: entry.version.isNotEmpty ? entry.version : manifest.version,
+      category: metadata?.category.isNotEmpty == true
+          ? metadata!.category
+          : 'Plugin',
+      installed: true,
+      enabled: !entry.disabled,
+      installs: metadata?.installs ?? 0,
+      installsKnown: metadata?.installsKnown ?? false,
+      source: metadata?.source,
+      marketplace: metadata?.marketplace,
+      runtimeId: pluginId,
+      activation: entry.disabled
+          ? PluginActivation.disabled
+          : entry.activation.state,
+      immediateSessionId: entry.activation.immediateSessionId,
+      promoteOnNextBoot: entry.activation.promoteOnNextBoot,
+      manifestDigest: pluginManifestDigest(manifest),
+      compatibilityWarnings: [
+        for (final issue in manifest.compatibility)
+          if (issue.severity == CompatibilitySeverity.optional) issue,
+      ],
+      migrationRequired: stored?.migrationRequired ?? false,
+      runtimeReason: stored?.runtimeReason,
+    );
+  }
+
+  static bool _isExecutableLegacyRow(PluginItem row) =>
+      row.installed &&
+      row.enabled &&
+      row.runtimeId == null &&
+      (row.source != null ||
+          row.category.toLowerCase() == 'external' ||
+          row.hooks.isNotEmpty ||
+          row.pluginHooks.isNotEmpty);
+
+  static String _legacyStatusId(PluginItem row, int ordinal) {
+    final identity = row.source ?? row.marketplace ?? row.name;
+    return 'legacy:$identity:$ordinal';
+  }
+
+  Future<bool> _hasEffectiveGrant(
+    String pluginId,
+    PluginInstallEntry entry,
+  ) async {
+    if (pluginId != entry.activation.pluginId ||
+        pluginId != entry.manifest.id) {
+      return false;
+    }
+    return await PluginPermissionStore().effectiveRuntimeGrant(
+          pluginId: pluginId,
+          manifest: entry.manifest,
+        ) !=
+        null;
+  }
+
+  Future<bool> _isContainedEntry(
+    String pluginId,
+    PluginInstallEntry entry,
+  ) async {
+    if (pluginId.isEmpty || entry.version.isEmpty || entry.contentDir.isEmpty) {
+      return false;
+    }
+    final expected = await _contentDirFor(pluginId, entry.version);
+    return Directory(entry.contentDir).absolute.path ==
+            expected.absolute.path &&
+        entry.manifest.rootPath == entry.contentDir;
+  }
+
+  PluginInstallEntry _replaceEntry(
+    PluginInstallEntry entry, {
+    required PluginActivationRecord activation,
+    bool? disabled,
+    List<String>? probeFailures,
+  }) => PluginInstallEntry(
+    activation: activation,
+    manifest: entry.manifest,
+    contentDir: entry.contentDir,
+    version: entry.version,
+    degradedNames: entry.degradedNames,
+    probeFailures: probeFailures ?? entry.probeFailures,
+    disabled: disabled ?? entry.disabled,
+  );
+
+  PluginActivationRecord _disabledRecord(
+    String pluginId,
+    PluginInstallEntry entry,
+  ) => PluginActivationRecord(
+    pluginId: pluginId,
+    state: PluginActivation.disabled,
+    installedBootEpoch: entry.activation.installedBootEpoch,
+  );
+
+  PluginActivationRecord _failedRecord(
+    String pluginId,
+    PluginInstallEntry entry,
+  ) => PluginActivationRecord(
+    pluginId: pluginId,
+    state: PluginActivation.failed,
+    installedBootEpoch: entry.activation.installedBootEpoch,
+  );
+
+  /// Rebuilds canonical rows before any activation, fails closed on missing
+  /// grants/content, then disables executable legacy rows without deleting
+  /// their caches or approval history.
+  Future<List<StartupItemStatus>> reconcileRowsAndGrants() async {
+    final entries = await _loadEntries();
+    final storedRows = await _loadRows();
+    final rows = <String, PluginItem>{};
+    final statuses = <StartupItemStatus>[];
+    final ids = entries.keys.toList()..sort();
+
+    for (final id in ids) {
+      var entry = entries[id]!;
+      if (id.isEmpty ||
+          id != entry.activation.pluginId ||
+          id != entry.manifest.id ||
+          !await _isContainedEntry(id, entry)) {
+        entry = _replaceEntry(
+          entry,
+          activation: _disabledRecord(id, entry),
+          disabled: true,
+        );
+        entries[id] = entry;
+        PluginContributionRegistry.I.unregisterPlugin(id);
+        await AppState.I.unmountPluginOwnedMcpServers(id, uninstall: false);
+        statuses.add(
+          StartupItemStatus.failed(
+            id,
+            StartupItemKind.plugin,
+            entry.manifest.name.isNotEmpty ? entry.manifest.name : id,
+            reason: 'Installed runtime identity is invalid',
+          ),
+        );
+        continue;
+      }
+      final row = _runtimeRow(
+        id,
+        entry,
+        stored: storedRows[id],
+        catalog: _catalogRowFor(id),
+      );
+      if (!Directory(entry.contentDir).existsSync()) {
+        entry = _replaceEntry(entry, activation: _failedRecord(id, entry));
+        entries[id] = entry;
+        row
+          ..enabled = false
+          ..activation = PluginActivation.failed
+          ..migrationRequired = false
+          ..runtimeReason = _kMissingContentReason;
+        PluginContributionRegistry.I.unregisterPlugin(id);
+        await AppState.I.unmountPluginOwnedMcpServers(id, uninstall: false);
+        statuses.add(
+          StartupItemStatus.failed(
+            id,
+            StartupItemKind.plugin,
+            row.name,
+            reason: _kMissingContentReason,
+          ),
+        );
+      } else if (!await _hasEffectiveGrant(id, entry)) {
+        entry = _replaceEntry(
+          entry,
+          activation: _disabledRecord(id, entry),
+          disabled: true,
+        );
+        entries[id] = entry;
+        row
+          ..enabled = false
+          ..activation = PluginActivation.disabled
+          ..immediateSessionId = null
+          ..promoteOnNextBoot = false
+          ..migrationRequired = true
+          ..runtimeReason = _kPluginReapprovalReason;
+        PluginContributionRegistry.I.unregisterPlugin(id);
+        await AppState.I.unmountPluginOwnedMcpServers(id, uninstall: false);
+        statuses.add(
+          StartupItemStatus.migrationRequired(
+            id,
+            StartupItemKind.plugin,
+            row.name,
+            reason: _kPluginReapprovalReason,
+          ),
+        );
+      } else {
+        row
+          ..migrationRequired = false
+          ..runtimeReason = null;
+        statuses.add(
+          entry.disabled || entry.activation.state == PluginActivation.disabled
+              ? StartupItemStatus.disabled(id, StartupItemKind.plugin, row.name)
+              : StartupItemStatus.ready(id, StartupItemKind.plugin, row.name),
+        );
+      }
+      rows[id] = row;
+    }
+
+    var legacyOrdinal = 0;
+    for (final row in AppState.I.plugins) {
+      if (!_isExecutableLegacyRow(row)) continue;
+      row
+        ..enabled = false
+        ..activation = PluginActivation.disabled
+        ..migrationRequired = true
+        ..runtimeReason = _kLegacyReapprovalReason;
+      statuses.add(
+        StartupItemStatus.migrationRequired(
+          _legacyStatusId(row, legacyOrdinal++),
+          StartupItemKind.plugin,
+          row.name,
+          reason: _kLegacyReapprovalReason,
+        ),
+      );
+    }
+
+    await _saveEntries(entries);
+    await _saveRows(rows);
+    final canonicalIds = rows.keys.toSet();
+    AppState.I.plugins.removeWhere(
+      (row) => row.runtimeId != null && canonicalIds.contains(row.runtimeId),
+    );
+    AppState.I.plugins.addAll([
+      for (final id in (rows.keys.toList()..sort())) rows[id]!,
+    ]);
+    await AppState.I.persistPluginState();
+    await AppState.I.persistMergedMarketplaceCatalog();
+    await (await SharedPreferences.getInstance()).setBool(
+      _kPluginRowsV2MigratedPrefKey,
+      true,
+    );
+    AppState.I.refresh();
+    return statuses;
+  }
+
+  Future<List<ActivePluginRuntime>> activeRuntimes() async {
+    final entries = await _loadEntries();
+    final out = <ActivePluginRuntime>[];
+    for (final id in (entries.keys.toList()..sort())) {
+      final entry = entries[id]!;
+      final state = entry.activation.state;
+      final active =
+          state == PluginActivation.globalActive ||
+          state == PluginActivation.degraded ||
+          (state == PluginActivation.sessionActive &&
+              (entry.activation.immediateSessionId?.isNotEmpty ?? false));
+      if (!active || entry.disabled) continue;
+      if (!await _isContainedEntry(id, entry) ||
+          !Directory(entry.contentDir).existsSync() ||
+          !await _hasEffectiveGrant(id, entry)) {
+        continue;
+      }
+      out.add(
+        ActivePluginRuntime(
+          pluginId: id,
+          contentDir: entry.contentDir,
+          activation: state,
+          immediateSessionId: entry.activation.immediateSessionId,
+          manifest: entry.manifest,
+        ),
+      );
+    }
+    return List.unmodifiable(out);
+  }
 
   // ── row sync (catalog rows carrying runtimeId) ────────────────────
 
@@ -793,8 +1161,19 @@ class PluginRuntimeManager extends ChangeNotifier {
       var entriesChanged = false;
       var rowsChanged = false;
       for (final id in entries.keys.toList()) {
-        final entry = entries[id]!;
+        var entry = entries[id]!;
         if (entry.disabled) continue;
+        if (!await _isContainedEntry(id, entry) ||
+            !await _hasEffectiveGrant(id, entry)) {
+          final rec = _disabledRecord(id, entry);
+          entry = _replaceEntry(entry, activation: rec, disabled: true);
+          entries[id] = entry;
+          entriesChanged = true;
+          rowsChanged |= _syncRow(rec);
+          PluginContributionRegistry.I.unregisterPlugin(id);
+          await AppState.I.unmountPluginOwnedMcpServers(id, uninstall: false);
+          continue;
+        }
         var rec = entry.activation;
         var dirty = false;
         if (rec.promoteOnNextBoot && rec.installedBootEpoch < epoch) {
@@ -878,7 +1257,15 @@ class PluginRuntimeManager extends ChangeNotifier {
     final entries = await _loadEntries();
     final entry = entries[pluginId];
     if (entry == null) return PluginActivation.failed;
-    if (entry.disabled) {
+    if (entry.disabled) return PluginActivation.disabled;
+    if (!await _isContainedEntry(pluginId, entry) ||
+        !await _hasEffectiveGrant(pluginId, entry)) {
+      final rec = _disabledRecord(pluginId, entry);
+      entries[pluginId] = _replaceEntry(entry, activation: rec, disabled: true);
+      await _saveEntries(entries);
+      PluginContributionRegistry.I.unregisterPlugin(pluginId);
+      await AppState.I.unmountPluginOwnedMcpServers(pluginId, uninstall: false);
+      _syncRow(rec);
       return PluginActivation.disabled;
     }
     if (!Directory(entry.contentDir).existsSync()) {
@@ -911,13 +1298,23 @@ class PluginRuntimeManager extends ChangeNotifier {
     // re-resolve the source, never reinstall dependencies. Fresh probe
     // failures persist as degraded honesty; scope transitions below.
     final probeFailures = _probeContent(entry.manifest);
-    final degraded =
-        entry.degradedNames.isNotEmpty || probeFailures.isNotEmpty;
+    final degraded = entry.degradedNames.isNotEmpty || probeFailures.isNotEmpty;
     var rec = entry.activation;
-    if (rec.promoteOnNextBoot && rec.installedBootEpoch < await _readEpoch()) {
+    if (rec.state == PluginActivation.disabled) {
       rec = PluginActivationRecord(
         pluginId: pluginId,
-        state: degraded ? PluginActivation.degraded : PluginActivation.globalActive,
+        state: degraded
+            ? PluginActivation.degraded
+            : PluginActivation.globalActive,
+        installedBootEpoch: rec.installedBootEpoch,
+      );
+    } else if (rec.promoteOnNextBoot &&
+        rec.installedBootEpoch < await _readEpoch()) {
+      rec = PluginActivationRecord(
+        pluginId: pluginId,
+        state: degraded
+            ? PluginActivation.degraded
+            : PluginActivation.globalActive,
         immediateSessionId: null,
         installedBootEpoch: rec.installedBootEpoch,
         promoteOnNextBoot: false,
@@ -928,7 +1325,9 @@ class PluginRuntimeManager extends ChangeNotifier {
       // promotion clears any stale session binding and the flag.
       rec = PluginActivationRecord(
         pluginId: pluginId,
-        state: degraded ? PluginActivation.degraded : PluginActivation.globalActive,
+        state: degraded
+            ? PluginActivation.degraded
+            : PluginActivation.globalActive,
         immediateSessionId: null,
         installedBootEpoch: rec.installedBootEpoch,
         promoteOnNextBoot: false,
@@ -944,6 +1343,13 @@ class PluginRuntimeManager extends ChangeNotifier {
       disabled: entry.disabled,
     );
     await _saveEntries(entries);
+    for (final row in AppState.I.plugins) {
+      if (row.runtimeId != pluginId) continue;
+      row
+        ..enabled = true
+        ..migrationRequired = false
+        ..runtimeReason = null;
+    }
     PluginContributionRegistry.I.register(
       entry.manifest,
       activation: rec.state,
@@ -955,6 +1361,7 @@ class PluginRuntimeManager extends ChangeNotifier {
       await AppState.I.mountPluginOwnedMcpServers(entry.manifest);
     }
     _syncRow(rec);
+    await persistRuntimeRow(pluginId);
     notifyListeners();
     return rec.state;
   }
@@ -981,8 +1388,13 @@ class PluginRuntimeManager extends ChangeNotifier {
     await _saveEntries(entries);
     PluginContributionRegistry.I.unregisterPlugin(pluginId);
     for (final p in AppState.I.plugins) {
-      if (p.runtimeId == pluginId) p.activation = PluginActivation.disabled;
+      if (p.runtimeId == pluginId) {
+        p
+          ..enabled = false
+          ..activation = PluginActivation.disabled;
+      }
     }
+    await persistRuntimeRow(pluginId);
     notifyListeners();
   }
 
@@ -995,6 +1407,25 @@ class PluginRuntimeManager extends ChangeNotifier {
     final entries = await _loadEntries();
     final entry = entries[pluginId];
     if (entry == null) return;
+    if (!await _isContainedEntry(pluginId, entry) ||
+        !await _hasEffectiveGrant(pluginId, entry)) {
+      final rec = _disabledRecord(pluginId, entry);
+      entries[pluginId] = _replaceEntry(entry, activation: rec, disabled: true);
+      await _saveEntries(entries);
+      PluginContributionRegistry.I.unregisterPlugin(pluginId);
+      await AppState.I.unmountPluginOwnedMcpServers(pluginId, uninstall: false);
+      for (final row in AppState.I.plugins) {
+        if (row.runtimeId != pluginId) continue;
+        row
+          ..enabled = false
+          ..activation = PluginActivation.disabled
+          ..migrationRequired = true
+          ..runtimeReason = _kPluginReapprovalReason;
+      }
+      await persistRuntimeRow(pluginId);
+      notifyListeners();
+      return;
+    }
     if (!Directory(entry.contentDir).existsSync()) {
       final rec = PluginActivationRecord(
         pluginId: pluginId,
@@ -1019,13 +1450,23 @@ class PluginRuntimeManager extends ChangeNotifier {
       return;
     }
     final probeFailures = _probeContent(entry.manifest);
-    final degraded =
-        entry.degradedNames.isNotEmpty || probeFailures.isNotEmpty;
+    final degraded = entry.degradedNames.isNotEmpty || probeFailures.isNotEmpty;
     var rec = entry.activation;
-    if (rec.promoteOnNextBoot && rec.installedBootEpoch < await _readEpoch()) {
+    if (rec.state == PluginActivation.disabled) {
       rec = PluginActivationRecord(
         pluginId: pluginId,
-        state: degraded ? PluginActivation.degraded : PluginActivation.globalActive,
+        state: degraded
+            ? PluginActivation.degraded
+            : PluginActivation.globalActive,
+        installedBootEpoch: rec.installedBootEpoch,
+      );
+    } else if (rec.promoteOnNextBoot &&
+        rec.installedBootEpoch < await _readEpoch()) {
+      rec = PluginActivationRecord(
+        pluginId: pluginId,
+        state: degraded
+            ? PluginActivation.degraded
+            : PluginActivation.globalActive,
         immediateSessionId: null,
         installedBootEpoch: rec.installedBootEpoch,
         promoteOnNextBoot: false,
@@ -1041,6 +1482,13 @@ class PluginRuntimeManager extends ChangeNotifier {
       disabled: false,
     );
     await _saveEntries(entries);
+    for (final row in AppState.I.plugins) {
+      if (row.runtimeId != pluginId) continue;
+      row
+        ..enabled = true
+        ..migrationRequired = false
+        ..runtimeReason = null;
+    }
     PluginContributionRegistry.I.register(
       entry.manifest,
       activation: rec.state,
@@ -1052,6 +1500,7 @@ class PluginRuntimeManager extends ChangeNotifier {
       await AppState.I.mountPluginOwnedMcpServers(entry.manifest);
     }
     _syncRow(rec);
+    await persistRuntimeRow(pluginId);
     notifyListeners();
   }
 
@@ -1062,6 +1511,7 @@ class PluginRuntimeManager extends ChangeNotifier {
     final entries = await _loadEntries();
     final entry = entries.remove(pluginId);
     await _saveEntries(entries);
+    await _removeRuntimeRow(pluginId);
     PluginContributionRegistry.I.unregisterPlugin(pluginId);
     if (entry != null) {
       try {
