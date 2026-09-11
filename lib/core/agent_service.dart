@@ -44,12 +44,23 @@ class BrowserTab {
   Future<void>? fileSelectorRegistration;
   bool loadedOnce = false;
 
-  /// Logical viewport emulation (B10, browser-resize parity): zoom
-  /// factor applied to the tab's WebView — 0.5 renders the page as if the
-  /// window were ~2× wider (desktop-style layout), 2.0 = narrow mobile.
+  /// Logical viewport factor (B10, browser-resize parity): drives the
+  /// media-query width ([logicalWidth]/[logicalHeight]) only. It is NOT the
+  /// visual CSS scale — see [userZoom]. 0.5 describes a ~2× wider logical
+  /// window, 2.0 a narrower one.
   double zoom = 1.0;
   int get logicalWidth => (devW / zoom).round();
   int get logicalHeight => (devH / zoom).round();
+
+  /// Visual CSS scale injected into the page (document zoom). User-controlled
+  /// and independent of the device width, so desktop mode stays readable
+  /// instead of auto-shrinking to ~28%. Always clamped to the readable range.
+  static const double minUserZoom = 0.5;
+  static const double maxUserZoom = 2.0;
+  double _userZoom = 1.0;
+  double get userZoom => _userZoom;
+  set userZoom(double v) =>
+      _userZoom = v.clamp(minUserZoom, maxUserZoom).toDouble();
 
   /// Device viewport baseline (set at controller creation).
   static int devW = 360;
@@ -1515,17 +1526,22 @@ class AgentService extends ChangeNotifier {
     }
   }
 
-  /// Inject the tab's logical zoom into the live page (browser_resize
-  /// parity). Zoom is a per-document CSS property — setting [tab.zoom]
+  /// The JS that applies a tab's visual scale. A pure builder so the injected
+  /// value ([BrowserTab.userZoom], never the viewport-derived logical `zoom`)
+  /// is directly testable without a WebView platform.
+  @visibleForTesting
+  static String browserZoomScriptForTest(double scale) =>
+      'document.documentElement.style.zoom = "$scale";';
+
+  /// Inject the tab's user-controlled visual zoom into the live page.
+  /// Zoom is a per-document CSS property — setting [BrowserTab.userZoom]
   /// alone changes nothing on screen, and every navigation/reload wipes
   /// it, so every mode switch AND every page-finished must re-apply it.
   Future<void> _applyTabZoom(BrowserTab tab) async {
     final c = tab.controller;
     if (c == null) return;
     try {
-      await c.runJavaScript(
-        'document.documentElement.style.zoom = "${tab.zoom}";',
-      );
+      await c.runJavaScript(browserZoomScriptForTest(tab.userZoom));
     } catch (_) {}
   }
 
@@ -1555,13 +1571,9 @@ class AgentService extends ChangeNotifier {
     bool reload = true,
   }) async {
     tab.desktopMode = desktop;
-    if (desktop) {
-      if (BrowserTab.devW > 0) {
-        tab.zoom = (BrowserTab.devW / 1280).clamp(0.25, 3.0);
-      }
-    } else {
-      tab.zoom = 1.0;
-    }
+    // Desktop compatibility = desktop UA + wide viewport only. Visual scale
+    // stays userZoom; it is never derived from the device width (the old
+    // devW/1280 shrink made content unreadably small).
     unawaited(applyDesktopViewport(desktop));
     // WebSettings.setUseWideViewPort takes effect at initialization / load time.
     // Recreate controller fresh with new viewport settings and UA, dropping
@@ -1762,13 +1774,10 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     if (!tab.loadedOnce) {
       tab.loadedOnce = true;
       // Apply desktop viewport and user agent to tabs in desktopMode:
-      // desktop = 1280px logical width via the same zoom mechanism
-      // browser_resize uses; mobile (default) = device viewport (1.0).
+      // desktop = desktop UA + wide viewport; visual scale stays userZoom.
+      // mobile (default) = device viewport.
       final desktopUA = BrowserTab.desktopUserAgent;
       if (tab.desktopMode) {
-        if (BrowserTab.devW > 0) {
-          tab.zoom = (BrowserTab.devW / 1280).clamp(0.25, 3.0);
-        }
         tab.controller!.setUserAgent(desktopUA);
       }
       // Platform wide viewport setting before initial load (desktop or mobile reset).
@@ -8007,7 +8016,7 @@ ${await _agentsMdBlock()}
         tab.controller ??= controllerForTab(tab);
         await setTabDesktopMode(tab, isDesktop);
         _emit('nav', 'mode $modeArg');
-        return 'tab switched to $modeArg mode (desktopMode=$isDesktop, zoom=${tab.zoom.toStringAsFixed(2)})';
+        return 'tab switched to $modeArg mode (desktopMode=$isDesktop, userZoom=${tab.userZoom.toStringAsFixed(2)})';
 
       case 'browser_read':
         final tab = _activeTab;

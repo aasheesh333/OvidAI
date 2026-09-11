@@ -3267,7 +3267,7 @@ libncursesw.so.6.5←./lib/libncurses.so.6
     );
 
     test(
-      'BRD: browser_desktop denied read-only and plan mode; setTabDesktopMode updates zoom and UA state',
+      'BRD: browser_desktop denied read-only and plan mode; setTabDesktopMode updates UA state',
       () async {
         final app = AppState.I;
         final s = ChatSession(id: 'brd', title: 'S', model: 'm', mode: 'safe');
@@ -3304,11 +3304,15 @@ libncursesw.so.6.5←./lib/libncurses.so.6
 
         await AgentService.I.setTabDesktopMode(tab, true, reload: false);
         expect(tab.desktopMode, isTrue);
-        expect(tab.zoom, closeTo(BrowserTab.devW / 1280, 0.01));
+        // Task 1: desktop mode is UA + wide viewport only. It must NOT shrink
+        // the visual scale from the device width (old devW/1280 ≈ 0.28).
+        expect(tab.zoom, 1.0);
+        expect(tab.userZoom, 1.0);
 
         await AgentService.I.setTabDesktopMode(tab, false, reload: false);
         expect(tab.desktopMode, isFalse);
         expect(tab.zoom, 1.0);
+        expect(tab.userZoom, 1.0);
 
         // 4. Tool exists in roster
         final tools = AgentService.I.toolsForTest();
@@ -7146,18 +7150,18 @@ block</pre>
       expect(app.browserDesktopMode, isFalse);
     });
 
-    test('new tabs pick up desktop zoom when the mode is on', () {
-      // The zoom formula at tab creation (PR27/B5 contract).
+    test('new tabs render at a readable scale (no device-derived zoom)', () {
+      // Task 1 contract: desktop mode is UA + wide viewport only; the visual
+      // scale stays userZoom (1.0) instead of the old devW/1280 ≈ 0.28 shrink.
       BrowserTab.devW = 360;
       BrowserTab.devH = 720;
-      final tab = BrowserTab(url: 'https://x.test');
-      // Mobile (default): zoom stays 1.0.
-      expect(tab.zoom, 1.0);
-      // Desktop: 360/1280 → zoom < 1 (page renders as a wide window).
-      final desktopZoom = (BrowserTab.devW / 1280).clamp(0.25, 3.0);
-      expect(desktopZoom, lessThan(1.0));
-      tab.zoom = desktopZoom;
-      expect(tab.logicalWidth, 1280);
+      final mobile = BrowserTab(url: 'https://x.test');
+      expect(mobile.zoom, 1.0);
+      expect(mobile.userZoom, 1.0);
+
+      final desktop = BrowserTab(url: 'https://x.test', desktopMode: true);
+      expect(desktop.zoom, 1.0);
+      expect(desktop.userZoom, 1.0);
     });
 
     test('header shows jobs only: subagents + trajectory icons removed', () {
@@ -10778,19 +10782,32 @@ url = "https://api.example.com/mcp"
     );
 
     test(
-      'BRD2: desktop mode applies zoom JS live + persists across page loads',
+      'BRD2: user visual zoom is applied live + persists across page loads',
       () {
         final src = File('lib/core/agent_service.dart').readAsStringSync();
-        // The zoom helper must inject the zoom into the live page
-        // (browser_resize parity — setting tab.zoom alone renders nothing).
+        // The injected visual scale is the user-controlled userZoom, never the
+        // viewport-derived logical `zoom` (old desktop devW/1280 shrink).
         final helper = src.indexOf('Future<void> _applyTabZoom');
         expect(helper, isNot(-1), reason: '_applyTabZoom helper exists');
+        final helperEnd = src.indexOf(
+          'Future<void> recreateControllerForDesktopToggle',
+          helper,
+        );
+        final helperBody = src.substring(
+          helper,
+          helperEnd == -1 ? src.length : helperEnd,
+        );
+        expect(helperBody, contains('tab.userZoom'));
+        expect(helperBody, isNot(contains('tab.zoom')));
+        // The JS builder injects style.zoom.
+        final builder = src.indexOf('browserZoomScriptForTest');
+        expect(builder, isNot(-1), reason: 'zoom JS builder exists');
         expect(
-          src.substring(helper, (helper + 600).clamp(0, src.length)),
+          src.substring(builder, (builder + 300).clamp(0, src.length)),
           contains('style.zoom'),
         );
-        // setTabDesktopMode recreates the controller fresh on toggle.
-        // Dropped wasted pre-reload _applyTabZoom; keep onPageFinished re-apply for zoom fallback.
+        // setTabDesktopMode recreates the controller fresh on toggle, and no
+        // longer derives the visual scale from the device width.
         final idx = src.indexOf('Future<void> setTabDesktopMode');
         expect(idx, isNot(-1), reason: 'setTabDesktopMode exists');
         final end = src.indexOf('consoleBucketFor', idx);
@@ -10800,7 +10817,8 @@ url = "https://api.example.com/mcp"
           contains('recreateControllerForDesktopToggle'),
           reason: 'setTabDesktopMode must recreate controller on toggle',
         );
-        // onPageFinished must re-apply the tab zoom (reload wipes it).
+        expect(body, isNot(contains('devW / 1280')));
+        // onPageFinished must re-apply the visual zoom (reload wipes it).
         final finished = src.indexOf('onPageFinished: (url)');
         expect(finished, isNot(-1));
         final finishedEnd = src.indexOf('onWebResourceError', finished);
@@ -10812,7 +10830,7 @@ url = "https://api.example.com/mcp"
           finishedBody,
           contains('_applyTabZoom'),
           reason:
-              'onPageFinished must re-apply tab.zoom after every load/reload',
+              'onPageFinished must re-apply userZoom after every load/reload',
         );
       },
     );
