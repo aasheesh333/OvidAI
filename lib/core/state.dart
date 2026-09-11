@@ -874,6 +874,15 @@ class ChatSession {
   /// session switch keeps the amber planning state.
   bool planMode;
 
+  /// The access mode the `plan` preset overrode when it entered plan mode.
+  /// Non-null ONLY while the plan preset owns the session's read-only mode:
+  /// entering plan from a non-safe mode stores the prior mode here and sets
+  /// `mode = safe`; every plan exit restores it. A session made read-only by
+  /// `/permission read-only` (or a legacy persisted `safe`) leaves this null,
+  /// so a later plan exit never clobbers a user's independent read-only.
+  /// Persisted with the session.
+  String? planPreMode;
+
   /// Session-local reminders (the reminder scheduler schedule equivalent) — created by
   /// schedule_create, fired by AgentService's timer.  Persisted.
   List<Map<String, dynamic>> schedules;
@@ -898,6 +907,7 @@ class ChatSession {
     this.compactedSummary,
     this.goal,
     this.planMode = false,
+    this.planPreMode,
     this.compactedAtCount = 0,
     this.parentId,
     this.agentLabel,
@@ -950,6 +960,7 @@ class ChatSession {
         ? null
         : Map<String, dynamic>.from(j['goal'] as Map),
     planMode: j['planMode'] as bool? ?? false,
+    planPreMode: j['planPreMode'] as String?,
     messages:
         (j['messages'] as List?)
             ?.map((m) => Message.fromJson(m as Map<String, dynamic>))
@@ -996,6 +1007,7 @@ class ChatSession {
     if (agentAllowedTools.isNotEmpty) 'agentAllowedTools': agentAllowedTools,
     if (goal != null) 'goal': goal,
     if (planMode) 'planMode': planMode,
+    if (planPreMode != null) 'planPreMode': planPreMode,
     'schedules': schedules,
     'todos': todos,
     'messages': messages.map((m) => m.toJson()).toList(),
@@ -2952,6 +2964,7 @@ class AppState extends ChangeNotifier {
       session.compactedSummary,
       session.compactedAtCount,
       session.planMode,
+      session.planPreMode,
       session.sandboxId,
       session.goal?.toString(),
       session.todos.map((t) => t.toString()).join('|'),

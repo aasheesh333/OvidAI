@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -8,6 +10,7 @@ import 'package:ovid_ai/core/commands.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
+import 'package:ovid_ai/ui/studio_screen.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -28,6 +31,7 @@ void main() {
 
   tearDown(() {
     workspaceChipOpenStudioForTest = null;
+    studioFolderPickOverrideForTest = null;
     AgentService.setRunSessionForTest('');
     AgentService.I.debugPauseScheduleTimerForTest(false);
     AgentNotificationService.I.resetForTest();
@@ -183,6 +187,191 @@ void main() {
         findsNothing,
         reason: 'the in-chat folder picker must be gone',
       );
+    });
+  });
+
+  // ── C1: plan mode exit must release the plan-owned read-only mode ──────
+  group('plan mode exit', () {
+    ChatSession planSession(String id) {
+      final app = AppState.I;
+      final s = ChatSession(id: id, title: 'P', model: 'm', mode: 'auto');
+      app.sessions.add(s);
+      app.activeSessionId = s.id;
+      return s;
+    }
+
+    test(
+      'approving exit_plan_mode restores the pre-plan mode and allows mutating '
+      'tools',
+      () async {
+        final s = planSession('plan-exit');
+        AgentService.setRunSessionForTest(s.id);
+
+        await CommandService.I.execute('/preset plan');
+        expect(s.planMode, isTrue);
+        expect(s.mode, 'safe');
+        expect(s.planPreMode, 'auto');
+
+        final planFuture = AgentService.I.dispatchForTest('exit_plan_mode', {
+          'plan': 'Do the thing',
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(AgentService.I.pendingApproval, isNotNull);
+        AgentService.I.approve(true);
+        expect(await planFuture, contains('approved'));
+
+        expect(s.planMode, isFalse);
+        expect(
+          s.mode,
+          'auto',
+          reason: 'plan-owned read-only must be released on approval',
+        );
+        expect(s.planPreMode, isNull);
+
+        // M4: a mutating tool is no longer blocked by the plan/read-only
+        // gates. device_read is mutating and requires Control mode, so
+        // reaching THAT denial proves both gates released.
+        final res = await AgentService.I.dispatchForTest('device_read', {});
+        expect(res, isNot(contains('PLAN MODE ACTIVE')));
+        expect(res, isNot(contains('READ-ONLY MODE')));
+        expect(res, contains('Control mode'));
+
+        // And a mutating tool the released mode DOES allow actually runs:
+        // file_write proceeds past both gates (it is never plan/read-only
+        // refused after approval).
+        final writeRes = await AgentService.I.dispatchForTest('file_write', {
+          'path': 'plan-exec.txt',
+          'content': 'executed',
+        });
+        expect(writeRes, isNot(contains('PLAN MODE ACTIVE')));
+        expect(writeRes, isNot(contains('READ-ONLY MODE')));
+      },
+    );
+
+    test('/plan off releases the plan-owned read-only mode', () async {
+      final s = planSession('plan-off');
+      await CommandService.I.execute('/preset plan');
+      expect(s.mode, 'safe');
+
+      final res = await CommandService.I.execute('/plan off');
+      expect(res!.feedback, contains('Plan mode off'));
+      expect(s.planMode, isFalse);
+      expect(s.mode, 'auto');
+      expect(s.planPreMode, isNull);
+    });
+
+    testWidgets('tapping the Plan chip releases the plan-owned read-only mode',
+        (tester) async {
+      final s = planSession('plan-chip');
+      await CommandService.I.execute('/preset plan');
+      expect(s.mode, 'safe');
+
+      await tester.pumpWidget(
+        MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.text('Plan'));
+      await tester.pump();
+
+      expect(s.planMode, isFalse);
+      expect(s.mode, 'auto');
+      expect(s.planPreMode, isNull);
+    });
+
+    test(
+      'a /permission read-only session is not clobbered by a plan exit',
+      () async {
+        final s = planSession('plan-independent-ro');
+        await CommandService.I.execute('/permission read-only');
+        expect(s.mode, 'safe');
+        expect(s.planMode, isFalse);
+        expect(s.planPreMode, isNull);
+
+        // Enter and leave plan WITHOUT the plan preset owning the read-only
+        // mode: the independently-set safe mode must survive.
+        await CommandService.I.execute('/plan');
+        expect(s.planMode, isTrue);
+        await CommandService.I.execute('/plan off');
+
+        expect(s.planMode, isFalse);
+        expect(
+          s.mode,
+          'safe',
+          reason: 'plan must not release a read-only mode it did not set',
+        );
+      },
+    );
+
+    // M1: a direct mode pick must clear planMode so picker state and the
+    // enforcement gate agree.
+    test('selecting a direct mode clears planMode and the plan gate', () async {
+      final s = planSession('plan-direct-mode');
+      await CommandService.I.execute('/preset plan');
+      expect(s.planMode, isTrue);
+      expect(s.mode, 'safe');
+
+      AgentService.I.setMode(AgentMode.studio);
+
+      expect(s.planMode, isFalse);
+      expect(s.mode, 'studio');
+      expect(s.planPreMode, isNull);
+    });
+  });
+
+  // ── I1: folder change/clear lives in Studio ────────────────────────────
+  group('studio workspace folder', () {
+    Future<void> pumpStudio(WidgetTester tester) async {
+      await tester.pumpWidget(
+        MaterialApp(theme: Aether.theme(), home: const StudioScreen()),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    testWidgets('changing the folder from Studio updates the session',
+        (tester) async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'studio-ws', title: 'S', model: 'm');
+      app.sessions.add(s);
+      app.activeSessionId = s.id;
+
+      final picked = Directory.systemTemp.createTempSync('ovid-studio-folder');
+      addTearDown(() {
+        try {
+          picked.deleteSync(recursive: true);
+        } catch (_) {}
+      });
+      studioFolderPickOverrideForTest = picked.path;
+
+      await pumpStudio(tester);
+      await tester.tap(find.byTooltip('Working folder'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Working folder'), findsOneWidget);
+      await tester.tap(find.text('Change folder'));
+      await tester.pumpAndSettle();
+
+      expect(s.workspaceFolder, picked.path);
+    });
+
+    testWidgets('clearing the folder from Studio updates the session',
+        (tester) async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'studio-clear', title: 'S', model: 'm');
+      s.workspaceFolder = '/tmp/some-pinned-folder';
+      app.sessions.add(s);
+      app.activeSessionId = s.id;
+
+      await pumpStudio(tester);
+      await tester.tap(find.byTooltip('Working folder'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Use session sandbox'));
+      await tester.pumpAndSettle();
+
+      expect(s.workspaceFolder, isNull);
     });
   });
 }

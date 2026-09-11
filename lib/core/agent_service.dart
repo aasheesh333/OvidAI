@@ -640,6 +640,12 @@ class AgentService extends ChangeNotifier {
     final s = _runCtx?.session ?? AppState.I.activeSession;
     if (s == null) return;
     s.mode = m.name;
+    // An explicit mode set means the plan preset no longer owns the
+    // session's read-only mode: clear the remembered pre-plan mode so a
+    // later plan exit cannot override the user's choice (e.g. `/permission
+    // full-access` while planning). `applyPreset` and `_releasePlanOwnedMode`
+    // write `s.mode` directly, so they are unaffected.
+    s.planPreMode = null;
     AppState.I.persistSessions();
   }
 
@@ -715,12 +721,31 @@ class AgentService extends ChangeNotifier {
   set planMode(bool v) {
     final s = _runSession ?? AppState.I.activeSession;
     if (s != null) {
+      final wasPlan = s.planMode;
       s.planMode = v;
+      // Every plan-mode exit releases the read-only mode the plan PRESET
+      // set (approval of exit_plan_mode, `/plan off`, the composer Plan
+      // chip). A read-only mode the user set independently is left alone
+      // because `planPreMode` is null in that case.
+      if (!v && wasPlan) _releasePlanOwnedMode(s);
       AppState.I.persistSessions();
     }
     // Keep the run bucket in step for reads outside a session context.
     _runResolved.planMode = v;
     AppState.I.refresh();
+  }
+
+  /// Restores the access mode the `plan` preset overrode when it entered
+  /// plan mode. No-op when the read-only mode was NOT plan-owned
+  /// (`planPreMode` null), so `/permission read-only` and legacy `safe`
+  /// sessions are never clobbered by a plan exit.
+  void _releasePlanOwnedMode(ChatSession s) {
+    final pre = s.planPreMode;
+    if (pre == null) return;
+    s.planPreMode = null;
+    s.mode = AgentMode.values.any((m) => m.name == pre)
+        ? pre
+        : AgentMode.auto.name;
   }
 
   bool get cancelRequested => _runResolved.cancelRequested;
@@ -2348,6 +2373,15 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   bool get anyBusy => _runs.values.any((r) => r.activeRunId != null);
 
   void setMode(AgentMode m) {
+    // Picking an access mode directly ends plan mode: the picker and the
+    // enforcement gate must agree, and any plan-owned read-only is released
+    // as part of that exit.
+    final s = _runSession ?? AppState.I.activeSession;
+    if (s != null && s.planMode) {
+      s.planMode = false;
+      _releasePlanOwnedMode(s);
+      _runResolved.planMode = false;
+    }
     mode = m; // writes to active session (or detached child)
     events.add(AgentEvent('think', 'access mode → ${m.label}'));
     notifyListeners();
@@ -2356,18 +2390,32 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// Applies a preset's full policy to the target session: the roster id,
   /// plus the plan/read-only coupling the `plan` preset owns. Selecting the
   /// `plan` preset turns plan mode on and applies the Read-Only tool gate;
-  /// selecting any other preset clears plan mode (and the Read-Only policy
-  /// it owned) so the session is not left gated with no picker entry.
+  /// selecting any other preset clears plan mode and releases any read-only
+  /// mode the plan preset itself set, so the session is never left gated
+  /// with no picker entry.
+  ///
+  /// Only the read-only the plan preset introduces is released. If the
+  /// session was ALREADY read-only when plan was selected (an independent
+  /// `/permission read-only`, or a legacy persisted `safe`), `planPreMode`
+  /// stays null and a later plan exit leaves that mode untouched — the
+  /// safe→previous promotion is plan-owned only.
   Future<void> applyPreset(AgentPreset preset) async {
     final s = _runSession ?? AppState.I.activeSession;
     if (s == null) return;
     s.presetId = preset.id;
     if (preset.id == 'plan') {
+      if (!s.planMode) {
+        // Entering plan: the preset owns the read-only only when it is the
+        // one introducing it. An already-read-only session keeps its mode
+        // and `planPreMode` stays null so a later exit leaves it alone.
+        s.planPreMode = s.mode == AgentMode.safe.name ? null : s.mode;
+      }
       s.planMode = true;
-      s.mode = AgentMode.safe.name;
+      if (s.mode != AgentMode.safe.name) s.mode = AgentMode.safe.name;
     } else {
+      final wasPlan = s.planMode;
       s.planMode = false;
-      if (s.mode == AgentMode.safe.name) s.mode = AgentMode.auto.name;
+      if (wasPlan) _releasePlanOwnedMode(s);
     }
     await AppState.I.persistSessions();
     AppState.I.refresh();

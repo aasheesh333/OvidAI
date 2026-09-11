@@ -10,6 +10,12 @@ import '../core/repo_cache.dart';
 import '../core/sandbox_service.dart';
 import 'github_login_sheet.dart';
 
+/// Test seam: overrides the device directory picker for the Studio
+/// working-folder affordance so host widget tests can drive "change folder"
+/// without a platform channel. Production is null (real FilePicker).
+@visibleForTesting
+String? studioFolderPickOverrideForTest;
+
 /// Studio — coding harness (DeepSeek-web style): file explorer bound to the
 /// user's connected GitHub repo, real editable editor with per-session
 /// buffers, agent-visible tabs, and a live Ubuntu sandbox terminal. The
@@ -149,11 +155,93 @@ class _StudioScreenState extends State<StudioScreen> {
       _toast('Working in the session sandbox.');
       return;
     }
+    await _pickAndPinFolder(dialogTitle: 'Pick working folder for $repo');
+  }
+
+  /// Studio affordance (opened from the app-bar folder button): change or
+  /// clear the ACTIVE session's pinned working folder. Folder selection
+  /// lives only in Studio — the composer chip just opens Studio.
+  Future<void> _manageWorkspaceFolder() async {
+    final s = AppState.I.activeSession;
+    if (!mounted || s == null) return;
+    final current = s.workspaceFolder;
+    final hasFolder = current != null && current.isNotEmpty;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const SizedBox(height: 14),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 18),
+              child: Text(
+                'Working folder',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
+              child: Text(
+                hasFolder ? current : 'Session sandbox (no pinned folder)',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+            ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.drive_file_move_outline,
+                size: 19,
+                color: Aether.accent,
+              ),
+              title: const Text(
+                'Change folder',
+                style: TextStyle(fontSize: 13.5),
+              ),
+              onTap: () => Navigator.pop(sheetCtx, 'pick'),
+            ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.inventory_2_outlined,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              title: const Text(
+                'Use session sandbox',
+                style: TextStyle(fontSize: 13.5),
+              ),
+              onTap: () => Navigator.pop(sheetCtx, 'sandbox'),
+            ),
+            const SizedBox(height: 10),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || choice == null) return;
+    if (choice == 'sandbox') {
+      AppState.I.setSessionWorkspaceFolder(null);
+      _toast('Working in the session sandbox.');
+      return;
+    }
+    await _pickAndPinFolder(dialogTitle: 'Pick working folder');
+  }
+
+  /// Picks a directory (device picker, or the test override) and pins it as
+  /// the active session's working folder after a writability probe.
+  Future<void> _pickAndPinFolder({required String dialogTitle}) async {
     String? path;
     try {
-      path = await FilePicker.platform.getDirectoryPath(
-        dialogTitle: 'Pick working folder for $repo',
-      );
+      path = studioFolderPickOverrideForTest ??
+          await FilePicker.platform.getDirectoryPath(dialogTitle: dialogTitle);
     } catch (_) {
       path = null;
     }
@@ -163,10 +251,10 @@ class _StudioScreenState extends State<StudioScreen> {
       _toast('That folder is not accessible.');
       return;
     }
-    var writable = await _probeWritable(path);
+    var writable = _probeWritable(path);
     if (!writable) {
       final granted = await AgentService.I.requestAllFilesAccess();
-      if (granted) writable = await _probeWritable(path);
+      if (granted) writable = _probeWritable(path);
     }
     if (!mounted) return;
     if (!writable) {
@@ -180,11 +268,11 @@ class _StudioScreenState extends State<StudioScreen> {
     _toast('Working folder: ${path.split('/').last}');
   }
 
-  Future<bool> _probeWritable(String path) async {
+  bool _probeWritable(String path) {
     try {
       final probe = File('$path/.ovid_probe');
-      await probe.writeAsString('ok');
-      await probe.delete();
+      probe.writeAsStringSync('ok');
+      probe.deleteSync();
       return true;
     } catch (_) {
       return false;
@@ -270,6 +358,18 @@ class _StudioScreenState extends State<StudioScreen> {
         leading: const BackButton(),
         title: const Text('Studio'),
         actions: [
+          // Working-folder control: the only place to change/clear a pinned
+          // folder (the chat chip just opens Studio).
+          IconButton(
+            tooltip: 'Working folder',
+            visualDensity: VisualDensity.compact,
+            icon: Icon(
+              Icons.drive_file_move_outline,
+              size: 19,
+              color: Aether.textMuted,
+            ),
+            onPressed: _manageWorkspaceFolder,
+          ),
           IconButton(
             tooltip: 'Toggle files',
             visualDensity: VisualDensity.compact,

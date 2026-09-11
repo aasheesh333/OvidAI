@@ -5747,10 +5747,8 @@ class _QuestionsCardState extends State<_QuestionsCard> {
 @visibleForTesting
 void Function(BuildContext context)? workspaceChipOpenStudioForTest;
 
-/// Permission mode chip (Read-Only / General / Full Access / Studio) —
-/// web-IDE dropdown under the input. Tapping cycles; long-press opens sheet.
 /// web-IDE workspace chip — shows the active workspace (repo name, or
-/// "sandbox" when working in the local sandbox).  Tapping opens Studio;
+/// "sandbox" when working in the local sandbox). Tapping opens Studio;
 /// folder selection lives only in Studio. A pinned folder is shown
 /// read-only on the chip.
 class _WorkspaceChip extends StatelessWidget {
