@@ -20,18 +20,11 @@ class FoldedGroup extends ChatItem {
   const FoldedGroup(this.msgs, this.indices);
 }
 
-/// Test instrumentation seam: the number of messages passed through
-/// [foldMessages] and the number of invocations since the last
-/// [resetTranscriptFoldStats]. Purely diagnostic — production logic never
-/// reads these.
-int transcriptFoldedMessages = 0;
-int transcriptFoldInvocations = 0;
-
-/// Resets the [foldMessages] instrumentation counters.
-void resetTranscriptFoldStats() {
-  transcriptFoldedMessages = 0;
-  transcriptFoldInvocations = 0;
-}
+/// Optional diagnostic observer invoked once per [foldMessages] call with the
+/// number of messages folded. It is `null` in production, so folding stays
+/// pure and free of global side effects; tests inject a counter to assert
+/// bounded work. Not read by any production code path.
+void Function(int messageCount)? transcriptFoldObserver;
 
 /// Folds consecutive assistant tool/reasoning messages into a single
 /// expandable strip when the run is complete (followed by an assistant text
@@ -42,8 +35,7 @@ List<ChatItem> foldMessages(
   List<Message> messages, {
   required bool showReasoning,
 }) {
-  transcriptFoldInvocations++;
-  transcriptFoldedMessages += messages.length;
+  transcriptFoldObserver?.call(messages.length);
   final out = <ChatItem>[];
   var i = 0;
   while (i < messages.length) {
@@ -179,7 +171,8 @@ TranscriptWindow windowFor(
     visible: visible,
     hiddenCount: hidden,
     totalFolded: total,
-    hasEarlier: hidden > 0,
+    // Nothing to page toward when the window renders no rows.
+    hasEarlier: visible.isNotEmpty && hidden > 0,
     hiddenMessages: hiddenMessages,
   );
 }
@@ -204,12 +197,12 @@ TranscriptWindow windowForBounded(
 }) {
   final requested = visibleCount > 0 ? visibleCount : pageSize;
   if (messages.isEmpty || requested <= 0) {
-    return TranscriptWindow(
-      visible: const [],
+    return const TranscriptWindow(
+      visible: [],
       hiddenCount: 0,
       totalFolded: 0,
-      hasEarlier: messages.isNotEmpty,
-      hiddenMessages: messages.length,
+      hasEarlier: false,
+      hiddenMessages: 0,
     );
   }
   final total = messages.length;
@@ -218,10 +211,23 @@ TranscriptWindow windowForBounded(
   while (true) {
     var candidate = total - span;
     if (candidate < 0) candidate = 0;
-    // Snap back to a foldable-run boundary: folding the suffix then matches
-    // the corresponding suffix of a full-history fold (no run is split).
-    while (candidate > 0 && _isFoldable(messages[candidate - 1])) {
-      candidate--;
+    // Snap back to a foldable-run boundary ONLY when [foldMessages] would
+    // actually fold the run the slice starts inside — i.e. a text answer
+    // follows it. A trailing (in-progress) run is never folded, so starting
+    // mid-run yields the same tail and must not drag the fold across the
+    // whole run. The forward probe is bounded by the current span; the
+    // backward snap only runs for a run that is genuinely folded.
+    if (candidate > 0 && _isFoldable(messages[candidate - 1])) {
+      var runEnd = candidate;
+      while (runEnd < total && _isFoldable(messages[runEnd])) {
+        runEnd++;
+      }
+      final complete = runEnd < total && messages[runEnd].kind == MsgKind.text;
+      if (complete) {
+        while (candidate > 0 && _isFoldable(messages[candidate - 1])) {
+          candidate--;
+        }
+      }
     }
     folded = _rebase(
       foldMessages(
@@ -245,7 +251,7 @@ TranscriptWindow windowForBounded(
     visible: visible,
     hiddenCount: hiddenItems,
     totalFolded: folded.length,
-    hasEarlier: hiddenMessages > 0,
+    hasEarlier: visible.isNotEmpty && hiddenMessages > 0,
     hiddenMessages: hiddenMessages,
   );
 }

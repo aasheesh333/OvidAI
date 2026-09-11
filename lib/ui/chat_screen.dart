@@ -65,21 +65,27 @@ class ChatTranscript extends StatelessWidget {
         final layout = ChatLayout(
           viewportWidth: MediaQuery.of(context).size.width,
         );
-        final items = windowForBounded(
+        final window = windowForBounded(
           session.messages,
           pageSize: _subagentTranscriptPage,
           visibleCount: 0,
           showReasoning: AppState.I.showReasoning,
-        ).visible;
-        final count = items.length + (typing ? 1 : 0);
+        );
+        final items = window.visible;
+        // The subagent transcript is bounded; when older rows are omitted,
+        // say so instead of silently truncating the child's history.
+        final showOlder = window.hasEarlier;
+        final count = items.length + (showOlder ? 1 : 0) + (typing ? 1 : 0);
         final list = ListView.builder(
           controller: scrollController,
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
           itemCount: count,
           itemBuilder: (_, i) {
-            if (i == items.length) return const _TypingBubble();
+            if (showOlder && i == 0) return const _OlderMessagesIndicator();
+            final li = showOlder ? i - 1 : i;
+            if (li == items.length) return const _TypingBubble();
             return _buildItem(
-              items[i],
+              items[li],
               session,
               onAction: () {},
               input: TextEditingController(),
@@ -668,11 +674,11 @@ class _ChatScreenState extends State<ChatScreen>
   bool _windowShowReasoning = false;
   int _windowVisibleCount = -1;
 
-  // The built transcript ListView is memoized too: returning the identical
-  // widget instance lets Flutter skip rebuilding the whole list per token.
-  // Only the live tail bubble subscribes to streaming updates.
-  Widget? _transcriptListCache;
-  Object? _transcriptListKey;
+  // NOTE: the ListView is intentionally NOT memoized by widget identity.
+  // Doing so froze per-row UI state (a like/dislike tap mutates `m.feedback`
+  // and calls setState, but the memo fast-path returned the identical list
+  // and the icon never repainted). The expensive part — folding the history —
+  // is cached above; the cheap list rebuild is left to Flutter.
 
   void _bindDraft(String sessionId) {
     if (_boundSessionId == sessionId) return;
@@ -1040,45 +1046,6 @@ class _ChatScreenState extends State<ChatScreen>
                                         AgentService.I.producedFiles;
                                     final showProduced =
                                         !typing && produced.isNotEmpty;
-                                    final producedSig = showProduced
-                                        ? Object.hashAll(
-                                            produced.map(
-                                              (e) => Object.hash(
-                                                e.path,
-                                                e.size,
-                                              ),
-                                            ),
-                                          )
-                                        : 0;
-                                    // Memoize the ListView: when only the live
-                                    // message's content changed (streaming),
-                                    // the identical widget instance lets
-                                    // Flutter skip rebuilding the list. The
-                                    // live tail bubble has its own AppState
-                                    // listener so its text still updates.
-                                    final listKey = (
-                                      s.id,
-                                      window,
-                                      typing,
-                                      showProduced,
-                                      producedSig,
-                                      layout.contentWidth,
-                                      _paging,
-                                    );
-                                    if (_transcriptListCache != null &&
-                                        _transcriptListKey == listKey) {
-                                      return Center(
-                                        child: ConstrainedBox(
-                                          key: const ValueKey(
-                                            'chat-transcript-column',
-                                          ),
-                                          constraints: BoxConstraints(
-                                            maxWidth: layout.contentWidth,
-                                          ),
-                                          child: _transcriptListCache!,
-                                        ),
-                                      );
-                                    }
                                     final count =
                                         (hiddenMessages > 0 ? 1 : 0) +
                                         items.length +
@@ -1183,8 +1150,6 @@ class _ChatScreenState extends State<ChatScreen>
                                         );
                                       },
                                     );
-                                    _transcriptListCache = list;
-                                    _transcriptListKey = listKey;
                                     return Center(
                                       child: ConstrainedBox(
                                         key: const ValueKey(
@@ -4496,6 +4461,30 @@ class _InputBarState extends State<_InputBar> {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Minimal "older messages not shown" marker for the bounded subagent
+/// transcript (`ChatTranscript`), so a truncated child run is never silent.
+class _OlderMessagesIndicator extends StatelessWidget {
+  const _OlderMessagesIndicator();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.more_horiz, size: 14, color: Aether.textFaint),
+          const SizedBox(width: 6),
+          Text(
+            'Older messages not shown',
+            style: TextStyle(fontSize: 11, color: Aether.textFaint),
+          ),
+        ],
       ),
     );
   }
