@@ -1964,11 +1964,10 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-/// Collapsible thinking/reasoning card — Gemini-web style.
-/// Tap the "Thinking…" header to expand/collapse the body.
-/// Auto-expands while streaming (m.thinking == true), auto-collapses
-/// when the stream completes (m.thinking == false). User toggles persist
-/// for the message lifetime.
+/// Compact, default-collapsed reasoning disclosure — DSH-style geometry.
+/// A 28px summary row (leading glyph · truncating title · rotating chevron)
+/// expands to a hairline-separated, full-width muted body. The live
+/// "Thinking…" shimmer is preserved in the summary while streaming.
 class _ReasoningCard extends StatefulWidget {
   final Message m;
   const _ReasoningCard(this.m);
@@ -1977,82 +1976,93 @@ class _ReasoningCard extends StatefulWidget {
 }
 
 class _ReasoningCardState extends State<_ReasoningCard> {
-  /// null = follow the streaming state (expanded while thinking, collapsed
-  /// when done).  Once the user taps, we lock to their choice.
+  /// null = collapsed by default. Once the user taps, we lock to their choice.
   bool? _override;
 
   @override
   Widget build(BuildContext context) {
     final isStreaming = widget.m.thinking;
-    // Default: expanded while streaming, collapsed when done — unless the
-    // user has explicitly toggled.
-    final expanded = _override ?? isStreaming;
+    final expanded = _override ?? false;
+    final hasBody = widget.m.content.trim().isNotEmpty;
     return Container(
-      decoration: BoxDecoration(
-        color: Aether.surface,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Aether.hairline),
-      ),
+      key: const ValueKey('chat-reasoning-disclosure'),
+      margin: const EdgeInsets.only(bottom: 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Header — tap to toggle.
+          // Compact 28px summary — tap to toggle. No border, no background.
           InkWell(
-            borderRadius: const BorderRadius.only(
-              topLeft: Radius.circular(10),
-              topRight: Radius.circular(10),
-            ),
-            onTap: () => setState(() => _override = !expanded),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            key: const ValueKey('chat-reasoning-summary'),
+            borderRadius: BorderRadius.circular(6),
+            onTap: hasBody ? () => setState(() => _override = !expanded) : null,
+            child: SizedBox(
+              height: 28,
               child: Row(
                 children: [
                   if (isStreaming)
                     const _ChaseDot(Aether.accent)
                   else
                     Icon(
-                      expanded
-                          ? Icons.keyboard_arrow_down
-                          : Icons.keyboard_arrow_right,
+                      Icons.psychology_outlined,
                       size: 14,
                       color: Aether.textFaint,
                     ),
                   const SizedBox(width: 8),
                   if (isStreaming)
-                    _ShimmerText(
-                      'Thinking…',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Aether.textMuted,
-                        fontWeight: FontWeight.w500,
+                    Expanded(
+                      child: _ShimmerText(
+                        'Thinking…',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Aether.textMuted,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
                     )
                   else
-                    Text(
-                      'Thoughts',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Aether.textMuted,
-                        fontWeight: FontWeight.w500,
+                    Expanded(
+                      child: Text(
+                        'Thoughts',
+                        key: const ValueKey('chat-reasoning-title'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Aether.textMuted,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
                     ),
-                  const Spacer(),
                   if (isStreaming)
                     Text(
                       'live',
                       style: TextStyle(fontSize: 10, color: Aether.textFaint),
                     ),
+                  if (hasBody)
+                    AnimatedRotation(
+                      key: const ValueKey('chat-reasoning-chevron'),
+                      turns: expanded ? 0.5 : 0.0,
+                      duration: const Duration(milliseconds: 150),
+                      child: Icon(
+                        Icons.expand_more,
+                        size: 16,
+                        color: Aether.textFaint,
+                      ),
+                    ),
                 ],
               ),
             ),
           ),
-          // Body — only when expanded. Reasoning is apparatus, not prose:
-          // smaller and dimmer than the answer so it never competes with it.
-          if (expanded && widget.m.content.trim().isNotEmpty)
+          // A single hairline separates summary from the expanded body.
+          if (expanded && hasBody) Container(height: 1, color: Aether.hairline),
+          // Body — full column width, muted, no heavy border. Reasoning is
+          // apparatus, not prose: smaller and dimmer than the answer.
+          if (expanded && hasBody)
             Container(
+              key: const ValueKey('chat-reasoning-body'),
               width: double.infinity,
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              padding: const EdgeInsets.fromLTRB(22, 8, 4, 10),
               child: _OvidMarkdown(
                 content: widget.m.content,
                 fontSize: 12.5,
@@ -2150,157 +2160,168 @@ class _ToolCardState extends State<_ToolCard>
     final childSessionId = m.toolSessionId;
 
     return Container(
+      key: const ValueKey('chat-tool-disclosure'),
       margin: const EdgeInsets.only(bottom: 4),
-      decoration: BoxDecoration(
-        color: Aether.surface,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: failed
-              ? Aether.dangerC.withValues(alpha: 0.4)
-              : Aether.hairline,
-        ),
-      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          InkWell(
-            borderRadius: BorderRadius.circular(10),
-            onTap: hasDetail ? () => setState(() => _open = !_open) : null,
-            child: SizedBox(
-              height: 30,
-              child: Row(
-                children: [
-                  const SizedBox(width: 10),
-                  if (failed)
-                    _StateDot(Aether.dangerC)
-                  else if (m.toolState == 'unknown')
-                    _StateDot(Aether.textFaint)
-                  else if (stopped)
-                    _StateDot(Aether.warn)
-                  else if (running)
-                    const _ChaseDot(Aether.accent)
-                  else
-                    Icon(_iconFor(iconKind), size: 14, color: Aether.textMuted),
-                  const SizedBox(width: 7),
-                  Text(
-                    m.toolTitle ?? m.toolName ?? 'tool',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: failed ? Aether.dangerC : Aether.text,
-                    ),
-                  ),
-                  if ((m.toolSummary ?? '').isNotEmpty) ...[
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 7),
-                      child: Container(
-                        width: 2,
-                        height: 2,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Aether.textFaint,
+          // Compact 30px summary. The running glare sweep paints over this
+          // row via a Stack so it never adds layout height.
+          Stack(
+            children: [
+              InkWell(
+                key: const ValueKey('chat-tool-summary'),
+                borderRadius: BorderRadius.circular(6),
+                onTap: hasDetail ? () => setState(() => _open = !_open) : null,
+                child: SizedBox(
+                  height: 30,
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 10),
+                      if (failed)
+                        _StateDot(Aether.dangerC)
+                      else if (m.toolState == 'unknown')
+                        _StateDot(Aether.textFaint)
+                      else if (stopped)
+                        _StateDot(Aether.warn)
+                      else if (running)
+                        const _ChaseDot(Aether.accent)
+                      else
+                        Icon(
+                          _iconFor(iconKind),
+                          size: 14,
+                          color: Aether.textMuted,
+                        ),
+                      const SizedBox(width: 7),
+                      Flexible(
+                        child: Text(
+                          m.toolTitle ?? m.toolName ?? 'tool',
+                          key: const ValueKey('chat-tool-title'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: failed ? Aether.dangerC : Aether.text,
+                          ),
                         ),
                       ),
-                    ),
-                    Expanded(
-                      child: Text(
-                        m.toolSummary!,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          color: failed ? Aether.dangerC : Aether.textMuted,
-                          fontFamily: Aether.mono,
+                      if ((m.toolSummary ?? '').isNotEmpty) ...[
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 7),
+                          child: Container(
+                            width: 2,
+                            height: 2,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Aether.textFaint,
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
-                    // PR25/D3: edit cards show a +N/−M line-count chip
-                    // (the diff badge diff-row parity) computed from the real diff.
-                    if (diffCounts != null) ...[
-                      const SizedBox(width: 6),
-                      Text(
-                        '+${diffCounts.$1} −${diffCounts.$2}',
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontFamily: Aether.mono,
-                          color: Aether.success,
+                        Expanded(
+                          child: Text(
+                            m.toolSummary!,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: failed ? Aether.dangerC : Aether.textMuted,
+                              fontFamily: Aether.mono,
+                            ),
+                          ),
                         ),
-                      ),
+                        // PR25/D3: edit cards show a +N/−M line-count chip
+                        // (the diff badge diff-row parity) computed from the real diff.
+                        if (diffCounts != null) ...[
+                          const SizedBox(width: 6),
+                          Text(
+                            '+${diffCounts.$1} −${diffCounts.$2}',
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontFamily: Aether.mono,
+                              color: Aether.success,
+                            ),
+                          ),
+                        ],
+                      ] else
+                        const Spacer(),
+                      if (hasDetail)
+                        AnimatedRotation(
+                          key: const ValueKey('chat-tool-chevron'),
+                          turns: _open ? 0.5 : 0.0,
+                          duration: const Duration(milliseconds: 150),
+                          child: Icon(
+                            Icons.expand_more,
+                            size: 16,
+                            color: Aether.textFaint,
+                          ),
+                        ),
+                      // A subagent card links to the child's OWN session, so the
+                      // user can read its full transcript instead of the summary.
+                      if (childSessionId != null)
+                        InkWell(
+                          borderRadius: BorderRadius.circular(6),
+                          onTap: () =>
+                              SubagentScreen.open(context, childSessionId),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  'Open',
+                                  style: TextStyle(
+                                    fontSize: 10.5,
+                                    fontWeight: FontWeight.w600,
+                                    color: Aether.accent,
+                                  ),
+                                ),
+                                Icon(
+                                  Icons.open_in_new,
+                                  size: 12,
+                                  color: Aether.accent,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      const SizedBox(width: 8),
                     ],
-                  ] else
-                    const Spacer(),
-                  if (hasDetail)
-                    Icon(
-                      _open
-                          ? Icons.keyboard_arrow_down
-                          : Icons.keyboard_arrow_right,
-                      size: 16,
-                      color: Aether.textFaint,
-                    ),
-                  // A subagent card links to the child's OWN session, so the
-                  // user can read its full transcript instead of the summary.
-                  if (childSessionId != null)
-                    InkWell(
-                      borderRadius: BorderRadius.circular(6),
-                      onTap: () => SubagentScreen.open(context, childSessionId),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              'Open',
-                              style: TextStyle(
-                                fontSize: 10.5,
-                                fontWeight: FontWeight.w600,
-                                color: Aether.accent,
-                              ),
-                            ),
-                            Icon(
-                              Icons.open_in_new,
-                              size: 12,
-                              color: Aether.accent,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  const SizedBox(width: 8),
-                ],
-              ),
-            ),
-          ),
-          // Glare sweep while running — `ovid-tool-row-sweep` parity:
-          // a soft highlight band sweeping the FULL row left→right
-          // (lifted over the row above via a paint-only translation).
-          if (running)
-            IgnorePointer(
-              child: Transform.translate(
-                offset: const Offset(0, -34),
-                child: AnimatedBuilder(
-                  animation: _sweep,
-                  builder: (_, _) {
-                    final t = _sweep.value;
-                    return Container(
-                      height: 30,
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment(-1.2 + 2.4 * t, 0),
-                          end: Alignment(-0.7 + 2.4 * t, 0),
-                          colors: [
-                            Colors.transparent,
-                            Aether.accent.withValues(alpha: 0.06),
-                            Aether.accent.withValues(alpha: 0.14),
-                            Colors.transparent,
-                          ],
-                          stops: const [0.0, 0.45, 0.55, 1.0],
-                        ),
-                      ),
-                    );
-                  },
+                  ),
                 ),
               ),
-            ),
+              // Glare sweep while running — `ovid-tool-row-sweep` parity:
+              // a soft highlight band sweeping the FULL row left→right.
+              if (running)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: AnimatedBuilder(
+                      animation: _sweep,
+                      builder: (_, _) {
+                        final t = _sweep.value;
+                        return DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment(-1.2 + 2.4 * t, 0),
+                              end: Alignment(-0.7 + 2.4 * t, 0),
+                              colors: [
+                                Colors.transparent,
+                                Aether.accent.withValues(alpha: 0.06),
+                                Aether.accent.withValues(alpha: 0.14),
+                                Colors.transparent,
+                              ],
+                              stops: const [0.0, 0.45, 0.55, 1.0],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          // A single hairline separates summary from the expanded body.
+          if (_open && hasDetail) Container(height: 1, color: Aether.hairline),
           // Expanded detail — Terminal / Diff / plain body.
           if (_open && hasDetail) _DetailBody(m: m),
         ],
@@ -2360,13 +2381,9 @@ class _DetailBodyState extends State<_DetailBody> {
     final isTerminal = kind == 'terminal' || kind == 'code' || kind == 'agent';
 
     return Container(
+      key: const ValueKey('chat-tool-body'),
       width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-      decoration: BoxDecoration(
-        color: Aether.surfaceAlt,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Aether.hairline),
-      ),
+      padding: const EdgeInsets.only(top: 6, bottom: 6),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
