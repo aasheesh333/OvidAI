@@ -75,6 +75,9 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
       case AppLifecycleState.paused:
       case AppLifecycleState.inactive:
       case AppLifecycleState.hidden:
+        // A pending coalesced session write must land before Android can
+        // freeze the isolate (spec §5.4: flush on lifecycle pause).
+        unawaited(AppState.I.flushSessionPersistence());
         // PR32 keep-alive: while ANY agent run is active, make sure the
         // foreground service is up BEFORE Android can freeze the isolate.
         // (It normally starts at runTask; this covers races + OEM killers.)

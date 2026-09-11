@@ -1256,6 +1256,7 @@ class AppState extends ChangeNotifier {
 
   @visibleForTesting
   static void resetTestInstance() {
+    _testInstance?.sessionEncodeCountsForTest.clear();
     _testInstance = null;
     StartupCoordinator.I.statusSink = null;
     PluginRuntimeStatusStore.I.resetForTest();
@@ -1795,6 +1796,36 @@ class AppState extends ChangeNotifier {
   String? _deferredActiveSessionId;
   int _deferredActiveTailLength = 0;
   var _deferredSessionGeneration = 0;
+
+  // ── Coalesced per-session persistence (spec §5.4) ────────────────────────
+  /// Ids whose content changed since the last successful write. Mutations mark
+  /// here; unchanged sessions reuse their last encoded raw.
+  final Set<String> _dirtySessionIds = {};
+
+  /// Forces the next build to re-encode every session (list membership or a
+  /// wholesale reset invalidated the derivative raw cache).
+  var _persistFullRewrite = true;
+
+  /// Last successfully written raw JSON per in-memory session id.
+  final Map<String, String> _persistedSessionRaw = {};
+
+  /// Content signature captured with [_persistedSessionRaw]; a mismatch means
+  /// the session changed in place without an explicit dirty mark.
+  final Map<String, Object?> _persistedSessionSignature = {};
+
+  var _persistScheduled = false;
+  Completer<void>? _persistCompleter;
+  Future<void>? _persistScheduledFuture;
+  Future<void>? _persistWriteInFlight;
+
+  /// Test seam: count of full-session encodes performed, keyed by session id.
+  @visibleForTesting
+  final Map<String, int> sessionEncodeCountsForTest = {};
+
+  /// Test seam: when true, [persistSessions] marks changes but holds the
+  /// coalesced write until an explicit [flushSessionPersistence].
+  @visibleForTesting
+  var suspendCoalescedPersistenceForTest = false;
   var _sessionRestoreFinished = false;
   var _sessionRestoreRequested = false;
   var _skillMountSettled = false;
@@ -2804,6 +2835,7 @@ class AppState extends ChangeNotifier {
     _deferredActiveSessionId = null;
     _deferredActiveTailLength = 0;
     _deferredDeletedSessionIds.clear();
+    _invalidateSessionPersistenceCache();
     final active = sessionById(activeSessionId);
     if (active == null || active.isSubagent) {
       activeSessionId = rootSessions.firstOrNull?.id;
@@ -2835,10 +2867,161 @@ class AppState extends ChangeNotifier {
     return ChatSession.fromJson(merged);
   }
 
-  Future<void> persistSessions() async {
+  /// Mark [id]'s in-memory content as changed. A null [id] forces a full
+  /// re-encode (list membership changed).
+  void _markSessionDirty(String? id) {
+    if (id == null) {
+      _persistFullRewrite = true;
+    } else {
+      _dirtySessionIds.add(id);
+    }
+  }
+
+  /// Drop the derivative encode caches so the next write rebuilds from live
+  /// state. Used when the session list is replaced wholesale.
+  void _invalidateSessionPersistenceCache() {
+    _persistedSessionRaw.clear();
+    _persistedSessionSignature.clear();
+    _persistFullRewrite = true;
+  }
+
+  /// A cheap content fingerprint for [session]. It folds a per-message
+  /// structural hash (identity + kind + content + tool/feedback fields) with
+  /// every mutable metadata field, so in-place edits and agent tool-card
+  /// updates are detected without re-encoding the message list to JSON.
+  Object? _sessionContentSignature(ChatSession session) {
+    var messageHash = 0;
+    for (final message in session.messages) {
+      messageHash = Object.hash(
+        messageHash,
+        identityHashCode(message),
+        message.kind,
+        message.thinking,
+        message.content,
+        message.toolState,
+        message.toolDetail,
+        message.toolSummary,
+        message.toolTitle,
+        message.feedback,
+        message.feedbackNote,
+      );
+    }
+    return Object.hashAll([
+      session.messages.length,
+      messageHash,
+      session.title,
+      session.model,
+      session.providerId,
+      session.mode,
+      session.presetId,
+      session.workspaceFolder,
+      session.repo,
+      session.parentId,
+      session.agentLabel,
+      session.agentState,
+      session.agentResult,
+      session.agentId,
+      session.compactedSummary,
+      session.compactedAtCount,
+      session.planMode,
+      session.sandboxId,
+      session.goal?.toString(),
+      session.todos.map((t) => t.toString()).join('|'),
+      session.schedules.map((t) => t.toString()).join('|'),
+    ]);
+  }
+
+  /// Coalesce rapid writes: the first call in a burst schedules a single flush
+  /// on the next microtask; later calls join that future. The returned future
+  /// completes once the coalesced write lands.
+  Future<void> persistSessions() {
+    _persistScheduled = true;
+    final existing = _persistScheduledFuture;
+    if (existing != null) return existing;
+    final completer = Completer<void>();
+    _persistCompleter = completer;
+    _persistScheduledFuture = completer.future;
+    if (!suspendCoalescedPersistenceForTest) {
+      scheduleMicrotask(_flushScheduledPersistence);
+    }
+    return completer.future;
+  }
+
+  Future<void> _flushScheduledPersistence() async {
+    if (!_persistScheduled) return;
+    _persistScheduled = false;
+    await _ensureSessionWrite();
+    _completeScheduledPersistence();
+    if (_hasUnpersistedSessionChanges()) {
+      unawaited(persistSessions());
+    }
+  }
+
+  /// Run a pending coalesced write immediately and await it. Called on session
+  /// switch and lifecycle pause so a pending change is never dropped.
+  Future<void> flushSessionPersistence() async {
+    _persistScheduled = false;
+    await _ensureSessionWrite();
+    _completeScheduledPersistence();
+    if (_hasUnpersistedSessionChanges()) {
+      await flushSessionPersistence();
+    }
+  }
+
+  /// Test seam: force any pending write and await it.
+  @visibleForTesting
+  Future<void> flushSessionPersistenceForTest() => flushSessionPersistence();
+
+  /// Test seam: await in-flight / automatically scheduled writes without
+  /// forcing one. Proves a switch/pause flush actually started.
+  @visibleForTesting
+  Future<void> awaitPendingSessionWritesForTest() async {
+    await Future<void>.delayed(Duration.zero);
+    while (_persistWriteInFlight != null) {
+      await _persistWriteInFlight;
+    }
+    if (_persistScheduled && !suspendCoalescedPersistenceForTest) {
+      _persistScheduled = false;
+      await _ensureSessionWrite();
+    }
+    _completeScheduledPersistence();
+  }
+
+  Future<void> _ensureSessionWrite() {
+    final inFlight = _persistWriteInFlight;
+    if (inFlight != null) return inFlight;
+    final future = _writeSessionsNow();
+    _persistWriteInFlight = future.whenComplete(() {
+      _persistWriteInFlight = null;
+    });
+    return _persistWriteInFlight!;
+  }
+
+  void _completeScheduledPersistence() {
+    final completer = _persistCompleter;
+    _persistCompleter = null;
+    _persistScheduledFuture = null;
+    if (completer != null && !completer.isCompleted) completer.complete();
+  }
+
+  bool _hasUnpersistedSessionChanges() {
+    if (_persistFullRewrite || _dirtySessionIds.isNotEmpty) return true;
+    for (final session in sessions) {
+      final raw = _persistedSessionRaw[session.id];
+      if (raw == null ||
+          _persistedSessionSignature[session.id] !=
+              _sessionContentSignature(session)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Future<void> _writeSessionsNow() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await _loadDeferredSessionSnapshot();
+      final dirtySnapshot = Set<String>.of(_dirtySessionIds);
       final encoded = _sessionJsonForPersistence();
       final active = activeSession;
       final activeRaw = _activeRawSession(encoded, active?.id);
@@ -2853,8 +3036,13 @@ class AppState extends ChangeNotifier {
       } else {
         await prefs.remove(_kActive);
       }
+      _dirtySessionIds.removeAll(dirtySnapshot);
       await _awaitWorkspaceDeletions();
-    } catch (_) {}
+    } catch (_) {
+      // A failed write must not leave the derivative caches claiming the
+      // changes are durable; force a full re-encode next time.
+      _invalidateSessionPersistenceCache();
+    }
   }
 
   Future<void> _writeSessionBootstrapFromSession(
@@ -2883,35 +3071,87 @@ class AppState extends ChangeNotifier {
   }
 
   List<String> _sessionJsonForPersistence() {
+    final force = _persistFullRewrite;
+    final dirtySnapshot = Set<String>.of(_dirtySessionIds);
+    final rawById = <String, String>{};
+    final signatureById = <String, Object?>{};
+    final encoded = <String>[];
+
+    bool needsEncode(ChatSession session) {
+      if (force || dirtySnapshot.contains(session.id)) return true;
+      return _persistedSessionRaw[session.id] == null ||
+          _persistedSessionSignature[session.id] !=
+              _sessionContentSignature(session);
+    }
+
+    String encode(ChatSession session) {
+      final raw = jsonEncode(session.toJson());
+      rawById[session.id] = raw;
+      signatureById[session.id] = _sessionContentSignature(session);
+      sessionEncodeCountsForTest[session.id] =
+          (sessionEncodeCountsForTest[session.id] ?? 0) + 1;
+      return raw;
+    }
+
+    String encodeMerged(ChatSession partial, Map<String, dynamic> fullJson) {
+      final raw = jsonEncode(
+        _mergeDeferredActiveSession(fullJson, partial).toJson(),
+      );
+      rawById[partial.id] = raw;
+      signatureById[partial.id] = _sessionContentSignature(partial);
+      sessionEncodeCountsForTest[partial.id] =
+          (sessionEncodeCountsForTest[partial.id] ?? 0) + 1;
+      return raw;
+    }
+
+    String reuse(ChatSession session) {
+      final raw = _persistedSessionRaw[session.id]!;
+      rawById[session.id] = raw;
+      signatureById[session.id] = _persistedSessionSignature[session.id];
+      return raw;
+    }
+
     final raw = _deferredSessionJson;
     if (raw == null) {
-      return [
-        ...sessions.map((session) => jsonEncode(session.toJson())),
-        ..._unparsedSessionJson,
-      ];
-    }
-    final current = {for (final session in sessions) session.id: session};
-    final encoded = <String>[];
-    for (final original in raw) {
-      try {
-        final fullJson = jsonDecode(original) as Map<String, dynamic>;
-        final id = fullJson['id'] as String?;
-        if (id != null && _deferredDeletedSessionIds.contains(id)) continue;
-        final partial = id == null ? null : current.remove(id);
-        if (partial != null && id == _deferredActiveSessionId) {
-          encoded.add(
-            jsonEncode(_mergeDeferredActiveSession(fullJson, partial).toJson()),
-          );
-        } else {
+      for (final session in sessions) {
+        encoded.add(needsEncode(session) ? encode(session) : reuse(session));
+      }
+      encoded.addAll(_unparsedSessionJson);
+    } else {
+      final current = {for (final session in sessions) session.id: session};
+      for (final original in raw) {
+        try {
+          final fullJson = jsonDecode(original) as Map<String, dynamic>;
+          final id = fullJson['id'] as String?;
+          if (id != null && _deferredDeletedSessionIds.contains(id)) continue;
+          final partial = id == null ? null : current.remove(id);
+          if (partial != null && id == _deferredActiveSessionId) {
+            encoded.add(
+              needsEncode(partial)
+                  ? encodeMerged(partial, fullJson)
+                  : reuse(partial),
+            );
+          } else {
+            encoded.add(original);
+          }
+        } catch (_) {
           encoded.add(original);
         }
-      } catch (_) {
-        encoded.add(original);
       }
+      encoded.addAll(
+        current.values.map(
+          (session) => needsEncode(session) ? encode(session) : reuse(session),
+        ),
+      );
     }
-    encoded.addAll(
-      current.values.map((session) => jsonEncode(session.toJson())),
-    );
+
+    _persistedSessionRaw
+      ..clear()
+      ..addAll(rawById);
+    _persistedSessionSignature
+      ..clear()
+      ..addAll(signatureById);
+    _persistFullRewrite = false;
     return encoded;
   }
 
@@ -2923,6 +3163,7 @@ class AppState extends ChangeNotifier {
     _deferredActiveTailLength = 0;
     _deferredDeletedSessionIds.clear();
     _unparsedSessionJson.clear();
+    _invalidateSessionPersistenceCache();
   }
 
   /// Delete all user data: sessions, workspaces, providers, keys, plugin
@@ -3372,6 +3613,7 @@ class AppState extends ChangeNotifier {
       repo: parent.repo,
     );
     sessions.insert(0, child);
+    _markSessionDirty(child.id);
     notifyListeners();
     persistSessions();
     return child;
@@ -3383,6 +3625,7 @@ class AppState extends ChangeNotifier {
     if (s == null) return;
     s.agentState = state;
     if (result != null) s.agentResult = result;
+    _markSessionDirty(sessionId);
     notifyListeners();
     persistSessions();
   }
@@ -3472,6 +3715,8 @@ class AppState extends ChangeNotifier {
     _warmWorkspace(id);
     notifyListeners();
     persistSessions();
+    // A pending coalesced write must land before the user moves on.
+    unawaited(flushSessionPersistence());
   }
 
   /// Hook for AgentService to lazy-restore per-session browser tabs on
@@ -3485,6 +3730,7 @@ class AppState extends ChangeNotifier {
     final s = activeSession;
     if (s == null || s.mode == m) return;
     s.mode = m;
+    _markSessionDirty(s.id);
     notifyListeners();
     persistSessions();
   }
@@ -3499,6 +3745,7 @@ class AppState extends ChangeNotifier {
         : path.trim();
     if (s.workspaceFolder == normalized) return;
     s.workspaceFolder = normalized;
+    _markSessionDirty(s.id);
     notifyListeners();
     persistSessions();
   }
@@ -3584,6 +3831,7 @@ class AppState extends ChangeNotifier {
       s.compactedSummary = null;
       s.compactedAtCount = 0;
     }
+    _markSessionDirty(s.id);
     notifyListeners();
     persistSessions();
   }
@@ -3593,12 +3841,14 @@ class AppState extends ChangeNotifier {
     final s = sessions.where((x) => x.id == sessionId).firstOrNull;
     if (s == null || index < 0 || index >= s.messages.length) return;
     s.messages[index].content = newContent;
+    _markSessionDirty(s.id);
     notifyListeners();
     persistSessions();
   }
 
   void renameSession(String id, String title) {
     sessions.firstWhere((s) => s.id == id).title = title;
+    _markSessionDirty(id);
     notifyListeners();
     persistSessions();
   }
@@ -3610,6 +3860,7 @@ class AppState extends ChangeNotifier {
     if (s.title == 'New chat' || s.title.isEmpty) {
       s.title = _autoTitle(text);
     }
+    _markSessionDirty(s.id);
     notifyListeners();
     persistSessions();
   }
@@ -3649,6 +3900,7 @@ class AppState extends ChangeNotifier {
         session
           ..providerId = null
           ..model = 'Select a provider';
+        _markSessionDirty(session.id);
       }
     }
     refresh();
@@ -3669,6 +3921,7 @@ class AppState extends ChangeNotifier {
         session
           ..providerId = null
           ..model = 'Select a provider';
+        _markSessionDirty(session.id);
       }
     }
     refresh();
@@ -3688,6 +3941,7 @@ class AppState extends ChangeNotifier {
     lastSelectedModel = model;
     lastSelectedProviderId = providerId;
     _persistLastSelection();
+    _markSessionDirty(s.id);
     notifyListeners();
     persistSessions();
   }
@@ -3752,6 +4006,7 @@ class AppState extends ChangeNotifier {
         s
           ..providerId = null
           ..model = 'Select a provider';
+        _markSessionDirty(s.id);
       }
     }
     providers.remove(p);
