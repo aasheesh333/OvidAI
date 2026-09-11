@@ -775,7 +775,8 @@ void main() {
       (task) => task.id == 'plugin.activate',
     );
 
-    await expectLater(pluginTask.run(), throwsStateError);
+    final first = await pluginTask.run();
+    expect(first.state, StartupItemState.failed);
     await pluginTask.run();
     await pluginTask.run();
 
@@ -1022,6 +1023,29 @@ void main() {
       expect(firstEpoch, 1);
       expect(prefs.getInt('ovid_plugin_boot_epoch_v1'), 1);
       expect(calls.where((stage) => stage == 'plugin.activate'), hasLength(1));
+    },
+  );
+
+  test(
+    'per-server MCP tasks use canonical child ids through the base stage',
+    () async {
+      SharedPreferences.setMockInitialValues({
+        'ovid_mcp_connected_v1': ['Filesystem'],
+      });
+      final calls = <String>[];
+      final app = AppState.createForTest(
+        startupStageRecorder: calls.add,
+        startupStageDelegates: _offlineStages(),
+      );
+
+      await app.initializeReadiness();
+
+      expect(calls, contains('mcp.connect'));
+      final item = StartupCoordinator.I.snapshot.items.singleWhere(
+        (candidate) => candidate.id == 'mcp.connect:Filesystem',
+      );
+      expect(item.kind, StartupItemKind.mcp);
+      expect(item.state, StartupItemState.ready);
     },
   );
 

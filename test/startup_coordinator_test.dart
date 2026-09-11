@@ -697,6 +697,53 @@ void main() {
     );
   });
 
+  test(
+    'unsupported is a terminal state preserved by the coordinator',
+    () async {
+      final coordinator = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 1),
+      );
+
+      await coordinator.start([
+        FakeStartupTask(
+          'unsupported',
+          kind: StartupItemKind.mcp,
+          label: 'Unsupported MCP',
+          run: () async => StartupItemStatus.unsupported(
+            'unsupported',
+            StartupItemKind.mcp,
+            'Unsupported MCP',
+            reason: 'SSE transport is not supported',
+          ),
+        ),
+      ]);
+
+      final status = _status(coordinator, 'unsupported');
+      expect(status.state, StartupItemState.unsupported);
+      expect(status.state.isTerminal, isTrue);
+      expect(status.reason, 'SSE transport is not supported');
+      expect(coordinator.snapshot.readinessComplete, isTrue);
+    },
+  );
+
+  test('duplicate task ids are rejected', () async {
+    final coordinator = StartupCoordinator.forTest(
+      deadline: const Duration(seconds: 1),
+    );
+    StartupTask duplicate(String id) => FakeStartupTask(
+      id,
+      kind: StartupItemKind.plugin,
+      label: 'Duplicate',
+      run: () async =>
+          StartupItemStatus.ready(id, StartupItemKind.plugin, 'Duplicate'),
+    );
+
+    await expectLater(
+      coordinator.start([duplicate('dup'), duplicate('dup')]),
+      throwsArgumentError,
+    );
+  });
+
   test('a task cannot leave readiness in a non-terminal state', () async {
     final coordinator = StartupCoordinator.forTest(
       deadline: const Duration(seconds: 1),

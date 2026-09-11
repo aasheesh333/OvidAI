@@ -117,8 +117,10 @@ class McpService {
     return match?.canonicalId ?? serverName;
   }
 
-  bool isConnected(String serverName) =>
-      _running.containsKey(_keyForName(serverName));
+  bool isConnected(String serverName) {
+    final rs = _running[_keyForName(serverName)];
+    return rs != null && rs.handshakeDone;
+  }
 
   /// Inline cap for a tool result handed to the model. Oversized output is
   /// trimmed head+tail with an exact omission notice (spill-style).
@@ -193,6 +195,110 @@ class McpService {
     return _connectStdio(server, rs);
   }
 
+  /// Complete-handshake startup connect with ONE budget covering credential
+  /// lookup, runtime ensure, spawn/dial, initialize, initialized, and
+  /// tools/list (spec §5.7). Never throws; returns a truthful outcome.
+  ///
+  /// The budget is `min(server.startupTimeoutS, 30s)` at the call site. A
+  /// timeout removes the exact reserved slot, marks the attempt user-aborted
+  /// BEFORE killing the process, cancels any scheduled reconnect, and never
+  /// marks the handshake done — a detached late completion is ignored.
+  Future<McpConnectOutcome> connectOutcome(
+    McpServer server, {
+    required Duration handshakeBudget,
+  }) async {
+    final key = _key(server);
+    final deadline = DateTime.now().add(handshakeBudget);
+    _RunningServer? reserved;
+
+    Future<McpConnectOutcome> attempt() async {
+      if (!_ownerActive(server)) {
+        return const McpConnectOutcome(
+          McpConnectOutcomeKind.failed,
+          'Owning plugin is not active',
+        );
+      }
+      final existing = _running[key];
+      if (existing != null) {
+        if (existing.handshakeDone) {
+          return const McpConnectOutcome(McpConnectOutcomeKind.ready);
+        }
+        return const McpConnectOutcome(
+          McpConnectOutcomeKind.failed,
+          'Connection is already in progress',
+        );
+      }
+      if (server.transport == 'sse') {
+        return const McpConnectOutcome(
+          McpConnectOutcomeKind.unsupported,
+          'SSE transport not supported, use Streamable HTTP '
+          '(set transport to "http" with a url).',
+        );
+      }
+      if (server.transport != 'http' && server.transport != 'stdio') {
+        return McpConnectOutcome(
+          McpConnectOutcomeKind.unsupported,
+          'Unsupported transport "${server.transport}"',
+        );
+      }
+      final missing = await _missingCredentials(server);
+      if (missing.isNotEmpty) {
+        return McpConnectOutcome(
+          McpConnectOutcomeKind.needsSetup,
+          'Needs configuration (${missing.join(', ')})',
+        );
+      }
+      if (server.ownerPluginId != null) {
+        server.headers = await AppState.I.getMcpHeaders(server.canonicalId);
+      }
+      final rs = _RunningServer(server: server);
+      reserved = rs;
+      _running[key] = rs;
+      final message = server.transport == 'http'
+          ? await _connectHttp(server, rs, deadline: deadline)
+          : await _connectStdio(server, rs, deadline: deadline);
+      if (isConnected(server.canonicalId)) {
+        return const McpConnectOutcome(McpConnectOutcomeKind.ready);
+      }
+      return McpConnectOutcome(McpConnectOutcomeKind.failed, message);
+    }
+
+    try {
+      return await attempt().timeout(
+        handshakeBudget,
+        onTimeout: () {
+          final rs = reserved;
+          if (rs != null) _abortStartupAttempt(server, rs);
+          return const McpConnectOutcome(
+            McpConnectOutcomeKind.failed,
+            'MCP handshake timed out',
+          );
+        },
+      );
+    } catch (error) {
+      final rs = reserved;
+      if (rs != null) _abortStartupAttempt(server, rs);
+      return McpConnectOutcome(McpConnectOutcomeKind.failed, '$error');
+    }
+  }
+
+  /// Abort a budgeted startup attempt without ever marking it ready.
+  void _abortStartupAttempt(McpServer server, _RunningServer rs) {
+    final key = _key(server);
+    if (identical(_running[key], rs)) _running.remove(key);
+    // Set BEFORE kill so the stdio death watcher never schedules a reconnect.
+    rs.userDisconnected = true;
+    _cancelReconnect(key);
+    try {
+      rs.process?.kill();
+    } catch (_) {}
+  }
+
+  static Duration _remainingUntil(DateTime deadline) {
+    final left = deadline.difference(DateTime.now());
+    return left.isNegative ? Duration.zero : left;
+  }
+
   static bool _ownerActive(McpServer server) {
     final owner = server.ownerPluginId;
     if (owner == null) return true;
@@ -251,29 +357,49 @@ class McpService {
   /// JSON-RPC call is its own HTTP POST to [McpServer.url]; the handshake
   /// is the same three calls (initialize/initialized/tools/list) as stdio,
   /// just carried over HTTP instead of stdin/stdout.
-  Future<String> _connectHttp(McpServer server, _RunningServer rs) async {
+  ///
+  /// When [deadline] is supplied (startup budget) every RPC is bounded by the
+  /// remaining budget instead of the per-server startup timeout.
+  Future<String> _connectHttp(
+    McpServer server,
+    _RunningServer rs, {
+    DateTime? deadline,
+  }) async {
     final key = _key(server);
+    Duration timeoutFor() => deadline == null
+        ? Duration(seconds: server.startupTimeoutS)
+        : _remainingUntil(deadline);
     try {
       final url = server.url;
       if (url == null || url.isEmpty) {
         throw Exception('no url configured for HTTP transport');
       }
-      final startupTimeout = Duration(seconds: server.startupTimeoutS);
       final initResult = await _rpcHttp(rs, 'initialize', {
         'protocolVersion': '2024-11-05',
         'capabilities': {},
         'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
-      }, timeout: startupTimeout);
+      }, timeout: timeoutFor());
+      if (initResult.isTimeout) {
+        throw TimeoutException('initialize timed out', timeoutFor());
+      }
       if (initResult.isError) {
         throw Exception('initialize failed: ${initResult.error}');
       }
-      await _sendNotificationHttp(rs, 'notifications/initialized', {});
+      await _sendNotificationHttp(
+        rs,
+        'notifications/initialized',
+        {},
+        timeout: timeoutFor(),
+      );
       final toolsResult = await _rpcHttp(
         rs,
         'tools/list',
         {},
-        timeout: startupTimeout,
+        timeout: timeoutFor(),
       );
+      if (toolsResult.isTimeout) {
+        throw TimeoutException('tools/list timed out', timeoutFor());
+      }
       if (toolsResult.isError) {
         throw Exception('tools/list failed: ${toolsResult.error}');
       }
@@ -286,6 +412,10 @@ class McpService {
                 .toList() ??
             <McpToolDef>[];
       }
+      // A budget abort may have detached this attempt — never mark it ready.
+      if (!identical(_running[key], rs) || rs.userDisconnected) {
+        return 'connect aborted';
+      }
       rs.handshakeDone = true;
       _reconnectAttempts.remove(key);
       return '"${server.name}" connected (http) · ${rs.tools.length} tools';
@@ -295,8 +425,18 @@ class McpService {
     }
   }
 
-  Future<String> _connectStdio(McpServer server, _RunningServer rs) async {
+  Future<String> _connectStdio(
+    McpServer server,
+    _RunningServer rs, {
+    DateTime? deadline,
+  }) async {
     final key = _key(server);
+    Duration timeoutFor() => deadline == null
+        ? Duration(seconds: server.startupTimeoutS)
+        : _remainingUntil(deadline);
+    bool aborted() =>
+        deadline != null &&
+        (!identical(_running[key], rs) || rs.userDisconnected);
     try {
       // Spawn inside the native sandbox — servers are trusted code the
       // user explicitly connected, same trust level as MCP defaults.
@@ -350,6 +490,15 @@ class McpService {
       // never blocks the pipes (keep a tail for diagnostics).
       _attachStdioStreams(rs, key, proc);
 
+      // A budget abort may have landed while the process was spawning — kill
+      // it and bail without ever marking the handshake done.
+      if (aborted()) {
+        try {
+          proc.kill();
+        } catch (_) {}
+        return 'connect aborted';
+      }
+
       // Server-death watcher: the moment the process exits, drop it from
       // the connected map. Without this, a crashed server stayed
       // "connected" until the next write to its dead stdin threw.
@@ -367,12 +516,14 @@ class McpService {
       );
 
       // ── MCP handshake ──────────────────────────────────────────────
-      final startupTimeout = Duration(seconds: server.startupTimeoutS);
       final initResult = await _rpc(rs, 'initialize', {
         'protocolVersion': '2024-11-05',
         'capabilities': {},
         'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
-      }, timeout: startupTimeout);
+      }, timeout: timeoutFor());
+      if (initResult.isTimeout) {
+        throw TimeoutException('initialize timed out', timeoutFor());
+      }
       if (initResult.isError) {
         throw Exception('initialize failed: ${initResult.error}');
       }
@@ -383,8 +534,11 @@ class McpService {
         rs,
         'tools/list',
         {},
-        timeout: startupTimeout,
+        timeout: timeoutFor(),
       );
+      if (toolsResult.isTimeout) {
+        throw TimeoutException('tools/list timed out', timeoutFor());
+      }
       if (toolsResult.isError) {
         throw Exception('tools/list failed: ${toolsResult.error}');
       }
@@ -397,6 +551,7 @@ class McpService {
                 .toList() ??
             <McpToolDef>[];
       }
+      if (aborted()) return 'connect aborted';
       rs.handshakeDone = true;
       _reconnectAttempts.remove(key);
       return '"${server.name}" connected · ${rs.tools.length} tools';
@@ -729,8 +884,9 @@ class McpService {
   Future<void> _sendNotificationHttp(
     _RunningServer rs,
     String method,
-    Map<String, dynamic> params,
-  ) async {
+    Map<String, dynamic> params, {
+    Duration? timeout,
+  }) async {
     final url = rs.server.url;
     if (url == null) return;
     final client = httpClientForTest ?? http.Client();
@@ -750,7 +906,7 @@ class McpService {
               'params': params,
             }),
           )
-          .timeout(Duration(seconds: rs.server.startupTimeoutS));
+          .timeout(timeout ?? Duration(seconds: rs.server.startupTimeoutS));
       _rememberSessionId(rs, res.headers);
     } catch (_) {
       // Notifications are fire-and-forget by design.
@@ -993,6 +1149,18 @@ class McpService {
       await sub.cancel();
     }
   }
+}
+
+/// Truthful outcome of one complete MCP handshake attempt used by startup.
+enum McpConnectOutcomeKind { ready, needsSetup, unsupported, failed }
+
+class McpConnectOutcome {
+  const McpConnectOutcome(this.kind, [this.reason]);
+
+  final McpConnectOutcomeKind kind;
+  final String? reason;
+
+  bool get isReady => kind == McpConnectOutcomeKind.ready;
 }
 
 /// One JSON-RPC round-trip outcome: a result, an error, or a timeout.

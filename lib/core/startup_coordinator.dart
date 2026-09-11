@@ -19,6 +19,7 @@ enum StartupItemState {
   ready,
   needsSetup,
   migrationRequired,
+  unsupported,
   degraded,
   failed,
   disabled,
@@ -106,6 +107,21 @@ class StartupItemStatus {
     kind: kind,
     label: label,
     state: StartupItemState.migrationRequired,
+    reason: reason,
+    attempt: attempt,
+  );
+
+  factory StartupItemStatus.unsupported(
+    String id,
+    StartupItemKind kind,
+    String label, {
+    String? reason,
+    int attempt = 1,
+  }) => StartupItemStatus(
+    id: id,
+    kind: kind,
+    label: label,
+    state: StartupItemState.unsupported,
     reason: reason,
     attempt: attempt,
   );
@@ -239,6 +255,12 @@ class StartupCoordinator extends ChangeNotifier {
   );
 
   Future<void> start(List<StartupTask> tasks) async {
+    final seenIds = <String>{};
+    for (final task in tasks) {
+      if (!seenIds.add(task.id)) {
+        throw ArgumentError('Duplicate startup task id: ${task.id}');
+      }
+    }
     final runToken = ++_runToken;
     _deadlineExceeded = false;
     final orderedTasks = [

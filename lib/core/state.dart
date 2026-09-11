@@ -25,6 +25,7 @@ import 'sandbox_service.dart';
 import 'session_lifecycle_service.dart';
 import 'presets.dart';
 import 'startup_coordinator.dart';
+import 'startup_tasks.dart';
 
 const kDeniedControlDomains = <String>[
   'paypal.com',
@@ -1189,19 +1190,9 @@ class _PluginSafetyStartupTask implements StartupTask {
     await app._runStartupStage(id, app._reconcilePluginSafety);
     final statuses = app.pluginSafetyStatuses;
     if (statuses.isEmpty) return StartupItemStatus.ready(id, kind, label);
-    var aggregate = StartupItemState.ready;
-    for (final status in statuses) {
-      if (status.state == StartupItemState.failed) {
-        aggregate = StartupItemState.failed;
-        break;
-      }
-      if (status.state == StartupItemState.migrationRequired) {
-        aggregate = StartupItemState.migrationRequired;
-      } else if (status.state == StartupItemState.degraded &&
-          aggregate == StartupItemState.ready) {
-        aggregate = StartupItemState.degraded;
-      }
-    }
+    final aggregate = aggregateStartupStates(
+      statuses.map((status) => status.state),
+    );
     return StartupItemStatus(
       id: id,
       kind: kind,
@@ -1690,54 +1681,231 @@ class AppState extends ChangeNotifier {
   }
 
   Future<List<StartupTask>> buildReadinessTasks() =>
-      _readinessTasks ??= Future.value([
-        _LocalHydrationStartupTask(this),
-        _PluginSafetyStartupTask(this),
-        _startupTask(
-          id: 'plugin.activate',
-          kind: StartupItemKind.plugin,
-          label: 'Activate plugins',
-          timeout: const Duration(seconds: 15),
-          body: _activatePluginsForBoot,
+      _readinessTasks ??= _buildReadinessTasks();
+
+  Future<List<StartupTask>> _buildReadinessTasks() async {
+    final mcpTasks = await _buildMcpReadinessTasks();
+    return [
+      _LocalHydrationStartupTask(this),
+      _PluginSafetyStartupTask(this),
+      PluginActivationTask(
+        id: 'plugin.activate',
+        label: 'Activate plugins',
+        timeout: _startupTimeout(
+          'plugin.activate',
+          const Duration(seconds: 15),
         ),
-        _SkillMountStartupTask(this),
-        _SessionRestoreStartupTask(this),
-        _startupTask(
-          id: 'marketplace.refresh',
-          kind: StartupItemKind.marketplace,
-          label: 'Refresh plugin marketplaces',
-          timeout: const Duration(seconds: 20),
-          body: () async => syncMarketplaceCatalogs(),
+        activate: () =>
+            _runStartupStage('plugin.activate', _activatePluginsForBoot),
+      ),
+      _SkillMountStartupTask(this),
+      _SessionRestoreStartupTask(this),
+      MarketplaceRefreshTask(
+        id: 'marketplace.refresh',
+        label: 'Refresh plugin marketplaces',
+        timeout: _startupTimeout(
+          'marketplace.refresh',
+          const Duration(seconds: 20),
         ),
-        _startupTask(
-          id: 'mcp.connect',
-          kind: StartupItemKind.mcp,
-          label: 'Connect services',
-          timeout: const Duration(seconds: 30),
-          body: reconnectServices,
+        repos: () => List.of(marketplaces),
+        refresh: _refreshMarketplaceForStartup,
+      ),
+      _startupTask(
+        id: 'github.initialize',
+        kind: StartupItemKind.marketplace,
+        label: 'Restore GitHub connection',
+        timeout: const Duration(seconds: 20),
+        body: GitHubService.I.initialize,
+      ),
+      ...mcpTasks,
+      FirebaseStartupTask(
+        id: 'firebase.initialize',
+        label: 'Initialize optional services',
+        timeout: _startupTimeout(
+          'firebase.initialize',
+          const Duration(seconds: 10),
         ),
-        _startupTask(
-          id: 'firebase.initialize',
-          kind: StartupItemKind.firebase,
-          label: 'Initialize optional services',
-          timeout: const Duration(seconds: 10),
-          body: FirebaseService.I.initialize,
+        initialize: _initializeFirebaseForStartup,
+      ),
+      SandboxMaintenanceTask(
+        id: 'sandbox.selfHeal',
+        label: 'Maintain local sandbox',
+        timeout: _startupTimeout(
+          'sandbox.selfHeal',
+          const Duration(seconds: 30),
         ),
-        _startupTask(
-          id: 'github.initialize',
-          kind: StartupItemKind.marketplace,
-          label: 'Restore GitHub connection',
-          timeout: const Duration(seconds: 20),
-          body: GitHubService.I.initialize,
+        isInstalled: () => sandboxInstalled,
+        startMaintenance: () =>
+            _runStartupStage('sandbox.selfHeal', _startSandboxMaintenance),
+        runtimesVerified: SandboxService.I.runtimesVerified,
+        installCoreRuntimes: () =>
+            SandboxService.I.installCoreRuntimes((_, _, _) {}),
+        enforceQuota: _enforceSandboxQuota,
+      ),
+    ];
+  }
+
+  /// One MCP child item per canonical id the user asked to keep connected.
+  /// The ids are read from the persisted intent so custom servers are queued
+  /// before local hydration has populated `mcpServers`.
+  Future<List<StartupTask>> _buildMcpReadinessTasks() async {
+    final intent = await _mcpConnectedIntent();
+    // An injected `mcp.connect` stage stands in for a real handshake, so the
+    // honesty check treats the stubbed connection as live.
+    final stageOverridden = _startupStageDelegates.containsKey('mcp.connect');
+    final tasks = <StartupTask>[];
+    final seen = <String>{};
+    for (final name in intent) {
+      if (!seen.add(name)) continue;
+      final server = _mcpServerByCanonicalId(name);
+      tasks.add(
+        McpConnectTask(
+          canonicalId: name,
+          label: 'Connect ${server?.name ?? name}',
+          budget: McpConnectTask.budgetFor(server?.startupTimeoutS ?? 30),
+          connect: (budget) => _connectMcpForStartup(name, budget),
+          isConnected: () => stageOverridden || McpService.I.isConnected(name),
+          onDisable: () => _disableMcpForStartup(name),
         ),
-        _startupTask(
-          id: 'sandbox.selfHeal',
-          kind: StartupItemKind.sandbox,
-          label: 'Maintain local sandbox',
-          timeout: const Duration(seconds: 30),
-          body: _runSandboxMaintenance,
-        ),
-      ]);
+      );
+    }
+    return tasks;
+  }
+
+  Future<List<String>> _mcpConnectedIntent() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getStringList(_kMcpConnectedIntent) ?? const [];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  McpServer? _mcpServerByCanonicalId(String canonicalId) => mcpServers
+      .where((s) => s.canonicalId == canonicalId || s.name == canonicalId)
+      .firstOrNull;
+
+  Future<McpConnectOutcome> _connectMcpForStartup(
+    String canonicalId,
+    Duration budget,
+  ) async {
+    McpConnectOutcome? outcome;
+    final overridden = await _runStartupStage('mcp.connect', () async {
+      final server = _mcpServerByCanonicalId(canonicalId);
+      if (server == null) {
+        outcome = const McpConnectOutcome(
+          McpConnectOutcomeKind.failed,
+          'Server is no longer configured',
+        );
+        return;
+      }
+      outcome = await McpService.I.connectOutcome(
+        server,
+        handshakeBudget: budget,
+      );
+    });
+    if (overridden) return const McpConnectOutcome(McpConnectOutcomeKind.ready);
+    return outcome ??
+        const McpConnectOutcome(
+          McpConnectOutcomeKind.failed,
+          'MCP handshake did not run',
+        );
+  }
+
+  /// Disable one MCP item: disconnect it and remove ONLY its canonical id from
+  /// the persisted intent (never rebuild the intent from live connected flags).
+  Future<void> _disableMcpForStartup(String canonicalId) async {
+    await McpService.I.disconnect(canonicalId);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final current = prefs.getStringList(_kMcpConnectedIntent) ?? const [];
+      final next = [
+        for (final id in current)
+          if (id != canonicalId) id,
+      ];
+      if (next.length != current.length) {
+        await prefs.setStringList(_kMcpConnectedIntent, next);
+      }
+    } catch (_) {}
+    final server = _mcpServerByCanonicalId(canonicalId);
+    if (server != null) server.connected = false;
+    serviceStatus.remove('mcp:$canonicalId');
+    refresh();
+  }
+
+  @visibleForTesting
+  Future<MarketplaceSyncOutcome> refreshMarketplaceForStartup(String repo) =>
+      _refreshMarketplaceCatalogOnce(repo);
+
+  Future<MarketplaceSyncOutcome> _refreshMarketplaceForStartup(
+    String repo,
+  ) async {
+    MarketplaceSyncOutcome? outcome;
+    final overridden = await _runStartupStage('marketplace.refresh', () async {
+      outcome = await _refreshMarketplaceCatalogOnce(repo);
+    });
+    if (overridden) return MarketplaceSyncOutcome.ready;
+    return outcome ?? MarketplaceSyncOutcome.failed;
+  }
+
+  Future<MarketplaceSyncOutcome> _refreshMarketplaceCatalogOnce(
+    String repo,
+  ) async {
+    final normalized = normalizeMarketplace(repo);
+    if (_fetchedMarketplaces.contains(normalized)) {
+      return MarketplaceSyncOutcome.ready;
+    }
+    final message = await fetchMarketplaceCatalog(repo);
+    if (_marketplaceFetchSucceeded(message)) {
+      _fetchedMarketplaces.add(normalized);
+      return MarketplaceSyncOutcome.ready;
+    }
+    final hasCached =
+        plugins.any(
+          (p) =>
+              p.marketplace == normalized ||
+              p.marketplace == repo ||
+              p.source == normalized ||
+              p.source == repo,
+        ) ||
+        mcpServers.any(
+          (s) =>
+              s.source == 'marketplace:$normalized' ||
+              s.source == 'marketplace:$repo',
+        );
+    return hasCached
+        ? MarketplaceSyncOutcome.degraded
+        : MarketplaceSyncOutcome.failed;
+  }
+
+  static bool _marketplaceFetchSucceeded(String message) =>
+      message.startsWith('Imported') || message.startsWith('Fetched');
+
+  Future<bool> _initializeFirebaseForStartup() async {
+    bool? available;
+    final overridden = await _runStartupStage('firebase.initialize', () async {
+      try {
+        await FirebaseService.I.initialize();
+      } catch (_) {
+        // Firebase is optional; the startup task maps unavailable to degraded.
+      }
+      available = FirebaseService.I.isAvailable;
+    });
+    if (overridden) return true;
+    return available ?? false;
+  }
+
+  Future<void> _startSandboxMaintenance() async {
+    await SandboxService.I.selfHealInBackground();
+    unawaited(AgentService.I.prewarmBrowser());
+  }
+
+  Future<void> _enforceSandboxQuota() => SandboxService.I.enforceWorkspaceQuota(
+    activeSandboxIds: sessions
+        .map((session) => session.sandboxId)
+        .whereType<String>()
+        .toSet(),
+  );
 
   Future<void> initializeReadiness() =>
       _readinessInitialization ??= _initializeReadiness();
@@ -1773,10 +1941,16 @@ class AppState extends ChangeNotifier {
   Duration _startupTimeout(String id, Duration fallback) =>
       _startupStageTimeouts[id] ?? fallback;
 
-  Future<void> _runStartupStage(String id, StartupStageDelegate body) async {
+  Future<bool> _runStartupStage(String id, StartupStageDelegate body) async {
     _startupStageRecorder?.call(id);
+    final override = _startupStageDelegates[id];
     try {
-      await (_startupStageDelegates[id] ?? body)();
+      if (override != null) {
+        await override();
+        return true;
+      }
+      await body();
+      return false;
     } finally {
       // The activation barrier must settle when the `plugin.activate` STAGE
       // reaches terminal, not only when the production body's own `finally`
@@ -1926,21 +2100,6 @@ class AppState extends ChangeNotifier {
     } else {
       await reconnectServices();
     }
-  }
-
-  Future<void> _runSandboxMaintenance() async {
-    if (!sandboxInstalled) return;
-    await SandboxService.I.selfHealInBackground();
-    unawaited(AgentService.I.prewarmBrowser());
-    if (!await SandboxService.I.runtimesVerified()) {
-      await SandboxService.I.installCoreRuntimes((_, _, _) {});
-    }
-    await SandboxService.I.enforceWorkspaceQuota(
-      activeSandboxIds: sessions
-          .map((session) => session.sandboxId)
-          .whereType<String>()
-          .toSet(),
-    );
   }
 
   Future<void> _loadShellPreferences() async {
@@ -3609,9 +3768,13 @@ class AppState extends ChangeNotifier {
   Future<int> syncMarketplaceCatalogs({bool force = false}) async {
     var fetched = 0;
     for (final repo in List.of(marketplaces)) {
-      if (!force && _fetchedMarketplaces.contains(repo)) continue;
-      _fetchedMarketplaces.add(repo);
-      await fetchMarketplaceCatalog(repo);
+      final normalized = normalizeMarketplace(repo);
+      if (!force && _fetchedMarketplaces.contains(normalized)) continue;
+      final message = await fetchMarketplaceCatalog(repo);
+      // Record the fetch only AFTER it succeeded so a failed attempt stays
+      // retryable (startup Retry re-fetches instead of short-circuiting).
+      if (!_marketplaceFetchSucceeded(message)) continue;
+      _fetchedMarketplaces.add(normalized);
       fetched++;
     }
     return fetched;
