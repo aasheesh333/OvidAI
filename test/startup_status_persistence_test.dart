@@ -91,8 +91,11 @@ void main() {
     activation: PluginActivation.globalActive,
   );
 
-  Future<void> seedRuntime(NormalizedPluginManifest m) async {
-    Directory(m.rootPath).createSync(recursive: true);
+  Future<void> seedRuntime(
+    NormalizedPluginManifest m, {
+    bool createContent = true,
+  }) async {
+    if (createContent) Directory(m.rootPath).createSync(recursive: true);
     final entry = PluginInstallEntry(
       activation: PluginActivationRecord(
         pluginId: m.id,
@@ -104,10 +107,12 @@ void main() {
       version: m.version,
     );
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      kPluginActivationPrefKey,
-      jsonEncode({m.id: jsonEncode(entry.toJson())}),
-    );
+    final existingRaw = prefs.getString(kPluginActivationPrefKey);
+    final entries = existingRaw == null || existingRaw.isEmpty
+        ? <String, dynamic>{}
+        : (jsonDecode(existingRaw) as Map).cast<String, dynamic>();
+    entries[m.id] = jsonEncode(entry.toJson());
+    await prefs.setString(kPluginActivationPrefKey, jsonEncode(entries));
     await PluginPermissionStore().save(
       PluginPermissionGrant(
         pluginId: m.id,
@@ -770,6 +775,299 @@ void main() {
         coordinator.snapshot.items.single.state,
         StartupItemState.degraded,
       );
+    });
+  });
+
+  group('capability-truthful durable status via real coordinator path', () {
+    Future<void> runRealReadiness() async {
+      app = AppState.createForTest(
+        startupStageDelegates: {
+          'marketplace.refresh': () async {},
+          'firebase.initialize': () async {},
+          'github.initialize': () async {},
+          'sandbox.selfHeal': () async {},
+        },
+      );
+      await app.initialize();
+    }
+
+    test('hook-only plugin persists Ready only after hooks register', () async {
+      final manifest = runtimeManifest(
+        'acme/hookonly',
+        name: 'Hook Only',
+        hooks: [
+          PluginHook(
+            pluginId: 'acme/hookonly',
+            event: 'session_start',
+            payload: 'echo hi',
+          ),
+        ],
+      );
+      await seedRuntime(manifest);
+
+      await runRealReadiness();
+
+      expect(
+        PluginContributionRegistry.I.isRegistered('acme/hookonly'),
+        isTrue,
+      );
+      final durable = app.statusFor('acme/hookonly');
+      expect(durable, isNotNull);
+      expect(durable!.state, StartupItemState.ready);
+    });
+
+    test(
+      'MCP-only plugin persists Ready only after the real handshake',
+      () async {
+        final manifest = runtimeManifest(
+          'acme/mcponly',
+          name: 'MCP Only',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: 'acme/mcponly',
+              name: 'server',
+              transport: 'http',
+              url: 'https://mcp.example/rpc',
+            ),
+          ],
+        );
+        await seedRuntime(manifest);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setStringList('ovid_mcp_connected_v1', [
+          'acme/mcponly/server',
+        ]);
+        McpService.I.httpClientForTest = healthyMcp();
+
+        await runRealReadiness();
+
+        expect(
+          McpService.I.isConnected('acme/mcponly/server'),
+          isTrue,
+          reason: 'the real handshake must have run',
+        );
+        expect(app.statusFor('acme/mcponly')!.state, StartupItemState.ready);
+        // I2: plugin-owned MCP canonical id is three segments and persists.
+        expect(
+          app.statusFor('acme/mcponly/server')!.state,
+          StartupItemState.ready,
+        );
+      },
+    );
+
+    test('missing committed content persists Failed', () async {
+      final manifest = runtimeManifest('acme/missing', name: 'Missing');
+      await seedRuntime(manifest, createContent: false);
+
+      await runRealReadiness();
+
+      final durable = app.statusFor('acme/missing');
+      expect(durable, isNotNull);
+      expect(durable!.state, StartupItemState.failed);
+      expect(durable.reason, contains('missing'));
+    });
+
+    test('plugin-owned MCP status survives AppState recreation', () async {
+      final manifest = runtimeManifest(
+        'acme/ownedmcp',
+        name: 'Owned MCP',
+        mcpServers: [
+          PluginMcpServer(
+            pluginId: 'acme/ownedmcp',
+            name: 'server',
+            transport: 'http',
+            url: 'https://mcp.example/rpc',
+          ),
+        ],
+      );
+      await seedRuntime(manifest);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList('ovid_mcp_connected_v1', [
+        'acme/ownedmcp/server',
+      ]);
+      McpService.I.httpClientForTest = healthyMcp();
+
+      await runRealReadiness();
+      expect(
+        app.statusFor('acme/ownedmcp/server')!.state,
+        StartupItemState.ready,
+      );
+
+      AppState.resetTestInstance();
+      final app2 = AppState.createForTest();
+      await app2.hydrateRuntimeStatuses();
+      expect(
+        app2.statusFor('acme/ownedmcp/server')!.state,
+        StartupItemState.ready,
+      );
+    });
+
+    test('ownerless MCP status persists and survives recreation', () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList('ovid_custom_mcp_servers_v1', [
+        jsonEncode({
+          'name': 'ownerless',
+          'author': 'test',
+          'description': '',
+          'category': 'Custom',
+          'command': '',
+          'args': <String>[],
+          'source': 'custom',
+          'transport': 'http',
+          'url': 'https://mcp.example/rpc',
+          'startupTimeoutS': 30,
+        }),
+      ]);
+      await prefs.setStringList('ovid_mcp_connected_v1', ['ownerless']);
+      McpService.I.httpClientForTest = healthyMcp();
+
+      await runRealReadiness();
+      expect(app.statusFor('ownerless')!.state, StartupItemState.ready);
+
+      AppState.resetTestInstance();
+      final app2 = AppState.createForTest();
+      await app2.hydrateRuntimeStatuses();
+      expect(app2.statusFor('ownerless')!.state, StartupItemState.ready);
+    });
+  });
+
+  group('service health truthfulness', () {
+    test(
+      'hook-only ready, MCP needsSetup, and unsupported map to accurate detail',
+      () async {
+        final hookManifest = runtimeManifest(
+          'acme/svc-hook',
+          name: 'Svc Hook',
+          hooks: [
+            PluginHook(
+              pluginId: 'acme/svc-hook',
+              event: 'session_start',
+              payload: 'echo hi',
+            ),
+          ],
+        );
+        await seedRuntime(hookManifest);
+        PluginContributionRegistry.I.register(
+          hookManifest,
+          activation: PluginActivation.globalActive,
+        );
+        app.plugins.add(runtimeRow(hookManifest));
+
+        final needsManifest = runtimeManifest(
+          'acme/svc-needs',
+          name: 'Svc Needs',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: 'acme/svc-needs',
+              name: 'server',
+              transport: 'http',
+              url: 'https://mcp.example/rpc',
+              envNames: const ['API_TOKEN'],
+            ),
+          ],
+        );
+        await seedRuntime(needsManifest);
+        PluginContributionRegistry.I.register(
+          needsManifest,
+          activation: PluginActivation.globalActive,
+        );
+        app.plugins.add(runtimeRow(needsManifest));
+        app.mcpServers.add(
+          ownedServer(
+            'acme/svc-needs',
+            'server',
+            requiredEnvNames: const ['API_TOKEN'],
+          ),
+        );
+
+        final sseManifest = runtimeManifest(
+          'acme/svc-sse',
+          name: 'Svc SSE',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: 'acme/svc-sse',
+              name: 'server',
+              transport: 'sse',
+            ),
+          ],
+        );
+        await seedRuntime(sseManifest);
+        PluginContributionRegistry.I.register(
+          sseManifest,
+          activation: PluginActivation.globalActive,
+        );
+        app.plugins.add(runtimeRow(sseManifest));
+        app.mcpServers.add(
+          ownedServer('acme/svc-sse', 'server', transport: 'sse'),
+        );
+
+        await app.reconnectServices();
+
+        final hookStatus = app.serviceStatus['plugin:Svc Hook']!;
+        expect(hookStatus.health, ServiceHealth.working);
+        expect(hookStatus.detail, contains('hooks'));
+
+        final needsStatus = app.serviceStatus['plugin:Svc Needs']!;
+        expect(needsStatus.detail, isNot(contains('no agent tools')));
+        expect(needsStatus.detail, contains('Needs setup'));
+
+        final sseStatus = app.serviceStatus['plugin:Svc SSE']!;
+        expect(sseStatus.detail, isNot(contains('no agent tools')));
+        expect(sseStatus.detail, contains('Unsupported'));
+      },
+    );
+  });
+
+  group('capability probe completeness', () {
+    test('mixed roster + hook + MCP is not Ready before the MCP probe', () async {
+      final manifest = runtimeManifest(
+        'acme/mixedfull',
+        name: 'Mixed Full',
+        commands: const [
+          PluginCommand(
+            pluginId: 'acme/mixedfull',
+            name: 'run',
+            path: 'commands/run.md',
+          ),
+        ],
+        hooks: [
+          PluginHook(
+            pluginId: 'acme/mixedfull',
+            event: 'session_start',
+            payload: 'echo hi',
+          ),
+        ],
+        mcpServers: [
+          PluginMcpServer(
+            pluginId: 'acme/mixedfull',
+            name: 'server',
+            transport: 'http',
+            url: 'https://mcp.example/rpc',
+          ),
+        ],
+      );
+      await seedRuntime(manifest);
+      PluginContributionRegistry.I.register(
+        manifest,
+        activation: PluginActivation.globalActive,
+      );
+      final row = runtimeRow(manifest);
+      final server = ownedServer('acme/mixedfull', 'server');
+      app.mcpServers.add(server);
+
+      expect(
+        (await app.pluginHealthFor(row)).state,
+        isNot(StartupItemState.ready),
+        reason: 'roster tools must not short-circuit the MCP probe',
+      );
+
+      McpService.I.httpClientForTest = healthyMcp();
+      await McpService.I.connectOutcome(
+        server,
+        handshakeBudget: const Duration(seconds: 5),
+      );
+      server.connected = true;
+
+      expect((await app.pluginHealthFor(row)).state, StartupItemState.ready);
     });
   });
 }

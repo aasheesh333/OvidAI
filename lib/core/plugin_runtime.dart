@@ -85,13 +85,15 @@ const int kPluginRuntimeStatusMaxLogLines = 100;
 const int kPluginRuntimeStatusMaxLogBytes = 32 * 1024;
 
 /// Canonical ids the durable store accepts: a non-empty, whitespace-free
-/// one- or two-segment id (plugin `publisher/name`, plugin-owned MCP
-/// `publisher/name`, or a bare ownerless server name). Synthetic legacy ids
-/// and anything with stray separators are rejected.
+/// one-, two-, or three-segment id — a bare ownerless server name, a plugin
+/// `publisher/name`, or a plugin-owned MCP `publisher/name/server`. Every
+/// segment must be non-empty and drawn from the canonical id alphabet.
+/// Synthetic legacy ids (`legacy:…`) and anything with stray separators are
+/// rejected.
 bool isCanonicalRuntimeStatusId(String value) {
   if (value.isEmpty || value.trim() != value) return false;
   final parts = value.split('/');
-  if (parts.length > 2) return false;
+  if (parts.length > 3) return false;
   for (final part in parts) {
     if (part.isEmpty) return false;
     if (part.contains(RegExp(r'[^A-Za-z0-9._~-]'))) return false;
@@ -114,6 +116,11 @@ class PluginRuntimeStatus {
   final StartupItemState state;
   final String? reason;
   final DateTime updatedAt;
+
+  /// Scrubbed, capped diagnostic lines. Dormant in this task: the coordinator
+  /// and probe surfaces do not currently emit per-item logs, so production
+  /// records carry an empty list. The field and its caps/scrubbing are
+  /// retained for Task 8/9 diagnostics so the wire shape stays stable.
   final List<String> logs;
   final int wireVersion;
 
@@ -1209,8 +1216,17 @@ class PluginRuntimeManager extends ChangeNotifier {
     if (entry.disabled) {
       return StartupItemStatus.disabled(pluginId, StartupItemKind.plugin, name);
     }
-    if (!await _isContainedEntry(pluginId, entry) ||
-        !await _hasEffectiveGrant(pluginId, entry)) {
+    // Containment is a hard integrity failure; a missing/mismatched grant is
+    // the fail-closed migration case. They must not collapse into one state.
+    if (!await _isContainedEntry(pluginId, entry)) {
+      return StartupItemStatus.failed(
+        pluginId,
+        StartupItemKind.plugin,
+        name,
+        reason: 'Installed runtime identity is invalid',
+      );
+    }
+    if (!await _hasEffectiveGrant(pluginId, entry)) {
       return StartupItemStatus.migrationRequired(
         pluginId,
         StartupItemKind.plugin,
@@ -1239,9 +1255,8 @@ class PluginRuntimeManager extends ChangeNotifier {
         manifest.commands.isNotEmpty ||
         manifest.skills.isNotEmpty ||
         manifest.agents.isNotEmpty;
-    if (hasRoster) {
-      return StartupItemStatus.ready(pluginId, StartupItemKind.plugin, name);
-    }
+    // Probe EVERY declared capability; a roster tool must never short-circuit
+    // a declared hook or owned-MCP requirement (M4).
     if (manifest.hooks.isNotEmpty &&
         !HookService.I.hasRegisteredHooks(pluginId)) {
       return StartupItemStatus.failed(
@@ -1295,7 +1310,7 @@ class PluginRuntimeManager extends ChangeNotifier {
         );
       }
     }
-    if (manifest.hooks.isEmpty && manifest.mcpServers.isEmpty) {
+    if (!hasRoster && manifest.hooks.isEmpty && manifest.mcpServers.isEmpty) {
       return StartupItemStatus.failed(
         pluginId,
         StartupItemKind.plugin,

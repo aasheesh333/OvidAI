@@ -1244,6 +1244,7 @@ class AppState extends ChangeNotifier {
   @visibleForTesting
   static void resetTestInstance() {
     _testInstance = null;
+    StartupCoordinator.I.statusSink = null;
     PluginRuntimeStatusStore.I.resetForTest();
   }
 
@@ -1297,6 +1298,7 @@ class AppState extends ChangeNotifier {
   Future<void> recordStartupStatus(
     StartupItemStatus status, {
     String? ownerId,
+    bool revive = false,
   }) {
     final id = ownerId ?? status.id;
     if (id.isEmpty) return Future<void>.value();
@@ -1307,13 +1309,80 @@ class AppState extends ChangeNotifier {
         reason: status.reason,
         updatedAt: status.updatedAt,
       ),
+      revive: revive,
     );
   }
 
+  /// Recomputes the truthful capability probe for one canonical runtime id and
+  /// records it durably. Used after activation and after each owned-MCP
+  /// outcome settles, so a `ready` status is never persisted before the
+  /// plugin's real capability is active (C1). [revive] clears an uninstall
+  /// tombstone for a same-session reinstall / marketplace re-add.
+  Future<void> recordTruthfulPluginStatus(
+    String pluginId, {
+    bool revive = false,
+  }) async {
+    final row = plugins
+        .where((p) => p.runtimeId == pluginId)
+        .firstOrNull;
+    if (row == null) return;
+    final health = await pluginHealthFor(row);
+    if (!health.state.isTerminal) return;
+    await recordStartupStatus(health, ownerId: pluginId, revive: revive);
+  }
+
+  /// Recomputes and records the truthful probe for every runtime row. Called
+  /// when the `plugin.activate` item reaches terminal.
+  Future<void> recordTruthfulPluginStatuses() async {
+    for (final row in List<PluginItem>.of(plugins)) {
+      final id = row.runtimeId;
+      if (id == null) continue;
+      final health = await pluginHealthFor(row);
+      if (!health.state.isTerminal) continue;
+      await recordStartupStatus(health, ownerId: id);
+    }
+  }
+
+  /// Serializes truthful probes so an earlier (pre-MCP) probe can never be
+  /// computed AFTER a later (post-handshake) probe and overwrite it with a
+  /// stale degraded state. The tail is created lazily in the caller's zone so
+  /// it never captures a widget-test fake-async future.
+  Future<void>? _probeTail;
+
+  Future<void> _enqueueProbe(Future<void> Function() probe) {
+    final previous = _probeTail;
+    final pending = previous == null
+        ? probe()
+        : previous.catchError((Object _) {}).then((_) => probe());
+    _probeTail = pending.catchError((Object _) {});
+    return pending;
+  }
+
+  /// Waits for every enqueued truthful probe to settle (no-op when none).
+  Future<void> whenStatusProbesSettled() async {
+    final pending = _probeTail;
+    if (pending != null) await pending;
+  }
+
   /// Coordinator sink adapter: durable status for plugin/MCP-owned items.
+  /// Owned-MCP terminal outcomes also refresh the owning plugin's aggregate
+  /// probe; the `plugin.activate` terminal refreshes every runtime row.
   void _onStartupStatus(StartupItemStatus status, String? ownerId) {
-    if (ownerId == null || ownerId.isEmpty) return;
-    unawaited(recordStartupStatus(status, ownerId: ownerId));
+    if (ownerId != null && ownerId.isNotEmpty) {
+      unawaited(
+        _enqueueProbe(() => recordStartupStatus(status, ownerId: ownerId)),
+      );
+      final ownerPluginId = _mcpServerByCanonicalId(ownerId)?.ownerPluginId;
+      if (ownerPluginId != null) {
+        unawaited(
+          _enqueueProbe(() => recordTruthfulPluginStatus(ownerPluginId)),
+        );
+      }
+      return;
+    }
+    if (status.id == 'plugin.activate' && status.state.isTerminal) {
+      unawaited(_enqueueProbe(recordTruthfulPluginStatuses));
+    }
   }
 
   /// Truthful health for one plugin row. Runtime rows probe their declared
@@ -1484,6 +1553,13 @@ class AppState extends ChangeNotifier {
       await persistPluginState();
       await persistMergedMarketplaceCatalog();
       await PluginRuntimeManager.I.persistRuntimeRow(result.manifest!.id);
+      // A same-session reinstall / marketplace re-add must revive the
+      // uninstall tombstone and persist the fresh truthful probe (M5).
+      try {
+        await _enqueueProbe(
+          () => recordTruthfulPluginStatus(result.manifest!.id, revive: true),
+        );
+      } catch (_) {}
       try {
         await onRefreshSkills?.call(result.manifest!.id);
       } catch (_) {}
@@ -2028,6 +2104,9 @@ class AppState extends ChangeNotifier {
     final tasks = await buildReadinessTasks();
     try {
       await StartupCoordinator.I.start(tasks);
+      // Let the post-activation capability probes settle so the durable store
+      // reflects the truthful final state when readiness completes (C1).
+      await whenStatusProbesSettled();
     } finally {
       _readinessComplete = true;
     }
@@ -2108,6 +2187,10 @@ class AppState extends ChangeNotifier {
     _pluginSafetyStatuses = await attempt;
     for (final status in _pluginSafetyStatuses) {
       if (!status.state.isTerminal) continue;
+      // Reconcile's `ready` only means "valid grant + committed content" — it
+      // is NOT truthful until the plugin is actually registered/activated.
+      // The post-activation capability probe records the durable `ready` (C1).
+      if (status.state == StartupItemState.ready) continue;
       unawaited(
         recordStartupStatus(status, ownerId: status.id),
       );
@@ -4717,7 +4800,8 @@ class AppState extends ChangeNotifier {
     // derived from a real capability probe — roster tools, registered hooks,
     // and live owned-MCP connectivity — never a hardcoded 'working' stamp or
     // the roster-tool list alone. Hook-only and MCP-only normalized plugins
-    // report working from their real active capability.
+    // report working from their real active capability. Non-ready states map
+    // to an accurate scrubbed detail (never the misleading "no agent tools").
     for (final p in plugins.where((p) => p.installed && p.enabled)) {
       final tools = AgentService.I.pluginToolNames(p);
       if (tools.isNotEmpty) {
@@ -4729,23 +4813,39 @@ class AppState extends ChangeNotifier {
         continue;
       }
       final health = await pluginHealthFor(p);
-      if (health.state == StartupItemState.ready) {
-        updateServiceStatus(
-          'plugin:${p.name}',
-          ServiceHealth.working,
-          detail: 'probe ok · ${_healthCapabilityDetail(p)}',
-        );
-      } else {
-        updateServiceStatus(
-          'plugin:${p.name}',
-          ServiceHealth.failed,
-          detail:
-              'probe failed: installed+enabled but contributes no agent '
-              'tools, skills, hooks, or MCP servers',
-        );
-      }
+      updateServiceStatus(
+        'plugin:${p.name}',
+        health.state == StartupItemState.ready
+            ? ServiceHealth.working
+            : ServiceHealth.failed,
+        detail: _serviceDetailForHealth(p, health),
+      );
     }
     refresh();
+  }
+
+  /// Accurate, scrubbed ServiceHealth detail for a plugin probe outcome.
+  /// Needs-setup/unsupported/migration/degraded are honest about WHY the
+  /// plugin is not working instead of blaming a missing roster tool.
+  String _serviceDetailForHealth(PluginItem row, StartupItemStatus health) {
+    final reason = health.reason;
+    return switch (health.state) {
+      StartupItemState.ready =>
+        'probe ok · ${_healthCapabilityDetail(row)}',
+      StartupItemState.needsSetup =>
+        'Needs setup: ${reason ?? 'configuration required'}',
+      StartupItemState.unsupported =>
+        'Unsupported on this device: ${reason ?? 'not supported here'}',
+      StartupItemState.migrationRequired =>
+        'Migration required: ${reason ?? 're-approve this plugin'}',
+      StartupItemState.degraded =>
+        'Degraded: ${reason ?? 'capability not ready'}',
+      StartupItemState.disabled => 'Disabled',
+      _ =>
+        reason ??
+            'probe failed: installed+enabled but contributes no agent '
+                'tools, skills, hooks, or MCP servers',
+    };
   }
 
   /// Reconnect every server the user had connected (app resume/launch).
