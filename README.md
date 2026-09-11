@@ -35,6 +35,30 @@ ids (`plugin:<id>/command:<name>`, `…/skill:<name>`, `…/agent:<name>`,
   before activation; missing runtime ⇢ `Degraded`/`Failed`, never fake
   `working`.
 
+## Startup behavior contract
+
+- The chat shell and composer are interactive within **3 seconds** of launch,
+  including with large local histories. No network, marketplace, plugin
+  activation, or MCP handshake runs on the first-frame critical path; those run
+  after the first frame in the background readiness queue.
+- Runtime readiness has a **120-second global deadline**. Unfinished items open
+  in a truthful **degraded** state with a per-item reason and `Retry`/`Disable`
+  actions; the app stays usable and never blocks indefinitely. Local safety
+  migration is never skipped by the deadline.
+- `session_start` fires **exactly once** for every new root, implicit first,
+  restored active, and subagent session, after the relevant plugin activation
+  and session-visible skill mount have settled.
+- Runtime-managed `skills/**/SKILL.md` contributions mount with **session
+  scope**: the installing session sees them immediately, another session does
+  not until the next-boot promotion, and they become global after one restart.
+- Legacy installed/enabled plugins without a normalized runtime and a valid
+  manifest-digest grant are disabled as **`Migration required`** and cannot
+  execute legacy hooks or skills until the user runs inspect → approve →
+  install. There is no silent auto-approval.
+- Every plugin/MCP startup result has a durable, secret-scrubbed status:
+  `Ready`, `Needs setup`, `Unsupported on this device`, `Migration required`,
+  `Degraded`, `Failed`, or `Disabled`.
+
 ## MCP servers
 
 - Stdio servers spawn inside the sandbox (if provisioned) with per-server
@@ -67,3 +91,11 @@ device smoke pass of install → approve → session activation → restart
 promotion → disable/uninstall cleanup. Preinstalled seed truthfulness is
 pinned by the audit in
 `docs/superpowers/audits/2026-09-06-preinstalled-plugin-mcp-runtime.md`.
+
+The startup/plugin-runtime release gate and its measured evidence (first-frame
+budget, 120-second deadline, runtime skill + `session_start` integration, legacy
+migration, APK SHA-256, and the physical-Android checklist) are recorded in
+`docs/superpowers/audits/2026-09-10-startup-plugin-runtime-reliability.md`. The
+physical-device smoke pass is `NOT EXECUTED` when no Android device/emulator is
+attached; on-device sign-off remains open until a release owner completes that
+checklist.

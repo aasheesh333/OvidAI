@@ -31,6 +31,8 @@ import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/pty_service.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
+import 'package:ovid_ai/core/session_lifecycle_service.dart';
+import 'package:ovid_ai/core/startup_coordinator.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/health_service.dart';
 import 'package:ovid_ai/core/skills.dart';
@@ -20938,6 +20940,405 @@ cwd = 'tools'
       },
     );
   });
+
+  group('Task 9: cross-task startup runtime integration', () {
+    late Directory staging;
+    late Directory runtime;
+    late Directory source;
+    final registeredIds = <String>{};
+
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+      FlutterSecureStorage.setMockInitialValues({});
+      AppState.resetTestInstance();
+      SkillService.I.invalidateAllSessions();
+      SkillService.I.clearRoots();
+      SessionLifecycleService.I.resetForTest();
+      AgentService.setRunSessionForTest('');
+      AgentService.skillCatalogInputsForTest = null;
+      HookService.I.enabled = true;
+      HookService.I.executorForTest = (_, _) async => '';
+      staging = Directory.systemTemp.createTempSync('ovid-t9-stage-');
+      runtime = Directory.systemTemp.createTempSync('ovid-t9-runtime-');
+      source = Directory.systemTemp.createTempSync('ovid-t9-source-');
+      PluginRuntimeManager.stagingRootOverrideForTest = staging;
+      PluginRuntimeManager.runtimeRootOverrideForTest = runtime;
+    });
+
+    tearDown(() async {
+      for (final id in registeredIds) {
+        PluginContributionRegistry.I.unregisterPlugin(id);
+      }
+      registeredIds.clear();
+      AgentService.setRunSessionForTest('');
+      AgentService.skillCatalogInputsForTest = null;
+      SessionLifecycleService.I.resetForTest();
+      HookService.I.executorForTest = null;
+      SkillService.I.invalidateAllSessions();
+      SkillService.I.clearRoots();
+      PluginRuntimeManager.stagingRootOverrideForTest = null;
+      PluginRuntimeManager.runtimeRootOverrideForTest = null;
+      AppState.resetTestInstance();
+      for (final dir in [staging, runtime, source]) {
+        if (dir.existsSync()) dir.deleteSync(recursive: true);
+      }
+    });
+
+    Future<PluginInspection> inspectAndApprove() async {
+      final inspection = await PluginRuntimeManager.I.inspect(
+        LocalFolderPluginSource(source.path),
+      );
+      await AppState.pluginPermissions.save(
+        PluginPermissionGrant(
+          pluginId: inspection.manifest.id,
+          manifestDigest: inspection.manifestDigest,
+          capabilities: inspection.manifest.requestedCapabilities,
+          approvedAt: DateTime.utc(2026, 9, 10),
+        ),
+      );
+      registeredIds.add(inspection.manifest.id);
+      return inspection;
+    }
+
+    test(
+      'real install is session-scoped then global after one restart',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          'ovid_sessions': [
+            _task9SessionJson('A', ['a']),
+            _task9SessionJson('B', ['b']),
+          ],
+          'ovid_active_session': 'B',
+        });
+        var app = AppState.createForTest(
+          startupStageDelegates: _task9OfflineStages(),
+          persistedSessionDecoder: _task9Decode,
+        );
+
+        // Boot 1: the app is fully initialized before the user installs.
+        await app.initialize();
+        expect(app.sessionById('A'), isNotNull);
+        expect(app.sessionById('B'), isNotNull);
+        await AgentService.I.refreshSkills(sessionId: 'A');
+        await AgentService.I.refreshSkills(sessionId: 'B');
+
+        _task9WriteResearchFixture(source);
+        final row = PluginItem(
+          name: 'Research Kit',
+          author: 'acme',
+          description: '',
+          version: '1.0.0',
+          category: 'Tool',
+        );
+        app.plugins.add(row);
+        final inspection = await inspectAndApprove();
+        final result = await app.installPlugin(
+          row,
+          inspection: inspection,
+          origin: PluginInstallOrigin.agent,
+          sessionId: 'A',
+        );
+        expect(result?.status, PluginInstallStatus.ok);
+
+        // The installing session sees the runtime skill immediately; the
+        // other session does not until the next-boot promotion.
+        expect(
+          SkillService.I
+              .resolveForSession(
+                'A',
+                'plugin:acme/research-kit/skill:research',
+              )
+              .unique
+              ?.content,
+          'RESEARCH BODY',
+        );
+        expect(SkillService.I.resolveForSession('A', 'research').isUnique, isTrue);
+        expect(SkillService.I.resolveForSession('B', 'research').isAbsent, isTrue);
+
+        // Boot 2 (one restart): the coordinator promotes the runtime globally
+        // and remounts every session.
+        AppState.resetTestInstance();
+        SkillService.I.invalidateAllSessions();
+        app = AppState.createForTest(
+          startupStageDelegates: _task9OfflineStages(),
+          persistedSessionDecoder: _task9Decode,
+        );
+        await app.initializeReadiness();
+
+        expect(SkillService.I.resolveForSession('A', 'research').isUnique, isTrue);
+        expect(SkillService.I.resolveForSession('B', 'research').isUnique, isTrue);
+        final promoted = app.plugins.singleWhere(
+          (plugin) => plugin.runtimeId == 'acme/research-kit',
+        );
+        expect(promoted.activation, PluginActivation.globalActive);
+        expect(promoted.enabled, isTrue);
+      },
+    );
+
+    test(
+      'session_start fires exactly once per reason with the runtime skill visible',
+      () async {
+        final app = AppState.createForTest(
+          startupStageDelegates: _task9OfflineStages(),
+          persistedSessionDecoder: _task9Decode,
+        );
+        await app.initialize();
+        final seed = app.activeSession!;
+        await AgentService.I.refreshSkills(sessionId: seed.id);
+
+        _task9WriteResearchFixture(source, withHook: true);
+        final row = PluginItem(
+          name: 'Research Kit',
+          author: 'acme',
+          description: '',
+          version: '1.0.0',
+          category: 'Tool',
+        );
+        app.plugins.add(row);
+        final inspection = await inspectAndApprove();
+        final result = await app.installPlugin(
+          row,
+          inspection: inspection,
+          origin: PluginInstallOrigin.agent,
+          sessionId: seed.id,
+        );
+        expect(result?.status, PluginInstallStatus.ok);
+        // Promote globally for this boot so every session can see the skill.
+        // A fresh token advances the boot epoch, which is what flips
+        // `promoteOnNextBoot` to globalActive.
+        await PluginRuntimeManager.I.activateForBoot(
+          bootToken: Object(),
+          connectMcp: false,
+          reportFailure: true,
+        );
+        expect(
+          app.plugins
+              .singleWhere((plugin) => plugin.runtimeId == 'acme/research-kit')
+              .activation,
+          PluginActivation.globalActive,
+        );
+
+        final events = <String>[];
+        var skillVisible = 0;
+        HookService.I.executorForTest = (_, env) async {
+          if (env['PLUGIN_EVENT'] != 'session_start') return '';
+          final sessionId = env['PLUGIN_SESSION']!;
+          events.add(sessionId);
+          final names = SkillService.I
+              .skillsForSession(sessionId)
+              .map((skill) => skill.name);
+          if (names.contains('research')) skillVisible++;
+          return '';
+        };
+        addTearDown(() => HookService.I.executorForTest = null);
+
+        final sessions = <SessionStartReason, ChatSession>{
+          SessionStartReason.created: ChatSession(
+            id: 'created-1',
+            title: 'created',
+            model: 'm',
+          ),
+          SessionStartReason.implicit: ChatSession(
+            id: 'implicit-1',
+            title: 'implicit',
+            model: 'm',
+          ),
+          SessionStartReason.restored: ChatSession(
+            id: 'restored-1',
+            title: 'restored',
+            model: 'm',
+          ),
+          SessionStartReason.subagent: ChatSession(
+            id: 'subagent-1',
+            title: 'subagent',
+            model: 'm',
+            parentId: 'created-1',
+          ),
+        };
+        app.sessions.addAll(sessions.values);
+
+        for (final entry in sessions.entries) {
+          await SessionLifecycleService.I.sessionStarted(
+            entry.value,
+            reason: entry.key,
+          );
+          // A duplicate, reason-independent call in the same boot must not
+          // fire again.
+          await SessionLifecycleService.I.sessionStarted(
+            entry.value,
+            reason: entry.key,
+          );
+        }
+        await SessionLifecycleService.I.drainForTest();
+
+        expect(events, hasLength(4));
+        expect(
+          events.toSet(),
+          sessions.values.map((session) => session.id).toSet(),
+        );
+        expect(
+          skillVisible,
+          4,
+          reason: 'the executor observed the runtime skill for every session',
+        );
+      },
+    );
+
+    test(
+      'legacy enabled hook and skill row cannot execute until normalized install',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          'ovid_custom_plugins_v1': [
+            jsonEncode({
+              'name': 'Legacy Tools',
+              'description': '',
+              'category': 'Tool',
+              'installed': true,
+              'enabled': true,
+              'source': 'legacy/legacy-tools',
+              'hooks': {'on_turn_start': 'echo unsafe'},
+            }),
+          ],
+          'ovid_plugin_state_v1': jsonEncode({
+            'Legacy Tools': jsonEncode({
+              'installed': true,
+              'enabled': true,
+              'source': 'legacy/legacy-tools',
+              'hooks': {'on_turn_start': 'echo unsafe'},
+            }),
+          }),
+        });
+        final app = AppState.createForTest(
+          startupStageDelegates: _task9OfflineStages(),
+        );
+        final tasks = await app.buildReadinessTasks();
+        await tasks.singleWhere((task) => task.id == 'local.hydrate').run();
+        final safety = await tasks
+            .singleWhere((task) => task.id == 'localSafety.migrate')
+            .run();
+        expect(safety.state, StartupItemState.migrationRequired);
+
+        final row = app.plugins.singleWhere(
+          (plugin) => plugin.name == 'Legacy Tools',
+        );
+        expect(row.enabled, isFalse);
+        expect(row.activation, PluginActivation.disabled);
+        expect(row.migrationRequired, isTrue);
+        expect(row.runtimeReason, contains('Re-approve'));
+
+        // The legacy hook map and cached skill must not execute.
+        final cache = await app.pluginCacheDirFor(row.source!);
+        File('${cache.path}/skills/legacy-skill/SKILL.md')
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync(
+            '---\nname: legacy-skill\nuser-invocable: true\n---\nLEGACY',
+          );
+        var hookCalls = 0;
+        HookService.I.executorForTest = (_, _) async {
+          hookCalls++;
+          return '';
+        };
+        await HookService.I.fire('on_turn_start', 'legacy-session');
+        await AgentService.I.refreshSkills();
+        expect(hookCalls, 0);
+        expect(
+          HookService.I.hasLegacyMapHookListeners('on_turn_start'),
+          isFalse,
+        );
+        expect(SkillService.I.resolveAlias('legacy-skill').isAbsent, isTrue);
+
+        // Migration recovery: inspect + approve + install the normalized
+        // runtime, then its contributions become real.
+        _task9WriteResearchFixture(source, withHook: true);
+        final inspection = await inspectAndApprove();
+        final result = await app.installPlugin(
+          row,
+          inspection: inspection,
+          origin: PluginInstallOrigin.pluginsScreen,
+        );
+        expect(result?.status, PluginInstallStatus.ok);
+        expect(row.runtimeId, 'acme/research-kit');
+        expect(row.migrationRequired, isFalse);
+        expect(row.enabled, isTrue);
+        await PluginRuntimeManager.I.activateForBoot(
+          bootToken: app.bootToken,
+          connectMcp: false,
+          reportFailure: true,
+        );
+        final recovery = ChatSession(id: 'recovery', title: 'r', model: 'm');
+        app.sessions.add(recovery);
+        await AgentService.I.refreshSkills(sessionId: recovery.id);
+
+        expect(
+          SkillService.I
+              .resolveForSession(
+                recovery.id,
+                'plugin:acme/research-kit/skill:research',
+              )
+              .unique
+              ?.content,
+          'RESEARCH BODY',
+        );
+        expect(
+          SkillService.I.resolveForSession(recovery.id, 'legacy-skill').isAbsent,
+          isTrue,
+        );
+        expect(HookService.I.hasRegisteredHooks('acme/research-kit'), isTrue);
+      },
+    );
+  });
+}
+
+Map<String, Future<void> Function()> _task9OfflineStages() => {
+  'marketplace.refresh': () async {},
+  'mcp.connect': () async {},
+  'firebase.initialize': () async {},
+  'github.initialize': () async {},
+  'sandbox.selfHeal': () async {},
+};
+
+String _task9SessionJson(String id, List<String> messages) => jsonEncode(
+  ChatSession(
+    id: id,
+    title: id,
+    model: 'm',
+    messages: [
+      for (final message in messages) Message(role: 'user', content: message),
+    ],
+  ).toJson(),
+);
+
+ChatSession _task9Decode(String raw) =>
+    ChatSession.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+
+void _task9WriteResearchFixture(Directory dir, {bool withHook = false}) {
+  File('${dir.path}/.claude-plugin/plugin.json')
+    ..parent.createSync(recursive: true)
+    ..writeAsStringSync(
+      '{"name":"Research Kit","author":"acme","version":"1.0.0"}',
+    );
+  File('${dir.path}/skills/research/SKILL.md')
+    ..parent.createSync(recursive: true)
+    ..writeAsStringSync(
+      '---\nname: research\nuser-invocable: true\n---\nRESEARCH BODY',
+    );
+  if (withHook) {
+    File('${dir.path}/hooks/hooks.json')
+      ..parent.createSync(recursive: true)
+      ..writeAsStringSync(
+        jsonEncode({
+          'hooks': {
+            'SessionStart': [
+              {
+                'hooks': [
+                  {'type': 'command', 'command': 'echo session-start'},
+                ],
+              },
+            ],
+          },
+        }),
+      );
+  }
 }
 
 class Plugin9McpProcess implements Process {
