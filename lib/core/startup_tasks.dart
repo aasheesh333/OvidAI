@@ -157,7 +157,7 @@ class MarketplaceRefreshTask implements StartupTask {
 /// while the injected body routes through the base `mcp.connect` stage. The
 /// task timeout is the budget plus a one-second safety margin so the task's
 /// own truthful status wins over the coordinator's generic timeout.
-class McpConnectTask implements StartupTask {
+class McpConnectTask implements StartupTask, StartupOwnedTask {
   McpConnectTask({
     required this.canonicalId,
     required this.label,
@@ -170,6 +170,10 @@ class McpConnectTask implements StartupTask {
   final String canonicalId;
   @override
   final String label;
+
+  /// Canonical MCP server id this item owns (durable-status attribution).
+  @override
+  String get ownerId => canonicalId;
 
   /// Resolves the complete-handshake budget lazily, at run time, so a server
   /// loaded during readiness inventory (custom/marketplace rows) contributes

@@ -1244,6 +1244,7 @@ class AppState extends ChangeNotifier {
   @visibleForTesting
   static void resetTestInstance() {
     _testInstance = null;
+    PluginRuntimeStatusStore.I.resetForTest();
   }
 
   AppState._({
@@ -1279,6 +1280,89 @@ class AppState extends ChangeNotifier {
   PersistedSessionDecoder? _persistedSessionDecoderForTest;
   late final SessionBootstrapDecoder _sessionBootstrapDecoder;
   late final WorkspaceDeleter _workspaceDeleter;
+
+  /// Durable, secret-scrubbed startup status per canonical plugin/MCP id
+  /// (Task 7, spec §5.8). Shared process-wide store.
+  PluginRuntimeStatusStore get runtimeStatusStore =>
+      PluginRuntimeStatusStore.I;
+
+  /// The persisted terminal status for [canonicalId], or null.
+  PluginRuntimeStatus? statusFor(String canonicalId) =>
+      runtimeStatusStore.statusFor(canonicalId);
+
+  /// Loads the durable status map during local hydration.
+  Future<void> hydrateRuntimeStatuses() => runtimeStatusStore.hydrate();
+
+  /// Records one terminal startup status through the durable store.
+  Future<void> recordStartupStatus(
+    StartupItemStatus status, {
+    String? ownerId,
+  }) {
+    final id = ownerId ?? status.id;
+    if (id.isEmpty) return Future<void>.value();
+    return runtimeStatusStore.record(
+      PluginRuntimeStatus(
+        pluginId: id,
+        state: status.state,
+        reason: status.reason,
+        updatedAt: status.updatedAt,
+      ),
+    );
+  }
+
+  /// Coordinator sink adapter: durable status for plugin/MCP-owned items.
+  void _onStartupStatus(StartupItemStatus status, String? ownerId) {
+    if (ownerId == null || ownerId.isEmpty) return;
+    unawaited(recordStartupStatus(status, ownerId: ownerId));
+  }
+
+  /// Truthful health for one plugin row. Runtime rows probe their declared
+  /// capability surface (roster tools, registered hooks, owned MCP); legacy
+  /// rows fall back to the roster probe. Hooks are never executed.
+  Future<StartupItemStatus> pluginHealthFor(PluginItem row) async {
+    final label = row.name.isNotEmpty
+        ? row.name
+        : (row.runtimeId ?? 'Plugin');
+    if (row.migrationRequired) {
+      return StartupItemStatus.migrationRequired(
+        row.runtimeId ?? label,
+        StartupItemKind.plugin,
+        label,
+        reason: row.runtimeReason ?? 'Re-approve this plugin before it can run',
+      );
+    }
+    final id = row.runtimeId;
+    if (id == null) {
+      final tools = AgentService.I.pluginToolNames(row);
+      if (tools.isNotEmpty) {
+        return StartupItemStatus.ready(label, StartupItemKind.plugin, label);
+      }
+      return StartupItemStatus.failed(
+        label,
+        StartupItemKind.plugin,
+        label,
+        reason:
+            'probe failed: installed+enabled but contributes no agent '
+            'tools, skills, hooks, or MCP servers',
+      );
+    }
+    return PluginRuntimeManager.I.probeNormalizedHealth(id, label: label);
+  }
+
+  /// Short capability label for a Ready plugin's status detail.
+  String _healthCapabilityDetail(PluginItem row) {
+    final id = row.runtimeId;
+    final manifest = id == null
+        ? null
+        : PluginContributionRegistry.I.manifestFor(id);
+    if (manifest != null && manifest.mcpServers.isNotEmpty) {
+      return 'mcp connected';
+    }
+    if (manifest != null && manifest.hooks.isNotEmpty) {
+      return 'hooks registered';
+    }
+    return 'capability active';
+  }
 
   Future<void> setPluginInstalled(
     String name,
@@ -1684,6 +1768,7 @@ class AppState extends ChangeNotifier {
       _readinessTasks ??= _buildReadinessTasks();
 
   Future<List<StartupTask>> _buildReadinessTasks() async {
+    StartupCoordinator.I.statusSink = _onStartupStatus;
     final mcpTasks = await _buildMcpReadinessTasks();
     return [
       _LocalHydrationStartupTask(this),
@@ -2000,6 +2085,7 @@ class AppState extends ChangeNotifier {
     await _loadPluginState();
     await _loadMemories();
     await HookService.I.loadEnabled();
+    await hydrateRuntimeStatuses();
   }
 
   Future<void> _reconcilePluginSafety() async {
@@ -2020,6 +2106,12 @@ class AppState extends ChangeNotifier {
     });
     _pluginSafetyReconciliation = attempt;
     _pluginSafetyStatuses = await attempt;
+    for (final status in _pluginSafetyStatuses) {
+      if (!status.state.isTerminal) continue;
+      unawaited(
+        recordStartupStatus(status, ownerId: status.id),
+      );
+    }
     _pluginSafetyReconciled = true;
   }
 
@@ -2671,6 +2763,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.clear();
+      await runtimeStatusStore.clear();
       _clearDeferredSessions();
       // Secure-storage keys (API credentials, MCP env) are cleared below.
       for (final s in List.of(sessions)) {
@@ -3647,6 +3740,9 @@ class AppState extends ChangeNotifier {
       if (p.installed) {
         await uninstallPlugin(p);
       }
+      if (p.runtimeId != null) {
+        await runtimeStatusStore.remove(p.runtimeId!);
+      }
       plugins.remove(p);
     }
 
@@ -4617,12 +4713,11 @@ class AppState extends ChangeNotifier {
       }
     }
 
-    // Re-verify enabled plugins (Task 10, spec §10): startup health is
-    // derived from a real capability probe — never a hardcoded 'working'
-    // stamp. A plugin that resolves at least one real contribution
-    // (tool/skill/hook/MCP) is working; an installed+enabled row with
-    // nothing mounted fails honestly so the Plugins screen shows an
-    // actionable state.
+    // Re-verify enabled plugins (Task 7, spec §5.8/§6.2): startup health is
+    // derived from a real capability probe — roster tools, registered hooks,
+    // and live owned-MCP connectivity — never a hardcoded 'working' stamp or
+    // the roster-tool list alone. Hook-only and MCP-only normalized plugins
+    // report working from their real active capability.
     for (final p in plugins.where((p) => p.installed && p.enabled)) {
       final tools = AgentService.I.pluginToolNames(p);
       if (tools.isNotEmpty) {
@@ -4630,6 +4725,15 @@ class AppState extends ChangeNotifier {
           'plugin:${p.name}',
           ServiceHealth.working,
           detail: 'probe ok · tools: ${tools.join(', ')}',
+        );
+        continue;
+      }
+      final health = await pluginHealthFor(p);
+      if (health.state == StartupItemState.ready) {
+        updateServiceStatus(
+          'plugin:${p.name}',
+          ServiceHealth.working,
+          detail: 'probe ok · ${_healthCapabilityDetail(p)}',
         );
       } else {
         updateServiceStatus(

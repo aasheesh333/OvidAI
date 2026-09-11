@@ -215,6 +215,12 @@ class StartupSnapshot {
 
 typedef StartupDisable = Future<void> Function();
 
+/// Terminal status of one startup item, plus the canonical plugin/MCP owner
+/// id when the item is owned. A null [ownerId] means the item is not a
+/// per-plugin/MCP item (local state, marketplace, firebase, sandbox, …).
+typedef StartupStatusSink =
+    void Function(StartupItemStatus status, String? ownerId);
+
 abstract interface class StartupTask {
   String get id;
   StartupItemKind get kind;
@@ -224,11 +230,22 @@ abstract interface class StartupTask {
   Future<StartupItemStatus> run();
 }
 
+/// Optional marker for startup tasks that own a canonical plugin/MCP id.
+/// Implemented by [McpConnectTask] and available to plugin-owned tasks, so
+/// the coordinator can attribute a terminal transition to that owner without
+/// forcing every [StartupTask] to carry a new member.
+abstract interface class StartupOwnedTask {
+  String get ownerId;
+}
+
 class StartupCoordinator extends ChangeNotifier {
-  StartupCoordinator({this._deadline = const Duration(seconds: 120)});
+  StartupCoordinator({
+    this._deadline = const Duration(seconds: 120),
+    this.statusSink,
+  });
 
   @visibleForTesting
-  StartupCoordinator.forTest({required this._deadline});
+  StartupCoordinator.forTest({required this._deadline, this.statusSink});
 
   static final StartupCoordinator I = StartupCoordinator();
 
@@ -236,6 +253,15 @@ class StartupCoordinator extends ChangeNotifier {
   final Map<String, StartupTask> _tasks = {};
   final List<StartupItemStatus> _items = [];
   final Set<String> _runningItemIds = {};
+
+  /// Last terminal status emitted per item for the current run, so the sink
+  /// only sees actually-changed transitions.
+  final Map<String, StartupItemStatus> _emitted = {};
+
+  /// Durable-status sink (Task 7). Set by production wiring; null in unit
+  /// tests that do not need persistence.
+  StartupStatusSink? statusSink;
+
   Completer<void>? _invocationsSettled;
   var _runToken = 0;
   var _deadlineExceeded = false;
@@ -263,6 +289,7 @@ class StartupCoordinator extends ChangeNotifier {
     }
     final runToken = ++_runToken;
     _deadlineExceeded = false;
+    _emitted.clear();
     final orderedTasks = [
       ...tasks.where((task) => task.kind == StartupItemKind.localState),
       ...tasks.where((task) => task.kind != StartupItemKind.localState),
@@ -288,22 +315,26 @@ class StartupCoordinator extends ChangeNotifier {
           if (item.state == StartupItemState.running ||
               (item.state == StartupItemState.queued &&
                   item.kind == StartupItemKind.localState)) {
-            _items[i] = StartupItemStatus.degraded(
+            final degraded = StartupItemStatus.degraded(
               item.id,
               item.kind,
               item.label,
               reason: 'Startup readiness deadline exceeded',
               attempt: item.attempt,
             );
+            _items[i] = degraded;
+            _emitStatus(degraded);
           } else if (item.state == StartupItemState.queued &&
               item.kind != StartupItemKind.localState) {
-            _items[i] = StartupItemStatus.skipped(
+            final skipped = StartupItemStatus.skipped(
               item.id,
               item.kind,
               item.label,
               reason: 'Startup readiness deadline exceeded',
               attempt: item.attempt,
             );
+            _items[i] = skipped;
+            _emitStatus(skipped);
           }
         }
         notifyListeners();
@@ -499,6 +530,30 @@ class StartupCoordinator extends ChangeNotifier {
     if (index == -1) return;
     _items[index] = status;
     notifyListeners();
+    _emitStatus(status);
+  }
+
+  /// Notifies the durable-status sink for an actually-changed terminal
+  /// transition. Non-terminal states and repeated identical terminal states
+  /// are never emitted; the canonical owner id is supplied by tasks that
+  /// implement [StartupOwnedTask].
+  void _emitStatus(StartupItemStatus status) {
+    if (!status.state.isTerminal) return;
+    final previous = _emitted[status.id];
+    if (previous != null &&
+        previous.state == status.state &&
+        previous.reason == status.reason) {
+      return;
+    }
+    _emitted[status.id] = status;
+    final sink = statusSink;
+    if (sink == null) return;
+    final task = _tasks[status.id];
+    String? ownerId;
+    if (task is StartupOwnedTask) {
+      ownerId = (task as StartupOwnedTask).ownerId;
+    }
+    sink(status, ownerId);
   }
 
   StartupItemStatus _item(String id) =>

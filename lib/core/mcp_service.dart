@@ -250,20 +250,14 @@ class McpService {
           'Connection is already in progress',
         );
       }
-      if (server.transport == 'sse') {
-        return const McpConnectOutcome(
-          McpConnectOutcomeKind.unsupported,
-          'SSE transport not supported, use Streamable HTTP '
-          '(set transport to "http" with a url).',
-        );
-      }
-      if (server.transport != 'http' && server.transport != 'stdio') {
+      final unsupported = unsupportedTransportReason(server);
+      if (unsupported != null) {
         return McpConnectOutcome(
           McpConnectOutcomeKind.unsupported,
-          'Unsupported transport "${server.transport}"',
+          unsupported,
         );
       }
-      final missing = await _missingCredentials(server);
+      final missing = await missingCredentialsFor(server);
       if (missing.isNotEmpty) {
         return McpConnectOutcome(
           McpConnectOutcomeKind.needsSetup,
@@ -349,6 +343,25 @@ class McpService {
     return activation == PluginActivation.sessionActive ||
         activation == PluginActivation.globalActive ||
         activation == PluginActivation.degraded;
+  }
+
+  /// Side-effect-free credential probe used by health checks: returns the
+  /// declared env/header names that have no stored value. Never dials or
+  /// spawns a process.
+  Future<List<String>> missingCredentialsFor(McpServer server) =>
+      _missingCredentials(server);
+
+  /// Structural transport gate used by health checks: null when the transport
+  /// can run on this device, otherwise the actionable unsupported reason.
+  String? unsupportedTransportReason(McpServer server) {
+    if (server.transport == 'sse') {
+      return 'SSE transport not supported, use Streamable HTTP '
+          '(set transport to "http" with a url).';
+    }
+    if (server.transport != 'http' && server.transport != 'stdio') {
+      return 'Unsupported transport "${server.transport}"';
+    }
+    return null;
   }
 
   Future<List<String>> _missingCredentials(McpServer server) async {

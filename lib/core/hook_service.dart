@@ -274,6 +274,14 @@ class HookService extends ChangeNotifier {
     return _resolveHooks(event, sessionId).isNotEmpty;
   }
 
+  /// Side-effect-free health probe: whether [pluginId] has a live normalized
+  /// hook registration. Never executes a hook — only consults the registry.
+  bool hasRegisteredHooks(String pluginId) {
+    if (!PluginContributionRegistry.I.isRegistered(pluginId)) return false;
+    final manifest = PluginContributionRegistry.I.manifestFor(pluginId);
+    return manifest != null && manifest.hooks.isNotEmpty;
+  }
+
   /// Whether any LEGACY `PluginItem` map hook listens for [event] — the
   /// per-turn `on_turn_start` firing site uses this so a plugin that
   /// declared the legacy name does not get a second canonical

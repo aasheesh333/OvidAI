@@ -45,6 +45,8 @@ import 'plugin_manifest.dart';
 import 'plugin_permissions.dart';
 import 'plugin_registry.dart';
 import 'plugin_source_resolver.dart';
+import 'hook_service.dart';
+import 'mcp_service.dart';
 import 'startup_coordinator.dart';
 import 'state.dart';
 
@@ -73,6 +75,284 @@ const String _kFailedActivationReason = 'Plugin activation failed';
 /// content directory (spec §5.2 step 6).
 const String kPluginRuntimeManifestFile = 'ovid-plugin.json';
 const String kPluginRuntimeActivationFile = 'ovid-activation.json';
+
+/// Versioned durable-status store (spec §5.8): canonical plugin/MCP id →
+/// scrubbed terminal startup status. Deliberately separate from the
+/// activation/row stores so a status write can never corrupt install state.
+const String kPluginRuntimeStatusPrefKey = 'ovid_plugin_runtime_status_v1';
+const int kPluginRuntimeStatusWireVersion = 1;
+const int kPluginRuntimeStatusMaxLogLines = 100;
+const int kPluginRuntimeStatusMaxLogBytes = 32 * 1024;
+
+/// Canonical ids the durable store accepts: a non-empty, whitespace-free
+/// one- or two-segment id (plugin `publisher/name`, plugin-owned MCP
+/// `publisher/name`, or a bare ownerless server name). Synthetic legacy ids
+/// and anything with stray separators are rejected.
+bool isCanonicalRuntimeStatusId(String value) {
+  if (value.isEmpty || value.trim() != value) return false;
+  final parts = value.split('/');
+  if (parts.length > 2) return false;
+  for (final part in parts) {
+    if (part.isEmpty) return false;
+    if (part.contains(RegExp(r'[^A-Za-z0-9._~-]'))) return false;
+  }
+  return true;
+}
+
+/// One durable startup outcome for a canonical plugin/MCP id (spec §5.8).
+class PluginRuntimeStatus {
+  PluginRuntimeStatus({
+    required this.pluginId,
+    required this.state,
+    this.reason,
+    DateTime? updatedAt,
+    this.logs = const [],
+    this.wireVersion = kPluginRuntimeStatusWireVersion,
+  }) : updatedAt = (updatedAt ?? DateTime.now()).toUtc();
+
+  final String pluginId;
+  final StartupItemState state;
+  final String? reason;
+  final DateTime updatedAt;
+  final List<String> logs;
+  final int wireVersion;
+
+  Map<String, dynamic> toJson() => {
+    'pluginId': pluginId,
+    'state': state.name,
+    'reason': reason,
+    'updatedAt': updatedAt.toUtc().toIso8601String(),
+    'logs': logs,
+    'wireVersion': wireVersion,
+  };
+
+  /// Corrupt-tolerant decode: null when the record is unusable or from a
+  /// newer wire version.
+  static PluginRuntimeStatus? fromJson(Map<String, dynamic> j) {
+    final pluginId = j['pluginId']?.toString() ?? '';
+    if (!isCanonicalRuntimeStatusId(pluginId)) return null;
+    final stateName = j['state']?.toString();
+    StartupItemState? state;
+    for (final candidate in StartupItemState.values) {
+      if (candidate.name == stateName) {
+        state = candidate;
+        break;
+      }
+    }
+    if (state == null) return null;
+    final wire =
+        (j['wireVersion'] as num?)?.toInt() ?? kPluginRuntimeStatusWireVersion;
+    if (wire > kPluginRuntimeStatusWireVersion) return null;
+    DateTime updatedAt;
+    try {
+      updatedAt = DateTime.parse(j['updatedAt'] as String).toUtc();
+    } catch (_) {
+      return null;
+    }
+    final logs =
+        (j['logs'] as List?)?.map((e) => e.toString()).toList() ??
+        const <String>[];
+    return PluginRuntimeStatus(
+      pluginId: pluginId,
+      state: state,
+      reason: j['reason']?.toString(),
+      updatedAt: updatedAt,
+      logs: logs,
+      wireVersion: wire,
+    );
+  }
+}
+
+/// Durable, versioned, secret-scrubbed startup status per canonical id
+/// (spec §5.8). Uses the same double-encoded JSON convention as the
+/// activation/grant stores: an outer map of canonical id → JSON string of the
+/// inner record, keys sorted for stable bytes.
+class PluginRuntimeStatusStore {
+  PluginRuntimeStatusStore();
+
+  static final PluginRuntimeStatusStore I = PluginRuntimeStatusStore();
+
+  @visibleForTesting
+  static bool failWritesForTest = false;
+
+  final Map<String, PluginRuntimeStatus> _statuses = {};
+  final Set<String> _removed = {};
+  Future<void> _writeChain = Future<void>.value();
+  bool _blocked = false;
+  int _persistCount = 0;
+
+  @visibleForTesting
+  int get persistCountForTest => _persistCount;
+
+  @visibleForTesting
+  Map<String, PluginRuntimeStatus> get statusesForTest =>
+      Map<String, PluginRuntimeStatus>.unmodifiable(_statuses);
+
+  @visibleForTesting
+  bool get blockedForTest => _blocked;
+
+  /// Clears in-memory state (not prefs) — called when the test app instance
+  /// is reset so store state never leaks between tests.
+  void resetForTest() {
+    _statuses.clear();
+    _removed.clear();
+    _blocked = false;
+    _writeChain = Future<void>.value();
+    _persistCount = 0;
+  }
+
+  /// Hydrates from preferences. Corrupt inner records, noncanonical ids, and
+  /// newer wire versions are dropped without blocking the rest of the boot.
+  Future<void> hydrate() async {
+    _blocked = false;
+    _statuses.clear();
+    _removed.clear();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(kPluginRuntimeStatusPrefKey);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      decoded.forEach((key, value) {
+        final id = key.toString();
+        if (!isCanonicalRuntimeStatusId(id) || value is! String) return;
+        try {
+          final inner = jsonDecode(value);
+          if (inner is! Map) return;
+          final status = PluginRuntimeStatus.fromJson(
+            inner.cast<String, dynamic>(),
+          );
+          if (status != null && status.pluginId == id) {
+            _statuses[id] = status;
+          }
+        } catch (_) {
+          // A single damaged inner record never blocks the rest.
+        }
+      });
+    } catch (_) {}
+  }
+
+  PluginRuntimeStatus? statusFor(String canonicalId) => _statuses[canonicalId];
+
+  /// Records a terminal status. Non-terminal states, noncanonical ids, stale
+  /// writes older than the current record, and writes to a removed id are
+  /// ignored. [revive] clears an uninstall tombstone for a fresh install.
+  Future<void> record(PluginRuntimeStatus status, {bool revive = false}) {
+    if (_blocked) return Future<void>.value();
+    if (!status.state.isTerminal) return Future<void>.value();
+    if (!isCanonicalRuntimeStatusId(status.pluginId)) {
+      return Future<void>.value();
+    }
+    if (revive) _removed.remove(status.pluginId);
+    if (_removed.contains(status.pluginId)) return Future<void>.value();
+
+    final scrubbed = PluginRuntimeStatus(
+      pluginId: status.pluginId,
+      state: status.state,
+      reason: status.reason == null
+          ? null
+          : redactStartupError(status.reason!),
+      updatedAt: status.updatedAt,
+      logs: _capLogs(status.logs),
+      wireVersion: status.wireVersion,
+    );
+
+    final existing = _statuses[scrubbed.pluginId];
+    if (existing != null) {
+      if (scrubbed.updatedAt.isBefore(existing.updatedAt)) {
+        return Future<void>.value();
+      }
+      if (existing.state == scrubbed.state &&
+          existing.reason == scrubbed.reason &&
+          _sameLogs(existing.logs, scrubbed.logs) &&
+          existing.wireVersion == scrubbed.wireVersion) {
+        return Future<void>.value();
+      }
+    }
+    _statuses[scrubbed.pluginId] = scrubbed;
+    return _enqueueWrite();
+  }
+
+  /// Removes the record and tombstones the id so a late completion cannot
+  /// recreate it. Used by uninstall.
+  Future<void> remove(String canonicalId) {
+    if (!isCanonicalRuntimeStatusId(canonicalId)) {
+      return Future<void>.value();
+    }
+    _removed.add(canonicalId);
+    if (_statuses.remove(canonicalId) == null) {
+      return Future<void>.value();
+    }
+    return _enqueueWrite();
+  }
+
+  /// Factory reset: clears memory, the persisted key, and tombstones, and
+  /// blocks every late completion from recreating a record.
+  Future<void> clear() {
+    _statuses.clear();
+    _removed.clear();
+    _blocked = true;
+    return _enqueueWrite();
+  }
+
+  Future<void> _enqueueWrite() {
+    final pending = _writeChain.then((_) => _persist());
+    _writeChain = pending.catchError((Object _) {});
+    return pending;
+  }
+
+  Future<void> _persist() async {
+    try {
+      if (failWritesForTest) {
+        throw StateError('Injected runtime status write failure');
+      }
+      final prefs = await SharedPreferences.getInstance();
+      final ids = _statuses.keys.toList()..sort();
+      if (ids.isEmpty) {
+        await prefs.remove(kPluginRuntimeStatusPrefKey);
+      } else {
+        final written = await prefs.setString(
+          kPluginRuntimeStatusPrefKey,
+          jsonEncode({
+            for (final id in ids) id: jsonEncode(_statuses[id]!.toJson()),
+          }),
+        );
+        if (!written) {
+          throw StateError('Failed to persist plugin runtime status');
+        }
+      }
+      _persistCount++;
+    } catch (_) {
+      // A status write must never brick startup or uninstall.
+    }
+  }
+
+  static bool _sameLogs(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// Newest [kPluginRuntimeStatusMaxLogLines] lines, scrubbed, then bounded
+  /// to [kPluginRuntimeStatusMaxLogBytes] UTF-8 bytes from the newest end.
+  static List<String> _capLogs(List<String> input) {
+    final scrubbed = [for (final line in input) redactStartupError(line)];
+    final newest = scrubbed.length > kPluginRuntimeStatusMaxLogLines
+        ? scrubbed.sublist(scrubbed.length - kPluginRuntimeStatusMaxLogLines)
+        : scrubbed;
+    final out = <String>[];
+    var bytes = 0;
+    for (var i = newest.length - 1; i >= 0; i--) {
+      final lineBytes = utf8.encode(newest[i]).length;
+      if (bytes + lineBytes > kPluginRuntimeStatusMaxLogBytes) break;
+      bytes += lineBytes;
+      out.insert(0, newest[i]);
+    }
+    return List<String>.unmodifiable(out);
+  }
+}
 
 /// Why an install was refused before the transaction started (nothing
 /// was rolled back — nothing had begun).
@@ -906,6 +1186,126 @@ class PluginRuntimeManager extends ChangeNotifier {
     return List.unmodifiable(out);
   }
 
+  /// Truthful health for one canonical runtime row (spec §5.8/§6.2). Probes
+  /// the effective grant, committed content, live registration, and the
+  /// declared capability surface — roster tools, registered hooks (never
+  /// executed), and owned-MCP connectivity. A hook-only or MCP-only plugin is
+  /// Ready from its real active capability instead of requiring roster tools.
+  Future<StartupItemStatus> probeNormalizedHealth(
+    String pluginId, {
+    required String label,
+  }) async {
+    final entries = await _loadEntries();
+    final entry = entries[pluginId];
+    if (entry == null) {
+      return StartupItemStatus.failed(
+        pluginId,
+        StartupItemKind.plugin,
+        label,
+        reason: 'Plugin is not registered',
+      );
+    }
+    final name = entry.manifest.name.isNotEmpty ? entry.manifest.name : label;
+    if (entry.disabled) {
+      return StartupItemStatus.disabled(pluginId, StartupItemKind.plugin, name);
+    }
+    if (!await _isContainedEntry(pluginId, entry) ||
+        !await _hasEffectiveGrant(pluginId, entry)) {
+      return StartupItemStatus.migrationRequired(
+        pluginId,
+        StartupItemKind.plugin,
+        name,
+        reason: _kPluginReapprovalReason,
+      );
+    }
+    if (!Directory(entry.contentDir).existsSync()) {
+      return StartupItemStatus.failed(
+        pluginId,
+        StartupItemKind.plugin,
+        name,
+        reason: _kMissingContentReason,
+      );
+    }
+    if (!PluginContributionRegistry.I.isRegistered(pluginId)) {
+      return StartupItemStatus.failed(
+        pluginId,
+        StartupItemKind.plugin,
+        name,
+        reason: 'Plugin is not registered',
+      );
+    }
+    final manifest = entry.manifest;
+    final hasRoster =
+        manifest.commands.isNotEmpty ||
+        manifest.skills.isNotEmpty ||
+        manifest.agents.isNotEmpty;
+    if (hasRoster) {
+      return StartupItemStatus.ready(pluginId, StartupItemKind.plugin, name);
+    }
+    if (manifest.hooks.isNotEmpty &&
+        !HookService.I.hasRegisteredHooks(pluginId)) {
+      return StartupItemStatus.failed(
+        pluginId,
+        StartupItemKind.plugin,
+        name,
+        reason: 'Registered hooks are missing',
+      );
+    }
+    for (final declared in manifest.mcpServers) {
+      final canonicalId = '$pluginId/${declared.name}';
+      McpServer? server;
+      for (final candidate in AppState.I.mcpServers) {
+        if (candidate.canonicalId == canonicalId) {
+          server = candidate;
+          break;
+        }
+      }
+      if (server == null) {
+        return StartupItemStatus.failed(
+          pluginId,
+          StartupItemKind.plugin,
+          name,
+          reason: 'MCP server is not mounted',
+        );
+      }
+      final unsupported = McpService.I.unsupportedTransportReason(server);
+      if (unsupported != null) {
+        return StartupItemStatus.unsupported(
+          pluginId,
+          StartupItemKind.plugin,
+          name,
+          reason: unsupported,
+        );
+      }
+      final missing = await McpService.I.missingCredentialsFor(server);
+      if (missing.isNotEmpty) {
+        return StartupItemStatus.needsSetup(
+          pluginId,
+          StartupItemKind.plugin,
+          name,
+          reason: 'Needs configuration (${missing.join(', ')})',
+        );
+      }
+      if (!McpService.I.isConnected(canonicalId)) {
+        return StartupItemStatus.degraded(
+          pluginId,
+          StartupItemKind.plugin,
+          name,
+          reason: 'MCP server is not connected',
+        );
+      }
+    }
+    if (manifest.hooks.isEmpty && manifest.mcpServers.isEmpty) {
+      return StartupItemStatus.failed(
+        pluginId,
+        StartupItemKind.plugin,
+        name,
+        reason: 'Plugin declares no runtime capability',
+      );
+    }
+    return StartupItemStatus.ready(pluginId, StartupItemKind.plugin, name);
+  }
+
   // ── row sync (catalog rows carrying runtimeId) ────────────────────
 
   bool _syncRow(PluginActivationRecord rec) {
@@ -1676,6 +2076,8 @@ class PluginRuntimeManager extends ChangeNotifier {
   /// activation record, grant, and plugin-owned secrets (spec §5.1/§9).
   Future<void> uninstall(String pluginId) async {
     await AppState.I.unmountPluginOwnedMcpServers(pluginId, uninstall: true);
+    // Durable status is removed even when there is no activation entry left.
+    await PluginRuntimeStatusStore.I.remove(pluginId);
     final entries = await _loadEntries();
     final entry = entries.remove(pluginId);
     await _saveEntries(entries);
