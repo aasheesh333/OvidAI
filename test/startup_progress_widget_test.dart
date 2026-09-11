@@ -1184,4 +1184,161 @@ void main() {
       }
     },
   );
+
+  PluginItem legacyRow({
+    required String name,
+    String? source,
+    bool migrationRequired = true,
+    String? runtimeReason =
+        'Re-approve this legacy plugin before it can run',
+  }) => PluginItem(
+    name: name,
+    author: 'legacy',
+    description: 'legacy row',
+    version: '1.0.0',
+    category: 'Tool',
+    installed: true,
+    enabled: false,
+    source: source,
+    migrationRequired: migrationRequired,
+    runtimeReason: runtimeReason,
+  );
+
+  testWidgets(
+    'legacy migration row shows state + reason on card and detail',
+    (tester) async {
+      AppState.I.plugins.clear();
+      final row = legacyRow(name: 'Legacy Migrate', source: 'legacy/migrate');
+      AppState.I.plugins.add(row);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: Scaffold(body: PluginCard(plugin: row)),
+        ),
+      );
+      await tester.pump();
+      expect(find.textContaining('Migration required'), findsWidgets);
+      expect(
+        find.textContaining('Re-approve this legacy plugin'),
+        findsWidgets,
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: PluginDetailScreen(plugin: row),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('Migration required'), findsOneWidget);
+      expect(
+        find.text('Re-approve this legacy plugin before it can run'),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('legacy migration row deep-links and focuses its card', (
+    tester,
+  ) async {
+    AppState.I.plugins.clear();
+    final row = legacyRow(name: 'Legacy Focus', source: 'legacy/focus');
+    AppState.I.plugins.add(row);
+    final focusId = legacyPluginFocusId(row, 0);
+
+    tester.view.physicalSize = const Size(400, 520);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: Aether.theme(),
+        home: PluginsScreen(focusCanonicalId: focusId),
+      ),
+    );
+    for (var i = 0; i < 40; i++) {
+      await tester.pump(const Duration(milliseconds: 30));
+    }
+
+    expect(
+      find.byKey(ValueKey('plugin-card-highlight-$focusId')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('same-name legacy rows do not cross-target focus', (
+    tester,
+  ) async {
+    AppState.I.plugins.clear();
+    final a = legacyRow(name: 'Twin Legacy', source: 'legacy/a');
+    final b = legacyRow(name: 'Twin Legacy', source: 'legacy/b');
+    AppState.I.plugins.addAll([a, b]);
+    final focusA = legacyPluginFocusId(a, 0);
+    final focusB = legacyPluginFocusId(b, 1);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: Aether.theme(),
+        home: PluginsScreen(focusCanonicalId: focusA),
+      ),
+    );
+    for (var i = 0; i < 40; i++) {
+      await tester.pump(const Duration(milliseconds: 30));
+    }
+
+    expect(
+      find.byKey(ValueKey('plugin-card-highlight-$focusA')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(ValueKey('plugin-card-highlight-$focusB')),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'migration sentinel filters and highlights every migration row',
+    (tester) async {
+      AppState.I.plugins.clear();
+      final a = legacyRow(name: 'Migrate A', source: 'legacy/a');
+      final b = legacyRow(name: 'Migrate B', source: 'legacy/b');
+      final healthy = PluginItem(
+        name: 'Healthy Plugin',
+        author: 'you',
+        description: 'fine',
+        version: '1.0.0',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+      );
+      AppState.I.plugins.addAll([a, b, healthy]);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: const PluginsScreen(focusCanonicalId: kMigrationRequiredFocusId),
+        ),
+      );
+      for (var i = 0; i < 40; i++) {
+        await tester.pump(const Duration(milliseconds: 30));
+      }
+
+      expect(find.text('NEEDS RE-APPROVAL'), findsOneWidget);
+      expect(find.text('Healthy Plugin'), findsNothing);
+      expect(
+        find.byKey(ValueKey('plugin-card-highlight-${legacyPluginFocusId(a, 0)}')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(ValueKey('plugin-card-highlight-${legacyPluginFocusId(b, 1)}')),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
 }

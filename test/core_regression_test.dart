@@ -21291,6 +21291,84 @@ cwd = 'tools'
       },
     );
   });
+
+  group('session title generation', () {
+    test(
+      'title generation does not throw and is idempotent per session',
+      () async {
+        final app = AppState.createForTest();
+        addTearDown(AppState.resetTestInstance);
+        final s = ChatSession(
+          id: 'title-no-throw',
+          title: 'New chat',
+          model: 'm',
+          mode: 'auto',
+        );
+        s.messages.addAll([
+          Message(role: 'user', content: 'hello world'),
+          Message(role: 'assistant', content: 'hi there'),
+        ]);
+        app.sessions.insert(0, s);
+
+        // No provider key is configured, so the generator marks the session
+        // and returns without any network call. The bug is that marking the
+        // session threw on a const set before this could ever happen.
+        await AgentService.I.maybeGenerateSessionTitle(s);
+        await AgentService.I.maybeGenerateSessionTitle(s);
+      },
+    );
+
+    test('title generation runs once per session and applies the title', () async {
+      final app = AppState.createForTest();
+      addTearDown(AppState.resetTestInstance);
+      const providerId = 'title-prov';
+      app.providers.add(
+        ProviderConfig(
+          id: providerId,
+          name: 'Title Test',
+          description: '',
+          baseUrl: 'https://example.test/v1',
+          apiKey: 'test-key',
+          models: const ['m'],
+        ),
+      );
+      addTearDown(
+        () => app.providers.removeWhere((p) => p.id == providerId),
+      );
+
+      var calls = 0;
+      AgentService.titleLlmForTest = (provider, messages, session) async {
+        calls++;
+        return {
+          'choices': [
+            {
+              'message': {'content': 'Generated Title'},
+            },
+          ],
+        };
+      };
+      addTearDown(AgentService.resetTitleStateForTest);
+
+      final s = ChatSession(
+        id: 'title-once',
+        title: 'New chat',
+        providerId: providerId,
+        model: 'm',
+        mode: 'auto',
+      );
+      s.messages.addAll([
+        Message(role: 'user', content: 'hello world'),
+        Message(role: 'assistant', content: 'hi there'),
+      ]);
+      app.sessions.insert(0, s);
+
+      await AgentService.I.maybeGenerateSessionTitle(s);
+      await AgentService.I.maybeGenerateSessionTitle(s);
+
+      expect(calls, 1, reason: 'the LLM title call runs once per session');
+      expect(s.title, 'Generated Title');
+    });
+  });
 }
 
 Map<String, Future<void> Function()> _task9OfflineStages() => {

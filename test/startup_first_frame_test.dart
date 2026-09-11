@@ -724,13 +724,7 @@ void main() {
   test(
     'persist builds an exact bootstrap tail without decoding session JSON',
     () async {
-      var bootstrapDecodes = 0;
-      final app = AppState.createForTest(
-        sessionBootstrapDecoder: (raw) {
-          bootstrapDecodes++;
-          return jsonDecode(raw) as Map<String, dynamic>;
-        },
-      );
+      final app = AppState.createForTest();
       final active = app.activeSession!;
       active.messages.addAll([
         for (var i = 0; i < 80; i++)
@@ -739,7 +733,6 @@ void main() {
 
       await app.persistSessions();
 
-      expect(bootstrapDecodes, 0);
       final prefs = await SharedPreferences.getInstance();
       final activeRaw = prefs
           .getStringList('ovid_sessions')!
@@ -758,6 +751,23 @@ void main() {
       expect((tail.last as Map<String, dynamic>)['content'], 'message-79');
     },
   );
+
+  // M1: the parked zero-decode requirement is a source contract, not a
+  // behavior a decoder counter can observe (the bootstrap write never routes
+  // through the decoder seam). Pin it directly on the source so a future
+  // `jsonDecode(activeRaw)` regression fails here.
+  test('bootstrap write never decodes the active session raw JSON', () {
+    final src = File('lib/core/state.dart').readAsStringSync();
+    final start = src.indexOf('Future<void> persistSessions()');
+    final end = src.indexOf('List<String> _sessionJsonForPersistence()');
+    expect(start, greaterThan(0));
+    expect(end, greaterThan(start));
+    final region = src.substring(start, end);
+    expect(region, isNot(contains('jsonDecode(activeRaw)')));
+    expect(region, isNot(contains('jsonDecode(active')));
+    // The tail is built from the live session object, never re-parsed.
+    expect(region, contains('active.toJson()'));
+  });
 
   test('plugin activation retries with one boot token and one epoch', () async {
     var attempts = 0;

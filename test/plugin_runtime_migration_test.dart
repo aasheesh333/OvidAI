@@ -1353,4 +1353,67 @@ void main() {
     expect(migrated.runtimeReason, contains('Re-approve'));
     expect(migrated.toJson()['migrationRequired'], isTrue);
   });
+
+  test(
+    'localSafety.migrate carries the single legacy row focus id',
+    () async {
+      final legacy = PluginItem(
+        name: 'Solo Legacy',
+        author: 'legacy',
+        description: '',
+        version: '1',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'legacy/solo',
+        hooks: const {'on_turn_start': 'echo solo'},
+      );
+      app.plugins.add(legacy);
+      final tasks = await app.buildReadinessTasks();
+      await tasks.singleWhere((task) => task.id == 'local.hydrate').run();
+      final status = await tasks
+          .singleWhere((task) => task.id == 'localSafety.migrate')
+          .run();
+
+      expect(status.state, StartupItemState.migrationRequired);
+      expect(status.ownerId, legacyPluginFocusId(legacy, 0));
+    },
+  );
+
+  test(
+    'localSafety.migrate uses the filter sentinel for multiple legacy rows',
+    () async {
+      final first = PluginItem(
+        name: 'Multi Legacy A',
+        author: 'legacy',
+        description: '',
+        version: '1',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'legacy/multi-a',
+        hooks: const {'on_turn_start': 'echo a'},
+      );
+      final second = PluginItem(
+        name: 'Multi Legacy B',
+        author: 'legacy',
+        description: '',
+        version: '1',
+        category: 'Tool',
+        installed: true,
+        enabled: true,
+        source: 'legacy/multi-b',
+        hooks: const {'on_turn_start': 'echo b'},
+      );
+      app.plugins.addAll([first, second]);
+      final tasks = await app.buildReadinessTasks();
+      await tasks.singleWhere((task) => task.id == 'local.hydrate').run();
+      final status = await tasks
+          .singleWhere((task) => task.id == 'localSafety.migrate')
+          .run();
+
+      expect(status.state, StartupItemState.migrationRequired);
+      expect(status.ownerId, kMigrationRequiredFocusId);
+    },
+  );
 }

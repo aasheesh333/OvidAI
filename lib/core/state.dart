@@ -1193,6 +1193,18 @@ class _PluginSafetyStartupTask implements StartupTask {
     final aggregate = aggregateStartupStates(
       statuses.map((status) => status.state),
     );
+    // When a single row is responsible for the migration gate, carry its
+    // exact focus id so `Open Plugins` deep-links that row. When several are,
+    // carry the filter sentinel so the Plugins screen narrows to all
+    // migration-required rows instead of opening unfocused.
+    final migrationStatuses = statuses
+        .where((status) => status.state == StartupItemState.migrationRequired)
+        .toList();
+    final ownerId = migrationStatuses.length == 1
+        ? migrationStatuses.single.id
+        : migrationStatuses.isEmpty
+        ? null
+        : kMigrationRequiredFocusId;
     return StartupItemStatus(
       id: id,
       kind: kind,
@@ -1204,6 +1216,7 @@ class _PluginSafetyStartupTask implements StartupTask {
           .whereType<String>()
           .firstOrNull,
       attempt: 1,
+      ownerId: ownerId,
     );
   }
 }
@@ -1246,6 +1259,10 @@ class AppState extends ChangeNotifier {
     _testInstance = null;
     StartupCoordinator.I.statusSink = null;
     PluginRuntimeStatusStore.I.resetForTest();
+    // ignore: invalid_use_of_visible_for_testing_member
+    SessionLifecycleService.I.resetForTest();
+    // ignore: invalid_use_of_visible_for_testing_member
+    AgentService.resetTitleStateForTest();
   }
 
   AppState._({

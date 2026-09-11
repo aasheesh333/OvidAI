@@ -6250,7 +6250,24 @@ ${await _agentsMdBlock()}
   /// background call after the first real exchange — thinking disabled,
   /// tight token budget, falls back to the heuristic title on any failure.
   /// Never retried per session (the heuristic stays if this fails).
-  static const _titledSessions = <String>{};
+  static final Set<String> _titledSessions = <String>{};
+
+  /// Test seam: replaces the title-generation LLM call. Null in production.
+  @visibleForTesting
+  static Future<Map<String, dynamic>?> Function(
+    ProviderConfig provider,
+    List<Map<String, dynamic>> messages,
+    ChatSession session,
+  )?
+  titleLlmForTest;
+
+  /// Clears the once-per-session title set and the LLM override so process
+  /// globals never leak across tests.
+  @visibleForTesting
+  static void resetTitleStateForTest() {
+    _titledSessions.clear();
+    titleLlmForTest = null;
+  }
 
   Future<void> maybeGenerateSessionTitle(ChatSession s) async {
     // Only once per session, only after a real exchange, only when the title
@@ -6274,21 +6291,20 @@ ${await _agentsMdBlock()}
                 '${cleanTruncate(m.content, 300)}',
           )
           .join('\n');
-      final r = await _callLlm(
-        p,
-        [
-          {
-            'role': 'system',
-            'content':
-                'Generate a 3-6 word title for this conversation. Reply '
-                'with ONLY the title text — no quotes, no punctuation at '
-                'the end, no explanation. Use the conversation\'s language.',
-          },
-          {'role': 'user', 'content': firstExchange},
-        ],
-        s,
-        includeTools: false,
-      );
+      final titleMsgs = [
+        {
+          'role': 'system',
+          'content':
+              'Generate a 3-6 word title for this conversation. Reply '
+              'with ONLY the title text — no quotes, no punctuation at '
+              'the end, no explanation. Use the conversation\'s language.',
+        },
+        {'role': 'user', 'content': firstExchange},
+      ];
+      final override = titleLlmForTest;
+      final r = override != null
+          ? await override(p, titleMsgs, s)
+          : await _callLlm(p, titleMsgs, s, includeTools: false);
       final choices = (r?['choices'] as List?)?.whereType<Map>().toList() ?? [];
       if (choices.isEmpty) return;
       final raw = choices.first['message']?['content'];

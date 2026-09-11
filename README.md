@@ -56,9 +56,12 @@ ids (`plugin:<id>/command:<name>`, `…/skill:<name>`, `…/agent:<name>`,
   manifest-digest grant are disabled as **`Migration required`** and cannot
   execute legacy hooks or skills until the user runs inspect → approve →
   install. There is no silent auto-approval.
-- Every plugin/MCP startup result has a durable, secret-scrubbed status:
-  `Ready`, `Needs setup`, `Unsupported on this device`, `Migration required`,
-  `Degraded`, `Failed`, or `Disabled`.
+- Every normalized runtime plugin/MCP startup result has a durable,
+  secret-scrubbed status: `Ready`, `Needs setup`, `Unsupported on this device`,
+  `Migration required`, `Degraded`, `Failed`, or `Disabled`. Legacy
+  migration-required rows surface the same `Migration required` state and a
+  scrubbed reason from their own persisted row marker; they are not stored
+  under the canonical runtime status store.
 
 ## MCP servers
 

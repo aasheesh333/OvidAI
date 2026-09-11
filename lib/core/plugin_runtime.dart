@@ -71,6 +71,21 @@ const String _kLegacyReapprovalReason =
 const String _kMissingContentReason = 'Installed content is missing';
 const String _kFailedActivationReason = 'Plugin activation failed';
 
+/// Stable synthetic focus id for a legacy (`runtimeId`-null) migration row.
+/// Mirrors the per-row migration status id emitted by
+/// [PluginRuntimeManager.reconcileRowsAndGrants] so the startup dashboard and
+/// the Plugins screen agree on exactly which row to reveal. [ordinal]
+/// disambiguates rows sharing the same source/marketplace/name.
+String legacyPluginFocusId(PluginItem row, int ordinal) {
+  final identity = row.source ?? row.marketplace ?? row.name;
+  return 'legacy:$identity:$ordinal';
+}
+
+/// Sentinel focus id the aggregate `localSafety.migrate` item carries when
+/// more than one row needs re-approval: `Open Plugins` then lands on the
+/// Plugins screen filtered to migration-required rows.
+const String kMigrationRequiredFocusId = 'legacy:migration-required';
+
 /// Self-describing transaction artifacts written inside the committed
 /// content directory (spec §5.2 step 6).
 const String kPluginRuntimeManifestFile = 'ovid-plugin.json';
@@ -882,10 +897,8 @@ class PluginRuntimeManager extends ChangeNotifier {
           row.hooks.isNotEmpty ||
           row.pluginHooks.isNotEmpty);
 
-  static String _legacyStatusId(PluginItem row, int ordinal) {
-    final identity = row.source ?? row.marketplace ?? row.name;
-    return 'legacy:$identity:$ordinal';
-  }
+  static String _legacyStatusId(PluginItem row, int ordinal) =>
+      legacyPluginFocusId(row, ordinal);
 
   Future<bool> _hasEffectiveGrant(
     String pluginId,

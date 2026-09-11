@@ -73,8 +73,22 @@ String? mcpUnsupportedReason(McpServer s) {
 /// Durable canonical startup status for a runtime plugin row, or null when
 /// the row has no normalized runtime id. The Plugins screen consumes this
 /// instead of inferring readiness from `installed`/`enabled`.
-PluginRuntimeStatus? durablePluginStatus(PluginItem p) =>
-    p.runtimeId == null ? null : AppState.I.statusFor(p.runtimeId!);
+///
+/// Legacy (`runtimeId`-null) rows are not stored under the canonical status
+/// store, so a row carrying the persisted `migrationRequired` marker surfaces
+/// its own state + scrubbed reason here. This is a direct read of the stored
+/// marker, never an inference from `installed`/`enabled`.
+PluginRuntimeStatus? durablePluginStatus(PluginItem p) {
+  final runtimeId = p.runtimeId;
+  if (runtimeId != null) return AppState.I.statusFor(runtimeId);
+  if (!p.migrationRequired) return null;
+  final identity = p.source ?? p.marketplace ?? p.name;
+  return PluginRuntimeStatus(
+    pluginId: 'legacy:$identity',
+    state: StartupItemState.migrationRequired,
+    reason: p.runtimeReason,
+  );
+}
 
 /// Durable canonical startup status for an MCP server, or null.
 PluginRuntimeStatus? durableMcpStatus(McpServer s) =>
@@ -801,13 +815,21 @@ class _PluginsScreenState extends State<PluginsScreen> {
   /// Brings the deep-linked canonical row into view. The sliver builds rows
   /// lazily, so an off-screen target is first approached by an estimated
   /// offset and then `ensureVisible`d once it exists in the tree.
-  void _scheduleFocusReveal(List<PluginItem> items) {
+  void _scheduleFocusReveal(
+    List<PluginItem> items,
+    Map<PluginItem, String> focusIds,
+  ) {
     final focus = widget.focusCanonicalId;
     if (focus == null || _focusRevealed) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) => _revealFocus(items));
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _revealFocus(items, focusIds),
+    );
   }
 
-  void _revealFocus(List<PluginItem> items) {
+  void _revealFocus(
+    List<PluginItem> items,
+    Map<PluginItem, String> focusIds,
+  ) {
     if (!mounted || _focusRevealed) return;
     final focus = widget.focusCanonicalId;
     if (focus == null) return;
@@ -824,7 +846,10 @@ class _PluginsScreenState extends State<PluginsScreen> {
       );
       return;
     }
-    final index = items.indexWhere((p) => p.runtimeId == focus);
+    // The migration sentinel focuses a filtered list, so reveal its first row.
+    final index = focus == kMigrationRequiredFocusId
+        ? (items.isEmpty ? -1 : 0)
+        : items.indexWhere((p) => focusIds[p] == focus);
     if (index >= 0 && _scroll.hasClients && _revealAttempts < 24) {
       _revealAttempts++;
       final estimate = (index * _estimatedPluginCardExtent).clamp(
@@ -834,7 +859,9 @@ class _PluginsScreenState extends State<PluginsScreen> {
       if ((_scroll.offset - estimate).abs() > 1) {
         _scroll.jumpTo(estimate);
       }
-      WidgetsBinding.instance.addPostFrameCallback((_) => _revealFocus(items));
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _revealFocus(items, focusIds),
+      );
     }
   }
 
@@ -853,9 +880,26 @@ class _PluginsScreenState extends State<PluginsScreen> {
   Widget build(BuildContext context) {
     final app = AppState.I;
     const cats = ['All', 'Agent', 'MCP', 'Tool', 'Runtime'];
+    // Stable per-row focus ids: canonical runtime id, or the synthetic legacy
+    // id (same ordinal scheme reconcile uses) so a same-name legacy row is
+    // never confused with its sibling.
+    final focusIds = <PluginItem, String>{};
+    var legacyOrdinal = 0;
+    for (final p in app.plugins) {
+      if (p.runtimeId != null) {
+        focusIds[p] = p.runtimeId!;
+      } else if (p.migrationRequired) {
+        focusIds[p] = legacyPluginFocusId(p, legacyOrdinal++);
+      }
+    }
+    final migrationOnly =
+        widget.focusCanonicalId == kMigrationRequiredFocusId;
     final items = app.plugins
         .where(
           (p) =>
+              (!migrationOnly ||
+                  durablePluginStatus(p)?.state ==
+                      StartupItemState.migrationRequired) &&
               (_cat == 'All' || p.category == _cat) &&
               (p.name.toLowerCase().contains(_query.toLowerCase()) ||
                   p.description.toLowerCase().contains(_query.toLowerCase())),
@@ -908,7 +952,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
       body: AnimatedBuilder(
         animation: app,
         builder: (_, _) {
-          _scheduleFocusReveal(items);
+          _scheduleFocusReveal(items, focusIds);
           return CustomScrollView(
             controller: _scroll,
             slivers: [
@@ -961,18 +1005,33 @@ class _PluginsScreenState extends State<PluginsScreen> {
               ),
             ),
             // ── MCP section ──
-            SliverToBoxAdapter(
-              child: _McpSection(
-                app: app,
-                focusCanonicalId: widget.focusCanonicalId,
-                cardKeys: _mcpCardKeys,
+            if (!migrationOnly)
+              SliverToBoxAdapter(
+                child: _McpSection(
+                  app: app,
+                  focusCanonicalId: widget.focusCanonicalId,
+                  cardKeys: _mcpCardKeys,
+                ),
               ),
-            ),
+            if (migrationOnly)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 2),
+                  child: Text(
+                    'Plugins needing re-approval show the exact reason '
+                    'below.',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: Aether.textMuted,
+                    ),
+                  ),
+                ),
+              ),
             SliverToBoxAdapter(
               child: Padding(
                 padding: EdgeInsets.fromLTRB(20, 12, 20, 2),
                 child: Text(
-                  'ALL PLUGINS',
+                  migrationOnly ? 'NEEDS RE-APPROVAL' : 'ALL PLUGINS',
                   style: TextStyle(
                     fontSize: 10.5,
                     fontWeight: FontWeight.w700,
@@ -988,18 +1047,22 @@ class _PluginsScreenState extends State<PluginsScreen> {
                 itemCount: items.length,
                 separatorBuilder: (_, _) => const SizedBox(height: 10),
                 itemBuilder: (_, i) {
-                  final runtimeId = items[i].runtimeId;
+                  final p = items[i];
+                  final focusId = focusIds[p];
                   return PluginCard(
-                    key: runtimeId == null
+                    key: focusId == null
                         ? null
                         : _pluginCardKeys.putIfAbsent(
-                            runtimeId,
+                            focusId,
                             () => GlobalKey(),
                           ),
-                    plugin: items[i],
-                    highlighted:
-                        runtimeId != null &&
-                        runtimeId == widget.focusCanonicalId,
+                    plugin: p,
+                    focusId: focusId,
+                    highlighted: migrationOnly
+                        ? durablePluginStatus(p)?.state ==
+                              StartupItemState.migrationRequired
+                        : focusId != null &&
+                              focusId == widget.focusCanonicalId,
                   );
                 },
               ),
@@ -1215,7 +1278,19 @@ class PluginCard extends StatelessWidget {
   /// Deep-link target: renders an accent border when this row matches the
   /// canonical id a startup `Open Plugins` action asked to focus.
   final bool highlighted;
-  const PluginCard({super.key, required this.plugin, this.highlighted = false});
+
+  /// Stable focus identity for this row. Defaults to the canonical runtime id;
+  /// legacy (`runtimeId`-null) rows pass their synthetic focus id so the
+  /// dashboard and this screen agree on exactly which row to reveal.
+  final String? focusId;
+  const PluginCard({
+    super.key,
+    required this.plugin,
+    this.highlighted = false,
+    this.focusId,
+  });
+
+  String? get _keyId => plugin.runtimeId ?? focusId;
 
   /// Task 11 (spec §11) + Task 10 copy pass: honest install/availability
   /// state for rows with NO runtime activation. `installed && !enabled`
@@ -1244,9 +1319,9 @@ class PluginCard extends StatelessWidget {
         MaterialPageRoute(builder: (_) => PluginDetailScreen(plugin: plugin)),
       ),
       child: Container(
-        key: plugin.runtimeId == null
+        key: _keyId == null
             ? null
-            : ValueKey('plugin-card-${plugin.runtimeId}'),
+            : ValueKey('plugin-card-$_keyId'),
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: highlighted ? Aether.accentSoft : Aether.surface,
@@ -1261,7 +1336,7 @@ class PluginCard extends StatelessWidget {
           children: [
             if (highlighted)
               Container(
-                key: ValueKey('plugin-card-highlight-${plugin.runtimeId}'),
+                key: ValueKey('plugin-card-highlight-$_keyId'),
                 width: 3,
                 height: 40,
                 margin: const EdgeInsets.only(right: 8),
