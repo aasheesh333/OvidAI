@@ -15,9 +15,11 @@ import 'package:ovid_ai/core/state.dart';
 
 /// The spec §8 first-frame budget: under three seconds on the synthetic
 /// worst-case local fixture. This test necessarily uses a wall clock because
-/// the fixture drives real `dart:io` session decode / preference IO, which
-/// `fake_async` cannot virtualize. It is disclosed as the one wall-clock
-/// assertion in this file; every deadline assertion below is fake-time exact.
+/// the fixture drives a real `Isolate.run` session-decode hop, which
+/// `fake_async` cannot virtualize. (Preferences and secure storage use
+/// `setMockInitialValues`, i.e. in-memory mocks — not real platform IO.) It is
+/// disclosed as the one wall-clock assertion in this file; every deadline
+/// assertion below is fake-time exact.
 const _firstFrameBudget = Duration(seconds: 3);
 
 const _optionalStages = <String>[
