@@ -30,6 +30,26 @@ void Function(BuildContext context)? studioLoginPromptOverrideForTest;
 @visibleForTesting
 Future<Process> Function()? studioPtySpawnerOverrideForTest;
 
+/// Test seam: overrides the branch list for the Studio branch picker so host
+/// widget tests can drive "change branch" without a real GitHub request.
+/// Production is null (the real [GitHubService.listBranches]).
+@visibleForTesting
+Future<List<String>> Function(String owner, String repo)?
+studioListBranchesOverrideForTest;
+
+/// Test seam: overrides the repo re-sync so host widget tests can exercise
+/// the binding flow without network. Production is null (RepoCache.sync).
+@visibleForTesting
+Future<void> Function()? studioRepoSyncOverrideForTest;
+
+/// Branch to bind when a repo is picked: the repo's `default_branch`, else
+/// `main`. Prevents carrying the previous repo's branch onto the new repo.
+@visibleForTesting
+String branchForPickedRepo(Map<String, dynamic>? repo) {
+  final branch = (repo?['default_branch'] as String?)?.trim();
+  return (branch == null || branch.isEmpty) ? 'main' : branch;
+}
+
 /// Studio — coding harness (DeepSeek-web style): file explorer bound to the
 /// user's connected GitHub repo, real editable editor with per-session
 /// buffers, agent-visible tabs, and a live Ubuntu sandbox terminal. The
@@ -44,6 +64,7 @@ class _StudioScreenState extends State<StudioScreen> {
   bool _showFiles = true;
   bool _syncing = false;
   bool _handledInitialAuth = false;
+  String? _syncError;
 
   String? get _repo => AgentService.I.sessionRepoFull;
 
@@ -87,7 +108,11 @@ class _StudioScreenState extends State<StudioScreen> {
 
   Future<void> _autoSync() async {
     if (_repo == null || _syncing) return;
-    setState(() => _syncing = true);
+    setState(() {
+      _syncing = true;
+      _syncError = null;
+    });
+    String? error;
     try {
       RepoCache.I.bind(
         _repo!,
@@ -95,9 +120,20 @@ class _StudioScreenState extends State<StudioScreen> {
         branch: AgentService.I.sessionBranch,
         sessionId: AppState.I.activeSession?.id,
       );
-      await RepoCache.I.sync();
-    } catch (_) {}
-    if (mounted) setState(() => _syncing = false);
+      final sync = studioRepoSyncOverrideForTest ?? (() => RepoCache.I.sync());
+      await sync();
+    } catch (e) {
+      error = '$e';
+    }
+    if (!mounted) return;
+    if (error != null) {
+      // A missing branch/ref must surface, not be swallowed — and the previous
+      // repo's files must not linger under the new binding.
+      RepoCache.I.clearWorkingCopy();
+      setState(() => _syncError = error);
+      _toast('Repo sync failed: $error');
+    }
+    setState(() => _syncing = false);
   }
 
   /// After a repo is bound + synced, offer to pin a working folder for this
@@ -368,7 +404,14 @@ class _StudioScreenState extends State<StudioScreen> {
         ),
       );
       if (picked != null) {
+        final pickedRepo = repos.firstWhere(
+          (r) => r['full_name'] == picked,
+          orElse: () => const <String, dynamic>{},
+        );
         AgentService.I.sessionRepoFull = picked;
+        // A new repo starts on its own default branch — never the previous
+        // repo's branch, whose ref may not exist (tree fetch would 404).
+        AgentService.I.sessionBranch = branchForPickedRepo(pickedRepo);
         await _autoSync();
         // Freshly bound repo → ask where the work should happen (the studio workspace prompt asks
         // for a workspace directory before it starts editing).
@@ -391,7 +434,9 @@ class _StudioScreenState extends State<StudioScreen> {
     final parts = repo.split('/');
     if (parts.length != 2 || parts.any((p) => p.isEmpty)) return;
     try {
-      final branches = await GitHubService.I.listBranches(parts[0], parts[1]);
+      final lister =
+          studioListBranchesOverrideForTest ?? GitHubService.I.listBranches;
+      final branches = await lister(parts[0], parts[1]);
       if (!mounted) return;
       final current = AgentService.I.sessionBranch;
       final picked = await showModalBottomSheet<String>(
@@ -526,6 +571,19 @@ class _StudioScreenState extends State<StudioScreen> {
               onPickBranch: _pickBranch,
               syncing: _syncing,
             ),
+            if (_syncError != null)
+              Container(
+                width: double.infinity,
+                color: Aether.warn.withValues(alpha: 0.12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
+                child: Text(
+                  'Sync failed: $_syncError',
+                  style: TextStyle(fontSize: 11.5, color: Aether.warn),
+                ),
+              ),
             Expanded(
               child: Row(
                 children: [

@@ -84,6 +84,22 @@ void main() {
 
       expect(app.getBranchForSession(id), 'main');
     });
+
+    test('createSubagentSession inherits the parent (repo, branch)', () {
+      final app = AppState.createForTest();
+      final parent = app.activeSession!;
+      parent.repo = 'owner/repo';
+      parent.branch = 'develop';
+
+      final child = app.createSubagentSession(
+        parent: parent,
+        label: 'child',
+        mode: 'auto',
+      );
+
+      expect(child.repo, 'owner/repo');
+      expect(child.branch, 'develop');
+    });
   });
 
   group('GitHubService.listBranches', () {
@@ -236,6 +252,75 @@ void main() {
       expect(pushed, 1);
       expect(shaUrl!.queryParameters['ref'], 'feature/x');
       expect(putBody!['branch'], 'feature/x');
+    });
+
+    test('sync URL-encodes a branch containing a slash', () async {
+      final urls = <Uri>[];
+      final client = MockClient((request) async {
+        urls.add(request.url);
+        if (request.url.path.contains('/git/trees/')) {
+          return http.Response(jsonEncode({'tree': []}), 200);
+        }
+        return http.Response('', 200);
+      });
+
+      RepoCache.I.bind(
+        'owner/repo',
+        'tok',
+        branch: 'feature/x',
+        sessionId: 's1',
+      );
+      await RepoCache.I.sync(client: client);
+
+      final tree = urls.firstWhere((u) => u.path.contains('/git/trees/'));
+      expect(tree.path, contains('/git/trees/feature%2Fx'));
+    });
+
+    test('commitAll surfaces a failed push instead of reporting success', () async {
+      final client = MockClient((request) async {
+        if (request.method == 'GET') {
+          return http.Response(jsonEncode({'sha': 'old'}), 200);
+        }
+        return http.Response('branch not found', 404);
+      });
+
+      RepoCache.I.bind('owner/repo', 'tok', branch: 'gone', sessionId: 's1');
+      RepoCache.I.write('README.md', 'updated');
+
+      await expectLater(
+        RepoCache.I.commitAll('Update README', client: client),
+        throwsA(isA<Exception>()),
+      );
+    });
+  });
+
+  group('last branch migration', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+      AppState.resetTestInstance();
+    });
+
+    tearDown(AppState.resetTestInstance);
+
+    test('lastBranch backfills from the active session on first load', () async {
+      final raw = jsonEncode(
+        ChatSession(
+          id: 'active',
+          title: 'Saved chat',
+          model: 'test-model',
+          repo: 'owner/repo',
+          branch: 'release',
+        ).toJson(),
+      );
+      SharedPreferences.setMockInitialValues({
+        'ovid_sessions': [raw],
+        'ovid_active_session': 'active',
+      });
+      final app = AppState.createForTest();
+
+      await app.initializeForFirstFrame();
+
+      expect(app.lastBranch, 'release');
     });
   });
 }

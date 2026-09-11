@@ -443,6 +443,9 @@ class GitHubService extends ChangeNotifier {
   }
 
   /// List branch names of a repo (Studio branch picker).
+  ///
+  /// Capped at GitHub's maximum 100 branches per page; pagination is not
+  /// followed, so repos with more branches expose only the first page.
   Future<List<String>> listBranches(
     String owner,
     String repo, {

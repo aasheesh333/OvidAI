@@ -2505,7 +2505,8 @@ class AppState extends ChangeNotifier {
       lastSelectedModel = prefs.getString(_kLastModel) ?? '';
       lastSelectedProviderId = prefs.getString(_kLastProvider);
       lastRepoFull = prefs.getString(_kLastRepo);
-      lastBranch = prefs.getString(_kLastBranch) ?? 'main';
+      final storedBranch = prefs.getString(_kLastBranch);
+      lastBranch = storedBranch ?? 'main';
       lastWorkspaceFolder = prefs.getString(_kLastWorkspace);
       // Backfill from the currently-restored active session if nothing
       // was persisted yet (upgrade path for existing installs).
@@ -2519,6 +2520,12 @@ class AppState extends ChangeNotifier {
       if (lastRepoFull == null || lastRepoFull!.isEmpty) {
         final repo = s?.repo;
         if (repo != null && repo.isNotEmpty) lastRepoFull = repo;
+      }
+      // Spec §8: backfill the branch from the restored active session when
+      // nothing was persisted yet (upgrade path for existing installs).
+      if (storedBranch == null || storedBranch.isEmpty) {
+        final branch = s?.branch;
+        if (branch != null && branch.isNotEmpty) lastBranch = branch;
       }
       if (lastWorkspaceFolder == null || lastWorkspaceFolder!.isEmpty) {
         final folder = s?.workspaceFolder;
@@ -3755,6 +3762,9 @@ class AppState extends ChangeNotifier {
       // sandbox workspace (sandboxId defaults to the child id).
       workspaceFolder: parent.workspaceFolder,
       repo: parent.repo,
+      // Children share the parent's `(repo, branch)` binding so their edits
+      // land on the same ref, not the default branch.
+      branch: parent.branch,
     );
     sessions.insert(0, child);
     _markSessionDirty(child.id);

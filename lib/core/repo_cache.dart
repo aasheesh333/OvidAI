@@ -164,15 +164,31 @@ class RepoCache extends ChangeNotifier {
     }
   }
 
+  /// Drop the in-memory working copy without changing the binding. Used when a
+  /// sync fails so stale files from a previous repo/branch are never shown
+  /// under the new binding.
+  void clearWorkingCopy() {
+    files.clear();
+    treePaths.clear();
+    _dirty.clear();
+    lastSync = null;
+    notifyListeners();
+  }
+
   Future<List<Map<String, dynamic>>> _getTree(
     String repo,
     String token,
     String branch,
     http.Client client,
   ) async {
+    // `{tree_sha}` is a single path segment, so a branch like `feature/x`
+    // must be percent-encoded or it routes to a different endpoint (404).
     final res = await client
         .get(
-          Uri.parse('$_api/repos/$repo/git/trees/$branch?recursive=1'),
+          Uri.parse(
+            '$_api/repos/$repo/git/trees/${Uri.encodeComponent(branch)}'
+            '?recursive=1',
+          ),
           headers: {
             'Authorization': 'Bearer $token',
             'Accept': 'application/vnd.github+json',
@@ -296,7 +312,7 @@ class RepoCache extends ChangeNotifier {
         _ensureBinding(generation);
         final sha = await _shaOf(repo, token, entry.key, branch, c);
         _ensureBinding(generation);
-        final ok = await _putFile(
+        await _putFile(
           repo,
           token,
           entry.key,
@@ -307,10 +323,8 @@ class RepoCache extends ChangeNotifier {
           c,
         );
         _ensureBinding(generation);
-        if (ok) {
-          if (files[entry.key] == entry.value) _dirty.remove(entry.key);
-          pushed++;
-        }
+        if (files[entry.key] == entry.value) _dirty.remove(entry.key);
+        pushed++;
       }
       return pushed;
     } finally {
@@ -345,7 +359,7 @@ class RepoCache extends ChangeNotifier {
     return null;
   }
 
-  Future<bool> _putFile(
+  Future<void> _putFile(
     String repo,
     String token,
     String path,
@@ -373,7 +387,10 @@ class RepoCache extends ChangeNotifier {
           }),
         )
         .timeout(_requestTimeout);
-    return res.statusCode == 200 || res.statusCode == 201;
+    // A vanished branch/ref must surface as a failure, never a silent no-op.
+    if (res.statusCode != 200 && res.statusCode != 201) {
+      throw Exception('contents PUT $path failed: ${res.statusCode}');
+    }
   }
 
   // ── live preview (vibe-coding) ───────────────────────────────────────
