@@ -14,6 +14,7 @@ import 'browser_screen.dart';
 import 'sidebar.dart';
 import 'subagent_screen.dart';
 import 'transcript_model.dart';
+import 'chat_layout.dart';
 import '../core/agent_service.dart';
 import '../core/commands.dart';
 import '../core/device_control_service.dart';
@@ -55,28 +56,38 @@ class ChatTranscript extends StatelessWidget {
     return AnimatedBuilder(
       animation: Listenable.merge([AppState.I, AgentService.I]),
       builder: (_, _) {
+        final layout = ChatLayout(
+          viewportWidth: MediaQuery.of(context).size.width,
+        );
         final items = foldMessages(
           session.messages,
           showReasoning: AppState.I.showReasoning,
         );
         final count = items.length + (typing ? 1 : 0);
+        final list = ListView.builder(
+          controller: scrollController,
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+          itemCount: count,
+          itemBuilder: (_, i) {
+            if (i == items.length) return const _TypingBubble();
+            return _buildItem(
+              items[i],
+              session,
+              onAction: () {},
+              input: TextEditingController(),
+              layout: layout,
+            );
+          },
+        );
         return MediaQuery(
           data: MediaQuery.of(context).copyWith(
             textScaler: TextScaler.linear(AppState.I.chatFontScale),
           ),
-          child: ListView.builder(
-            controller: scrollController,
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-            itemCount: count,
-            itemBuilder: (_, i) {
-              if (i == items.length) return const _TypingBubble();
-              return _buildItem(
-                items[i],
-                session,
-                onAction: () {},
-                input: TextEditingController(),
-              );
-            },
+          child: Center(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: layout.contentWidth),
+              child: list,
+            ),
           ),
         );
       },
@@ -224,6 +235,7 @@ Widget _buildItem(
   dynamic s, {
   required VoidCallback onAction,
   required TextEditingController input,
+  required ChatLayout layout,
 }) {
   if (item is SingleItem) {
     return _RowIn(
@@ -233,6 +245,7 @@ Widget _buildItem(
         msgIndex: item.index,
         onAction: onAction,
         input: input,
+        layout: layout,
       ),
     );
   }
@@ -871,12 +884,29 @@ class _ChatScreenState extends State<ChatScreen>
           body: SafeArea(
             child: LayoutBuilder(
               builder: (context, constraints) {
+                // The pane width already excludes the persistent sidebar when
+                // the shell renders it (ChatScreen lives in the Expanded slot),
+                // so the shared axis is derived from the actual chat pane.
+                final layout = ChatLayout(viewportWidth: constraints.maxWidth);
                 // Reserve most of a short viewport for the composer/docks so
                 // an expanded dashboard can never crowd them off-screen at
                 // large text scales. The panel still scrolls internally.
                 final panelCap = math.min(
                   240.0,
                   constraints.maxHeight * 0.35,
+                );
+                // Docks share the same centered content column as the
+                // transcript so the whole chat reads as one axis.
+                final dockColumn = Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const _GoalBar(),
+                    const _TodoDock(),
+                    const _StatsLine(),
+                    _QueueDock(onEdited: () => setState(() {})),
+                    const _ApprovalDock(),
+                  ],
                 );
                 return Column(
                   children: [
@@ -963,7 +993,7 @@ class _ChatScreenState extends State<ChatScreen>
                                         items.length +
                                         (typing ? 1 : 0) +
                                         (showProduced ? 1 : 0);
-                                    return ListView.builder(
+                                    final list = ListView.builder(
                                       controller: _scroll,
                                       padding: const EdgeInsets.fromLTRB(
                                         16,
@@ -1036,8 +1066,20 @@ class _ChatScreenState extends State<ChatScreen>
                                           s,
                                           onAction: () => setState(() {}),
                                           input: _input,
+                                          layout: layout,
                                         );
                                       },
+                                    );
+                                    return Center(
+                                      child: ConstrainedBox(
+                                        key: const ValueKey(
+                                          'chat-transcript-column',
+                                        ),
+                                        constraints: BoxConstraints(
+                                          maxWidth: layout.contentWidth,
+                                        ),
+                                        child: list,
+                                      ),
                                     );
                                   },
                                 ),
@@ -1081,12 +1123,14 @@ class _ChatScreenState extends State<ChatScreen>
                           ],
                         ),
                 ),
-                const _GoalBar(),
-                const _TodoDock(),
-                const _StatsLine(),
-                _QueueDock(onEdited: () => setState(() {})),
-                const _ApprovalDock(),
+                Center(
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: layout.contentWidth),
+                    child: dockColumn,
+                  ),
+                ),
                 _InputBar(
+                  layout: layout,
                   controller: _input,
                   sessionId: s?.id,
                   coordinator: widget.startupCoordinator,
@@ -2850,12 +2894,14 @@ class _MessageView extends StatelessWidget {
   final int msgIndex;
   final VoidCallback onAction;
   final TextEditingController input;
+  final ChatLayout layout;
   const _MessageView({
     required this.m,
     required this.session,
     required this.msgIndex,
     required this.onAction,
     required this.input,
+    required this.layout,
   });
 
   @override
@@ -2870,9 +2916,12 @@ class _MessageView extends StatelessWidget {
             : CrossAxisAlignment.start,
         children: [
           Container(
+            key: isUser ? ValueKey('chat-user-bubble-$msgIndex') : null,
             margin: const EdgeInsets.only(bottom: 2),
             constraints: BoxConstraints(
-              maxWidth: MediaQuery.of(context).size.width * 0.82,
+              maxWidth: isUser
+                  ? layout.userBubbleMaxWidth
+                  : layout.contentWidth,
             ),
             child: Column(
               crossAxisAlignment: isUser
@@ -3439,11 +3488,16 @@ class _InputBar extends StatefulWidget {
   /// Approval takeover: when an approval/question card is pending, the
   /// composer is disabled until the user answers it (the approval takeover parity).
   final bool locked;
+
+  /// Shared width axis: the composer card is capped to [ChatLayout.composerWidth]
+  /// and centered within the chat pane.
+  final ChatLayout layout;
   final VoidCallback onSend;
   const _InputBar({
     required this.controller,
     required this.sessionId,
     required this.running,
+    required this.layout,
     this.coordinator,
     this.locked = false,
     required this.onSend,
@@ -4057,8 +4111,16 @@ class _InputBarState extends State<_InputBar> {
     return SafeArea(
       top: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
+        // Symmetric inset centers the composer card on the same axis as the
+        // transcript; on a narrow pane the card collapses to the pane width.
+        padding: EdgeInsets.only(
+          top: 4,
+          bottom: 10,
+          left: (widget.layout.viewportWidth - widget.layout.composerWidth) / 2,
+          right: (widget.layout.viewportWidth - widget.layout.composerWidth) / 2,
+        ),
         child: Container(
+          key: const ValueKey('chat-composer-card'),
           // composer card: text fills the FULL width on top; the
           // toolbar (attach / mode chip / mic / send-stop) sits on its own
           // row below — the text never shares a row with the mode icon.
