@@ -18,12 +18,14 @@ class PtyShell {
         .transform(const LineSplitter())
         .listen(_onLine, onError: (_) {});
     // Drain stderr — otherwise stderr output back-pressures the pipe
-    // (32K) and a noisy command deadlocks mid-run. Merged into the same
-    // buffer with an `err:` prefix so the model still sees it.
+    // (32K) and a noisy command deadlocks mid-run. Streamed to the UI sink
+    // (and merged into the run buffer) with an `[stderr]` prefix so both
+    // the user and the model still see it.
     _subErr = _proc.stderr
         .transform(utf8.decoder)
         .transform(const LineSplitter())
         .listen((l) {
+      _emit('[stderr] $l');
       final waiting = _waiting;
       if (waiting == null || waiting.isCompleted) return;
       _buffer.writeln('[stderr] $l');
@@ -34,11 +36,36 @@ class PtyShell {
   late final StreamSubscription<String> _sub;
   late final StreamSubscription<String> _subErr;
   final StringBuffer _buffer = StringBuffer();
+  final StreamController<String> _outCtrl =
+      StreamController<String>.broadcast();
   int _nextId = 0;
   bool _dead = false;
 
   Completer<String>? _waiting;
   String? _marker;
+
+  /// Live stdout/stderr lines as they arrive (markers filtered). Broadcast:
+  /// every Studio tab (and any other observer) can subscribe independently.
+  Stream<String> get output => _outCtrl.stream;
+
+  void _emit(String line) {
+    if (!_outCtrl.isClosed) _outCtrl.add(line);
+  }
+
+  /// Send raw bytes to the shell's stdin — used by the Studio terminal so a
+  /// command runs in the persistent shell without the run-marker protocol.
+  ///
+  /// No `flush()` here: a pending flush binds the IOSink and a second write
+  /// throws `Bad state: StreamSink is bound to a stream`. `write()` already
+  /// hands the bytes to the OS pipe, so back-to-back commands stay reliable.
+  void writeStdin(String data) {
+    if (_dead) return;
+    try {
+      _proc.stdin.write(data);
+    } catch (_) {
+      _dead = true;
+    }
+  }
 
   static Future<PtyShell?> start(Future<Process> Function() spawner) async {
     try {
@@ -52,21 +79,26 @@ class PtyShell {
   bool get isDead => _dead;
 
   void _onLine(String line) {
-    final waiting = _waiting;
-    if (waiting == null || waiting.isCompleted) return;
-    // Marker line that ends this command's output span.
+    // Marker line that ends this command's output span. Never surfaced to
+    // the UI sink — it is internal protocol.
     if (_marker != null && line.startsWith(_marker!)) {
       // Extract trailing exit code: `__OVID_DONE_<id>:<rc>`
       final tail = line.substring(_marker!.length);
       final rc = int.tryParse(tail.replaceAll(RegExp(r'\D'), '')) ?? -1;
-      _waiting = null;
-      if (!waiting.isCompleted) {
+      final waiting = _waiting;
+      if (waiting != null && !waiting.isCompleted) {
+        _waiting = null;
         var out = _buffer.toString();
         if (out.endsWith('\n')) out = out.substring(0, out.length - 1);
         waiting.complete('rc=$rc\n$out');
       }
       return;
     }
+    // A stale/foreign marker from a previous command must not leak either.
+    if (line.startsWith('__OVID_DONE_')) return;
+    _emit(line);
+    final waiting = _waiting;
+    if (waiting == null || waiting.isCompleted) return;
     _buffer.writeln(line);
   }
 
@@ -107,24 +139,33 @@ class PtyShell {
       await _subErr.cancel();
       _proc.kill(ProcessSignal.sigkill);
     } catch (_) {}
+    try {
+      await _outCtrl.close();
+    } catch (_) {}
   }
 }
 
-/// A pool of per-session bash shells. Kill-all comes free via the registry.
+/// A pool of per-(session, tab) bash shells. Kill-all comes free via the
+/// registry.
 class PtyPool {
   PtyPool._();
   static final PtyPool I = PtyPool._();
   final Map<String, PtyShell> _shells = {};
 
+  /// NUL-delimited so `('a', 'b')` never collides with `('ab', '')`.
+  static String _key(String sessionId, String tab) => '$sessionId\u0000$tab';
+
   Future<PtyShell?> getOrCreate(
     String sessionId,
-    Future<Process> Function() spawner,
-  ) async {
-    final existing = _shells[sessionId];
+    Future<Process> Function() spawner, {
+    String tab = 'agent',
+  }) async {
+    final key = _key(sessionId, tab);
+    final existing = _shells[key];
     if (existing != null && !existing.isDead) return existing;
     final shell = await PtyShell.start(spawner);
     if (shell == null) return null;
-    _shells[sessionId] = shell;
+    _shells[key] = shell;
     return shell;
   }
 
@@ -136,9 +177,19 @@ class PtyPool {
     _shells.clear();
   }
 
-  /// One session is gone — drop only its shell.
-  Future<void> discardFor(String sessionId) async {
-    final s = _shells.remove(sessionId);
+  /// One tab is gone — drop only that tab's shell.
+  Future<void> discard(String sessionId, {String tab = 'agent'}) async {
+    final s = _shells.remove(_key(sessionId, tab));
     if (s != null) await s.close();
+  }
+
+  /// One session is gone — drop every tab shell belonging to it.
+  Future<void> discardFor(String sessionId) async {
+    final prefix = '$sessionId\u0000';
+    final keys = _shells.keys.where((k) => k.startsWith(prefix)).toList();
+    for (final k in keys) {
+      final s = _shells.remove(k);
+      if (s != null) await s.close();
+    }
   }
 }

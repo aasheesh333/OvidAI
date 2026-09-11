@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -7,6 +8,7 @@ import '../core/state.dart';
 import '../core/github_service.dart';
 import '../core/agent_service.dart';
 import '../core/repo_cache.dart';
+import '../core/pty_service.dart';
 import '../core/sandbox_service.dart';
 import 'github_login_sheet.dart';
 
@@ -1023,9 +1025,11 @@ class _TerminalTabsState extends State<_TerminalTabs> {
   }
 
   void _closeTerminal(int i) {
+    final t = _terms[i];
+    _discardShell(t);
     setState(() {
       // Dispose the closing terminal's controllers.
-      final t = _terms.removeAt(i);
+      _terms.removeAt(i);
       t.input.dispose();
       t.scroll.dispose();
       if (_terms.isEmpty) {
@@ -1037,9 +1041,20 @@ class _TerminalTabsState extends State<_TerminalTabs> {
     });
   }
 
+  /// Drop the persistent shell backing [t] (tab close / screen dispose).
+  /// Other tabs on the same session keep their own shells.
+  void _discardShell(_TerminalSession t) {
+    final sid = t.sessionId;
+    t.sub?.cancel();
+    t.sub = null;
+    t.shell = null;
+    if (sid != null) unawaited(PtyPool.I.discard(sid, tab: t.tabId));
+  }
+
   @override
   void dispose() {
     for (final t in _terms) {
+      _discardShell(t);
       t.input.dispose();
       t.scroll.dispose();
     }
@@ -1146,12 +1161,21 @@ class _TerminalTabsState extends State<_TerminalTabs> {
   }
 }
 
-/// One terminal's mutable UI state.
+/// One terminal's mutable UI state. Each tab owns a stable [tabId] and the
+/// persistent shell it is bound to (created lazily on first command).
 class _TerminalSession {
+  _TerminalSession() : tabId = 'tab-${_seq++}';
+  static int _seq = 0;
+  final String tabId;
   final input = TextEditingController();
   final scroll = ScrollController();
   final history = <String>[];
   bool busy = false;
+  String? sessionId;
+  PtyShell? shell;
+  StreamSubscription<String>? sub;
+  int cmdSeq = 0;
+  String? pendingToken;
 }
 
 /// The active terminal's pane (scrollback + input).
@@ -1163,12 +1187,29 @@ class _TerminalPane extends StatefulWidget {
 }
 
 class _TerminalPaneState extends State<_TerminalPane> {
-  void _scrollToBottom() {
+  void _scrollToBottom([_TerminalSession? term]) {
+    final t = term ?? widget.term;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (widget.term.scroll.hasClients) {
-        widget.term.scroll.jumpTo(widget.term.scroll.position.maxScrollExtent);
+      if (t.scroll.hasClients) {
+        t.scroll.jumpTo(t.scroll.position.maxScrollExtent);
       }
     });
+  }
+
+  void _onOutput(_TerminalSession t, String line) {
+    // Per-tab completion sentinel: the persistent shell has no per-command
+    // future, so the command is followed by an `echo <token>` and we clear
+    // busy when that line arrives (and never show it in the scrollback).
+    if (t.pendingToken != null && line.trim() == t.pendingToken) {
+      t.pendingToken = null;
+      if (!mounted) return;
+      setState(() => t.busy = false);
+      _scrollToBottom(t);
+      return;
+    }
+    if (!mounted) return;
+    setState(() => t.history.add(line));
+    _scrollToBottom(t);
   }
 
   Future<void> _run(String cmd) async {
@@ -1181,8 +1222,37 @@ class _TerminalPaneState extends State<_TerminalPane> {
       t.busy = true;
     });
     _scrollToBottom();
+    final sessionId = AppState.I.activeSession?.sandboxId ?? 'default';
+    t.sessionId = sessionId;
+
+    // Persistent per-tab shell: state (`cd`, exports) survives commands and
+    // output streams in as it happens. Falls back to the one-shot exec when
+    // the sandbox is unavailable.
+    PtyShell? shell;
     try {
-      final sessionId = AppState.I.activeSession?.sandboxId ?? 'default';
+      final workDir = await SandboxService.I.workDirFor(sessionId);
+      shell = await PtyPool.I.getOrCreate(
+        sessionId,
+        () async => SandboxService.I.spawn(['bash'], hostWorkDir: workDir),
+        tab: t.tabId,
+      );
+    } catch (_) {
+      shell = null;
+    }
+    if (shell != null) {
+      if (!identical(t.shell, shell)) {
+        t.sub?.cancel();
+        t.sub = shell.output.listen((line) => _onOutput(t, line));
+        t.shell = shell;
+      }
+      final token = '__OVID_STUDIO_DONE_${t.tabId}_${t.cmdSeq++}__';
+      t.pendingToken = token;
+      shell.writeStdin('$c\n');
+      shell.writeStdin('echo "$token"\n');
+      return;
+    }
+
+    try {
       final workDir = await SandboxService.I.workDirFor(sessionId);
       final out = await SandboxService.I.exec(
         ['bash', '-c', c],
