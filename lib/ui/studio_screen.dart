@@ -8,7 +8,7 @@ import '../core/state.dart';
 import '../core/github_service.dart';
 import '../core/agent_service.dart';
 import '../core/repo_cache.dart';
-import '../core/pty_service.dart';
+import '../core/studio_terminal.dart';
 import '../core/sandbox_service.dart';
 import 'github_login_sheet.dart';
 
@@ -23,6 +23,12 @@ String? studioFolderPickOverrideForTest;
 /// Production is null (the real modal bottom sheet).
 @visibleForTesting
 void Function(BuildContext context)? studioLoginPromptOverrideForTest;
+
+/// Test seam: replaces the sandbox spawner for the Studio terminal so host
+/// widget tests can drive a real host shell without a native sandbox.
+/// Production is null (commands run through [SandboxService.spawn]).
+@visibleForTesting
+Future<Process> Function()? studioPtySpawnerOverrideForTest;
 
 /// Studio — coding harness (DeepSeek-web style): file explorer bound to the
 /// user's connected GitHub repo, real editable editor with per-session
@@ -539,7 +545,7 @@ class _StudioScreenState extends State<StudioScreen> {
               ),
             ),
             const Divider(height: 1),
-            SizedBox(height: 240, child: const _TerminalTabs()),
+            SizedBox(height: 240, child: const StudioTerminalTabs()),
           ],
         ),
       ),
@@ -1084,17 +1090,18 @@ class _EditorState extends State<_Editor> {
   }
 }
 
-// ── Multi-terminal (P8) — N independent sandbox shells ────────────────
-// Each terminal keeps its own scrollback + busy state; tabs at the top
-// with add/close icons (VS Code style). All terminals share the session
-// workspace as cwd; commands run through the native sandbox env.
-class _TerminalTabs extends StatefulWidget {
-  const _TerminalTabs();
+// ── Multi-terminal (P8) — N independent persistent shells ─────────────
+// Each terminal keeps its own scrollback + busy state and its own
+// persistent pipe shell (StudioShellSession), so `cd`/exports survive
+// across commands. Tabs at the top with add/close icons (VS Code style).
+// Shells are owner-scoped in PtyPool so agent Stop never kills them.
+class StudioTerminalTabs extends StatefulWidget {
+  const StudioTerminalTabs({super.key});
   @override
-  State<_TerminalTabs> createState() => _TerminalTabsState();
+  State<StudioTerminalTabs> createState() => _StudioTerminalTabsState();
 }
 
-class _TerminalTabsState extends State<_TerminalTabs> {
+class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
   final List<_TerminalSession> _terms = [];
   int _active = 0;
 
@@ -1113,12 +1120,9 @@ class _TerminalTabsState extends State<_TerminalTabs> {
 
   void _closeTerminal(int i) {
     final t = _terms[i];
-    _discardShell(t);
+    t.dispose();
     setState(() {
-      // Dispose the closing terminal's controllers.
       _terms.removeAt(i);
-      t.input.dispose();
-      t.scroll.dispose();
       if (_terms.isEmpty) {
         _terms.add(_TerminalSession());
         _active = 0;
@@ -1128,22 +1132,10 @@ class _TerminalTabsState extends State<_TerminalTabs> {
     });
   }
 
-  /// Drop the persistent shell backing [t] (tab close / screen dispose).
-  /// Other tabs on the same session keep their own shells.
-  void _discardShell(_TerminalSession t) {
-    final sid = t.sessionId;
-    t.sub?.cancel();
-    t.sub = null;
-    t.shell = null;
-    if (sid != null) unawaited(PtyPool.I.discard(sid, tab: t.tabId));
-  }
-
   @override
   void dispose() {
     for (final t in _terms) {
-      _discardShell(t);
-      t.input.dispose();
-      t.scroll.dispose();
+      t.dispose();
     }
     super.dispose();
   }
@@ -1180,48 +1172,60 @@ class _TerminalTabsState extends State<_TerminalTabs> {
                     final sel = i == _active;
                     return GestureDetector(
                       onTap: () => setState(() => _active = i),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 9),
-                        margin: const EdgeInsets.fromLTRB(0, 4, 6, 4),
-                        decoration: BoxDecoration(
-                          color: sel ? Aether.surfaceAlt : Colors.transparent,
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(
-                            color: sel ? Aether.hairline : Colors.transparent,
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              t.busy ? Icons.sync : Icons.chevron_right,
-                              size: 11,
-                              color: t.busy
-                                  ? Aether.accent
-                                  : sel
-                                  ? Aether.textMuted
-                                  : Aether.textFaint,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              'bash ${i + 1}',
-                              style: TextStyle(
-                                fontFamily: Aether.mono,
-                                fontSize: 10,
-                                color: sel ? Aether.text : Aether.textFaint,
+                      child: AnimatedBuilder(
+                        animation: t.shell,
+                        builder: (_, _) {
+                          final busy = t.shell.busy;
+                          return Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 9),
+                            margin: const EdgeInsets.fromLTRB(0, 4, 6, 4),
+                            decoration: BoxDecoration(
+                              color: sel
+                                  ? Aether.surfaceAlt
+                                  : Colors.transparent,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(
+                                color: sel
+                                    ? Aether.hairline
+                                    : Colors.transparent,
                               ),
                             ),
-                            const SizedBox(width: 5),
-                            GestureDetector(
-                              onTap: () => _closeTerminal(i),
-                              child: Icon(
-                                Icons.close,
-                                size: 11,
-                                color: Aether.textFaint,
-                              ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  busy ? Icons.sync : Icons.chevron_right,
+                                  size: 11,
+                                  color: busy
+                                      ? Aether.accent
+                                      : sel
+                                      ? Aether.textMuted
+                                      : Aether.textFaint,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'bash ${i + 1}',
+                                  style: TextStyle(
+                                    fontFamily: Aether.mono,
+                                    fontSize: 10,
+                                    color: sel
+                                        ? Aether.text
+                                        : Aether.textFaint,
+                                  ),
+                                ),
+                                const SizedBox(width: 5),
+                                GestureDetector(
+                                  onTap: () => _closeTerminal(i),
+                                  child: Icon(
+                                    Icons.close,
+                                    size: 11,
+                                    color: Aether.textFaint,
+                                  ),
+                                ),
+                              ],
                             ),
-                          ],
-                        ),
+                          );
+                        },
                       ),
                     );
                   },
@@ -1251,18 +1255,21 @@ class _TerminalTabsState extends State<_TerminalTabs> {
 /// One terminal's mutable UI state. Each tab owns a stable [tabId] and the
 /// persistent shell it is bound to (created lazily on first command).
 class _TerminalSession {
-  _TerminalSession() : tabId = 'tab-${_seq++}';
+  _TerminalSession() {
+    tabId = 'tab-${_seq++}';
+    shell = StudioShellSession(tabId: tabId);
+  }
   static int _seq = 0;
-  final String tabId;
+  late final String tabId;
+  late final StudioShellSession shell;
   final input = TextEditingController();
   final scroll = ScrollController();
-  final history = <String>[];
-  bool busy = false;
-  String? sessionId;
-  PtyShell? shell;
-  StreamSubscription<String>? sub;
-  int cmdSeq = 0;
-  String? pendingToken;
+
+  void dispose() {
+    shell.dispose();
+    input.dispose();
+    scroll.dispose();
+  }
 }
 
 /// The active terminal's pane (scrollback + input).
@@ -1274,8 +1281,30 @@ class _TerminalPane extends StatefulWidget {
 }
 
 class _TerminalPaneState extends State<_TerminalPane> {
-  void _scrollToBottom([_TerminalSession? term]) {
-    final t = term ?? widget.term;
+  @override
+  void initState() {
+    super.initState();
+    widget.term.shell.addListener(_onShellChanged);
+  }
+
+  @override
+  void didUpdateWidget(_TerminalPane oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.term, widget.term)) {
+      oldWidget.term.shell.removeListener(_onShellChanged);
+      widget.term.shell.addListener(_onShellChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.term.shell.removeListener(_onShellChanged);
+    super.dispose();
+  }
+
+  void _onShellChanged() => _scrollToBottom(widget.term);
+
+  void _scrollToBottom(_TerminalSession t) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (t.scroll.hasClients) {
         t.scroll.jumpTo(t.scroll.position.maxScrollExtent);
@@ -1283,60 +1312,32 @@ class _TerminalPaneState extends State<_TerminalPane> {
     });
   }
 
-  void _onOutput(_TerminalSession t, String line) {
-    // Per-tab completion sentinel: the persistent shell has no per-command
-    // future, so the command is followed by an `echo <token>` and we clear
-    // busy when that line arrives (and never show it in the scrollback).
-    if (t.pendingToken != null && line.trim() == t.pendingToken) {
-      t.pendingToken = null;
-      if (!mounted) return;
-      setState(() => t.busy = false);
-      _scrollToBottom(t);
-      return;
-    }
-    if (!mounted) return;
-    setState(() => t.history.add(line));
-    _scrollToBottom(t);
-  }
-
   Future<void> _run(String cmd) async {
     final t = widget.term;
+    final shell = t.shell;
     final c = cmd.trim();
-    if (c.isEmpty || t.busy) return;
+    if (c.isEmpty || shell.busy) return;
     t.input.clear();
-    setState(() {
-      t.history.add('\$ $c');
-      t.busy = true;
-    });
-    _scrollToBottom();
-    final sessionId = AppState.I.activeSession?.sandboxId ?? 'default';
-    t.sessionId = sessionId;
+    shell.begin(c);
+    _scrollToBottom(t);
 
+    final sessionId = AppState.I.activeSession?.sandboxId ?? 'default';
     // Persistent per-tab shell: state (`cd`, exports) survives commands and
     // output streams in as it happens. Falls back to the one-shot exec when
     // the sandbox is unavailable.
-    PtyShell? shell;
+    final override = studioPtySpawnerOverrideForTest;
     try {
-      final workDir = await SandboxService.I.workDirFor(sessionId);
-      shell = await PtyPool.I.getOrCreate(
-        sessionId,
-        () async => SandboxService.I.spawn(['bash'], hostWorkDir: workDir),
-        tab: t.tabId,
-      );
-    } catch (_) {
-      shell = null;
-    }
-    if (shell != null) {
-      if (!identical(t.shell, shell)) {
-        t.sub?.cancel();
-        t.sub = shell.output.listen((line) => _onOutput(t, line));
-        t.shell = shell;
+      final spawner =
+          override ??
+          () async {
+            final workDir = await SandboxService.I.workDirFor(sessionId);
+            return SandboxService.I.spawn(['bash'], hostWorkDir: workDir);
+          };
+      if (await shell.runPersistent(c, sid: sessionId, spawner: spawner)) {
+        return;
       }
-      final token = '__OVID_STUDIO_DONE_${t.tabId}_${t.cmdSeq++}__';
-      t.pendingToken = token;
-      shell.writeStdin('$c\n');
-      shell.writeStdin('echo "$token"\n');
-      return;
+    } catch (_) {
+      // Fall through to the one-shot exec fallback.
     }
 
     try {
@@ -1344,130 +1345,127 @@ class _TerminalPaneState extends State<_TerminalPane> {
       final out = await SandboxService.I.exec(
         ['bash', '-c', c],
         hostWorkDir: workDir,
-        onLine: (l) {
-          if (!mounted) return;
-          setState(() => t.history.add(l));
-          _scrollToBottom();
-        },
+        onLine: shell.addOutput,
       );
-      if (out.trim().isEmpty) {
-        setState(() => t.history.add('(no output)'));
-      }
+      if (out.trim().isEmpty) shell.addOutput('(no output)');
     } catch (e) {
-      setState(() => t.history.add('⚠ $e'));
+      shell.addOutput('⚠ $e');
     } finally {
-      t.busy = false;
-      if (mounted) setState(() {});
-      _scrollToBottom();
+      shell.finish();
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final t = widget.term;
-    return Column(
-      children: [
-        Expanded(
-          child: ListView.builder(
-            controller: t.scroll,
-            padding: const EdgeInsets.all(12),
-            itemCount: t.history.length + (t.busy ? 1 : 0),
-            itemBuilder: (_, i) {
-              if (i == t.history.length) {
-                return const Padding(
-                  padding: EdgeInsets.only(top: 2),
-                  child: SizedBox(
-                    width: 12,
-                    height: 12,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 1.5,
-                      color: Aether.accent,
-                    ),
-                  ),
-                );
-              }
-              final l = t.history[i];
-              return SelectableText(
-                l,
-                style: TextStyle(
-                  fontFamily: Aether.mono,
-                  fontSize: 11.5,
-                  height: 1.6,
-                  color: l.startsWith('\$')
-                      ? Aether.accent
-                      : l.startsWith('⚠')
-                      ? Aether.danger
-                      : l.endsWith('✓') || l.startsWith('✓')
-                      ? Aether.success
-                      : Aether.textMuted,
-                ),
-              );
-            },
-          ),
-        ),
-        // Real command input — runs natively in the sandbox.
-        Container(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-          decoration: BoxDecoration(
-            border: Border(top: BorderSide(color: Aether.hairline)),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: t.input,
-                  style: const TextStyle(
-                    fontFamily: Aether.mono,
-                    fontSize: 12.5,
-                  ),
-                  decoration: InputDecoration(
-                    isDense: true,
-                    hintText: 'bash \$ …',
-                    hintStyle: TextStyle(
+    return AnimatedBuilder(
+      animation: t.shell,
+      builder: (_, _) {
+        final s = t.shell;
+        return Column(
+          children: [
+            Expanded(
+              child: ListView.builder(
+                controller: t.scroll,
+                padding: const EdgeInsets.all(12),
+                itemCount: s.history.length + (s.busy ? 1 : 0),
+                itemBuilder: (_, i) {
+                  if (i == s.history.length) {
+                    return const Padding(
+                      padding: EdgeInsets.only(top: 2),
+                      child: SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.5,
+                          color: Aether.accent,
+                        ),
+                      ),
+                    );
+                  }
+                  final l = s.history[i];
+                  return SelectableText(
+                    l,
+                    style: TextStyle(
                       fontFamily: Aether.mono,
-                      color: Aether.textFaint,
+                      fontSize: 11.5,
+                      height: 1.6,
+                      color: l.startsWith('\$')
+                          ? Aether.accent
+                          : l.startsWith('⚠')
+                          ? Aether.danger
+                          : l.endsWith('✓') || l.startsWith('✓')
+                          ? Aether.success
+                          : Aether.textMuted,
                     ),
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    prefixIcon: const Icon(
-                      Icons.chevron_right,
-                      size: 16,
-                      color: Aether.accent,
-                    ),
-                    suffixIcon: t.busy
-                        ? const SizedBox(
-                            width: 14,
-                            height: 14,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 1.5,
-                              color: Aether.accent,
-                            ),
-                          )
-                        : null,
-                  ),
-                  textInputAction: TextInputAction.send,
-                  onSubmitted: _run,
-                  enabled: !t.busy,
-                ),
+                  );
+                },
               ),
-              // Clear scrollback for THIS terminal.
-              if (t.history.isNotEmpty)
-                IconButton(
-                  tooltip: 'Clear',
-                  visualDensity: VisualDensity.compact,
-                  icon: Icon(
-                    Icons.delete_outline,
-                    size: 14,
-                    color: Aether.textFaint,
+            ),
+            // Real command input — runs natively in the sandbox.
+            Container(
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              decoration: BoxDecoration(
+                border: Border(top: BorderSide(color: Aether.hairline)),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: t.input,
+                      style: const TextStyle(
+                        fontFamily: Aether.mono,
+                        fontSize: 12.5,
+                      ),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: 'bash \$ …',
+                        hintStyle: TextStyle(
+                          fontFamily: Aether.mono,
+                          color: Aether.textFaint,
+                        ),
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        prefixIcon: const Icon(
+                          Icons.chevron_right,
+                          size: 16,
+                          color: Aether.accent,
+                        ),
+                        suffixIcon: s.busy
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 1.5,
+                                  color: Aether.accent,
+                                ),
+                              )
+                            : null,
+                      ),
+                      textInputAction: TextInputAction.send,
+                      onSubmitted: _run,
+                      enabled: !s.busy,
+                    ),
                   ),
-                  onPressed: () =>
-                      setState(t.history.clear),
-                ),
-            ],
-          ),
-        ),
-      ],
+                  // Clear scrollback for THIS terminal.
+                  if (s.history.isNotEmpty)
+                    IconButton(
+                      tooltip: 'Clear',
+                      visualDensity: VisualDensity.compact,
+                      icon: Icon(
+                        Icons.delete_outline,
+                        size: 14,
+                        color: Aether.textFaint,
+                      ),
+                      onPressed: () => setState(s.history.clear),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }

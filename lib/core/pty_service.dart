@@ -30,6 +30,12 @@ class PtyShell {
       if (waiting == null || waiting.isCompleted) return;
       _buffer.writeln('[stderr] $l');
     }, onError: (_) {});
+    // Surface process death: close the output sink so subscribers get
+    // onDone, and fail any in-flight run instead of hanging it forever.
+    unawaited(_proc.exitCode.whenComplete(_onExit));
+    // A write to a shell that has already exited surfaces as an async broken
+    // pipe on the sink; absorb it so it never becomes an unhandled zone error.
+    unawaited(_proc.stdin.done.then((_) {}, onError: (Object _) {}));
   }
 
   final Process _proc;
@@ -46,24 +52,40 @@ class PtyShell {
 
   /// Live stdout/stderr lines as they arrive (markers filtered). Broadcast:
   /// every Studio tab (and any other observer) can subscribe independently.
+  /// Closes (onDone) when the underlying process exits.
   Stream<String> get output => _outCtrl.stream;
 
   void _emit(String line) {
     if (!_outCtrl.isClosed) _outCtrl.add(line);
   }
 
+  void _onExit() {
+    _dead = true;
+    final waiting = _waiting;
+    _waiting = null;
+    if (waiting != null && !waiting.isCompleted) {
+      waiting.complete('PTY process exited');
+    }
+    if (!_outCtrl.isClosed) {
+      unawaited(_outCtrl.close());
+    }
+  }
+
   /// Send raw bytes to the shell's stdin — used by the Studio terminal so a
   /// command runs in the persistent shell without the run-marker protocol.
   ///
-  /// No `flush()` here: a pending flush binds the IOSink and a second write
-  /// throws `Bad state: StreamSink is bound to a stream`. `write()` already
-  /// hands the bytes to the OS pipe, so back-to-back commands stay reliable.
+  /// Deliberately does not call `flush()`: `flush()` returns a Future that
+  /// must be awaited, and an unawaited flush leaves the `IOSink` bound, so a
+  /// second back-to-back `write()` throws
+  /// `Bad state: StreamSink is bound to a stream`. `write()` already hands
+  /// the bytes to the OS pipe, so back-to-back commands stay reliable.
   void writeStdin(String data) {
     if (_dead) return;
     try {
       _proc.stdin.write(data);
     } catch (_) {
       _dead = true;
+      _onExit();
     }
   }
 
@@ -139,28 +161,42 @@ class PtyShell {
       await _subErr.cancel();
       _proc.kill(ProcessSignal.sigkill);
     } catch (_) {}
-    try {
-      await _outCtrl.close();
-    } catch (_) {}
+    if (!_outCtrl.isClosed) {
+      try {
+        await _outCtrl.close();
+      } catch (_) {}
+    }
   }
 }
 
-/// A pool of per-(session, tab) bash shells. Kill-all comes free via the
-/// registry.
+/// A pool of persistent bash shells, namespaced by owner so the agent's
+/// shells and the Studio terminal's shells never destroy each other.
+///
+/// - [agentOwner] shells back `run_shell(persistent: true)` and are killed by
+///   agent Stop (`discardFor`/`discardAll`).
+/// - [studioOwner] shells back Studio terminal tabs and are only dropped by
+///   their own tab close (`discard`) or full teardown (`discardAllShells`).
 class PtyPool {
   PtyPool._();
   static final PtyPool I = PtyPool._();
+
+  static const String agentOwner = 'agent';
+  static const String studioOwner = 'studio';
+
   final Map<String, PtyShell> _shells = {};
 
-  /// NUL-delimited so `('a', 'b')` never collides with `('ab', '')`.
-  static String _key(String sessionId, String tab) => '$sessionId\u0000$tab';
+  /// NUL-delimited so `('a', 'b')` never collides with `('ab', '')`, and
+  /// owner-prefixed so agent and studio namespaces never collide.
+  static String _key(String owner, String sessionId, String tab) =>
+      '$owner\u0000$sessionId\u0000$tab';
 
   Future<PtyShell?> getOrCreate(
     String sessionId,
     Future<Process> Function() spawner, {
     String tab = 'agent',
+    String owner = agentOwner,
   }) async {
-    final key = _key(sessionId, tab);
+    final key = _key(owner, sessionId, tab);
     final existing = _shells[key];
     if (existing != null && !existing.isDead) return existing;
     final shell = await PtyShell.start(spawner);
@@ -169,24 +205,35 @@ class PtyPool {
     return shell;
   }
 
-  /// Kill everything (agent panic stop).
+  /// Agent panic stop: kill every agent-owned shell (Studio tabs survive).
   Future<void> discardAll() async {
-    for (final s in _shells.values) {
-      await s.close();
-    }
-    _shells.clear();
+    await _discardWhere((k) => k.startsWith('$agentOwner\u0000'));
+  }
+
+  /// Full teardown (app exit/tests): kill every shell, Studio included.
+  Future<void> discardAllShells() async {
+    await _discardWhere((_) => true);
   }
 
   /// One tab is gone — drop only that tab's shell.
-  Future<void> discard(String sessionId, {String tab = 'agent'}) async {
-    final s = _shells.remove(_key(sessionId, tab));
+  Future<void> discard(
+    String sessionId, {
+    String tab = 'agent',
+    String owner = agentOwner,
+  }) async {
+    final s = _shells.remove(_key(owner, sessionId, tab));
     if (s != null) await s.close();
   }
 
-  /// One session is gone — drop every tab shell belonging to it.
+  /// Agent Stop for one session — drops only agent-owned shells, leaving
+  /// Studio terminal tabs alive.
   Future<void> discardFor(String sessionId) async {
-    final prefix = '$sessionId\u0000';
-    final keys = _shells.keys.where((k) => k.startsWith(prefix)).toList();
+    final prefix = '$agentOwner\u0000$sessionId\u0000';
+    await _discardWhere((k) => k.startsWith(prefix));
+  }
+
+  Future<void> _discardWhere(bool Function(String key) match) async {
+    final keys = _shells.keys.where(match).toList();
     for (final k in keys) {
       final s = _shells.remove(k);
       if (s != null) await s.close();

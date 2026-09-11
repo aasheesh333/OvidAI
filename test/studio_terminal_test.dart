@@ -23,7 +23,7 @@ Future<void> _waitFor(
 
 void main() {
   tearDown(() async {
-    await PtyPool.I.discardAll();
+    await PtyPool.I.discardAllShells();
   });
 
   test('output streams before the command completes', () async {
@@ -135,35 +135,110 @@ void main() {
     );
   });
 
-  test('discardFor closes every tab shell for the session', () async {
-    final a = await PtyPool.I.getOrCreate(
-      'sess-discard',
+  test('agent discardFor leaves studio tab shells alive', () async {
+    final agent = await PtyPool.I.getOrCreate(
+      'sess-owner',
       _spawnShell,
-      tab: 'a',
+      tab: 'agent',
+      owner: PtyPool.agentOwner,
     );
-    final b = await PtyPool.I.getOrCreate(
-      'sess-discard',
+    final studio = await PtyPool.I.getOrCreate(
+      'sess-owner',
       _spawnShell,
-      tab: 'b',
+      tab: 'tab-1',
+      owner: PtyPool.studioOwner,
     );
-    expect(a, isNotNull);
-    expect(b, isNotNull);
+    expect(agent, isNotNull);
+    expect(studio, isNotNull);
 
-    await PtyPool.I.discardFor('sess-discard');
-    expect(a!.isDead, isTrue, reason: 'tab a shell closed');
-    expect(b!.isDead, isTrue, reason: 'tab b shell closed');
+    await PtyPool.I.discardFor('sess-owner');
+    expect(agent!.isDead, isTrue, reason: 'agent shell dies on agent stop');
+    expect(
+      studio!.isDead,
+      isFalse,
+      reason: 'studio terminal shell survives agent stop',
+    );
 
-    var respawned = 0;
-    final replacement = await PtyPool.I.getOrCreate(
-      'sess-discard',
+    await PtyPool.I.discard(
+      'sess-owner',
+      tab: 'tab-1',
+      owner: PtyPool.studioOwner,
+    );
+    expect(studio.isDead, isTrue, reason: 'explicit studio tab close discards');
+  });
+
+  test('agent discardAll leaves studio shells; discardAllShells clears all', () async {
+    final studio = await PtyPool.I.getOrCreate(
+      'sess-all',
+      _spawnShell,
+      tab: 'tab-1',
+      owner: PtyPool.studioOwner,
+    );
+    final agent = await PtyPool.I.getOrCreate(
+      'sess-all',
+      _spawnShell,
+      tab: 'agent',
+      owner: PtyPool.agentOwner,
+    );
+    expect(studio, isNotNull);
+    expect(agent, isNotNull);
+
+    await PtyPool.I.discardAll();
+    expect(agent!.isDead, isTrue, reason: 'agent panic stop kills agent shells');
+    expect(
+      studio!.isDead,
+      isFalse,
+      reason: 'agent panic stop must not kill studio shells',
+    );
+
+    await PtyPool.I.discardAllShells();
+    expect(studio.isDead, isTrue, reason: 'full teardown clears studio too');
+  });
+
+  test('shell death closes output and a later command respawns', () async {
+    final shell = await PtyPool.I.getOrCreate(
+      'sess-death',
+      _spawnShell,
+      tab: 'agent',
+      owner: PtyPool.agentOwner,
+    );
+    expect(shell, isNotNull);
+    var done = false;
+    final lines = <String>[];
+    final sub = shell!.output.listen(lines.add, onDone: () => done = true);
+    addTearDown(sub.cancel);
+
+    shell.writeStdin('echo before\n');
+    await _waitFor(
+      () => lines.contains('before'),
+      reason: 'output before exit',
+    );
+
+    shell.writeStdin('exit\n');
+    await _waitFor(() => done, reason: 'output stream closes on process exit');
+    expect(shell.isDead, isTrue, reason: 'exit marks the shell dead');
+
+    var spawns = 0;
+    final fresh = await PtyPool.I.getOrCreate(
+      'sess-death',
       () async {
-        respawned++;
+        spawns++;
         return _spawnShell();
       },
-      tab: 'a',
+      tab: 'agent',
+      owner: PtyPool.agentOwner,
     );
-    expect(replacement, isNotNull);
-    expect(identical(replacement, a), isFalse);
-    expect(respawned, 1);
+    expect(fresh, isNotNull);
+    expect(identical(fresh, shell), isFalse, reason: 'dead shell is replaced');
+    expect(spawns, 1);
+
+    final freshLines = <String>[];
+    final freshSub = fresh!.output.listen(freshLines.add);
+    addTearDown(freshSub.cancel);
+    fresh.writeStdin('echo alive\n');
+    await _waitFor(
+      () => freshLines.contains('alive'),
+      reason: 'fresh shell works',
+    );
   });
 }

@@ -43,7 +43,7 @@ void main() {
       agent.dropSessionRun(sessionId);
     }
     sandbox.killAllProcesses();
-    await PtyPool.I.discardAll();
+    await PtyPool.I.discardAllShells();
     AgentNotificationService.I.resetForTest();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(const MethodChannel('ovid/native'), null);
