@@ -99,6 +99,42 @@ physical-device checklist) are recorded in
 smoke pass is `NOT EXECUTED` when no Android device/emulator is attached;
 on-device sign-off remains open until a release owner completes that checklist.
 
+## Studio and Git behavior contract
+
+- **GitHub login persists.** After one successful login the stored token keeps
+  `isLoggedIn` true across sessions and restarts. A transient profile failure
+  (5xx/network/decode) keeps the token and retries in the background; only a
+  real `401` clears it. Studio never re-prompts on a transient failure.
+- **A new chat inherits the last selection.** Creating a session seeds the
+  last-used `(repo, branch, workspace folder)` when logged in, so a restart
+  does not force a fresh repo/folder selection. A folder that no longer exists
+  falls back to the per-session sandbox.
+- **The Studio terminal is persistent and streaming.** Each terminal tab owns
+  an independent pipe shell: shell state (`cd`, exports) survives across
+  commands, output streams as it happens, and stdin is supported. It is a pipe
+  shell, not a full TTY (no job control or terminal escape handling).
+- **Repo binding is `(repo, branch)`.** Branch selection is threaded end-to-end:
+  tree/read/blob-SHA requests carry the branch (`?ref=`), commits target the
+  branch, and a missing ref surfaces an explicit error rather than silently
+  reading the default branch.
+- **The package manager is honest.** `apt update` works; `apt upgrade` /
+  `full-upgrade` fail loudly (non-zero, stderr) instead of silently succeeding;
+  `-y`/`--yes` are options, not packages; and a native `dpkg` failure surfaces
+  its real non-zero exit code.
+- **Git credentials are host-scoped and ephemeral.** Terminal/agent git against
+  github.com authenticates from a credential helper scoped to
+  `https://github.com`, injected into the spawned process environment only. It
+  is never written to `.git-credentials` or any global/system config and is
+  cleared on sign-out.
+
+The Studio/Git release gate and its measured evidence (the end-to-end suite,
+the full Flutter suite, `flutter analyze`, the debug APK SHA-256, and the
+physical-device checklist) are recorded in
+`docs/superpowers/audits/2026-09-10-studio-git-reliability.md`. The
+physical-device pass is `NOT EXECUTED` when no Android device/emulator is
+attached; on-device sign-off remains open until a release owner completes that
+checklist.
+
 ## MCP servers
 
 - Stdio servers spawn inside the sandbox (if provisioned) with per-server
