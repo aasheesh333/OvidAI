@@ -21162,11 +21162,15 @@ cwd = 'tools'
             entry.value,
             reason: entry.key,
           );
-          // A duplicate, reason-independent call in the same boot must not
-          // fire again.
+          // A duplicate call with a DIFFERENT reason in the same boot must
+          // not fire again: the first reason wins and exactly-once is
+          // reason-independent.
+          final otherReason = entry.key == SessionStartReason.created
+              ? SessionStartReason.restored
+              : SessionStartReason.created;
           await SessionLifecycleService.I.sessionStarted(
             entry.value,
-            reason: entry.key,
+            reason: otherReason,
           );
         }
         await SessionLifecycleService.I.drainForTest();

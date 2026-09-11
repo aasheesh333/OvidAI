@@ -41,10 +41,11 @@ ids (`plugin:<id>/command:<name>`, `…/skill:<name>`, `…/agent:<name>`,
   including with large local histories. No network, marketplace, plugin
   activation, or MCP handshake runs on the first-frame critical path; those run
   after the first frame in the background readiness queue.
-- Runtime readiness has a **120-second global deadline**. Unfinished items open
-  in a truthful **degraded** state with a per-item reason and `Retry`/`Disable`
-  actions; the app stays usable and never blocks indefinitely. Local safety
-  migration is never skipped by the deadline.
+- Runtime readiness has a **120-second global deadline**. An item still running
+  at the deadline opens in a truthful **degraded** state; a queued non-local
+  item becomes **skipped**. Both carry a per-item reason and `Retry`, and
+  plugin/MCP rows offer `Disable`; the app stays usable and never blocks
+  indefinitely. Local safety migration is never skipped by the deadline.
 - `session_start` fires **exactly once** for every new root, implicit first,
   restored active, and subagent session, after the relevant plugin activation
   and session-visible skill mount have settled.

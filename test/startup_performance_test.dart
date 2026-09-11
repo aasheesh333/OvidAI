@@ -108,12 +108,17 @@ void main() {
         );
         stopwatch.stop();
 
-        // Wall-clock (disclosed): the fixture performs real local IO.
+        // Wall-clock (disclosed): the active-session decode runs through a
+        // real `Isolate.run`, which `fake_async` cannot virtualize.
         expect(stopwatch.elapsed, lessThan(_firstFrameBudget));
         // The deferred stages never ran, so first frame is independent of
         // hanging network/runtime work.
         expect(calls, ['local.firstFrame']);
-        expect(never.isCompleted, isFalse);
+        // Readiness has NOT completed: the shell is up while deferred work is
+        // still pending. This is a real observable, not a vacuous Completer
+        // check (a never-completed Completer's `isCompleted` is trivially
+        // false).
+        expect(app.startupSafeToReconnect, isFalse);
         expect(app.activeSession!.id, 'active');
         // Only the active tail is hydrated on the first frame.
         expect(app.activeSession!.messages, hasLength(50));
@@ -146,6 +151,42 @@ void main() {
   });
 
   group('120s readiness deadline (fake time)', () {
+    test('production default coordinator deadline is 120 seconds', () {
+      fakeAsync((async) {
+        // Default constructor (no injected deadline): pins the production
+        // constant so a regression to a different default is caught.
+        final coordinator = StartupCoordinator();
+        var complete = false;
+
+        coordinator
+            .start([
+              MarketplaceRefreshTask(
+                id: 'marketplace.refresh',
+                label: 'Refresh plugin marketplaces',
+                timeout: const Duration(seconds: 300),
+                repos: () => const ['slow/market'],
+                refresh: (_) => Completer<MarketplaceSyncOutcome>().future,
+              ),
+            ])
+            .then((_) => complete = true);
+
+        async.flushMicrotasks();
+        async.elapse(const Duration(seconds: 119));
+        async.elapse(const Duration(milliseconds: 999));
+        expect(complete, isFalse, reason: 'default deadline is not under 120s');
+
+        async.elapse(const Duration(milliseconds: 1));
+        async.flushMicrotasks();
+
+        expect(complete, isTrue);
+        expect(coordinator.snapshot.deadlineExceeded, isTrue);
+        expect(
+          _status(coordinator, 'marketplace.refresh').reason,
+          'Startup readiness deadline exceeded',
+        );
+      });
+    });
+
     test(
       'hanging marketplace and MCP reach terminal degraded at exactly 120s',
       () {

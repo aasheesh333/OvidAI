@@ -1,11 +1,15 @@
 # Startup and Plugin Runtime Reliability — Task 9 Release Gate Audit
 
-Date: 2026-09-11 · Branch `hoplite/gortyn-77773150` · Baseline `8464bd2`
+Date: 2026-09-11 · Branch `hoplite/gortyn-77773150` · Baseline `8464bd2` · Task 9 verification commit `8033f31`
+
+This is a docs/test-only accuracy follow-up to the Task 9 verification commit
+`8033f31` (follow-up subject: `docs: tighten startup release-gate accuracy`);
+it does not rebuild the APK or change production behavior.
 
 This audit is the release gate for the Startup and Plugin Runtime Reliability
 project (spec `docs/superpowers/specs/2026-09-10-startup-plugin-runtime-reliability-design.md`
 §8, §12, §13). It records the automated verification matrix, the synthetic
-fixtures, the measured first-frame and 120-second deadline behavior, the
+fixtures, the first-frame budget and 120-second deadline behavior, the
 runtime-skill/session-hook integration, the legacy migration recovery, the
 debug APK artifact, and the physical-Android checklist with its execution
 status.
@@ -30,9 +34,9 @@ All commands run with `/home/ubuntu/sdk/flutter/bin/flutter` on 2026-09-11.
 | `flutter test test/startup_tasks_test.dart` | 32/32 passed |
 | `flutter test test/startup_status_persistence_test.dart` | 25/25 passed |
 | `flutter test test/startup_progress_widget_test.dart` | 17/17 passed |
-| `flutter test test/startup_performance_test.dart` | 5/5 passed (new) |
+| `flutter test test/startup_performance_test.dart` | 6/6 passed (new) |
 | `flutter test test/core_regression_test.dart` | 555/555 passed (552 + 3 new Task 9 pins) |
-| `flutter test` (all files) | 785/785 passed (777 + 5 performance + 3 integration) |
+| `flutter test` (all files) | 786/786 passed (777 + 6 performance + 3 integration) |
 | `flutter analyze --no-pub` | No issues found (ran in 5.1s) |
 | `flutter build apk --debug` | Built `build/app/outputs/flutter-apk/app-debug.apk` |
 | `git diff --check` | clean |
@@ -53,30 +57,38 @@ wired to a `Completer` that never completes (`marketplace.refresh`,
 `mcp.connect`, `firebase.initialize`, `github.initialize`, `sandbox.selfHeal`,
 `plugin.activate`).
 
-Measured with a temporary in-repo measurement test (deleted after use), same
-fixture and hanging delegates:
+What is mocked vs real in this fixture:
 
-- cold first call (isolate decode path): **296 ms**
-- warm second call: **139 ms**
+- **Mocked:** `SharedPreferences` and `FlutterSecureStorage` use
+  `setMockInitialValues` (in-memory maps). There is no real `dart:io`
+  preference/file IO on the first-frame path.
+- **Real:** the active-session decode runs through `Isolate.run` for the
+  fingerprint and tail (`_loadSessionsForFirstFrame` →
+  `_decodeSessionForFirstFrame`), which `fake_async` cannot virtualize.
 
-Both are under the 3-second budget with an order of magnitude of headroom. The
-permanent test asserts `initializeForFirstFrame()` completes under
+The permanent test asserts `initializeForFirstFrame()` completes under
 `_firstFrameBudget = 3 s`, that the recorded stages are exactly
-`['local.firstFrame']`, that no optional stage ran, and that the hanging
-completer is still incomplete.
+`['local.firstFrame']`, that no optional stage ran, and that readiness has not
+completed (`app.startupSafeToReconnect == false`) while the hanging delegates
+remain pending.
 
-**Disclosure:** this is the only wall-clock assertion in the file. The fixture
-drives real `dart:io` session decode and preference IO, which `fake_async`
-cannot virtualize; the 120-second deadline assertions below use fake time and
-are exact. The cold/warm numbers above are single-host measurements, not a
-guarantee for every device — the release gate is the `< 3 s` assertion plus the
-device checklist in §8.
+**Disclosure:** this is the only wall-clock assertion in the file, retained
+because of the real `Isolate.run` decode above. No committed millisecond
+benchmark is claimed: the earlier 296 ms/139 ms figures came from a temporary
+measurement test that was deleted and is therefore not bound to any commit;
+they are not reproduced here. The 120-second deadline assertions below use
+fake time and are exact. The release gate is the `< 3 s` wall-clock assertion
+plus the device checklist in §8.
 
 ## 3. 120-second readiness deadline and per-item isolation (spec §8/§13)
 
 Also in `test/startup_performance_test.dart`, using `fake_async` and the real
 `MarketplaceRefreshTask`, `McpConnectTask`, and `FirebaseStartupTask`:
 
+- `production default coordinator deadline is 120 seconds`: constructs
+  `StartupCoordinator()` with **no injected deadline** and asserts a hanging
+  marketplace item is not terminal at `119.999 s` but is terminal at exactly
+  `120.000 s`, pinning the production default constant against regression.
 - `hanging marketplace and MCP reach terminal degraded at exactly 120s`: a
   local-state item completes, a marketplace item whose own timeout is 300 s is
   still `running`, an MCP item and a Firebase item are still `queued`. At
@@ -116,11 +128,12 @@ local-folder plugin (`LocalFolderPluginSource`) with
   `PluginActivation.globalActive` + `enabled`.
 - **`session_start` exactly once for every reason with the runtime skill
   visible**: the real installed runtime is promoted globally, then
-  `SessionLifecycleService.I.sessionStarted` is called twice per reason
-  (`created`, `implicit`, `restored`, `subagent`) through the real
-  `HookService` executor. Exactly four events fire (one per session), and the
-  executor observes the mounted `research` skill in
-  `SkillService.skillsForSession(sessionId)` for all four.
+  `SessionLifecycleService.I.sessionStarted` is called once per reason
+  (`created`, `implicit`, `restored`, `subagent`) followed by a duplicate call
+  with a **different** reason, through the real `HookService` executor. Exactly
+  four events fire (one per session) — the first reason wins and exactly-once
+  is reason-independent — and the executor observes the mounted `research`
+  skill in `SkillService.skillsForSession(sessionId)` for all four.
 - The AppState creation paths themselves (`newSession`, implicit first,
   restored active, subagent `dispatch_agent`) and hook ordering remain pinned
   by `test/session_plugin_lifecycle_test.dart` (21/21).
@@ -128,8 +141,10 @@ local-folder plugin (`LocalFolderPluginSource`) with
 ## 5. Legacy migration recovery
 
 Third cross-task test in `test/core_regression_test.dart`. It seeds legacy
-installed/enabled rows with a hook map (`on_turn_start`) and a cached
-`skills/legacy-skill/SKILL.md`, then boots the readiness queue.
+installed/enabled rows with a hook map (`on_turn_start`), then boots the
+readiness queue. The cached `skills/legacy-skill/SKILL.md` is written **after**
+that boot (immediately before the execution probes), so the probe proves a
+post-migration cache cannot be mounted.
 
 - After `local.hydrate` + `localSafety.migrate`, the row is `enabled == false`,
   `PluginActivation.disabled`, `migrationRequired == true`, with reason
@@ -137,7 +152,8 @@ installed/enabled rows with a hook map (`on_turn_start`) and a cached
   `StartupItemState.migrationRequired`.
 - The legacy hook map does not execute (`HookService.fire('on_turn_start', …)`
   makes zero executor calls), `hasLegacyMapHookListeners('on_turn_start')` is
-  false, and the cached legacy skill is absent from the catalog.
+  false, and the cached legacy skill (written after migration) is absent from
+  the catalog.
 - The recovery path then runs `inspect` → approve → `installPlugin` →
   `activateForBoot`. The row becomes `runtimeId == acme/research-kit`,
   `migrationRequired == false`, `enabled == true`; the normalized skill resolves
@@ -158,9 +174,14 @@ Migration/row/grant behavior is additionally pinned by
 | SHA-256 | `60ba182f8fdfcf9d6f220bbb70c9ded223ca759035258ce3738a874a15cb704e` |
 | Build command | `flutter build apk --debug` |
 | Build time | 340.9 s |
+| Built from | Task 9 verification commit `8033f31` (working tree) |
 
 This is a debug build; it is an artifact-integrity and buildability gate, not a
-release-signed artifact.
+release-signed artifact. The APK is **workspace-bound and gitignored** (it lives
+under `/build/`, which `.gitignore` excludes): a debug build is not
+byte-reproducible across machines, and the SHA-256 above pins this specific
+workspace artifact only, not a reproducible release. The docs/test-only
+accuracy follow-up does not rebuild it.
 
 ## 7. Offline startup and observability
 
@@ -189,7 +210,7 @@ devices attached. Therefore **every row below is `NOT EXECUTED`**.
 
 | # | Check | Status | Evidence / notes |
 |---|---|---|---|
-| 1 | Offline startup: launch with no network, shell/composer usable, first frame < 3 s | NOT EXECUTED | No Android device/emulator attached. Automated offline first-frame pin: 296 ms cold / 139 ms warm on host. |
+| 1 | Offline startup: launch with no network, shell/composer usable, first frame < 3 s | NOT EXECUTED | No Android device/emulator attached. Automated offline first-frame pin: `startup_performance_test.dart` asserts first frame < 3 s with all optional/plugin stages hanging. |
 | 2 | One hanging MCP: does not block first frame; item degrades at its budget | NOT EXECUTED | No device. Automated fake-time pin in `startup_performance_test.dart`. |
 | 3 | One missing-credential MCP: shows `Needs setup: <ENV>` and never dials | NOT EXECUTED | No device. Automated `startup_tasks_test.dart` pin. |
 | 4 | One runtime skill: appears in the installing session, hidden elsewhere before promotion, global after restart | NOT EXECUTED | No device. Automated cross-task pin in `core_regression_test.dart`. |
@@ -204,9 +225,10 @@ devices attached. Therefore **every row below is `NOT EXECUTED`**.
    notification/lifecycle) remains unverified until a release owner runs §8 on
    a physical device.
 2. **Wall-clock first-frame assertion.** The 3-second assertion is host wall
-   clock because the fixture performs real local IO. It has ~10x headroom on
-   this host; a very slow CI host could in principle flake. The 120-second
-   deadline assertion is fake-time exact.
+   clock because the active-session decode runs through a real `Isolate.run`
+   (preferences/storage are in-memory mocks). It has headroom on this host; a
+   very slow CI host could in principle flake. The 120-second deadline
+   assertion is fake-time exact, and no millisecond benchmark is claimed.
 3. **Debug APK size.** 204 MiB is a debug artifact; not representative of a
    release build.
 4. **Strip warnings.** `llvm-strip` does not recognize the debug
@@ -219,7 +241,7 @@ devices attached. Therefore **every row below is `NOT EXECUTED`**.
 ## 10. Gate decision
 
 Automated gates are green: all focused suites, the full core regression
-(555/555), the full Flutter suite (785/785), `flutter analyze` (no issues), the
+(555/555), the full Flutter suite (786/786), `flutter analyze` (no issues), the
 debug APK build, and `git diff --check`. The on-device smoke checklist (§8) is
 `NOT EXECUTED` because no Android device/emulator is attached; on-device release
 sign-off must therefore remain open until a release owner completes it.
