@@ -135,6 +135,20 @@ class PresetRegistry {
         'files outside the workspace.',
   );
 
+  /// Plan preset: the read-only planning policy. Selecting it turns on
+  /// plan mode and applies the Read-Only tool gate; the roster itself is
+  /// unrestricted because the mode gate is what enforces read-only.
+  static const plan = AgentPreset(
+    id: 'plan',
+    label: 'Plan',
+    description: 'Read-only planning — explore and propose before executing.',
+    allowedTools: [],
+    deniedTools: [],
+    persona: 'You are in plan mode. Explore the workspace read-only, then '
+        'present a concrete plan and call exit_plan_mode for approval '
+        'before making any change.',
+  );
+
   static final List<AgentPreset> _custom = [];
 
   static List<AgentPreset> get customPresets => List.unmodifiable(_custom);
@@ -155,7 +169,13 @@ class PresetRegistry {
     return all.firstWhere((p) => p.id == id, orElse: () => standard);
   }
 
-  static const List<AgentPreset> _builtIn = [standard, minimal, studio, code];
+  static const List<AgentPreset> _builtIn = [
+    standard,
+    minimal,
+    studio,
+    code,
+    plan,
+  ];
 
   static List<AgentPreset> get all => [..._builtIn, ..._custom];
 

@@ -175,7 +175,7 @@ class CommandService {
     register(
       AgentCommand(
         name: 'preset',
-        hint: '[standard|minimal|studio|code]',
+        hint: '[standard|minimal|studio|code|plan]',
         description: 'Show or switch this chat\'s agent preset',
         handler: (args) async {
           final app = AppState.I;
@@ -202,11 +202,10 @@ class CommandService {
           // Mid-chat switching is safe: the tool gate and the persona block
           // are both built per run, so the new roster applies from the
           // next message. Blocking it made /preset a no-op on every real
-          // chat.
+          // chat. The `plan` preset additionally owns plan + read-only;
+          // any other preset clears that coupling.
           final hadMessages = s.messages.isNotEmpty;
-          s.presetId = match.id;
-          await app.persistSessions();
-          app.refresh();
+          await AgentService.I.applyPreset(match);
           return CommandResult(
             feedback: 'Preset → ${match.id} (${match.label}) — '
                 '${match.description}'
@@ -255,7 +254,7 @@ class CommandService {
     register(
       AgentCommand(
         name: 'permission',
-        hint: '[read-only|general|studio|full-access|control]',
+        hint: '[general|studio|full-access|control]',
         description: 'Show or set what the agent may do in this chat',
         handler: (args) async {
           final agent = AgentService.I;
@@ -277,7 +276,7 @@ class CommandService {
             return CommandResult(
               feedback:
                   'Unknown preset "$q". Options: '
-                  '${AgentMode.values.map(_permName).join(', ')}.',
+                  '${modeOptionsForPicker().map(_permName).join(', ')}.',
             );
           }
           if ((target == AgentMode.drive || target == AgentMode.control) &&

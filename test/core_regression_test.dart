@@ -844,6 +844,10 @@ void main() {
       expect(AgentMode.studio.label, 'Studio');
       expect(AgentMode.control.label, 'Control');
       expect(AgentMode.values.length, 5);
+      // Read-Only stays reachable internally but is never a direct pick;
+      // the read-only policy is selected through the `plan` preset.
+      expect(modeOptionsForPicker(), isNot(contains(AgentMode.safe)));
+      expect(modeOptionsForPicker().length, AgentMode.values.length - 1);
       // Studio auto-approves everything except commit.
       expect(AgentMode.studio.hint, contains('Studio'));
     });
@@ -6355,6 +6359,12 @@ block</pre>
       expect(PresetRegistry.allows(code, 'browser_navigate'), isFalse);
       expect(PresetRegistry.allows(code, 'generate_image'), isFalse);
       expect(PresetRegistry.allows(code, 'run_shell'), isTrue);
+
+      // Plan preset (new): the read-only planning policy. Its roster is
+      // unrestricted because the plan/read-only mode gate enforces it.
+      final plan = PresetRegistry.byId('plan');
+      expect(plan.id, 'plan');
+      expect(PresetRegistry.all.map((p) => p.id), contains('plan'));
 
       // Unknown id falls back to standard (deny nothing).
       expect(PresetRegistry.byId('nope').id, 'standard');

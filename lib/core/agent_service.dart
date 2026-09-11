@@ -121,6 +121,13 @@ extension AgentModeX on AgentMode {
   };
 }
 
+/// The modes every picker offers. Read-Only stays reachable internally —
+/// legacy sessions persisted as `safe` keep working and
+/// `/permission read-only` stays functional — but it is never a direct
+/// pick: the read-only policy is selected through the `plan` preset.
+List<AgentMode> modeOptionsForPicker() =>
+    AgentMode.values.where((m) => m != AgentMode.safe).toList(growable: false);
+
 /// Live event jisse screens subscribe hote hain.
 /// kind: think | shell | shellOut | nav | page | file | err | done
 class AgentEvent {
@@ -2344,6 +2351,26 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     mode = m; // writes to active session (or detached child)
     events.add(AgentEvent('think', 'access mode → ${m.label}'));
     notifyListeners();
+  }
+
+  /// Applies a preset's full policy to the target session: the roster id,
+  /// plus the plan/read-only coupling the `plan` preset owns. Selecting the
+  /// `plan` preset turns plan mode on and applies the Read-Only tool gate;
+  /// selecting any other preset clears plan mode (and the Read-Only policy
+  /// it owned) so the session is not left gated with no picker entry.
+  Future<void> applyPreset(AgentPreset preset) async {
+    final s = _runSession ?? AppState.I.activeSession;
+    if (s == null) return;
+    s.presetId = preset.id;
+    if (preset.id == 'plan') {
+      s.planMode = true;
+      s.mode = AgentMode.safe.name;
+    } else {
+      s.planMode = false;
+      if (s.mode == AgentMode.safe.name) s.mode = AgentMode.auto.name;
+    }
+    await AppState.I.persistSessions();
+    AppState.I.refresh();
   }
 
   void _emit(String kind, String text) =>

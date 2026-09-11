@@ -1349,7 +1349,7 @@ class _ChatScreenState extends State<ChatScreen>
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 6),
-            for (final m in AgentMode.values)
+            for (final m in modeOptionsForPicker())
               ListTile(
                 dense: true,
                 title: Text(m.label, style: const TextStyle(fontSize: 13.5)),
@@ -1387,44 +1387,46 @@ class _ChatScreenState extends State<ChatScreen>
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
       builder: (_) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 12),
-            const Text(
-              'Agent preset',
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 6),
-            for (final p in PresetRegistry.all)
-              ListTile(
-                dense: true,
-                title: Text(p.label, style: const TextStyle(fontSize: 13.5)),
-                subtitle: Text(
-                  p.description,
-                  style: TextStyle(fontSize: 11, color: Aether.textMuted),
-                ),
-                trailing: AppState.I.activeSession?.presetId == p.id
-                    ? const Icon(Icons.check, size: 16, color: Aether.accent)
-                    : null,
-                onTap: () async {
-                  Navigator.pop(context);
-                  final result =
-                      await CommandService.I.execute('/preset ${p.id}');
-                  if (!context.mounted) return;
-                  final fb = result?.feedback;
-                  if (fb != null && fb.isNotEmpty) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(fb),
-                        behavior: SnackBarBehavior.floating,
-                      ),
-                    );
-                  }
-                },
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 12),
+              const Text(
+                'Agent preset',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
               ),
-            const SizedBox(height: 10),
-          ],
+              const SizedBox(height: 6),
+              for (final p in PresetRegistry.all)
+                ListTile(
+                  dense: true,
+                  title: Text(p.label, style: const TextStyle(fontSize: 13.5)),
+                  subtitle: Text(
+                    p.description,
+                    style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                  ),
+                  trailing: AppState.I.activeSession?.presetId == p.id
+                      ? const Icon(Icons.check, size: 16, color: Aether.accent)
+                      : null,
+                  onTap: () async {
+                    Navigator.pop(context);
+                    final result =
+                        await CommandService.I.execute('/preset ${p.id}');
+                    if (!context.mounted) return;
+                    final fb = result?.feedback;
+                    if (fb != null && fb.isNotEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(fb),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                    }
+                  },
+                ),
+              const SizedBox(height: 10),
+            ],
+          ),
         ),
       ),
     );
@@ -5563,10 +5565,17 @@ class _QuestionsCardState extends State<_QuestionsCard> {
   }
 }
 
+/// Test seam: lets widget tests intercept the workspace chip's Studio
+/// navigation. The chip must never open the in-chat folder picker.
+@visibleForTesting
+void Function(BuildContext context)? workspaceChipOpenStudioForTest;
+
 /// Permission mode chip (Read-Only / General / Full Access / Studio) —
 /// web-IDE dropdown under the input. Tapping cycles; long-press opens sheet.
 /// web-IDE workspace chip — shows the active workspace (repo name, or
-/// "sandbox" when working in the local sandbox).  Tapping opens Studio.
+/// "sandbox" when working in the local sandbox).  Tapping opens Studio;
+/// folder selection lives only in Studio. A pinned folder is shown
+/// read-only on the chip.
 class _WorkspaceChip extends StatelessWidget {
   const _WorkspaceChip();
 
@@ -5593,13 +5602,7 @@ class _WorkspaceChip extends StatelessWidget {
           }
         }
         return GestureDetector(
-          onTap: () {
-            if (isFolder) {
-              _showFolderSheet(context);
-            } else {
-              openStudio(context);
-            }
-          },
+          onTap: () => (workspaceChipOpenStudioForTest ?? openStudio)(context),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
             decoration: BoxDecoration(
@@ -5643,130 +5646,6 @@ class _WorkspaceChip extends StatelessWidget {
     );
   }
 
-  void _showFolderSheet(BuildContext context) {
-    final s = AppState.I.activeSession;
-    if (s == null) return;
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Aether.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (_) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 12),
-            const Text(
-              'Working folder',
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 6),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Text(
-                s.workspaceFolder ?? '',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-              ),
-            ),
-            const SizedBox(height: 6),
-            ListTile(
-              dense: true,
-              leading: const Icon(Icons.drive_file_move_outline, size: 18),
-              title: const Text('Change folder', style: TextStyle(fontSize: 13.5)),
-              onTap: () {
-                Navigator.pop(context);
-                // The old flow cleared the pinned folder BEFORE opening the
-                // picker, so cancelling the picker silently dropped it.
-                // _pickFolderDirect only writes on success.
-                _pickFolderDirect(context);
-              },
-            ),
-            ListTile(
-              dense: true,
-              leading: const Icon(Icons.clear_all_outlined, size: 18),
-              title: const Text('Clear folder (sandbox)', style: TextStyle(fontSize: 13.5)),
-              onTap: () {
-                AppState.I.setSessionWorkspaceFolder(null);
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Working folder cleared — back to sandbox.'),
-                    behavior: SnackBarBehavior.floating,
-                  ),
-                );
-              },
-            ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _pickFolderDirect(BuildContext context) async {
-    String? path;
-    try {
-      path = await FilePicker.platform.getDirectoryPath(
-        dialogTitle: 'Pick working folder',
-      );
-    } catch (_) {
-      path = null;
-    }
-    if (path == null) return;
-    final dir = Directory(path);
-    if (!dir.existsSync()) return;
-    var writable = false;
-    try {
-      final probe = File('$path/.ovid_probe');
-      await probe.writeAsString('ok');
-      writable = true;
-      await probe.delete();
-    } catch (_) {}
-    if (!writable) {
-      final granted = await AgentService.I.requestAllFilesAccess();
-      if (!granted) {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('That folder is read-only for Ovid.'),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
-        return;
-      }
-      try {
-        final probe = File('$path/.ovid_probe');
-        await probe.writeAsString('ok');
-        writable = true;
-        await probe.delete();
-      } catch (_) {
-        writable = false;
-      }
-      if (!writable) {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Folder is still read-only — pick a different one.'),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
-        return;
-      }
-    }
-    AppState.I.setSessionWorkspaceFolder(path);
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Working folder: ${path.split('/').last}'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
-  }
 }
 
 /// web-IDE plan chip — amber "Plan" indicator in the composer, visible only
@@ -5875,7 +5754,7 @@ class _ModeChip extends StatelessWidget {
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 6),
-            for (final m in AgentMode.values)
+            for (final m in modeOptionsForPicker())
               ListTile(
                 dense: true,
                 leading: Icon(m.icon, size: 18, color: m.color),
