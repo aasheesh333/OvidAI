@@ -104,7 +104,7 @@ mkdir -p "$PKG_IDX/archives"
 ARCH="$(uname -m 2>/dev/null || echo aarch64)"
 case "$ARCH" in
   armv7l|armv8l|armv7*) ARCH=arm ;;
-  arm64) ARCH=aarch64 ;;
+  arm64|aarch64) ARCH=aarch64 ;;
 esac
 
 # Mirror order: the app-written list first, then the generated
@@ -134,6 +134,11 @@ _fetch_index() {
   return 0
 }
 
+# A usable index exists on disk and actually carries package records.
+_index_ok() {
+  [ -f "$PKG_IDX/Packages" ] && grep -q '^Package: ' "$PKG_IDX/Packages"
+}
+
 cmd="${1:-}"; shift 2>/dev/null || true
 case "$cmd" in
   update)
@@ -141,15 +146,13 @@ case "$cmd" in
     echo "[ovid-pkg] fetch index → $url (curl — apt https is unreliable)"
     _fetch_index "$url" || { echo "[ovid-pkg] index fetch failed" >&2; exit 1; }
     [ ! -f "$PKG_IDX/Packages" ] && { echo "[ovid-pkg] no index on disk" >&2; exit 1; }
-    grep -q '^Package: ' "$PKG_IDX/Packages" \
-      || { echo "[ovid-pkg] index empty or stale" >&2; exit 1; }
+    _index_ok || { echo "[ovid-pkg] index empty or stale" >&2; exit 1; }
     echo "[ovid-pkg] index ready ($(wc -l < "$PKG_IDX/Packages") lines)"
     ;;
   search)
     pat="${1:-}"; [ -z "$pat" ] && { echo "usage: ovid-pkg search '<text>'" >&2; exit 1; }
-    [ ! -f "$PKG_IDX/Packages" ] && ovid-pkg update
-    [ ! -f "$PKG_IDX/Packages" ] \
-      && { echo "[ovid-pkg] no index; run 'ovid-pkg update'" >&2; exit 1; }
+    if ! _index_ok; then ovid-pkg update || exit 1; fi
+    _index_ok || { echo "[ovid-pkg] index empty or stale" >&2; exit 1; }
     grep -B8 -- "$pat" "$PKG_IDX/Packages" | grep '^Package: ' | sort -u | head -40
     ;;
   install)
@@ -165,9 +168,8 @@ case "$cmd" in
     # shellcheck disable=SC2086
     set -- $_names
     [ "$#" -lt 1 ] && { echo "usage: ovid-pkg install <pkg>..." >&2; exit 1; }
-    [ ! -f "$PKG_IDX/Packages" ] && ovid-pkg update
-    [ ! -f "$PKG_IDX/Packages" ] \
-      && { echo "[ovid-pkg] no index; run 'ovid-pkg update'" >&2; exit 1; }
+    if ! _index_ok; then ovid-pkg update || exit 1; fi
+    _index_ok || { echo "[ovid-pkg] index empty or stale" >&2; exit 1; }
     work="$PKG_IDX/archives"; targets=""; pending="$*"; missing=""
     for round in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
       [ -z "$pending" ] && break
