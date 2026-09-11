@@ -626,6 +626,13 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+/// Optional diagnostic observer invoked when the keyed anchor row is not built
+/// after a prepend and the coarse extent-delta fallback runs. `null` in
+/// production, so the restore path stays free of global side effects; tests
+/// inject a counter to prove the fallback was exercised. Not read by any
+/// production code path.
+void Function()? transcriptAnchorFallbackObserver;
+
 /// A keyed scroll anchor: the transcript item key that was at the top of the
 /// viewport when a page of older history began loading, plus the offset it had
 /// from the viewport top (and the scroll metrics at capture time, used only
@@ -682,9 +689,8 @@ class _ChatScreenState extends State<ChatScreen>
   // ── Keyed scroll anchoring (Task 7) ──
   // Paging older history records the top visible item's key + offset before
   // the window grows, then restores that item to the same offset afterwards,
-  // so prepended rows never jump the viewport. Tip-follow uses a signature
-  // (last item key + rendered row count) so a stream auto-scrolls only when
-  // the user is already at the bottom.
+  // so prepended rows never jump the viewport. Tip-follow keeps an at-bottom
+  // user pinned; a scrolled-up user is never moved.
 
   /// Row keys for the transcript list currently on screen: index = ListView
   /// row, value = the item's stable key (its first message index) or a
@@ -693,7 +699,10 @@ class _ChatScreenState extends State<ChatScreen>
   List<Object> _rowKeys = const [];
   static const Object _affordanceRowKey = 'transcript-affordance';
   static const Object _tailRowKey = 'transcript-tail';
-  (Object?, int)? _tipSignature;
+
+  /// True while a post-frame bottom-follow jump is already scheduled. Bursts
+  /// of rebuilds within one frame are collapsed into a single jump.
+  bool _followScheduled = false;
 
   // ── Windowed transcript cache (Task 4) ──
   // The folded window is recomputed only when the session, message count, the
@@ -737,7 +746,7 @@ class _ChatScreenState extends State<ChatScreen>
     _atBottom = true;
     _showJumpFab = false;
     _visibleCount = _pageSize; // lazy paging resets per session
-    _tipSignature = null; // tip-follow re-arms for the new transcript
+    _followScheduled = false; // tip-follow re-arms for the new transcript
   }
 
   void _openPlugins(BuildContext context, {String? focusCanonicalId}) {
@@ -945,6 +954,7 @@ class _ChatScreenState extends State<ChatScreen>
       _jumpToOffset(offset - anchor.viewportOffset);
       return;
     }
+    transcriptAnchorFallbackObserver?.call();
     final delta = _scroll.position.maxScrollExtent - anchor.maxScrollExtent;
     _jumpToOffset(anchor.pixels + delta);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -954,17 +964,23 @@ class _ChatScreenState extends State<ChatScreen>
     });
   }
 
-  /// Called from the message-list builder when content changes — keeps the
-  /// stream pinned to the bottom only if the user was already at the bottom
-  /// AND the tip actually changed (last item key + rendered row count).
-  void _maybeFollowTip(TranscriptWindow window) {
-    final items = window.visible;
-    final lastKey = items.isEmpty ? null : _itemKey(items.last);
-    final signature = (lastKey, _rowKeys.length);
-    if (signature == _tipSignature) return;
-    _tipSignature = signature;
+  /// Called from the message-list builder on every rebuild — keeps the stream
+  /// pinned to the bottom while the user is at the bottom.
+  ///
+  /// The jump is NOT gated on a tip key/count signature: a live stream mutates
+  /// the last message IN PLACE (`AppState.refresh()` per token), so the folded
+  /// window's key and row count stay constant even though the rendered height
+  /// grows every token. A signature-only gate stopped following mid-stream and
+  /// let new tokens scroll off-screen (Task 7 review I1). Instead, schedule a
+  /// post-frame jump whenever [_atBottom] is true; [_followScheduled] collapses
+  /// redundant schedules within a frame, and the callback re-checks [_atBottom]
+  /// so a user who scrolls up is never yanked to the bottom.
+  void _maybeFollowTip() {
     if (!_atBottom) return;
+    if (_followScheduled) return;
+    _followScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _followScheduled = false;
       if (!mounted || !_scroll.hasClients) return;
       // Re-check: the user may have scrolled up before the frame settled.
       if (!_atBottom) return;
@@ -1227,7 +1243,7 @@ class _ChatScreenState extends State<ChatScreen>
                                       typing,
                                       showProduced,
                                     );
-                                    _maybeFollowTip(window);
+                                    _maybeFollowTip();
                                     final list = ListView.builder(
                                       key: const ValueKey(
                                         'chat-transcript-list',
