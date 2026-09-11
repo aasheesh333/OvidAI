@@ -1590,6 +1590,11 @@ class AppState extends ChangeNotifier {
     final runtimeManaged = runtimeId != null;
     plugin.installed = false;
     plugin.enabled = false;
+    // Terminal removal clears the fail-closed migration marker for every row
+    // (legacy and runtime-managed): an uninstalled row is `Available`, never
+    // `Migration required`. Persisted below, so a cold load cannot resurrect it.
+    plugin.migrationRequired = false;
+    plugin.runtimeReason = null;
     if (runtimeId != null) {
       // Task 7: runtime-managed rows tear down the atomic install
       // (registry, committed content, dependency sandbox, activation

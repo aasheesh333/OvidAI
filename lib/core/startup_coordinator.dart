@@ -507,6 +507,7 @@ class StartupCoordinator extends ChangeNotifier {
           task.label,
           reason: 'Startup task returned a non-terminal state',
           attempt: attempt,
+          ownerId: result.ownerId,
         );
       }
       return StartupItemStatus(
@@ -518,6 +519,11 @@ class StartupCoordinator extends ChangeNotifier {
             ? null
             : redactStartupError(result.reason!),
         attempt: attempt,
+        // A task may compute its owner dynamically at run time (for example
+        // the aggregate `localSafety.migrate` item, which is not a
+        // [StartupOwnedTask]). Preserve the owner the task returned so the
+        // snapshot and `Open Plugins` deep-link keep it.
+        ownerId: result.ownerId,
       );
     } on TimeoutException {
       return StartupItemStatus.degraded(

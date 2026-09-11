@@ -57,6 +57,35 @@ final class _Task implements StartupTask, StartupOwnedTask {
 StartupItemStatus _ready(String id, StartupItemKind kind, String label) =>
     StartupItemStatus.ready(id, kind, label);
 
+/// A task with no static owner. Its [run] may return a status carrying an
+/// owner id computed at run time — the aggregate `localSafety.migrate` case.
+final class _PlainTask implements StartupTask {
+  _PlainTask(
+    this.id, {
+    required this.kind,
+    required this.label,
+    required Future<StartupItemStatus> Function() run,
+    // ignore: prefer_initializing_formals
+  }) : _run = run;
+
+  @override
+  final String id;
+  @override
+  final StartupItemKind kind;
+  @override
+  final String label;
+  @override
+  Duration get timeout => const Duration(seconds: 15);
+
+  final Future<StartupItemStatus> Function() _run;
+
+  @override
+  StartupDisable? get onDisable => null;
+
+  @override
+  Future<StartupItemStatus> run() => _run();
+}
+
 StartupItemStatus _terminal(
   String id,
   StartupItemKind kind,
@@ -1339,6 +1368,59 @@ void main() {
         findsOneWidget,
       );
       expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'Open Plugins receives the owner a non-owned task returned at run time',
+    (tester) async {
+      final c = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      String? openedWith;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: Scaffold(
+            body: StartupProgressPanel(
+              coordinator: c,
+              onOpenPlugins: (id) => openedWith = id,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      unawaited(
+        c.start([
+          _PlainTask(
+            'localSafety.migrate',
+            kind: StartupItemKind.localState,
+            label: 'Check local plugin safety',
+            run: () async => StartupItemStatus.migrationRequired(
+              'localSafety.migrate',
+              StartupItemKind.localState,
+              'Check local plugin safety',
+              reason: 'Re-approve this legacy plugin before it can run',
+              ownerId: 'legacy:legacy/solo:0',
+            ),
+          ),
+        ]),
+      );
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+      // All items terminal → auto-collapsed; re-expand to reach the action.
+      await tester.tap(find.byKey(const ValueKey('startup-panel-toggle')));
+      await tester.pump();
+      await tester.tap(
+        find.byKey(
+          const ValueKey('startup-open-plugins-localSafety.migrate'),
+        ),
+      );
+      await tester.pump();
+
+      expect(openedWith, 'legacy:legacy/solo:0');
     },
   );
 }

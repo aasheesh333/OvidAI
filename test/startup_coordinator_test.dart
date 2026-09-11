@@ -838,6 +838,39 @@ void main() {
       expect(emitted['mcp.connect:acme/server'], 'acme/server');
     });
   });
+
+  test(
+    'a non-owned task returning an ownerId keeps it through the real queue',
+    () async {
+      final emitted = <String, String?>{};
+      final coordinator = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+        statusSink: (status, ownerId) => emitted[status.id] = ownerId,
+      );
+
+      await coordinator.start([
+        FakeStartupTask(
+          'localSafety.migrate',
+          kind: StartupItemKind.localState,
+          label: 'Check local plugin safety',
+          run: () async => StartupItemStatus.migrationRequired(
+            'localSafety.migrate',
+            StartupItemKind.localState,
+            'Check local plugin safety',
+            reason: 'Re-approve this legacy plugin before it can run',
+            ownerId: 'legacy:legacy/solo:0',
+          ),
+        ),
+      ]);
+
+      expect(
+        _status(coordinator, 'localSafety.migrate').ownerId,
+        'legacy:legacy/solo:0',
+        reason: 'the snapshot must carry the owner the task returned',
+      );
+      expect(emitted['localSafety.migrate'], 'legacy:legacy/solo:0');
+    },
+  );
 }
 
 StartupItemStatus _status(StartupCoordinator coordinator, String id) =>

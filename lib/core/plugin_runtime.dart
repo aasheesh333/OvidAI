@@ -1383,6 +1383,10 @@ class PluginRuntimeManager extends ChangeNotifier {
       p.immediateSessionId = null;
       p.promoteOnNextBoot = false;
       p.activation = PluginActivation.disabled;
+      // Terminal removal: a removed row must never keep the fail-closed
+      // migration marker, which would otherwise surface on an `Available` row.
+      p.migrationRequired = false;
+      p.runtimeReason = null;
     }
   }
 

@@ -1416,4 +1416,69 @@ void main() {
       expect(status.ownerId, kMigrationRequiredFocusId);
     },
   );
+
+  test(
+    'uninstalling a migration-required legacy row clears its marker',
+    () async {
+      final legacy = PluginItem(
+        name: 'Legacy Uninstall',
+        author: 'legacy',
+        description: '',
+        version: '1',
+        category: 'Tool',
+        installed: true,
+        enabled: false,
+        source: 'legacy/uninstall',
+        migrationRequired: true,
+        runtimeReason: 'Re-approve this legacy plugin before it can run',
+      );
+      app.plugins.add(legacy);
+      await app.persistPluginState();
+
+      await app.uninstallPlugin(legacy);
+
+      expect(legacy.installed, isFalse);
+      expect(legacy.migrationRequired, isFalse);
+      expect(legacy.runtimeReason, isNull);
+
+      // The persisted legacy row must not resurrect the migration marker on
+      // the next cold load.
+      final prefs = await SharedPreferences.getInstance();
+      final state =
+          (jsonDecode(prefs.getString('ovid_plugin_state_v1')!)
+                  as Map<String, dynamic>)
+              .cast<String, dynamic>();
+      final persisted =
+          jsonDecode(state['Legacy Uninstall'] as String)
+              as Map<String, dynamic>;
+      expect(persisted['migrationRequired'], isNot(true));
+      expect(persisted.containsKey('runtimeReason'), isFalse);
+    },
+  );
+
+  test(
+    'runtime uninstall clears a migration marker on the projected row',
+    () async {
+      final runtime = manifest('acme/uninstall-migration');
+      final row = PluginItem(
+        name: 'Runtime Migrate',
+        author: 'acme',
+        description: '',
+        version: '1.0.0',
+        category: 'Tool',
+        installed: true,
+        enabled: false,
+        runtimeId: runtime.id,
+        migrationRequired: true,
+        runtimeReason: 'Re-approve this plugin before it can run',
+      );
+      app.plugins.add(row);
+
+      await PluginRuntimeManager.I.uninstall(runtime.id);
+
+      expect(row.runtimeId, isNull);
+      expect(row.migrationRequired, isFalse);
+      expect(row.runtimeReason, isNull);
+    },
+  );
 }
