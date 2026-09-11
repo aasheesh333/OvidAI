@@ -671,7 +671,11 @@ class SandboxService {
       // wrappers — npm/npx (no Termux-env dependency), ovid-pkg + apt/pkg
       // wrappers. Without this a fresh install on a broken device can't
       // ever get started whatever path got the bits in place.
-      OvidPkgInstaller.writeAll(prefix);
+      OvidPkgInstaller.writeAll(
+        prefix,
+        arch: aptArchFor(_payloadAbi, _deviceArch),
+        mirrors: _aptMirrors,
+      );
     }
 
     // Verify node + npm/npx.
@@ -1826,7 +1830,11 @@ audit=false
       // Termux-shebang chain permanently. Runs on every boot (cheap).
       // Plus ovi-pkg + apt/pkg wrappers living on disk so shell work in
       // the sandbox never needs apt's broken https transport.
-      OvidPkgInstaller.writeAll(prefix);
+      OvidPkgInstaller.writeAll(
+        prefix,
+        arch: aptArchFor(_payloadAbi, _deviceArch),
+        mirrors: _aptMirrors,
+      );
     } catch (_) {
       // Self-heal must never break the boot.
     }

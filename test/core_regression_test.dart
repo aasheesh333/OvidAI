@@ -10201,10 +10201,10 @@ url = "https://api.example.com/mcp"
       'K4: SandboxService hooks OvidPkgInstaller.writeAll in selfHeal and install',
       () {
         final src = File('lib/core/sandbox_service.dart').readAsStringSync();
-        expect(src, contains('OvidPkgInstaller.writeAll(prefix)'));
-        // Appears in both _installRuntime and _selfHeal
+        // Appears in both _installRuntime and _selfHeal, now with the
+        // baked arch + mirror pool arguments.
         final count = RegExp(
-          r'OvidPkgInstaller\.writeAll\(prefix\)',
+          r'OvidPkgInstaller\.writeAll\(\s*prefix\b',
         ).allMatches(src).length;
         expect(count, greaterThanOrEqualTo(2));
       },
