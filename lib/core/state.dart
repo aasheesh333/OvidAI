@@ -2485,18 +2485,37 @@ class AppState extends ChangeNotifier {
   String lastSelectedModel = '';
   String? lastSelectedProviderId;
 
+  /// Last Studio repo (owner/name) and pinned workspace folder — carried into
+  /// new sessions so a restart never forces fresh repo/folder selection.
+  String? lastRepoFull;
+  String lastBranch = 'main';
+  String? lastWorkspaceFolder;
+
   Future<void> _loadLastSelection() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       lastSelectedModel = prefs.getString(_kLastModel) ?? '';
       lastSelectedProviderId = prefs.getString(_kLastProvider);
+      lastRepoFull = prefs.getString(_kLastRepo);
+      lastBranch = prefs.getString(_kLastBranch) ?? 'main';
+      lastWorkspaceFolder = prefs.getString(_kLastWorkspace);
       // Backfill from the currently-restored active session if nothing
       // was persisted yet (upgrade path for existing installs).
+      final s = activeSession;
       if (lastSelectedModel.isEmpty) {
-        final s = activeSession;
         if (s != null && s.model != 'Select a provider') {
           lastSelectedModel = s.model;
           lastSelectedProviderId = s.providerId;
+        }
+      }
+      if (lastRepoFull == null || lastRepoFull!.isEmpty) {
+        final repo = s?.repo;
+        if (repo != null && repo.isNotEmpty) lastRepoFull = repo;
+      }
+      if (lastWorkspaceFolder == null || lastWorkspaceFolder!.isEmpty) {
+        final folder = s?.workspaceFolder;
+        if (folder != null && folder.isNotEmpty) {
+          lastWorkspaceFolder = folder;
         }
       }
     } catch (_) {}
@@ -2511,7 +2530,33 @@ class AppState extends ChangeNotifier {
       if (lastSelectedProviderId != null) {
         await prefs.setString(_kLastProvider, lastSelectedProviderId!);
       }
+      if (lastRepoFull != null && lastRepoFull!.isNotEmpty) {
+        await prefs.setString(_kLastRepo, lastRepoFull!);
+      } else {
+        await prefs.remove(_kLastRepo);
+      }
+      if (lastBranch.isNotEmpty) {
+        await prefs.setString(_kLastBranch, lastBranch);
+      }
+      if (lastWorkspaceFolder != null && lastWorkspaceFolder!.isNotEmpty) {
+        await prefs.setString(_kLastWorkspace, lastWorkspaceFolder!);
+      } else {
+        await prefs.remove(_kLastWorkspace);
+      }
     } catch (_) {}
+  }
+
+  /// A persisted workspace folder is only reused while it still exists on
+  /// disk; a vanished path (deleted dir / unmounted drive) falls back to the
+  /// per-session sandbox by returning null.
+  String? _resolvedLastWorkspaceFolder() {
+    final folder = lastWorkspaceFolder;
+    if (folder == null || folder.trim().isEmpty) return null;
+    try {
+      return Directory(folder).existsSync() ? folder : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   static const _kSessions = 'ovid_sessions';
@@ -2520,6 +2565,9 @@ class AppState extends ChangeNotifier {
   static const _kProviders = 'ovid_provider_configs_v1';
   static const _kLastModel = 'ovid_last_model';
   static const _kLastProvider = 'ovid_last_provider';
+  static const _kLastRepo = 'ovid_last_repo';
+  static const _kLastBranch = 'ovid_last_branch';
+  static const _kLastWorkspace = 'ovid_last_workspace';
   Future<void> _providerWrite = Future<void>.value();
   Future<void> _credentialWrite = Future<void>.value();
 
@@ -3833,6 +3881,8 @@ class AppState extends ChangeNotifier {
         : path.trim();
     if (s.workspaceFolder == normalized) return;
     s.workspaceFolder = normalized;
+    lastWorkspaceFolder = normalized;
+    unawaited(_persistLastSelection());
     _markSessionDirty(s.id);
     notifyListeners();
     persistSessions();
@@ -3850,9 +3900,11 @@ class AppState extends ChangeNotifier {
       s.providerId =
           lastSelectedProviderId ?? _inferProviderId(lastSelectedModel);
     }
-    // New session starts with its own default browser tab + the global
-    // repo as its Studio repo (fresh per-session state, cookies shared).
-    s.repo = null;
+    // New session starts with its own default browser tab + the last Studio
+    // repo/folder so a restart never forces fresh selection (fresh per-session
+    // state, cookies shared). A vanished folder falls back to the sandbox.
+    s.repo = lastRepoFull;
+    s.workspaceFolder = _resolvedLastWorkspaceFolder();
     sessions.insert(0, s);
     activeSessionId = s.id;
     onSessionSwitched?.call(s.id);
@@ -5771,16 +5823,19 @@ class AppState extends ChangeNotifier {
   // ── Per-session repo selection (Studio) ─────────────────────────────
   /// Repo bound to a session.  Falls back to [fallback] (the global
   /// AgentService.repoFull — passed by the caller to avoid a circular
-  /// import) when the session has no repo of its own.
+  /// import) when the session has no repo of its own, then to the persisted
+  /// [lastRepoFull] so agent tools resolve after a restart.
   String? getRepoForSession(String sessionId, {String? fallback}) {
     final session = sessions.where((s) => s.id == sessionId).firstOrNull;
-    return session?.repo ?? fallback;
+    return session?.repo ?? fallback ?? lastRepoFull;
   }
 
   void setRepoForSession(String sessionId, String repoFull) {
     final session = sessions.where((s) => s.id == sessionId).firstOrNull;
     if (session != null) {
       session.repo = repoFull;
+      lastRepoFull = repoFull;
+      unawaited(_persistLastSelection());
       persistSessions();
       refresh();
     }
