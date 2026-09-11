@@ -281,7 +281,7 @@ void main() {
     });
 
     test(
-      'a /permission read-only session is not clobbered by a plan exit',
+      'an independent /permission read-only session stays read-only',
       () async {
         final s = planSession('plan-independent-ro');
         await CommandService.I.execute('/permission read-only');
@@ -289,20 +289,128 @@ void main() {
         expect(s.planMode, isFalse);
         expect(s.planPreMode, isNull);
 
-        // Enter and leave plan WITHOUT the plan preset owning the read-only
-        // mode: the independently-set safe mode must survive.
-        await CommandService.I.execute('/plan');
-        expect(s.planMode, isTrue);
+        // A plan cycle on a DIFFERENT session must not touch it.
+        final other = planSession('plan-independent-other');
+        await CommandService.I.execute('/preset plan');
         await CommandService.I.execute('/plan off');
+        expect(other.mode, 'auto');
 
-        expect(s.planMode, isFalse);
         expect(
           s.mode,
           'safe',
-          reason: 'plan must not release a read-only mode it did not set',
+          reason: 'independent read-only (planMode=false) is untouched',
         );
+        expect(s.planMode, isFalse);
+        expect(s.planPreMode, isNull);
       },
     );
+
+    // Entry-order regression: `/plan` sets planMode first, then
+    // `/preset plan` introduces safe read-only. Ownership must still be
+    // recorded so a plan exit releases it.
+    test(
+      '/plan then /preset plan then approve exit_plan_mode releases read-only',
+      () async {
+        final s = planSession('plan-order-approve');
+        AgentService.setRunSessionForTest(s.id);
+
+        await CommandService.I.execute('/plan');
+        expect(s.planMode, isTrue);
+        expect(s.mode, 'auto');
+
+        await CommandService.I.execute('/preset plan');
+        expect(s.planMode, isTrue);
+        expect(s.mode, 'safe');
+        expect(
+          s.planPreMode,
+          'auto',
+          reason: 'ownership must be recorded even though planMode was set',
+        );
+
+        final planFuture = AgentService.I.dispatchForTest('exit_plan_mode', {
+          'plan': 'Do it',
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(AgentService.I.pendingApproval, isNotNull);
+        AgentService.I.approve(true);
+        expect(await planFuture, contains('approved'));
+
+        expect(s.planMode, isFalse);
+        expect(s.mode, 'auto');
+        expect(s.planPreMode, isNull);
+
+        // A mutating tool is allowed again.
+        final res = await AgentService.I.dispatchForTest('device_read', {});
+        expect(res, isNot(contains('PLAN MODE ACTIVE')));
+        expect(res, isNot(contains('READ-ONLY MODE')));
+        expect(res, contains('Control mode'));
+      },
+    );
+
+    test('/plan then /preset plan then /plan off releases read-only', () async {
+      final s = planSession('plan-order-off');
+      await CommandService.I.execute('/plan');
+      await CommandService.I.execute('/preset plan');
+      expect(s.mode, 'safe');
+      expect(s.planPreMode, 'auto');
+
+      await CommandService.I.execute('/plan off');
+      expect(s.planMode, isFalse);
+      expect(s.mode, 'auto');
+      expect(s.planPreMode, isNull);
+    });
+
+    testWidgets(
+        '/plan then /preset plan then tapping the Plan chip releases read-only',
+        (tester) async {
+      final s = planSession('plan-order-chip');
+      await CommandService.I.execute('/plan');
+      await CommandService.I.execute('/preset plan');
+      expect(s.mode, 'safe');
+
+      await tester.pumpWidget(
+        MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.text('Plan'));
+      await tester.pump();
+
+      expect(s.planMode, isFalse);
+      expect(s.mode, 'auto');
+      expect(s.planPreMode, isNull);
+    });
+
+    // Upgrade regression: a session persisted by the round-1 bug
+    // (planMode=true, mode=safe, planPreMode=null) must not stay locked
+    // after a plan exit.
+    test('legacy persisted plan session releases read-only on exit', () async {
+      final app = AppState.I;
+      final legacy = ChatSession.fromJson({
+        'id': 'legacy-plan',
+        'title': 'Legacy',
+        'model': 'm',
+        'mode': 'safe',
+        'planMode': true,
+      });
+      expect(legacy.mode, 'safe');
+      expect(legacy.planMode, isTrue);
+      expect(legacy.planPreMode, isNull);
+      app.sessions.add(legacy);
+      app.activeSessionId = legacy.id;
+      AgentService.setRunSessionForTest(legacy.id);
+
+      await CommandService.I.execute('/plan off');
+
+      expect(legacy.planMode, isFalse);
+      expect(
+        legacy.mode,
+        'auto',
+        reason: 'legacy plan-owned read-only must not stay locked',
+      );
+      expect(legacy.planPreMode, isNull);
+    });
 
     // M1: a direct mode pick must clear planMode so picker state and the
     // enforcement gate agree.

@@ -875,12 +875,13 @@ class ChatSession {
   bool planMode;
 
   /// The access mode the `plan` preset overrode when it entered plan mode.
-  /// Non-null ONLY while the plan preset owns the session's read-only mode:
-  /// entering plan from a non-safe mode stores the prior mode here and sets
-  /// `mode = safe`; every plan exit restores it. A session made read-only by
-  /// `/permission read-only` (or a legacy persisted `safe`) leaves this null,
-  /// so a later plan exit never clobbers a user's independent read-only.
-  /// Persisted with the session.
+  /// Recorded when the plan preset introduces safe read-only (the session
+  /// was not already `safe`), regardless of entry order. Every plan exit
+  /// restores it. When it is null and the session exits plan while `safe`
+  /// (the legacy round-1 state, or an already-safe session the plan preset
+  /// gated), the exit releases the read-only to `auto` rather than leaving
+  /// the session locked. An independent `/permission read-only` session has
+  /// `planMode=false` and never reaches a plan exit. Persisted.
   String? planPreMode;
 
   /// Session-local reminders (the reminder scheduler schedule equivalent) — created by

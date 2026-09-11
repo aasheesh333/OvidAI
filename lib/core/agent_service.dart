@@ -723,10 +723,10 @@ class AgentService extends ChangeNotifier {
     if (s != null) {
       final wasPlan = s.planMode;
       s.planMode = v;
-      // Every plan-mode exit releases the read-only mode the plan PRESET
-      // set (approval of exit_plan_mode, `/plan off`, the composer Plan
-      // chip). A read-only mode the user set independently is left alone
-      // because `planPreMode` is null in that case.
+      // Every plan-mode exit releases the read-only mode the plan policy
+      // introduced (approval of exit_plan_mode, `/plan off`, the composer
+      // Plan chip). An independent `/permission read-only` session has
+      // planMode=false and never reaches this path.
       if (!v && wasPlan) _releasePlanOwnedMode(s);
       AppState.I.persistSessions();
     }
@@ -736,16 +736,23 @@ class AgentService extends ChangeNotifier {
   }
 
   /// Restores the access mode the `plan` preset overrode when it entered
-  /// plan mode. No-op when the read-only mode was NOT plan-owned
-  /// (`planPreMode` null), so `/permission read-only` and legacy `safe`
-  /// sessions are never clobbered by a plan exit.
+  /// plan mode. When no pre-mode was recorded the plan-owned read-only is
+  /// released to `auto` instead of leaving the session locked. This covers
+  /// both the entry-order case (`/plan` set `planMode` first, so the plan
+  /// preset introduced safe without a recorded pre-mode) and the legacy
+  /// persisted state (`planMode=true, mode=safe, planPreMode=null` from the
+  /// round-1 bug). An independent `/permission read-only` session has
+  /// `planMode=false` and never reaches a plan exit, so it is never touched.
   void _releasePlanOwnedMode(ChatSession s) {
     final pre = s.planPreMode;
-    if (pre == null) return;
     s.planPreMode = null;
-    s.mode = AgentMode.values.any((m) => m.name == pre)
-        ? pre
-        : AgentMode.auto.name;
+    if (pre != null) {
+      s.mode = AgentMode.values.any((m) => m.name == pre)
+          ? pre
+          : AgentMode.auto.name;
+      return;
+    }
+    if (s.mode == AgentMode.safe.name) s.mode = AgentMode.auto.name;
   }
 
   bool get cancelRequested => _runResolved.cancelRequested;
@@ -2394,21 +2401,24 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// mode the plan preset itself set, so the session is never left gated
   /// with no picker entry.
   ///
-  /// Only the read-only the plan preset introduces is released. If the
-  /// session was ALREADY read-only when plan was selected (an independent
-  /// `/permission read-only`, or a legacy persisted `safe`), `planPreMode`
-  /// stays null and a later plan exit leaves that mode untouched — the
-  /// safe→previous promotion is plan-owned only.
+  /// When the plan preset introduces safe read-only it records the prior
+  /// mode in `planPreMode` (regardless of entry order — `/plan` first is
+  /// fine). Every plan exit restores it; when no pre-mode was recorded the
+  /// exit releases `safe` to `auto` rather than leaving the session locked.
+  /// An independent `/permission read-only` session has `planMode=false`
+  /// and never reaches a plan exit, so it is never touched.
   Future<void> applyPreset(AgentPreset preset) async {
     final s = _runSession ?? AppState.I.activeSession;
     if (s == null) return;
     s.presetId = preset.id;
     if (preset.id == 'plan') {
-      if (!s.planMode) {
-        // Entering plan: the preset owns the read-only only when it is the
-        // one introducing it. An already-read-only session keeps its mode
-        // and `planPreMode` stays null so a later exit leaves it alone.
-        s.planPreMode = s.mode == AgentMode.safe.name ? null : s.mode;
+      // Record ownership whenever the plan preset is the one INTRODUCING
+      // safe read-only — independent of whether planMode was already true
+      // (e.g. `/plan` entered first). An already-safe session keeps its
+      // mode and records no pre-mode; a later plan exit releases it to
+      // `auto` (see `_releasePlanOwnedMode`).
+      if (s.mode != AgentMode.safe.name && s.planPreMode == null) {
+        s.planPreMode = s.mode;
       }
       s.planMode = true;
       if (s.mode != AgentMode.safe.name) s.mode = AgentMode.safe.name;
