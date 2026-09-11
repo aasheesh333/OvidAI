@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
@@ -625,6 +626,24 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+/// A keyed scroll anchor: the transcript item key that was at the top of the
+/// viewport when a page of older history began loading, plus the offset it had
+/// from the viewport top (and the scroll metrics at capture time, used only
+/// for the coarse out-of-cache fallback).
+class _ScrollAnchor {
+  final Object key;
+  final double viewportOffset;
+  final double pixels;
+  final double maxScrollExtent;
+
+  const _ScrollAnchor({
+    required this.key,
+    required this.viewportOffset,
+    required this.pixels,
+    required this.maxScrollExtent,
+  });
+}
+
 class _ChatScreenState extends State<ChatScreen>
     with SingleTickerProviderStateMixin {
   final _input = TextEditingController();
@@ -659,6 +678,22 @@ class _ChatScreenState extends State<ChatScreen>
   int _visibleCount = _pageSize;
   bool _paging = false; // blocks re-entrant top-of-list pagination
   bool _hasEarlier = false; // older messages exist above the visible window
+
+  // ── Keyed scroll anchoring (Task 7) ──
+  // Paging older history records the top visible item's key + offset before
+  // the window grows, then restores that item to the same offset afterwards,
+  // so prepended rows never jump the viewport. Tip-follow uses a signature
+  // (last item key + rendered row count) so a stream auto-scrolls only when
+  // the user is already at the bottom.
+
+  /// Row keys for the transcript list currently on screen: index = ListView
+  /// row, value = the item's stable key (its first message index) or a
+  /// sentinel for the non-message rows (paging affordance / typing / produced
+  /// card). Used to locate the anchored row after a prepend.
+  List<Object> _rowKeys = const [];
+  static const Object _affordanceRowKey = 'transcript-affordance';
+  static const Object _tailRowKey = 'transcript-tail';
+  (Object?, int)? _tipSignature;
 
   // ── Windowed transcript cache (Task 4) ──
   // The folded window is recomputed only when the session, message count, the
@@ -702,6 +737,7 @@ class _ChatScreenState extends State<ChatScreen>
     _atBottom = true;
     _showJumpFab = false;
     _visibleCount = _pageSize; // lazy paging resets per session
+    _tipSignature = null; // tip-follow re-arms for the new transcript
   }
 
   void _openPlugins(BuildContext context, {String? focusCanonicalId}) {
@@ -740,18 +776,22 @@ class _ChatScreenState extends State<ChatScreen>
     // slides in automatically — no "Show earlier" tapping.
     if (!_paging && pos.pixels < 120 && _hasEarlier) {
       _paging = true;
-      final oldExtent = pos.maxScrollExtent;
-      final oldPixels = pos.pixels;
-      setState(() => _visibleCount += _pageSize);
-      // Keep the viewport pinned to the message the user was reading:
-      // prepended items grow maxScrollExtent; compensating by the delta
-      // makes the content appear to stay put while history loads above.
+      // Keyed anchor (Task 7): capture the top visible message AFTER the new
+      // scroll offset has laid out (this listener runs before that layout),
+      // then grow the window. Once the prepend lays out, restore that same
+      // message to the same offset instead of trusting the maxScrollExtent
+      // delta (which also moves when the tip streams).
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scroll.hasClients) {
-          final newExtent = _scroll.position.maxScrollExtent;
-          _scroll.jumpTo(newExtent - oldExtent + oldPixels);
+        if (!mounted || !_scroll.hasClients) {
+          _paging = false;
+          return;
         }
-        _paging = false;
+        final anchor = _captureTopAnchor();
+        setState(() => _visibleCount += _pageSize);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _restoreAnchor(anchor);
+          _paging = false;
+        });
       });
     }
   }
@@ -792,14 +832,143 @@ class _ChatScreenState extends State<ChatScreen>
     return _windowCache!;
   }
 
+  /// Stable key for a folded transcript item: the absolute message index of
+  /// its first message. Prepending older history does not change it, so the
+  /// same key identifies the same row before and after a page loads.
+  Object _itemKey(ChatItem item) =>
+      item is SingleItem ? item.index : (item as FoldedGroup).indices.first;
+
+  /// Row keys for the window currently rendered. Row 0 is the paging
+  /// affordance when history is hidden; the tail row is the typing/produced
+  /// card. Message rows carry their [_itemKey].
+  List<Object> _computeRowKeys(
+    TranscriptWindow window,
+    bool typing,
+    bool showProduced,
+  ) {
+    final keys = <Object>[];
+    if (window.hiddenMessages > 0) keys.add(_affordanceRowKey);
+    for (final item in window.visible) {
+      keys.add(_itemKey(item));
+    }
+    if (typing || showProduced) keys.add(_tailRowKey);
+    return keys;
+  }
+
+  /// The `RenderSliverList` backing the transcript, or null before layout.
+  RenderSliverMultiBoxAdaptor? _transcriptSliver() {
+    if (!_scroll.hasClients) return null;
+    final context = _scroll.position.context.storageContext;
+    return _findSliver(context.findRenderObject());
+  }
+
+  RenderSliverMultiBoxAdaptor? _findSliver(RenderObject? node) {
+    if (node == null) return null;
+    if (node is RenderSliverMultiBoxAdaptor) return node;
+    RenderSliverMultiBoxAdaptor? found;
+    node.visitChildren((child) {
+      found ??= _findSliver(child);
+    });
+    return found;
+  }
+
+  /// Records the top visible message row and its offset from the viewport
+  /// top. Skips the paging affordance / tail rows so the anchor is always a
+  /// real transcript item.
+  _ScrollAnchor? _captureTopAnchor() {
+    if (!_scroll.hasClients) return null;
+    final sliver = _transcriptSliver();
+    if (sliver == null) return null;
+    final pixels = _scroll.position.pixels;
+    RenderBox? candidate;
+    RenderBox? child = sliver.firstChild;
+    while (child != null) {
+      final row = sliver.indexOf(child);
+      if (row >= 0 && row < _rowKeys.length) {
+        final key = _rowKeys[row];
+        if (key != _affordanceRowKey && key != _tailRowKey) {
+          final offset = sliver.childScrollOffset(child);
+          if (offset != null) {
+            if (offset <= pixels) {
+              candidate = child;
+            } else {
+              candidate ??= child;
+              break;
+            }
+          }
+        }
+      }
+      child = sliver.childAfter(child);
+    }
+    if (candidate == null) return null;
+    final row = sliver.indexOf(candidate);
+    final offset = sliver.childScrollOffset(candidate);
+    if (row < 0 || row >= _rowKeys.length || offset == null) return null;
+    return _ScrollAnchor(
+      key: _rowKeys[row],
+      viewportOffset: offset - pixels,
+      pixels: pixels,
+      maxScrollExtent: _scroll.position.maxScrollExtent,
+    );
+  }
+
+  /// Layout offset of the row carrying [key], or null when it is outside the
+  /// sliver's built (visible + cache) range.
+  double? _anchorLayoutOffset(Object key) {
+    final sliver = _transcriptSliver();
+    if (sliver == null) return null;
+    RenderBox? child = sliver.firstChild;
+    while (child != null) {
+      final row = sliver.indexOf(child);
+      if (row >= 0 && row < _rowKeys.length && _rowKeys[row] == key) {
+        return sliver.childScrollOffset(child);
+      }
+      child = sliver.childAfter(child);
+    }
+    return null;
+  }
+
+  void _jumpToOffset(double target) {
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
+    _scroll.jumpTo(target.clamp(pos.minScrollExtent, pos.maxScrollExtent));
+  }
+
+  /// Restores the anchored row to the viewport offset it had before the
+  /// prepend. If a very large prepend pushed it beyond the built cache, make
+  /// a coarse extent-delta jump to bring it back into range and re-locate the
+  /// keyed row on the next frame for the exact restore.
+  void _restoreAnchor(_ScrollAnchor? anchor) {
+    if (anchor == null || !mounted || !_scroll.hasClients) return;
+    final offset = _anchorLayoutOffset(anchor.key);
+    if (offset != null) {
+      _jumpToOffset(offset - anchor.viewportOffset);
+      return;
+    }
+    final delta = _scroll.position.maxScrollExtent - anchor.maxScrollExtent;
+    _jumpToOffset(anchor.pixels + delta);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final retry = _anchorLayoutOffset(anchor.key);
+      if (retry != null) _jumpToOffset(retry - anchor.viewportOffset);
+    });
+  }
+
   /// Called from the message-list builder when content changes — keeps the
-  /// stream pinned to the bottom if the user was already at the bottom.
-  void _maybeJumpToBottom() {
+  /// stream pinned to the bottom only if the user was already at the bottom
+  /// AND the tip actually changed (last item key + rendered row count).
+  void _maybeFollowTip(TranscriptWindow window) {
+    final items = window.visible;
+    final lastKey = items.isEmpty ? null : _itemKey(items.last);
+    final signature = (lastKey, _rowKeys.length);
+    if (signature == _tipSignature) return;
+    _tipSignature = signature;
     if (!_atBottom) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) {
-        _scroll.jumpTo(_scroll.position.maxScrollExtent);
-      }
+      if (!mounted || !_scroll.hasClients) return;
+      // Re-check: the user may have scrolled up before the frame settled.
+      if (!_atBottom) return;
+      _scroll.jumpTo(_scroll.position.maxScrollExtent);
     });
   }
 
@@ -1029,7 +1198,6 @@ class _ChatScreenState extends State<ChatScreen>
                                   animation: AgentService.I,
                                   builder: (_, _) {
                                     final typing = AgentService.I.busyFor(s.id);
-                                    _maybeJumpToBottom();
                                     // Bounded, cached fold (Task 4): the
                                     // folded window is reused across streaming
                                     // tokens; only the message count / last
@@ -1051,6 +1219,15 @@ class _ChatScreenState extends State<ChatScreen>
                                         items.length +
                                         (typing ? 1 : 0) +
                                         (showProduced ? 1 : 0);
+                                    // Keyed anchor (Task 7): keep the row-key
+                                    // map current for capture/restore, then
+                                    // follow the tip only when it changed.
+                                    _rowKeys = _computeRowKeys(
+                                      window,
+                                      typing,
+                                      showProduced,
+                                    );
+                                    _maybeFollowTip(window);
                                     final list = ListView.builder(
                                       key: const ValueKey(
                                         'chat-transcript-list',
