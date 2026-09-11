@@ -1240,6 +1240,7 @@ class AppState extends ChangeNotifier {
     PersistedSessionDecoder? persistedSessionDecoder,
     SessionBootstrapDecoder? sessionBootstrapDecoder,
     WorkspaceDeleter? workspaceDeleter,
+    Duration sessionPersistDebounce = Duration.zero,
   }) {
     final instance = AppState._(
       startupStageRecorder: startupStageRecorder,
@@ -1249,14 +1250,25 @@ class AppState extends ChangeNotifier {
       persistedSessionDecoder: persistedSessionDecoder,
       sessionBootstrapDecoder: sessionBootstrapDecoder,
       workspaceDeleter: workspaceDeleter,
+      sessionPersistDebounce: sessionPersistDebounce,
     );
     _testInstance = instance;
     return instance;
   }
 
+  /// Enable the production trailing debounce for session writes. Never called
+  /// from tests, which keep a zero window (microtask) so no Timer is left
+  /// pending after a `testWidgets` tree is disposed.
+  static void enableSessionPersistDebounce([
+    Duration window = _productionSessionPersistDebounce,
+  ]) {
+    _singleton._sessionPersistDebounce = window;
+  }
+
   @visibleForTesting
   static void resetTestInstance() {
     _testInstance?.sessionEncodeCountsForTest.clear();
+    _testInstance?._cancelPersistDebounce();
     _testInstance = null;
     StartupCoordinator.I.statusSink = null;
     PluginRuntimeStatusStore.I.resetForTest();
@@ -1274,8 +1286,10 @@ class AppState extends ChangeNotifier {
     PersistedSessionDecoder? persistedSessionDecoder,
     SessionBootstrapDecoder? sessionBootstrapDecoder,
     WorkspaceDeleter? workspaceDeleter,
+    Duration? sessionPersistDebounce,
   }) : _startupStageDelegates = Map.unmodifiable(startupStageDelegates),
        _startupStageTimeouts = Map.unmodifiable(startupStageTimeouts) {
+    _sessionPersistDebounce = sessionPersistDebounce ?? Duration.zero;
     _pluginBootActivator =
         pluginBootActivator ??
         ((bootToken, connectMcp) => PluginRuntimeManager.I.activateForBoot(
@@ -1816,7 +1830,14 @@ class AppState extends ChangeNotifier {
   var _persistScheduled = false;
   Completer<void>? _persistCompleter;
   Future<void>? _persistScheduledFuture;
-  Future<void>? _persistWriteInFlight;
+  Future<bool>? _persistWriteInFlight;
+
+  /// Trailing debounce window for coalescing session writes. Defaults to zero
+  /// (microtask) so tests leave no wall-clock Timer pending; production opts in
+  /// via [enableSessionPersistDebounce] from `main`.
+  static const _productionSessionPersistDebounce = Duration(milliseconds: 200);
+  Duration _sessionPersistDebounce = Duration.zero;
+  Timer? _persistDebounceTimer;
 
   /// Test seam: count of full-session encodes performed, keyed by session id.
   @visibleForTesting
@@ -1866,7 +1887,9 @@ class AppState extends ChangeNotifier {
   ) {
     final future = () async {
       try {
-        await persistSessions();
+        // The exactly-once `session_start` must observe the persisted session,
+        // so bypass the debounce rather than waiting on a coalesced window.
+        await flushSessionPersistence();
       } catch (_) {}
       await SessionLifecycleService.I.sessionStarted(session, reason: reason);
     }();
@@ -2898,12 +2921,17 @@ class AppState extends ChangeNotifier {
         message.kind,
         message.thinking,
         message.content,
+        message.elapsedMs,
         message.toolState,
         message.toolDetail,
         message.toolSummary,
         message.toolTitle,
+        message.toolSessionId,
         message.feedback,
         message.feedbackNote,
+        message.attachments
+            .map((attachment) => '${attachment.name}:${attachment.size}')
+            .join('|'),
       );
     }
     return Object.hashAll([
@@ -2931,28 +2959,51 @@ class AppState extends ChangeNotifier {
     ]);
   }
 
-  /// Coalesce rapid writes: the first call in a burst schedules a single flush
-  /// on the next microtask; later calls join that future. The returned future
-  /// completes once the coalesced write lands.
+  /// Coalesce rapid writes with a trailing debounce. The first call in a burst
+  /// arms a timer; later calls (including across `await` boundaries) push it
+  /// out, so one turn lands as one write. The returned future completes once
+  /// the coalesced write settles.
   Future<void> persistSessions() {
     _persistScheduled = true;
     final existing = _persistScheduledFuture;
-    if (existing != null) return existing;
+    if (existing != null) {
+      _armPersistDebounce();
+      return existing;
+    }
     final completer = Completer<void>();
     _persistCompleter = completer;
     _persistScheduledFuture = completer.future;
-    if (!suspendCoalescedPersistenceForTest) {
-      scheduleMicrotask(_flushScheduledPersistence);
-    }
+    _armPersistDebounce();
     return completer.future;
   }
 
+  /// (Re)arm the trailing debounce. A zero window falls back to a microtask
+  /// (the test default) so no wall-clock Timer is left pending in widget tests.
+  void _armPersistDebounce() {
+    if (suspendCoalescedPersistenceForTest) return;
+    _cancelPersistDebounce();
+    if (_sessionPersistDebounce <= Duration.zero) {
+      scheduleMicrotask(_flushScheduledPersistence);
+      return;
+    }
+    _persistDebounceTimer = Timer(_sessionPersistDebounce, () {
+      _persistDebounceTimer = null;
+      unawaited(_flushScheduledPersistence());
+    });
+  }
+
+  void _cancelPersistDebounce() {
+    _persistDebounceTimer?.cancel();
+    _persistDebounceTimer = null;
+  }
+
   Future<void> _flushScheduledPersistence() async {
+    _cancelPersistDebounce();
     if (!_persistScheduled) return;
     _persistScheduled = false;
-    await _ensureSessionWrite();
+    final wrote = await _ensureSessionWrite();
     _completeScheduledPersistence();
-    if (_hasUnpersistedSessionChanges()) {
+    if (wrote && _hasUnpersistedSessionChanges()) {
       unawaited(persistSessions());
     }
   }
@@ -2960,10 +3011,11 @@ class AppState extends ChangeNotifier {
   /// Run a pending coalesced write immediately and await it. Called on session
   /// switch and lifecycle pause so a pending change is never dropped.
   Future<void> flushSessionPersistence() async {
+    _cancelPersistDebounce();
     _persistScheduled = false;
-    await _ensureSessionWrite();
+    final wrote = await _ensureSessionWrite();
     _completeScheduledPersistence();
-    if (_hasUnpersistedSessionChanges()) {
+    if (wrote && _hasUnpersistedSessionChanges()) {
       await flushSessionPersistence();
     }
   }
@@ -2972,22 +3024,31 @@ class AppState extends ChangeNotifier {
   @visibleForTesting
   Future<void> flushSessionPersistenceForTest() => flushSessionPersistence();
 
+  /// Test seam: perform exactly one write (no coalescing loop) and report
+  /// whether unpersisted changes remain. Used to prove the dirty tracker
+  /// settles instead of scheduling writes forever.
+  @visibleForTesting
+  Future<bool> writeSessionsOnceForTest() async {
+    await _writeSessionsNow();
+    return _hasUnpersistedSessionChanges();
+  }
+
   /// Test seam: await in-flight / automatically scheduled writes without
   /// forcing one. Proves a switch/pause flush actually started.
   @visibleForTesting
   Future<void> awaitPendingSessionWritesForTest() async {
-    await Future<void>.delayed(Duration.zero);
-    while (_persistWriteInFlight != null) {
-      await _persistWriteInFlight;
-    }
-    if (_persistScheduled && !suspendCoalescedPersistenceForTest) {
+    _cancelPersistDebounce();
+    if (_persistScheduled) {
       _persistScheduled = false;
       await _ensureSessionWrite();
+    }
+    while (_persistWriteInFlight != null) {
+      await _persistWriteInFlight;
     }
     _completeScheduledPersistence();
   }
 
-  Future<void> _ensureSessionWrite() {
+  Future<bool> _ensureSessionWrite() {
     final inFlight = _persistWriteInFlight;
     if (inFlight != null) return inFlight;
     final future = _writeSessionsNow();
@@ -3017,7 +3078,7 @@ class AppState extends ChangeNotifier {
     return false;
   }
 
-  Future<void> _writeSessionsNow() async {
+  Future<bool> _writeSessionsNow() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await _loadDeferredSessionSnapshot();
@@ -3038,10 +3099,13 @@ class AppState extends ChangeNotifier {
       }
       _dirtySessionIds.removeAll(dirtySnapshot);
       await _awaitWorkspaceDeletions();
+      return true;
     } catch (_) {
       // A failed write must not leave the derivative caches claiming the
-      // changes are durable; force a full re-encode next time.
+      // changes are durable; force a full re-encode next time. Returning false
+      // stops the coalescing loop from retrying forever.
       _invalidateSessionPersistenceCache();
+      return false;
     }
   }
 
@@ -3132,6 +3196,16 @@ class AppState extends ChangeNotifier {
                   : reuse(partial),
             );
           } else {
+            // Invariant: during the deferred window only the boot-active
+            // session is materialized as a tail-only partial; every other row
+            // is authoritative on disk. If a non-active in-memory session
+            // appears here (unexpected), keep the persisted original — never
+            // write its possibly-truncated projection — and register the
+            // derivative so the dirty tracker settles instead of re-flushing.
+            if (partial != null) {
+              rawById[partial.id] = original;
+              signatureById[partial.id] = _sessionContentSignature(partial);
+            }
             encoded.add(original);
           }
         } catch (_) {

@@ -8,6 +8,8 @@ import 'ui/shell.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Coalesce session writes in production; tests keep the zero-window default.
+  AppState.enableSessionPersistDebounce();
   await AppState.I.initializeForFirstFrame();
   // Apply persisted theme BEFORE first frame (no dark flash on light).
   Aether.dark = !AppState.I.lightTheme;

@@ -34,6 +34,29 @@ void main() {
     return (entry['messages'] as List).cast<Map<String, dynamic>>();
   }
 
+  String sessionJson(String id, List<String> contents) => jsonEncode({
+    'id': id,
+    'title': id,
+    'model': 'test-model',
+    'sandboxId': id,
+    'mode': 'auto',
+    'messages': [
+      for (final content in contents)
+        {
+          'role': 'user',
+          'kind': 'text',
+          'content': content,
+          'time': DateTime.now().toIso8601String(),
+        },
+    ],
+    'createdAt': DateTime.now().toIso8601String(),
+  });
+
+  Map<String, dynamic> firstPersistedMessage(
+    List<String> raw,
+    String sessionId,
+  ) => persistedMessages(raw, sessionId).first;
+
   group('coalesced per-session persistence', () {
     test('N rapid persistSessions calls coalesce to one encode', () async {
       final app = AppState.createForTest();
@@ -113,6 +136,158 @@ void main() {
       expect(app.sessionEncodeCountsForTest[active.id], 1);
     });
 
+    test('an in-place elapsedMs mutation is detected and persisted', () async {
+      final app = AppState.createForTest();
+      final active = app.activeSession!;
+      app.sendMessage('hello');
+      await app.flushSessionPersistenceForTest();
+      app.sessionEncodeCountsForTest.clear();
+
+      // AgentService stamps elapsedMs on the live bubble after streaming.
+      active.messages.first.elapsedMs = 4321;
+      app.persistSessions();
+      await app.flushSessionPersistenceForTest();
+
+      expect(app.sessionEncodeCountsForTest[active.id], 1);
+      final prefs = await SharedPreferences.getInstance();
+      final message = firstPersistedMessage(
+        prefs.getStringList('ovid_sessions')!,
+        active.id,
+      );
+      expect(message['elapsedMs'], 4321);
+    });
+
+    test('an in-place attachments mutation is detected and persisted', () async {
+      final app = AppState.createForTest();
+      final active = app.activeSession!;
+      app.sendMessage('hello');
+      await app.flushSessionPersistenceForTest();
+      app.sessionEncodeCountsForTest.clear();
+
+      // AgentService attaches workspace files to the last user message.
+      active.messages.first.attachments = [
+        MessageAttachment(name: 'notes.txt', size: 12),
+      ];
+      app.persistSessions();
+      await app.flushSessionPersistenceForTest();
+
+      expect(app.sessionEncodeCountsForTest[active.id], 1);
+      final prefs = await SharedPreferences.getInstance();
+      final message = firstPersistedMessage(
+        prefs.getStringList('ovid_sessions')!,
+        active.id,
+      );
+      final attachment = (message['attachments'] as List).single;
+      expect(attachment['name'], 'notes.txt');
+      expect(attachment['size'], 12);
+    });
+
+    test('an in-place toolSessionId mutation is detected and persisted', () async {
+      final app = AppState.createForTest();
+      final active = app.activeSession!;
+      app.sendMessage('hello');
+      await app.flushSessionPersistenceForTest();
+      app.sessionEncodeCountsForTest.clear();
+
+      // dispatch_agent links the parent tool card to the child session.
+      active.messages.first.toolSessionId = 'sub-42';
+      app.persistSessions();
+      await app.flushSessionPersistenceForTest();
+
+      expect(app.sessionEncodeCountsForTest[active.id], 1);
+      final prefs = await SharedPreferences.getInstance();
+      final message = firstPersistedMessage(
+        prefs.getStringList('ovid_sessions')!,
+        active.id,
+      );
+      expect(message['toolSessionId'], 'sub-42');
+    });
+
+    test('a debounced persist does not write before the window elapses', () async {
+      final app = AppState.createForTest(
+        sessionPersistDebounce: const Duration(milliseconds: 60),
+      );
+      final active = app.activeSession!;
+      app.sessionEncodeCountsForTest.clear();
+
+      app.persistSessions();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(app.sessionEncodeCountsForTest[active.id], isNull);
+
+      await app.flushSessionPersistenceForTest();
+      expect(app.sessionEncodeCountsForTest[active.id], 1);
+    });
+
+    test('await-separated persists within the debounce window coalesce', () async {
+      final app = AppState.createForTest(
+        sessionPersistDebounce: const Duration(milliseconds: 40),
+      );
+      final active = app.activeSession!;
+      app.sessionEncodeCountsForTest.clear();
+
+      // Each `await` yields to the event loop; a microtask-granular scheduler
+      // would encode the intermediate states. A real debounce holds them all
+      // and encodes only the final state once.
+      app.sendMessage('a');
+      app.persistSessions();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      app.sendMessage('b');
+      app.persistSessions();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      app.sendMessage('c');
+      app.persistSessions();
+      await app.flushSessionPersistenceForTest();
+
+      expect(app.sessionEncodeCountsForTest[active.id], 1);
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        persistedMessages(
+          prefs.getStringList('ovid_sessions')!,
+          active.id,
+        ).map((m) => m['content']),
+        ['a', 'b', 'c'],
+      );
+    });
+
+    test(
+      'a non-active in-memory deferred session keeps the original and quiesces',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          'ovid_sessions': [
+            sessionJson('active', ['a0', 'a1']),
+            sessionJson('other', ['o0', 'o1', 'o2']),
+          ],
+          'ovid_active_session': 'active',
+        });
+        final app = AppState.createForTest(
+          persistedSessionDecoder: (encoded) =>
+              ChatSession.fromJson(jsonDecode(encoded) as Map<String, dynamic>),
+        );
+        await app.initializeForFirstFrame();
+        // Unexpected state: a non-active session materializes while the
+        // deferred snapshot is still authoritative. Its persisted history must
+        // not be truncated by the tail-only in-memory projection, and the
+        // dirty tracker must settle instead of scheduling writes forever.
+        app.sessions.add(
+          ChatSession(
+            id: 'other',
+            title: 'Other',
+            model: 'test-model',
+            messages: [Message(role: 'user', content: 'in-memory')],
+          ),
+        );
+
+        final stillDirty = await app.writeSessionsOnceForTest();
+        expect(stillDirty, isFalse);
+
+        final prefs = await SharedPreferences.getInstance();
+        final raw = prefs
+            .getStringList('ovid_sessions')!
+            .firstWhere((r) => r.startsWith('{"id":"other",'));
+        expect(((jsonDecode(raw) as Map)['messages'] as List), hasLength(3));
+      },
+    );
+
     test('final flush writes the last state', () async {
       final app = AppState.createForTest();
       final active = app.activeSession!;
@@ -167,9 +342,19 @@ void main() {
       expect(messages.last['content'], 'before-pause');
     });
 
-    test('shell wires lifecycle pause to the flush seam', () {
+    test('shell flushes persistence inside the lifecycle pause branch', () {
       final src = File('lib/ui/shell.dart').readAsStringSync();
-      expect(src, contains('flushSessionPersistence'));
+      final methodStart = src.indexOf('void didChangeAppLifecycleState');
+      expect(methodStart, greaterThan(0));
+      final paused = src.indexOf('case AppLifecycleState.paused:', methodStart);
+      final detached = src.indexOf(
+        'case AppLifecycleState.detached:',
+        methodStart,
+      );
+      expect(paused, greaterThan(methodStart));
+      expect(detached, greaterThan(paused));
+      final pauseBranch = src.substring(paused, detached);
+      expect(pauseBranch, contains('flushSessionPersistence'));
     });
 
     test('bootstrap tail-50 and fingerprint survive coalesced writes', () async {
