@@ -1163,6 +1163,25 @@ class PluginRuntimeManager extends ChangeNotifier {
     return statuses;
   }
 
+  /// One readiness item per persisted normalized runtime (spec §5.7):
+  /// canonical id + display label, sorted by id for a stable startup order.
+  /// User-disabled installs are excluded (they do not participate in
+  /// readiness), matching [activateForBoot]'s skip.
+  Future<List<({String id, String label})>> bootRuntimeItems() async {
+    final entries = await _loadEntries();
+    final ids = entries.keys.toList()..sort();
+    return [
+      for (final id in ids)
+        if (isCanonicalPluginId(id) && !entries[id]!.disabled)
+          (
+            id: id,
+            label: entries[id]!.manifest.name.isNotEmpty
+                ? entries[id]!.manifest.name
+                : id,
+          ),
+    ];
+  }
+
   Future<List<ActivePluginRuntime>> activeRuntimes() async {
     final entries = await _loadEntries();
     final out = <ActivePluginRuntime>[];

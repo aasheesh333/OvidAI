@@ -41,6 +41,7 @@ class StartupItemStatus {
     DateTime? updatedAt,
     this.attempt = 0,
     this.ownerId,
+    this.canDisable = false,
   }) : updatedAt = updatedAt ?? DateTime.now();
 
   factory StartupItemStatus.queued(
@@ -146,6 +147,7 @@ class StartupItemStatus {
     String? reason,
     int attempt = 1,
     String? ownerId,
+    bool canDisable = false,
   }) => StartupItemStatus(
     id: id,
     kind: kind,
@@ -154,6 +156,7 @@ class StartupItemStatus {
     reason: reason,
     attempt: attempt,
     ownerId: ownerId,
+    canDisable: canDisable,
   );
 
   factory StartupItemStatus.failed(
@@ -197,6 +200,7 @@ class StartupItemStatus {
     String? reason,
     int attempt = 0,
     String? ownerId,
+    bool canDisable = false,
   }) => StartupItemStatus(
     id: id,
     kind: kind,
@@ -205,6 +209,7 @@ class StartupItemStatus {
     reason: reason,
     attempt: attempt,
     ownerId: ownerId,
+    canDisable: canDisable,
   );
 
   final String id;
@@ -219,6 +224,11 @@ class StartupItemStatus {
   /// Supplied by [StartupOwnedTask] implementations so the startup dashboard
   /// can deep-link `Open Plugins` by canonical id instead of display name.
   final String? ownerId;
+
+  /// True only when the backing [StartupTask] exposes a real `onDisable`
+  /// callback. The dashboard uses this instead of the item kind so aggregate
+  /// rows (for example a boot-level `plugin.activate`) never offer Disable.
+  final bool canDisable;
 }
 
 class StartupSnapshot {
@@ -327,7 +337,9 @@ class StartupCoordinator extends ChangeNotifier {
       ..clear()
       ..addAll(
         orderedTasks.map(
-          (task) => StartupItemStatus.queued(task.id, task.kind, task.label),
+          (task) => _withOwner(
+            StartupItemStatus.queued(task.id, task.kind, task.label),
+          ),
         ),
       );
     notifyListeners();
@@ -348,6 +360,7 @@ class StartupCoordinator extends ChangeNotifier {
               reason: 'Startup readiness deadline exceeded',
               attempt: item.attempt,
               ownerId: item.ownerId,
+              canDisable: item.canDisable,
             );
             _items[i] = degraded;
             _emitStatus(degraded);
@@ -360,6 +373,7 @@ class StartupCoordinator extends ChangeNotifier {
               reason: 'Startup readiness deadline exceeded',
               attempt: item.attempt,
               ownerId: item.ownerId,
+              canDisable: item.canDisable,
             );
             _items[i] = skipped;
             _emitStatus(skipped);
@@ -563,14 +577,22 @@ class StartupCoordinator extends ChangeNotifier {
     _emitStatus(resolved);
   }
 
-  /// Attributes a status to the canonical owner id carried by its
-  /// [StartupOwnedTask], unless the status already names one.
+  /// Attributes a status to the canonical owner id and real disable
+  /// capability carried by its backing [StartupTask]. [StartupOwnedTask]
+  /// supplies the owner id; a non-null `onDisable` is the only signal that a
+  /// row can actually be disabled.
   StartupItemStatus _withOwner(StartupItemStatus status) {
-    if (status.ownerId != null) return status;
     final task = _tasks[status.id];
-    if (task is! StartupOwnedTask) return status;
-    final ownerId = (task as StartupOwnedTask).ownerId;
-    if (ownerId.isEmpty) return status;
+    if (task == null) return status;
+    String? ownerId = status.ownerId;
+    if (ownerId == null && task is StartupOwnedTask) {
+      final candidate = (task as StartupOwnedTask).ownerId;
+      if (candidate.isNotEmpty) ownerId = candidate;
+    }
+    final canDisable = task.onDisable != null;
+    if (ownerId == status.ownerId && canDisable == status.canDisable) {
+      return status;
+    }
     return StartupItemStatus(
       id: status.id,
       kind: status.kind,
@@ -580,6 +602,7 @@ class StartupCoordinator extends ChangeNotifier {
       updatedAt: status.updatedAt,
       attempt: status.attempt,
       ownerId: ownerId,
+      canDisable: canDisable,
     );
   }
 
@@ -602,7 +625,8 @@ class StartupCoordinator extends ChangeNotifier {
     if (ownerId == null) {
       final task = _tasks[status.id];
       if (task is StartupOwnedTask) {
-        ownerId = (task as StartupOwnedTask).ownerId;
+        final candidate = (task as StartupOwnedTask).ownerId;
+        if (candidate.isNotEmpty) ownerId = candidate;
       }
     }
     sink(status, ownerId);

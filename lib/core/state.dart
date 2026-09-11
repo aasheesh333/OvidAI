@@ -1846,19 +1846,11 @@ class AppState extends ChangeNotifier {
   Future<List<StartupTask>> _buildReadinessTasks() async {
     StartupCoordinator.I.statusSink = _onStartupStatus;
     final mcpTasks = await _buildMcpReadinessTasks();
+    final pluginTasks = await _buildPluginReadinessTasks();
     return [
       _LocalHydrationStartupTask(this),
       _PluginSafetyStartupTask(this),
-      PluginActivationTask(
-        id: 'plugin.activate',
-        label: 'Activate plugins',
-        timeout: _startupTimeout(
-          'plugin.activate',
-          const Duration(seconds: 15),
-        ),
-        activate: () =>
-            _runStartupStage('plugin.activate', _activatePluginsForBoot),
-      ),
+      ...pluginTasks,
       _SkillMountStartupTask(this),
       _SessionRestoreStartupTask(this),
       MarketplaceRefreshTask(
@@ -1903,6 +1895,45 @@ class AppState extends ChangeNotifier {
             SandboxService.I.installCoreRuntimes((_, _, _) {}),
         enforceQuota: _enforceSandboxQuota,
       ),
+    ];
+  }
+
+  /// One plugin startup item per persisted normalized runtime (spec §5.7),
+  /// ordered by canonical id. Each item shares the coalesced boot activation
+  /// through the base `plugin.activate` stage, so stage-delegate tests keep
+  /// working while the epoch still advances exactly once. With zero runtimes
+  /// the aggregate boot item preserves the epoch/barrier behavior.
+  Future<List<StartupTask>> _buildPluginReadinessTasks() async {
+    final runtimes = await PluginRuntimeManager.I.bootRuntimeItems();
+    if (runtimes.isEmpty) {
+      return [
+        PluginActivationTask(
+          id: 'plugin.activate',
+          label: 'Activate plugins',
+          timeout: _startupTimeout(
+            'plugin.activate',
+            const Duration(seconds: 15),
+          ),
+          activate: () =>
+              _runStartupStage('plugin.activate', _activatePluginsForBoot),
+        ),
+      ];
+    }
+    return [
+      for (final runtime in runtimes)
+        PluginActivationTask(
+          id: 'plugin.activate:${runtime.id}',
+          label: runtime.label,
+          ownerId: runtime.id,
+          timeout: _startupTimeout(
+            'plugin.activate',
+            const Duration(seconds: 15),
+          ),
+          activate: () =>
+              _runStartupStage('plugin.activate', _ensureBootActivation),
+          probe: () => _pluginHealthByRuntimeId(runtime.id, runtime.label),
+          onDisable: () => _disablePluginByRuntimeId(runtime.id),
+        ),
     ];
   }
 
@@ -2198,42 +2229,75 @@ class AppState extends ChangeNotifier {
     _pluginSafetyReconciled = true;
   }
 
+  /// Coalesced boot activation: every per-runtime plugin task awaits this
+  /// same future, so the boot epoch advances exactly once per AppState boot
+  /// and the injected `_pluginBootActivator` is invoked once.
+  Future<void> _ensureBootActivation() async {
+    await _reconcilePluginSafety();
+    if (_pluginBootActivated) return;
+    final existing = _pluginBootActivation;
+    if (existing != null) {
+      await existing.timeout(_activationBudget, onTimeout: () {});
+      return;
+    }
+    late final Future<void> attempt;
+    attempt = _pluginBootActivator(_bootToken, false)
+        .then<void>((_) => _pluginBootActivated = true)
+        .whenComplete(() {
+          if (identical(_pluginBootActivation, attempt)) {
+            _pluginBootActivation = null;
+          }
+        });
+    _pluginBootActivation = attempt;
+    // If the raw activation outlives its bounded await and later fails, the
+    // error would otherwise be unhandled (the timeout future detached).
+    unawaited(attempt.catchError((Object _) {}));
+    await attempt.timeout(_activationBudget, onTimeout: () {});
+  }
+
+  Duration get _activationBudget =>
+      _startupTimeout('plugin.activate', const Duration(seconds: 15));
+
+  /// Aggregate boot activation used when there are zero normalized runtimes:
+  /// it still advances the epoch and settles the session-restore barrier
+  /// exactly once.
   Future<void> _activatePluginsForBoot() async {
-    // Bound the activation await to the stage timeout. The coordinator's own
-    // `invocation.timeout` does NOT cancel the underlying future, so without
-    // this a hung activation would leave `_bootActivationSettled` pending
-    // forever and every `sessionStarted` would hang.
-    final budget = _startupTimeout(
-      'plugin.activate',
-      const Duration(seconds: 15),
-    );
     try {
-      await _reconcilePluginSafety();
-      if (_pluginBootActivated) return;
-      final existing = _pluginBootActivation;
-      if (existing != null) {
-        await existing.timeout(budget, onTimeout: () {});
-        return;
-      }
-      late final Future<void> attempt;
-      attempt = _pluginBootActivator(_bootToken, false)
-          .then<void>((_) => _pluginBootActivated = true)
-          .whenComplete(() {
-            if (identical(_pluginBootActivation, attempt)) {
-              _pluginBootActivation = null;
-            }
-          });
-      _pluginBootActivation = attempt;
-      // If the raw activation outlives its bounded await and later fails, the
-      // error would otherwise be unhandled (the timeout future detached).
-      unawaited(attempt.catchError((Object _) {}));
-      await attempt.timeout(budget, onTimeout: () {});
+      await _ensureBootActivation();
     } finally {
       if (!_bootActivationSettled.isCompleted) {
         _bootActivationSettled.complete();
       }
     }
     await _maybeFinishSessionRestore();
+  }
+
+  /// Truthful terminal status for one normalized runtime after activation.
+  Future<StartupItemStatus> _pluginHealthByRuntimeId(
+    String runtimeId,
+    String label,
+  ) async {
+    final row = plugins
+        .where((plugin) => plugin.runtimeId == runtimeId)
+        .firstOrNull;
+    if (row == null) {
+      return StartupItemStatus.failed(
+        runtimeId,
+        StartupItemKind.plugin,
+        label,
+        reason: 'Plugin is not registered',
+      );
+    }
+    return pluginHealthFor(row);
+  }
+
+  /// Disables one normalized runtime by canonical id (dashboard action).
+  Future<void> _disablePluginByRuntimeId(String runtimeId) async {
+    final row = plugins
+        .where((plugin) => plugin.runtimeId == runtimeId)
+        .firstOrNull;
+    if (row == null) return;
+    await disablePlugin(row);
   }
 
   Future<void> _mountRuntimeSkills() async {

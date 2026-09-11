@@ -762,6 +762,18 @@ class _PluginsScreenState extends State<PluginsScreen> {
   /// True while registered marketplace catalogs are being merged.
   bool _syncing = false;
 
+  /// Vertical scroll for the catalog; used to bring a deep-linked startup row
+  /// into view even when it is outside the lazily-built window.
+  final ScrollController _scroll = ScrollController();
+
+  /// Stable keys for the canonical rows so `Open Plugins` can reveal them.
+  final Map<String, GlobalKey> _pluginCardKeys = {};
+  final Map<String, GlobalKey> _mcpCardKeys = {};
+  bool _focusRevealed = false;
+  int _revealAttempts = 0;
+
+  static const double _estimatedPluginCardExtent = 132;
+
   @override
   void initState() {
     super.initState();
@@ -769,6 +781,61 @@ class _PluginsScreenState extends State<PluginsScreen> {
     // catalog stayed at the built-in list and "Add marketplace" appeared to
     // do nothing. Merge them once when the library opens.
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncCatalogs());
+  }
+
+  @override
+  void didUpdateWidget(PluginsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.focusCanonicalId != widget.focusCanonicalId) {
+      _focusRevealed = false;
+      _revealAttempts = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  /// Brings the deep-linked canonical row into view. The sliver builds rows
+  /// lazily, so an off-screen target is first approached by an estimated
+  /// offset and then `ensureVisible`d once it exists in the tree.
+  void _scheduleFocusReveal(List<PluginItem> items) {
+    final focus = widget.focusCanonicalId;
+    if (focus == null || _focusRevealed) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _revealFocus(items));
+  }
+
+  void _revealFocus(List<PluginItem> items) {
+    if (!mounted || _focusRevealed) return;
+    final focus = widget.focusCanonicalId;
+    if (focus == null) return;
+    final targetContext =
+        _pluginCardKeys[focus]?.currentContext ??
+        _mcpCardKeys[focus]?.currentContext;
+    if (targetContext != null) {
+      _focusRevealed = true;
+      Scrollable.ensureVisible(
+        targetContext,
+        alignment: 0.08,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+      return;
+    }
+    final index = items.indexWhere((p) => p.runtimeId == focus);
+    if (index >= 0 && _scroll.hasClients && _revealAttempts < 24) {
+      _revealAttempts++;
+      final estimate = (index * _estimatedPluginCardExtent).clamp(
+        0.0,
+        _scroll.position.maxScrollExtent,
+      );
+      if ((_scroll.offset - estimate).abs() > 1) {
+        _scroll.jumpTo(estimate);
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) => _revealFocus(items));
+    }
   }
 
   Future<void> _syncCatalogs({bool force = false}) async {
@@ -840,8 +907,11 @@ class _PluginsScreenState extends State<PluginsScreen> {
       ),
       body: AnimatedBuilder(
         animation: app,
-        builder: (_, _) => CustomScrollView(
-          slivers: [
+        builder: (_, _) {
+          _scheduleFocusReveal(items);
+          return CustomScrollView(
+            controller: _scroll,
+            slivers: [
             // ── Search bar ON TOP ──
             SliverToBoxAdapter(
               child: Padding(
@@ -895,6 +965,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
               child: _McpSection(
                 app: app,
                 focusCanonicalId: widget.focusCanonicalId,
+                cardKeys: _mcpCardKeys,
               ),
             ),
             SliverToBoxAdapter(
@@ -916,16 +987,26 @@ class _PluginsScreenState extends State<PluginsScreen> {
               sliver: SliverList.separated(
                 itemCount: items.length,
                 separatorBuilder: (_, _) => const SizedBox(height: 10),
-                itemBuilder: (_, i) => PluginCard(
-                  plugin: items[i],
-                  highlighted:
-                      items[i].runtimeId != null &&
-                      items[i].runtimeId == widget.focusCanonicalId,
-                ),
+                itemBuilder: (_, i) {
+                  final runtimeId = items[i].runtimeId;
+                  return PluginCard(
+                    key: runtimeId == null
+                        ? null
+                        : _pluginCardKeys.putIfAbsent(
+                            runtimeId,
+                            () => GlobalKey(),
+                          ),
+                    plugin: items[i],
+                    highlighted:
+                        runtimeId != null &&
+                        runtimeId == widget.focusCanonicalId,
+                  );
+                },
               ),
             ),
           ],
-        ),
+        );
+        },
       ),
     );
   }
@@ -1168,7 +1249,7 @@ class PluginCard extends StatelessWidget {
             : ValueKey('plugin-card-${plugin.runtimeId}'),
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: Aether.surface,
+          color: highlighted ? Aether.accentSoft : Aether.surface,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
             color: highlighted ? Aether.accent : Aether.hairline,
@@ -1178,6 +1259,17 @@ class PluginCard extends StatelessWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (highlighted)
+              Container(
+                key: ValueKey('plugin-card-highlight-${plugin.runtimeId}'),
+                width: 3,
+                height: 40,
+                margin: const EdgeInsets.only(right: 8),
+                decoration: BoxDecoration(
+                  color: Aether.accent,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
             Container(
               width: 40,
               height: 40,
@@ -1415,10 +1507,13 @@ class PluginDetailScreen extends StatelessWidget {
                     // Task 11 (spec §11): the activation badge — This
                     // session / Restart to enable everywhere / Global /
                     // Degraded / Failed. Legacy flag-flip rows (no
-                    // runtimeId) render no badge.
-                    if (pluginActivationBadge(plugin) case final badge?) ...[
-                      badge,
-                    ],
+                    // runtimeId) render no badge. When a durable canonical
+                    // status exists it is authoritative (M5) and the badge is
+                    // suppressed so the two signals never conflict.
+                    if (durablePluginStatus(plugin) == null)
+                      if (pluginActivationBadge(plugin) case final badge?) ...[
+                        badge,
+                      ],
                   ],
                 ),
               ),
@@ -2076,7 +2171,8 @@ class _Perm extends StatelessWidget {
 class _McpSection extends StatelessWidget {
   final AppState app;
   final String? focusCanonicalId;
-  const _McpSection({required this.app, this.focusCanonicalId});
+  final Map<String, GlobalKey>? cardKeys;
+  const _McpSection({required this.app, this.focusCanonicalId, this.cardKeys});
 
   @override
   Widget build(BuildContext context) {
@@ -2118,6 +2214,7 @@ class _McpSection extends StatelessWidget {
               }
               final s = app.mcpServers[i];
               return McpCard(
+                key: cardKeys?.putIfAbsent(s.canonicalId, () => GlobalKey()),
                 server: s,
                 highlighted: s.canonicalId == focusCanonicalId,
               );

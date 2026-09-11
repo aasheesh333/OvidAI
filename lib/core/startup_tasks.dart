@@ -41,12 +41,21 @@ StartupItemState aggregateStartupStates(Iterable<StartupItemState> states) {
 /// The body is injected by `AppState` so it always runs through the
 /// `_runStartupStage('plugin.activate', …)` seam (test delegates short-circuit
 /// it). Never throws: a failure becomes a terminal [StartupItemStatus.failed].
-class PluginActivationTask implements StartupTask {
+///
+/// One task is emitted per normalized runtime (spec §5.7). [ownerId] carries
+/// the canonical plugin id so the dashboard can deep-link and disable that
+/// exact row; [probe] recomputes the truthful per-runtime health after
+/// activation. The aggregate boot task (zero runtimes) leaves [ownerId] empty
+/// and has no [probe].
+class PluginActivationTask implements StartupTask, StartupOwnedTask {
   PluginActivationTask({
     required this.id,
     required this.label,
     required this.timeout,
     required this.activate,
+    this.ownerId = '',
+    this.probe,
+    this.onDisable,
   });
 
   @override
@@ -57,19 +66,50 @@ class PluginActivationTask implements StartupTask {
   final Duration timeout;
   final Future<void> Function() activate;
 
+  /// Canonical plugin id this item owns, or empty for the aggregate boot item.
   @override
-  StartupItemKind get kind => StartupItemKind.plugin;
+  final String ownerId;
+
+  /// Recomputes the truthful terminal status for this runtime after
+  /// activation. Null for the aggregate boot item.
+  final Future<StartupItemStatus> Function()? probe;
+
+  /// Real disable callback for a per-runtime item (null for the aggregate).
+  @override
+  final StartupDisable? onDisable;
 
   @override
-  StartupDisable? get onDisable => null;
+  StartupItemKind get kind => StartupItemKind.plugin;
 
   @override
   Future<StartupItemStatus> run() async {
     try {
       await activate();
-      return StartupItemStatus.ready(id, kind, label);
+      final probed = await probe?.call();
+      if (probed != null) {
+        return StartupItemStatus(
+          id: id,
+          kind: kind,
+          label: label,
+          state: probed.state,
+          reason: probed.reason,
+          ownerId: ownerId.isEmpty ? null : ownerId,
+        );
+      }
+      return StartupItemStatus.ready(
+        id,
+        kind,
+        label,
+        ownerId: ownerId.isEmpty ? null : ownerId,
+      );
     } catch (error) {
-      return StartupItemStatus.failed(id, kind, label, reason: '$error');
+      return StartupItemStatus.failed(
+        id,
+        kind,
+        label,
+        reason: '$error',
+        ownerId: ownerId.isEmpty ? null : ownerId,
+      );
     }
   }
 }

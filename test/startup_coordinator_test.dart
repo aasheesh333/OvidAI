@@ -806,6 +806,38 @@ void main() {
       expect(settled, isTrue);
     });
   });
+
+  test('deadline-skipped owned items keep their canonical owner id', () {
+    fakeAsync((async) {
+      final never = Completer<StartupItemStatus>();
+      final emitted = <String, String?>{};
+      final coordinator = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+        statusSink: (status, ownerId) => emitted[status.id] = ownerId,
+      );
+
+      coordinator.start([
+        FakeStartupTask(
+          'blocker',
+          kind: StartupItemKind.localState,
+          label: 'Blocker',
+          timeout: const Duration(seconds: 300),
+          run: () => never.future,
+        ),
+        _OwnedStartupTask(
+          'mcp.connect:acme/server',
+          ownerId: 'acme/server',
+          kind: StartupItemKind.mcp,
+          label: 'Server',
+        ),
+      ]);
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 120));
+      async.flushMicrotasks();
+
+      expect(emitted['mcp.connect:acme/server'], 'acme/server');
+    });
+  });
 }
 
 StartupItemStatus _status(StartupCoordinator coordinator, String id) =>
@@ -842,4 +874,30 @@ final class FakeStartupTask implements StartupTask {
 
   @override
   Future<StartupItemStatus> run() => _run();
+}
+
+final class _OwnedStartupTask implements StartupTask, StartupOwnedTask {
+  _OwnedStartupTask(
+    this.id, {
+    required this.ownerId,
+    required this.kind,
+    required this.label,
+  });
+
+  @override
+  final String id;
+  @override
+  final String ownerId;
+  @override
+  final StartupItemKind kind;
+  @override
+  final String label;
+  @override
+  Duration get timeout => const Duration(seconds: 15);
+  @override
+  StartupDisable? get onDisable => null;
+
+  @override
+  Future<StartupItemStatus> run() async =>
+      StartupItemStatus.ready(id, kind, label);
 }

@@ -24,9 +24,10 @@ bool startupItemCanRetry(StartupItemState state) =>
     state == StartupItemState.degraded ||
     state == StartupItemState.skipped;
 
-/// Only plugin/MCP items own a runtime that can be disabled.
-bool startupItemCanDisable(StartupItemStatus item) =>
-    item.kind == StartupItemKind.plugin || item.kind == StartupItemKind.mcp;
+/// Only items whose backing task exposes a real disable callback can be
+/// disabled. The coordinator sets [StartupItemStatus.canDisable] from the
+/// task's `onDisable`; aggregate rows never have one.
+bool startupItemCanDisable(StartupItemStatus item) => item.canDisable;
 
 /// Setup/migration problems are fixed on the Plugins screen.
 bool startupItemOpensPlugins(StartupItemState state) =>
@@ -88,7 +89,7 @@ class StartupProgressPanel extends StatefulWidget {
 
 class _StartupProgressPanelState extends State<StartupProgressPanel> {
   late bool _expanded;
-  bool _collapseScheduled = false;
+  bool _wasIncomplete = false;
 
   StartupCoordinator get _coordinator =>
       widget.coordinator ?? StartupCoordinator.I;
@@ -96,22 +97,21 @@ class _StartupProgressPanelState extends State<StartupProgressPanel> {
   @override
   void initState() {
     super.initState();
-    _expanded = !_coordinator.snapshot.readinessComplete;
+    _expanded = false;
   }
 
   @override
   void didUpdateWidget(StartupProgressPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.coordinator != widget.coordinator) {
-      _expanded = !_coordinator.snapshot.readinessComplete;
-      _collapseScheduled = false;
+      _expanded = false;
+      _wasIncomplete = false;
     }
   }
 
   void _toggle() {
     setState(() {
       _expanded = !_expanded;
-      _collapseScheduled = true;
     });
   }
 
@@ -121,16 +121,22 @@ class _StartupProgressPanelState extends State<StartupProgressPanel> {
       animation: _coordinator,
       builder: (context, _) {
         final snapshot = _coordinator.snapshot;
-        if (snapshot.total == 0) return const SizedBox.shrink();
+        if (snapshot.total == 0) {
+          _wasIncomplete = false;
+          return const SizedBox.shrink();
+        }
         final allTerminal = snapshot.readinessComplete;
 
-        // The panel defaults collapsed once every item reaches a terminal
-        // state; the user can still re-expand it afterwards. This is derived
-        // state, so it is applied during build without another frame.
-        if (!allTerminal) {
-          _collapseScheduled = false;
-        } else if (!_collapseScheduled) {
-          _collapseScheduled = true;
+        // Readiness starts post-frame in production: the first build sees an
+        // empty snapshot, then tasks queue on a later notification. Expand the
+        // queue when work appears and auto-collapse once every item is
+        // terminal. A manual toggle while work is in flight is respected
+        // because this only fires on the incomplete→complete transitions.
+        if (!allTerminal && !_wasIncomplete) {
+          _wasIncomplete = true;
+          _expanded = true;
+        } else if (allTerminal && _wasIncomplete) {
+          _wasIncomplete = false;
           _expanded = false;
         }
 
@@ -268,9 +274,16 @@ class _StartupItemRow extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    Text(
-                      startupItemStateLabel(item.state),
-                      style: TextStyle(fontSize: 11.5, color: color),
+                    // Long state copy ("Unsupported on this device",
+                    // "Migration required") must wrap, not overflow the row at
+                    // large text scales.
+                    Flexible(
+                      child: Text(
+                        startupItemStateLabel(item.state),
+                        textAlign: TextAlign.end,
+                        softWrap: true,
+                        style: TextStyle(fontSize: 11.5, color: color),
+                      ),
                     ),
                   ],
                 ),

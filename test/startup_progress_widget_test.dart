@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
+import 'package:ovid_ai/core/plugin_permissions.dart';
 import 'package:ovid_ai/core/plugin_runtime.dart';
 import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/startup_coordinator.dart';
@@ -133,6 +134,45 @@ void main() {
       ),
     );
     await tester.pump();
+  }
+
+  NormalizedPluginManifest runtimeManifest(String id, {String name = 'Runtime'}) =>
+      NormalizedPluginManifest(
+        id: id,
+        name: name,
+        version: '1.0.0',
+        format: PluginFormat.claudeCode,
+        rootPath: '${tempRoot.path}/$id/content',
+        requestedCapabilities: const {PluginCapability.workspaceRead},
+      );
+
+  Future<void> seedRuntimeEntry(NormalizedPluginManifest m) async {
+    Directory(m.rootPath).createSync(recursive: true);
+    final entry = PluginInstallEntry(
+      activation: PluginActivationRecord(
+        pluginId: m.id,
+        state: PluginActivation.globalActive,
+        installedBootEpoch: 0,
+      ),
+      manifest: m,
+      contentDir: m.rootPath,
+      version: m.version,
+    );
+    final prefs = await SharedPreferences.getInstance();
+    final existingRaw = prefs.getString(kPluginActivationPrefKey);
+    final entries = existingRaw == null || existingRaw.isEmpty
+        ? <String, dynamic>{}
+        : (jsonDecode(existingRaw) as Map).cast<String, dynamic>();
+    entries[m.id] = jsonEncode(entry.toJson());
+    await prefs.setString(kPluginActivationPrefKey, jsonEncode(entries));
+    await PluginPermissionStore().save(
+      PluginPermissionGrant(
+        pluginId: m.id,
+        manifestDigest: pluginManifestDigest(m),
+        capabilities: m.requestedCapabilities,
+        approvedAt: DateTime.utc(2026, 9, 10),
+      ),
+    );
   }
 
   testWidgets(
@@ -784,4 +824,364 @@ void main() {
     );
     await tester.pump();
   });
+
+  testWidgets(
+    'panel expands when tasks queue after an empty first snapshot',
+    (tester) async {
+      // Production readiness starts post-frame: the panel first sees an empty
+      // snapshot (readinessComplete is vacuously true), then tasks arrive.
+      final c = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      await pumpPanel(tester, c);
+      expect(find.textContaining('Finishing setup'), findsNothing);
+
+      final gate = Completer<StartupItemStatus>();
+      unawaited(
+        c.start([
+          _Task(
+            'local.hydrate',
+            kind: StartupItemKind.localState,
+            label: 'Load local state',
+            run: () => gate.future,
+          ),
+        ]),
+      );
+      await tester.pump();
+
+      expect(find.text('Finishing setup · 0 of 1'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('startup-item-local.hydrate')),
+        findsOneWidget,
+      );
+
+      gate.complete(
+        _ready('local.hydrate', StartupItemKind.localState, 'Load local state'),
+      );
+      await tester.pump();
+      await tester.pump();
+      // Auto-collapse once the only item is terminal.
+      expect(
+        find.byKey(const ValueKey('startup-item-local.hydrate')),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets('Disable renders only for rows with a real disable callback', (
+    tester,
+  ) async {
+    final c = StartupCoordinator.forTest(deadline: const Duration(seconds: 120));
+    unawaited(
+      c.start([
+        _Task(
+          'plugin.activate',
+          kind: StartupItemKind.plugin,
+          label: 'Activate plugins',
+          run: () async => _terminal(
+            'plugin.activate',
+            StartupItemKind.plugin,
+            'Activate plugins',
+            StartupItemState.failed,
+            reason: 'boot failed',
+          ),
+        ),
+        _Task(
+          'plugin.activate:acme/x',
+          kind: StartupItemKind.plugin,
+          label: 'Acme X',
+          ownerId: 'acme/x',
+          onDisable: () async {},
+          run: () async => _terminal(
+            'plugin.activate:acme/x',
+            StartupItemKind.plugin,
+            'Acme X',
+            StartupItemState.failed,
+            reason: 'boom',
+          ),
+        ),
+        _Task(
+          'mcp.connect:acme/server',
+          kind: StartupItemKind.mcp,
+          label: 'Acme Server',
+          ownerId: 'acme/server',
+          onDisable: () async {},
+          run: () async => _terminal(
+            'mcp.connect:acme/server',
+            StartupItemKind.mcp,
+            'Acme Server',
+            StartupItemState.failed,
+            reason: 'boom',
+          ),
+        ),
+        _Task(
+          'localSafety.migrate',
+          kind: StartupItemKind.localState,
+          label: 'Local state',
+          run: () async => _terminal(
+            'localSafety.migrate',
+            StartupItemKind.localState,
+            'Local state',
+            StartupItemState.failed,
+            reason: 'boom',
+          ),
+        ),
+      ]),
+    );
+
+    await pumpPanel(tester, c);
+    // Every item is terminal → auto-collapsed; re-expand to inspect actions.
+    await tester.tap(find.byKey(const ValueKey('startup-panel-toggle')));
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('startup-disable-plugin.activate')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('startup-disable-plugin.activate:acme/x')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('startup-disable-mcp.connect:acme/server')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('startup-disable-localSafety.migrate')),
+      findsNothing,
+    );
+  });
+
+  test(
+    'readiness emits one plugin item per canonical runtime in sorted order',
+    () async {
+      await seedRuntimeEntry(runtimeManifest('zeta/two', name: 'Zeta Two'));
+      await seedRuntimeEntry(runtimeManifest('alpha/one', name: 'Alpha One'));
+
+      final tasks = await AppState.I.buildReadinessTasks();
+      final pluginTasks = tasks
+          .where((task) => task.id.startsWith('plugin.activate:'))
+          .toList();
+
+      expect(pluginTasks.map((task) => task.id), [
+        'plugin.activate:alpha/one',
+        'plugin.activate:zeta/two',
+      ]);
+      expect(
+        pluginTasks.map((task) => (task as StartupOwnedTask).ownerId),
+        ['alpha/one', 'zeta/two'],
+      );
+      expect(
+        pluginTasks.map((task) => task.kind),
+        everyElement(StartupItemKind.plugin),
+      );
+      expect(
+        tasks.where((task) => task.id == 'plugin.activate'),
+        isEmpty,
+        reason: 'per-runtime items replace the single aggregate',
+      );
+    },
+  );
+
+  test('zero normalized runtimes still emit the aggregate boot item', () async {
+    final tasks = await AppState.I.buildReadinessTasks();
+    expect(tasks.where((task) => task.id == 'plugin.activate'), hasLength(1));
+    expect(
+      tasks.where((task) => task.id.startsWith('plugin.activate:')),
+      isEmpty,
+    );
+  });
+
+  test(
+    'per-runtime plugin items share one boot activation and one epoch',
+    () async {
+      await seedRuntimeEntry(runtimeManifest('alpha/one', name: 'Alpha One'));
+      await seedRuntimeEntry(runtimeManifest('zeta/two', name: 'Zeta Two'));
+
+      var activatorCalls = 0;
+      final app = AppState.createForTest(
+        startupStageDelegates: {
+          'marketplace.refresh': () async {},
+          'mcp.connect': () async {},
+          'firebase.initialize': () async {},
+          'github.initialize': () async {},
+          'sandbox.selfHeal': () async {},
+        },
+        pluginBootActivator: (token, connect) {
+          activatorCalls++;
+          return PluginRuntimeManager.I.activateForBoot(
+            bootToken: token,
+            connectMcp: connect,
+            reportFailure: true,
+          );
+        },
+      );
+
+      await app.initializeReadiness();
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(activatorCalls, 1);
+      expect(prefs.getInt(kPluginBootEpochPrefKey), 1);
+    },
+  );
+
+  testWidgets(
+    'Open Plugins deep-links, highlights, and scrolls the canonical row',
+    (tester) async {
+      const targetId = 'acme/target';
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        kPluginRuntimeStatusPrefKey,
+        jsonEncode({
+          targetId: jsonEncode({
+            'pluginId': targetId,
+            'state': 'failed',
+            'reason': 'Installed content is missing',
+            'updatedAt': DateTime.utc(2026, 9, 10).toIso8601String(),
+            'logs': <String>[],
+            'wireVersion': 1,
+          }),
+        }),
+      );
+      await AppState.I.hydrateRuntimeStatuses();
+      AppState.I.plugins.clear();
+      for (var i = 0; i < 12; i++) {
+        AppState.I.plugins.add(
+          PluginItem(
+            name: 'Same Name',
+            author: 'acme',
+            description: 'row $i',
+            version: '1.0.0',
+            category: 'Tool',
+            installed: true,
+            enabled: true,
+            runtimeId: 'acme/p$i',
+          ),
+        );
+      }
+      AppState.I.plugins.add(
+        PluginItem(
+          name: 'Same Name',
+          author: 'acme',
+          description: 'target row',
+          version: '1.0.0',
+          category: 'Tool',
+          installed: true,
+          enabled: true,
+          runtimeId: targetId,
+        ),
+      );
+
+      tester.view.physicalSize = const Size(400, 520);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: const PluginsScreen(focusCanonicalId: targetId),
+        ),
+      );
+      for (var i = 0; i < 40; i++) {
+        await tester.pump(const Duration(milliseconds: 30));
+      }
+
+      // Only the exact canonical row is highlighted, even though every row
+      // shares the display name "Same Name".
+      expect(
+        find.byKey(const ValueKey('plugin-card-highlight-$targetId')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('plugin-card-highlight-acme/p0')),
+        findsNothing,
+      );
+      final rect = tester.getRect(
+        find.byKey(const ValueKey('plugin-card-$targetId')),
+      );
+      expect(rect.top, greaterThanOrEqualTo(-1));
+      expect(rect.bottom, lessThanOrEqualTo(521));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'long state labels do not overflow the expanded panel at 2x on narrow',
+    (tester) async {
+      session('s11');
+      final c = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      unawaited(
+        c.start([
+          _Task(
+            'unsupported',
+            kind: StartupItemKind.plugin,
+            label: 'Unsupported runtime plugin with a long name',
+            ownerId: 'acme/unsupported',
+            run: () async => _terminal(
+              'unsupported',
+              StartupItemKind.plugin,
+              'Unsupported runtime plugin with a long name',
+              StartupItemState.unsupported,
+              reason: 'No compatible ABI or runtime is available',
+            ),
+          ),
+          _Task(
+            'migration',
+            kind: StartupItemKind.plugin,
+            label: 'Legacy plugin needing migration',
+            ownerId: 'acme/legacy',
+            run: () async => _terminal(
+              'migration',
+              StartupItemKind.plugin,
+              'Legacy plugin needing migration',
+              StartupItemState.migrationRequired,
+              reason: 'Re-approve this legacy plugin before it can run',
+            ),
+          ),
+        ]),
+      );
+
+      for (final size in [const Size(360, 640), const Size(1200, 800)]) {
+        tester.view.physicalSize = size;
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: Aether.theme(),
+            home: MediaQuery(
+              data: MediaQueryData(textScaler: TextScaler.linear(2.0)),
+              child: ChatScreen(
+                key: ValueKey(size),
+                startupCoordinator: c,
+              ),
+            ),
+          ),
+        );
+        for (var i = 0; i < 4; i++) {
+          await tester.pump(const Duration(milliseconds: 20));
+        }
+        // All items are terminal → auto-collapsed; re-expand to lay out the
+        // long state labels.
+        await tester.tap(find.byKey(const ValueKey('startup-panel-toggle')));
+        await tester.pump();
+
+        expect(
+          find.text('Unsupported on this device'),
+          findsOneWidget,
+        );
+        expect(find.text('Migration required'), findsOneWidget);
+        final composer = find.byKey(const ValueKey('chat-composer'));
+        expect(composer, findsOneWidget);
+        final rect = tester.getRect(composer);
+        expect(rect.top, greaterThanOrEqualTo(-1));
+        expect(rect.bottom, lessThanOrEqualTo(size.height + 1));
+        expect(tester.takeException(), isNull);
+      }
+    },
+  );
 }

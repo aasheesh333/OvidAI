@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -927,25 +928,34 @@ class _ChatScreenState extends State<ChatScreen>
             ],
           ),
           body: SafeArea(
-            child: Column(
-              children: [
-                // Non-blocking startup readiness dashboard, pinned just
-                // below the app header. Its own AnimatedBuilder observes the
-                // coordinator so startup transitions never rebuild the
-                // transcript or the composer.
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 240),
-                  child: SingleChildScrollView(
-                    child: StartupProgressPanel(
-                      coordinator: widget.startupCoordinator,
-                      onOpenPlugins: (canonicalId) => _openPlugins(
-                        context,
-                        focusCanonicalId: canonicalId,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                // Reserve most of a short viewport for the composer/docks so
+                // an expanded dashboard can never crowd them off-screen at
+                // large text scales. The panel still scrolls internally.
+                final panelCap = math.min(
+                  240.0,
+                  constraints.maxHeight * 0.35,
+                );
+                return Column(
+                  children: [
+                    // Non-blocking startup readiness dashboard, pinned just
+                    // below the app header. Its own AnimatedBuilder observes
+                    // the coordinator so startup transitions never rebuild the
+                    // transcript or the composer.
+                    ConstrainedBox(
+                      constraints: BoxConstraints(maxHeight: panelCap),
+                      child: SingleChildScrollView(
+                        child: StartupProgressPanel(
+                          coordinator: widget.startupCoordinator,
+                          onOpenPlugins: (canonicalId) => _openPlugins(
+                            context,
+                            focusCanonicalId: canonicalId,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                ),
-                Expanded(
+                    Expanded(
                   child: s == null || s.messages.isEmpty
                       ? const _EmptyState()
                       : Stack(
@@ -1241,7 +1251,9 @@ class _ChatScreenState extends State<ChatScreen>
                     if (context.mounted) _sendPrompt(context, s, t);
                   },
                 ),
-              ],
+                  ],
+                );
+              },
             ),
           ),
         );
@@ -1877,7 +1889,9 @@ class _EmptyState extends StatelessWidget {
         return SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(22, 40, 22, 24),
           child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: c.maxHeight - 64),
+            constraints: BoxConstraints(
+              minHeight: math.max(0.0, c.maxHeight - 64),
+            ),
             child: _RowIn(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
