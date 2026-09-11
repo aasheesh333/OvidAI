@@ -300,7 +300,8 @@ void main() {
       await GitHubService.I.initialize(client: client);
 
       expect(GitHubService.I.isInitializing, isFalse);
-      expect(GitHubService.I.isLoggedIn, isFalse);
+      expect(GitHubService.I.isLoggedIn, isTrue);
+      expect(GitHubService.I.token, 'stored-token');
       expect(await storage.read(key: 'ovid_github_token'), 'stored-token');
       client.close();
     },

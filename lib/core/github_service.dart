@@ -56,6 +56,11 @@ class GitHubService extends ChangeNotifier {
   Future<void> _tokenWrite = Future<void>.value();
   bool _isInitializing = true;
 
+  /// Delay before retrying a profile fetch that failed transiently. Exposed so
+  /// tests can drive the background retry without waiting.
+  @visibleForTesting
+  Duration profileRetryDelay = const Duration(seconds: 30);
+
   bool get isLoggedIn => _token != null;
   bool get isInitializing => _isInitializing;
   String? get login => _user?['login'] as String?;
@@ -85,19 +90,30 @@ class GitHubService extends ChangeNotifier {
       if (token == null || token.isEmpty || generation != _authGeneration) {
         return;
       }
+      // The stored token is trusted immediately so `isLoggedIn` is true across
+      // restarts; the profile is loaded (and retried) separately.
+      _token = token;
+      notifyListeners();
       final user = await _fetchUser(token, c);
       if (generation != _authGeneration) return;
-      _token = token;
       _user = user;
       notifyListeners();
     } on GitHubAuthException catch (error) {
-      if (generation == _authGeneration && error.code == 'invalid_token') {
+      if (generation != _authGeneration) return;
+      if (error.code == 'invalid_token') {
         _token = null;
         _user = null;
+        notifyListeners();
         await _persistToken(null);
+      } else {
+        _scheduleProfileRetry(generation, client);
       }
     } catch (_) {
-      // Keep a stored token through transient network and decoding failures.
+      // Transient network/decoding failures keep the token; retry in the
+      // background rather than signing the user out.
+      if (generation == _authGeneration) {
+        _scheduleProfileRetry(generation, client);
+      }
     } finally {
       if (ownsClient) c.close();
       if (generation == _authGeneration) {
@@ -105,6 +121,38 @@ class GitHubService extends ChangeNotifier {
         notifyListeners();
       }
     }
+  }
+
+  /// Retries a transient profile failure without ever clearing the stored
+  /// token. A later 401 from the profile endpoint is the only thing that
+  /// signs the user out.
+  void _scheduleProfileRetry(int generation, http.Client? client) {
+    final token = _token;
+    if (token == null) return;
+    Future<void>.delayed(profileRetryDelay, () async {
+      if (generation != _authGeneration || _token != token) return;
+      final c = client ?? http.Client();
+      final ownsClient = client == null;
+      try {
+        final user = await _fetchUser(token, c);
+        if (generation != _authGeneration || _token != token) return;
+        _user = user;
+        notifyListeners();
+      } on GitHubAuthException catch (error) {
+        if (generation == _authGeneration &&
+            _token == token &&
+            error.code == 'invalid_token') {
+          _token = null;
+          _user = null;
+          notifyListeners();
+          await _persistToken(null);
+        }
+      } catch (_) {
+        // Still authenticated-but-unknown; keep the token.
+      } finally {
+        if (ownsClient) c.close();
+      }
+    });
   }
 
   Future<void> _persistToken(String? token, {int? generation}) {

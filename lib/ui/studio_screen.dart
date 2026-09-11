@@ -48,13 +48,17 @@ class _StudioScreenState extends State<StudioScreen> {
 
   void _handleInitialAuth() {
     final github = GitHubService.I;
-    if (!mounted || _handledInitialAuth || github.isInitializing) return;
-    _handledInitialAuth = true;
-    if (!github.isLoggedIn) {
-      showGithubLoginSheet(context);
-    } else if (_repo != null && !RepoCache.I.isReady) {
-      _autoSync();
+    if (!mounted || _handledInitialAuth) return;
+    if (github.isLoggedIn) {
+      _handledInitialAuth = true;
+      if (_repo != null && !RepoCache.I.isReady) {
+        _autoSync();
+      }
+      return;
     }
+    if (github.isInitializing) return;
+    _handledInitialAuth = true;
+    showGithubLoginSheet(context);
   }
 
   Future<void> _autoSync() async {
