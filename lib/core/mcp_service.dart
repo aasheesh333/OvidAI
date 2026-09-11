@@ -155,6 +155,28 @@ class McpService {
   @visibleForTesting
   static int reconnectMaxAttemptsForTest = 10;
 
+  /// Test seam: injectable clock for the complete-handshake budget so a test
+  /// can advance time between initialize → initialized → tools/list and
+  /// observe the remaining-time propagation.
+  @visibleForTesting
+  static DateTime Function() clockForTest = DateTime.now;
+
+  /// Test seam: records the remaining budget passed to each handshake phase.
+  @visibleForTesting
+  static void Function(String phase, Duration timeout)?
+  connectPhaseTimeoutRecorderForTest;
+
+  /// Test seam: awaited immediately before the handshake slot is reserved, so
+  /// a test can expire the deadline during the credential gate and prove no
+  /// slot/process is leaked.
+  @visibleForTesting
+  static Future<void> Function()? beforeReserveHookForTest;
+
+  static DateTime _now() => clockForTest();
+
+  static void _recordConnectPhase(String phase, Duration timeout) =>
+      connectPhaseTimeoutRecorderForTest?.call(phase, timeout);
+
   /// Spawn/dial the server and perform the MCP handshake
   /// (initialize → initialized → tools/list).
   ///
@@ -208,10 +230,10 @@ class McpService {
     required Duration handshakeBudget,
   }) async {
     final key = _key(server);
-    final deadline = DateTime.now().add(handshakeBudget);
+    final deadline = _now().add(handshakeBudget);
     _RunningServer? reserved;
 
-    Future<McpConnectOutcome> attempt() async {
+    Future<McpConnectOutcome> runAttempt() async {
       if (!_ownerActive(server)) {
         return const McpConnectOutcome(
           McpConnectOutcomeKind.failed,
@@ -251,6 +273,16 @@ class McpService {
       if (server.ownerPluginId != null) {
         server.headers = await AppState.I.getMcpHeaders(server.canonicalId);
       }
+      // Close the pre-reservation timeout window: the credential gate may
+      // have consumed the whole budget, so never reserve a slot / spawn a
+      // process after the deadline has passed.
+      await beforeReserveHookForTest?.call();
+      if (!_now().isBefore(deadline)) {
+        return const McpConnectOutcome(
+          McpConnectOutcomeKind.failed,
+          'MCP handshake timed out',
+        );
+      }
       final rs = _RunningServer(server: server);
       reserved = rs;
       _running[key] = rs;
@@ -263,8 +295,19 @@ class McpService {
       return McpConnectOutcome(McpConnectOutcomeKind.failed, message);
     }
 
+    Future<McpConnectOutcome> attempt() async {
+      try {
+        return await runAttempt();
+      } catch (error) {
+        final rs = reserved;
+        if (rs != null) _abortStartupAttempt(server, rs);
+        return McpConnectOutcome(McpConnectOutcomeKind.failed, '$error');
+      }
+    }
+
+    final invocation = attempt();
     try {
-      return await attempt().timeout(
+      return await invocation.timeout(
         handshakeBudget,
         onTimeout: () {
           final rs = reserved;
@@ -295,7 +338,7 @@ class McpService {
   }
 
   static Duration _remainingUntil(DateTime deadline) {
-    final left = deadline.difference(DateTime.now());
+    final left = deadline.difference(_now());
     return left.isNegative ? Duration.zero : left;
   }
 
@@ -369,7 +412,16 @@ class McpService {
     Duration timeoutFor() => deadline == null
         ? Duration(seconds: server.startupTimeoutS)
         : _remainingUntil(deadline);
+    Duration phaseTimeout(String phase) {
+      final timeout = timeoutFor();
+      _recordConnectPhase(phase, timeout);
+      return timeout;
+    }
+
     try {
+      if (deadline != null && !_now().isBefore(deadline)) {
+        throw TimeoutException('MCP handshake timed out', Duration.zero);
+      }
       final url = server.url;
       if (url == null || url.isEmpty) {
         throw Exception('no url configured for HTTP transport');
@@ -378,7 +430,7 @@ class McpService {
         'protocolVersion': '2024-11-05',
         'capabilities': {},
         'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
-      }, timeout: timeoutFor());
+      }, timeout: phaseTimeout('initialize'));
       if (initResult.isTimeout) {
         throw TimeoutException('initialize timed out', timeoutFor());
       }
@@ -389,13 +441,13 @@ class McpService {
         rs,
         'notifications/initialized',
         {},
-        timeout: timeoutFor(),
+        timeout: phaseTimeout('notifications/initialized'),
       );
       final toolsResult = await _rpcHttp(
         rs,
         'tools/list',
         {},
-        timeout: timeoutFor(),
+        timeout: phaseTimeout('tools/list'),
       );
       if (toolsResult.isTimeout) {
         throw TimeoutException('tools/list timed out', timeoutFor());
@@ -434,10 +486,18 @@ class McpService {
     Duration timeoutFor() => deadline == null
         ? Duration(seconds: server.startupTimeoutS)
         : _remainingUntil(deadline);
+    Duration phaseTimeout(String phase) {
+      final timeout = timeoutFor();
+      _recordConnectPhase(phase, timeout);
+      return timeout;
+    }
     bool aborted() =>
         deadline != null &&
         (!identical(_running[key], rs) || rs.userDisconnected);
     try {
+      if (deadline != null && !_now().isBefore(deadline)) {
+        throw TimeoutException('MCP handshake timed out', Duration.zero);
+      }
       // Spawn inside the native sandbox — servers are trusted code the
       // user explicitly connected, same trust level as MCP defaults.
       final sandbox = SandboxService.I;
@@ -520,13 +580,14 @@ class McpService {
         'protocolVersion': '2024-11-05',
         'capabilities': {},
         'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
-      }, timeout: timeoutFor());
+      }, timeout: phaseTimeout('initialize'));
       if (initResult.isTimeout) {
         throw TimeoutException('initialize timed out', timeoutFor());
       }
       if (initResult.isError) {
         throw Exception('initialize failed: ${initResult.error}');
       }
+      _recordConnectPhase('notifications/initialized', timeoutFor());
       _sendNotification(rs, 'notifications/initialized', {});
 
       // ── Tool discovery ─────────────────────────────────────────────
@@ -534,7 +595,7 @@ class McpService {
         rs,
         'tools/list',
         {},
-        timeout: timeoutFor(),
+        timeout: phaseTimeout('tools/list'),
       );
       if (toolsResult.isTimeout) {
         throw TimeoutException('tools/list timed out', timeoutFor());

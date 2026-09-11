@@ -408,7 +408,7 @@ class StartupCoordinator extends ChangeNotifier {
         task.id,
         task.kind,
         task.label,
-        reason: _redactStartupError(error.toString()),
+        reason: redactStartupError(error.toString()),
         attempt: current.attempt,
       );
     } finally {
@@ -442,7 +442,7 @@ class StartupCoordinator extends ChangeNotifier {
         state: result.state,
         reason: result.reason == null
             ? null
-            : _redactStartupError(result.reason!),
+            : redactStartupError(result.reason!),
         attempt: attempt,
       );
     } on TimeoutException {
@@ -458,7 +458,7 @@ class StartupCoordinator extends ChangeNotifier {
         task.id,
         task.kind,
         task.label,
-        reason: _redactStartupError(error.toString()),
+        reason: redactStartupError(error.toString()),
         attempt: attempt,
       );
     }
@@ -505,7 +505,10 @@ class StartupCoordinator extends ChangeNotifier {
       _items.singleWhere((item) => item.id == id);
 }
 
-String _redactStartupError(String value) {
+/// Conservative secret-safe scrubber for startup reasons and status details.
+/// Shared by the coordinator (task reasons) and by producers that write
+/// service status directly (e.g. the MCP startup connect).
+String redactStartupError(String value) {
   var scrubbed = value
       .replaceAllMapped(
         RegExp(

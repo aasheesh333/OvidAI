@@ -105,13 +105,33 @@ class MarketplaceRefreshTask implements StartupTask {
   @override
   Future<StartupItemStatus> run() async {
     var worst = MarketplaceSyncOutcome.ready;
-    for (final repo in repos()) {
+    final repos = this.repos();
+    // One item covers every registered marketplace. Bound each repo by its
+    // fair share of the remaining item budget so one slow repo cannot starve
+    // the repos queued behind it.
+    final deadline = DateTime.now().add(timeout);
+    Future<MarketplaceSyncOutcome> guarded(String repo) async {
       try {
-        final outcome = await refresh(repo);
-        if (outcome.index > worst.index) worst = outcome;
+        return await refresh(repo);
       } catch (_) {
-        worst = MarketplaceSyncOutcome.failed;
+        return MarketplaceSyncOutcome.failed;
       }
+    }
+
+    for (var i = 0; i < repos.length; i++) {
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) {
+        worst = MarketplaceSyncOutcome.failed;
+        continue;
+      }
+      final reposLeft = repos.length - i;
+      final slice = Duration(
+        microseconds: remaining.inMicroseconds ~/ reposLeft,
+      );
+      final outcome = await guarded(
+        repos[i],
+      ).timeout(slice, onTimeout: () => MarketplaceSyncOutcome.failed);
+      if (outcome.index > worst.index) worst = outcome;
     }
     return switch (worst) {
       MarketplaceSyncOutcome.ready => StartupItemStatus.ready(id, kind, label),
@@ -141,7 +161,7 @@ class McpConnectTask implements StartupTask {
   McpConnectTask({
     required this.canonicalId,
     required this.label,
-    required this.budget,
+    required this.resolveBudget,
     required this.connect,
     required this.isConnected,
     required this.onDisable,
@@ -150,7 +170,11 @@ class McpConnectTask implements StartupTask {
   final String canonicalId;
   @override
   final String label;
-  final Duration budget;
+
+  /// Resolves the complete-handshake budget lazily, at run time, so a server
+  /// loaded during readiness inventory (custom/marketplace rows) contributes
+  /// its real `startupTimeoutS` instead of the pre-hydration default.
+  final Duration Function() resolveBudget;
   final Future<McpConnectOutcome> Function(Duration budget) connect;
   final bool Function() isConnected;
 
@@ -168,12 +192,12 @@ class McpConnectTask implements StartupTask {
   StartupItemKind get kind => StartupItemKind.mcp;
 
   @override
-  Duration get timeout => budget + const Duration(seconds: 1);
+  Duration get timeout => resolveBudget() + const Duration(seconds: 1);
 
   @override
   Future<StartupItemStatus> run() async {
     try {
-      final outcome = await connect(budget);
+      final outcome = await connect(resolveBudget());
       if (outcome.kind == McpConnectOutcomeKind.ready && !isConnected()) {
         return StartupItemStatus.failed(
           id,

@@ -44,7 +44,7 @@ McpConnectTask _mcpTask(
 }) => McpConnectTask(
   canonicalId: canonicalId,
   label: 'Connect $canonicalId',
-  budget: McpConnectTask.budgetFor(startupTimeoutS),
+  resolveBudget: () => McpConnectTask.budgetFor(startupTimeoutS),
   connect: connect,
   isConnected: isConnected ?? () => true,
   onDisable: onDisable ?? () async {},
@@ -61,6 +61,9 @@ void main() {
 
   tearDown(() async {
     McpService.I.httpClientForTest = null;
+    McpService.clockForTest = DateTime.now;
+    McpService.connectPhaseTimeoutRecorderForTest = null;
+    McpService.beforeReserveHookForTest = null;
     await McpService.I.disconnectAll();
     AppState.resetTestInstance();
   });
@@ -400,6 +403,183 @@ void main() {
         addTearDown(() => McpService.I.disconnect(server.canonicalId));
       },
     );
+
+    test(
+      'remaining budget shrinks across initialize, initialized, tools/list',
+      () async {
+        var clock = DateTime.utc(2020);
+        McpService.clockForTest = () => clock;
+        final recorded = <String, Duration>{};
+        McpService.connectPhaseTimeoutRecorderForTest = (phase, timeout) =>
+            recorded[phase] = timeout;
+        McpService.I.httpClientForTest = MockClient((request) async {
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          final response = http.Response(
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': body['id'],
+              'result': body['method'] == 'tools/list'
+                  ? {
+                      'tools': [
+                        {'name': 'lookup'},
+                      ],
+                    }
+                  : {},
+            }),
+            200,
+          );
+          // Advance the injected clock after each phase is issued.
+          clock = clock.add(const Duration(seconds: 5));
+          return response;
+        });
+        AppState.createForTest();
+        final server = _httpServer('propagate');
+
+        final outcome = await McpService.I.connectOutcome(
+          server,
+          handshakeBudget: const Duration(seconds: 30),
+        );
+
+        expect(outcome.kind, McpConnectOutcomeKind.ready);
+        expect(recorded['initialize'], const Duration(seconds: 30));
+        expect(
+          recorded['notifications/initialized'],
+          const Duration(seconds: 25),
+        );
+        expect(recorded['tools/list'], const Duration(seconds: 20));
+        addTearDown(() => McpService.I.disconnect(server.canonicalId));
+      },
+    );
+
+    test('an expired deadline never reserves a slot or dials', () async {
+      var clock = DateTime.utc(2020);
+      McpService.clockForTest = () => clock;
+      var requests = 0;
+      McpService.I.httpClientForTest = MockClient((request) async {
+        requests++;
+        return http.Response('{}', 200);
+      });
+      McpService.beforeReserveHookForTest = () async {
+        clock = clock.add(const Duration(seconds: 11));
+      };
+      AppState.createForTest();
+      final server = _httpServer('expired');
+
+      final outcome = await McpService.I.connectOutcome(
+        server,
+        handshakeBudget: const Duration(seconds: 10),
+      );
+
+      expect(outcome.kind, McpConnectOutcomeKind.failed);
+      expect(requests, 0, reason: 'no spawn/dial after the budget expired');
+      expect(McpService.I.isConnected(server.canonicalId), isFalse);
+    });
+  });
+
+  group('MCP startup side effects', () {
+    MockClient healthyMcp() => MockClient((request) async {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      return http.Response(
+        jsonEncode({
+          'jsonrpc': '2.0',
+          'id': body['id'],
+          'result': body['method'] == 'tools/list'
+              ? {
+                  'tools': [
+                    {'name': 'lookup'},
+                  ],
+                }
+              : {},
+        }),
+        200,
+      );
+    });
+
+    test(
+      'successful startup connect sets connected + working and keeps intent',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          'ovid_mcp_connected_v1': ['fast'],
+        });
+        McpService.I.httpClientForTest = healthyMcp();
+        final app = AppState.createForTest();
+        final tasks = await app.buildReadinessTasks();
+        final server = _httpServer('fast');
+        app.mcpServers.add(server);
+        final task = tasks.singleWhere((t) => t.id == 'mcp.connect:fast');
+
+        final status = await task.run();
+
+        expect(status.state, StartupItemState.ready);
+        expect(server.connected, isTrue);
+        expect(app.serviceStatus['mcp:fast']!.health, ServiceHealth.working);
+
+        await app.persistMcpIntent();
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getStringList('ovid_mcp_connected_v1'), contains('fast'));
+        addTearDown(() => McpService.I.disconnect('fast'));
+      },
+    );
+
+    test(
+      'failed startup connect sets failed/needsSetup without dropping intent',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          'ovid_mcp_connected_v1': ['needs'],
+        });
+        var requests = 0;
+        McpService.I.httpClientForTest = MockClient((request) async {
+          requests++;
+          return http.Response('{}', 200);
+        });
+        final app = AppState.createForTest();
+        final tasks = await app.buildReadinessTasks();
+        final server = _httpServer('needs', requiredEnvNames: const ['TOKEN']);
+        app.mcpServers.add(server);
+        final task = tasks.singleWhere((t) => t.id == 'mcp.connect:needs');
+
+        final status = await task.run();
+
+        expect(status.state, StartupItemState.needsSetup);
+        expect(server.connected, isFalse);
+        final service = app.serviceStatus['mcp:needs']!;
+        expect(service.health, ServiceHealth.failed);
+        expect(service.detail, contains('configuration'));
+        expect(requests, 0);
+
+        await app.persistMcpIntent();
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getStringList('ovid_mcp_connected_v1'), contains('needs'));
+      },
+    );
+  });
+
+  group('MCP budget resolution', () {
+    test(
+      'resolves the budget from the server loaded after task build',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          'ovid_mcp_connected_v1': ['custom-fast', 'publisher/slow'],
+        });
+        final app = AppState.createForTest();
+        final tasks = await app.buildReadinessTasks();
+        // Inventory arrives only after buildReadinessTasks (local hydration).
+        app.mcpServers.add(_httpServer('custom-fast', startupTimeoutS: 5));
+        app.mcpServers.add(
+          _httpServer('slow', owner: 'publisher', startupTimeoutS: 120),
+        );
+
+        final fast = tasks.singleWhere(
+          (t) => t.id == 'mcp.connect:custom-fast',
+        );
+        final slow = tasks.singleWhere(
+          (t) => t.id == 'mcp.connect:publisher/slow',
+        );
+
+        expect(fast.timeout, const Duration(seconds: 6));
+        expect(slow.timeout, const Duration(seconds: 31));
+      },
+    );
   });
 
   group('marketplace startup task', () {
@@ -479,6 +659,31 @@ void main() {
         final outcome = await app.refreshMarketplaceForStartup('cached/repo');
 
         expect(outcome, MarketplaceSyncOutcome.degraded);
+      },
+    );
+
+    test(
+      'a slow repo cannot starve later repos within the item budget',
+      () async {
+        final visited = <String>[];
+        final slowGate = Completer<void>();
+        final task = MarketplaceRefreshTask(
+          id: 'marketplace.refresh',
+          label: 'Refresh plugin marketplaces',
+          timeout: const Duration(milliseconds: 200),
+          repos: () => const ['slow', 'fast'],
+          refresh: (repo) async {
+            visited.add(repo);
+            if (repo == 'slow') await slowGate.future;
+            return MarketplaceSyncOutcome.ready;
+          },
+        );
+
+        final status = await task.run();
+        slowGate.complete();
+
+        expect(visited, ['slow', 'fast']);
+        expect(status.state, StartupItemState.failed);
       },
     );
   });
@@ -628,6 +833,28 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getStringList('ovid_mcp_connected_v1'), ['Fetch']);
     });
+
+    test(
+      'toggling an ownerless server off prunes only its intent id',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          'ovid_mcp_connected_v1': ['ownerless-a', 'ownerless-b'],
+        });
+        final app = AppState.createForTest();
+        final a = _httpServer('ownerless-a')..connected = true;
+        final b = _httpServer('ownerless-b')..connected = true;
+        app.mcpServers.addAll([a, b]);
+
+        app.toggleMcpServer(a);
+        await Future<void>.delayed(Duration.zero);
+        await Future<void>.delayed(Duration.zero);
+
+        final prefs = await SharedPreferences.getInstance();
+        final intent = prefs.getStringList('ovid_mcp_connected_v1') ?? [];
+        expect(intent, isNot(contains('ownerless-a')));
+        expect(intent, contains('ownerless-b'));
+      },
+    );
 
     test('startup reasons never leak secret values', () async {
       final coordinator = StartupCoordinator.forTest(

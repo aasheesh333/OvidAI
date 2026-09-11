@@ -1762,7 +1762,9 @@ class AppState extends ChangeNotifier {
         McpConnectTask(
           canonicalId: name,
           label: 'Connect ${server?.name ?? name}',
-          budget: McpConnectTask.budgetFor(server?.startupTimeoutS ?? 30),
+          resolveBudget: () => McpConnectTask.budgetFor(
+            _mcpServerByCanonicalId(name)?.startupTimeoutS ?? 30,
+          ),
           connect: (budget) => _connectMcpForStartup(name, budget),
           isConnected: () => stageOverridden || McpService.I.isConnected(name),
           onDisable: () => _disableMcpForStartup(name),
@@ -1789,27 +1791,49 @@ class AppState extends ChangeNotifier {
     String canonicalId,
     Duration budget,
   ) async {
+    final server = _mcpServerByCanonicalId(canonicalId);
+    if (server == null) {
+      return const McpConnectOutcome(
+        McpConnectOutcomeKind.failed,
+        'Server is no longer configured',
+      );
+    }
+    updateServiceStatus(
+      'mcp:$canonicalId',
+      ServiceHealth.connecting,
+      detail: 'connecting…',
+    );
     McpConnectOutcome? outcome;
     final overridden = await _runStartupStage('mcp.connect', () async {
-      final server = _mcpServerByCanonicalId(canonicalId);
-      if (server == null) {
-        outcome = const McpConnectOutcome(
-          McpConnectOutcomeKind.failed,
-          'Server is no longer configured',
-        );
-        return;
-      }
       outcome = await McpService.I.connectOutcome(
         server,
         handshakeBudget: budget,
       );
     });
-    if (overridden) return const McpConnectOutcome(McpConnectOutcomeKind.ready);
-    return outcome ??
+    if (overridden) {
+      // Test seam: a stubbed stage stands in for a successful handshake, but
+      // the real connection state is untouched.
+      return const McpConnectOutcome(McpConnectOutcomeKind.ready);
+    }
+    final result =
+        outcome ??
         const McpConnectOutcome(
           McpConnectOutcomeKind.failed,
           'MCP handshake did not run',
         );
+    final connected =
+        result.kind == McpConnectOutcomeKind.ready &&
+        McpService.I.isConnected(canonicalId);
+    server.connected = connected;
+    updateServiceStatus(
+      'mcp:$canonicalId',
+      connected ? ServiceHealth.working : ServiceHealth.failed,
+      detail: connected
+          ? 'connected'
+          : redactStartupError(result.reason ?? 'connect failed'),
+    );
+    refresh();
+    return result;
   }
 
   /// Disable one MCP item: disconnect it and remove ONLY its canonical id from
@@ -4511,7 +4535,9 @@ class AppState extends ChangeNotifier {
       serviceStatus.remove('mcp:${s.canonicalId}');
       unawaited(McpService.I.disconnect(s.canonicalId));
     }
-    _persistMcpConnectedIntent();
+    _persistMcpConnectedIntent(
+      removed: s.connected ? const [] : [s.canonicalId],
+    );
     refresh();
   }
 
@@ -4524,14 +4550,33 @@ class AppState extends ChangeNotifier {
   /// UI install paths both call it so a restart keeps them connected).
   Future<void> persistMcpIntent() => _persistMcpConnectedIntent();
 
-  Future<void> _persistMcpConnectedIntent() async {
-    final names = mcpServers
-        .where((s) => s.connected)
-        .map((s) => s.canonicalId)
-        .toList();
+  /// Persist the connected-server intent. Connected servers are always
+  /// recorded; an intended **ownerless** server (bundled/custom seed) is
+  /// retained even when its last connect failed, so a startup attempt never
+  /// silently drops the user's intent. Owned servers follow the plugin
+  /// lifecycle and are only retained while actually connected.
+  ///
+  /// [removed] lets explicit user actions (toggle-off) prune one id without
+  /// rebuilding the whole intent from live connection flags.
+  Future<void> _persistMcpConnectedIntent({
+    Iterable<String> removed = const [],
+  }) async {
+    final removedIds = removed.toSet();
+    final existing = await _mcpConnectedIntent();
+    final merged = <String>{};
+    for (final id in existing) {
+      if (removedIds.contains(id)) continue;
+      final server = _mcpServerByCanonicalId(id);
+      if (server != null && server.ownerPluginId == null) merged.add(id);
+    }
+    for (final s in mcpServers) {
+      if (s.connected && !removedIds.contains(s.canonicalId)) {
+        merged.add(s.canonicalId);
+      }
+    }
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setStringList(_kMcpConnectedIntent, names);
+      await prefs.setStringList(_kMcpConnectedIntent, merged.toList());
     } catch (_) {}
   }
 
