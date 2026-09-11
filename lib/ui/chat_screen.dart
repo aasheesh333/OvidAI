@@ -13,6 +13,7 @@ import 'sandbox_setup.dart';
 import 'browser_screen.dart';
 import 'sidebar.dart';
 import 'subagent_screen.dart';
+import 'transcript_model.dart';
 import '../core/agent_service.dart';
 import '../core/commands.dart';
 import '../core/device_control_service.dart';
@@ -31,69 +32,6 @@ import 'startup_progress_panel.dart';
 /// Thought for a while") that sits right before the final answer.
 /// The LAST tool/reasoning run (no text after it yet, or the last tool
 /// in a run still in progress) stays unfolded — same as Compact.
-sealed class _ChatItem {}
-
-class _SingleItem extends _ChatItem {
-  final Message m;
-  final int index;
-  _SingleItem(this.m, this.index);
-}
-
-class _FoldedGroup extends _ChatItem {
-  final List<Message> msgs;
-  final List<int> indices;
-  _FoldedGroup(this.msgs, this.indices);
-}
-
-List<_ChatItem> _foldMessages(List<Message> messages) {
-  final showReasoning = AppState.I.showReasoning;
-  final out = <_ChatItem>[];
-  var i = 0;
-  while (i < messages.length) {
-    final m = messages[i];
-    // Reasoning display toggle (Settings): OFF → skip thinking chips.
-    // Data stays in the session; only display is suppressed.
-    if (m.kind == MsgKind.reasoning && !showReasoning) {
-      i++;
-      continue;
-    }
-    final foldable =
-        m.role == 'assistant' &&
-        (m.kind == MsgKind.tool || m.kind == MsgKind.reasoning) &&
-        !m.thinking;
-    if (!foldable) {
-      out.add(_SingleItem(m, i));
-      i++;
-      continue;
-    }
-    // Collect the foldable run.
-    final group = <Message>[];
-    final idx = <int>[];
-    while (i < messages.length &&
-        messages[i].role == 'assistant' &&
-        (messages[i].kind == MsgKind.tool ||
-            messages[i].kind == MsgKind.reasoning) &&
-        !messages[i].thinking) {
-      group.add(messages[i]);
-      idx.add(i);
-      i++;
-    }
-    // Look ahead: if the NEXT message is assistant text, this group is
-    // complete → fold it.  If the group runs to the end (or before a
-    // user message), keep it unfolded (still in progress / latest).
-    final nextIsAnswer =
-        i < messages.length && messages[i].kind == MsgKind.text;
-    if (group.length >= 2 && nextIsAnswer) {
-      out.add(_FoldedGroup(group, idx));
-    } else {
-      for (var j = 0; j < group.length; j++) {
-        out.add(_SingleItem(group[j], idx[j]));
-      }
-    }
-  }
-  return out;
-}
-
 /// Read/write transcript for ONE session — the same rendering the main chat
 /// uses (folded tool/reasoning strips, streaming bubbles, tool cards).
 ///
@@ -117,7 +55,10 @@ class ChatTranscript extends StatelessWidget {
     return AnimatedBuilder(
       animation: Listenable.merge([AppState.I, AgentService.I]),
       builder: (_, _) {
-        final items = _foldMessages(session.messages);
+        final items = foldMessages(
+          session.messages,
+          showReasoning: AppState.I.showReasoning,
+        );
         final count = items.length + (typing ? 1 : 0);
         return MediaQuery(
           data: MediaQuery.of(context).copyWith(
@@ -279,12 +220,12 @@ class _ShimmerTextState extends State<_ShimmerText>
 }
 
 Widget _buildItem(
-  _ChatItem item,
+  ChatItem item,
   dynamic s, {
   required VoidCallback onAction,
   required TextEditingController input,
 }) {
-  if (item is _SingleItem) {
+  if (item is SingleItem) {
     return _RowIn(
       child: _MessageView(
         m: item.m,
@@ -295,7 +236,7 @@ Widget _buildItem(
       ),
     );
   }
-  final g = item as _FoldedGroup;
+  final g = item as FoldedGroup;
   return _RowIn(child: _TurnProcessStrip(group: g.msgs));
 }
 
@@ -992,7 +933,10 @@ class _ChatScreenState extends State<ChatScreen>
                                     // turn-process folding: consecutive
                                     // tool/reasoning items collapse into a
                                     // single strip before the final answer.
-                                    final allItems = _foldMessages(s.messages);
+                                    final allItems = foldMessages(
+                                      s.messages,
+                                      showReasoning: app.showReasoning,
+                                    );
                                     // Lazy paging (ChatGPT/Gemini style) —
                                     // render ONLY the newest [_visibleCount]
                                     // folded items; scrolling to the top
