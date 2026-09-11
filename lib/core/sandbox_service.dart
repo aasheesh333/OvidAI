@@ -100,6 +100,12 @@ class SandboxService {
   bool _installed = false;
   bool _checked = false;
 
+  /// GitHub token injected into sandbox process env so terminal/agent git
+  /// against github.com can authenticate. Process-env only — never written
+  /// to `.git-credentials` or global config. Set by [GitHubService] on
+  /// login/initialize and cleared on sign-out.
+  String? gitCredentialToken;
+
   bool get isInstalled => _installed;
 
   /// Public paths — MCP spawns servers through these.
@@ -1696,6 +1702,20 @@ audit=false
     // PYTHONPATH would pollute sys.path with cwd).
     final pysp = _pythonSitePackages;
     if (pysp != null && pysp.isNotEmpty) env['PYTHONPATH'] = pysp;
+    // ── git credentials: host-scoped, process-env only ────────────────
+    // When signed in, hand git a credential helper scoped to github.com
+    // through GIT_CONFIG_* env vars. Never write `.git-credentials` or any
+    // global config, and suppress interactive prompts (a hung prompt is
+    // the bug this fixes). The token lives only in this process env.
+    final token = gitCredentialToken;
+    if (token != null && token.isNotEmpty) {
+      env['GIT_TERMINAL_PROMPT'] = '0';
+      env['GIT_CONFIG_COUNT'] = '1';
+      env['GIT_CONFIG_KEY_0'] = 'credential.https://github.com.helper';
+      env['GIT_CONFIG_VALUE_0'] =
+          '!f() { echo username=x-access-token; '
+          'echo password=$token; }; f';
+    }
     return env;
   }
 
@@ -1892,6 +1912,11 @@ audit=false
   /// with a real `<prefix>/bin/sh` (the byte-cast regression test).
   @visibleForTesting
   set sandboxPrefixForTest(Directory? d) => _prefix = d;
+
+  /// Exposes the sandbox process env so tests can assert credential
+  /// scoping without spawning a process.
+  @visibleForTesting
+  Map<String, String> sandboxEnvForTest() => _sandboxEnv();
 
   /// Kill EVERY process this service spawned (agent Stop / app pause
   /// cleanup). SIGKILL — cooperative exits are too slow for a Stop.

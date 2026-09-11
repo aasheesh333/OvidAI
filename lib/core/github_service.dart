@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'repo_cache.dart';
+import 'sandbox_service.dart';
 
 class GitHubDeviceAuthorization {
   final String deviceCode;
@@ -69,12 +70,20 @@ class GitHubService extends ChangeNotifier {
   String? get name => _user?['name'] as String?;
   String? get token => _token;
 
+  /// Single write point for the auth token: keeps the sandbox's git
+  /// credential channel in lockstep. The token reaches spawned git only
+  /// through `SandboxService._sandboxEnv`, and is never persisted there.
+  void _setToken(String? value) {
+    _token = value;
+    SandboxService.I.gitCredentialToken = value;
+  }
+
   /// Sign out — clear token + profile, disconnect repo cache.
   Future<void> signOut() async {
     _authGeneration++;
     _isInitializing = false;
     _cancelProfileRetry();
-    _token = null;
+    _setToken(null);
     _user = null;
     RepoCache.I.unbind();
     notifyListeners();
@@ -106,7 +115,7 @@ class GitHubService extends ChangeNotifier {
       }
       // The stored token is trusted immediately so `isLoggedIn` is true across
       // restarts; the profile is loaded (and retried) separately.
-      _token = token;
+      _setToken(token);
       notifyListeners();
       final user = await _fetchUser(token, c);
       if (generation != _authGeneration) return;
@@ -115,7 +124,7 @@ class GitHubService extends ChangeNotifier {
     } on GitHubAuthException catch (error) {
       if (generation != _authGeneration) return;
       if (error.code == 'invalid_token') {
-        _token = null;
+        _setToken(null);
         _user = null;
         notifyListeners();
         await _persistToken(null);
@@ -158,7 +167,7 @@ class GitHubService extends ChangeNotifier {
         if (generation == _authGeneration &&
             _token == token &&
             error.code == 'invalid_token') {
-          _token = null;
+          _setToken(null);
           _user = null;
           notifyListeners();
           await _persistToken(null);
@@ -316,7 +325,7 @@ class GitHubService extends ChangeNotifier {
           ensureCurrent();
           await _persistToken(accessToken, generation: generation);
           ensureCurrent();
-          _token = accessToken;
+          _setToken(accessToken);
           _user = user;
           notifyListeners();
           return accessToken;
