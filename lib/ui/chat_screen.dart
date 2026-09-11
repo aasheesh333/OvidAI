@@ -38,6 +38,12 @@ import 'startup_progress_panel.dart';
 ///
 /// The subagent view renders a child session with this, so a subagent's work
 /// is shown in full instead of being summarised into one line.
+///
+/// The subagent transcript uses the same bounded window as the main chat with
+/// a larger page, so a long child run is not re-folded in full on every
+/// rebuild.
+const int _subagentTranscriptPage = 200;
+
 class ChatTranscript extends StatelessWidget {
   final ChatSession session;
   final ScrollController? scrollController;
@@ -59,10 +65,12 @@ class ChatTranscript extends StatelessWidget {
         final layout = ChatLayout(
           viewportWidth: MediaQuery.of(context).size.width,
         );
-        final items = foldMessages(
+        final items = windowForBounded(
           session.messages,
+          pageSize: _subagentTranscriptPage,
+          visibleCount: 0,
           showReasoning: AppState.I.showReasoning,
-        );
+        ).visible;
         final count = items.length + (typing ? 1 : 0);
         final list = ListView.builder(
           controller: scrollController,
@@ -644,7 +652,27 @@ class _ChatScreenState extends State<ChatScreen>
   static const _pageSize = 40;
   int _visibleCount = _pageSize;
   bool _paging = false; // blocks re-entrant top-of-list pagination
-  int _totalItems = 0; // last known full history length (for paging)
+  bool _hasEarlier = false; // older messages exist above the visible window
+
+  // ── Windowed transcript cache (Task 4) ──
+  // The folded window is recomputed only when the session, message count, the
+  // identity/kind/thinking of the last message, `showReasoning`, or the pager
+  // window changes. Streaming token appends mutate the live message's content
+  // in place, so they never invalidate the fold.
+  TranscriptWindow? _windowCache;
+  String? _windowSessionId;
+  int _windowCount = -1;
+  Message? _windowLast;
+  MsgKind? _windowLastKind;
+  bool _windowLastThinking = false;
+  bool _windowShowReasoning = false;
+  int _windowVisibleCount = -1;
+
+  // The built transcript ListView is memoized too: returning the identical
+  // widget instance lets Flutter skip rebuilding the whole list per token.
+  // Only the live tail bubble subscribes to streaming updates.
+  Widget? _transcriptListCache;
+  Object? _transcriptListKey;
 
   void _bindDraft(String sessionId) {
     if (_boundSessionId == sessionId) return;
@@ -704,7 +732,7 @@ class _ChatScreenState extends State<ChatScreen>
     }
     // ChatGPT/Gemini-style lazy paging: scroll to the top and more history
     // slides in automatically — no "Show earlier" tapping.
-    if (!_paging && pos.pixels < 120 && _visibleCount < _totalItems) {
+    if (!_paging && pos.pixels < 120 && _hasEarlier) {
       _paging = true;
       final oldExtent = pos.maxScrollExtent;
       final oldPixels = pos.pixels;
@@ -720,6 +748,42 @@ class _ChatScreenState extends State<ChatScreen>
         _paging = false;
       });
     }
+  }
+
+  /// The bounded folded window for [s], recomputed only when its inputs
+  /// change (Task 4). Streaming token appends mutate the live message in
+  /// place, so the identity/last-kind checks keep the cache warm across
+  /// tokens and the full history is never re-folded.
+  TranscriptWindow _transcriptWindow(ChatSession s) {
+    final showReasoning = AppState.I.showReasoning;
+    final messages = s.messages;
+    final count = messages.length;
+    final last = count == 0 ? null : messages.last;
+    final lastKind = last?.kind;
+    final lastThinking = last?.thinking ?? false;
+    if (_windowCache == null ||
+        _windowSessionId != s.id ||
+        _windowCount != count ||
+        !identical(_windowLast, last) ||
+        _windowLastKind != lastKind ||
+        _windowLastThinking != lastThinking ||
+        _windowShowReasoning != showReasoning ||
+        _windowVisibleCount != _visibleCount) {
+      _windowCache = windowForBounded(
+        messages,
+        pageSize: _pageSize,
+        visibleCount: _visibleCount,
+        showReasoning: showReasoning,
+      );
+      _windowSessionId = s.id;
+      _windowCount = count;
+      _windowLast = last;
+      _windowLastKind = lastKind;
+      _windowLastThinking = lastThinking;
+      _windowShowReasoning = showReasoning;
+      _windowVisibleCount = _visibleCount;
+    }
+    return _windowCache!;
   }
 
   /// Called from the message-list builder when content changes — keeps the
@@ -960,27 +1024,15 @@ class _ChatScreenState extends State<ChatScreen>
                                   builder: (_, _) {
                                     final typing = AgentService.I.busyFor(s.id);
                                     _maybeJumpToBottom();
-                                    // turn-process folding: consecutive
-                                    // tool/reasoning items collapse into a
-                                    // single strip before the final answer.
-                                    final allItems = foldMessages(
-                                      s.messages,
-                                      showReasoning: app.showReasoning,
-                                    );
-                                    // Lazy paging (ChatGPT/Gemini style) —
-                                    // render ONLY the newest [_visibleCount]
-                                    // folded items; scrolling to the top
-                                    // auto-loads the previous page (no tap
-                                    // needed, see _onScroll). A 500-message
-                                    // chat never lags the phone.
-                                    _totalItems = allItems.length;
-                                    final hidden =
-                                        allItems.length - _visibleCount;
-                                    final items = hidden > 0
-                                        ? allItems.sublist(
-                                            allItems.length - _visibleCount,
-                                          )
-                                        : allItems;
+                                    // Bounded, cached fold (Task 4): the
+                                    // folded window is reused across streaming
+                                    // tokens; only the message count / last
+                                    // message identity / showReasoning / pager
+                                    // window can invalidate it.
+                                    final window = _transcriptWindow(s);
+                                    _hasEarlier = window.hasEarlier;
+                                    final hiddenMessages = window.hiddenMessages;
+                                    final items = window.visible;
                                     // "Produced" card — files written by
                                     // this run surface as a card under the
                                     // final answer (tap → Studio).
@@ -988,12 +1040,54 @@ class _ChatScreenState extends State<ChatScreen>
                                         AgentService.I.producedFiles;
                                     final showProduced =
                                         !typing && produced.isNotEmpty;
+                                    final producedSig = showProduced
+                                        ? Object.hashAll(
+                                            produced.map(
+                                              (e) => Object.hash(
+                                                e.path,
+                                                e.size,
+                                              ),
+                                            ),
+                                          )
+                                        : 0;
+                                    // Memoize the ListView: when only the live
+                                    // message's content changed (streaming),
+                                    // the identical widget instance lets
+                                    // Flutter skip rebuilding the list. The
+                                    // live tail bubble has its own AppState
+                                    // listener so its text still updates.
+                                    final listKey = (
+                                      s.id,
+                                      window,
+                                      typing,
+                                      showProduced,
+                                      producedSig,
+                                      layout.contentWidth,
+                                      _paging,
+                                    );
+                                    if (_transcriptListCache != null &&
+                                        _transcriptListKey == listKey) {
+                                      return Center(
+                                        child: ConstrainedBox(
+                                          key: const ValueKey(
+                                            'chat-transcript-column',
+                                          ),
+                                          constraints: BoxConstraints(
+                                            maxWidth: layout.contentWidth,
+                                          ),
+                                          child: _transcriptListCache!,
+                                        ),
+                                      );
+                                    }
                                     final count =
-                                        (hidden > 0 ? 1 : 0) +
+                                        (hiddenMessages > 0 ? 1 : 0) +
                                         items.length +
                                         (typing ? 1 : 0) +
                                         (showProduced ? 1 : 0);
                                     final list = ListView.builder(
+                                      key: const ValueKey(
+                                        'chat-transcript-list',
+                                      ),
                                       controller: _scroll,
                                       padding: const EdgeInsets.fromLTRB(
                                         16,
@@ -1007,7 +1101,7 @@ class _ChatScreenState extends State<ChatScreen>
                                         // spinner shows only while a page is
                                         // actually loading — it used to spin
                                         // forever in any long thread.
-                                        if (hidden > 0 && i == 0) {
+                                        if (hiddenMessages > 0 && i == 0) {
                                           return Center(
                                             child: Padding(
                                               padding: const EdgeInsets.all(8),
@@ -1038,8 +1132,8 @@ class _ChatScreenState extends State<ChatScreen>
                                                   Text(
                                                     _paging
                                                         ? 'Loading earlier…'
-                                                        : '$hidden earlier '
-                                                              'message${hidden == 1 ? '' : 's'} '
+                                                        : '$hiddenMessages earlier '
+                                                              'message${hiddenMessages == 1 ? '' : 's'} '
                                                               '· scroll up',
                                                     style: TextStyle(
                                                       fontSize: 11,
@@ -1051,7 +1145,9 @@ class _ChatScreenState extends State<ChatScreen>
                                             ),
                                           );
                                         }
-                                        final li = hidden > 0 ? i - 1 : i;
+                                        final li = hiddenMessages > 0
+                                            ? i - 1
+                                            : i;
                                         if (li == items.length) {
                                           return typing
                                               ? const _TypingBubble()
@@ -1061,8 +1157,25 @@ class _ChatScreenState extends State<ChatScreen>
                                                   ),
                                                 );
                                         }
+                                        final item = items[li];
+                                        // The live tail bubble subscribes to
+                                        // AppState so streaming tokens repaint
+                                        // only this row — the rest of the list
+                                        // stays cached.
+                                        if (typing && li == items.length - 1) {
+                                          return AnimatedBuilder(
+                                            animation: AppState.I,
+                                            builder: (_, _) => _buildItem(
+                                              item,
+                                              s,
+                                              onAction: () => setState(() {}),
+                                              input: _input,
+                                              layout: layout,
+                                            ),
+                                          );
+                                        }
                                         return _buildItem(
-                                          items[li],
+                                          item,
                                           s,
                                           onAction: () => setState(() {}),
                                           input: _input,
@@ -1070,6 +1183,8 @@ class _ChatScreenState extends State<ChatScreen>
                                         );
                                       },
                                     );
+                                    _transcriptListCache = list;
+                                    _transcriptListKey = listKey;
                                     return Center(
                                       child: ConstrainedBox(
                                         key: const ValueKey(
