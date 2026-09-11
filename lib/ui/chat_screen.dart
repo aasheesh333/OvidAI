@@ -19,6 +19,9 @@ import '../core/mcp_service.dart';
 import '../core/plugin_registry.dart';
 import '../core/presets.dart';
 import '../core/skills.dart';
+import '../core/startup_coordinator.dart';
+import 'plugins_screen.dart';
+import 'startup_progress_panel.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
@@ -643,7 +646,12 @@ class _TurnProcessStripState extends State<_TurnProcessStrip> {
 }
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key});
+  const ChatScreen({super.key, this.startupCoordinator});
+
+  /// Startup coordinator rendered by the readiness dashboard. Defaults to
+  /// the process singleton; tests inject an isolated instance.
+  final StartupCoordinator? startupCoordinator;
+
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
@@ -705,6 +713,14 @@ class _ChatScreenState extends State<ChatScreen>
     _atBottom = true;
     _showJumpFab = false;
     _visibleCount = _pageSize; // lazy paging resets per session
+  }
+
+  void _openPlugins(BuildContext context, {String? focusCanonicalId}) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => PluginsScreen(focusCanonicalId: focusCanonicalId),
+      ),
+    );
   }
 
   @override
@@ -913,6 +929,22 @@ class _ChatScreenState extends State<ChatScreen>
           body: SafeArea(
             child: Column(
               children: [
+                // Non-blocking startup readiness dashboard, pinned just
+                // below the app header. Its own AnimatedBuilder observes the
+                // coordinator so startup transitions never rebuild the
+                // transcript or the composer.
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 240),
+                  child: SingleChildScrollView(
+                    child: StartupProgressPanel(
+                      coordinator: widget.startupCoordinator,
+                      onOpenPlugins: (canonicalId) => _openPlugins(
+                        context,
+                        focusCanonicalId: canonicalId,
+                      ),
+                    ),
+                  ),
+                ),
                 Expanded(
                   child: s == null || s.messages.isEmpty
                       ? const _EmptyState()
@@ -1103,6 +1135,7 @@ class _ChatScreenState extends State<ChatScreen>
                 _InputBar(
                   controller: _input,
                   sessionId: s?.id,
+                  coordinator: widget.startupCoordinator,
                   running: s == null ? false : AgentService.I.busyFor(s.id),
                   // approval takeover parity: a pending approval LOCKS
                   // the composer — the user answers the card, not the box.
@@ -3438,6 +3471,11 @@ class _AttachmentChip extends StatelessWidget {
 class _InputBar extends StatefulWidget {
   final TextEditingController controller;
   final String? sessionId;
+
+  /// Startup coordinator observed so runtime plugin skills mounted by the
+  /// `skill.mount` item refresh the slash suggestions without rebuilding the
+  /// transcript. Defaults to the process singleton.
+  final StartupCoordinator? coordinator;
   final bool running;
 
   /// Approval takeover: when an approval/question card is pending, the
@@ -3448,6 +3486,7 @@ class _InputBar extends StatefulWidget {
     required this.controller,
     required this.sessionId,
     required this.running,
+    this.coordinator,
     this.locked = false,
     required this.onSend,
   });
@@ -3461,6 +3500,52 @@ class _InputBarState extends State<_InputBar> {
   bool get running => widget.running;
   bool get locked => widget.locked;
   VoidCallback get onSend => widget.onSend;
+
+  StartupCoordinator get _coordinator =>
+      widget.coordinator ?? StartupCoordinator.I;
+
+  /// Last observed `skill.mount` state, so the composer rebuilds exactly when
+  /// runtime skills finish mounting (and not on every startup transition).
+  StartupItemState? _skillMountState;
+
+  @override
+  void initState() {
+    super.initState();
+    _skillMountState = _currentSkillMountState();
+    _coordinator.addListener(_onStartupChanged);
+  }
+
+  @override
+  void didUpdateWidget(_InputBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.coordinator != widget.coordinator) {
+      (oldWidget.coordinator ?? StartupCoordinator.I).removeListener(
+        _onStartupChanged,
+      );
+      _skillMountState = _currentSkillMountState();
+      _coordinator.addListener(_onStartupChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    _coordinator.removeListener(_onStartupChanged);
+    super.dispose();
+  }
+
+  StartupItemState? _currentSkillMountState() {
+    for (final item in _coordinator.snapshot.items) {
+      if (item.id == 'skill.mount') return item.state;
+    }
+    return null;
+  }
+
+  void _onStartupChanged() {
+    final next = _currentSkillMountState();
+    if (next == _skillMountState) return;
+    _skillMountState = next;
+    if (mounted) setState(() {});
+  }
 
   /// web-IDE rule: running + empty draft = Stop; running + draft = Send
   /// (queue). The queue color (teal) signals "this goes to the queue",
@@ -4133,6 +4218,7 @@ class _InputBarState extends State<_InputBar> {
                 ),
               // ── Text area — full card width ──
               TextField(
+                key: const ValueKey('chat-composer'),
                 controller: controller,
                 minLines: 1,
                 maxLines: 5,
@@ -4170,15 +4256,26 @@ class _InputBarState extends State<_InputBar> {
                     ),
                     onPressed: () => _attachSheet(context),
                   ),
-                  // web-IDE workspace chip — current workspace/repo name.
-                  const _WorkspaceChip(),
-                  const SizedBox(width: 6),
-                  // web-IDE plan chip — amber, only while plan mode is on.
-                  const _PlanChip(),
-                  // web-IDE mode selector — icon + text chip, opens the mode sheet.
-                  const _ModeChip(),
+                  // The middle chips (workspace / plan / mode) scroll
+                  // horizontally on narrow phones instead of overflowing the
+                  // composer row; the mic/send actions stay pinned right.
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          // web-IDE workspace chip — current workspace/repo name.
+                          const _WorkspaceChip(),
+                          const SizedBox(width: 6),
+                          // web-IDE plan chip — amber, only while plan mode is on.
+                          const _PlanChip(),
+                          // web-IDE mode selector — icon + text chip, opens the mode sheet.
+                          const _ModeChip(),
+                        ],
+                      ),
+                    ),
+                  ),
                   // Model selector lives in the header AppBar — not duplicated here.
-                  const Spacer(),
                   IconButton(
                     tooltip: 'Voice',
                     icon: Icon(

@@ -11,9 +11,11 @@ import '../core/plugin_registry.dart';
 import '../core/plugin_runtime.dart';
 import '../core/plugin_source_resolver.dart';
 import '../core/sandbox_service.dart';
+import '../core/startup_coordinator.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import 'plugin_permission_sheet.dart';
+import 'startup_progress_panel.dart';
 
 /// Agent tools a plugin contributes when installed+enabled — mirrors the
 /// `_tools` gate in AgentService so the install snackbar can report what
@@ -66,6 +68,71 @@ String? mcpUnsupportedReason(McpServer s) {
         'on-device sandbox and need $needs there';
   }
   return null;
+}
+
+/// Durable canonical startup status for a runtime plugin row, or null when
+/// the row has no normalized runtime id. The Plugins screen consumes this
+/// instead of inferring readiness from `installed`/`enabled`.
+PluginRuntimeStatus? durablePluginStatus(PluginItem p) =>
+    p.runtimeId == null ? null : AppState.I.statusFor(p.runtimeId!);
+
+/// Durable canonical startup status for an MCP server, or null.
+PluginRuntimeStatus? durableMcpStatus(McpServer s) =>
+    AppState.I.statusFor(s.canonicalId);
+
+/// Trailing status icon for a durable record (spec §6.2). A durable `Ready`
+/// is the only source of a green check for runtime rows.
+Widget durableStatusIcon(PluginRuntimeStatus status) {
+  final label = startupItemStateLabel(status.state);
+  final tooltip = status.reason == null || status.reason!.isEmpty
+      ? label
+      : '$label · ${status.reason}';
+  switch (status.state) {
+    case StartupItemState.ready:
+      return const Icon(
+        Icons.check_circle_outline,
+        size: 18,
+        color: Aether.success,
+      );
+    case StartupItemState.queued:
+    case StartupItemState.running:
+      return const SizedBox(
+        width: 14,
+        height: 14,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          color: Aether.accent,
+        ),
+      );
+    case StartupItemState.failed:
+    case StartupItemState.unsupported:
+      return Tooltip(
+        message: tooltip,
+        child: Icon(
+          Icons.error_outline,
+          size: 18,
+          color: Aether.dangerC,
+        ),
+      );
+    case StartupItemState.degraded:
+    case StartupItemState.skipped:
+    case StartupItemState.needsSetup:
+    case StartupItemState.migrationRequired:
+      return Tooltip(
+        message: tooltip,
+        child: const Icon(
+          Icons.warning_amber,
+          size: 18,
+          color: Aether.accent,
+        ),
+      );
+    case StartupItemState.disabled:
+      return Icon(
+        Icons.power_settings_new,
+        size: 18,
+        color: Aether.textFaint,
+      );
+  }
 }
 
 // ── Task 11 test seams ──────────────────────────────────────────────
@@ -678,7 +745,12 @@ class _SourceTile extends StatelessWidget {
 /// Plugins library — Claude-Code-extensions style: trending banner carousel,
 /// search, category chips, thousands of community plugins, detail pages.
 class PluginsScreen extends StatefulWidget {
-  const PluginsScreen({super.key});
+  const PluginsScreen({super.key, this.focusCanonicalId});
+
+  /// Deep-link target from the startup dashboard's `Open Plugins` action:
+  /// the canonical plugin/MCP id whose card should be highlighted.
+  final String? focusCanonicalId;
+
   @override
   State<PluginsScreen> createState() => _PluginsScreenState();
 }
@@ -819,7 +891,12 @@ class _PluginsScreenState extends State<PluginsScreen> {
               ),
             ),
             // ── MCP section ──
-            SliverToBoxAdapter(child: _McpSection(app: app)),
+            SliverToBoxAdapter(
+              child: _McpSection(
+                app: app,
+                focusCanonicalId: widget.focusCanonicalId,
+              ),
+            ),
             SliverToBoxAdapter(
               child: Padding(
                 padding: EdgeInsets.fromLTRB(20, 12, 20, 2),
@@ -839,7 +916,12 @@ class _PluginsScreenState extends State<PluginsScreen> {
               sliver: SliverList.separated(
                 itemCount: items.length,
                 separatorBuilder: (_, _) => const SizedBox(height: 10),
-                itemBuilder: (_, i) => PluginCard(plugin: items[i]),
+                itemBuilder: (_, i) => PluginCard(
+                  plugin: items[i],
+                  highlighted:
+                      items[i].runtimeId != null &&
+                      items[i].runtimeId == widget.focusCanonicalId,
+                ),
               ),
             ),
           ],
@@ -1048,7 +1130,11 @@ class _PluginsScreenState extends State<PluginsScreen> {
 
 class PluginCard extends StatelessWidget {
   final PluginItem plugin;
-  const PluginCard({super.key, required this.plugin});
+
+  /// Deep-link target: renders an accent border when this row matches the
+  /// canonical id a startup `Open Plugins` action asked to focus.
+  final bool highlighted;
+  const PluginCard({super.key, required this.plugin, this.highlighted = false});
 
   /// Task 11 (spec §11) + Task 10 copy pass: honest install/availability
   /// state for rows with NO runtime activation. `installed && !enabled`
@@ -1077,11 +1163,17 @@ class PluginCard extends StatelessWidget {
         MaterialPageRoute(builder: (_) => PluginDetailScreen(plugin: plugin)),
       ),
       child: Container(
+        key: plugin.runtimeId == null
+            ? null
+            : ValueKey('plugin-card-${plugin.runtimeId}'),
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: Aether.surface,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Aether.hairline),
+          border: Border.all(
+            color: highlighted ? Aether.accent : Aether.hairline,
+            width: highlighted ? 1.5 : 1,
+          ),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1159,6 +1251,21 @@ class PluginCard extends StatelessWidget {
                     PluginCard.availabilityLabel(plugin),
                     style: TextStyle(fontSize: 11, color: Aether.textFaint),
                   ),
+                  // Task 8 (spec §5.8/§6.2): the durable canonical startup
+                  // status + short reason, never inferred from booleans.
+                  if (durablePluginStatus(plugin) case final durable?
+                      when durable.state != StartupItemState.ready) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      durable.reason == null || durable.reason!.isEmpty
+                          ? startupItemStateLabel(durable.state)
+                          : '${startupItemStateLabel(durable.state)} · '
+                                '${durable.reason}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                    ),
+                  ],
                   const SizedBox(height: 6),
                   Text(
                     plugin.description,
@@ -1181,6 +1288,10 @@ class PluginCard extends StatelessWidget {
                   size: 18,
                   color: Aether.textFaint,
                 );
+              }
+              final durable = durablePluginStatus(plugin);
+              if (durable != null) {
+                return durableStatusIcon(durable);
               }
               final status = app.serviceStatus['plugin:${plugin.name}'];
               if (status != null) {
@@ -1209,6 +1320,15 @@ class PluginCard extends StatelessWidget {
                     ),
                   );
                 }
+              }
+              // Runtime rows without a durable record are honestly unknown —
+              // never a green check derived from installed/enabled flags.
+              if (plugin.runtimeId != null) {
+                return Icon(
+                  Icons.help_outline,
+                  size: 18,
+                  color: Aether.textFaint,
+                );
               }
               return Icon(
                 plugin.enabled ? Icons.check_circle : Icons.check_circle_outline,
@@ -1304,6 +1424,52 @@ class PluginDetailScreen extends StatelessWidget {
               ),
             ],
           ),
+          // Task 8 (spec §5.8/§6.2): the durable canonical startup status +
+          // short reason, persisted across restarts by Task 7.
+          if (durablePluginStatus(plugin) case final durable?) ...[
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Aether.surfaceAlt,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Aether.hairline),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  durableStatusIcon(durable),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          startupItemStateLabel(durable.state),
+                          style: const TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        if (durable.reason != null &&
+                            durable.reason!.isNotEmpty) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            durable.reason!,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: Aether.textMuted,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           SizedBox(
             width: double.infinity,
@@ -1909,7 +2075,8 @@ class _Perm extends StatelessWidget {
 /// (running process + JSON-RPC, not a downloaded package).
 class _McpSection extends StatelessWidget {
   final AppState app;
-  const _McpSection({required this.app});
+  final String? focusCanonicalId;
+  const _McpSection({required this.app, this.focusCanonicalId});
 
   @override
   Widget build(BuildContext context) {
@@ -1950,7 +2117,10 @@ class _McpSection extends StatelessWidget {
                 return _AddMcpTile(onTap: () => _addMcpDialog(context));
               }
               final s = app.mcpServers[i];
-              return McpCard(server: s);
+              return McpCard(
+                server: s,
+                highlighted: s.canonicalId == focusCanonicalId,
+              );
             },
           ),
         ),
@@ -2269,7 +2439,11 @@ parseMcpConfigForTest(String raw) => [
 /// Compact horizontal card for an MCP server.
 class McpCard extends StatelessWidget {
   final McpServer server;
-  const McpCard({super.key, required this.server});
+
+  /// Deep-link target: accent border when the startup `Open Plugins` action
+  /// asked to focus this canonical server.
+  final bool highlighted;
+  const McpCard({super.key, required this.server, this.highlighted = false});
 
   @override
   Widget build(BuildContext context) {
@@ -2282,13 +2456,16 @@ class McpCard extends StatelessWidget {
           ? () => AppState.I.removeMcpServer(server)
           : null,
       child: Container(
+        key: ValueKey('mcp-card-${server.canonicalId}'),
         width: 196,
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: Aether.surface,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
+            width: highlighted ? 1.5 : 1,
             color: () {
+              if (highlighted) return Aether.accent;
               final status = AppState.I.serviceStatus['mcp:${server.canonicalId}'];
               if (status != null) {
                 switch (status.health) {
@@ -2326,7 +2503,9 @@ class McpCard extends StatelessWidget {
                 ),
                 const Spacer(),
                 Builder(builder: (_) {
-                   final status = AppState.I.serviceStatus['mcp:${server.canonicalId}'];
+                  final durable = durableMcpStatus(server);
+                  if (durable != null) return durableStatusIcon(durable);
+                  final status = AppState.I.serviceStatus['mcp:${server.canonicalId}'];
                   if (status != null) {
                     if (status.health == ServiceHealth.connecting) {
                       return const SizedBox(
@@ -2377,7 +2556,23 @@ class McpCard extends StatelessWidget {
             ),
             const SizedBox(height: 2),
             Builder(builder: (_) {
-               final status = AppState.I.serviceStatus['mcp:${server.canonicalId}'];
+              final durable = durableMcpStatus(server);
+              if (durable != null) {
+                final label = startupItemStateLabel(durable.state);
+                final reason = durable.reason;
+                return Text(
+                  reason == null || reason.isEmpty ? label : '$label · $reason',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    color: durable.state == StartupItemState.ready
+                        ? Aether.success
+                        : Aether.textMuted,
+                  ),
+                );
+              }
+              final status = AppState.I.serviceStatus['mcp:${server.canonicalId}'];
               if (status != null) {
                 switch (status.health) {
                   case ServiceHealth.connecting:

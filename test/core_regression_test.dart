@@ -7651,9 +7651,10 @@ block</pre>
       // No debounce window at runTask start.
       expect(src, contains("agentWorking('starting task…', sessionId: s.id)"));
       // Lifecycle paused re-asserts the notification while any run is on.
-      final main = File('lib/main.dart').readAsStringSync();
-      expect(main, contains('anyRunActive'));
-      expect(main, contains('working in background…'));
+      // The chat shell (extracted from main.dart) owns the lifecycle hook.
+      final shell = File('lib/ui/shell.dart').readAsStringSync();
+      expect(shell, contains('anyRunActive'));
+      expect(shell, contains('working in background…'));
       final agent = src;
       expect(agent, contains('bool get anyRunActive'));
     });

@@ -4,8 +4,7 @@ import '../core/theme.dart';
 import '../core/state.dart';
 import '../core/sandbox_service.dart';
 import 'studio_screen.dart';
-import 'chat_screen.dart';
-import 'sidebar.dart';
+import 'shell.dart';
 
 /// Opens Studio.  The sandbox is now installed on FIRST LAUNCH (blocking
 /// gate in main.dart) — Studio just opens.  (Defense-in-depth: if the
@@ -375,7 +374,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                       context,
                       rootNavigator: true,
                     ).pushAndRemoveUntil(
-                      MaterialPageRoute(builder: (_) => const _ShellHost()),
+                      MaterialPageRoute(builder: (_) => const OvidShell()),
                       (_) => false,
                     );
                   } else {
@@ -526,7 +525,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                       context,
                       rootNavigator: true,
                     ).pushAndRemoveUntil(
-                      MaterialPageRoute(builder: (_) => const _ShellHost()),
+                      MaterialPageRoute(builder: (_) => const OvidShell()),
                       (_) => false,
                     );
                   } else {
@@ -550,35 +549,6 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
           ],
         ),
       ),
-    );
-  }
-}
-
-/// Post-setup chat shell host — used by gate mode to push the chat shell
-/// after a successful first-launch install.  Mirrors main.dart's _Shell.
-class _ShellHost extends StatelessWidget {
-  const _ShellHost();
-  @override
-  Widget build(BuildContext context) {
-    final wide = MediaQuery.of(context).size.width >= 840;
-    final chat = const ChatScreen();
-    return Scaffold(
-      drawer: wide
-          ? null
-          : Drawer(
-              width: 288,
-              backgroundColor: Aether.surface,
-              child: SessionsSidebar(),
-            ),
-      body: wide
-          ? Row(
-              children: [
-                const SessionsSidebar(),
-                const VerticalDivider(width: 1),
-                Expanded(child: chat),
-              ],
-            )
-          : chat,
     );
   }
 }

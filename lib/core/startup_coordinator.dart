@@ -40,6 +40,7 @@ class StartupItemStatus {
     this.reason,
     DateTime? updatedAt,
     this.attempt = 0,
+    this.ownerId,
   }) : updatedAt = updatedAt ?? DateTime.now();
 
   factory StartupItemStatus.queued(
@@ -47,12 +48,14 @@ class StartupItemStatus {
     StartupItemKind kind,
     String label, {
     int attempt = 0,
+    String? ownerId,
   }) => StartupItemStatus(
     id: id,
     kind: kind,
     label: label,
     state: StartupItemState.queued,
     attempt: attempt,
+    ownerId: ownerId,
   );
 
   factory StartupItemStatus.running(
@@ -60,12 +63,14 @@ class StartupItemStatus {
     StartupItemKind kind,
     String label, {
     required int attempt,
+    String? ownerId,
   }) => StartupItemStatus(
     id: id,
     kind: kind,
     label: label,
     state: StartupItemState.running,
     attempt: attempt,
+    ownerId: ownerId,
   );
 
   factory StartupItemStatus.ready(
@@ -73,12 +78,14 @@ class StartupItemStatus {
     StartupItemKind kind,
     String label, {
     int attempt = 1,
+    String? ownerId,
   }) => StartupItemStatus(
     id: id,
     kind: kind,
     label: label,
     state: StartupItemState.ready,
     attempt: attempt,
+    ownerId: ownerId,
   );
 
   factory StartupItemStatus.needsSetup(
@@ -87,6 +94,7 @@ class StartupItemStatus {
     String label, {
     String? reason,
     int attempt = 1,
+    String? ownerId,
   }) => StartupItemStatus(
     id: id,
     kind: kind,
@@ -94,6 +102,7 @@ class StartupItemStatus {
     state: StartupItemState.needsSetup,
     reason: reason,
     attempt: attempt,
+    ownerId: ownerId,
   );
 
   factory StartupItemStatus.migrationRequired(
@@ -102,6 +111,7 @@ class StartupItemStatus {
     String label, {
     String? reason,
     int attempt = 1,
+    String? ownerId,
   }) => StartupItemStatus(
     id: id,
     kind: kind,
@@ -109,6 +119,7 @@ class StartupItemStatus {
     state: StartupItemState.migrationRequired,
     reason: reason,
     attempt: attempt,
+    ownerId: ownerId,
   );
 
   factory StartupItemStatus.unsupported(
@@ -117,6 +128,7 @@ class StartupItemStatus {
     String label, {
     String? reason,
     int attempt = 1,
+    String? ownerId,
   }) => StartupItemStatus(
     id: id,
     kind: kind,
@@ -124,6 +136,7 @@ class StartupItemStatus {
     state: StartupItemState.unsupported,
     reason: reason,
     attempt: attempt,
+    ownerId: ownerId,
   );
 
   factory StartupItemStatus.degraded(
@@ -132,6 +145,7 @@ class StartupItemStatus {
     String label, {
     String? reason,
     int attempt = 1,
+    String? ownerId,
   }) => StartupItemStatus(
     id: id,
     kind: kind,
@@ -139,6 +153,7 @@ class StartupItemStatus {
     state: StartupItemState.degraded,
     reason: reason,
     attempt: attempt,
+    ownerId: ownerId,
   );
 
   factory StartupItemStatus.failed(
@@ -147,6 +162,7 @@ class StartupItemStatus {
     String label, {
     String? reason,
     int attempt = 1,
+    String? ownerId,
   }) => StartupItemStatus(
     id: id,
     kind: kind,
@@ -154,6 +170,7 @@ class StartupItemStatus {
     state: StartupItemState.failed,
     reason: reason,
     attempt: attempt,
+    ownerId: ownerId,
   );
 
   factory StartupItemStatus.disabled(
@@ -162,6 +179,7 @@ class StartupItemStatus {
     String label, {
     String? reason,
     int attempt = 1,
+    String? ownerId,
   }) => StartupItemStatus(
     id: id,
     kind: kind,
@@ -169,6 +187,7 @@ class StartupItemStatus {
     state: StartupItemState.disabled,
     reason: reason,
     attempt: attempt,
+    ownerId: ownerId,
   );
 
   factory StartupItemStatus.skipped(
@@ -177,6 +196,7 @@ class StartupItemStatus {
     String label, {
     String? reason,
     int attempt = 0,
+    String? ownerId,
   }) => StartupItemStatus(
     id: id,
     kind: kind,
@@ -184,6 +204,7 @@ class StartupItemStatus {
     state: StartupItemState.skipped,
     reason: reason,
     attempt: attempt,
+    ownerId: ownerId,
   );
 
   final String id;
@@ -193,6 +214,11 @@ class StartupItemStatus {
   final String? reason;
   final DateTime updatedAt;
   final int attempt;
+
+  /// Canonical plugin/MCP id this item owns, when it is a per-runtime item.
+  /// Supplied by [StartupOwnedTask] implementations so the startup dashboard
+  /// can deep-link `Open Plugins` by canonical id instead of display name.
+  final String? ownerId;
 }
 
 class StartupSnapshot {
@@ -321,6 +347,7 @@ class StartupCoordinator extends ChangeNotifier {
               item.label,
               reason: 'Startup readiness deadline exceeded',
               attempt: item.attempt,
+              ownerId: item.ownerId,
             );
             _items[i] = degraded;
             _emitStatus(degraded);
@@ -332,6 +359,7 @@ class StartupCoordinator extends ChangeNotifier {
               item.label,
               reason: 'Startup readiness deadline exceeded',
               attempt: item.attempt,
+              ownerId: item.ownerId,
             );
             _items[i] = skipped;
             _emitStatus(skipped);
@@ -357,6 +385,7 @@ class StartupCoordinator extends ChangeNotifier {
             task.label,
             reason: 'Startup task is still running',
             attempt: current.attempt,
+            ownerId: current.ownerId,
           ),
         );
         continue;
@@ -528,9 +557,30 @@ class StartupCoordinator extends ChangeNotifier {
   void _replace(StartupItemStatus status) {
     final index = _items.indexWhere((item) => item.id == status.id);
     if (index == -1) return;
-    _items[index] = status;
+    final resolved = _withOwner(status);
+    _items[index] = resolved;
     notifyListeners();
-    _emitStatus(status);
+    _emitStatus(resolved);
+  }
+
+  /// Attributes a status to the canonical owner id carried by its
+  /// [StartupOwnedTask], unless the status already names one.
+  StartupItemStatus _withOwner(StartupItemStatus status) {
+    if (status.ownerId != null) return status;
+    final task = _tasks[status.id];
+    if (task is! StartupOwnedTask) return status;
+    final ownerId = (task as StartupOwnedTask).ownerId;
+    if (ownerId.isEmpty) return status;
+    return StartupItemStatus(
+      id: status.id,
+      kind: status.kind,
+      label: status.label,
+      state: status.state,
+      reason: status.reason,
+      updatedAt: status.updatedAt,
+      attempt: status.attempt,
+      ownerId: ownerId,
+    );
   }
 
   /// Notifies the durable-status sink for an actually-changed terminal
@@ -548,10 +598,12 @@ class StartupCoordinator extends ChangeNotifier {
     _emitted[status.id] = status;
     final sink = statusSink;
     if (sink == null) return;
-    final task = _tasks[status.id];
-    String? ownerId;
-    if (task is StartupOwnedTask) {
-      ownerId = (task as StartupOwnedTask).ownerId;
+    var ownerId = status.ownerId;
+    if (ownerId == null) {
+      final task = _tasks[status.id];
+      if (task is StartupOwnedTask) {
+        ownerId = (task as StartupOwnedTask).ownerId;
+      }
     }
     sink(status, ownerId);
   }
