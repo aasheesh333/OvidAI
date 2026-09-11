@@ -64,7 +64,12 @@ class _StudioScreenState extends State<StudioScreen> {
       // the one prompt and a later signed-out settle never re-prompts.
       if (github.isInitializing) return;
       _handledInitialAuth = true;
-      if (_repo != null && !RepoCache.I.isReady) {
+      // Re-sync when the cache is empty OR belongs to another session — the
+      // singleton RepoCache would otherwise show session A's working copy to
+      // session B (cross-session bleed).
+      if (_repo != null &&
+          (!RepoCache.I.isReady ||
+              RepoCache.I.boundSessionId != AppState.I.activeSession?.id)) {
         _autoSync();
       }
       return;
@@ -78,7 +83,12 @@ class _StudioScreenState extends State<StudioScreen> {
     if (_repo == null || _syncing) return;
     setState(() => _syncing = true);
     try {
-      RepoCache.I.bind(_repo!, GitHubService.I.token!);
+      RepoCache.I.bind(
+        _repo!,
+        GitHubService.I.token!,
+        branch: AgentService.I.sessionBranch,
+        sessionId: AppState.I.activeSession?.id,
+      );
       await RepoCache.I.sync();
     } catch (_) {}
     if (mounted) setState(() => _syncing = false);
@@ -367,6 +377,61 @@ class _StudioScreenState extends State<StudioScreen> {
     }
   }
 
+  /// Change the branch half of the `(repo, branch)` binding, then re-sync so
+  /// reads/commits target the chosen ref.
+  Future<void> _pickBranch() async {
+    final repo = _repo;
+    if (repo == null || !GitHubService.I.isLoggedIn) return;
+    final parts = repo.split('/');
+    if (parts.length != 2 || parts.any((p) => p.isEmpty)) return;
+    try {
+      final branches = await GitHubService.I.listBranches(parts[0], parts[1]);
+      if (!mounted) return;
+      final current = AgentService.I.sessionBranch;
+      final picked = await showModalBottomSheet<String>(
+        context: context,
+        backgroundColor: Aether.surface,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (_) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(14),
+                child: Text(
+                  'Branches',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                ),
+              ),
+              for (final b in branches)
+                ListTile(
+                  dense: true,
+                  leading: Icon(
+                    b == current
+                        ? Icons.radio_button_checked
+                        : Icons.call_split,
+                    size: 18,
+                    color: b == current ? Aether.accent : Aether.textMuted,
+                  ),
+                  title: Text(b, style: const TextStyle(fontSize: 13.5)),
+                  onTap: () => Navigator.pop(context, b),
+                ),
+            ],
+          ),
+        ),
+      );
+      if (picked != null && picked != current) {
+        AgentService.I.sessionBranch = picked;
+        await _autoSync();
+      }
+    } catch (e) {
+      _toast('Branch list failed: $e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -450,7 +515,9 @@ class _StudioScreenState extends State<StudioScreen> {
           children: [
             _RepoBar(
               repo: _repo ?? 'Connect a repo',
+              branch: AgentService.I.sessionBranch,
               onPick: _pickRepo,
+              onPickBranch: _pickBranch,
               syncing: _syncing,
             ),
             Expanded(
@@ -482,11 +549,15 @@ class _StudioScreenState extends State<StudioScreen> {
 
 class _RepoBar extends StatelessWidget {
   final String repo;
+  final String branch;
   final VoidCallback onPick;
+  final VoidCallback onPickBranch;
   final bool syncing;
   const _RepoBar({
     required this.repo,
+    required this.branch,
     required this.onPick,
+    required this.onPickBranch,
     required this.syncing,
   });
 
@@ -517,6 +588,22 @@ class _RepoBar extends StatelessWidget {
             ),
           ),
           if (repo != 'Connect a repo') Tag('GITHUB', color: Aether.textMuted),
+          if (repo != 'Connect a repo') ...[
+            const SizedBox(width: 8),
+            TextButton.icon(
+              style: TextButton.styleFrom(
+                minimumSize: Size.zero,
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                foregroundColor: Aether.textMuted,
+              ),
+              onPressed: onPickBranch,
+              icon: const Icon(Icons.call_split, size: 13),
+              label: Text(
+                branch,
+                style: const TextStyle(fontSize: 12),
+              ),
+            ),
+          ],
           if (syncing) ...[
             const SizedBox(width: 8),
             const SizedBox(

@@ -1827,6 +1827,11 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// Global repo (owner/name) — the last one the user connected in Studio.
   String? repoFull; // e.g. "aasheesh333/Ovid"
 
+  /// Global branch — the last one the user selected in Studio. The repo
+  /// binding is the pair `(repo, branch)`; a null global falls through to the
+  /// persisted `lastBranch` (default `main`).
+  String? branch;
+
   /// Repo for the ACTIVE session — per-session Studio repos.  Falls back
   /// to the global [repoFull] when the session never picked one, so old
   /// sessions keep working exactly as before (as-is).
@@ -1841,6 +1846,22 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       AppState.I.setRepoForSession(key, v);
     }
     repoFull = v; // global default for new sessions
+  }
+
+  /// Branch for the ACTIVE session — the second half of the repo binding.
+  /// Falls back to the global [branch] when the session never picked one.
+  String get sessionBranch =>
+      AppState.I.getBranchForSession(_currentRunKey(), fallback: branch);
+
+  /// Set the branch for the ACTIVE session (Studio pick) — also updates the
+  /// global default so future sessions inherit the latest choice.
+  set sessionBranch(String? v) {
+    final value = (v == null || v.isEmpty) ? 'main' : v;
+    final key = _currentRunKey();
+    if (key.isNotEmpty) {
+      AppState.I.setBranchForSession(key, value);
+    }
+    branch = value; // global default for new sessions
   }
 
   /// Open-file tab list — scoped to the ACTIVE session.
@@ -8499,7 +8520,12 @@ ${await _agentsMdBlock()}
         _emit('think', 'syncing repo $sessionRepoFull …');
         try {
           // bind cache
-          RepoCache.I.bind(sessionRepoFull!, GitHubService.I.token!);
+          RepoCache.I.bind(
+            sessionRepoFull!,
+            GitHubService.I.token!,
+            branch: sessionBranch,
+            sessionId: _currentRunKey(),
+          );
           await RepoCache.I.sync(onLine: (l) => _emit('shellOut', l));
           notifyListeners();
           return 'repo synced · ${RepoCache.I.files.length} files ready in '

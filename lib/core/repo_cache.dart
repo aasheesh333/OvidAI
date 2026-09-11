@@ -22,6 +22,15 @@ class RepoCache extends ChangeNotifier {
   String? repoFull; // "owner/repo"
   String? _token; // from GitHubService after login
   String? defaultBranch;
+
+  /// The session that owns the current binding, when the caller supplied one.
+  /// This is a lightweight guard against cross-session bleed: the cache is a
+  /// singleton, so callers can detect that the working copy belongs to another
+  /// session and rebind before trusting [files]. A full per-session cache is
+  /// out of scope.
+  String? _boundSessionId;
+  String? get boundSessionId => _boundSessionId;
+
   int _bindingGeneration = 0;
 
   /// path → content (working copy)
@@ -38,11 +47,17 @@ class RepoCache extends ChangeNotifier {
   void notifyListeners() => super.notifyListeners();
 
   // ── init ─────────────────────────────────────────────────────────────
-  void bind(String full, String token, {String branch = 'main'}) {
+  void bind(
+    String full,
+    String token, {
+    String branch = 'main',
+    String? sessionId,
+  }) {
     _bindingGeneration++;
     repoFull = full;
     _token = token;
     defaultBranch = branch;
+    _boundSessionId = sessionId;
   }
 
   /// Disconnect — clear everything so Studio shows the login state again.
@@ -51,6 +66,7 @@ class RepoCache extends ChangeNotifier {
     repoFull = null;
     _token = null;
     defaultBranch = null;
+    _boundSessionId = null;
     files.clear();
     treePaths.clear();
     _dirty.clear();
@@ -119,7 +135,7 @@ class RepoCache extends ChangeNotifier {
       var done = 0;
       for (final p in take) {
         _ensureBinding(generation);
-        final content = await _fetchRaw(repo, token, p, c);
+        final content = await _fetchRaw(repo, token, p, branch, c);
         if (content != null) syncedFiles[p] = content;
         done++;
         if (done % 25 == 0) {
@@ -174,13 +190,15 @@ class RepoCache extends ChangeNotifier {
     String repo,
     String token,
     String path,
+    String branch,
     http.Client client,
   ) async {
     try {
       final res = await client
           .get(
             Uri.parse(
-              '$_api/repos/$repo/contents/${Uri.encodeComponent(path)}',
+              '$_api/repos/$repo/contents/${Uri.encodeComponent(path)}'
+              '?ref=${Uri.encodeQueryComponent(branch)}',
             ),
             headers: {
               'Authorization': 'Bearer $token',
@@ -212,7 +230,13 @@ class RepoCache extends ChangeNotifier {
     try {
       final c = http.Client();
       try {
-        final contents = await _fetchRaw(repoFull!, _token ?? '', path, c);
+        final contents = await _fetchRaw(
+          repoFull!,
+          _token ?? '',
+          path,
+          defaultBranch ?? 'main',
+          c,
+        );
         return contents;
       } finally {
         c.close();
@@ -256,6 +280,7 @@ class RepoCache extends ChangeNotifier {
   Future<int> commitAll(String message, {http.Client? client}) async {
     final repo = repoFull;
     final token = _token;
+    final branch = defaultBranch ?? 'main';
     final generation = _bindingGeneration;
     if (repo == null || token == null || token.isEmpty) {
       throw StateError('repo not bound');
@@ -269,7 +294,7 @@ class RepoCache extends ChangeNotifier {
       var pushed = 0;
       for (final entry in pending.entries) {
         _ensureBinding(generation);
-        final sha = await _shaOf(repo, token, entry.key, c);
+        final sha = await _shaOf(repo, token, entry.key, branch, c);
         _ensureBinding(generation);
         final ok = await _putFile(
           repo,
@@ -278,6 +303,7 @@ class RepoCache extends ChangeNotifier {
           entry.value,
           message,
           sha,
+          branch,
           c,
         );
         _ensureBinding(generation);
@@ -296,13 +322,15 @@ class RepoCache extends ChangeNotifier {
     String repo,
     String token,
     String path,
+    String branch,
     http.Client client,
   ) async {
     try {
       final res = await client
           .get(
             Uri.parse(
-              '$_api/repos/$repo/contents/${Uri.encodeComponent(path)}',
+              '$_api/repos/$repo/contents/${Uri.encodeComponent(path)}'
+              '?ref=${Uri.encodeQueryComponent(branch)}',
             ),
             headers: {
               'Authorization': 'Bearer $token',
@@ -324,8 +352,11 @@ class RepoCache extends ChangeNotifier {
     String content,
     String message,
     String? sha,
+    String branch,
     http.Client client,
   ) async {
+    // GitHub's contents API commits to `branch` via the body; `?ref=` is not
+    // accepted for PUT (the SHA read above carries `?ref=` instead).
     final res = await client
         .put(
           Uri.parse('$_api/repos/$repo/contents/${Uri.encodeComponent(path)}'),
@@ -337,6 +368,7 @@ class RepoCache extends ChangeNotifier {
           body: jsonEncode({
             'message': message,
             'content': base64Encode(utf8.encode(content)),
+            'branch': branch,
             'sha': ?sha,
           }),
         )

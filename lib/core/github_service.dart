@@ -442,6 +442,39 @@ class GitHubService extends ChangeNotifier {
     }
   }
 
+  /// List branch names of a repo (Studio branch picker).
+  Future<List<String>> listBranches(
+    String owner,
+    String repo, {
+    http.Client? client,
+  }) async {
+    final token = _requireToken();
+    final c = client ?? http.Client();
+    try {
+      final res = await c
+          .get(
+            Uri.parse(
+              '$_apiBase/repos/$owner/$repo/branches?per_page=100',
+            ),
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Accept': 'application/vnd.github+json',
+            },
+          )
+          .timeout(_requestTimeout);
+      if (res.statusCode != 200) {
+        throw Exception('branches fetch failed: ${res.statusCode}');
+      }
+      return (jsonDecode(res.body) as List)
+          .map((e) => (e as Map<String, dynamic>)['name'] as String?)
+          .whereType<String>()
+          .where((name) => name.isNotEmpty)
+          .toList();
+    } finally {
+      if (client == null) c.close();
+    }
+  }
+
   /// List files of a repo at a branch/path (Studio file tree).
   /// Single file -> returns [{name, content, sha, type:'file'}]
   /// Directory  -> returns [{name, path, type:'dir'|'file'}, ...]
@@ -449,10 +482,14 @@ class GitHubService extends ChangeNotifier {
     required String owner,
     required String repo,
     String path = '',
+    String? branch,
     http.Client? client,
   }) async {
     final token = _requireToken();
-    final uri = Uri.parse('$_apiBase/repos/$owner/$repo/contents/$path');
+    final uri = Uri.parse(
+      '$_apiBase/repos/$owner/$repo/contents/$path'
+      '${branch == null || branch.isEmpty ? '' : '?ref=${Uri.encodeQueryComponent(branch)}'}',
+    );
     final c = client ?? http.Client();
     try {
       final res = await c

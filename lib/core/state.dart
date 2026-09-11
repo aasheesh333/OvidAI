@@ -818,6 +818,11 @@ class ChatSession {
   /// connected repo).  Persisted with the session.
   String? repo;
 
+  /// Per-session Studio branch. Null falls back to the persisted [lastBranch]
+  /// (default `main`) at the point of use, so the repo binding is the pair
+  /// `(repo, branch)`. Persisted with the session.
+  String? branch;
+
   // ── Subagent lineage ────────────────────────────────────────────────────
   // A subagent is a REAL session with its own transcript, tool cards and
   // workspace, parented to the session that dispatched it. Child sessions
@@ -902,6 +907,7 @@ class ChatSession {
     this.providerId,
     this.sandboxId,
     this.repo,
+    this.branch,
     this.mode = 'auto',
     this.presetId = 'standard',
     this.workspaceFolder,
@@ -938,6 +944,7 @@ class ChatSession {
     providerId: j['providerId'] as String?,
     sandboxId: j['sandboxId'] as String?,
     repo: j['repo'] as String?,
+    branch: j['branch'] as String?,
     mode: AppState.sanitizeColdStartMode(j['mode'] as String? ?? 'auto'),
     presetId: j['presetId'] as String? ?? 'standard',
     workspaceFolder: j['workspaceFolder'] as String?,
@@ -989,6 +996,7 @@ class ChatSession {
     if (providerId != null) 'providerId': providerId,
     'sandboxId': sandboxId ?? id,
     if (repo != null) 'repo': repo,
+    if (branch != null) 'branch': branch,
     'mode': mode,
     if (presetId != 'standard') 'presetId': presetId,
     if (workspaceFolder != null && workspaceFolder!.isNotEmpty)
@@ -3904,6 +3912,7 @@ class AppState extends ChangeNotifier {
     // repo/folder so a restart never forces fresh selection (fresh per-session
     // state, cookies shared). A vanished folder falls back to the sandbox.
     s.repo = lastRepoFull;
+    s.branch = lastBranch;
     s.workspaceFolder = _resolvedLastWorkspaceFolder();
     sessions.insert(0, s);
     activeSessionId = s.id;
@@ -5835,6 +5844,25 @@ class AppState extends ChangeNotifier {
     if (session != null) {
       session.repo = repoFull;
       lastRepoFull = repoFull;
+      unawaited(_persistLastSelection());
+      persistSessions();
+      refresh();
+    }
+  }
+
+  /// Branch bound to a session.  Falls back to [fallback] (the global
+  /// AgentService.branch) then to the persisted [lastBranch]; the repo binding
+  /// is the pair `(repo, branch)`, so a null branch means `main`.
+  String getBranchForSession(String sessionId, {String? fallback}) {
+    final session = sessions.where((s) => s.id == sessionId).firstOrNull;
+    return session?.branch ?? fallback ?? lastBranch;
+  }
+
+  void setBranchForSession(String sessionId, String branch) {
+    final session = sessions.where((s) => s.id == sessionId).firstOrNull;
+    if (session != null) {
+      session.branch = branch;
+      lastBranch = branch;
       unawaited(_persistLastSelection());
       persistSessions();
       refresh();
