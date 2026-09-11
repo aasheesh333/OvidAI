@@ -16,6 +16,12 @@ import 'github_login_sheet.dart';
 @visibleForTesting
 String? studioFolderPickOverrideForTest;
 
+/// Test seam: overrides the GitHub login prompt so host widget tests can
+/// assert the Studio auth gate without starting a real device flow.
+/// Production is null (the real modal bottom sheet).
+@visibleForTesting
+void Function(BuildContext context)? studioLoginPromptOverrideForTest;
+
 /// Studio — coding harness (DeepSeek-web style): file explorer bound to the
 /// user's connected GitHub repo, real editable editor with per-session
 /// buffers, agent-visible tabs, and a live Ubuntu sandbox terminal. The
@@ -50,6 +56,11 @@ class _StudioScreenState extends State<StudioScreen> {
     final github = GitHubService.I;
     if (!mounted || _handledInitialAuth) return;
     if (github.isLoggedIn) {
+      // The token is assigned before the profile fetch, so during a restore
+      // that will 401 `isLoggedIn` is momentarily true. Only settle once
+      // initialization has finished; otherwise that transient state consumes
+      // the one prompt and a later signed-out settle never re-prompts.
+      if (github.isInitializing) return;
       _handledInitialAuth = true;
       if (_repo != null && !RepoCache.I.isReady) {
         _autoSync();
@@ -58,7 +69,7 @@ class _StudioScreenState extends State<StudioScreen> {
     }
     if (github.isInitializing) return;
     _handledInitialAuth = true;
-    showGithubLoginSheet(context);
+    (studioLoginPromptOverrideForTest ?? showGithubLoginSheet)(context);
   }
 
   Future<void> _autoSync() async {

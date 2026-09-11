@@ -50,6 +50,39 @@ void main() {
     },
   );
 
+  test(
+    'stored token + transient then 401 retry clears the token',
+    () async {
+      await storage.write(key: 'ovid_github_token', value: 'stored-token');
+      var profileRequests = 0;
+      final client = MockClient((request) async {
+        if (request.url.path == '/user') {
+          profileRequests++;
+          if (profileRequests == 1) {
+            return http.Response('temporarily unavailable', 503);
+          }
+          return http.Response('unauthorized', 401);
+        }
+        return http.Response('not found', 404);
+      });
+
+      await GitHubService.I.initialize(client: client);
+
+      // The initial transient failure keeps the token so the user stays
+      // signed in until the background profile retry settles.
+      expect(GitHubService.I.isLoggedIn, isTrue);
+      expect(GitHubService.I.token, 'stored-token');
+
+      await pumpEventQueue();
+
+      expect(profileRequests, greaterThanOrEqualTo(2));
+      expect(GitHubService.I.isLoggedIn, isFalse);
+      expect(GitHubService.I.token, isNull);
+      expect(await storage.read(key: 'ovid_github_token'), isNull);
+      client.close();
+    },
+  );
+
   test('stored token + 401 logs out and deletes the token', () async {
     await storage.write(key: 'ovid_github_token', value: 'invalid-token');
     final client = MockClient((request) async {

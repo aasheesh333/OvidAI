@@ -297,12 +297,24 @@ void main() {
         return http.Response('temporarily unavailable', 503);
       });
 
+      // Drive the background profile retry deterministically so no real
+      // 30s timer is left pending at the end of the test.
+      GitHubService.I.profileRetryDelay = Duration.zero;
+      addTearDown(
+        () => GitHubService.I.profileRetryDelay = const Duration(seconds: 30),
+      );
+
       await GitHubService.I.initialize(client: client);
 
       expect(GitHubService.I.isInitializing, isFalse);
       expect(GitHubService.I.isLoggedIn, isTrue);
       expect(GitHubService.I.token, 'stored-token');
       expect(await storage.read(key: 'ovid_github_token'), 'stored-token');
+
+      // Let the scheduled retry run and settle (it fails transiently again).
+      await pumpEventQueue();
+      expect(GitHubService.I.isLoggedIn, isTrue);
+      expect(GitHubService.I.token, 'stored-token');
       client.close();
     },
   );

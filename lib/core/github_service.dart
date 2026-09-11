@@ -55,6 +55,7 @@ class GitHubService extends ChangeNotifier {
   int _authGeneration = 0;
   Future<void> _tokenWrite = Future<void>.value();
   bool _isInitializing = true;
+  Timer? _profileRetryTimer;
 
   /// Delay before retrying a profile fetch that failed transiently. Exposed so
   /// tests can drive the background retry without waiting.
@@ -72,6 +73,7 @@ class GitHubService extends ChangeNotifier {
   Future<void> signOut() async {
     _authGeneration++;
     _isInitializing = false;
+    _cancelProfileRetry();
     _token = null;
     _user = null;
     RepoCache.I.unbind();
@@ -79,8 +81,20 @@ class GitHubService extends ChangeNotifier {
     await _persistToken(null);
   }
 
+  @override
+  void dispose() {
+    _cancelProfileRetry();
+    super.dispose();
+  }
+
+  void _cancelProfileRetry() {
+    _profileRetryTimer?.cancel();
+    _profileRetryTimer = null;
+  }
+
   Future<void> initialize({http.Client? client}) async {
     final generation = ++_authGeneration;
+    _cancelProfileRetry();
     _isInitializing = true;
     notifyListeners();
     final c = client ?? http.Client();
@@ -129,7 +143,9 @@ class GitHubService extends ChangeNotifier {
   void _scheduleProfileRetry(int generation, http.Client? client) {
     final token = _token;
     if (token == null) return;
-    Future<void>.delayed(profileRetryDelay, () async {
+    _cancelProfileRetry();
+    _profileRetryTimer = Timer(profileRetryDelay, () async {
+      _profileRetryTimer = null;
       if (generation != _authGeneration || _token != token) return;
       final c = client ?? http.Client();
       final ownsClient = client == null;
