@@ -36,6 +36,11 @@ import 'device_control_service.dart';
 /// A persistent browser tab — owns its WebView controller lazily so the
 /// page state survives across BrowserScreen open/close cycles.
 class BrowserTab {
+  /// Stable per-tab identity used to target native WebView settings at the
+  /// right view. Unique within an app launch; WebViews do not outlive it.
+  final int id = _nextTabId++;
+  static int _nextTabId = 0;
+
   String url;
   String? title;
   bool loading = false;
@@ -1511,14 +1516,40 @@ class AgentService extends ChangeNotifier {
 
   static const _webviewChannel = MethodChannel('ovid/webview');
 
+  /// Native WebView identifier for [tab], when its controller is an Android
+  /// WebView. The native handler resolves this to exactly one WebView, so a
+  /// mode change never touches another tab. Null in unit tests / non-Android.
+  static int? webViewIdentifierFor(BrowserTab tab) {
+    final platform = tab.controller?.platform;
+    if (platform is AndroidWebViewController) {
+      try {
+        return platform.webViewIdentifier;
+      } catch (_) {}
+    }
+    return null;
+  }
+
   /// Applies Android WebView WebSettings (wide viewport + overview mode)
   /// for desktop layout viewport rendering. Falls back gracefully when
   /// channel is unavailable (unit tests, non-Android, etc.).
-  static Future<bool> applyDesktopViewport(bool enabled) async {
+  ///
+  /// [tabId] identifies the owning tab; [webViewIdentifier] resolves to that
+  /// tab's native WebView so settings never leak across tabs. Identity keys
+  /// are omitted when absent to keep the legacy bool-only payload valid.
+  static Future<bool> applyDesktopViewport(
+    bool enabled, {
+    int? tabId,
+    int? webViewIdentifier,
+  }) async {
     try {
+      final args = <String, dynamic>{'enabled': enabled};
+      if (tabId != null) args['tabId'] = tabId;
+      if (webViewIdentifier != null) {
+        args['webViewIdentifier'] = webViewIdentifier;
+      }
       final res = await _webviewChannel.invokeMapMethod<String, dynamic>(
         'setDesktopViewport',
-        {'enabled': enabled},
+        args,
       );
       return res?['applied'] == true;
     } catch (_) {
@@ -1573,8 +1604,15 @@ class AgentService extends ChangeNotifier {
     tab.desktopMode = desktop;
     // Desktop compatibility = desktop UA + wide viewport only. Visual scale
     // stays userZoom; it is never derived from the device width (the old
-    // devW/1280 shrink made content unreadably small).
-    unawaited(applyDesktopViewport(desktop));
+    // devW/1280 shrink made content unreadably small). Target only THIS tab's
+    // WebView so toggling one tab never changes another.
+    unawaited(
+      applyDesktopViewport(
+        desktop,
+        tabId: tab.id,
+        webViewIdentifier: webViewIdentifierFor(tab),
+      ),
+    );
     // WebSettings.setUseWideViewPort takes effect at initialization / load time.
     // Recreate controller fresh with new viewport settings and UA, dropping
     // wasted pre-reload zoom while keeping zoom fallback on onPageFinished.
@@ -1780,8 +1818,15 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       if (tab.desktopMode) {
         tab.controller!.setUserAgent(desktopUA);
       }
-      // Platform wide viewport setting before initial load (desktop or mobile reset).
-      unawaited(applyDesktopViewport(tab.desktopMode));
+      // Platform wide viewport setting before initial load (desktop or mobile
+      // reset). Target only this tab's fresh WebView — no cross-tab leak.
+      unawaited(
+        applyDesktopViewport(
+          tab.desktopMode,
+          tabId: tab.id,
+          webViewIdentifier: webViewIdentifierFor(tab),
+        ),
+      );
       final previewPath = tab.localPreviewPath;
       if (previewPath != null) {
         tab.controller!.loadFile(previewPath);
