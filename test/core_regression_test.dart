@@ -12150,8 +12150,9 @@ You are an expert security auditor reviewing code for vulnerabilities.
         );
 
         testWidgets(
-          'HEALTH3: McpCard renders tri-state indicators for connecting, working, failed',
+          'HEALTH3: McpCard renders durable status and neutral no-record',
           (tester) async {
+            final app = AppState.I;
             final server = McpServer(
               name: 'health3_srv',
               author: 'test',
@@ -12160,48 +12161,60 @@ You are an expert security auditor reviewing code for vulnerabilities.
               command: 'echo',
               custom: true,
             );
-            addTearDown(
-              () => AppState.I.serviceStatus.remove('mcp:health3_srv'),
-            );
+            addTearDown(() async {
+              await app.runtimeStatusStore.remove('health3_srv');
+            });
 
+            Future<void> showCard() async {
+              await tester.pumpWidget(
+                MaterialApp(
+                  theme: Aether.theme(),
+                  home: Scaffold(body: McpCard(server: server)),
+                ),
+              );
+              await tester.pump();
+            }
+
+            // No record → neutral, even with a live serviceStatus entry.
             AppState.I.updateServiceStatus(
               'mcp:health3_srv',
               ServiceHealth.connecting,
             );
-            await tester.pumpWidget(
-              MaterialApp(
-                theme: Aether.theme(),
-                home: Scaffold(body: McpCard(server: server)),
-              ),
+            addTearDown(
+              () => AppState.I.serviceStatus.remove('mcp:health3_srv'),
             );
-            await tester.pump();
-            expect(find.byType(CircularProgressIndicator), findsOneWidget);
+            await showCard();
+            expect(find.byIcon(Icons.help_outline), findsOneWidget);
+            expect(find.text('Not started'), findsOneWidget);
 
-            AppState.I.updateServiceStatus(
-              'mcp:health3_srv',
-              ServiceHealth.working,
-            );
-            await tester.pumpWidget(
-              MaterialApp(
-                theme: Aether.theme(),
-                home: Scaffold(body: McpCard(server: server)),
+            await tester.runAsync(
+              () => app.recordStartupStatus(
+                StartupItemStatus(
+                  id: 'health3_srv',
+                  kind: StartupItemKind.mcp,
+                  label: 'Connect health3_srv',
+                  state: StartupItemState.ready,
+                  reason: 'connected',
+                ),
+                ownerId: 'health3_srv',
               ),
             );
-            await tester.pump();
+            await showCard();
             expect(find.byIcon(Icons.check_circle_outline), findsOneWidget);
 
-            AppState.I.updateServiceStatus(
-              'mcp:health3_srv',
-              ServiceHealth.failed,
-              detail: 'crashed',
-            );
-            await tester.pumpWidget(
-              MaterialApp(
-                theme: Aether.theme(),
-                home: Scaffold(body: McpCard(server: server)),
+            await tester.runAsync(
+              () => app.recordStartupStatus(
+                StartupItemStatus(
+                  id: 'health3_srv',
+                  kind: StartupItemKind.mcp,
+                  label: 'Connect health3_srv',
+                  state: StartupItemState.failed,
+                  reason: 'crashed',
+                ),
+                ownerId: 'health3_srv',
               ),
             );
-            await tester.pump();
+            await showCard();
             expect(find.byIcon(Icons.error_outline), findsOneWidget);
           },
         );
@@ -18896,23 +18909,37 @@ cwd = 'tools'
       },
     );
 
-    testWidgets('owned MCP UI status and editor use canonical keys', (
-      tester,
-    ) async {
+    testWidgets('owned MCP UI status uses canonical keys', (tester) async {
       final server = ownedServer('ui/plugin', name: 'shared');
-      app.updateServiceStatus(
-        'mcp:${server.canonicalId}',
-        ServiceHealth.failed,
-        detail: 'owner-specific failure',
+      // Durable record under the canonical id drives the card…
+      await tester.runAsync(
+        () => app.recordStartupStatus(
+          StartupItemStatus(
+            id: server.canonicalId,
+            kind: StartupItemKind.mcp,
+            label: 'Connect shared',
+            state: StartupItemState.failed,
+            reason: 'owner-specific failure',
+          ),
+          ownerId: server.canonicalId,
+        ),
       );
-      app.updateServiceStatus(
-        'mcp:${server.name}',
-        ServiceHealth.working,
-        detail: 'wrong owner',
+      // …while a record under the bare (wrong-owner) key is ignored.
+      await tester.runAsync(
+        () => app.recordStartupStatus(
+          StartupItemStatus(
+            id: server.name,
+            kind: StartupItemKind.mcp,
+            label: 'Connect shared',
+            state: StartupItemState.ready,
+            reason: 'wrong owner',
+          ),
+          ownerId: server.name,
+        ),
       );
-      addTearDown(() {
-        app.serviceStatus.remove('mcp:${server.canonicalId}');
-        app.serviceStatus.remove('mcp:${server.name}');
+      addTearDown(() async {
+        await app.runtimeStatusStore.remove(server.canonicalId);
+        await app.runtimeStatusStore.remove(server.name);
       });
 
       await tester.pumpWidget(
@@ -18924,7 +18951,7 @@ cwd = 'tools'
       expect(find.byIcon(Icons.error_outline), findsOneWidget);
 
       final source = File('lib/ui/plugins_screen.dart').readAsStringSync();
-      expect(source, contains("serviceStatus['mcp:\${server.canonicalId}']"));
+      expect(source, contains('durableMcpStatus'));
       expect(source, contains('setMcpEnv(s.canonicalId, env)'));
       expect(source, isNot(contains('McpService.I.isConnected(server.name)')));
     });

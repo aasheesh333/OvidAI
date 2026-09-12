@@ -1355,12 +1355,46 @@ class AppState extends ChangeNotifier {
   }) {
     final id = ownerId ?? status.id;
     if (id.isEmpty) return Future<void>.value();
+    // Spec §5.3 (Task 3): MCP ready/disabled records always carry their
+    // canonical reason, even when the coordinator emits them without one
+    // (task `ready` has no reason slot; disable emits reason-null after
+    // `_disableMcpForStartup` already recorded the reasoned write, and the
+    // later sink write must not clobber it back to null).
+    final effective =
+        status.kind == StartupItemKind.mcp &&
+            (status.reason == null || status.reason!.isEmpty)
+        ? switch (status.state) {
+            StartupItemState.ready => StartupItemStatus(
+              id: status.id,
+              kind: status.kind,
+              label: status.label,
+              state: status.state,
+              reason: 'connected',
+              updatedAt: status.updatedAt,
+              attempt: status.attempt,
+              ownerId: status.ownerId,
+              canDisable: status.canDisable,
+            ),
+            StartupItemState.disabled => StartupItemStatus(
+              id: status.id,
+              kind: status.kind,
+              label: status.label,
+              state: status.state,
+              reason: 'disconnected — tap Connect to start',
+              updatedAt: status.updatedAt,
+              attempt: status.attempt,
+              ownerId: status.ownerId,
+              canDisable: status.canDisable,
+            ),
+            _ => status,
+          }
+        : status;
     return runtimeStatusStore.record(
       PluginRuntimeStatus(
         pluginId: id,
-        state: status.state,
-        reason: status.reason,
-        updatedAt: status.updatedAt,
+        state: effective.state,
+        reason: effective.reason,
+        updatedAt: effective.updatedAt,
       ),
       revive: revive,
     );
@@ -2102,6 +2136,7 @@ class AppState extends ChangeNotifier {
     if (overridden) {
       // Test seam: a stubbed stage stands in for a successful handshake, but
       // the real connection state is untouched.
+      await _recordMcpReady(server);
       return const McpConnectOutcome(McpConnectOutcomeKind.ready);
     }
     final result =
@@ -2121,6 +2156,28 @@ class AppState extends ChangeNotifier {
           ? 'connected'
           : redactStartupError(result.reason ?? 'connect failed'),
     );
+    // Durable canonical outcome (spec §5.3): the startup sink re-records
+    // these through recordStartupStatus, which fills the same canonical
+    // reasons — both writes agree, so order never matters.
+    if (connected) {
+      await _recordMcpReady(server);
+    } else if (result.kind == McpConnectOutcomeKind.needsSetup) {
+      await _recordMcpStatus(
+        canonicalId,
+        StartupItemState.needsSetup,
+        result.reason ?? 'Needs configuration',
+        label: server.name,
+      );
+    } else if (result.kind == McpConnectOutcomeKind.unsupported) {
+      await _recordMcpStatus(
+        canonicalId,
+        StartupItemState.unsupported,
+        result.reason ?? 'Unsupported on this device',
+        label: server.name,
+      );
+    } else {
+      await _recordMcpFailed(server, result.reason ?? 'connect failed');
+    }
     refresh();
     return result;
   }
@@ -2143,8 +2200,35 @@ class AppState extends ChangeNotifier {
     final server = _mcpServerByCanonicalId(canonicalId);
     if (server != null) server.connected = false;
     serviceStatus.remove('mcp:$canonicalId');
+    final disabled = server;
+    if (disabled != null) {
+      unawaited(_recordMcpDisabled(disabled));
+    } else {
+      unawaited(
+        _recordMcpStatus(
+          canonicalId,
+          StartupItemState.disabled,
+          'disconnected — tap Connect to start',
+          label: canonicalId,
+        ),
+      );
+    }
     refresh();
   }
+
+  /// Test seam: drives the private startup connect for one canonical MCP id
+  /// (Task 3 durable-status tests). Pure delegation — no behavior change.
+  @visibleForTesting
+  Future<McpConnectOutcome> connectMcpForStartupForTest(
+    String canonicalId,
+    Duration budget,
+  ) => _connectMcpForStartup(canonicalId, budget);
+
+  /// Test seam: drives the private startup disable for one canonical MCP id
+  /// (Task 3 durable-status tests). Pure delegation — no behavior change.
+  @visibleForTesting
+  Future<void> disableMcpForStartupForTest(String canonicalId) =>
+      _disableMcpForStartup(canonicalId);
 
   @visibleForTesting
   Future<MarketplaceSyncOutcome> refreshMarketplaceForStartup(String repo) =>
@@ -5178,6 +5262,86 @@ class AppState extends ChangeNotifier {
   }
 
   /// ---------- MCP servers ----------
+
+  /// Durable MCP outcome recording (spec §5.3, Task 3). Every live MCP
+  /// outcome path records the canonical store under the server's canonical
+  /// id so the UI can render durable-only status + reason. Never throws:
+  /// a store failure must not break the toggle path (existing serviceStatus
+  /// + snackbar behavior stays intact).
+  Future<void> _recordMcpStatus(
+    String canonicalId,
+    StartupItemState state,
+    String? reason, {
+    String? label,
+  }) async {
+    if (canonicalId.isEmpty) return;
+    try {
+      await recordStartupStatus(
+        StartupItemStatus(
+          id: canonicalId,
+          kind: StartupItemKind.mcp,
+          label: label ?? canonicalId,
+          state: state,
+          reason: reason,
+        ),
+        ownerId: canonicalId,
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _recordMcpReady(McpServer s) => _recordMcpStatus(
+    s.canonicalId,
+    StartupItemState.ready,
+    'connected',
+    label: s.name,
+  );
+
+  Future<void> _recordMcpFailed(McpServer s, String detail) =>
+      _recordMcpStatus(
+        s.canonicalId,
+        StartupItemState.failed,
+        redactStartupError(detail),
+        label: s.name,
+      );
+
+  Future<void> _recordMcpNeedsSetup(McpServer s, List<String> missing) =>
+      _recordMcpStatus(
+        s.canonicalId,
+        StartupItemState.needsSetup,
+        'Needs configuration (${missing.join(', ')})',
+        label: s.name,
+      );
+
+  Future<void> _recordMcpDisabled(McpServer s) => _recordMcpStatus(
+    s.canonicalId,
+    StartupItemState.disabled,
+    'disconnected — tap Connect to start',
+    label: s.name,
+  );
+
+  /// Shared string-connect() outcome mapping for the toggle and
+  /// reconnectServices paths: success → ready; pre-spawn credential block
+  /// → needsSetup (missing names win over the degraded connect string);
+  /// anything else → failed (redacted). Never throws.
+  Future<void> _recordMcpConnectDurable(
+    McpServer s, {
+    required bool isOk,
+    required String detail,
+  }) async {
+    try {
+      if (isOk) {
+        await _recordMcpReady(s);
+        return;
+      }
+      final missing = await McpService.I.missingCredentialsFor(s);
+      if (missing.isNotEmpty) {
+        await _recordMcpNeedsSetup(s, missing);
+        return;
+      }
+      await _recordMcpFailed(s, detail);
+    } catch (_) {}
+  }
+
   void toggleMcpServer(McpServer s) {
     s.connected = !s.connected;
     if (s.connected) {
@@ -5190,7 +5354,7 @@ class AppState extends ChangeNotifier {
       unawaited(
         McpService.I
             .connect(s)
-            .then((msg) {
+            .then((msg) async {
               final isOk = McpService.I.isConnected(s.canonicalId);
               s.connected = isOk;
               updateServiceStatus(
@@ -5198,21 +5362,24 @@ class AppState extends ChangeNotifier {
                 isOk ? ServiceHealth.working : ServiceHealth.failed,
                 detail: msg,
               );
+              await _recordMcpConnectDurable(s, isOk: isOk, detail: msg);
               refresh();
             })
-            .catchError((e) {
+            .catchError((e) async {
               s.connected = false;
               updateServiceStatus(
                 'mcp:${s.canonicalId}',
                 ServiceHealth.failed,
                 detail: '$e',
               );
+              await _recordMcpFailed(s, '$e');
               refresh();
             }),
       );
     } else {
       serviceStatus.remove('mcp:${s.canonicalId}');
       unawaited(McpService.I.disconnect(s.canonicalId));
+      unawaited(_recordMcpDisabled(s));
     }
     _persistMcpConnectedIntent(
       removed: s.connected ? const [] : [s.canonicalId],
@@ -5290,9 +5457,11 @@ class AppState extends ChangeNotifier {
           isOk ? ServiceHealth.working : ServiceHealth.failed,
           detail: res,
         );
+        await _recordMcpConnectDurable(s, isOk: isOk, detail: res);
       } catch (e) {
         s.connected = false;
         updateServiceStatus('mcp:$name', ServiceHealth.failed, detail: '$e');
+        await _recordMcpFailed(s, '$e');
       }
     }
 

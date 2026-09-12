@@ -93,6 +93,17 @@ PluginRuntimeStatus? durablePluginStatus(PluginItem p) {
 PluginRuntimeStatus? durableMcpStatus(McpServer s) =>
     AppState.I.statusFor(s.canonicalId);
 
+/// Durable-only status copy for an MCP server (spec §5.3, Task 3): the
+/// persisted canonical label · reason, or the neutral no-record copy.
+/// Never reads serviceStatus or connected.
+String mcpDurableStatusText(McpServer s) {
+  final durable = durableMcpStatus(s);
+  if (durable == null) return 'Not started';
+  final label = startupItemStateLabel(durable.state);
+  final reason = durable.reason;
+  return reason == null || reason.isEmpty ? label : '$label · $reason';
+}
+
 /// Trailing status icon for a durable record (spec §6.2). A durable `Ready`
 /// is the only source of a green check for runtime rows.
 Widget durableStatusIcon(PluginRuntimeStatus status) {
@@ -1582,9 +1593,12 @@ class _PluginDiagnostics extends StatelessWidget {
         if (owned.isEmpty && (manifest == null || manifest.mcpServers.isEmpty))
           const _DiagRow('No MCP servers declared.'),
         for (final s in owned) ...[
+          // Durable-only status (spec §5.3, Task 3): canonical label ·
+          // reason, or neutral "Not started" — never a binary
+          // Connected/Not connected inference.
           _DiagRow(
             '${s.canonicalId} · ${s.transport} · '
-            '${s.connected ? 'Connected' : 'Not connected'}',
+            '${mcpDurableStatusText(s)}',
           ),
           if (s.envHint != null ||
               s.requiredEnvNames.isNotEmpty ||
@@ -1996,20 +2010,25 @@ class McpCard extends StatelessWidget {
             width: highlighted ? 1.5 : 1,
             color: () {
               if (highlighted) return Aether.accent;
-              final status = AppState.I.serviceStatus['mcp:${server.canonicalId}'];
-              if (status != null) {
-                switch (status.health) {
-                  case ServiceHealth.working:
-                    return Aether.accent.withValues(alpha: 0.45);
-                  case ServiceHealth.connecting:
-                    return Aether.accent.withValues(alpha: 0.45);
-                  case ServiceHealth.failed:
-                    return Aether.dangerC.withValues(alpha: 0.45);
-                }
+              // Durable-only border (spec §5.3, Task 3): no record reads
+              // neutral, never serviceStatus or connected.
+              switch (durableMcpStatus(server)?.state) {
+                case StartupItemState.ready:
+                  return Aether.accent.withValues(alpha: 0.45);
+                case StartupItemState.failed:
+                case StartupItemState.unsupported:
+                  return Aether.dangerC.withValues(alpha: 0.45);
+                case StartupItemState.needsSetup:
+                case StartupItemState.degraded:
+                case StartupItemState.migrationRequired:
+                case StartupItemState.skipped:
+                  return Aether.warn.withValues(alpha: 0.45);
+                case StartupItemState.disabled:
+                case StartupItemState.queued:
+                case StartupItemState.running:
+                case null:
+                  return Aether.hairline;
               }
-              return server.connected
-                  ? Aether.accent.withValues(alpha: 0.45)
-                  : Aether.hairline;
             }(),
           ),
         ),
@@ -2035,41 +2054,12 @@ class McpCard extends StatelessWidget {
                 Builder(builder: (_) {
                   final durable = durableMcpStatus(server);
                   if (durable != null) return durableStatusIcon(durable);
-                  final status = AppState.I.serviceStatus['mcp:${server.canonicalId}'];
-                  if (status != null) {
-                    if (status.health == ServiceHealth.connecting) {
-                      return const SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Aether.accent,
-                        ),
-                      );
-                    } else if (status.health == ServiceHealth.working) {
-                      return const Icon(
-                        Icons.check_circle_outline,
-                        size: 14,
-                        color: Aether.success,
-                      );
-                    } else if (status.health == ServiceHealth.failed) {
-                      return Tooltip(
-                        message: status.detail,
-                        child: Icon(
-                          Icons.error_outline,
-                          size: 14,
-                          color: Aether.dangerC,
-                        ),
-                      );
-                    }
-                  }
-                  return Container(
-                    width: 7,
-                    height: 7,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: server.connected ? Aether.success : Aether.textFaint,
-                    ),
+                  // No record: neutral, never inferred from serviceStatus
+                  // or connected (spec §5.3, Task 3).
+                  return Icon(
+                    Icons.help_outline,
+                    size: 14,
+                    color: Aether.textFaint,
                   );
                 }),
               ],
@@ -2102,56 +2092,14 @@ class McpCard extends StatelessWidget {
                   ),
                 );
               }
-              final status = AppState.I.serviceStatus['mcp:${server.canonicalId}'];
-              if (status != null) {
-                switch (status.health) {
-                  case ServiceHealth.connecting:
-                    return const Text(
-                      'Connecting…',
-                      style: TextStyle(
-                        fontSize: 10.5,
-                        color: Aether.accent,
-                      ),
-                    );
-                  case ServiceHealth.working:
-                    return const Text(
-                      'Connected',
-                      style: TextStyle(
-                        fontSize: 10.5,
-                        color: Aether.success,
-                      ),
-                    );
-                  case ServiceHealth.failed:
-                    return Tooltip(
-                      message: status.detail,
-                      child: Text(
-                        status.detail.isNotEmpty ? status.detail : 'Error',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 10.5,
-                          color: Aether.dangerC,
-                        ),
-                      ),
-                    );
-                }
-              }
+              // No record: neutral "Not started", never inferred from
+              // serviceStatus, connected, or structural guards — those stay
+              // on the detail screen banners (spec §5.3, Task 3).
               return Text(
-                server.connected
-                    ? 'Connected'
-                    : mcpUnsupportedReason(server) != null
-                    ? 'Unsupported'
-                    : server.envHint != null
-                    ? 'Not configured'
-                    : 'Not connected',
-                style: TextStyle(
-                  fontSize: 10.5,
-                  color: server.connected
-                      ? Aether.success
-                      : mcpUnsupportedReason(server) != null
-                      ? Aether.dangerC
-                      : Aether.textFaint,
-                ),
+                'Not started',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
               );
             }),
           ],
@@ -2252,6 +2200,36 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                       '${s.author} · ${s.category} · via ${s.source}',
                       style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
                     ),
+                    // Durable-only header status (spec §5.3, Task 3): the
+                    // canonical label · reason, or neutral "Not started" —
+                    // never serviceStatus or connected. The live
+                    // Connect/Disconnect toggle below stays as-is.
+                    const SizedBox(height: 3),
+                    Builder(builder: (_) {
+                      final durable = durableMcpStatus(s);
+                      if (durable == null) {
+                        return Text(
+                          'Not started',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: Aether.textFaint,
+                          ),
+                        );
+                      }
+                      final label = startupItemStateLabel(durable.state);
+                      final reason = durable.reason;
+                      return Text(
+                        reason == null || reason.isEmpty
+                            ? label
+                            : '$label · $reason',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: durable.state == StartupItemState.ready
+                              ? Aether.success
+                              : Aether.textMuted,
+                        ),
+                      );
+                    }),
                   ],
                 ),
               ),
