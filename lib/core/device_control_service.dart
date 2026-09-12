@@ -41,6 +41,63 @@ class DeviceControlService {
 
   MethodChannel get _channel => _channelOverrideForTest ?? _nativeChannel;
 
+  /// Cancellation contract (device-overlay spec §5.5): [DeviceControlService]
+  /// carries a monotonic device generation. [beginDeviceGeneration] opens a
+  /// fresh generation on every new run; [cancelDeviceActions] bumps it on
+  /// every Stop (composer Stop, notification Stop, and — in Task 4 — the
+  /// overlay X, which routes through the same Stop path). Every Dart
+  /// `device_*` call captures the generation before the channel invoke and,
+  /// when the native result lands on a stale generation, discards it and
+  /// reports [cancelledSupersededMessage] instead.
+  ///
+  /// Android limit (documented, not worked around): an already-dispatched
+  /// gesture runs to completion — cancellation covers Dart-awaited results
+  /// and queued work, never recalls motion already handed to the system.
+  static const String cancelledSupersededMessage =
+      'cancelled: superseded by a newer run/stop';
+
+  /// True when [result] is the superseded-generation marker (never a native
+  /// payload — native results are maps/bools/paths).
+  static bool isCancelledResult(Object? result) =>
+      result == cancelledSupersededMessage;
+
+  int _deviceGeneration = 0;
+
+  @visibleForTesting
+  int get deviceGenerationForTest => _deviceGeneration;
+
+  /// Opens a fresh device generation for a newly starting run. In-flight
+  /// `device_*` calls captured under the previous generation report
+  /// cancellation when their native results land.
+  void beginDeviceGeneration() {
+    _deviceGeneration++;
+  }
+
+  /// Public Stop hook for Task 4's overlay X (and any future Stop path):
+  /// invalidates every in-flight `device_*` call exactly like a composer
+  /// Stop. See the [cancelledSupersededMessage] contract for the Android
+  /// limit — dispatched gestures still run to completion.
+  void cancelDeviceActions() {
+    _deviceGeneration++;
+  }
+
+  /// Runs [invoke] under the current generation: a native result (or error)
+  /// landing after a [beginDeviceGeneration]/[cancelDeviceActions] bump is
+  /// replaced by [cancelledSupersededMessage]; anything else propagates
+  /// untouched (errors rethrow so honest native failures still surface).
+  Future<Object?> _invokeGuarded(Future<Object?> Function() invoke) async {
+    final generation = _deviceGeneration;
+    late final Object? result;
+    try {
+      result = await invoke();
+    } catch (_) {
+      if (generation != _deviceGeneration) return cancelledSupersededMessage;
+      rethrow;
+    }
+    if (generation != _deviceGeneration) return cancelledSupersededMessage;
+    return result;
+  }
+
   @visibleForTesting
   static void setMethodChannelForTest(MethodChannel? channel) {
     _channelOverrideForTest = channel;
@@ -72,18 +129,25 @@ class DeviceControlService {
     return formatReadResultForTest(await readRaw(full: full));
   }
 
-  Future<Object?> tap({int? node, num? x, num? y}) => _channel
-      .invokeMethod<Object?>('deviceTap', {'node': ?node, 'x': ?x, 'y': ?y});
+  Future<Object?> tap({int? node, num? x, num? y}) => _invokeGuarded(
+    () => _channel.invokeMethod<Object?>('deviceTap', {
+      'node': ?node,
+      'x': ?x,
+      'y': ?y,
+    }),
+  );
 
   Future<Object?> type({
     int? node,
     required String text,
     bool submit = false,
-  }) => _channel.invokeMethod<Object?>('deviceType', {
-    'node': ?node,
-    'text': text,
-    'submit': submit,
-  });
+  }) => _invokeGuarded(
+    () => _channel.invokeMethod<Object?>('deviceType', {
+      'node': ?node,
+      'text': text,
+      'submit': submit,
+    }),
+  );
 
   Future<Object?> swipe({
     required num fromX,
@@ -91,39 +155,54 @@ class DeviceControlService {
     required num toX,
     required num toY,
     int? durationMs,
-  }) => _channel.invokeMethod<Object?>('deviceSwipe', {
-    'from_x': fromX,
-    'from_y': fromY,
-    'to_x': toX,
-    'to_y': toY,
-    'duration_ms': ?durationMs,
-  });
+  }) => _invokeGuarded(
+    () => _channel.invokeMethod<Object?>('deviceSwipe', {
+      'from_x': fromX,
+      'from_y': fromY,
+      'to_x': toX,
+      'to_y': toY,
+      'duration_ms': ?durationMs,
+    }),
+  );
 
-  Future<Object?> systemNav(String action) =>
-      _channel.invokeMethod<Object?>('deviceSystemNav', {'action': action});
+  Future<Object?> systemNav(String action) => _invokeGuarded(
+    () => _channel.invokeMethod<Object?>('deviceSystemNav', {'action': action}),
+  );
 
-  Future<Object?> key(String key) =>
-      _channel.invokeMethod<Object?>('deviceKey', {'key': key});
+  Future<Object?> key(String key) => _invokeGuarded(
+    () => _channel.invokeMethod<Object?>('deviceKey', {'key': key}),
+  );
 
   Future<Object?> longPress({int? node, num? x, num? y, int? durationMs}) {
     // Mirrors clampLongPressDuration natively (default 600, clamp 200-3000).
     final duration = (durationMs ?? 600).clamp(200, 3000);
-    return _channel.invokeMethod<Object?>('deviceLongPress', {
-      'node': ?node,
-      'x': ?x,
-      'y': ?y,
-      'duration_ms': duration,
-    });
+    return _invokeGuarded(
+      () => _channel.invokeMethod<Object?>('deviceLongPress', {
+        'node': ?node,
+        'x': ?x,
+        'y': ?y,
+        'duration_ms': duration,
+      }),
+    );
   }
 
   Future<Object?> scroll({int? node, required String direction}) =>
-      _channel.invokeMethod<Object?>('deviceScroll', {
-        'node': ?node,
-        'direction': direction,
-      });
+      _invokeGuarded(
+        () => _channel.invokeMethod<Object?>('deviceScroll', {
+          'node': ?node,
+          'direction': direction,
+        }),
+      );
 
   Future<String> screenshot() async {
-    return await _channel.invokeMethod<String>('deviceScreenshot') ?? '';
+    // device_read/deviceRead stays unguarded: reads are fast and the
+    // pre-action verification read must reflect the live foreground app.
+    // Screenshot is a mutating-cancellable action result like the rest.
+    final result = await _invokeGuarded(
+      () => _channel.invokeMethod<Object?>('deviceScreenshot'),
+    );
+    if (result is String) return result;
+    return result?.toString() ?? '';
   }
 
   Future<String> copyScreenshotIntoWorkspace(

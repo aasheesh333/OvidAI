@@ -876,6 +876,10 @@ class AgentService extends ChangeNotifier {
   bool stopRequested({required String sessionId}) {
     final r = _runs[sessionId];
     if (r == null) return false;
+    // Both Stop branches (queue-preserved turn-abort + queue-empty panic
+    // below) invalidate in-flight device_* calls: the overlay X (Task 4)
+    // routes through this same path, so it gets cancellation for free.
+    DeviceControlService.I.cancelDeviceActions();
     final queuePreserved = r.queue.isNotEmpty;
     _cancelBucket(r);
     return queuePreserved;
@@ -885,6 +889,9 @@ class AgentService extends ChangeNotifier {
   /// every session's run, every subagent, every job, every spawned
   /// process. Instant, regardless of which session the UI is on.
   void cancelAllRuns() {
+    // Global panic Stop invalidates every in-flight device_* call first —
+    // queued work is cleared below, so no new device work can start stale.
+    DeviceControlService.I.cancelDeviceActions();
     // Cancellation releases each run's finally block. Clear continuations
     // first so no bucket can restart queued work during a global panic.
     for (final r in _runs.values) {
@@ -5815,6 +5822,11 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // async continuation — SSE stream handlers, tool dispatch, subagent
     // loops — inherits it, so two runs never see each other's state.
     final bucket = _runFor(s.id);
+    // Device overlay (spec §5.5): every new run opens a fresh device
+    // generation so in-flight device_* calls from a superseded run/Stop
+    // report `cancelled: superseded by a newer run/stop` instead of stale
+    // native results.
+    DeviceControlService.I.beginDeviceGeneration();
     // PR23/Q1: snapshot the model at run start — every LLM call of this
     // run uses it; a mid-run picker switch only affects the next run.
     bucket.modelSnapshot = s.model;
@@ -10559,6 +10571,52 @@ ${await _agentsMdBlock()}
     return '';
   }
 
+  /// Returns the superseded-generation marker when [result] is one, else
+  /// null — every device_* tool result is checked through this before any
+  /// success string is built, so a Stop/new-run never reports stale native
+  /// work as done.
+  static String? _cancelledDeviceResult(Object? result) =>
+      DeviceControlService.isCancelledResult(result)
+      ? DeviceControlService.cancelledSupersededMessage
+      : null;
+
+  /// Honest submit contract (overlay spec §5.4): surfaces the native
+  /// typed/submitted/message split verbatim. `typed=true` only when the
+  /// native map says SET_TEXT was accepted; `submitted=true` only when the
+  /// IME action was accepted (submit on API < 30 lands as typed=true,
+  /// submitted=false with the API-floor message). Opaque truthy results
+  /// (legacy mocks — real native always returns the map) count as typed
+  /// with submit unconfirmed, never as submitted.
+  static String _formatDeviceTypeResult({
+    required String text,
+    required int? node,
+    required Object? result,
+  }) {
+    var typed = false;
+    var submitted = false;
+    var message = '';
+    if (result is Map) {
+      typed = result['typed'] == true;
+      submitted = result['submitted'] == true;
+      message = result['message']?.toString() ?? '';
+    } else if (result == true) {
+      typed = true;
+    }
+    final base =
+        'typed ${text.length} characters${node == null ? '' : ' into node $node'}'
+        ' (typed=$typed, submitted=$submitted)';
+    if (message.trim().isEmpty) return base;
+    return '$base: $message';
+  }
+
+  /// Test seam for the honest-submit matrix.
+  @visibleForTesting
+  static String formatDeviceTypeResultForTest({
+    required String text,
+    required int? node,
+    required Object? result,
+  }) => _formatDeviceTypeResult(text: text, node: node, result: result);
+
   Future<String> _handleDeviceControlTool(
     String name,
     Map<String, dynamic> args,
@@ -10600,7 +10658,9 @@ ${await _agentsMdBlock()}
           if (node == null && (x == null || y == null)) {
             return 'device_tap requires node or both x and y.';
           }
-          await device.tap(node: node, x: x, y: y);
+          final tapResult = await device.tap(node: node, x: x, y: y);
+          final tapCancelled = _cancelledDeviceResult(tapResult);
+          if (tapCancelled != null) return tapCancelled;
           final detail = node != null ? 'tapped node $node' : 'tapped ($x, $y)';
           _emit('shell', 'device_tap: $detail');
           return detail;
@@ -10609,9 +10669,18 @@ ${await _agentsMdBlock()}
           if (text == null) return 'device_type requires text.';
           final node = (args['node'] as num?)?.toInt();
           final submit = args['submit'] == true;
-          await device.type(node: node, text: text, submit: submit);
-          final detail =
-              'typed ${text.length} characters${node == null ? '' : ' into node $node'}${submit ? ' and submitted' : ''}';
+          final typeResult = await device.type(
+            node: node,
+            text: text,
+            submit: submit,
+          );
+          final typeCancelled = _cancelledDeviceResult(typeResult);
+          if (typeCancelled != null) return typeCancelled;
+          final detail = _formatDeviceTypeResult(
+            text: text,
+            node: node,
+            result: typeResult,
+          );
           _emit('shell', 'device_type: $detail');
           return detail;
         case 'device_swipe':
@@ -10622,13 +10691,15 @@ ${await _agentsMdBlock()}
           if (fromX == null || fromY == null || toX == null || toY == null) {
             return 'device_swipe requires from_x, from_y, to_x, and to_y.';
           }
-          await device.swipe(
+          final swipeResult = await device.swipe(
             fromX: fromX,
             fromY: fromY,
             toX: toX,
             toY: toY,
             durationMs: (args['duration_ms'] as num?)?.toInt(),
           );
+          final swipeCancelled = _cancelledDeviceResult(swipeResult);
+          if (swipeCancelled != null) return swipeCancelled;
           final detail = 'swiped ($fromX, $fromY) to ($toX, $toY)';
           _emit('shell', 'device_swipe: $detail');
           return detail;
@@ -10644,7 +10715,9 @@ ${await _agentsMdBlock()}
           if (!actions.contains(action)) {
             return 'device_system_nav requires action: ${actions.join('|')}.';
           }
-          await device.systemNav(action);
+          final navResult = await device.systemNav(action);
+          final navCancelled = _cancelledDeviceResult(navResult);
+          if (navCancelled != null) return navCancelled;
           _emit('shell', 'device_system_nav: $action');
           return 'system navigation: $action';
         case 'device_key':
@@ -10663,6 +10736,8 @@ ${await _agentsMdBlock()}
                 'Android does not allow apps to inject arbitrary keycodes.';
           }
           final keyResult = await device.key(key);
+          final keyCancelled = _cancelledDeviceResult(keyResult);
+          if (keyCancelled != null) return keyCancelled;
           final keyDetail = 'pressed $key${_nativeNarration(keyResult)}';
           _emit('shell', 'device_key: $keyDetail');
           return keyDetail;
@@ -10681,6 +10756,8 @@ ${await _agentsMdBlock()}
             y: pressY,
             durationMs: duration,
           );
+          final pressCancelled = _cancelledDeviceResult(pressResult);
+          if (pressCancelled != null) return pressCancelled;
           final pressDetail = pressNode != null
               ? 'long-pressed node $pressNode${_nativeNarration(pressResult)}'
               : 'long-pressed ($pressX, $pressY) for ${duration}ms${_nativeNarration(pressResult)}';
@@ -10707,12 +10784,16 @@ ${await _agentsMdBlock()}
             node: scrollNode,
             direction: direction,
           );
+          final scrollCancelled = _cancelledDeviceResult(scrollResult);
+          if (scrollCancelled != null) return scrollCancelled;
           final scrollDetail =
               'scrolled node $scrollNode $direction${_nativeNarration(scrollResult)}';
           _emit('shell', 'device_scroll: $scrollDetail');
           return scrollDetail;
         case 'device_screenshot':
           final nativePath = await device.screenshot();
+          final shotCancelled = _cancelledDeviceResult(nativePath);
+          if (shotCancelled != null) return shotCancelled;
           if (nativePath.trim().isEmpty) {
             return 'device_screenshot returned no file.';
           }
