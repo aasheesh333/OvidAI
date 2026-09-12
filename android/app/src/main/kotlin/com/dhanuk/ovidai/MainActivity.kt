@@ -387,6 +387,15 @@ class MainActivity : FlutterActivity() {
                             )
                         }
                     }
+                    "deviceKey" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        val key = call.argument<String>("key")
+                        if (key == null) {
+                            result.error("BAD_ARGS", "deviceKey requires key.", null)
+                        } else {
+                            completeDeviceAction(result, service.pressKey(key))
+                        }
+                    }
                     "deviceScreenshot" -> {
                         val service = deviceService(result) ?: return@setMethodCallHandler
                         service.takeScreen(result)

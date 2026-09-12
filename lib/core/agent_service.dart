@@ -3169,6 +3169,86 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         },
       },
     },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'device_key',
+        'description':
+            'Press a key: enter (IME action on the focused editable field), volume_up/volume_down/volume_mute, or media_play_pause/media_next/media_previous. Arbitrary keycodes are refused by Android.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'key': {
+              'type': 'string',
+              'enum': [
+                'enter',
+                'volume_up',
+                'volume_down',
+                'volume_mute',
+                'media_play_pause',
+                'media_next',
+                'media_previous',
+              ],
+            },
+          },
+          'required': ['key'],
+          'additionalProperties': false,
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'device_long_press',
+        'description':
+            'Long-press a node handle (preferred) or x/y screen coordinates. Duration defaults to 600ms and is clamped to 200-3000ms.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'node': {'type': 'integer'},
+            'x': {'type': 'number'},
+            'y': {'type': 'number'},
+            'duration_ms': {'type': 'integer'},
+          },
+          'anyOf': [
+            {
+              'required': ['node'],
+            },
+            {
+              'required': ['x', 'y'],
+            },
+          ],
+          'additionalProperties': false,
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'device_scroll',
+        'description':
+            'Scroll a scrollable node handle in a direction. Below Android 6.0, up|left fall back to backward and down|right to forward, named in the result.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'node': {'type': 'integer'},
+            'direction': {
+              'type': 'string',
+              'enum': [
+                'forward',
+                'backward',
+                'up',
+                'down',
+                'left',
+                'right',
+              ],
+            },
+          },
+          'required': ['node', 'direction'],
+          'additionalProperties': false,
+        },
+      },
+    },
     // ── Chrome DevTools MCP-style browser tools (inbuilt WebView) ──
     {
       'type': 'function',
@@ -7133,6 +7213,9 @@ ${await _agentsMdBlock()}
       case 'device_swipe':
       case 'device_system_nav':
       case 'device_screenshot':
+      case 'device_key':
+      case 'device_long_press':
+      case 'device_scroll':
         if (_runSession?.isSubagent == true) {
           return 'DENIED: Subagents cannot control the device.';
         }
@@ -9220,6 +9303,9 @@ ${await _agentsMdBlock()}
       case 'device_swipe':
       case 'device_system_nav':
       case 'device_screenshot':
+      case 'device_key':
+      case 'device_long_press':
+      case 'device_scroll':
       case 'memory_save':
       case 'create_goal':
       case 'update_goal':
@@ -10463,6 +10549,16 @@ ${await _agentsMdBlock()}
     List<Map<String, dynamic>> messages,
   ) => _appendPendingVisionMessages(messages);
 
+  /// Parenthesized native narration for honest device results: a non-empty
+  /// native string (scroll fallback, gesture detail) is surfaced verbatim,
+  /// otherwise nothing is appended.
+  static String _nativeNarration(Object? result) {
+    if (result is String && result.trim().isNotEmpty) {
+      return ' (${result.trim()})';
+    }
+    return '';
+  }
+
   Future<String> _handleDeviceControlTool(
     String name,
     Map<String, dynamic> args,
@@ -10551,6 +10647,70 @@ ${await _agentsMdBlock()}
           await device.systemNav(action);
           _emit('shell', 'device_system_nav: $action');
           return 'system navigation: $action';
+        case 'device_key':
+          final key = args['key'] as String?;
+          const keys = {
+            'enter',
+            'volume_up',
+            'volume_down',
+            'volume_mute',
+            'media_play_pause',
+            'media_next',
+            'media_previous',
+          };
+          if (key == null || !keys.contains(key)) {
+            return 'BAD_KEY: device_key requires key: ${keys.join('|')}. '
+                'Android does not allow apps to inject arbitrary keycodes.';
+          }
+          final keyResult = await device.key(key);
+          final keyDetail = 'pressed $key${_nativeNarration(keyResult)}';
+          _emit('shell', 'device_key: $keyDetail');
+          return keyDetail;
+        case 'device_long_press':
+          final pressNode = (args['node'] as num?)?.toInt();
+          final pressX = args['x'] as num?;
+          final pressY = args['y'] as num?;
+          if (pressNode == null && (pressX == null || pressY == null)) {
+            return 'device_long_press requires node or both x and y.';
+          }
+          final duration =
+              ((args['duration_ms'] as num?)?.toInt() ?? 600).clamp(200, 3000);
+          final pressResult = await device.longPress(
+            node: pressNode,
+            x: pressX,
+            y: pressY,
+            durationMs: duration,
+          );
+          final pressDetail = pressNode != null
+              ? 'long-pressed node $pressNode${_nativeNarration(pressResult)}'
+              : 'long-pressed ($pressX, $pressY) for ${duration}ms${_nativeNarration(pressResult)}';
+          _emit('shell', 'device_long_press: $pressDetail');
+          return pressDetail;
+        case 'device_scroll':
+          final scrollNode = (args['node'] as num?)?.toInt();
+          if (scrollNode == null) {
+            return 'device_scroll requires node.';
+          }
+          final direction = args['direction'] as String? ?? '';
+          const directions = {
+            'forward',
+            'backward',
+            'up',
+            'down',
+            'left',
+            'right',
+          };
+          if (!directions.contains(direction)) {
+            return 'device_scroll requires direction: ${directions.join('|')}.';
+          }
+          final scrollResult = await device.scroll(
+            node: scrollNode,
+            direction: direction,
+          );
+          final scrollDetail =
+              'scrolled node $scrollNode $direction${_nativeNarration(scrollResult)}';
+          _emit('shell', 'device_scroll: $scrollDetail');
+          return scrollDetail;
         case 'device_screenshot':
           final nativePath = await device.screenshot();
           if (nativePath.trim().isEmpty) {
@@ -11097,6 +11257,9 @@ ${await _agentsMdBlock()}
     'device_swipe',
     'device_system_nav',
     'device_screenshot',
+    'device_key',
+    'device_long_press',
+    'device_scroll',
   };
 
   bool _isMutatingTool(String name) =>

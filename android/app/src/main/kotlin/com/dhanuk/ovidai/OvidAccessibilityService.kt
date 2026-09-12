@@ -7,9 +7,11 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.view.Display
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import io.flutter.plugin.common.MethodChannel
@@ -594,6 +596,94 @@ class OvidAccessibilityService : AccessibilityService() {
             DeviceActionResult(true)
         } else {
             DeviceActionResult(false, message = "Android did not accept the swipe gesture.")
+        }
+    }
+
+    @Synchronized
+    internal fun pressKey(key: String): DeviceActionResult {
+        // Closed vocabulary: Android denies INJECT_EVENTS to apps, so only
+        // keys with a real accessibility/audio mechanism are supported.
+        return when (key) {
+            "enter" -> pressEnterOnFocusedInput()
+            "volume_up", "volume_down", "volume_mute" -> adjustVolume(key)
+            "media_play_pause", "media_next", "media_previous" -> dispatchMediaKey(key)
+            else -> DeviceActionResult(
+                false,
+                "BAD_KEY",
+                "Unknown key: $key. Android does not allow apps to inject arbitrary keycodes; " +
+                    "use enter|volume_up|volume_down|volume_mute|media_play_pause|media_next|media_previous.",
+            )
+        }
+    }
+
+    private fun pressEnterOnFocusedInput(): DeviceActionResult {
+        val root = rootInActiveWindow
+            ?: return DeviceActionResult(false, "NO_FOCUS", "No active window has a focused input.")
+        try {
+            val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                ?: return DeviceActionResult(false, "NO_FOCUS", "No focused input is available.")
+            try {
+                if (!focused.refresh()) {
+                    return DeviceActionResult(false, "INVALID_NODE", "The focused input is no longer valid. Re-read the screen with device_read and retry.")
+                }
+                if (!focused.isEditable) {
+                    return DeviceActionResult(false, "NOT_EDITABLE", "The focused node is not editable.")
+                }
+                // Shared IME-enter path with device_type submit.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    return if (Api30Actions.submit(focused)) {
+                        DeviceActionResult(true)
+                    } else {
+                        DeviceActionResult(false, message = "The focused input did not accept IME Enter.")
+                    }
+                }
+                return DeviceActionResult(false, "UNSUPPORTED", "IME Enter requires Android 11 or newer.")
+            } finally {
+                focused.recycle()
+            }
+        } finally {
+            root.recycle()
+        }
+    }
+
+    private fun adjustVolume(key: String): DeviceActionResult {
+        val audio = getSystemService(AUDIO_SERVICE) as? AudioManager
+            ?: return DeviceActionResult(false, message = "Audio service is unavailable.")
+        return try {
+            if (key == "volume_mute" && Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                @Suppress("DEPRECATION")
+                audio.setStreamMute(AudioManager.STREAM_MUSIC, true)
+            } else {
+                val direction = when (key) {
+                    "volume_up" -> AudioManager.ADJUST_RAISE
+                    "volume_down" -> AudioManager.ADJUST_LOWER
+                    else -> AudioManager.ADJUST_MUTE
+                }
+                audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI)
+            }
+            DeviceActionResult(true)
+        } catch (error: SecurityException) {
+            DeviceActionResult(false, message = "Android refused the volume key: ${error.message}")
+        }
+    }
+
+    private fun dispatchMediaKey(key: String): DeviceActionResult {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+            return DeviceActionResult(false, "UNSUPPORTED", "Media keys require Android 5.0 or newer.")
+        }
+        val keyCode = when (key) {
+            "media_play_pause" -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+            "media_next" -> KeyEvent.KEYCODE_MEDIA_NEXT
+            else -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
+        }
+        val audio = getSystemService(AUDIO_SERVICE) as? AudioManager
+            ?: return DeviceActionResult(false, message = "Audio service is unavailable.")
+        return try {
+            audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+            DeviceActionResult(true)
+        } catch (error: SecurityException) {
+            DeviceActionResult(false, message = "Android refused the media key: ${error.message}")
         }
     }
 

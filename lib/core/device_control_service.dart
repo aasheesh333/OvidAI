@@ -102,6 +102,26 @@ class DeviceControlService {
   Future<Object?> systemNav(String action) =>
       _channel.invokeMethod<Object?>('deviceSystemNav', {'action': action});
 
+  Future<Object?> key(String key) =>
+      _channel.invokeMethod<Object?>('deviceKey', {'key': key});
+
+  Future<Object?> longPress({int? node, num? x, num? y, int? durationMs}) {
+    // Mirrors clampLongPressDuration natively (default 600, clamp 200-3000).
+    final duration = (durationMs ?? 600).clamp(200, 3000);
+    return _channel.invokeMethod<Object?>('deviceLongPress', {
+      'node': ?node,
+      'x': ?x,
+      'y': ?y,
+      'duration_ms': duration,
+    });
+  }
+
+  Future<Object?> scroll({int? node, required String direction}) =>
+      _channel.invokeMethod<Object?>('deviceScroll', {
+        'node': ?node,
+        'direction': direction,
+      });
+
   Future<String> screenshot() async {
     return await _channel.invokeMethod<String>('deviceScreenshot') ?? '';
   }
