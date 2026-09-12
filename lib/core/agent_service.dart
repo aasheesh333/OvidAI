@@ -1180,8 +1180,15 @@ class AgentService extends ChangeNotifier {
   // Tabs themselves are per-session: switching sessions switches tab sets;
   // old sessions keep their tabs and pages alive as-is.
   static const _kBrowserTabs = 'ovid_browser_tabs';
+  static const _kBrowserTabsV2 = 'ovid_browser_tabs_v2';
   static const _kBrowserActiveTab = 'ovid_browser_active_tab';
   static const _kBrowserSessionPrefix = 'ovid_browser_session_';
+  static const _kBrowserSessionV2Prefix = 'ovid_browser_session_v2_';
+
+  /// Version tag for the JSON envelope that carries per-tab settings
+  /// (`desktopMode` + `userZoom`) alongside the URL list. Legacy saves are a
+  /// plain `List<String>` of URLs and still restore with global defaults.
+  static const _browserTabsEnvelopeVersion = 2;
   static const _defaultBrowserUrl = 'https://www.google.com';
 
   /// Per-session browser bucket: tab list + active index.
@@ -1246,6 +1253,56 @@ class AgentService extends ChangeNotifier {
     }
   }
 
+  /// Serialize a tab list + active index into the versioned JSON envelope.
+  /// Per-tab `desktopMode`/`userZoom` ride along with the URL so restore can
+  /// apply them; `version` lets a future shape migrate without guessing.
+  String _encodeBrowserTabsEnvelope(List<BrowserTab> tabs, int activeIndex) =>
+      jsonEncode({
+        'version': _browserTabsEnvelopeVersion,
+        'activeIndex': activeIndex,
+        'tabs': [
+          for (final t in tabs)
+            {
+              'url': t.url,
+              'desktopMode': t.desktopMode,
+              'userZoom': t.userZoom,
+            },
+        ],
+      });
+
+  /// Parse a v2 envelope. Returns null when [raw] is absent/malformed so the
+  /// caller falls back to the legacy URL-list shape. Missing per-tab fields
+  /// fall back to the global default mode and a 1.0 zoom; out-of-range zoom is
+  /// clamped by the [BrowserTab.userZoom] setter.
+  ({List<BrowserTab> tabs, int activeIndex})? _decodeBrowserTabsEnvelope(
+    String? raw,
+  ) {
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final data = jsonDecode(raw);
+      if (data is! Map) return null;
+      final list = data['tabs'];
+      if (list is! List || list.isEmpty) return null;
+      final tabs = <BrowserTab>[];
+      for (final item in list) {
+        if (item is! Map) continue;
+        final url = item['url'];
+        if (url is! String || url.isEmpty) continue;
+        final tab = BrowserTab(url: url);
+        final mode = item['desktopMode'];
+        if (mode is bool) tab.desktopMode = mode;
+        final z = item['userZoom'];
+        if (z is num) tab.userZoom = z.toDouble();
+        tabs.add(tab);
+      }
+      if (tabs.isEmpty) return null;
+      final active = data['activeIndex'];
+      return (tabs: tabs, activeIndex: active is int ? active : 0);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Restore tabs for a session id — called lazily when the user switches
   /// to a session whose tabs were never materialized this launch.
   Future<void> _restoreSessionTabsIfNeeded(String sessionId) async {
@@ -1253,16 +1310,27 @@ class AgentService extends ChangeNotifier {
     if (tabs.isNotEmpty) return; // already alive this launch
     try {
       final prefs = await SharedPreferences.getInstance();
-      final urls = prefs.getStringList('$_kBrowserSessionPrefix$sessionId');
-      if (urls != null && urls.isNotEmpty) {
-        for (final u in urls) {
-          tabs.add(BrowserTab(url: u));
+      final decoded = _decodeBrowserTabsEnvelope(
+        prefs.getString('$_kBrowserSessionV2Prefix$sessionId'),
+      );
+      if (decoded != null) {
+        tabs.addAll(decoded.tabs);
+        _sessionActiveTab[sessionId] = decoded.activeIndex.clamp(
+          0,
+          tabs.length - 1,
+        );
+      } else {
+        final urls = prefs.getStringList('$_kBrowserSessionPrefix$sessionId');
+        if (urls != null && urls.isNotEmpty) {
+          for (final u in urls) {
+            tabs.add(BrowserTab(url: u));
+          }
+          _sessionActiveTab[sessionId] =
+              (prefs.getInt('$_kBrowserActiveTab$sessionId') ?? 0).clamp(
+                0,
+                tabs.length - 1,
+              );
         }
-        _sessionActiveTab[sessionId] =
-            (prefs.getInt('$_kBrowserActiveTab$sessionId') ?? 0).clamp(
-              0,
-              tabs.length - 1,
-            );
       }
     } catch (_) {}
     if (tabs.isEmpty) {
@@ -1281,6 +1349,15 @@ class AgentService extends ChangeNotifier {
   Future<bool> _restoreBrowserTabs() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      final decoded = _decodeBrowserTabsEnvelope(
+        prefs.getString(_kBrowserTabsV2),
+      );
+      if (decoded != null) {
+        browserTabs.addAll(decoded.tabs);
+        activeTabIndex = decoded.activeIndex.clamp(0, browserTabs.length - 1);
+        return true;
+      }
+      // Legacy save: a plain URL list with a separate active-index int.
       final urls = prefs.getStringList(_kBrowserTabs);
       if (urls == null || urls.isEmpty) return false;
       for (final u in urls) {
@@ -1302,17 +1379,44 @@ class AgentService extends ChangeNotifier {
       // file may not exist next launch) so they're skipped.
       final persistable = browserTabs
           .where((t) => t.localPreviewPath == null && t.url != 'ovid://preview')
-          .map((t) => t.url)
           .toList();
-      await prefs.setStringList(_kBrowserTabs, persistable);
+      final urls = persistable.map((t) => t.url).toList();
+      final envelope = _encodeBrowserTabsEnvelope(persistable, activeTabIndex);
+      // v2 envelope is authoritative (carries per-tab mode + zoom); the legacy
+      // URL list is still written so an older build can still restore URLs.
+      await prefs.setString(_kBrowserTabsV2, envelope);
+      await prefs.setStringList(_kBrowserTabs, urls);
       await prefs.setInt(_kBrowserActiveTab, activeTabIndex);
       // …and the per-session copy keyed by this session's id.
       final key = _currentRunKey();
       if (key.isNotEmpty) {
-        await prefs.setStringList('$_kBrowserSessionPrefix$key', persistable);
+        await prefs.setString('$_kBrowserSessionV2Prefix$key', envelope);
+        await prefs.setStringList('$_kBrowserSessionPrefix$key', urls);
         await prefs.setInt('$_kBrowserActiveTab$key', activeTabIndex);
       }
     } catch (_) {}
+  }
+
+  /// Test seam: persist the current browser tabs exactly as a page-finished
+  /// would (v2 envelope with per-tab mode + zoom).
+  @visibleForTesting
+  Future<void> persistBrowserTabsForTest() => _persistBrowserTabs();
+
+  /// Test seam: restore the global browser tabs from prefs.
+  @visibleForTesting
+  Future<bool> restoreBrowserTabsForTest() => _restoreBrowserTabs();
+
+  /// Test seam: restore one session's tabs from prefs.
+  @visibleForTesting
+  Future<void> restoreSessionTabsForTest(String sessionId) =>
+      _restoreSessionTabsIfNeeded(sessionId);
+
+  /// Test seam: drop every in-memory browser bucket (tab lists + active
+  /// index) so a test starts from a clean, restore-able state.
+  @visibleForTesting
+  void clearBrowserTabsForTest() {
+    _sessionBrowsers.clear();
+    _sessionActiveTab.clear();
   }
 
   /// User-facing: open a new tab.
@@ -1536,10 +1640,13 @@ class AgentService extends ChangeNotifier {
   /// [tabId] identifies the owning tab; [webViewIdentifier] resolves to that
   /// tab's native WebView so settings never leak across tabs. Identity keys
   /// are omitted when absent to keep the legacy bool-only payload valid.
+  /// [logicalWidth] (browser_resize) sets the layout viewport width the page
+  /// uses for media queries — the visual scale is never derived from it.
   static Future<bool> applyDesktopViewport(
     bool enabled, {
     int? tabId,
     int? webViewIdentifier,
+    int? logicalWidth,
   }) async {
     try {
       final args = <String, dynamic>{'enabled': enabled};
@@ -1547,6 +1654,7 @@ class AgentService extends ChangeNotifier {
       if (webViewIdentifier != null) {
         args['webViewIdentifier'] = webViewIdentifier;
       }
+      if (logicalWidth != null) args['logicalWidth'] = logicalWidth;
       final res = await _webviewChannel.invokeMapMethod<String, dynamic>(
         'setDesktopViewport',
         args,
@@ -1671,9 +1779,9 @@ class AgentService extends ChangeNotifier {
             browserUrl = url;
             notifyListeners();
             _persistBrowserTabs();
-            // Re-apply logical zoom: every navigation/reload resets the
-            // document's CSS zoom, so desktop-mode (and browser_resize)
-            // sizing must be re-injected on every page load.
+            // Re-apply the user's visual zoom: every navigation/reload resets
+            // the document's CSS zoom, so the readable scale (`userZoom`, never
+            // a viewport-derived factor) must be re-injected on every page load.
             unawaited(_applyTabZoom(tab));
             // Dialog/popup capture: webview_flutter has no onJsAlert API,
             // so shim alert/confirm/prompt + window.open once per page.
@@ -3240,7 +3348,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         'description':
             'Set the browser viewport for responsive testing. width/height '
             'define the logical viewport (e.g. 1280x800 desktop, 390x844 '
-            'phone); the tab renders at that logical size via zoom. Applies '
+            'phone); the tab lays out at that logical width via the per-tab '
+            'native viewport (visual scale stays the user zoom). Applies '
             'to the active tab. Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable).',
         'parameters': {
           'type': 'object',
@@ -8034,22 +8143,22 @@ ${await _agentsMdBlock()}
           return 'viewport out of range (240-3840 × 320-2160)';
         }
         final tab = _activeTab;
-        // Logical viewport via zoom: the physical window is fixed on
-        // mobile, so a wider logical viewport = smaller zoom factor.
+        // Logical viewport width for media queries. `zoom` is the logical
+        // factor that keeps logicalWidth == w; it is NOT a visual scale.
         tab.zoom = (BrowserTab.devW / w).clamp(0.25, 3.0);
-        // Apply to a LIVE controller only — in unit tests (no WebView
-        // platform) the logical size records and the next navigate applies.
-        if (tab.controller != null) {
-          try {
-            await tab.controller!.runJavaScript(
-              'document.documentElement.style.zoom = "${tab.zoom}";',
-            );
-          } catch (_) {}
-        }
+        // Drive the layout viewport through the per-tab native API (wide
+        // viewport + requested width). The injected CSS scale stays
+        // `userZoom` only — resize must never shrink the readable content.
+        await applyDesktopViewport(
+          tab.desktopMode,
+          tabId: tab.id,
+          webViewIdentifier: webViewIdentifierFor(tab),
+          logicalWidth: w,
+        );
         _emit('nav', 'viewport ${w}x$h');
-        return 'viewport set to ${w}x$h (logical; zoom '
-            '${tab.zoom.toStringAsFixed(2)}). browser_read/snapshot now see '
-            'the page at that size.';
+        return 'viewport set to ${w}x$h (logical width; visual zoom stays '
+            '${tab.userZoom.toStringAsFixed(2)}). browser_read/snapshot now '
+            'see the page at that size.';
 
       case 'browser_desktop':
         final modeArg = (args['mode'] as String? ?? '').toLowerCase();

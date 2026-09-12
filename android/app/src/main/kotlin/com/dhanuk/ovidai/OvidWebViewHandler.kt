@@ -43,6 +43,7 @@ class OvidWebViewHandler(
             "setDesktopViewport" -> {
                 val enabled = call.argument<Boolean>("enabled") ?: true
                 val identifier = call.argument<Number>("webViewIdentifier")?.toLong()
+                val logicalWidth = call.argument<Number>("logicalWidth")?.toInt()
                 val webView = resolveWebView(identifier)
                 val act = activity
                 if (webView == null || act == null) {
@@ -51,13 +52,17 @@ class OvidWebViewHandler(
                 }
                 act.runOnUiThread {
                     applySettings(webView.settings, enabled)
+                    if (logicalWidth != null && logicalWidth > 0) {
+                        applyLogicalViewport(webView, logicalWidth)
+                    }
                     result.success(
                         mapOf(
                             "applied" to true,
                             "enabled" to enabled,
                             "useWideViewPort" to enabled,
                             "loadWithOverviewMode" to !enabled,
-                            "supportMultipleWindows" to true
+                            "supportMultipleWindows" to true,
+                            "logicalWidth" to logicalWidth
                         )
                     )
                 }
@@ -89,5 +94,25 @@ class OvidWebViewHandler(
             settings.layoutAlgorithm = WebSettings.LayoutAlgorithm.NARROW_COLUMNS
         }
         settings.setSupportMultipleWindows(true)
+    }
+
+    /**
+     * Set the layout viewport width used for media queries (browser_resize).
+     * Wide viewport honors the page viewport meta; forcing `width=<n>` makes
+     * the layout viewport that exact CSS-pixel width without changing the
+     * visual scale — the Dart side owns the visual zoom (userZoom).
+     */
+    private fun applyLogicalViewport(webView: WebView, logicalWidth: Int) {
+        val settings = webView.settings
+        settings.useWideViewPort = true
+        settings.loadWithOverviewMode = false
+        val js = "(function(){" +
+            "var m=document.querySelector('meta[name=viewport]');" +
+            "if(!m){m=document.createElement('meta');" +
+            "m.setAttribute('name','viewport');" +
+            "(document.head||document.documentElement).appendChild(m);}" +
+            "m.setAttribute('content','width=$logicalWidth');" +
+            "})();"
+        webView.evaluateJavascript(js, null)
     }
 }

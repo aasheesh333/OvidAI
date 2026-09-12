@@ -6334,24 +6334,36 @@ block</pre>
       expect(s.model, target);
     });
 
-    test('browser_resize validates the range', () async {
-      final s = newSession('rf-s4');
-      AgentService.setRunSessionForTest(s.id);
-      addTearDown(() => AgentService.setRunSessionForTest(''));
+    test(
+      'browser_resize validates the range and never shrinks the visual scale',
+      () async {
+        final s = newSession('rf-s4');
+        AgentService.setRunSessionForTest(s.id);
+        addTearDown(() => AgentService.setRunSessionForTest(''));
 
-      final bad = await AgentService.I.dispatchForTest('browser_resize', {
-        'width': 100,
-        'height': 800,
-      });
-      expect(bad, contains('out of range'));
+        final bad = await AgentService.I.dispatchForTest('browser_resize', {
+          'width': 100,
+          'height': 800,
+        });
+        expect(bad, contains('out of range'));
 
-      final ok = await AgentService.I.dispatchForTest('browser_resize', {
-        'width': 1280,
-        'height': 800,
-      });
-      expect(ok, contains('1280x800'));
-      expect(ok, contains('zoom'));
-    });
+        final tab = BrowserTab(url: 'https://resize.test')..userZoom = 1.5;
+        AgentService.I.browserTabs.add(tab);
+        AgentService.I.activeTabIndex = 0;
+
+        final ok = await AgentService.I.dispatchForTest('browser_resize', {
+          'width': 1280,
+          'height': 800,
+        });
+        expect(ok, contains('1280x800'));
+        expect(ok, contains('visual zoom'));
+        expect(
+          tab.userZoom,
+          1.5,
+          reason: 'resize sets the logical viewport, not the visual scale',
+        );
+      },
+    );
   });
 
   group('PR21: agent presets', () {
