@@ -913,6 +913,105 @@ class AgentService extends ChangeNotifier {
   /// PR32: is ANY run active across all sessions (lifecycle keep-alive)?
   bool get anyRunActive => _runs.values.any((r) => r.activeRunId != null);
 
+  // ── Floating device overlay (spec §5.1, Task 4) ─────────────────────
+  // A small draggable textbox living outside Ovid while Control mode drives
+  // the device. Channel contract on ovid/native: Dart->native
+  // deviceOverlayShow/deviceOverlayHide; native->Dart
+  // deviceOverlayText(text) on send, deviceOverlayStop() on X.
+  // Send is EXACTLY the composer send (idle starts a run, busy joins the
+  // per-session queue); X is EXACTLY the composer Stop (stopRequested, the
+  // BUMPED two-branch path — never the legacy unbumped cancelRun).
+  static const String deviceOverlayShowMethod = 'deviceOverlayShow';
+  static const String deviceOverlayHideMethod = 'deviceOverlayHide';
+  static const String deviceOverlayTextMethod = 'deviceOverlayText';
+  static const String deviceOverlayStopMethod = 'deviceOverlayStop';
+
+  static const _overlayNativeChannel = MethodChannel('ovid/native');
+  static MethodChannel? _overlayChannelOverrideForTest;
+
+  MethodChannel get _overlayChannel =>
+      _overlayChannelOverrideForTest ?? _overlayNativeChannel;
+
+  @visibleForTesting
+  static void setOverlayChannelForTest(MethodChannel? channel) {
+    _overlayChannelOverrideForTest = channel;
+  }
+
+  /// Test seam: replaces the run start for idle overlay sends (no provider
+  /// in unit tests). Null in production, where the real runTask runs.
+  /// Signature: (text, target session).
+  @visibleForTesting
+  Future<void> Function(String text, ChatSession session)?
+  overlayRunStarterForTest;
+
+  /// Show the floating overlay. Guarded: with no active Control session the
+  /// overlay is never shown, so nothing is invoked and nothing appears.
+  Future<void> showDeviceOverlay() async {
+    final s = AppState.I.activeSession;
+    if (s == null || s.mode != AgentMode.control.name) return;
+    try {
+      await _overlayChannel.invokeMethod(deviceOverlayShowMethod);
+    } catch (_) {}
+  }
+
+  /// Hide the floating overlay. Unguarded by design: hiding must always
+  /// remove the window so no invisible touch target survives.
+  Future<void> hideDeviceOverlay() async {
+    try {
+      await _overlayChannel.invokeMethod(deviceOverlayHideMethod);
+    } catch (_) {}
+  }
+
+  /// Overlay send: the composer send on the active session. A busy session
+  /// queues the text into its run; an idle session appends it and starts a
+  /// run. Blank text is ignored.
+  Future<void> handleDeviceOverlayText(String text) async {
+    if (text.trim().isEmpty) return;
+    final s = AppState.I.activeSession;
+    if (s == null) return;
+    if (busyFor(s.id)) {
+      enqueueMessage(text);
+      return;
+    }
+    AppState.I.sendMessage(text);
+    final starter = overlayRunStarterForTest;
+    if (starter != null) {
+      await starter(text, s);
+    } else {
+      unawaited(runTask(text, sessionId: s.id, expandRefsFor: s));
+    }
+  }
+
+  /// Overlay X: the composer Stop on the steered session. Routes through
+  /// stopRequested so both Stop branches keep their queue semantics and the
+  /// device generation bump that cancels in-flight device work. Returns
+  /// whether a queued continuation was preserved.
+  Future<bool> handleDeviceOverlayStop() async {
+    final active = AppState.I.activeSession;
+    if (active != null) return stopRequested(sessionId: active.id);
+    for (final entry in _runs.entries) {
+      if (entry.value.activeRunId != null) {
+        return stopRequested(sessionId: entry.key);
+      }
+    }
+    return false;
+  }
+
+  /// Native->Dart dispatcher for overlay events. Chainable: returns true
+  /// when the call was an overlay event, false otherwise so a shared
+  /// ovid/native handler can fall through to other methods.
+  Future<bool> handleDeviceOverlayMethodCall(MethodCall call) async {
+    if (call.method == deviceOverlayTextMethod) {
+      await handleDeviceOverlayText(call.arguments as String? ?? '');
+      return true;
+    }
+    if (call.method == deviceOverlayStopMethod) {
+      await handleDeviceOverlayStop();
+      return true;
+    }
+    return false;
+  }
+
   /// Resolve the running session represented by foreground-notification
   /// progress. Never fall back to a different run: that would let a stale
   /// notification stop an unrelated session.

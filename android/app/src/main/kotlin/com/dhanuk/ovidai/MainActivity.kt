@@ -205,6 +205,19 @@ class MainActivity : FlutterActivity() {
             flutterEngine,
             flutterEngine.dartExecutor.binaryMessenger
         )
+        // Overlay events (send/stop) flow service → Dart on this channel.
+        OvidAccessibilityService.overlayEventListener = { method, argument ->
+            runOnUiThread {
+                try {
+                    MethodChannel(
+                        flutterEngine.dartExecutor.binaryMessenger,
+                        channelName
+                    ).invokeMethod(method, argument)
+                } catch (_: Exception) {
+                    // Dart gone (teardown race): the tap already happened.
+                }
+            }
+        }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -400,6 +413,14 @@ class MainActivity : FlutterActivity() {
                         val service = deviceService(result) ?: return@setMethodCallHandler
                         service.takeScreen(result)
                     }
+                    "deviceOverlayShow" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        completeDeviceAction(result, service.showOverlay())
+                    }
+                    "deviceOverlayHide" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        completeDeviceAction(result, service.hideOverlay())
+                    }
                     "deviceCopyScreenshot" -> {
                         val sourcePath = call.argument<String>("sourcePath")
                         val directoryPath = call.argument<String>("directoryPath")
@@ -591,6 +612,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        OvidAccessibilityService.overlayEventListener = null
         safExportCoordinator.cleanup()
         super.onDestroy()
     }

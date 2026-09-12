@@ -4,16 +4,33 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.annotation.TargetApi
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Path
+import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
 import android.view.Display
+import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
+import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.LinearLayout
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileOutputStream
@@ -219,11 +236,277 @@ class OvidAccessibilityService : AccessibilityService() {
 
         private const val MAX_NODES = 300
         private const val MAX_DEPTH = 30
+
+        /// Native→Dart bridge for overlay events. Set by MainActivity, which
+        /// owns the FlutterEngine: ("deviceOverlayText", text) on send,
+        /// ("deviceOverlayStop", null) on X with an empty field.
+        var overlayEventListener: ((method: String, argument: String?) -> Unit)? = null
     }
 
     private val treeCache = TreeReadCache<AccessibilityNodeInfo> { it.recycle() }
     private val screenshotExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "ovid-device-screenshot").apply { isDaemon = true }
+    }
+
+    // ── Floating control overlay (spec §5.1) ──────────────────────────
+    // TYPE_ACCESSIBILITY_OVERLAY: creatable from an accessibility service
+    // with no manifest permission, alive exactly while the service is bound.
+    // Hidden removes the window outright (no invisible touch target).
+    private var overlayView: View? = null
+    private var overlayParams: WindowManager.LayoutParams? = null
+    private var overlayInput: EditText? = null
+    private var overlayActionButton: ImageButton? = null
+
+    @Synchronized
+    internal fun showOverlay(): DeviceActionResult {
+        if (overlayView != null) return DeviceActionResult(true)
+        val windowManager = getSystemService(WINDOW_SERVICE) as? WindowManager
+            ?: return DeviceActionResult(false, "UNAVAILABLE", "Window manager is unavailable.")
+        return try {
+            val density = resources.displayMetrics.density
+            val container = overlayContainer(windowManager, density)
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                PixelFormat.TRANSLUCENT,
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = (24 * density).toInt()
+                y = (160 * density).toInt()
+            }
+            windowManager.addView(container, params)
+            overlayView = container
+            overlayParams = params
+            DeviceActionResult(true)
+        } catch (error: WindowManager.BadTokenException) {
+            DeviceActionResult(false, "UNAVAILABLE", "Overlay window was refused: " + error.message)
+        } catch (error: Throwable) {
+            overlayView = null
+            overlayParams = null
+            overlayInput = null
+            overlayActionButton = null
+            DeviceActionResult(false, "UNAVAILABLE", "Overlay could not be shown: " + error.message)
+        }
+    }
+
+    @Synchronized
+    internal fun hideOverlay(): DeviceActionResult {
+        val view = overlayView ?: return DeviceActionResult(true)
+        overlayView = null
+        overlayParams = null
+        overlayInput = null
+        overlayActionButton = null
+        return try {
+            val windowManager = getSystemService(WINDOW_SERVICE) as? WindowManager
+            windowManager?.removeView(view)
+            DeviceActionResult(true)
+        } catch (_: Throwable) {
+            // Hidden state is what matters: refs are already cleared, so no
+            // invisible touch target can survive. Never crash a hide.
+            DeviceActionResult(true)
+        }
+    }
+
+    internal fun isOverlayVisible(): Boolean = overlayView != null
+
+    /// Overlay send seam: non-blank text goes to Dart as deviceOverlayText,
+    /// then the field is cleared (which morphs the button back to X).
+    internal fun onOverlaySend(text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        overlayEventListener?.invoke("deviceOverlayText", trimmed)
+        overlayInput?.text?.clear()
+    }
+
+    /// Overlay X seam: an empty field is a hard stop for the run.
+    internal fun onOverlayStop() {
+        overlayEventListener?.invoke("deviceOverlayStop", null)
+    }
+
+    private fun removeOverlayNow() {
+        val view = overlayView ?: return
+        overlayView = null
+        overlayParams = null
+        overlayInput = null
+        overlayActionButton = null
+        try {
+            val windowManager = getSystemService(WINDOW_SERVICE) as? WindowManager
+            windowManager?.removeView(view)
+        } catch (_: Throwable) {
+            // Tearing down: nothing left to report to.
+        }
+    }
+
+    private fun overlayContainer(
+        windowManager: WindowManager,
+        density: Float,
+    ): LinearLayout {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            val pad = (10 * density).toInt()
+            setPadding(pad, (8 * density).toInt(), pad, (8 * density).toInt())
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                setColor(0xE61A1A1A.toInt())
+                cornerRadius = 22 * density
+            }
+            elevation = 8 * density
+        }
+        container.addView(overlayDragHandle(windowManager, container, density))
+        val input = EditText(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f,
+            ).apply {
+                leftMargin = (8 * density).toInt()
+                rightMargin = (8 * density).toInt()
+            }
+            minEms = 8
+            maxLines = 1
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT
+            imeOptions = EditorInfo.IME_ACTION_SEND
+            hint = "Steer Ovid…"
+            setHintTextColor(0xFF9A9A9A.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+            background = null
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_SEND ||
+                    actionId == EditorInfo.IME_ACTION_DONE
+                ) {
+                    onOverlaySend(text?.toString().orEmpty())
+                    true
+                } else {
+                    false
+                }
+            }
+            setOnFocusChangeListener { v, hasFocus ->
+                if (hasFocus) {
+                    val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+                    imm?.showSoftInput(v, InputMethodManager.SHOW_IMPLICIT)
+                }
+            }
+        }
+        container.addView(input)
+        overlayInput = input
+        val action = ImageButton(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                (36 * density).toInt(),
+                (36 * density).toInt(),
+            )
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            background = null
+            contentDescription = "Stop"
+            setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
+            imageTintList = ColorStateList.valueOf(0xFFB0B0B0.toInt())
+            setOnClickListener {
+                val current = overlayInput?.text?.toString().orEmpty()
+                if (current.isBlank()) {
+                    onOverlayStop()
+                } else {
+                    onOverlaySend(current)
+                }
+            }
+        }
+        container.addView(action)
+        overlayActionButton = action
+        // X ⇄ send morph: any non-blank text shows a colored send arrow,
+        // a blank field shows the X again.
+        input.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(
+                s: CharSequence?,
+                start: Int,
+                count: Int,
+                after: Int,
+            ) = Unit
+            override fun onTextChanged(
+                s: CharSequence?,
+                start: Int,
+                before: Int,
+                count: Int,
+            ) = Unit
+            override fun afterTextChanged(s: Editable?) {
+                val button = overlayActionButton ?: return
+                if (!s.isNullOrBlank()) {
+                    button.setImageResource(android.R.drawable.ic_menu_send)
+                    button.imageTintList = ColorStateList.valueOf(0xFF4DA3FF.toInt())
+                    button.contentDescription = "Send"
+                } else {
+                    button.setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
+                    button.imageTintList = ColorStateList.valueOf(0xFFB0B0B0.toInt())
+                    button.contentDescription = "Stop"
+                }
+            }
+        })
+        return container
+    }
+
+    /// 2×3 dot drag handle (2 columns × 3 rows of plain dot Views, no
+    /// assets): touch-drag moves the window through updateViewLayout.
+    private fun overlayDragHandle(
+        windowManager: WindowManager,
+        container: View,
+        density: Float,
+    ): LinearLayout {
+        val handle = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            contentDescription = "Drag to move"
+        }
+        val dot = (4 * density).toInt().coerceAtLeast(2)
+        val gap = (3 * density).toInt()
+        repeat(2) {
+            val column = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+            }
+            repeat(3) {
+                val dotView = View(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(dot, dot).apply {
+                        setMargins(gap, gap, gap, gap)
+                    }
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(0xFF8A8A8A.toInt())
+                    }
+                }
+                column.addView(dotView)
+            }
+            handle.addView(column)
+        }
+        handle.setOnTouchListener { touched, event ->
+            val params = overlayParams
+            if (params == null) {
+                false
+            } else when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    touched.tag = intArrayOf(
+                        params.x - event.rawX.toInt(),
+                        params.y - event.rawY.toInt(),
+                    )
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val offset = touched.tag as? IntArray
+                    if (offset != null && offset.size == 2) {
+                        params.x = event.rawX.toInt() + offset[0]
+                        params.y = event.rawY.toInt() + offset[1]
+                        try {
+                            windowManager.updateViewLayout(container, params)
+                        } catch (_: Throwable) {
+                            // A racing hide must not crash the drag.
+                        }
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+        return handle
     }
 
     override fun onServiceConnected() {
@@ -243,12 +526,14 @@ class OvidAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = Unit
 
     override fun onUnbind(intent: Intent?): Boolean {
+        removeOverlayNow()
         resetTree()
         if (instance === this) instance = null
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
+        removeOverlayNow()
         resetTree()
         screenshotExecutor.shutdown()
         if (instance === this) instance = null
