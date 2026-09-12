@@ -1710,21 +1710,18 @@ class AgentService extends ChangeNotifier {
     bool reload = true,
   }) async {
     tab.desktopMode = desktop;
-    // Desktop compatibility = desktop UA + wide viewport only. Visual scale
-    // stays userZoom; it is never derived from the device width (the old
-    // devW/1280 shrink made content unreadably small). Target only THIS tab's
-    // WebView so toggling one tab never changes another.
-    unawaited(
-      applyDesktopViewport(
-        desktop,
-        tabId: tab.id,
-        webViewIdentifier: webViewIdentifierFor(tab),
-      ),
-    );
-    // WebSettings.setUseWideViewPort takes effect at initialization / load time.
-    // Recreate controller fresh with new viewport settings and UA, dropping
-    // wasted pre-reload zoom while keeping zoom fallback on onPageFinished.
+    // WebSettings.setUseWideViewPort takes effect at initialization / load
+    // time, so recreate the controller fresh with the new viewport settings
+    // and UA. Recreating first avoids applying to the OLD WebView, which is
+    // discarded: the fresh controller receives the settings (with its own
+    // webViewIdentifier) through controllerForTab. Only when no controller is
+    // created (reload:false, no WebView platform, or an unloaded marker tab)
+    // do we emit the per-tab setting directly — it still carries the tab
+    // identity and is applied on the next controller init.
     await recreateControllerForDesktopToggle(tab, reload: reload);
+    if (tab.controller == null) {
+      await applyDesktopViewport(desktop, tabId: tab.id);
+    }
   }
 
   List<({DateTime at, String kind, String text})> consoleBucketFor(

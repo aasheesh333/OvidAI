@@ -133,10 +133,49 @@ void main() {
       expect(kotlin, isNot(contains('lastDesktopViewport')));
     });
 
-    test('desktop uses wide viewport but not overview mode', () {
-      final kotlin = _kotlinSource();
-      expect(kotlin, contains('useWideViewPort = true'));
-      expect(kotlin, contains('loadWithOverviewMode = false'));
+    test('desktop branch uses wide viewport without overview; mobile is inverse', () {
+      final branches = _applySettingsBranches(_kotlinSource());
+      expect(
+        branches,
+        isNotNull,
+        reason: 'applySettings must have desktop/mobile branches',
+      );
+      final (desktop, mobile) = branches!;
+
+      // Desktop must be pinned INSIDE the `if (desktop)` block. A whole-file
+      // substring check passes even when the branches are swapped, because the
+      // inverse literals also exist in the mobile branch.
+      expect(
+        desktop,
+        matches(RegExp(r'useWideViewPort\s*=\s*true')),
+        reason: 'desktop must enable the wide viewport',
+      );
+      expect(
+        desktop,
+        matches(RegExp(r'loadWithOverviewMode\s*=\s*false')),
+        reason: 'desktop must NOT auto-fit (overview mode)',
+      );
+      expect(
+        desktop,
+        matches(RegExp(r'LayoutAlgorithm\.NORMAL')),
+        reason: 'desktop layout algorithm',
+      );
+
+      expect(
+        mobile,
+        matches(RegExp(r'useWideViewPort\s*=\s*false')),
+        reason: 'mobile must not use the wide viewport',
+      );
+      expect(
+        mobile,
+        matches(RegExp(r'loadWithOverviewMode\s*=\s*true')),
+        reason: 'mobile restores overview mode',
+      );
+      expect(
+        mobile,
+        matches(RegExp(r'LayoutAlgorithm\.NARROW_COLUMNS')),
+        reason: 'mobile layout algorithm',
+      );
     });
   });
 
@@ -171,3 +210,45 @@ String _agentSource() => File('lib/core/agent_service.dart').readAsStringSync();
 String _kotlinSource() => File(
   'android/app/src/main/kotlin/com/dhanuk/ovidai/OvidWebViewHandler.kt',
 ).readAsStringSync();
+
+/// Returns the `(desktop, mobile)` bodies of `applySettings`' `if/else` so the
+/// test pins which flags belong to which mode. Whole-file substring checks
+/// cannot catch a branch swap (both literals appear somewhere in the file).
+(String, String)? _applySettingsBranches(String kotlin) {
+  final fnStart = kotlin.indexOf('private fun applySettings(');
+  if (fnStart == -1) return null;
+  final fnEnd = kotlin.indexOf('private fun ', fnStart + 1);
+  final body = kotlin.substring(fnStart, fnEnd == -1 ? kotlin.length : fnEnd);
+
+  final ifIndex = body.indexOf('if (');
+  if (ifIndex == -1) return null;
+  final desktopOpen = body.indexOf('{', ifIndex);
+  if (desktopOpen == -1) return null;
+  final desktopClose = _matchingBrace(body, desktopOpen);
+  if (desktopClose == -1) return null;
+  final desktop = body.substring(desktopOpen + 1, desktopClose);
+
+  final elseIndex = body.indexOf('else', desktopClose);
+  if (elseIndex == -1) return null;
+  final mobileOpen = body.indexOf('{', elseIndex);
+  if (mobileOpen == -1) return null;
+  final mobileClose = _matchingBrace(body, mobileOpen);
+  if (mobileClose == -1) return null;
+  final mobile = body.substring(mobileOpen + 1, mobileClose);
+
+  return (desktop, mobile);
+}
+
+/// Index of the `}` matching the `{` at [openIndex], or -1 when unbalanced.
+int _matchingBrace(String src, int openIndex) {
+  var depth = 0;
+  for (var i = openIndex; i < src.length; i++) {
+    final c = src[i];
+    if (c == '{') depth++;
+    if (c == '}') {
+      depth--;
+      if (depth == 0) return i;
+    }
+  }
+  return -1;
+}

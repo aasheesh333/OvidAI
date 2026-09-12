@@ -19,7 +19,7 @@ import io.flutter.plugins.webviewflutter.WebViewFlutterAndroidExternalApi
  *
  * Desktop: useWideViewPort(true), loadWithOverviewMode(false) — desktop layout
  * width without the overview auto-fit that shrinks readable content.
- * Mobile: platform defaults (useWideViewPort(false), loadWithOverviewMode(true)).
+ * Mobile: useWideViewPort(false), loadWithOverviewMode(true), NARROW_COLUMNS.
  */
 class OvidWebViewHandler(
     private var activity: Activity? = null,
@@ -42,12 +42,19 @@ class OvidWebViewHandler(
         when (call.method) {
             "setDesktopViewport" -> {
                 val enabled = call.argument<Boolean>("enabled") ?: true
+                val tabId = call.argument<Number>("tabId")?.toInt()
                 val identifier = call.argument<Number>("webViewIdentifier")?.toLong()
                 val logicalWidth = call.argument<Number>("logicalWidth")?.toInt()
                 val webView = resolveWebView(identifier)
                 val act = activity
                 if (webView == null || act == null) {
-                    result.success(mapOf("applied" to false, "enabled" to enabled))
+                    result.success(
+                        mapOf(
+                            "applied" to false,
+                            "enabled" to enabled,
+                            "tabId" to tabId
+                        )
+                    )
                     return
                 }
                 act.runOnUiThread {
@@ -59,6 +66,7 @@ class OvidWebViewHandler(
                         mapOf(
                             "applied" to true,
                             "enabled" to enabled,
+                            "tabId" to tabId,
                             "useWideViewPort" to enabled,
                             "loadWithOverviewMode" to !enabled,
                             "supportMultipleWindows" to true,
