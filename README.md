@@ -135,6 +135,30 @@ physical-device pass is `NOT EXECUTED` when no Android device/emulator is
 attached; on-device sign-off remains open until a release owner completes that
 checklist.
 
+## Browser desktop behavior contract
+
+- **Desktop mode stays readable.** Desktop is a desktop UA plus the wide
+  viewport for desktop layouts, without overview-mode auto-fit and without a
+  device-derived CSS shrink. Text renders at full size by default.
+- **Visual zoom is user-controlled.** The injected page scale is `userZoom`
+  only (default 1.0, clamped 0.5–2.0). Toggling desktop/mobile never changes
+  it, and `browser_resize` drives the layout viewport width without shrinking
+  readable content.
+- **Each tab keeps its own mode.** Toggling one tab's desktop/mobile (or
+  resizing it) targets that tab's WebView only and never changes another tab.
+- **Per-tab mode and zoom persist.** Each tab's `desktopMode` and `userZoom`
+  restore across restarts (missing values fall back to the global default and
+  1.0; out-of-range zoom clamps).
+
+The Browser Desktop release gate and its measured evidence (the end-to-end
+parity suite, the full Flutter suite, `flutter analyze`, and the
+physical-device checklist) are recorded in
+`docs/superpowers/audits/2026-09-10-browser-desktop.md`. The debug APK build
+in that gate fails on the missing `google-services.json` and the
+physical-device pass is `NOT EXECUTED` when no Android device/emulator is
+attached; on-device sign-off remains open until a release owner completes
+those items.
+
 ## MCP servers
 
 - Stdio servers spawn inside the sandbox (if provisioned) with per-server
