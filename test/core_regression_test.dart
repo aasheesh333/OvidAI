@@ -51,9 +51,7 @@ import 'package:ovid_ai/ui/plugins_screen.dart'
         startPluginInstallForTest,
         PluginInspectRecorderForTest,
         inspectResultsForTest,
-        PluginRuntimeCallRecorderForTest,
-        pluginPickDirectoryForTest,
-        pluginPickZipFileForTest;
+        PluginRuntimeCallRecorderForTest;
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
 import 'package:ovid_ai/core/sandbox_pkg.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
@@ -19889,8 +19887,6 @@ cwd = 'tools'
       PluginRuntimeManager.npmRegistryBaseOverrideForTest = null;
       PluginInspectRecorderForTest.record = null;
       PluginRuntimeCallRecorderForTest.record = null;
-      pluginPickDirectoryForTest = null;
-      pluginPickZipFileForTest = null;
       inspectResultsForTest.clear();
       for (final id
           in PluginContributionRegistry.I.registeredPluginIds.toList()) {
@@ -20093,7 +20089,65 @@ cwd = 'tools'
           category: 'Tool',
         );
         app.plugins.add(row);
-        pluginPickDirectoryForTest = () async => src.path;
+
+        // GitHub-only UI (contraction Task 1): the chooser's GitHub route
+        // resolves offline via the PLUGIN3 loopback-server pattern,
+        // serving the same Cancel Kit manifest the fixture dir carries.
+        final ghJson = utf8.encode(
+          jsonEncode({
+            'name': 'Cancel Kit',
+            'author': 'p11org',
+            'version': '1.0.0',
+          }),
+        );
+        final reviewMd = utf8.encode(
+          '---\ndescription: P11 command\n---\nP11 BODY',
+        );
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        // Closed mid-test (runAsync, once the blobs are staged) AND in
+        // tearDown: HttpServer.close on an already-closed server never
+        // completes in the fake-async zone, so the flag keeps it single.
+        var serverClosed = false;
+        Future<void> closeLoopbackServer() async {
+          if (serverClosed) return;
+          serverClosed = true;
+          await server.close(force: true);
+        }
+        server.listen((request) async {
+          final path = request.uri.path;
+          List<int>? body;
+          if (path == '/tree/main') {
+            body = utf8.encode(
+              jsonEncode({
+                'tree': [
+                  {'type': 'blob', 'path': '.claude-plugin/plugin.json'},
+                  {'type': 'blob', 'path': 'commands/review.md'},
+                ],
+              }),
+            );
+          } else if (path == '/raw/.claude-plugin/plugin.json') {
+            body = ghJson;
+          } else if (path == '/raw/commands/review.md') {
+            body = reviewMd;
+          }
+          // No keep-alive: the resolver never closes its HttpClients, and
+          // every pooled idle connection leaves a fake-zone idle Timer
+          // behind. Closing each connection outright keeps both sides
+          // timer-free.
+          request.response.persistentConnection = false;
+          if (body == null) {
+            request.response.statusCode = 404;
+          } else {
+            request.response
+              ..statusCode = 200
+              ..contentLength = body.length
+              ..add(body);
+          }
+          await request.response.close();
+        });
+        addTearDown(() => tester.runAsync(closeLoopbackServer));
+        PluginRuntimeManager.githubBaseOverrideForTest =
+            'http://127.0.0.1:${server.port}';
 
         await tester.pumpWidget(
           MaterialApp(
@@ -20106,14 +20160,16 @@ cwd = 'tools'
         // Source-less non-seed rows open the ONE source chooser
         // (bottom sheet with repeating progress animation — bounded
         // pumps only, never pumpAndSettle: the sheet animation replays
-        // forever and pumpAndSettle would hang). The inspection hop
-        // does real file IO — runAsync turns let the real event loop
-        // advance it, pumps render the sheet.
+        // forever and pumpAndSettle would hang). The GitHub route types
+        // a repo and fetches; the inspection hop does real HTTP IO —
+        // runAsync turns let the real event loop advance it, pumps
+        // render the sheet.
         await tester.tap(find.text('Install'));
         for (var i = 0; i < 20; i++) {
           await tester.pump(const Duration(milliseconds: 100));
         }
-        await tester.tap(find.text('Local folder'));
+        await tester.enterText(find.byType(TextField), 'p11org/cancel-kit');
+        await tester.tap(find.text('Fetch from GitHub'));
         var sheetFound = false;
         for (var i = 0; i < 50 && !sheetFound; i++) {
           await tester.runAsync(
@@ -20124,10 +20180,23 @@ cwd = 'tools'
         }
         expect(sheetFound, isTrue, reason: 'inspection sheet never opened');
 
+        // Inspection finished: every blob is staged, so the loopback
+        // server is idle (every connection already closed itself — see
+        // above). Close it NOW, not just in tearDown: its 2-minute
+        // idle-timeout Timer is a fake-zone Timer and would otherwise
+        // still be pending at tree dispose (runAsync: closing is real
+        // IO, which never completes in the fake zone).
+        await tester.runAsync(closeLoopbackServer);
+
         // The single inspection/approval flow reached inspect and shows
-        // the consolidated permission sheet for the staged manifest.
+        // the consolidated permission sheet for the staged manifest (the
+        // popped chooser's repo field may still animate out, so the sheet
+        // line is matched exactly).
         expect(find.text('Grant plugin access'), findsOneWidget);
-        expect(find.textContaining('p11org/cancel-kit'), findsOneWidget);
+        expect(
+          find.text('Cancel Kit · 1.0.0 · p11org/cancel-kit'),
+          findsOneWidget,
+        );
         await tester.ensureVisible(find.text('Cancel'));
         for (var i = 0; i < 20; i++) {
           await tester.pump(const Duration(milliseconds: 100));

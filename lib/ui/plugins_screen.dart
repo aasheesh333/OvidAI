@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../core/agent_service.dart';
 import '../core/hook_service.dart';
@@ -173,13 +172,6 @@ class PluginRuntimeCallRecorderForTest {
   static void Function(String op)? record;
 }
 
-/// Test seams replacing the file picker (no platform channel in tests).
-@visibleForTesting
-Future<String?> Function()? pluginPickDirectoryForTest;
-
-@visibleForTesting
-Future<String?> Function()? pluginPickZipFileForTest;
-
 /// Task 11 (spec §11): the ONE production install flow behind every
 /// entry point (marketplace row, GitHub repo, local folder, ZIP, npm,
 /// pasted JSON/TOML, stdio, HTTP). Inspect → consolidated approval
@@ -305,18 +297,12 @@ Widget? pluginActivationBadge(PluginItem plugin) {
   return Tag(label, color: badgeSpec.$2 ?? Aether.textFaint, filled: true);
 }
 
-/// Task 11 (spec §11): one source chooser for ALL install entry points
-/// — marketplace/GitHub repos, local folder, ZIP, npm, pasted JSON/TOML
-/// MCP config, direct stdio command, direct HTTP URL. Every route
-/// funnels into the single inspection/approval flow above.
+/// Task 1 (contraction spec §5.1): the GitHub-only source chooser — the
+/// single install entry point for sources the catalog doesn't already
+/// cover. One repo field (`owner/repo` or URL via [_githubSourceFromInput])
+/// funnels into the single inspection/approval flow ([_runSourceInstall]).
 Future<void> showPluginSourceChooser(BuildContext context) {
   final repoC = TextEditingController();
-  final npmC = TextEditingController();
-  final pasteC = TextEditingController();
-  final nameC = TextEditingController();
-  final cmdC = TextEditingController(text: 'npx');
-  final argsC = TextEditingController();
-  final urlC = TextEditingController();
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -354,7 +340,7 @@ Future<void> showPluginSourceChooser(BuildContext context) {
                 const SizedBox(width: 12),
                 const Expanded(
                   child: Text(
-                    'Install plugin from source',
+                    'Install plugin from GitHub',
                     style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700),
                   ),
                 ),
@@ -367,56 +353,13 @@ Future<void> showPluginSourceChooser(BuildContext context) {
             ),
             const SizedBox(height: 6),
             Text(
-              'Every source is inspected and asks for one capability '
-              'approval before anything installs: [CC], Codex, and MCP '
-              'formats all work.',
+              'Paste a GitHub repo — every repo is inspected and asks for '
+              'one capability approval before anything installs.',
               style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
             ),
             const SizedBox(height: 14),
-            // ── Local folder / ZIP (device picker) ──
-            _SourceTile(
-              icon: Icons.folder_outlined,
-              title: 'Local folder',
-              subtitle: 'A plugin directory on this device',
-              onTap: () async {
-                final hostContext = context;
-                Navigator.pop(ctx);
-                final path = await (pluginPickDirectoryForTest ??
-                        () => FilePicker.platform.getDirectoryPath(
-                          dialogTitle: 'Pick plugin folder',
-                        ))();
-                if (path == null || path.isEmpty) return;
-                if (!hostContext.mounted) return;
-                _runSourceInstall(
-                  hostContext,
-                  LocalFolderPluginSource(path),
-                  null,
-                );
-              },
-            ),
-            _SourceTile(
-              icon: Icons.folder_zip_outlined,
-              title: 'ZIP archive',
-              subtitle: 'A .zip plugin package on this device',
-              onTap: () async {
-                final hostContext = context;
-                Navigator.pop(ctx);
-                final path = await (pluginPickZipFileForTest ??
-                        () async {
-                          final r = await FilePicker.platform.pickFiles(
-                            type: FileType.custom,
-                            allowedExtensions: ['zip'],
-                          );
-                          return r?.files.single.path;
-                        })();
-                if (path == null || path.isEmpty) return;
-                if (!hostContext.mounted) return;
-                _runSourceInstall(hostContext, ZipPluginSource(path), null);
-              },
-            ),
-            const SizedBox(height: 10),
             Text(
-              'GITHUB / MARKETPLACE',
+              'GITHUB',
               style: TextStyle(
                 fontSize: 10,
                 fontWeight: FontWeight.w700,
@@ -453,188 +396,6 @@ Future<void> showPluginSourceChooser(BuildContext context) {
                   final src = _githubSourceFromInput(txt);
                   if (src == null) return;
                   _runSourceInstall(context, src, null);
-                },
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'NPM',
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.4,
-                color: Aether.textFaint,
-              ),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: npmC,
-              style: const TextStyle(
-                fontSize: 13.5,
-                fontFamily: Aether.mono,
-              ),
-              decoration: const InputDecoration(
-                hintText: '@scope/plugin-name or plugin-name',
-              ),
-            ),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Aether.accent,
-                  side: BorderSide(color: Aether.accent.withValues(alpha: .4)),
-                  padding: const EdgeInsets.symmetric(vertical: 11),
-                ),
-                icon: const Icon(Icons.download_outlined, size: 16),
-                label: const Text('Install from npm'),
-                onPressed: () {
-                  final txt = npmC.text.trim();
-                  if (txt.isEmpty) return;
-                  Navigator.pop(ctx);
-                  _runSourceInstall(
-                    context,
-                    NpmPluginSource(package: txt),
-                    null,
-                  );
-                },
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'PASTE MCP CONFIG (JSON / TOML)',
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.4,
-                color: Aether.textFaint,
-              ),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: pasteC,
-              maxLines: 4,
-              style: const TextStyle(
-                fontSize: 12,
-                fontFamily: Aether.mono,
-              ),
-              decoration: const InputDecoration(
-                hintText:
-                    '{"mcpServers": {"name": {"command": "npx", …}}} or a '
-                    'Codex config.toml block',
-              ),
-            ),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Aether.accent,
-                  side: BorderSide(color: Aether.accent.withValues(alpha: .4)),
-                  padding: const EdgeInsets.symmetric(vertical: 11),
-                ),
-                icon: const Icon(Icons.content_paste, size: 16),
-                label: const Text('Inspect pasted config'),
-                onPressed: () {
-                  final txt = pasteC.text.trim();
-                  if (txt.isEmpty) return;
-                  Navigator.pop(ctx);
-                  _runSourceInstall(
-                    context,
-                    PastedConfigPluginSource(
-                      label: 'pasted-${DateTime.now().millisecondsSinceEpoch}',
-                      rawConfig: txt,
-                    ),
-                    null,
-                  );
-                },
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'DIRECT MCP SERVER',
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.4,
-                color: Aether.textFaint,
-              ),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: nameC,
-              style: const TextStyle(fontSize: 13.5),
-              decoration: const InputDecoration(hintText: 'Server name'),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: urlC,
-              style: const TextStyle(
-                fontSize: 13.5,
-                fontFamily: Aether.mono,
-              ),
-              decoration: const InputDecoration(
-                hintText: 'https://remote.example/mcp (Streamable HTTP)',
-              ),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: cmdC,
-              style: const TextStyle(
-                fontSize: 13.5,
-                fontFamily: Aether.mono,
-              ),
-              decoration: const InputDecoration(
-                hintText: 'stdio command (npx / uvx / node …)',
-              ),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: argsC,
-              style: const TextStyle(
-                fontSize: 13.5,
-                fontFamily: Aether.mono,
-              ),
-              decoration: const InputDecoration(
-                hintText: 'Args, space separated',
-              ),
-            ),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Aether.accent,
-                  side: BorderSide(color: Aether.accent.withValues(alpha: .4)),
-                  padding: const EdgeInsets.symmetric(vertical: 11),
-                ),
-                icon: const Icon(Icons.usb_outlined, size: 16),
-                label: const Text('Add MCP server'),
-                onPressed: () {
-                  final name = nameC.text.trim();
-                  if (name.isEmpty) return;
-                  final url = urlC.text.trim();
-                  final cmd = cmdC.text.trim();
-                  Navigator.pop(ctx);
-                  if (url.isNotEmpty) {
-                    _runSourceInstall(
-                      context,
-                      DirectMcpPluginSource.http(name: name, url: url),
-                      null,
-                    );
-                  } else if (cmd.isNotEmpty) {
-                    _runSourceInstall(
-                      context,
-                      DirectMcpPluginSource.stdio(
-                        name: name,
-                        command: cmd,
-                        args: argsC.text.trim().isEmpty
-                            ? const []
-                            : argsC.text.trim().split(RegExp(r'\s+')),
-                      ),
-                      null,
-                    );
-                  }
                 },
               ),
             ),
@@ -694,66 +455,6 @@ Future<void> _runSourceInstall(
     SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
   );
   AppState.I.refresh();
-}
-
-class _SourceTile extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final VoidCallback onTap;
-  const _SourceTile({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(11),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            color: Aether.surfaceAlt,
-            borderRadius: BorderRadius.circular(11),
-            border: Border.all(color: Aether.hairline),
-          ),
-          child: Row(
-            children: [
-              Icon(icon, size: 18, color: Aether.accent),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    Text(
-                      subtitle,
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        color: Aether.textFaint,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Icon(Icons.chevron_right, size: 18, color: Aether.textFaint),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 /// Plugins library — Claude-Code-extensions style: trending banner carousel,
@@ -937,11 +638,10 @@ class _PluginsScreenState extends State<PluginsScreen> {
             icon: const Icon(Icons.add, size: 22),
             onPressed: () => _addMarketplaceDialog(context),
           ),
-          // Task 11 (spec §11): the ONE install entry point for every
-          // source the catalog doesn't already cover — GitHub repo,
-          // local folder, ZIP, npm, pasted JSON/TOML, stdio, HTTP.
+          // Task 1 (contraction spec §5.1): the GitHub-only install entry
+          // point for sources the catalog doesn't already cover.
           IconButton(
-            tooltip: 'Install plugin from source',
+            tooltip: 'Install plugin from GitHub',
             visualDensity: VisualDensity.compact,
             icon: const Icon(Icons.extension_outlined, size: 21),
             onPressed: () => showPluginSourceChooser(context),
