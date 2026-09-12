@@ -6,8 +6,13 @@ Protocol) compatibility layer.
 ## Plugin formats
 
 Ovid installs plugins from GitHub (repo, branch, tag, or commit — no silent
-fallback to `main` for pinned refs), local folders, ZIP archives, npm
-packages, and discovered marketplace catalogs. Adapters normalize each of the
+fallback to `main` for pinned refs) and discovered marketplace catalogs
+(each marketplace is itself a GitHub repo). The Plugins screen has exactly
+one "+" which opens one sheet: fetch a plugin from GitHub, or add a
+marketplace (with the existing marketplace list and remove). The core
+install transaction still accepts every source type (local folder, ZIP,
+npm, pasted config, direct MCP) for forward-compat; the UI offers only
+the GitHub route. Adapters normalize each of the
 relevant vendor formats into a single internal manifest:
 
 | Format | Contributions |
@@ -170,6 +175,12 @@ those items.
 - Credential-dependent servers show `Needs setup: <ENV>` and never auto-spawn
   before configuration; connection state is only ever `connected` after a
   real handshake.
+- Every MCP row, card, detail header, and diagnostics entry shows the
+  durable canonical startup status plus reason (`Ready · connected`,
+  `Failed · <scrubbed>`, `Needs setup`, `Disabled`); a server that never
+  ran reads `Not started`, never `Connected`/`Not connected`. Connect,
+  failure, credential-block, and disconnect outcomes are recorded durably
+  under the server's canonical id.
 
 ## Android limits
 
