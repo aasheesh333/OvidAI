@@ -356,6 +356,37 @@ class MainActivity : FlutterActivity() {
                             completeDeviceAction(result, service.systemNav(action))
                         }
                     }
+                    "deviceLongPress" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        val handle = call.argument<Number>("node")?.toInt()
+                            ?: call.argument<Number>("handle")?.toInt()
+                        val x = call.argument<Number>("x")?.toFloat()
+                        val y = call.argument<Number>("y")?.toFloat()
+                        completeDeviceAction(
+                            result,
+                            service.longPress(
+                                handle = handle,
+                                x = x,
+                                y = y,
+                                durationMs = call.argument<Number>("duration_ms")?.toLong()
+                                    ?: call.argument<Number>("durationMs")?.toLong(),
+                            ),
+                        )
+                    }
+                    "deviceScroll" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        val direction = call.argument<String>("direction")
+                        if (direction == null) {
+                            result.error("BAD_ARGS", "deviceScroll requires a direction.", null)
+                        } else {
+                            val handle = call.argument<Number>("node")?.toInt()
+                                ?: call.argument<Number>("handle")?.toInt()
+                            completeDeviceAction(
+                                result,
+                                service.scrollNode(handle, direction),
+                            )
+                        }
+                    }
                     "deviceScreenshot" -> {
                         val service = deviceService(result) ?: return@setMethodCallHandler
                         service.takeScreen(result)

@@ -370,11 +370,49 @@ class OvidAccessibilityService : AccessibilityService() {
     internal fun tap(handle: Int?, x: Float?, y: Float?): DeviceActionResult {
         if (handle != null) {
             val node = treeCache.nodesByHandle[handle]
-                ?: return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid.")
-            return if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                DeviceActionResult(true)
+                ?: return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
+            if (!node.refresh()) {
+                return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
+            }
+            if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                return DeviceActionResult(true)
+            }
+            // Ancestor-click fallback: the tapped row is often a non-clickable
+            // container, so walk up to 3 ancestors attempting ACTION_CLICK on
+            // clickable ones.
+            var ancestor: AccessibilityNodeInfo? = try {
+                node.parent
+            } catch (_: Throwable) {
+                null
+            }
+            var level = 0
+            while (ancestor != null && level < 3) {
+                level++
+                val current = ancestor
+                try {
+                    if (current.isClickable &&
+                        current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    ) {
+                        val name = current.className?.toString()?.substringAfterLast('.') ?: "node"
+                        return DeviceActionResult(true, value = "Clicked ancestor $level ($name).")
+                    }
+                } finally {
+                    ancestor = try {
+                        current.parent
+                    } catch (_: Throwable) {
+                        null
+                    }
+                    try {
+                        current.recycle()
+                    } catch (_: Throwable) {
+                        // The framework owns the node; keep walking.
+                    }
+                }
+            }
+            return if (level > 0) {
+                DeviceActionResult(false, message = "Node $handle did not accept a click action; all $level ancestor(s) refused.")
             } else {
-                DeviceActionResult(false, message = "Node $handle did not accept a click action.")
+                DeviceActionResult(false, message = "Node $handle did not accept a click action and has no clickable ancestor.")
             }
         }
         if (x == null || y == null || !x.isFinite() || !y.isFinite()) {
@@ -390,13 +428,105 @@ class OvidAccessibilityService : AccessibilityService() {
         }
     }
 
+    internal fun clampLongPressDuration(durationMs: Long?): Long =
+        (durationMs ?: 600L).coerceIn(200L, 3000L)
+
+    @Synchronized
+    internal fun longPress(
+        handle: Int?,
+        x: Float?,
+        y: Float?,
+        durationMs: Long?,
+    ): DeviceActionResult {
+        if (handle != null) {
+            val node = treeCache.nodesByHandle[handle]
+                ?: return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
+            if (!node.refresh()) {
+                return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
+            }
+            return if (node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
+                DeviceActionResult(true)
+            } else {
+                DeviceActionResult(false, message = "Node $handle did not accept a long-click action.")
+            }
+        }
+        if (x == null || y == null || !x.isFinite() || !y.isFinite()) {
+            return DeviceActionResult(false, "BAD_ARGS", "Long-press requires a node handle or finite x/y coordinates.")
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return DeviceActionResult(false, "UNSUPPORTED", "Long-press gestures require Android 7.0 or newer.")
+        }
+        val duration = clampLongPressDuration(durationMs)
+        return if (Api24Actions.longPress(this, x, y, duration)) {
+            DeviceActionResult(true)
+        } else {
+            DeviceActionResult(false, message = "Android did not accept the long-press gesture.")
+        }
+    }
+
+    @Synchronized
+    internal fun scrollNode(handle: Int?, direction: String?): DeviceActionResult {
+        if (handle == null) {
+            return DeviceActionResult(false, "BAD_ARGS", "Scroll requires a node handle.")
+        }
+        val requested = direction?.lowercase()
+            ?: return DeviceActionResult(false, "BAD_ARGS", "Scroll requires a direction: forward|backward|up|down|left|right.")
+        if (requested !in setOf("forward", "backward", "up", "down", "left", "right")) {
+            return DeviceActionResult(false, "BAD_ARGS", "Unknown scroll direction: $direction. Use forward|backward|up|down|left|right.")
+        }
+        val node = treeCache.nodesByHandle[handle]
+            ?: return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
+        if (!node.refresh()) {
+            return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
+        }
+        if (!node.isScrollable) {
+            return DeviceActionResult(false, "NOT_SCROLLABLE", "Node $handle is not scrollable.")
+        }
+        // Directional scroll actions (up/down/left/right) exist from API 23
+        // (M). Below that floor, fall back to forward/backward and name the
+        // fallback in the result.
+        val resolvedAction: Int
+        var fallback: String? = null
+        when (requested) {
+            "forward" -> resolvedAction = AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            "backward" -> resolvedAction = AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+            else -> {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                    fallback = if (requested == "up" || requested == "left") "backward" else "forward"
+                    resolvedAction = if (fallback == "backward") {
+                        AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                    } else {
+                        AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                    }
+                } else {
+                    resolvedAction = when (requested) {
+                        "up" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id
+                        "down" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id
+                        "left" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id
+                        else -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id
+                    }
+                }
+            }
+        }
+        return if (node.performAction(resolvedAction)) {
+            val usedFallback = fallback
+            if (usedFallback != null) {
+                DeviceActionResult(true, value = "Scrolled $requested via $usedFallback fallback (below API 23).")
+            } else {
+                DeviceActionResult(true)
+            }
+        } else {
+            DeviceActionResult(false, message = "Node $handle did not accept a scroll action.")
+        }
+    }
+
     @Synchronized
     internal fun type(handle: Int?, text: String, submit: Boolean): DeviceActionResult {
         var root: AccessibilityNodeInfo? = null
         var focusedNode: AccessibilityNodeInfo? = null
         val node = if (handle != null) {
             treeCache.nodesByHandle[handle]
-                ?: return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid.")
+                ?: return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
         } else {
             root = rootInActiveWindow
                 ?: return DeviceActionResult(false, "NO_FOCUS", "No active window has a focused input.")
@@ -409,7 +539,7 @@ class OvidAccessibilityService : AccessibilityService() {
 
         try {
             if (handle != null && !node.refresh()) {
-                return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid.")
+                return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
             }
             passwordTypingRefusal(node.isPassword)?.let { return it }
             if (!node.isEditable) {
@@ -570,6 +700,19 @@ private object Api24Actions {
             moveTo(fromX, fromY)
             lineTo(toX, toY)
         }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+            .build()
+        return service.dispatchGesture(gesture, null, null)
+    }
+
+    fun longPress(
+        service: AccessibilityService,
+        x: Float,
+        y: Float,
+        durationMs: Long,
+    ): Boolean {
+        val path = Path().apply { moveTo(x, y) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
             .build()
