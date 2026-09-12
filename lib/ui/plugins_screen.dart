@@ -297,11 +297,15 @@ Widget? pluginActivationBadge(PluginItem plugin) {
   return Tag(label, color: badgeSpec.$2 ?? Aether.textFaint, filled: true);
 }
 
-/// Task 1 (contraction spec §5.1): the GitHub-only source chooser — the
-/// single install entry point for sources the catalog doesn't already
-/// cover. One repo field (`owner/repo` or URL via [_githubSourceFromInput])
-/// funnels into the single inspection/approval flow ([_runSourceInstall]).
-Future<void> showPluginSourceChooser(BuildContext context) {
+/// Task 2 (contraction spec §5.2): the single "+" sheet — the one add
+/// entry point for sources the catalog doesn't already cover AND for
+/// marketplaces (themselves GitHub repos). One repo field
+/// (`owner/repo` or URL via [_githubSourceFromInput]) funnels into the
+/// single inspection/approval flow ([_runSourceInstall]), and the same
+/// field adds a marketplace (repo recorded + catalog fetched) with the
+/// existing marketplace list + remove below.
+Future<void> showPluginAddSheet(BuildContext context) {
+  final app = AppState.I;
   final repoC = TextEditingController();
   return showModalBottomSheet<void>(
     context: context,
@@ -310,96 +314,216 @@ Future<void> showPluginSourceChooser(BuildContext context) {
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),
-    builder: (ctx) => Padding(
-      padding: EdgeInsets.fromLTRB(
-        16,
-        16,
-        16,
-        MediaQuery.of(ctx).viewInsets.bottom + 16,
-      ),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    color: Aether.accentSoft,
-                    borderRadius: BorderRadius.circular(10),
+    builder: (ctx) => AnimatedBuilder(
+      animation: app,
+      builder: (ctx, _) => Padding(
+        padding: EdgeInsets.fromLTRB(
+          16,
+          16,
+          16,
+          MediaQuery.of(ctx).viewInsets.bottom + 16,
+        ),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: Aether.accentSoft,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(
+                      Icons.add,
+                      size: 19,
+                      color: Aether.accent,
+                    ),
                   ),
-                  child: const Icon(
-                    Icons.extension_outlined,
-                    size: 19,
-                    color: Aether.accent,
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text(
+                      'Add plugin or marketplace',
+                      style: TextStyle(
+                        fontSize: 15.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    icon: Icon(Icons.close, size: 18, color: Aether.textFaint),
+                    onPressed: () => Navigator.pop(ctx),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Fetch a plugin from GitHub, or add a marketplace (itself '
+                'a GitHub repo with a marketplace.json). Every repo is '
+                'inspected and asks for one capability approval before '
+                'anything installs.',
+                style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                'GITHUB REPO',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1.4,
+                  color: Aether.textFaint,
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: repoC,
+                autofocus: true,
+                style: const TextStyle(
+                  fontSize: 13.5,
+                  fontFamily: Aether.mono,
+                ),
+                decoration: const InputDecoration(
+                  hintText: 'owner/repo or https://github.com/owner/repo',
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Aether.accent,
+                    side: BorderSide(color: Aether.accent.withValues(alpha: .4)),
+                    padding: const EdgeInsets.symmetric(vertical: 11),
+                  ),
+                  icon: const Icon(Icons.code, size: 16),
+                  label: const Text('Fetch from GitHub'),
+                  onPressed: () {
+                    final txt = repoC.text.trim();
+                    if (txt.isEmpty) return;
+                    Navigator.pop(ctx);
+                    final src = _githubSourceFromInput(txt);
+                    if (src == null) return;
+                    _runSourceInstall(context, src, null);
+                  },
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Aether.accent,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(11),
+                    ),
+                  ),
+                  icon: const Icon(Icons.link, size: 16),
+                  label: const Text(
+                    'Add marketplace',
+                    style: TextStyle(fontSize: 13.5),
+                  ),
+                  onPressed: () async {
+                    final messenger = ScaffoldMessenger.of(context);
+                    final added = app.addMarketplace(repoC.text);
+                    if (added == null) {
+                      messenger.showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Enter owner/repo (or a GitHub URL) that is not '
+                            'already added.',
+                          ),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                      return;
+                    }
+                    Navigator.pop(ctx);
+                    messenger.showSnackBar(
+                      SnackBar(
+                        content: Text('Importing $added…'),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                    // Registering only records the repo — the catalog has to
+                    // be fetched for its plugins/MCP servers to show up.
+                    final msg = await app.fetchMarketplaceCatalog(added);
+                    if (!context.mounted) return;
+                    messenger.showSnackBar(
+                      SnackBar(
+                        content: Text(msg),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  },
+                ),
+              ),
+              if (app.marketplaces.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                Text(
+                  'YOUR MARKETPLACES',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.4,
+                    color: Aether.textFaint,
                   ),
                 ),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Text(
-                    'Install plugin from GitHub',
-                    style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700),
+                const SizedBox(height: 6),
+                for (final m in app.marketplaces)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 6),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 9,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Aether.surfaceAlt,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Aether.hairline),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.inventory_2_outlined,
+                          size: 14,
+                          color: Aether.textMuted,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            m,
+                            style: const TextStyle(
+                              fontSize: 12.5,
+                              fontFamily: Aether.mono,
+                            ),
+                          ),
+                        ),
+                        if (m == 'ovidai/ovid-plugins')
+                          const Tag(
+                            'DEFAULT',
+                            color: Aether.success,
+                            filled: true,
+                          )
+                        else
+                          GestureDetector(
+                            onTap: () => app.removeMarketplace(m),
+                            child: const Icon(
+                              Icons.delete_outline,
+                              size: 16,
+                              color: Aether.danger,
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
-                ),
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  icon: Icon(Icons.close, size: 18, color: Aether.textFaint),
-                  onPressed: () => Navigator.pop(ctx),
-                ),
               ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'Paste a GitHub repo — every repo is inspected and asks for '
-              'one capability approval before anything installs.',
-              style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-            ),
-            const SizedBox(height: 14),
-            Text(
-              'GITHUB',
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.4,
-                color: Aether.textFaint,
-              ),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: repoC,
-              style: const TextStyle(
-                fontSize: 13.5,
-                fontFamily: Aether.mono,
-              ),
-              decoration: const InputDecoration(
-                hintText: 'owner/repo or https://github.com/owner/repo',
-              ),
-            ),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Aether.accent,
-                  side: BorderSide(color: Aether.accent.withValues(alpha: .4)),
-                  padding: const EdgeInsets.symmetric(vertical: 11),
-                ),
-                icon: const Icon(Icons.code, size: 16),
-                label: const Text('Fetch from GitHub'),
-                onPressed: () {
-                  final txt = repoC.text.trim();
-                  if (txt.isEmpty) return;
-                  Navigator.pop(ctx);
-                  final src = _githubSourceFromInput(txt);
-                  if (src == null) return;
-                  _runSourceInstall(context, src, null);
-                },
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     ),
@@ -632,19 +756,13 @@ class _PluginsScreenState extends State<PluginsScreen> {
               icon: const Icon(Icons.refresh, size: 20),
               onPressed: () => _syncCatalogs(force: true),
             ),
+          // Task 2 (contraction spec §5.2): exactly one "+" — the single
+          // add sheet (GitHub fetch + marketplace add).
           IconButton(
-            tooltip: 'Add marketplace',
+            tooltip: 'Add plugin or marketplace',
             visualDensity: VisualDensity.compact,
             icon: const Icon(Icons.add, size: 22),
-            onPressed: () => _addMarketplaceDialog(context),
-          ),
-          // Task 1 (contraction spec §5.1): the GitHub-only install entry
-          // point for sources the catalog doesn't already cover.
-          IconButton(
-            tooltip: 'Install plugin from GitHub',
-            visualDensity: VisualDensity.compact,
-            icon: const Icon(Icons.extension_outlined, size: 21),
-            onPressed: () => showPluginSourceChooser(context),
+            onPressed: () => showPluginAddSheet(context),
           ),
           const SizedBox(width: 4),
         ],
@@ -774,202 +892,6 @@ class _PluginsScreenState extends State<PluginsScreen> {
     );
   }
 
-  /// Claude Code style — paste any GitHub repo to import as marketplace.
-  void _addMarketplaceDialog(BuildContext context) {
-    final app = AppState.I;
-    final c = TextEditingController();
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Aether.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) => AnimatedBuilder(
-        animation: app,
-        builder: (ctx, _) => Padding(
-          padding: EdgeInsets.fromLTRB(
-            16,
-            16,
-            16,
-            MediaQuery.of(ctx).viewInsets.bottom + 16,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: Aether.accentSoft,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: const Icon(
-                      Icons.hub_outlined,
-                      size: 19,
-                      color: Aether.accent,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Text(
-                      'Add plugin marketplace',
-                      style: TextStyle(
-                        fontSize: 15.5,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    icon: Icon(Icons.close, size: 18, color: Aether.textFaint),
-                    onPressed: () => Navigator.pop(ctx),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              Text(
-                'Paste any GitHub repo with a marketplace.json — Claude Code '
-                '(.claude-plugin/marketplace.json) and Codex/Claude Desktop '
-                '(mcpServers map) formats both work.',
-                style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-              ),
-              const SizedBox(height: 14),
-              TextField(
-                controller: c,
-                autofocus: true,
-                style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
-                decoration: InputDecoration(
-                  hintText: 'owner/repo or https://github.com/owner/repo',
-                  hintStyle: TextStyle(fontSize: 12.5, color: Aether.textFaint),
-                  prefixIcon: Icon(
-                    Icons.code,
-                    size: 17,
-                    color: Aether.textFaint,
-                  ),
-                ),
-              ),
-              if (app.marketplaces.isNotEmpty) ...[
-                const SizedBox(height: 14),
-                Text(
-                  'YOUR MARKETPLACES',
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.4,
-                    color: Aether.textFaint,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                for (final m in app.marketplaces)
-                  Container(
-                    margin: const EdgeInsets.only(bottom: 6),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 9,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Aether.surfaceAlt,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: Aether.hairline),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.inventory_2_outlined,
-                          size: 14,
-                          color: Aether.textMuted,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            m,
-                            style: const TextStyle(
-                              fontSize: 12.5,
-                              fontFamily: Aether.mono,
-                            ),
-                          ),
-                        ),
-                        if (m == 'ovidai/ovid-plugins')
-                          const Tag(
-                            'DEFAULT',
-                            color: Aether.success,
-                            filled: true,
-                          )
-                        else
-                          GestureDetector(
-                            onTap: () => app.removeMarketplace(m),
-                            child: const Icon(
-                              Icons.delete_outline,
-                              size: 16,
-                              color: Aether.danger,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-              ],
-              const SizedBox(height: 14),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Aether.accent,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(11),
-                    ),
-                  ),
-                  icon: const Icon(Icons.link, size: 16),
-                  label: const Text(
-                    'Add marketplace',
-                    style: TextStyle(fontSize: 13.5),
-                  ),
-                  onPressed: () async {
-                    final messenger = ScaffoldMessenger.of(context);
-                    final added = app.addMarketplace(c.text);
-                    if (added == null) {
-                      messenger.showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'Enter owner/repo (or a GitHub URL) that is not '
-                            'already added.',
-                          ),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                      return;
-                    }
-                    Navigator.pop(ctx);
-                    messenger.showSnackBar(
-                      SnackBar(
-                        content: Text('Importing $added…'),
-                        behavior: SnackBarBehavior.floating,
-                      ),
-                    );
-                    // Registering only records the repo — the catalog has to
-                    // be fetched for its plugins/MCP servers to show up.
-                    final msg = await app.fetchMarketplaceCatalog(added);
-                    if (!mounted) return;
-                    messenger.showSnackBar(
-                      SnackBar(
-                        content: Text(msg),
-                        behavior: SnackBarBehavior.floating,
-                      ),
-                    );
-                    setState(() {});
-                  },
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 class PluginCard extends StatelessWidget {
@@ -1412,14 +1334,14 @@ class PluginDetailScreen extends StatelessWidget {
                       // Task 11 (spec §11): ONE inspection/approval flow
                       // for every source. Catalog rows with a derivable
                       // source install straight through it; everything
-                      // else opens the single source chooser.
+                      // else opens the single add sheet (Task 2 §5.2).
                       final derived = plugin.source != null
                           ? githubPluginSourceFromSourceString(plugin.source!)
                           : null;
                       if (derived != null) {
                         await _runSourceInstall(context, derived, plugin);
                       } else {
-                        await showPluginSourceChooser(context);
+                        await showPluginAddSheet(context);
                       }
                     },
                   ),
@@ -1976,301 +1898,37 @@ class _McpSection extends StatelessWidget {
             ],
           ),
         ),
-        SizedBox(
-          height: 132,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            itemCount: app.mcpServers.length + 1, // +1 add-tile
-            separatorBuilder: (_, _) => const SizedBox(width: 10),
-            itemBuilder: (_, i) {
-              if (i == app.mcpServers.length) {
-                return _AddMcpTile(onTap: () => _addMcpDialog(context));
-              }
-              final s = app.mcpServers[i];
-              return McpCard(
-                key: cardKeys?.putIfAbsent(s.canonicalId, () => GlobalKey()),
-                server: s,
-                highlighted: s.canonicalId == focusCanonicalId,
-              );
-            },
+        // Task 2 (contraction spec §5.2): no add-tile — the single "+"
+        // opens the add sheet. An empty list hints at it instead.
+        if (app.mcpServers.isEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+            child: Text(
+              'Use + to add from GitHub',
+              style: TextStyle(fontSize: 12, color: Aether.textMuted),
+            ),
+          )
+        else
+          SizedBox(
+            height: 132,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              itemCount: app.mcpServers.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 10),
+              itemBuilder: (_, i) {
+                final s = app.mcpServers[i];
+                return McpCard(
+                  key: cardKeys?.putIfAbsent(s.canonicalId, () => GlobalKey()),
+                  server: s,
+                  highlighted: s.canonicalId == focusCanonicalId,
+                );
+              },
+            ),
           ),
-        ),
       ],
     );
   }
-
-  void _addMcpDialog(BuildContext context) {
-    final app = AppState.I;
-    final nameC = TextEditingController();
-    final cmdC = TextEditingController(text: 'npx');
-    final argsC = TextEditingController();
-    final envC = TextEditingController();
-    // PR41: a remote (Streamable-HTTP) server has no local command to
-    // spawn — filling this in switches the save button to the http path.
-    final urlC = TextEditingController();
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Aether.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) => Padding(
-        padding: EdgeInsets.fromLTRB(
-          16,
-          16,
-          16,
-          MediaQuery.of(ctx).viewInsets.bottom + 16,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    color: Aether.accentSoft,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: const Icon(
-                    Icons.usb_outlined,
-                    size: 18,
-                    color: Aether.accent,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Text(
-                    'Add custom MCP server',
-                    style: TextStyle(
-                      fontSize: 15.5,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  icon: Icon(Icons.close, size: 18, color: Aether.textFaint),
-                  onPressed: () => Navigator.pop(ctx),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'Runs as a local process (or leave Command blank and set a '
-              'URL for a remote Streamable-HTTP server). Config matches '
-              'standard mcp.json format.',
-              style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-            ),
-            const SizedBox(height: 8),
-            // Claude Code / Codex / shared config import — paste a raw
-            // .mcp.json, claude_desktop_config.json, or Codex config.toml
-            // [mcp_servers] block and every server gets added at once.
-            TextButton.icon(
-              style: TextButton.styleFrom(
-                foregroundColor: Aether.accent,
-                padding: const EdgeInsets.symmetric(horizontal: 6),
-              ),
-              icon: const Icon(Icons.download_done_outlined, size: 16),
-              label: const Text(
-                'Import Claude Code / Codex config (.mcp.json · config.toml)',
-                style: TextStyle(fontSize: 12),
-              ),
-              onPressed: () => _importMcpConfig(ctx),
-            ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: nameC,
-              autofocus: true,
-              style: const TextStyle(fontSize: 13.5),
-              decoration: const InputDecoration(
-                hintText: 'Name (e.g. my-database)',
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: urlC,
-              style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
-              decoration: const InputDecoration(
-                hintText:
-                    'Remote server URL (Streamable HTTP) — leave blank for '
-                    'a local command below',
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: cmdC,
-              style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
-              decoration: const InputDecoration(
-                hintText: 'Command (npx / uvx / node …) — ignored if URL is set',
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: argsC,
-              style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
-              decoration: const InputDecoration(
-                hintText: 'Args, space separated (-y @org/server)',
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: envC,
-              style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
-              decoration: const InputDecoration(
-                hintText:
-                    'Env vars (stdio) or headers (http), JSON '
-                    '({"Authorization":"Bearer …"}) — optional',
-              ),
-            ),
-            const SizedBox(height: 14),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                style: FilledButton.styleFrom(
-                  backgroundColor: Aether.accent,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(11),
-                  ),
-                ),
-                icon: const Icon(Icons.power_outlined, size: 16),
-                label: const Text(
-                  'Save server',
-                  style: TextStyle(fontSize: 13.5),
-                ),
-                onPressed: () {
-                  if (nameC.text.trim().isEmpty) return;
-                  final url = urlC.text.trim();
-                  final isHttp = url.isNotEmpty;
-                  // Env can be raw var names (envHint) or a JSON object
-                  // with values — the latter is stored in secure storage
-                  // and passed to the spawned server process (stdio), or
-                  // sent as HTTP headers (http transport — e.g. an
-                  // Authorization bearer token for a remote server).
-                  Map<String, String>? envMap;
-                  String? envHint;
-                  final envTxt = envC.text.trim();
-                  if (envTxt.startsWith('{')) {
-                    try {
-                      final m = jsonDecode(envTxt) as Map<String, dynamic>;
-                      envMap = m.map((k, v) => MapEntry(k, v.toString()));
-                    } catch (_) {
-                      ScaffoldMessenger.of(ctx).showSnackBar(
-                        const SnackBar(
-                          content: Text('Env JSON invalid — check syntax'),
-                        ),
-                      );
-                      return;
-                    }
-                  } else if (envTxt.isNotEmpty && !isHttp) {
-                    envHint = envTxt;
-                  }
-                  app.addCustomMcpServer(
-                    name: nameC.text,
-                    command: cmdC.text.isEmpty ? 'npx' : cmdC.text,
-                    args: argsC.text.trim().isEmpty
-                        ? []
-                        : argsC.text.trim().split(RegExp(r'\s+')),
-                    envHint: envHint,
-                    url: isHttp ? url : null,
-                    headers: isHttp ? (envMap ?? const {}) : const {},
-                  );
-                  if (envMap != null && !isHttp) {
-                    unawaited(app.setMcpEnv(nameC.text.trim(), envMap));
-                  }
-                  Navigator.pop(ctx);
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Import a whole MCP config — Claude Code `.mcp.json`,
-/// claude_desktop_config.json, or Codex `config.toml` `[mcp_servers.*]`.
-void _importMcpConfig(BuildContext context) {
-  final app = AppState.I;
-  final pasteC = TextEditingController();
-  showDialog<void>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: const Text('Import MCP config', style: TextStyle(fontSize: 15)),
-      content: SizedBox(
-        width: 400,
-        child: TextField(
-          controller: pasteC,
-          maxLines: 12,
-          minLines: 8,
-          style: const TextStyle(fontFamily: Aether.mono, fontSize: 11.5),
-          decoration: InputDecoration(
-            hintText:
-                'Paste .mcp.json / claude_desktop_config.json, or a '
-                'Codex config.toml block. Every server gets added.',
-            hintStyle: TextStyle(fontSize: 11, color: Aether.textFaint),
-            isDense: true,
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          style: FilledButton.styleFrom(backgroundColor: Aether.accent),
-          onPressed: () {
-            final res = _parseMcpConfig(pasteC.text);
-            if (res.isEmpty) {
-              ScaffoldMessenger.of(ctx).showSnackBar(
-                const SnackBar(
-                  content: Text('No mcpServers entries found in that text.'),
-                ),
-              );
-              return;
-            }
-            final ignored = <String>[];
-            for (final s in res) {
-              if (app.mcpServers.any((e) => e.name == s.name)) continue;
-              app.addCustomMcpServer(
-                name: s.name,
-                command: s.command,
-                args: s.args,
-                url: s.url,
-                headers: s.headers,
-                transport: s.type,
-                cwd: s.cwd,
-                startupTimeoutS: s.startupTimeoutS,
-              );
-              if (s.env.isNotEmpty) {
-                unawaited(app.setMcpEnv(s.name, s.env));
-              }
-              if (s.ignoredKeys.isNotEmpty) {
-                ignored.add('${s.name}: ${s.ignoredKeys.join(', ')}');
-              }
-            }
-            Navigator.pop(ctx);
-            final note = ignored.isEmpty
-                ? ''
-                : '\nIgnored unknown keys: ${ignored.join(' · ')}';
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Imported ${res.length} MCP server(s).$note'),
-              ),
-            );
-          },
-          child: const Text('Import'),
-        ),
-      ],
-    ),
-  );
 }
 
 /// Parse a pasted MCP config into entries — delegates to the shared core
@@ -2497,46 +2155,6 @@ class McpCard extends StatelessWidget {
               );
             }),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _AddMcpTile extends StatelessWidget {
-  final VoidCallback onTap;
-  const _AddMcpTile({required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      borderRadius: BorderRadius.circular(12),
-      onTap: onTap,
-      child: Container(
-        width: 120,
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Aether.accent.withValues(alpha: 0.3)),
-          color: Aether.accentSoft,
-        ),
-        child: const Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.add, size: 22, color: Aether.accent),
-              SizedBox(height: 4),
-              Text(
-                'Add server',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 11.5,
-                  fontWeight: FontWeight.w600,
-                  color: Aether.accent,
-                ),
-              ),
-            ],
-          ),
         ),
       ),
     );

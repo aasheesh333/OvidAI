@@ -20090,9 +20090,10 @@ cwd = 'tools'
         );
         app.plugins.add(row);
 
-        // GitHub-only UI (contraction Task 1): the chooser's GitHub route
-        // resolves offline via the PLUGIN3 loopback-server pattern,
-        // serving the same Cancel Kit manifest the fixture dir carries.
+        // GitHub-only UI (contraction Tasks 1-2): the single add
+        // sheet's GitHub route resolves offline via the PLUGIN3
+        // loopback-server pattern, serving the same Cancel Kit manifest
+        // the fixture dir carries.
         final ghJson = utf8.encode(
           jsonEncode({
             'name': 'Cancel Kit',
@@ -20157,13 +20158,13 @@ cwd = 'tools'
         );
         await tester.pump();
 
-        // Source-less non-seed rows open the ONE source chooser
-        // (bottom sheet with repeating progress animation — bounded
-        // pumps only, never pumpAndSettle: the sheet animation replays
-        // forever and pumpAndSettle would hang). The GitHub route types
-        // a repo and fetches; the inspection hop does real HTTP IO —
-        // runAsync turns let the real event loop advance it, pumps
-        // render the sheet.
+        // Source-less non-seed rows open the single add sheet (Task 2
+        // §5.2: GitHub fetch + marketplace add in one sheet; bottom sheet
+        // with repeating progress animation — bounded pumps only, never
+        // pumpAndSettle: the sheet animation replays forever and
+        // pumpAndSettle would hang). The GitHub route types a repo and
+        // fetches; the inspection hop does real HTTP IO — runAsync turns
+        // let the real event loop advance it, pumps render the sheet.
         await tester.tap(find.text('Install'));
         for (var i = 0; i < 20; i++) {
           await tester.pump(const Duration(milliseconds: 100));
