@@ -194,6 +194,25 @@ those items.
 - Plugins never bypass session permission mode, Control-mode restrictions,
   workspace containment, or Android platform security.
 
+## Control mode device actions
+
+- A floating Ovid field steers the run while Control mode drives other apps:
+  an accessibility overlay (no new permission), draggable by its dot handle,
+  with an X that hard-stops the run and a send arrow — shown while text is
+  typed — that delivers into the next AI request exactly like the composer
+  send. It is shown only while a Control session is active.
+- The agent's hands are human-equivalent and honestly reported: `device_key`
+  (closed vocabulary `enter | volume_* | media_*`; anything else refused as
+  `BAD_KEY`), `device_long_press` (default 600 ms, clamped 200–3000 ms),
+  `device_scroll` (non-scrollable refused as `NOT_SCROLLABLE`; below-API
+  fallbacks named), tap retries up to 3 clickable ancestors, and `device_type`
+  reports `typed`/`submitted` separately with the native reason verbatim.
+- Stale nodes are refused as `INVALID_NODE` (re-read hint) before anything
+  touches the screen; password and non-editable targets stay refused. Stop
+  cancels pending device work via a generation token
+  (`cancelled: superseded by a newer run/stop`); an already-dispatched gesture
+  runs to completion (Android limit, documented).
+
 ## Verification
 
 `flutter analyze`, `flutter test` (all regression groups clean), and
