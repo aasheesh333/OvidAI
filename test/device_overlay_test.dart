@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/device_control_service.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -482,6 +483,134 @@ void main() {
       expect(src, contains('BadTokenException'));
     });
   });
+
+  group('Task 4 fix: production ovid/native handler routes overlay events', () {
+    late ChatSession s;
+    late List<MethodCall> calls;
+    late List<({String text, String sessionId})> startedRuns;
+
+    setUp(() {
+      s = ChatSession(
+        id: 't4-prod-handler',
+        title: 'S',
+        model: 'm',
+        mode: 'control',
+      );
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.I.runBucketForTest(s.id)
+        ..queue.clear()
+        ..activeRunId = null
+        ..cancelRequested = false;
+      calls = <MethodCall>[];
+      startedRuns = <({String text, String sessionId})>[];
+      _gate = null;
+      AgentService.I.overlayRunStarterForTest =
+          (String text, ChatSession session) async {
+        startedRuns.add((text: text, sessionId: session.id));
+      };
+      // Outgoing Dart->native calls resolve immediately (deviceTap gates on
+      // _gate); incoming native->Dart events drive the production handler via
+      // _sendProductionNativeCall below.
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(const MethodChannel('ovid/native'), (
+            call,
+          ) async {
+            calls.add(call);
+            if (call.method == 'deviceTap') {
+              final pending = _gate;
+              if (pending != null) return pending.future;
+            }
+            return true;
+          });
+      AgentNotificationService.I.resetForTest();
+      addTearDown(() {
+        AgentService.I.overlayRunStarterForTest = null;
+        AgentService.setRunSessionForTest('');
+        AgentNotificationService.I.resetForTest();
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(const MethodChannel('ovid/native'), null);
+        _gate = null;
+        app.activeSessionId = null;
+        app.sessions.removeWhere((x) => x.id == s.id);
+        AgentService.I.runBucketForTest(s.id)
+          ..queue.clear()
+          ..activeRunId = null
+          ..cancelRequested = false;
+      });
+    });
+
+    test('deviceOverlayText via production handler sends like composer',
+        () async {
+      await AgentNotificationService.I.init();
+      await _sendProductionNativeCall(
+        const MethodCall('deviceOverlayText', 'hello overlay'),
+      );
+      expect(s.messages.isNotEmpty, isTrue);
+      expect(s.messages.last.content, 'hello overlay');
+      expect(startedRuns, hasLength(1));
+      expect(startedRuns.single.text, 'hello overlay');
+    });
+
+    test('deviceOverlayStop via production handler aborts in-flight work',
+        () async {
+      await AgentNotificationService.I.init();
+      _gate = Completer<Object?>();
+      final future = DeviceControlService.I.tap(node: 7);
+      await waitForChannelCall(calls, 'deviceTap');
+      await _sendProductionNativeCall(const MethodCall('deviceOverlayStop'));
+      _gate!.complete(true);
+      expect(await future, kCancelledCopy);
+    });
+
+    test('fall-through: onAgentStop still stops the displayed session',
+        () async {
+      final run = AgentService.I.runBucketForTest(s.id)
+        ..activeRunId = 'run-prod-fallthrough';
+      final displayed = Completer<void>();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(const MethodChannel('ovid/native'), (
+            call,
+          ) async {
+            if (call.method == 'agentServiceStart' ||
+                call.method == 'agentServiceUpdate') {
+              if (!displayed.isCompleted) displayed.complete();
+            }
+            return true;
+          });
+      final notification = AgentNotificationService.I;
+      notification.supportedForTest = true;
+      await notification.init();
+      await notification.agentWorking('working', sessionId: s.id);
+      await displayed.future.timeout(const Duration(seconds: 5));
+      await _sendProductionNativeCall(const MethodCall('onAgentStop'));
+      expect(run.activeRunId, isNull);
+      expect(run.cancelRequested, isTrue);
+    });
+
+    test('init delegates to the overlay dispatcher first (source pin)', () {
+      final src = File(
+        'lib/core/agent_notification_service.dart',
+      ).readAsStringSync();
+      final window = methodWindow(src, 'Future<void> init()');
+      expect(window, contains('handleDeviceOverlayMethodCall'));
+      expect(
+        window.indexOf('handleDeviceOverlayMethodCall'),
+        lessThan(window.indexOf('onAgentStop')),
+      );
+    });
+  });
+}
+
+Future<void> _sendProductionNativeCall(MethodCall call) async {
+  final handled = Completer<void>();
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .handlePlatformMessage(
+        'ovid/native',
+        const StandardMethodCodec().encodeMethodCall(call),
+        (_) => handled.complete(),
+      );
+  await handled.future.timeout(const Duration(seconds: 2));
 }
 
 Completer<Object?>? _gate;
