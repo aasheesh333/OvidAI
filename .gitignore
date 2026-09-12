@@ -4,6 +4,9 @@
 *.pyc
 *.swp
 .DS_Store
+# Agent working scratch (briefs, reports, ledgers) — local only, never tracked.
+# Tracked design records live under docs/superpowers/ instead.
+.superpowers/
 .atom/
 .build/
 .buildlog/
