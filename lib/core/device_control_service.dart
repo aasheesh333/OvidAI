@@ -116,6 +116,8 @@ class DeviceControlService {
     await _channel.invokeMethod<bool>('deviceOpenAccessibilitySettings');
   }
 
+  // device_read/deviceRead stays unguarded: reads are fast and the
+  // pre-action verification read must reflect the live foreground app.
   Future<Map<String, dynamic>> readRaw({bool full = false}) async {
     final result = await _channel.invokeMapMethod<String, dynamic>(
       'deviceRead',
@@ -195,8 +197,6 @@ class DeviceControlService {
       );
 
   Future<String> screenshot() async {
-    // device_read/deviceRead stays unguarded: reads are fast and the
-    // pre-action verification read must reflect the live foreground app.
     // Screenshot is a mutating-cancellable action result like the rest.
     final result = await _invokeGuarded(
       () => _channel.invokeMethod<Object?>('deviceScreenshot'),

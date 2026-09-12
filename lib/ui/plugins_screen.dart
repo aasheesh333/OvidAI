@@ -183,9 +183,10 @@ class PluginRuntimeCallRecorderForTest {
   static void Function(String op)? record;
 }
 
-/// Task 11 (spec §11): the ONE production install flow behind every
-/// entry point (marketplace row, GitHub repo, local folder, ZIP, npm,
-/// pasted JSON/TOML, stdio, HTTP). Inspect → consolidated approval
+/// Task 11 (spec §11): the ONE core transaction behind the GitHub-only UI;
+/// core still accepts all [PluginSource] types (marketplace row, GitHub
+/// repo, local folder, ZIP, npm, pasted JSON/TOML, stdio, HTTP).
+/// Inspect → consolidated approval
 /// sheet → atomic install transaction via [AppState.installPlugin].
 ///
 /// Pass a catalog [plugin] row to sync it with the install, or null to

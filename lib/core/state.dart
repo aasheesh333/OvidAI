@@ -52,7 +52,10 @@ const kControlModeDisclosure =
     'Ovid reads the screen only while Control mode is on, and only to do what you asked. '
     'Screen structure and screenshots may be stored in this chat or its workspace and '
     'sent to the selected AI provider; provider retention follows their policy. '
-    'Ovid will not act on banking or payment screens, and password fields are blocked. '
+    'Ovid will not act on banking or payment screens in these listed apps and sites — '
+    'PayPal, Wise, Chase, Bank of America, Wells Fargo, Citi, and Capital One '
+    '(in Ovid\'s own browser the page URL is checked only when Ovid is the foreground app) — '
+    'and password fields are blocked. '
     'Every action appears in this chat.\n\n'
     'You turn this on yourself in Settings > Accessibility, and you can turn it off there at any time.';
 

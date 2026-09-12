@@ -676,12 +676,12 @@ class OvidAccessibilityService : AccessibilityService() {
             while (ancestor != null && level < 3) {
                 level++
                 val current = ancestor
+                var clickedName: String? = null
                 try {
                     if (current.isClickable &&
                         current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     ) {
-                        val name = current.className?.toString()?.substringAfterLast('.') ?: "node"
-                        return DeviceActionResult(true, value = "Clicked ancestor $level ($name).")
+                        clickedName = current.className?.toString()?.substringAfterLast('.') ?: "node"
                     }
                 } finally {
                     ancestor = try {
@@ -694,6 +694,19 @@ class OvidAccessibilityService : AccessibilityService() {
                     } catch (_: Throwable) {
                         // The framework owns the node; keep walking.
                     }
+                }
+                if (clickedName != null) {
+                    // Success return: the finally above already prefetched
+                    // the next ancestor into `ancestor`, which no later walk
+                    // consumes — recycle it here so one node per success
+                    // does not leak.
+                    try {
+                        ancestor?.recycle()
+                    } catch (_: Throwable) {
+                        // The framework owns the node; the click landed.
+                    }
+                    ancestor = null
+                    return DeviceActionResult(true, value = "Clicked ancestor $level ($clickedName).")
                 }
             }
             return if (level > 0) {

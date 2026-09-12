@@ -655,7 +655,14 @@ class AgentService extends ChangeNotifier {
   set mode(AgentMode m) {
     final s = _runCtx?.session ?? AppState.I.activeSession;
     if (s == null) return;
+    final wasControl = s.mode == AgentMode.control.name;
     s.mode = m.name;
+    if (wasControl && m != AgentMode.control) {
+      // Control-mode exit must never leave the floating overlay behind.
+      // Hide is unguarded by design: it removes the window even when no
+      // session is active, so no invisible touch target survives.
+      unawaited(hideDeviceOverlay());
+    }
     // An explicit mode set means the plan preset no longer owns the
     // session's read-only mode: clear the remembered pre-plan mode so a
     // later plan exit cannot override the user's choice (e.g. `/permission
@@ -880,6 +887,10 @@ class AgentService extends ChangeNotifier {
     // below) invalidate in-flight device_* calls: the overlay X (Task 4)
     // routes through this same path, so it gets cancellation for free.
     DeviceControlService.I.cancelDeviceActions();
+    // Panic-stop path: the floating overlay must come down with the run.
+    // Hide is unguarded (always removes the window); a later Control run
+    // re-shows it at run start.
+    unawaited(hideDeviceOverlay());
     final queuePreserved = r.queue.isNotEmpty;
     _cancelBucket(r);
     return queuePreserved;
@@ -892,6 +903,8 @@ class AgentService extends ChangeNotifier {
     // Global panic Stop invalidates every in-flight device_* call first —
     // queued work is cleared below, so no new device work can start stale.
     DeviceControlService.I.cancelDeviceActions();
+    // Panic-stop path: the floating overlay must come down with the runs.
+    unawaited(hideDeviceOverlay());
     // Cancellation releases each run's finally block. Clear continuations
     // first so no bucket can restart queued work during a global panic.
     for (final r in _runs.values) {
@@ -1788,6 +1801,19 @@ class AgentService extends ChangeNotifier {
     try {
       await c.runJavaScript(browserZoomScriptForTest(tab.userZoom));
     } catch (_) {}
+  }
+
+  /// Apply an already-validated user zoom to [tab]: clamped setter
+  /// (0.5–2.0), live re-apply, persist. Split from the `browser_desktop`
+  /// handler so unit tests (no WebView platform) can pin apply + persist
+  /// + report without a controller — [_applyTabZoom] no-ops on a null
+  /// controller. Returns the `userZoom=…` fragment the tool reports.
+  @visibleForTesting
+  Future<String> applyBrowserZoomForTest(BrowserTab tab, double zoom) async {
+    tab.userZoom = zoom;
+    await _applyTabZoom(tab);
+    await _persistBrowserTabs();
+    return 'userZoom=${tab.userZoom.toStringAsFixed(2)}';
   }
 
   Future<void> recreateControllerForDesktopToggle(
@@ -2697,6 +2723,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     final s = _runSession ?? AppState.I.activeSession;
     if (s == null) return;
     s.presetId = preset.id;
+    // Preset switches write s.mode directly (bypassing the mode setter),
+    // so a Control exit here must hide the overlay itself.
+    final wasControl = s.mode == AgentMode.control.name;
     if (preset.id == 'plan') {
       // Record ownership whenever the plan preset is the one INTRODUCING
       // safe read-only — independent of whether planMode was already true
@@ -2712,6 +2741,10 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       final wasPlan = s.planMode;
       s.planMode = false;
       if (wasPlan) _releasePlanOwnedMode(s);
+    }
+    if (wasControl && s.mode != AgentMode.control.name) {
+      // Leaving Control via presets must not strand the overlay either.
+      unawaited(hideDeviceOverlay());
     }
     await AppState.I.persistSessions();
     AppState.I.refresh();
@@ -3280,7 +3313,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'device_key',
         'description':
-            'Press a key: enter (IME action on the focused editable field), volume_up/volume_down/volume_mute, or media_play_pause/media_next/media_previous. Arbitrary keycodes are refused by Android.',
+            'Press a key: enter (IME action on the focused editable field), volume_up/volume_down/volume_mute (volume_mute is mute-only; unmute via volume_up), or media_play_pause/media_next/media_previous. Arbitrary keycodes are refused by Android.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -3552,7 +3585,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             'Switch the active tab between desktop and mobile mode. '
             'mode: desktop|mobile. Desktop sets a 1280px logical viewport '
             'and desktop User-Agent, then reloads. '
-            'Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable).',
+            'Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable). '
+            'Optional zoom 0.5-2.0 sets the tab\'s visual user zoom (default 1.0).',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -3560,6 +3594,13 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
               'type': 'string',
               'enum': ['desktop', 'mobile'],
               'description': 'Target mode: "desktop" or "mobile"',
+            },
+            'zoom': {
+              'type': 'number',
+              'minimum': 0.5,
+              'maximum': 2.0,
+              'description':
+                  'Optional visual zoom 0.5-2.0 (default 1.0): readable CSS scale applied to the tab, persisted with it, and reported back.',
             },
           },
           'required': ['mode'],
@@ -5926,6 +5967,13 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // report `cancelled: superseded by a newer run/stop` instead of stale
     // native results.
     DeviceControlService.I.beginDeviceGeneration();
+    // Overlay lifecycle: a Control-mode run brings the floating overlay up
+    // (show stays guarded on the active Control session, so non-Control
+    // runs never display anything). Run end, mode exit, and panic-stop
+    // paths hide it again.
+    if (s.mode == AgentMode.control.name) {
+      unawaited(showDeviceOverlay());
+    }
     // PR23/Q1: snapshot the model at run start — every LLM call of this
     // run uses it; a mid-run picker switch only affects the next run.
     bucket.modelSnapshot = s.model;
@@ -6624,6 +6672,10 @@ ${await _agentsMdBlock()}
       // Foreground notification retires with the run (covers error paths
       // where no 'done'/'err' event ever fires).
       AgentNotificationService.I.agentIdle(sessionId: pinnedSessionId);
+      // Overlay lifecycle: run end brings the floating overlay down.
+      // Unguarded hide only removes the window; non-Control runs never
+      // showed one, so this is a no-op for them.
+      unawaited(hideDeviceOverlay());
       notifyListeners();
       // The queue auto-continue must run on the RUNNING session's queue,
       // not whatever session the UI switched to mid-run.
@@ -8356,12 +8408,31 @@ ${await _agentsMdBlock()}
         if (modeArg != 'desktop' && modeArg != 'mobile') {
           return 'invalid mode: "$modeArg" — must be "desktop" or "mobile"';
         }
+        // Optional user zoom validates BEFORE any platform touch so unit
+        // tests (no WebView platform) and agents get the message without
+        // side effects: no tab is created, no mode is switched.
+        double? newZoom;
+        if (args.containsKey('zoom') && args['zoom'] != null) {
+          final z = args['zoom'];
+          if (z is! num) {
+            return 'invalid zoom: "$z" — must be a number 0.5-2.0';
+          }
+          if (z < BrowserTab.minUserZoom || z > BrowserTab.maxUserZoom) {
+            return 'zoom out of range (0.5-2.0)';
+          }
+          newZoom = z.toDouble();
+        }
         final isDesktop = modeArg == 'desktop';
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
         await setTabDesktopMode(tab, isDesktop);
+        var zoomFrag =
+            'userZoom=${tab.userZoom.toStringAsFixed(2)}';
+        if (newZoom != null) {
+          zoomFrag = await applyBrowserZoomForTest(tab, newZoom);
+        }
         _emit('nav', 'mode $modeArg');
-        return 'tab switched to $modeArg mode (desktopMode=$isDesktop, userZoom=${tab.userZoom.toStringAsFixed(2)})';
+        return 'tab switched to $modeArg mode (desktopMode=$isDesktop, $zoomFrag)';
 
       case 'browser_read':
         final tab = _activeTab;

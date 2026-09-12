@@ -301,3 +301,17 @@ is therefore green; repo-wide release sign-off must remain open until a
 follow-up awaits the `onAgentExit` round-trip in `core_regression_test.dart`,
 a release owner provides the missing build config, and §8 is completed with
 hardware.
+
+## 12. Addendum — §§1/10/11 superseded at `1f3401c` (history preserved above)
+
+The red recorded in §1 and §§10–11 is superseded, not rewritten: at
+`1f3401c` (`fix: flush event queue in onAgentExit handler test`) the
+`onAgentExit` test-timing assumption was adapted with a `pumpEventQueue`
+flush, and the full suite is green at **1106/1106**. The production path was
+never regressed — only the test's synchronous expect needed the round-trip.
+
+The gate still remains open on exactly two pre-existing, environment-bound
+rows: the debug APK (missing gitignored `google-services.json` — never
+created per policy, so `assembleDebug` cannot succeed here) and the
+on-device checklist (§8, `NOT EXECUTED` — no hardware attached). No new
+permissions, no behavior change beyond the test-timing fix.
