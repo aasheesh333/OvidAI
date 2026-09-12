@@ -11942,6 +11942,7 @@ You are an expert security auditor reviewing code for vulnerabilities.
               ),
               (ByteData? data) {},
             );
+        await pumpEventQueue();
         expect(exitCalled, isTrue);
       });
 
