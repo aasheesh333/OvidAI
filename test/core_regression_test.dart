@@ -17089,7 +17089,7 @@ cwd = 'tools'
     );
 
     test(
-      'PLUGIN7: agent install without capability approval refuses honestly and auto-approves nothing',
+      'PLUGIN7: agent install without capability approval asks the user and auto-approves nothing',
       () async {
         final app = await p7Boot();
         final src = p7PluginDir(name: 'Runtime Kit', version: '1.0.0');
@@ -17103,15 +17103,27 @@ cwd = 'tools'
         );
         app.sessions.insert(0, s1);
         AgentService.setRunSessionForTest(s1.id);
-        // NOTE: no grant saved — the agent path must not auto-approve.
+        // NOTE: no grant saved — the agent must surface an approval card
+        // for the user to decide, never auto-approve.
 
-        final reply = await AgentService.I.dispatchForTest(
+        final fut = AgentService.I.dispatchForTest(
           'agent_install_plugin',
           {'plugin_name': 'P7 Runtime Kit', 'local_path': src.path},
         );
+        ApprovalRequest? req;
+        final deadline = DateTime.now().add(const Duration(seconds: 15));
+        while (AgentService.I.pendingApproval == null) {
+          if (DateTime.now().isAfter(deadline)) break;
+          await Future<void>.delayed(const Duration(milliseconds: 25));
+        }
+        req = AgentService.I.pendingApproval;
+        expect(req, isNotNull, reason: 'approval card must surface');
+        expect(req!.tool, 'agent_install_plugin');
 
-        expect(reply, contains('approv'));
-        expect(reply, isNot(contains('installed ✓')));
+        // Deny: honest refusal, no state, no grant.
+        AgentService.I.approve(false);
+        final reply = await fut.timeout(const Duration(seconds: 60));
+        expect(reply.toLowerCase(), contains('declin'));
         expect(row.installed, isFalse);
         expect(
           PluginContributionRegistry.I.isRegistered('p7org/runtime-kit'),

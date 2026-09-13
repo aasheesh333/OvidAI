@@ -27,6 +27,7 @@ import 'session_lifecycle_service.dart';
 import 'presets.dart';
 import 'hook_service.dart';
 import 'plugin_manifest.dart';
+import 'plugin_permissions.dart';
 import 'plugin_registry.dart';
 import 'plugin_runtime.dart';
 import 'plugin_source_resolver.dart';
@@ -8151,6 +8152,16 @@ ${await _agentsMdBlock()}
           );
           if (runtimeResult != null) {
             if (runtimeResult.status == PluginInstallStatus.failed) {
+              // Agent-path approval: a missing capability grant must surface
+              // an approval card to the user (Approve → persist grant →
+              // retry) instead of failing with no recourse.
+              final approvalResult = await _approvePluginInstallAndRetry(
+                match,
+                localPath: localPath,
+                localZipPath: localZipPath,
+                error: runtimeResult.error ?? 'unknown error',
+              );
+              if (approvalResult != null) return approvalResult;
               return 'install failed: '
                   '${runtimeResult.error ?? 'unknown error'}';
             }
@@ -9613,6 +9624,100 @@ ${await _agentsMdBlock()}
       default:
         return null;
     }
+  }
+
+  /// Agent-path plugin approval (spec §5.1): when a runtime install fails
+  /// for lack of a capability grant, inspect the source, show the user an
+  /// approval card listing the requested capabilities, and — on approval —
+  /// persist the grant (exactly like the Plugins-screen sheet accept) and
+  /// retry once with the approved inspection.
+  ///
+  /// Returns the final message for the model, or null when [error] is not
+  /// an approval failure (the caller keeps its original error).
+  Future<String?> _approvePluginInstallAndRetry(
+    PluginItem match, {
+    String? localPath,
+    String? localZipPath,
+    required String error,
+  }) async {
+    if (!error.contains('approv')) return null;
+    final app = AppState.I;
+    PluginSource? src;
+    if (localPath != null && localPath.isNotEmpty) {
+      src = LocalFolderPluginSource(localPath);
+    } else if (localZipPath != null && localZipPath.isNotEmpty) {
+      src = ZipPluginSource(localZipPath);
+    } else if (match.source != null) {
+      src = githubPluginSourceFromSourceString(match.source!);
+    }
+    if (src == null) return null;
+    PluginInspection inspection;
+    try {
+      inspection = await PluginRuntimeManager.I.inspect(src);
+    } catch (e) {
+      return 'install failed: source resolution failed: $e';
+    }
+    final explanations = explainCapabilities(inspection.manifest);
+    final detail = StringBuffer(
+      'Plugin "${match.name}" (${inspection.manifest.id}) requests:\n',
+    );
+    if (explanations.isEmpty) {
+      detail.writeln('- no special capabilities');
+    } else {
+      for (final e in explanations) {
+        final env = e.environmentNames.isEmpty
+            ? ''
+            : ' (variables: ${e.environmentNames.join(', ')})';
+        final path = e.sourcePath.isEmpty ? '' : ' — ${e.sourcePath}';
+        detail.writeln('- ${e.capability.name}: ${e.reason}$env$path');
+      }
+    }
+    detail.writeln('Approve once for this exact plugin version.');
+    final ok = await _askUser(
+      'agent_install_plugin',
+      'Approve install of "${match.name}"?',
+      detail.toString(),
+    );
+    if (!ok) {
+      inspection.discard();
+      return 'install declined by user: "${match.name}" was not installed.';
+    }
+    await AppState.pluginPermissions.save(
+      PluginPermissionGrant(
+        pluginId: inspection.manifest.id,
+        manifestDigest: pluginManifestDigest(inspection.manifest),
+        capabilities: inferRequestedCapabilities(inspection.manifest),
+        environmentReadNames: {
+          ...inspection.manifest.environmentReadNames,
+          for (final s in inspection.manifest.mcpServers) ...s.envNames,
+        },
+        approvedAt: DateTime.now(),
+      ),
+    );
+    final retry = await app.installPlugin(
+      match,
+      source: src,
+      inspection: inspection,
+      origin: PluginInstallOrigin.agent,
+      sessionId: _runSession?.id,
+    );
+    if (retry == null || retry.status == PluginInstallStatus.failed) {
+      return 'install failed: ${retry?.error ?? 'unknown error'}';
+    }
+    final sid = _runSession?.id ?? '';
+    final pendingOnly = sid.isEmpty;
+    final scopeNote = pendingOnly
+        ? 'installed (pending: activates globally after one restart)'
+        : 'installed ✓ — active in this session only (id $sid); '
+              'activates globally after one restart';
+    final parts = <String>[
+      scopeNote,
+      if (retry.degradedNames.isNotEmpty)
+        'optional dependencies unavailable: '
+            '${retry.degradedNames.join(', ')}',
+    ];
+    return 'Plugin "${match.name}" ${parts.join(' · ')} '
+        '(id ${match.runtimeId}).';
   }
 
   Future<bool> _askUser(
