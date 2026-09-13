@@ -55,7 +55,14 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun deviceService(result: MethodChannel.Result): OvidAccessibilityService? {
-        val service = OvidAccessibilityService.instance
+        var service = OvidAccessibilityService.instance
+        if (service == null && isAccessibilityServiceEnabled(this)) {
+            val deadline = android.os.SystemClock.uptimeMillis() + 1000
+            while (service == null && android.os.SystemClock.uptimeMillis() < deadline) {
+                android.os.SystemClock.sleep(50)
+                service = OvidAccessibilityService.instance
+            }
+        }
         if (service == null) {
             result.error(
                 "SERVICE_DISABLED",
@@ -292,7 +299,10 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     "deviceServiceEnabled" -> {
-                        result.success(OvidAccessibilityService.instance != null)
+                        result.success(isAccessibilityServiceEnabled(this))
+                    }
+                    "getSecurityStatus" -> {
+                        result.success(SecurityCheck.getDeviceSecuritySummary(this))
                     }
                     "deviceOpenAccessibilitySettings" -> {
                         try {

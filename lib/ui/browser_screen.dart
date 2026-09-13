@@ -3,6 +3,9 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../core/theme.dart';
 import '../core/agent_service.dart';
 
+@visibleForTesting
+Widget Function(BrowserTab tab)? browserWebViewBuilderForTest;
+
 /// In-app browser — persistent tabs (state survives screen open/close),
 /// omnibar, back/forward/refresh, agent robot indicator.
 ///
@@ -71,8 +74,30 @@ class _BrowserScreenState extends State<BrowserScreen> {
     setState(() {});
   }
 
-  String _omnibarText(BrowserTab tab) =>
-      tab.localPreviewPath != null ? 'Live preview' : tab.url;
+  String _omnibarText(BrowserTab tab) {
+    if (tab.localPreviewPath != null) return 'Live preview';
+    final title = tab.title?.trim();
+    return title == null || title.isEmpty ? tab.url : title;
+  }
+
+  void _beginUrlEditing() {
+    final tab = _activeTab;
+    if (tab == null) return;
+    setState(() {
+      _editingUrl = true;
+      _url
+        ..text = tab.url
+        ..selection = TextSelection.collapsed(offset: tab.url.length);
+    });
+  }
+
+  void _endUrlEditing() {
+    setState(() {
+      _editingUrl = false;
+      final tab = _activeTab;
+      if (tab != null) _url.text = _omnibarText(tab);
+    });
+  }
 
   BrowserTab? get _activeTab =>
       _agent.activeTabIndex < _agent.browserTabs.length
@@ -99,7 +124,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
   Widget build(BuildContext context) {
     final agent = _agent;
     final tab = _activeTab;
-    final controller = tab == null ? null : agent.controllerForTab(tab);
+    final controller = tab == null || browserWebViewBuilderForTest != null
+        ? tab?.controller
+        : agent.controllerForTab(tab);
     return Scaffold(
       backgroundColor: Aether.bg,
       appBar: AppBar(
@@ -281,10 +308,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
                         controller: _url,
                         style: const TextStyle(fontSize: 12.5),
                         textInputAction: TextInputAction.go,
-                        onSubmitted: _nav,
-                        onTap: () => setState(() => _editingUrl = true),
-                        onTapOutside: (_) =>
-                            setState(() => _editingUrl = false),
+                        onSubmitted: (value) {
+                          _nav(value);
+                          _endUrlEditing();
+                        },
+                        onTap: _beginUrlEditing,
+                        onTapOutside: (_) => _endUrlEditing(),
                         decoration: InputDecoration(
                           isDense: true,
                           contentPadding: const EdgeInsets.symmetric(
@@ -345,10 +374,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 index: agent.activeTabIndex,
                 children: [
                   for (final t in agent.browserTabs)
-                    WebViewWidget(
-                      key: ValueKey('${t.url}_${t.desktopMode}'),
-                      controller: agent.controllerForTab(t),
-                    ),
+                    browserWebViewBuilderForTest?.call(t) ??
+                        WebViewWidget(
+                          key: ValueKey('${t.url}_${t.desktopMode}'),
+                          controller: agent.controllerForTab(t),
+                        ),
                 ],
               ),
             ),

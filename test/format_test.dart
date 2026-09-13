@@ -27,4 +27,24 @@ void main() {
       expect(formatCompactCount(-1500), '-1.5K');
     });
   });
+
+  group('formatCompactDuration', () {
+    test('formats sub-minute durations with second precision', () {
+      expect(formatCompactDuration(const Duration(milliseconds: 400)), '0.4s');
+      expect(formatCompactDuration(const Duration(seconds: 12)), '12s');
+      expect(formatCompactDuration(const Duration(seconds: 59)), '59s');
+    });
+
+    test('formats 567 seconds as minutes and seconds, never raw 567s', () {
+      expect(formatCompactDuration(const Duration(seconds: 567)), '9m 27s');
+      expect(formatCompactDuration(const Duration(seconds: 567)),
+          isNot(contains('567s')));
+    });
+
+    test('formats hours cleanly', () {
+      expect(
+          formatCompactDuration(const Duration(hours: 2, minutes: 5, seconds: 12)),
+          '2h 5m');
+    });
+  });
 }

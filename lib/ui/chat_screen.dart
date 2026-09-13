@@ -342,7 +342,7 @@ class _StatsLine extends StatelessWidget {
                   [
                     '${today.length} turn${today.length == 1 ? '' : 's'} today',
                     if (AgentService.I.lastRunElapsedMs != null)
-                      'last ${(AgentService.I.lastRunElapsedMs! / 1000).toStringAsFixed(1)}s',
+                      'last ${formatCompactDuration(Duration(milliseconds: AgentService.I.lastRunElapsedMs!))}',
                     'Input ${_fmtTok(input)} tok · Output ${_fmtTok(output)} tok',
                     if (AgentService.I.sessionDecodeTokens > 0)
                       'decode ${_fmtTok(AgentService.I.sessionDecodeTokens)} tok',
@@ -1821,16 +1821,16 @@ class _ChatScreenState extends State<ChatScreen>
                                             fontWeight: FontWeight.w600,
                                           ),
                                         ),
-                                        Text(
-                                          '${j.state} · ${j.elapsedSec}s · '
-                                          '${j.outChars} chars of output',
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            color: Aether.textMuted,
-                                          ),
+                                      Text(
+                                        '${j.state} · ${formatCompactDuration(Duration(seconds: j.elapsedSec))} · '
+                                        '${j.outChars} chars',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: Aether.textMuted,
                                         ),
-                                      ],
-                                    ),
+                                      ),
+                                    ],
+                                  ),
                                   ),
                                   if (j.state == 'running' ||
                                       j.state == 'stopping')
@@ -3540,10 +3540,10 @@ class _MessageView extends StatelessWidget {
           ...items,
           if (!isUser && m.elapsedMs != null)
             Padding(
-              padding: const EdgeInsets.only(left: 4),
+              padding: const EdgeInsets.only(top: 2),
               child: Text(
-                '${(m.elapsedMs! / 1000).toStringAsFixed(1)}s',
-                style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                formatCompactDuration(Duration(milliseconds: m.elapsedMs!)),
+                style: TextStyle(fontSize: 10, color: Aether.textFaint),
               ),
             ),
           Padding(
@@ -4808,9 +4808,6 @@ class _InputBarState extends State<_InputBar> {
                       scrollDirection: Axis.horizontal,
                       child: Row(
                         children: [
-                          // web-IDE workspace chip — current workspace/repo name.
-                          const _WorkspaceChip(),
-                          const SizedBox(width: 6),
                           // web-IDE plan chip — amber, only while plan mode is on.
                           const _PlanChip(),
                           // web-IDE mode selector — icon + text chip, opens the mode sheet.
@@ -6008,87 +6005,6 @@ class _QuestionsCardState extends State<_QuestionsCard> {
       ),
     );
   }
-}
-
-/// Test seam: lets widget tests intercept the workspace chip's Studio
-/// navigation. The chip must never open the in-chat folder picker.
-@visibleForTesting
-void Function(BuildContext context)? workspaceChipOpenStudioForTest;
-
-/// web-IDE workspace chip — shows the active workspace (repo name, or
-/// "sandbox" when working in the local sandbox). Tapping opens Studio;
-/// folder selection lives only in Studio. A pinned folder is shown
-/// read-only on the chip.
-class _WorkspaceChip extends StatelessWidget {
-  const _WorkspaceChip();
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: AppState.I,
-      builder: (_, _) {
-        final s = AppState.I.activeSession;
-        String label = 'sandbox';
-        var isFolder = false;
-        if (s != null) {
-          final folder = s.workspaceFolder;
-          if (folder != null && folder.isNotEmpty) {
-            label = folder.split('/').last;
-            isFolder = true;
-          } else {
-            final repo = AppState.I.getRepoForSession(s.id);
-            if (repo != null && repo.contains('/')) {
-              label = repo.split('/').last;
-            } else if (repo != null && repo.isNotEmpty) {
-              label = repo;
-            }
-          }
-        }
-        return GestureDetector(
-          onTap: () => (workspaceChipOpenStudioForTest ?? openStudio)(context),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(
-                color: isFolder
-                    ? Aether.accent.withValues(alpha: 0.5)
-                    : Aether.hairline,
-              ),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  isFolder
-                      ? Icons.folder_special_outlined
-                      : Icons.folder_outlined,
-                  size: 14,
-                  color: isFolder ? Aether.accent : Aether.textMuted,
-                ),
-                const SizedBox(width: 6),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 90),
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      height: 20 / 13,
-                      color: isFolder ? Aether.accent : Aether.textMuted,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
 }
 
 /// web-IDE plan chip — amber "Plan" indicator in the composer, visible only

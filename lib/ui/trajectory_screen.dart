@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../core/format.dart';
 
 import '../core/session_ledger.dart';
 import '../core/state.dart';
@@ -135,9 +136,9 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
                         const SizedBox(height: 6),
                         Text(
                           '${p.turns} turns · ${p.steps} tool calls · '
-                          'wall ${(p.wallMs / 1000).toStringAsFixed(1)}s · '
-                          'llm ${(p.llmMs / 1000).toStringAsFixed(1)}s · '
-                          'tools ${(p.toolMs / 1000).toStringAsFixed(1)}s',
+                          'wall ${formatCompactDuration(Duration(milliseconds: p.wallMs))} · '
+                          'llm ${formatCompactDuration(Duration(milliseconds: p.llmMs))} · '
+                          'tools ${formatCompactDuration(Duration(milliseconds: p.toolMs))}',
                           style: TextStyle(
                             fontSize: 11.5,
                             color: Aether.textMuted,

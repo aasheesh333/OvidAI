@@ -30,7 +30,6 @@ void main() {
   });
 
   tearDown(() {
-    workspaceChipOpenStudioForTest = null;
     studioFolderPickOverrideForTest = null;
     AgentService.setRunSessionForTest('');
     AgentService.I.debugPauseScheduleTimerForTest(false);
@@ -157,7 +156,7 @@ void main() {
   });
 
   group('workspace chip', () {
-    testWidgets('opens Studio and never the in-chat folder picker',
+    testWidgets('no folder/sandbox chip in the composer (Studio-only)',
         (tester) async {
       final app = AppState.I;
       final s = ChatSession(id: 'ws', title: 'WS', model: 'm');
@@ -165,28 +164,16 @@ void main() {
       app.sessions.add(s);
       app.activeSessionId = s.id;
 
-      BuildContext? openedWith;
-      workspaceChipOpenStudioForTest = (ctx) => openedWith = ctx;
-
       await tester.pumpWidget(
         MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
       );
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 
-      // The chip shows the pinned folder read-only (basename only).
-      expect(find.text('some-pinned-folder'), findsOneWidget);
-
-      await tester.tap(find.text('some-pinned-folder'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
-
-      expect(openedWith, isNotNull, reason: 'chip must open Studio');
-      expect(
-        find.text('Working folder'),
-        findsNothing,
-        reason: 'the in-chat folder picker must be gone',
-      );
+      // The folder/sandbox chip is gone from the chatbox: folder selection
+      // lives only in Studio. The pinned folder name must not render.
+      expect(find.text('some-pinned-folder'), findsNothing);
+      expect(find.text('Working folder'), findsNothing);
     });
   });
 

@@ -2006,20 +2006,26 @@ class AgentService extends ChangeNotifier {
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (url) {
-            tab.url = url;
-            tab.loading = true;
-            tab.progress = 0;
+            tab
+              ..url = url
+              ..title = null
+              ..loading = true
+              ..progress = 0;
             notifyListeners();
           },
           onProgress: (p) {
             tab.progress = p;
             notifyListeners();
           },
-          onPageFinished: (url) {
+          onPageFinished: (url) async {
             tab
               ..url = url
               ..loading = false;
             browserUrl = url;
+            final title = (await tab.controller?.getTitle())?.trim();
+            if (tab.url == url) {
+              tab.title = title == null || title.isEmpty ? null : title;
+            }
             notifyListeners();
             _persistBrowserTabs();
             // Re-apply the user's visual zoom: every navigation/reload resets

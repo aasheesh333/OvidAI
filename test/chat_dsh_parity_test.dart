@@ -48,7 +48,6 @@ void main() {
 
   tearDown(() {
     transcriptFoldObserver = null;
-    workspaceChipOpenStudioForTest = null;
     AgentService.setRunSessionForTest('');
     AgentService.I.debugPauseScheduleTimerForTest(false);
     AgentNotificationService.I.resetForTest();
@@ -151,13 +150,10 @@ void main() {
       moreOrLessEquals(wideLayout.composerWidth, epsilon: 0.5),
     );
 
-    // ── Folder chip opens Studio, never an in-chat picker ─────────────────
-    var openedStudio = false;
-    workspaceChipOpenStudioForTest = (_) => openedStudio = true;
-    expect(find.text('some-pinned-folder'), findsOneWidget);
-    await tester.tap(find.text('some-pinned-folder'));
-    await tester.pump();
-    expect(openedStudio, isTrue, reason: 'the folder chip must open Studio');
+    // ── No folder/sandbox chip in the composer (Studio-only) ─────────────
+    // Folder selection lives only in Studio; the chatbox carries no
+    // folder affordance at all.
+    expect(find.text('some-pinned-folder'), findsNothing);
     expect(find.text('Working folder'), findsNothing);
 
     // ── Narrow pane collapses the column to the pane, still centered ──────

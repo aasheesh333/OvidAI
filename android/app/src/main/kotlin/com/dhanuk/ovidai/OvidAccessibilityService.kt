@@ -1,12 +1,15 @@
 package com.dhanuk.ovidai
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.animation.Animator
 import android.animation.AnimatorSet
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.annotation.TargetApi
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
@@ -17,6 +20,7 @@ import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
@@ -28,6 +32,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
@@ -43,6 +48,70 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
 internal data class HandleAllocation(val handle: Int, val nextHandle: Int)
+
+internal fun isAccessibilityServiceConfigured(
+    accessibilityEnabled: Boolean,
+    enabledServicesSetting: String?,
+    packageName: String,
+    serviceClassName: String,
+): Boolean {
+    if (!accessibilityEnabled || enabledServicesSetting.isNullOrBlank()) return false
+    val expectedFullName = "$packageName/$serviceClassName"
+    val expectedShortName = "$packageName/${if (serviceClassName.startsWith(packageName)) serviceClassName.removePrefix(packageName) else serviceClassName}"
+    val entries = enabledServicesSetting.split(':')
+    for (entry in entries) {
+        val trimmed = entry.trim()
+        if (trimmed.equals(expectedFullName, ignoreCase = true) ||
+            trimmed.equals(expectedShortName, ignoreCase = true)) {
+            return true
+        }
+    }
+    return false
+}
+
+internal fun isAccessibilityServiceEnabled(context: Context): Boolean {
+    if (OvidAccessibilityService.instance != null) return true
+
+    // 1. Query AccessibilityManager for enabled accessibility services
+    try {
+        val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
+        if (am != null) {
+            val enabledServices = am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+            for (service in enabledServices) {
+                val serviceInfo = service.resolveInfo?.serviceInfo ?: continue
+                if (serviceInfo.packageName == context.packageName &&
+                    (serviceInfo.name == OvidAccessibilityService::class.java.name ||
+                     serviceInfo.name == OvidAccessibilityService::class.java.canonicalName ||
+                     serviceInfo.name.endsWith(".OvidAccessibilityService"))) {
+                    return true
+                }
+            }
+        }
+    } catch (_: Exception) {}
+
+    // 2. Query Settings.Secure ENABLED_ACCESSIBILITY_SERVICES
+    try {
+        val accessibilityEnabled = Settings.Secure.getInt(
+            context.contentResolver,
+            Settings.Secure.ACCESSIBILITY_ENABLED,
+            0
+        ) == 1
+        val settingValue = Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        )
+        if (isAccessibilityServiceConfigured(
+                accessibilityEnabled = accessibilityEnabled,
+                enabledServicesSetting = settingValue,
+                packageName = context.packageName,
+                serviceClassName = OvidAccessibilityService::class.java.name,
+            )) {
+            return true
+        }
+    } catch (_: Exception) {}
+
+    return false
+}
 
 internal fun stableNodeKey(
     viewId: String,

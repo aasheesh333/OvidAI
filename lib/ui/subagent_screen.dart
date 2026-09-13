@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../core/format.dart';
 
 import '../core/agent_service.dart';
 import '../core/state.dart';
@@ -276,7 +277,7 @@ class _StatusStrip extends StatelessWidget {
     };
     final bits = <String>[
       state,
-      if (sub != null) '${sub!.elapsed.inSeconds}s',
+      if (sub != null) formatCompactDuration(sub!.elapsed),
       '${session.messages.length} rows',
       if (sub != null && sub!.messages.isNotEmpty)
         '${sub!.messages.length} queued',
@@ -538,7 +539,7 @@ class _CatalogRow extends StatelessWidget {
       subtitle: Text(
         [
           state,
-          if (sub != null) '${sub.elapsed.inSeconds}s',
+          if (sub != null) formatCompactDuration(sub.elapsed),
           '${session.messages.length} rows',
           session.mode,
           if (grandchildren > 0) '$grandchildren sub',

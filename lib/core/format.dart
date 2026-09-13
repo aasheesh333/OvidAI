@@ -24,3 +24,25 @@ String _trim(double v) {
   final s = v.toStringAsFixed(1);
   return s.endsWith('.0') ? s.substring(0, s.length - 2) : s;
 }
+
+/// Compact human-readable duration: `0.4s`, `12s`, `9m 27s`, `2h 5m`.
+/// Never emits unreadable raw seconds like `567s`.
+String formatCompactDuration(Duration d) {
+  final ms = d.inMilliseconds;
+  if (ms < 1000) {
+    final s = (ms / 1000).toStringAsFixed(1);
+    return '${s.endsWith('.0') ? s.substring(0, s.length - 2) : s}s';
+  }
+  final totalSec = d.inSeconds;
+  if (totalSec < 60) {
+    return '${totalSec}s';
+  }
+  final totalMin = d.inMinutes;
+  final remSec = totalSec % 60;
+  if (totalMin < 60) {
+    return remSec > 0 ? '${totalMin}m ${remSec}s' : '${totalMin}m';
+  }
+  final totalHours = d.inHours;
+  final remMin = totalMin % 60;
+  return remMin > 0 ? '${totalHours}h ${remMin}m' : '${totalHours}h';
+}

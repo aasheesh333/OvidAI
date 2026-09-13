@@ -63,4 +63,18 @@ void main() {
     ).readAsStringSync();
     expect(kt.contains('setOverlayPrompt'), isTrue);
   });
+
+  test('deviceServiceEnabled checks system-level enablement via isAccessibilityServiceEnabled', () {
+    final main = File(
+      'android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt',
+    ).readAsStringSync();
+    expect(main.contains('isAccessibilityServiceEnabled(this)'), isTrue);
+
+    final service = File(
+      'android/app/src/main/kotlin/com/dhanuk/ovidai/OvidAccessibilityService.kt',
+    ).readAsStringSync();
+    expect(service.contains('fun isAccessibilityServiceConfigured'), isTrue);
+    expect(service.contains('fun isAccessibilityServiceEnabled'), isTrue);
+    expect(service.contains('ENABLED_ACCESSIBILITY_SERVICES'), isTrue);
+  });
 }

@@ -146,4 +146,80 @@ class OvidAccessibilityServiceStateTest {
         assertEquals("PASSWORD_FIELD", passwordTypingRefusal(true)?.code)
         assertNull(passwordTypingRefusal(false))
     }
+
+    @Test
+    fun accessibilityServiceConfigurationDetection() {
+        val pkg = "com.dhanuk.ovidai"
+        val cls = "com.dhanuk.ovidai.OvidAccessibilityService"
+
+        // False when master switch is off
+        assertFalse(
+            isAccessibilityServiceConfigured(
+                accessibilityEnabled = false,
+                enabledServicesSetting = "$pkg/$cls",
+                packageName = pkg,
+                serviceClassName = cls,
+            )
+        )
+
+        // False when settings string is null or empty
+        assertFalse(
+            isAccessibilityServiceConfigured(
+                accessibilityEnabled = true,
+                enabledServicesSetting = null,
+                packageName = pkg,
+                serviceClassName = cls,
+            )
+        )
+        assertFalse(
+            isAccessibilityServiceConfigured(
+                accessibilityEnabled = true,
+                enabledServicesSetting = "   ",
+                packageName = pkg,
+                serviceClassName = cls,
+            )
+        )
+
+        // True for full component name
+        assertTrue(
+            isAccessibilityServiceConfigured(
+                accessibilityEnabled = true,
+                enabledServicesSetting = "$pkg/$cls",
+                packageName = pkg,
+                serviceClassName = cls,
+            )
+        )
+
+        // True for short component name (.OvidAccessibilityService)
+        assertTrue(
+            isAccessibilityServiceConfigured(
+                accessibilityEnabled = true,
+                enabledServicesSetting = "$pkg/.OvidAccessibilityService",
+                packageName = pkg,
+                serviceClassName = cls,
+            )
+        )
+
+        // True when part of multiple colon-delimited services
+        val multiple = "com.google.android.marvin.talkback/com.google.android.marvin.talkback.TalkBackService:$pkg/$cls:com.other.app/.Service"
+        assertTrue(
+            isAccessibilityServiceConfigured(
+                accessibilityEnabled = true,
+                enabledServicesSetting = multiple,
+                packageName = pkg,
+                serviceClassName = cls,
+            )
+        )
+
+        // False when other services enabled but not Ovid
+        val others = "com.google.android.marvin.talkback/com.google.android.marvin.talkback.TalkBackService:com.other.app/.Service"
+        assertFalse(
+            isAccessibilityServiceConfigured(
+                accessibilityEnabled = true,
+                enabledServicesSetting = others,
+                packageName = pkg,
+                serviceClassName = cls,
+            )
+        )
+    }
 }
