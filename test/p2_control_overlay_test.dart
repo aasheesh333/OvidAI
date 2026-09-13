@@ -49,4 +49,18 @@ void main() {
     expect(kt.contains('0xB31A1A1A'), isTrue);
     expect(kt.contains('0xE61A1A1A'), isFalse);
   });
+
+  test('AI questions surface in the overlay and are answered there', () {
+    expect(agent.contains("deviceOverlaySetPromptMethod = 'deviceOverlaySetPrompt'"), isTrue);
+    expect(agent.contains('_pushQuestionToOverlayIfNeeded'), isTrue);
+    // Overlay text answers a pending question.
+    final idx = agent.indexOf('Future<void> handleDeviceOverlayText');
+    final body = agent.substring(idx, idx + 1400);
+    expect(body.contains('pendingApproval'), isTrue);
+    expect(body.contains('approve(true)'), isTrue);
+    final kt = File(
+      'android/app/src/main/kotlin/com/dhanuk/ovidai/OvidAccessibilityService.kt',
+    ).readAsStringSync();
+    expect(kt.contains('setOverlayPrompt'), isTrue);
+  });
 }

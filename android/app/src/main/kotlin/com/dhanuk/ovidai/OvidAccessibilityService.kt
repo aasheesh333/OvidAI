@@ -348,6 +348,11 @@ class OvidAccessibilityService : AccessibilityService() {
         button.contentDescription = if (listening) "Stop dictation" else "Dictate"
     }
 
+    /// Show the AI's pending question as the overlay input hint.
+    internal fun setOverlayPrompt(prompt: String) {
+        overlayInput?.hint = prompt
+    }
+
     private fun removeOverlayNow() {
         val view = overlayView ?: return
         overlayView = null

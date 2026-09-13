@@ -23,4 +23,32 @@ void main() {
     final body = src.substring(idx, idx + 1400);
     expect(body.contains("about:blank"), isTrue);
   });
+
+  test('the workspace folder picker lives only in Studio', () {
+    final studio = File('lib/ui/studio_screen.dart').readAsStringSync();
+    expect(studio.contains('getDirectoryPath'), isTrue);
+    // No other screen opens a directory picker.
+    for (final f in [
+      'lib/ui/chat_screen.dart',
+      'lib/ui/sidebar.dart',
+      'lib/ui/shell.dart',
+    ]) {
+      final src = File(f).readAsStringSync();
+      expect(
+        src.contains('getDirectoryPath'),
+        isFalse,
+        reason: '$f must not open a folder picker',
+      );
+    }
+  });
+
+  test('in-app browser uses a non-wv mobile UA for OAuth', () {
+    final src = File('lib/core/agent_service.dart').readAsStringSync();
+    expect(src.contains('mobileUserAgent'), isTrue);
+    // The mobile UA must not carry the embedded-WebView `wv` token.
+    final idx = src.indexOf('static const mobileUserAgent');
+    final line = src.substring(idx, idx + 220);
+    expect(line.contains('; wv'), isFalse);
+    expect(src.contains('setUserAgent(BrowserTab.mobileUserAgent)'), isTrue);
+  });
 }

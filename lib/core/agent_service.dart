@@ -84,6 +84,11 @@ class BrowserTab {
 
   static const desktopUserAgent =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
+  // Mobile Chrome UA WITHOUT the `; wv` token the platform WebView adds.
+  // Google's OAuth policy rejects embedded WebViews identified by `wv`
+  // ("this browser is not secure"); a clean mobile UA lets sign-in work.
+  static const mobileUserAgent =
+      'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36';
   bool desktopMode;
 
   BrowserTab({required this.url, bool? desktopMode})
@@ -943,6 +948,7 @@ class AgentService extends ChangeNotifier {
   static const String deviceOverlayMicMethod = 'deviceOverlayMic';
   static const String deviceOverlaySetTextMethod = 'deviceOverlaySetText';
   static const String deviceOverlayMicListeningMethod = 'deviceOverlayMicListening';
+  static const String deviceOverlaySetPromptMethod = 'deviceOverlaySetPrompt';
 
   static const _overlayNativeChannel = MethodChannel('ovid/native');
   static MethodChannel? _overlayChannelOverrideForTest;
@@ -1003,9 +1009,21 @@ class AgentService extends ChangeNotifier {
 
   /// Overlay send: the composer send on the active session. A busy session
   /// queues the text into its run; an idle session appends it and starts a
-  /// run. Blank text is ignored.
+  /// run. Blank text is ignored. If the AI is waiting on a question, the
+  /// overlay text answers it instead (so control mode stays usable while the
+  /// app is minimized).
   Future<void> handleDeviceOverlayText(String text) async {
     if (text.trim().isEmpty) return;
+    final pending = pendingApproval;
+    if (pending != null &&
+        pending.questions != null &&
+        pending.questions!.isNotEmpty) {
+      for (final q in pending.questions!) {
+        pending.answers[q.id] = text.trim();
+      }
+      approve(true);
+      return;
+    }
     final s = AppState.I.activeSession;
     if (s == null) return;
     if (busyFor(s.id)) {
@@ -2114,10 +2132,12 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       tab.loadedOnce = true;
       // Apply desktop viewport and user agent to tabs in desktopMode:
       // desktop = desktop UA + wide viewport; visual scale stays userZoom.
-      // mobile (default) = device viewport.
-      final desktopUA = BrowserTab.desktopUserAgent;
+      // mobile (default) = device viewport with a clean mobile UA (no `wv`)
+      // so OAuth providers like Google don't reject the embedded browser.
       if (tab.desktopMode) {
-        tab.controller!.setUserAgent(desktopUA);
+        tab.controller!.setUserAgent(BrowserTab.desktopUserAgent);
+      } else {
+        tab.controller!.setUserAgent(BrowserTab.mobileUserAgent);
       }
       // Platform wide viewport setting before initial load (desktop or mobile
       // reset). Target only this tab's fresh WebView — no cross-tab leak.
@@ -11532,9 +11552,29 @@ ${await _agentsMdBlock()}
     );
     pendingApproval = req;
     notifyListeners();
+    // Control mode + backgrounded: surface the question in the overlay so the
+    // user can answer without returning to the app.
+    unawaited(_pushQuestionToOverlayIfNeeded(questions));
     final ok = await req.completer.future;
     if (!ok) return null;
     return req.answers;
+  }
+
+  Future<void> _pushQuestionToOverlayIfNeeded(
+    List<UserQuestion> questions,
+  ) async {
+    final s = AppState.I.activeSession;
+    if (s == null || s.mode != AgentMode.control.name) return;
+    if (_appForegrounded) return;
+    final prompt = questions.length == 1
+        ? questions.first.question
+        : '${questions.length} questions — ${questions.first.question}';
+    try {
+      await _overlayChannel.invokeMethod(
+        deviceOverlaySetPromptMethod,
+        {'prompt': prompt},
+      );
+    } catch (_) {}
   }
 
   /// Test seam: drive ask_user_question's handler directly (no LLM).

@@ -432,6 +432,11 @@ class MainActivity : FlutterActivity() {
                             ?.setOverlayMicListening(call.argument<Boolean>("listening") == true)
                         result.success(true)
                     }
+                    "deviceOverlaySetPrompt" -> {
+                        OvidAccessibilityService.instance
+                            ?.setOverlayPrompt(call.argument<String>("prompt").orEmpty())
+                        result.success(true)
+                    }
                     "requestBatteryExemption" -> {
                         try {
                             val pm = getSystemService(POWER_SERVICE) as PowerManager
