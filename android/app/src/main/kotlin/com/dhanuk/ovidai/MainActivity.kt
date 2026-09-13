@@ -9,6 +9,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.provider.Settings
 import android.system.Os
 import android.system.OsConstants
@@ -430,6 +431,23 @@ class MainActivity : FlutterActivity() {
                         OvidAccessibilityService.instance
                             ?.setOverlayMicListening(call.argument<Boolean>("listening") == true)
                         result.success(true)
+                    }
+                    "requestBatteryExemption" -> {
+                        try {
+                            val pm = getSystemService(POWER_SERVICE) as PowerManager
+                            if (pm.isIgnoringBatteryOptimizations(packageName)) {
+                                result.success(true)
+                            } else {
+                                val intent = Intent(
+                                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                    Uri.parse("package:$packageName")
+                                )
+                                startActivity(intent)
+                                result.success(false)
+                            }
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
                     }
                     "deviceCopyScreenshot" -> {
                         val sourcePath = call.argument<String>("sourcePath")

@@ -12061,6 +12061,19 @@ ${await _agentsMdBlock()}
     }
   }
 
+  /// 24/7: ask the OS to exempt Ovid from battery optimization so OEM killers
+  /// are less likely to stop the agent. Returns whether the app is (now)
+  /// exempt; false when the user declines or the platform can't answer.
+  Future<bool> requestBatteryExemption() async {
+    try {
+      final channel = MethodChannel('ovid/native');
+      final ok = await channel.invokeMethod<bool>('requestBatteryExemption');
+      return ok ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Test seam: run a tool through the real dispatch gates (plan mode +
   /// read-only mode + approval) without a live model loop.
   Future<String> dispatchForTest(String name, Map<String, dynamic> args) =>

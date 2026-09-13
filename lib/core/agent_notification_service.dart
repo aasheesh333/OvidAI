@@ -227,6 +227,16 @@ class AgentNotificationService {
     }
   }
 
+  /// 24/7: stop the foreground service completely — same effect as the
+  /// notification's Exit action. Cancels any in-flight runs first.
+  Future<void> agentExit() async {
+    AgentService.I.cancelAllRuns();
+    _active = false;
+    _displayedStopTargetSessionId = null;
+    serviceStopRequestedForTestFlag = true;
+    await _invoke('agentServiceStop', {});
+  }
+
   Future<bool> _invoke(String method, Map<String, String> args) async {
     try {
       final r = await _channel.invokeMethod(method, args);

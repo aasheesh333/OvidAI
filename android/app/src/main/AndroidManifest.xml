@@ -9,6 +9,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 24/7: restart the agent service after a reboot, and ask the user to
+         exempt Ovid from battery optimization so OEM killers leave it be. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Device permissions the AI agent can request at runtime, each behind
          an in-chat user-consent gate first (Play policy: no surprise prompts). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -87,6 +91,18 @@
         <receiver
             android:name=".AgentStopReceiver"
             android:exported="false"/>
+        <!-- Restart the agent foreground service after a reboot when
+             keep-alive is enabled (best-effort). -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
+            </intent-filter>
+        </receiver>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

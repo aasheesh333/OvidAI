@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import '../core/agent_service.dart';
+import '../core/agent_notification_service.dart';
 import '../core/firebase_service.dart';
 import '../core/hook_service.dart';
 import '../core/presets.dart';
@@ -557,17 +558,86 @@ class _KeepAliveToggle extends StatelessWidget {
     final app = AppState.I;
     return AnimatedBuilder(
       animation: app,
-      builder: (_, _) => SwitchListTile(
-        dense: true,
-        secondary: Icon(Icons.bolt_outlined, size: 19, color: Aether.textMuted),
-        title: const Text('Background keep-alive', style: TextStyle(fontSize: 14)),
-        subtitle: Text(
-          'Keep assistant listening for scheduled tasks in background',
-          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-        ),
-        value: app.keepAliveEnabled,
-        activeTrackColor: Aether.accent,
-        onChanged: (v) => app.keepAliveEnabled = v,
+      builder: (_, _) => Column(
+        children: [
+          SwitchListTile(
+            dense: true,
+            secondary: Icon(
+              Icons.bolt_outlined,
+              size: 19,
+              color: Aether.textMuted,
+            ),
+            title: const Text(
+              'Background keep-alive',
+              style: TextStyle(fontSize: 14),
+            ),
+            subtitle: Text(
+              'Keep assistant listening for scheduled tasks in background',
+              style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+            ),
+            value: app.keepAliveEnabled,
+            activeTrackColor: Aether.accent,
+            onChanged: (v) => app.keepAliveEnabled = v,
+          ),
+          // 24/7: battery-optimization exemption + in-app service stop.
+          ListTile(
+            dense: true,
+            leading: Icon(
+              Icons.battery_saver_outlined,
+              size: 19,
+              color: Aether.textMuted,
+            ),
+            title: const Text(
+              'Battery optimization exemption',
+              style: TextStyle(fontSize: 14),
+            ),
+            subtitle: Text(
+              'Ask Android to stop killing Ovid in the background',
+              style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+            ),
+            trailing: const Icon(Icons.chevron_right, size: 18),
+            onTap: () async {
+              final ok = await AgentService.I.requestBatteryExemption();
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    ok
+                        ? 'Ovid is exempt from battery optimization.'
+                        : 'Follow the system prompt to allow Ovid to run in the background.',
+                  ),
+                  behavior: SnackBarBehavior.floating,
+                ),
+              );
+            },
+          ),
+          ListTile(
+            dense: true,
+            leading: Icon(
+              Icons.power_settings_new,
+              size: 19,
+              color: Aether.textMuted,
+            ),
+            title: const Text(
+              'Stop background service',
+              style: TextStyle(fontSize: 14),
+            ),
+            subtitle: Text(
+              'End the foreground service (same as the notification Exit)',
+              style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+            ),
+            onTap: () async {
+              await AgentNotificationService.I.agentExit();
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Background service stopped.'),
+                  behavior: SnackBarBehavior.floating,
+                ),
+              );
+            },
+          ),
+        ],
       ),
     );
   }
