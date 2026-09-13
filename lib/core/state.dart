@@ -2579,6 +2579,8 @@ class AppState extends ChangeNotifier {
       localePref = prefs.getString(_kLocale) ?? 'system';
       seenWelcomeVersion = prefs.getString(_kWelcome) ?? '';
       _keepAliveEnabled = prefs.getBool(_kKeepAlivePref) ?? true;
+      _controlDisclosureAccepted =
+          prefs.getBool(_kControlDisclosure) ?? false;
       chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0).clamp(
         chatFontScaleMin,
         chatFontScaleMax,
@@ -3589,6 +3591,25 @@ class AppState extends ChangeNotifier {
     try {
       final p = await SharedPreferences.getInstance();
       await p.setBool(_kKeepAlivePref, v);
+    } catch (_) {}
+  }
+
+  /// Whether the user has accepted the Control-mode disclosure. Once true,
+  /// switching to Control no longer re-shows the dialog.
+  static const _kControlDisclosure = 'ovid_control_disclosure_accepted';
+  bool _controlDisclosureAccepted = false;
+  bool get controlDisclosureAccepted => _controlDisclosureAccepted;
+  set controlDisclosureAccepted(bool v) {
+    if (_controlDisclosureAccepted == v) return;
+    _controlDisclosureAccepted = v;
+    unawaited(_saveControlDisclosure(v));
+    notifyListeners();
+  }
+
+  Future<void> _saveControlDisclosure(bool v) async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setBool(_kControlDisclosure, v);
     } catch (_) {}
   }
 

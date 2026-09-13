@@ -959,10 +959,12 @@ class AgentService extends ChangeNotifier {
   overlayRunStarterForTest;
 
   /// Show the floating overlay. Guarded: with no active Control session the
-  /// overlay is never shown, so nothing is invoked and nothing appears.
+  /// overlay is never shown, and it is only visible while the app is
+  /// backgrounded (the overlay exists to steer a minimized app).
   Future<void> showDeviceOverlay() async {
     final s = AppState.I.activeSession;
     if (s == null || s.mode != AgentMode.control.name) return;
+    if (_appForegrounded) return;
     try {
       await _overlayChannel.invokeMethod(deviceOverlayShowMethod);
     } catch (_) {}
@@ -974,6 +976,25 @@ class AgentService extends ChangeNotifier {
     try {
       await _overlayChannel.invokeMethod(deviceOverlayHideMethod);
     } catch (_) {}
+  }
+
+  bool _appForegrounded = true;
+
+  @visibleForTesting
+  bool get appForegroundedForTest => _appForegrounded;
+
+  /// Track app foreground state. The control overlay appears only when the
+  /// app is backgrounded and hides when it returns to the foreground.
+  Future<void> setAppForegrounded(bool foreground) async {
+    _appForegrounded = foreground;
+    if (foreground) {
+      await hideDeviceOverlay();
+      return;
+    }
+    final s = AppState.I.activeSession;
+    if (s != null && s.mode == AgentMode.control.name) {
+      await showDeviceOverlay();
+    }
   }
 
   /// Overlay send: the composer send on the active session. A busy session
@@ -6127,6 +6148,15 @@ fs_edit (create/str_replace/insert), commit, git_clone, git_push, job_start,
 job_kill, catalog mutations, plugin/MCP installs, browser typing/clicking.
 Do not attempt them — instead explain what needs to change and ask the user
 to switch to General or Studio mode.''' : ''}
+${mode == AgentMode.control ? '''
+CONTROL MODE: the user has granted device control. You ARE expected to operate
+the device and other apps on the user's behalf — this is the point of the mode.
+Use the device_* tools (device_read, device_tap, device_long_press, device_scroll,
+device_type, device_key, device_submit, etc.) to read the accessibility node
+tree and drive the UI. Work step by step: read the screen, act, then re-read to
+confirm. When you need the user to decide or provide input, use ask_user_question
+so it can surface even while the app is backgrounded. Safety guardrails still
+apply — never take destructive or irreversible actions without asking.''' : ''}
 ${s.workspaceFolder == null || s.workspaceFolder!.isEmpty ? '''
 Workspace: per-session sandbox folder (session id: ${s.sandboxId ?? s.id}).
 All files, edits and shell commands happen inside this workspace.''' : '''

@@ -66,6 +66,8 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.resumed:
         unawaited(AppState.I.reconnectServicesAfterResume());
+        // Control overlay is visible only while backgrounded.
+        unawaited(AgentService.I.setAppForegrounded(true));
         // PR32: a run that survived the background must keep its
         // notification (some OEMs drop it on pause).
         if (AgentService.I.anyRunActive) {
@@ -78,6 +80,8 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
         // A pending coalesced session write must land before Android can
         // freeze the isolate (spec §5.4: flush on lifecycle pause).
         unawaited(AppState.I.flushSessionPersistence());
+        // Control overlay appears only once the app is backgrounded.
+        unawaited(AgentService.I.setAppForegrounded(false));
         // PR32 keep-alive: while ANY agent run is active, make sure the
         // foreground service is up BEFORE Android can freeze the isolate.
         // (It normally starts at runTask; this covers races + OEM killers.)

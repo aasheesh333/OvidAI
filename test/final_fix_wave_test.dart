@@ -300,6 +300,8 @@ void main() {
       );
       app.sessions.insert(0, s);
       app.activeSessionId = s.id;
+      // Overlay shows only while the app is backgrounded.
+      await AgentService.I.setAppForegrounded(false);
       try {
         await AgentService.I
             .runTask('wave hello', sessionId: s.id)
@@ -308,6 +310,7 @@ void main() {
         await waitForCall(calls, 'deviceOverlayShow');
         await waitForCall(calls, 'deviceOverlayHide');
       } finally {
+        await AgentService.I.setAppForegrounded(true);
         provider
           ..baseUrl = originals['baseUrl'] as String
           ..models = originals['models'] as List<String>

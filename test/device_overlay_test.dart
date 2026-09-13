@@ -133,7 +133,8 @@ void main() {
             return true;
           });
       AgentService.setOverlayChannelForTest(channel);
-      addTearDown(() {
+      addTearDown(() async {
+        await AgentService.I.setAppForegrounded(true);
         AgentService.setOverlayChannelForTest(null);
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
             .setMockMethodCallHandler(channel, null);
@@ -171,7 +172,8 @@ void main() {
 
     test('show invokes deviceOverlayShow with an active control session',
         () async {
-      await AgentService.I.showDeviceOverlay();
+      // Overlay shows only while the app is backgrounded.
+      await AgentService.I.setAppForegrounded(false);
       expect(
         calls.any((c) => c.method == 'deviceOverlayShow'),
         isTrue,

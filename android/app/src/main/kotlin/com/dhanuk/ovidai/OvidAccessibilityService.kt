@@ -350,7 +350,10 @@ class OvidAccessibilityService : AccessibilityService() {
             setPadding(pad, (8 * density).toInt(), pad, (8 * density).toInt())
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                setColor(0xE61A1A1A.toInt())
+                // See-through so the content behind stays legible while the
+                // user is being steered (alpha 0xB3 ≈ 70%).
+                setColor(0xB31A1A1A.toInt())
+                setStroke((1 * density).toInt(), 0x33FFFFFF)
                 cornerRadius = 22 * density
             }
             elevation = 8 * density

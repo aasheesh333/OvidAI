@@ -6011,26 +6011,39 @@ class _ModeChip extends StatelessWidget {
 }
 
 Future<void> _enableControlMode(BuildContext context) async {
-  final accepted = await showDialog<bool>(
-    context: context,
-    barrierDismissible: false,
-    builder: (dialogContext) => AlertDialog(
-      title: const Text('Enable Control mode'),
-      content: const SingleChildScrollView(child: Text(kControlModeDisclosure)),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(dialogContext, false),
-          child: const Text('Not now'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(dialogContext, true),
-          child: const Text('Enable Control'),
-        ),
-      ],
-    ),
-  );
-  if (accepted != true) return;
+  final app = AppState.I;
+  // Show the disclosure only once. After acceptance, switching to Control
+  // must not re-prompt.
+  if (!app.controlDisclosureAccepted) {
+    final accepted = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Enable Control mode'),
+        content: const SingleChildScrollView(child: Text(kControlModeDisclosure)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Enable Control'),
+          ),
+        ],
+      ),
+    );
+    if (accepted != true) return;
+    app.controlDisclosureAccepted = true;
+  }
   AgentService.I.setMode(AgentMode.control);
+  // Only deep-link to Settings when the accessibility service is not yet
+  // enabled — an already-granted service must not re-open Settings.
+  var enabled = false;
+  try {
+    enabled = await DeviceControlService.I.isEnabled();
+  } catch (_) {}
+  if (enabled) return;
   try {
     await DeviceControlService.I.openAccessibilitySettings();
   } catch (_) {

@@ -92,7 +92,7 @@ void main() {
     app.activeSessionId = null;
   });
 
-  test('overlay show-guard: Control-only show, unconditional hide', () async {
+  test('overlay show-guard: Control-only, background-only show; unconditional hide', () async {
     final s = ChatSession(id: 'parity-guard', title: 'S', model: 'm');
     app.sessions.insert(0, s);
     app.activeSessionId = s.id;
@@ -105,13 +105,22 @@ void main() {
         });
     AgentService.setOverlayChannelForTest(channel);
     try {
-      // No mode match (default auto): show stays silent.
+      // No mode match (default auto), backgrounded: show stays silent.
+      await AgentService.I.setAppForegrounded(false);
+      calls.clear();
       await AgentService.I.showDeviceOverlay();
       expect(calls, isEmpty);
 
-      // Control session: show goes out on the contracted name.
+      // Control session but FOREGROUNDED: show stays silent.
       s.mode = 'control';
+      await AgentService.I.setAppForegrounded(true);
+      calls.clear();
       await AgentService.I.showDeviceOverlay();
+      expect(calls, isEmpty);
+
+      // Control session while BACKGROUNDED: show goes out on the
+      // contracted name.
+      await AgentService.I.setAppForegrounded(false);
       expect(
         calls.where((c) => c.method == 'deviceOverlayShow'),
         hasLength(1),
@@ -131,6 +140,7 @@ void main() {
         hasLength(1),
       );
     } finally {
+      await AgentService.I.setAppForegrounded(true);
       AgentService.setOverlayChannelForTest(null);
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, null);
