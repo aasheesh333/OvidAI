@@ -13,6 +13,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../core/theme.dart';
+import 'format.dart';
 import 'agent_notification_service.dart';
 import 'state.dart';
 import 'sandbox_service.dart';
@@ -169,7 +170,7 @@ String cleanReasoningText(String raw) {
   return t.trim();
 }
 
-String _fmtK(int n) => n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}K' : '$n';
+String _fmtK(int n) => formatCompactCount(n);
 
 /// Minimal HTML → markdown for `fetch_url` (turndown-style, no deps).
 ///

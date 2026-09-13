@@ -25,7 +25,7 @@ reviewer, fix rounds max 5, per-plan ledger under `.superpowers/sdd/<plan>/`).
 | ID | Project | Spec | Plan | Status |
 |----|---------|------|------|--------|
 | P0 | Reliability bug bundle | `specs/2026-09-13-reliability-bug-bundle-design.md` | `plans/2026-09-13-reliability-bug-bundle.md` | NOT STARTED |
-| P1 | DSH web visual parity (home + chat + theme) | `specs/2026-09-13-dsh-visual-parity-design.md` | `plans/2026-09-13-dsh-visual-parity.md` | IN PROGRESS |
+| P1 | DSH web visual parity (home + chat + theme) | `specs/2026-09-13-dsh-visual-parity-design.md` | `plans/2026-09-13-dsh-visual-parity.md` | IN PROGRESS (theme, formatter, hero pill, hint, question scroll, recents, transcript geometry done; streaming + feature gaps open) |
 | P2 | Control mode + overlay | `specs/2026-09-13-control-mode-overlay-design.md` | `plans/2026-09-13-control-mode-overlay.md` | NOT STARTED |
 | P3 | 24/7 background operation | `specs/2026-09-13-background-24-7-design.md` | `plans/2026-09-13-background-24-7.md` | NOT STARTED |
 | P4 | Studio + browser | `specs/2026-09-13-studio-browser-design.md` | `plans/2026-09-13-studio-browser.md` | NOT STARTED |
@@ -97,5 +97,7 @@ deferred gets an explicit note.
 
 | Date | Project | Change | Commit |
 |------|---------|--------|--------|
-| 2026-09-13 | P1 | Roadmap + specs/plans authored | pending |
-| 2026-09-12 | — | apt `CRLFile` root cause fixed (uncommitted) | pending |
+| 2026-09-13 | P1 | DSH reference captured (dark theme tokens, geometry, markdown, empty state) | pending |
+| 2026-09-13 | P1 | Theme palette → reference ramp; compact-number formatter; hero preview pill removed; composer hint faint; question card scrollable; recent models (max 10); transcript geometry (bubble 22px, code block, markdown line-heights) | pending |
+| 2026-09-13 | P1 | Roadmap + specs/plans authored | 297206c |
+| 2026-09-12 | — | apt `CRLFile` root cause fixed | 297206c |

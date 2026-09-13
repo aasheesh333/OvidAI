@@ -9,6 +9,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
 import '../core/theme.dart';
+import '../core/format.dart';
 import '../core/state.dart';
 import 'sandbox_setup.dart';
 import 'browser_screen.dart';
@@ -274,10 +275,7 @@ Widget _buildItem(
 class _StatsLine extends StatelessWidget {
   const _StatsLine();
 
-  String _fmtTok(int t) {
-    if (t >= 1000) return '${(t / 1000).toStringAsFixed(1)}K';
-    return '$t';
-  }
+  String _fmtTok(int t) => formatCompactCount(t);
 
   @override
   Widget build(BuildContext context) {
@@ -519,9 +517,7 @@ class _MeterBreakdownBar extends StatelessWidget {
         ),
         const SizedBox(width: 8),
         Text(
-          value >= 1000
-              ? '${(value / 1000).toStringAsFixed(1)}K'
-              : '$value',
+          formatCompactCount(value),
           style: TextStyle(
             fontSize: 10.5,
             fontFamily: Aether.mono,
@@ -1941,13 +1937,55 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                     ),
                   );
                 }
+                // Recent models (newest first, max 10), only when the
+                // provider still exposes the model. Shown at the very top.
+                final recents = q.isEmpty
+                    ? app.recentModels
+                          .where(
+                            (r) =>
+                                app.providerById(r.providerId)?.models.contains(
+                                  r.model,
+                                ) ??
+                                false,
+                          )
+                          .take(10)
+                          .toList()
+                    : <({String providerId, String model})>[];
+                final showRecents = recents.isNotEmpty;
                 return ListView.builder(
                   controller: widget.scrollController,
                   padding: const EdgeInsets.only(bottom: 20),
-                  itemCount: configured.length + (unconfigured.isEmpty ? 0 : 1),
+                  itemCount:
+                      (showRecents ? 1 : 0) +
+                      configured.length +
+                      (unconfigured.isEmpty ? 0 : 1),
                   itemBuilder: (_, i) {
-                    if (i < configured.length) {
-                      final p = configured[i];
+                    if (showRecents && i == 0) {
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(18, 14, 18, 4),
+                            child: Text(
+                              'Recent',
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w700,
+                                color: Aether.textMuted,
+                              ),
+                            ),
+                          ),
+                          for (final r in recents)
+                            _ModelTile(
+                              providerId: r.providerId,
+                              model: r.model,
+                            ),
+                        ],
+                      );
+                    }
+                    final idx = showRecents ? i - 1 : i;
+                    if (idx < configured.length) {
+                      final p = configured[idx];
                       final models = p.models
                           .where(
                             (m) =>
@@ -2180,45 +2218,17 @@ class _EmptyState extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 22),
-                  // Greeting + mono pill (the hero greeting "What do you want to build? ·
-                  // Preview" pattern) in one row so the pill sits beside the
-                  // title like the hero layout, not under it.
-                  Wrap(
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 10,
-                    runSpacing: 6,
-                    children: [
-                      Text(
-                        'How can I help?',
-                        style: TextStyle(
-                          fontSize: 26,
-                          fontWeight: FontWeight.w500,
-                          height: 32 / 26,
-                          letterSpacing: -0.2,
-                          color: Aether.text,
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 9,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Aether.accent.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(24),
-                        ),
-                        child: Text(
-                          'preview',
-                          style: TextStyle(
-                            fontFamily: Aether.mono,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                            height: 18 / 12,
-                            color: Aether.accent,
-                          ),
-                        ),
-                      ),
-                    ],
+                  // Greeting headline (hero). The former mono "preview" pill
+                  // was removed for visual parity.
+                  Text(
+                    'How can I help?',
+                    style: TextStyle(
+                      fontSize: 26,
+                      fontWeight: FontWeight.w500,
+                      height: 32 / 26,
+                      letterSpacing: -0.2,
+                      color: Aether.text,
+                    ),
                   ),
                   const SizedBox(height: 8),
                   Text(
@@ -3456,22 +3466,19 @@ class _MessageView extends StatelessWidget {
 
   Widget _text(bool isUser) => Container(
     padding: EdgeInsets.symmetric(
-      horizontal: isUser ? 14 : 4,
+      horizontal: isUser ? 16 : 4,
       vertical: isUser ? 10 : 4,
     ),
     decoration: BoxDecoration(
-      // web-IDE user bubble: a SOFT accent-tinted fill, fully rounded,
-      // NO hard border (the bordered "wireframe box" was the visual
-      // mismatch the user flagged). Assistant stays borderless prose.
-      color: isUser
-          ? Aether.accent.withValues(alpha: 0.16)
-          : Colors.transparent,
-      borderRadius: BorderRadius.circular(18),
+      // User bubble: solid raised fill, 22px radius, no border. Assistant
+      // stays borderless prose. Geometry follows the captured reference.
+      color: isUser ? Aether.surfaceAlt : Colors.transparent,
+      borderRadius: BorderRadius.circular(22),
     ),
     child: isUser
         ? SelectableText(
             m.content,
-            style: TextStyle(fontSize: 14.5, height: 1.5, color: Aether.text),
+            style: TextStyle(fontSize: 14, height: 22 / 14, color: Aether.text),
           )
         : _OvidMarkdown(content: m.content),
   );
@@ -4542,7 +4549,13 @@ class _InputBarState extends State<_InputBar> {
                   hintText: locked
                       ? 'Answer the approval card above first…'
                       : 'Describe what you want to build…  / commands  @ agents',
-                  hintStyle: const TextStyle(fontSize: 16, height: 24 / 16),
+                  hintStyle: TextStyle(
+                    fontSize: 16,
+                    height: 24 / 16,
+                    // Explicit faint color so the hint reads as a hint and
+                    // is not overridden by the theme's default.
+                    color: Aether.textFaint,
+                  ),
                   filled: false,
                   border: InputBorder.none,
                   enabledBorder: InputBorder.none,
@@ -5603,36 +5616,54 @@ class _QuestionsCardState extends State<_QuestionsCard> {
             ],
           ),
           const SizedBox(height: 8),
-          for (final q in qs) ...[
-            if (q.header != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 6, bottom: 2),
-                child: Text(
-                  q.header!,
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                    color: Aether.textFaint,
-                  ),
-                ),
-              ),
-            Text(
-              q.question,
-              style: TextStyle(fontSize: 13, color: Aether.text),
+          // The question list is bounded and scrollable so a tall set of
+          // questions never overflows the viewport (header + actions stay
+          // fixed; only the questions scroll).
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: math.min(MediaQuery.sizeOf(context).height * 0.5, 360),
             ),
-            if (q.options.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: [for (final opt in q.options) _optionChip(q, opt)],
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final q in qs) ...[
+                    if (q.header != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6, bottom: 2),
+                        child: Text(
+                          q.header!,
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                            color: Aether.textFaint,
+                          ),
+                        ),
+                      ),
+                    Text(
+                      q.question,
+                      style: TextStyle(fontSize: 13, color: Aether.text),
+                    ),
+                    if (q.options.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final opt in q.options) _optionChip(q, opt),
+                        ],
+                      ),
+                    ],
+                    // Free-form "own answer" — for answers the chips don't cover.
+                    const SizedBox(height: 6),
+                    _ownAnswerField(q),
+                    const SizedBox(height: 8),
+                  ],
+                ],
               ),
-            ],
-            // Free-form "own answer" — for answers the chips don't cover.
-            const SizedBox(height: 6),
-            _ownAnswerField(q),
-            const SizedBox(height: 8),
-          ],
+            ),
+          ),
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
@@ -6147,20 +6178,29 @@ class _OvidMarkdown extends StatelessWidget {
       onTapLink: (text, href, title) => _openLink(context, text, href, title),
       builders: {'code': _OvidInlineCodeBuilder()},
       styleSheet: MarkdownStyleSheet(
-        p: TextStyle(fontSize: fontSize, height: 1.55, color: body),
+        // Line-heights follow the captured reference: base 24px at 14px,
+        // shifting with the content font size (24 + (size - 14)).
+        p: TextStyle(
+          fontSize: fontSize,
+          height: (fontSize + 10) / fontSize,
+          color: body,
+        ),
         h1: TextStyle(
-          fontSize: fontSize + 5,
+          fontSize: fontSize + 7,
+          height: (fontSize + 16) / (fontSize + 7),
           fontWeight: FontWeight.w700,
           color: body,
         ),
         h2: TextStyle(
-          fontSize: fontSize + 3,
+          fontSize: fontSize + 5,
+          height: (fontSize + 14) / (fontSize + 5),
           fontWeight: FontWeight.w700,
           color: body,
         ),
         h3: TextStyle(
-          fontSize: fontSize + 1.5,
-          fontWeight: FontWeight.w600,
+          fontSize: fontSize + 4,
+          height: (fontSize + 12) / (fontSize + 4),
+          fontWeight: FontWeight.w700,
           color: body,
         ),
         strong: TextStyle(fontWeight: FontWeight.w600, color: body),
@@ -6286,15 +6326,14 @@ class _OvidCodeBox extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       margin: const EdgeInsets.symmetric(vertical: 4),
       decoration: BoxDecoration(
-        color: Aether.surface,
+        color: Aether.codeBg,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Aether.hairline),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
             color: Aether.surfaceAlt,
             child: Row(
               children: [
@@ -6308,6 +6347,7 @@ class _OvidCodeBox extends StatelessWidget {
                   lang,
                   style: TextStyle(
                     fontSize: 11,
+                    height: 18 / 11,
                     fontFamily: Aether.mono,
                     color: Aether.textMuted,
                   ),
@@ -6319,15 +6359,15 @@ class _OvidCodeBox extends StatelessWidget {
           ),
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            padding: const EdgeInsets.all(16),
             child: _isDiff
                 ? _DiffLines(code: code)
                 : Text(
                     code,
                     style: TextStyle(
                       fontFamily: Aether.mono,
-                      fontSize: 12,
-                      height: 1.55,
+                      fontSize: 11,
+                      height: 19 / 11,
                       color: Aether.text,
                     ),
                   ),
@@ -6394,7 +6434,6 @@ class _OvidInlineCodeBuilder extends MarkdownElementBuilder {
       decoration: BoxDecoration(
         color: Aether.surfaceAlt,
         borderRadius: BorderRadius.circular(5),
-        border: Border.all(color: Aether.hairline),
       ),
       child: Text(
         text,

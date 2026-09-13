@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../core/format.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 
@@ -310,11 +311,7 @@ class UsageScreen extends StatelessWidget {
     );
   }
 
-  static String _fmtTok(int n) => n >= 1000000
-      ? '${(n / 1000000).toStringAsFixed(2)}M'
-      : n >= 1000
-      ? '${(n / 1000).toStringAsFixed(1)}K'
-      : '$n';
+  static String _fmtTok(int n) => formatCompactCount(n);
 
   Widget _stat(String label, String value, {bool big = false}) {
     return Expanded(
@@ -379,7 +376,7 @@ class _ProviderTile extends StatelessWidget {
     );
   }
 
-  String _fmtK(int n) => n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}K' : '$n';
+  String _fmtK(int n) => formatCompactCount(n);
 }
 
 /// Detailed per-provider usage screen.
@@ -559,7 +556,7 @@ class ProviderUsageScreen extends StatelessWidget {
     );
   }
 
-  String _fmtK(int n) => n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}K' : '$n';
+  String _fmtK(int n) => formatCompactCount(n);
 
   /// Approx USD cost for ONE model on this provider, computed from the raw
   /// log (per-model in/out split lives there, not in the aggregate tuple).

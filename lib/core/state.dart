@@ -2580,6 +2580,11 @@ class AppState extends ChangeNotifier {
   String lastSelectedModel = '';
   String? lastSelectedProviderId;
 
+  /// Most-recently selected models, newest first, capped at 10. Identity is
+  /// `(providerId, model)` so the same model id exposed by two providers
+  /// never collides. Surfaced at the top of the model picker.
+  final List<({String providerId, String model})> recentModels = [];
+
   /// Last Studio repo (owner/name) and pinned workspace folder — carried into
   /// new sessions so a restart never forces fresh repo/folder selection.
   String? lastRepoFull;
@@ -2591,6 +2596,7 @@ class AppState extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       lastSelectedModel = prefs.getString(_kLastModel) ?? '';
       lastSelectedProviderId = prefs.getString(_kLastProvider);
+      _loadRecentModels(prefs);
       lastRepoFull = prefs.getString(_kLastRepo);
       final storedBranch = prefs.getString(_kLastBranch);
       lastBranch = storedBranch ?? 'main';
@@ -2648,6 +2654,47 @@ class AppState extends ChangeNotifier {
     } catch (_) {}
   }
 
+  void _loadRecentModels(SharedPreferences prefs) {
+    try {
+      recentModels.clear();
+      final raw = prefs.getString(_kRecentModels);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return;
+      for (final e in decoded) {
+        if (e is Map && e['p'] is String && e['m'] is String) {
+          recentModels.add((providerId: e['p'] as String, model: e['m'] as String));
+        }
+        if (recentModels.length >= 10) break;
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _persistRecentModels() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _kRecentModels,
+        jsonEncode([
+          for (final r in recentModels) {'p': r.providerId, 'm': r.model},
+        ]),
+      );
+    } catch (_) {}
+  }
+
+  /// Record a `(providerId, model)` selection as most-recent (newest first,
+  /// de-duplicated, capped at 10).
+  void _rememberRecentModel(String providerId, String model) {
+    recentModels.removeWhere(
+      (r) => r.providerId == providerId && r.model == model,
+    );
+    recentModels.insert(0, (providerId: providerId, model: model));
+    if (recentModels.length > 10) {
+      recentModels.removeRange(10, recentModels.length);
+    }
+    _persistRecentModels();
+  }
+
   /// A persisted workspace folder is only reused while it still exists on
   /// disk; a vanished path (deleted dir / unmounted drive) falls back to the
   /// per-session sandbox by returning null.
@@ -2667,6 +2714,7 @@ class AppState extends ChangeNotifier {
   static const _kProviders = 'ovid_provider_configs_v1';
   static const _kLastModel = 'ovid_last_model';
   static const _kLastProvider = 'ovid_last_provider';
+  static const _kRecentModels = 'ovid_recent_models';
   static const _kLastRepo = 'ovid_last_repo';
   static const _kLastBranch = 'ovid_last_branch';
   static const _kLastWorkspace = 'ovid_last_workspace';
@@ -4186,6 +4234,7 @@ class AppState extends ChangeNotifier {
     // Remember as the default for future sessions + restarts.
     lastSelectedModel = model;
     lastSelectedProviderId = providerId;
+    _rememberRecentModel(providerId, model);
     _persistLastSelection();
     _markSessionDirty(s.id);
     notifyListeners();

@@ -12,26 +12,30 @@ class Aether {
   static bool dark = true;
 
   // ── Dark palette ──
-  static const _bgD = Color(0xFF0A0A0C);
-  static const _surfaceD = Color(0xFF111114);
-  static const _surfaceAltD = Color(0xFF17171B);
-  static const _surfaceRaisedD = Color(0xFF1D1D23);
-  static const _hairlineD = Color(0xFF26262C);
-  static const _hairlineStrongD = Color(0xFF33333B);
-  static const _textD = Color(0xFFEDEDF0);
-  static const _textMutedD = Color(0xFF9B9BA4);
-  static const _textFaintD = Color(0xFF63636C);
+  // Values aligned to the captured reference ramp
+  // (docs/superpowers/reference/2026-09-13-dsh-web-visual-reference.md).
+  static const _bgD = Color(0xFF151517);
+  static const _surfaceD = Color(0xFF232324);
+  static const _surfaceAltD = Color(0xFF2C2C2E);
+  static const _surfaceRaisedD = Color(0xFF353638);
+  static const _hairlineD = Color(0xFF232324);
+  static const _hairlineStrongD = Color(0xFF313134);
+  static const _textD = Color(0xFFF9FAFB);
+  static const _textMutedD = Color(0xFFADB2B8);
+  static const _textFaintD = Color(0xFF81858C);
+  static const _codeBgD = Color(0xFF1B1B1C);
 
   // ── Light palette ──
-  static const _bgL = Color(0xFFFAFAFC);
+  static const _bgL = Color(0xFFFAFAFA);
   static const _surfaceL = Color(0xFFFFFFFF);
   static const _surfaceAltL = Color(0xFFF2F2F5);
   static const _surfaceRaisedL = Color(0xFFE9E9EE);
   static const _hairlineL = Color(0xFFE2E2E8);
   static const _hairlineStrongL = Color(0xFFCFCFD8);
-  static const _textL = Color(0xFF1A1A20);
-  static const _textMutedL = Color(0xFF5C5C66);
-  static const _textFaintL = Color(0xFF9494A0);
+  static const _textL = Color(0xFF0F1115);
+  static const _textMutedL = Color(0xFF545557);
+  static const _textFaintL = Color(0xFF81858C);
+  static const _codeBgL = Color(0xFFF5F5F5);
 
   static Color get bg => dark ? _bgD : _bgL;
   static Color get surface => dark ? _surfaceD : _surfaceL;
@@ -44,11 +48,14 @@ class Aether {
   static Color get textMuted => dark ? _textMutedD : _textMutedL;
   static Color get textFaint => dark ? _textFaintD : _textFaintL;
 
-  static const accent = Color(0xFF4D6BFE); // DeepSeek-ish muted blue
-  static const accentSoft = Color(0x1A4D6BFE);
-  static const success = Color(0xFF3ECF8E);
-  static const warn = Color(0xFFE8B44C);
-  static const danger = Color(0xFFE5534B);
+  /// Fenced code-block background (distinct from the card surface).
+  static Color get codeBg => dark ? _codeBgD : _codeBgL;
+
+  static const accent = Color(0xFF679EFE);
+  static const accentSoft = Color(0x1F679EFE);
+  static const success = Color(0xFF22C55E);
+  static const warn = Color(0xFFF59E0B);
+  static const danger = Color(0xFFF25A5A);
 
   // Light-mode readable variants for success/danger on white surfaces.
   static Color get successC => dark ? success : const Color(0xFF1FA05F);
