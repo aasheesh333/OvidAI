@@ -25,7 +25,7 @@ reviewer, fix rounds max 5, per-plan ledger under `.superpowers/sdd/<plan>/`).
 | ID | Project | Spec | Plan | Status |
 |----|---------|------|------|--------|
 | P0 | Reliability bug bundle | `specs/2026-09-13-reliability-bug-bundle-design.md` | `plans/2026-09-13-reliability-bug-bundle.md` | DONE (ovid-pkg `.gz`-first + `dpkg-deb -x` extraction, apt CRLFile, inbuilt install routing, marketplace object-source, provider ambiguity) |
-| P1 | DSH web visual parity (home + chat + theme) | `specs/2026-09-13-dsh-visual-parity-design.md` | `plans/2026-09-13-dsh-visual-parity.md` | VISUAL DONE (theme, compact numbers, hero, hint, questions, recents, transcript + reasoning geometry, blue status shimmer, 3-dot chase). Optional DSH feature additions remain (branch-into-conversation, per-turn system-prompt disclosure, compact mode, send-while-busy selector) |
+| P1 | DSH web visual parity (home + chat + theme) | `specs/2026-09-13-dsh-visual-parity-design.md` | `plans/2026-09-13-dsh-visual-parity.md` | DONE incl. optional DSH features (branch-into-conversation, per-turn system-prompt disclosure, conversation display compact/full, send-while-busy queue/interrupt) |
 | P2 | Control mode + overlay | `specs/2026-09-13-control-mode-overlay-design.md` | `plans/2026-09-13-control-mode-overlay.md` | DONE (one-time disclosure, background-only overlay, lower opacity + stroke, control briefing, overlay mic, overlay AI questions) |
 | P3 | 24/7 background operation | `specs/2026-09-13-background-24-7-design.md` | `plans/2026-09-13-background-24-7.md` | DONE (boot receiver + keep-alive gate, battery-exemption request, in-app stop; Kotlin compiles) |
 | P4 | Studio + browser | `specs/2026-09-13-studio-browser-design.md` | `plans/2026-09-13-studio-browser.md` | DONE (external GitHub login, login dot, fresh blank tabs, Studio-only picker, non-wv UA for OAuth) |
@@ -97,6 +97,7 @@ deferred gets an explicit note.
 
 | Date | Project | Change | Commit |
 |------|---------|--------|--------|
+| 2026-09-13 | P1 | Optional DSH features: branch-into-conversation, send-while-busy (queue/interrupt), conversation display (compact/full), per-turn system-prompt disclosure | pending |
 | 2026-09-13 | P0 | `ovid-pkg install` uses `dpkg-deb -x` into PREFIX (dpkg -i fails on-device) — the `gh` install failure | pending |
 | 2026-09-13 | P2/P4 | Overlay AI questions + answers; in-app browser non-`wv` mobile UA (Google OAuth); Studio-only picker pin | pending |
 | 2026-09-13 | P6 | Mode-aware tool gate: device_* omitted outside Control (82 vs 91 tools ≈ 810 tok/req saved) | pending |

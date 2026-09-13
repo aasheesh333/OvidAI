@@ -34,6 +34,7 @@ void Function(int messageCount)? transcriptFoldObserver;
 List<ChatItem> foldMessages(
   List<Message> messages, {
   required bool showReasoning,
+  bool compact = true,
 }) {
   transcriptFoldObserver?.call(messages.length);
   final out = <ChatItem>[];
@@ -47,6 +48,7 @@ List<ChatItem> foldMessages(
       continue;
     }
     final foldable =
+        compact &&
         m.role == 'assistant' &&
         (m.kind == MsgKind.tool || m.kind == MsgKind.reasoning) &&
         !m.thinking;
@@ -157,8 +159,13 @@ TranscriptWindow windowFor(
   required int pageSize,
   required int visibleCount,
   required bool showReasoning,
+  bool compact = true,
 }) {
-  final all = foldMessages(messages, showReasoning: showReasoning);
+  final all = foldMessages(
+    messages,
+    showReasoning: showReasoning,
+    compact: compact,
+  );
   final total = all.length;
   final requested = visibleCount > 0 ? visibleCount : pageSize;
   final take = requested < 0
@@ -194,6 +201,7 @@ TranscriptWindow windowForBounded(
   required int pageSize,
   required int visibleCount,
   required bool showReasoning,
+  bool compact = true,
 }) {
   final requested = visibleCount > 0 ? visibleCount : pageSize;
   if (messages.isEmpty || requested <= 0) {
@@ -233,6 +241,7 @@ TranscriptWindow windowForBounded(
       foldMessages(
         candidate == 0 ? messages : messages.sublist(candidate),
         showReasoning: showReasoning,
+        compact: compact,
       ),
       candidate,
     );

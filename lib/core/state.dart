@@ -903,6 +903,11 @@ class ChatSession {
   final List<Message> messages;
   final DateTime createdAt;
 
+  /// The assembled system prompt sent on this session's most recent turn.
+  /// Surfaced as a collapsible "System prompt" disclosure so the user can
+  /// see exactly what the model was told (context visibility parity).
+  String? systemPromptSnapshot;
+
   ChatSession({
     required this.id,
     required this.title,
@@ -915,6 +920,7 @@ class ChatSession {
     this.presetId = 'standard',
     this.workspaceFolder,
     this.compactedSummary,
+    this.systemPromptSnapshot,
     this.goal,
     this.planMode = false,
     this.planPreMode,
@@ -952,6 +958,7 @@ class ChatSession {
     presetId: j['presetId'] as String? ?? 'standard',
     workspaceFolder: j['workspaceFolder'] as String?,
     compactedSummary: j['compactedSummary'] as String?,
+    systemPromptSnapshot: j['systemPromptSnapshot'] as String?,
     compactedAtCount: (j['compactedAtCount'] as num?)?.toInt() ?? 0,
     parentId: j['parentId'] as String?,
     agentLabel: j['agentLabel'] as String?,
@@ -1005,6 +1012,8 @@ class ChatSession {
     if (workspaceFolder != null && workspaceFolder!.isNotEmpty)
       'workspaceFolder': workspaceFolder,
     if (compactedSummary != null) 'compactedSummary': compactedSummary,
+    if (systemPromptSnapshot != null)
+      'systemPromptSnapshot': systemPromptSnapshot,
     if (compactedAtCount > 0) 'compactedAtCount': compactedAtCount,
     if (parentId != null) 'parentId': parentId,
     if (agentLabel != null) 'agentLabel': agentLabel,
@@ -2575,6 +2584,9 @@ class AppState extends ChangeNotifier {
       workflowEnabled = prefs.getBool(_kWorkflowEnabled) ?? true;
       browserDesktopMode = prefs.getBool(_kBrowserDesktopMode) ?? false;
       autoRunSafeCommands = prefs.getBool(_kAutoRunSafe) ?? true;
+      sendWhileBusy = prefs.getString(_kSendWhileBusy) ?? 'queue';
+      conversationDisplay =
+          prefs.getString(_kConversationDisplay) ?? 'compact';
       sandboxSkipped = prefs.getBool(_kSandboxSkipped) ?? false;
       localePref = prefs.getString(_kLocale) ?? 'system';
       seenWelcomeVersion = prefs.getString(_kWelcome) ?? '';
@@ -3574,6 +3586,38 @@ class AppState extends ChangeNotifier {
   static const _kAutoRunSafe = 'ovid_auto_run_safe';
   bool autoRunSafeCommands = true;
 
+  /// Send behavior while the agent is running: `queue` (default) appends the
+  /// text to the active run; `interrupt` stops the current run first, then
+  /// sends. Mirrors the reference's send-while-busy selector.
+  static const _kSendWhileBusy = 'ovid_send_while_busy';
+  String sendWhileBusy = 'queue';
+  bool get sendWhileBusyInterrupt => sendWhileBusy == 'interrupt';
+  Future<void> setSendWhileBusy(String v) async {
+    if (v != 'queue' && v != 'interrupt') return;
+    sendWhileBusy = v;
+    notifyListeners();
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(_kSendWhileBusy, v);
+    } catch (_) {}
+  }
+
+  /// Conversation display for completed turns: `compact` (default) folds the
+  /// process run into a disclosure strip; `full` shows every tool/reasoning
+  /// row. Mirrors the reference's conversation-display selector.
+  static const _kConversationDisplay = 'ovid_conversation_display';
+  String conversationDisplay = 'compact';
+  bool get conversationFull => conversationDisplay == 'full';
+  Future<void> setConversationDisplay(String v) async {
+    if (v != 'compact' && v != 'full') return;
+    conversationDisplay = v;
+    notifyListeners();
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(_kConversationDisplay, v);
+    } catch (_) {}
+  }
+
   static const _kKeepAlivePref = 'ovid_keep_alive';
   bool _keepAliveEnabled = true;
   bool get keepAliveEnabled => _keepAliveEnabled;
@@ -4111,6 +4155,39 @@ class AppState extends ChangeNotifier {
     // Persist first, then dispatch exactly-once `created` lifecycle. The
     // method stays synchronous; the tracked future owns persistence.
     _dispatchSessionStart(s, SessionStartReason.created);
+  }
+
+  /// Fork the conversation: create a new session that copies messages
+  /// `0..throughIndex` (inclusive) from [sessionId] and becomes active. The
+  /// branch inherits the source's model, provider, mode, preset, and Studio
+  /// binding, but gets its own transcript + workspace. Returns the new
+  /// session, or null when the source or index is invalid.
+  ChatSession? branchSessionFrom(String sessionId, int throughIndex) {
+    final src = sessions.where((x) => x.id == sessionId).firstOrNull;
+    if (src == null) return null;
+    final end = (throughIndex + 1).clamp(0, src.messages.length);
+    if (end <= 0) return null;
+    final branch = ChatSession(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      title: '${src.title} (branch)',
+      model: src.model,
+      providerId: src.providerId,
+      repo: src.repo,
+      branch: src.branch,
+      mode: src.mode,
+      presetId: src.presetId,
+      workspaceFolder: src.workspaceFolder,
+      messages: [
+        for (var i = 0; i < end; i++)
+          Message.fromJson(src.messages[i].toJson()),
+      ],
+    );
+    sessions.insert(0, branch);
+    activeSessionId = branch.id;
+    onSessionSwitched?.call(branch.id);
+    notifyListeners();
+    persistSessions();
+    return branch;
   }
 
   /// Ensure a session's workspace dir exists (mention menu + agent runs

@@ -115,6 +115,23 @@ Finalized from Phase 0 capture (candidate: message-level copy/retry affordances,
 session/thread affordances, attachment/context display, keyboard shortcuts).
 Each gets an explicit outcome and task once listed.
 
+**Implemented (2026-09-13, optional wave):**
+- **Branch into a new conversation** — assistant message action that forks the
+  session at that point (`AppState.branchSessionFrom`), deep-copying messages.
+- **Send behavior while busy** — Settings selector: `Queue` (default) appends to
+  the active run; `Interrupt` stops the run and sends immediately.
+- **Conversation display** — Settings selector: `Compact` (default) folds the
+  completed process run; `Full` shows every tool/reasoning row.
+- **System prompt disclosure** — a collapsible `System prompt` row at the top of
+  the transcript showing the exact assembled prompt from the latest turn.
+
+Already present in Ovid before this wave (verified, no work needed): copy,
+edit & resend, revert, like/dislike, per-session stop/queue, attachments,
+`/` and `@` triggers, usage/context ring, cache %, tok/s, trajectory,
+produced-files card, subagents.
+
+Not implemented (out of scope; no user request): keyboard-shortcut parity.
+
 ## 7. Testing
 
 - Pure formatter unit tests (K/M/B boundaries).

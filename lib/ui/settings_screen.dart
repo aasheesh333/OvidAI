@@ -236,6 +236,28 @@ class SettingsScreen extends StatelessWidget {
             getter: _getBrowserDesktop,
             setter: _setBrowserDesktop,
           ),
+          const _ChoiceTile(
+            icon: Icons.send_outlined,
+            title: 'Send behavior while busy',
+            subtitle: 'What sending does while the agent is still running',
+            getter: _getSendWhileBusy,
+            options: [
+              ('queue', 'Queue'),
+              ('interrupt', 'Interrupt'),
+            ],
+            onChanged: _setSendWhileBusy,
+          ),
+          const _ChoiceTile(
+            icon: Icons.view_agenda_outlined,
+            title: 'Conversation display',
+            subtitle: 'Controls process content in completed turns',
+            getter: _getConversationDisplay,
+            options: [
+              ('compact', 'Compact'),
+              ('full', 'Full'),
+            ],
+            onChanged: _setConversationDisplay,
+          ),
           _settingTile(
             Icons.security_outlined,
             'Sandbox',
@@ -342,6 +364,64 @@ class SettingsScreen extends StatelessWidget {
   }
 }
 
+/// A labeled two-option selector (e.g. Queue / Interrupt) bound to an
+/// AppState string pref. Shows the options as tappable chips.
+class _ChoiceTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final String Function() getter;
+  final List<(String value, String label)> options;
+  final Future<void> Function(String) onChanged;
+  const _ChoiceTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.getter,
+    required this.options,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AppState.I,
+      builder: (_, _) {
+        final value = getter();
+        return ListTile(
+          dense: true,
+          contentPadding: const EdgeInsets.fromLTRB(16, 2, 16, 2),
+          leading: Icon(icon, size: 19, color: Aether.textMuted),
+          title: Text(title, style: const TextStyle(fontSize: 14)),
+          subtitle: Text(
+            subtitle,
+            style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+          ),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final o in options)
+                Padding(
+                  padding: const EdgeInsets.only(left: 6),
+                  child: ChoiceChip(
+                    label: Text(o.$2, style: const TextStyle(fontSize: 11.5)),
+                    selected: value == o.$1,
+                    showCheckmark: false,
+                    selectedColor: Aether.accent.withValues(alpha: 0.18),
+                    side: BorderSide(
+                      color: value == o.$1 ? Aether.accent : Aether.hairline,
+                    ),
+                    onSelected: (_) => onChanged(o.$1),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// Telemetry consent toggle bound to FirebaseService.
 class _TelemetryTile extends StatelessWidget {
   @override
@@ -442,6 +522,13 @@ Future<void> _setHooksEnabled(bool v) => HookService.I.setEnabled(v);
 bool _getBrowserDesktop() => AppState.I.browserDesktopMode;
 Future<void> _setBrowserDesktop(bool v) =>
     AppState.I.setBrowserDesktopMode(v);
+
+String _getSendWhileBusy() => AppState.I.sendWhileBusy;
+Future<void> _setSendWhileBusy(String v) => AppState.I.setSendWhileBusy(v);
+
+String _getConversationDisplay() => AppState.I.conversationDisplay;
+Future<void> _setConversationDisplay(String v) =>
+    AppState.I.setConversationDisplay(v);
 
 /// Live on-device storage usage (replaces the hardcoded "214 MB" string).
 class _StorageTile extends StatefulWidget {

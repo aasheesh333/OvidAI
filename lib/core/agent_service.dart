@@ -6314,6 +6314,10 @@ ${await _agentsMdBlock()}
     // every model incl. custom BYOK routes, 256K and 1M windows alike.
     await _maybeCompact(s, p);
 
+    // Capture the assembled system prompt for this turn so the user can
+    // inspect exactly what the model was told (context visibility parity).
+    s.systemPromptSnapshot = sys;
+
     final msgs = buildRequestMessages(s, sys, atts: atts);
 
     try {

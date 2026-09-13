@@ -738,6 +738,7 @@ class _ChatScreenState extends State<ChatScreen>
   MsgKind? _windowLastKind;
   bool _windowLastThinking = false;
   bool _windowShowReasoning = false;
+  bool _windowCompact = true;
   int _windowVisibleCount = -1;
 
   // NOTE: the ListView is intentionally NOT memoized by widget identity.
@@ -833,6 +834,7 @@ class _ChatScreenState extends State<ChatScreen>
   /// tokens and the full history is never re-folded.
   TranscriptWindow _transcriptWindow(ChatSession s) {
     final showReasoning = AppState.I.showReasoning;
+    final compact = !AppState.I.conversationFull;
     final messages = s.messages;
     final count = messages.length;
     final last = count == 0 ? null : messages.last;
@@ -845,12 +847,14 @@ class _ChatScreenState extends State<ChatScreen>
         _windowLastKind != lastKind ||
         _windowLastThinking != lastThinking ||
         _windowShowReasoning != showReasoning ||
+        _windowCompact != compact ||
         _windowVisibleCount != _visibleCount) {
       _windowCache = windowForBounded(
         messages,
         pageSize: _pageSize,
         visibleCount: _visibleCount,
         showReasoning: showReasoning,
+        compact: compact,
       );
       _windowSessionId = s.id;
       _windowCount = count;
@@ -858,6 +862,7 @@ class _ChatScreenState extends State<ChatScreen>
       _windowLastKind = lastKind;
       _windowLastThinking = lastThinking;
       _windowShowReasoning = showReasoning;
+      _windowCompact = compact;
       _windowVisibleCount = _visibleCount;
     }
     return _windowCache!;
@@ -1252,7 +1257,18 @@ class _ChatScreenState extends State<ChatScreen>
                                         AgentService.I.producedFiles;
                                     final showProduced =
                                         !typing && produced.isNotEmpty;
+                                    // System-prompt disclosure (context
+                                    // visibility): only at the top of the
+                                    // loaded window so it never shifts the
+                                    // paging row.
+                                    final sysPrompt = hiddenMessages == 0
+                                        ? s.systemPromptSnapshot
+                                        : null;
+                                    final showSysPrompt =
+                                        sysPrompt != null &&
+                                        sysPrompt.trim().isNotEmpty;
                                     final count =
+                                        (showSysPrompt ? 1 : 0) +
                                         (hiddenMessages > 0 ? 1 : 0) +
                                         items.length +
                                         (typing ? 1 : 0) +
@@ -1279,11 +1295,22 @@ class _ChatScreenState extends State<ChatScreen>
                                       ),
                                       itemCount: count,
                                       itemBuilder: (_, i) {
-                                        // Row 0: paging affordance. The
+                                        var idx = i;
+                                        // Row 0 (no paging): the system-prompt
+                                        // disclosure for the latest turn.
+                                        if (showSysPrompt && idx == 0) {
+                                          return _RowIn(
+                                            child: _SystemPromptRow(
+                                              text: sysPrompt,
+                                            ),
+                                          );
+                                        }
+                                        if (showSysPrompt) idx -= 1;
+                                        // Next row: paging affordance. The
                                         // spinner shows only while a page is
                                         // actually loading — it used to spin
                                         // forever in any long thread.
-                                        if (hiddenMessages > 0 && i == 0) {
+                                        if (hiddenMessages > 0 && idx == 0) {
                                           return Center(
                                             child: Padding(
                                               padding: const EdgeInsets.all(8),
@@ -1328,8 +1355,8 @@ class _ChatScreenState extends State<ChatScreen>
                                           );
                                         }
                                         final li = hiddenMessages > 0
-                                            ? i - 1
-                                            : i;
+                                            ? idx - 1
+                                            : idx;
                                         if (li == items.length) {
                                           return typing
                                               ? const _TypingBubble()
@@ -1523,12 +1550,18 @@ class _ChatScreenState extends State<ChatScreen>
                       // Unknown /command falls through to the agent.
                     }
 
-                    // ── web-IDE busy behavior: typing while running queues
-                    // the message to auto-run after the current turn. ──
+                    // ── web-IDE busy behavior: typing while running either
+                    // queues the message (default) or interrupts the current
+                    // run and sends immediately, per the user's setting. ──
                     if (s != null && AgentService.I.busyFor(s.id)) {
-                      AgentService.I.enqueueMessage(t);
-                      _input.clear();
-                      return;
+                      if (AppState.I.sendWhileBusyInterrupt) {
+                        AgentService.I.stopRequested(sessionId: s.id);
+                        // fall through to send
+                      } else {
+                        AgentService.I.enqueueMessage(t);
+                        _input.clear();
+                        return;
+                      }
                     }
 
                     if (context.mounted) _sendPrompt(context, s, t);
@@ -2271,6 +2304,85 @@ class _EmptyState extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Collapsible "System prompt" disclosure for the latest turn — shows the
+/// exact assembled system prompt the model received (context visibility).
+class _SystemPromptRow extends StatefulWidget {
+  final String text;
+  const _SystemPromptRow({required this.text});
+  @override
+  State<_SystemPromptRow> createState() => _SystemPromptRowState();
+}
+
+class _SystemPromptRowState extends State<_SystemPromptRow> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      key: const ValueKey('chat-system-prompt-row'),
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            key: const ValueKey('chat-system-prompt-summary'),
+            borderRadius: BorderRadius.circular(6),
+            onTap: () => setState(() => _open = !_open),
+            child: SizedBox(
+              height: 28,
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.terminal_outlined,
+                    size: 14,
+                    color: Aether.textMuted,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'System prompt',
+                    style: TextStyle(fontSize: 13, color: Aether.textMuted),
+                  ),
+                  const Spacer(),
+                  AnimatedRotation(
+                    turns: _open ? 0.0 : -0.25,
+                    duration: const Duration(milliseconds: 100),
+                    child: Icon(
+                      Icons.chevron_right,
+                      size: 16,
+                      color: Aether.textMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_open)
+            Container(
+              key: const ValueKey('chat-system-prompt-body'),
+              width: double.infinity,
+              margin: const EdgeInsets.only(top: 4),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Aether.codeBg,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: SelectableText(
+                widget.text,
+                style: TextStyle(
+                  fontFamily: Aether.mono,
+                  fontSize: 11,
+                  height: 19 / 11,
+                  color: Aether.text,
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -3405,6 +3517,20 @@ class _MessageView extends StatelessWidget {
           ),
         ),
       );
+    }
+    // Branch into a new conversation from this assistant message.
+    if (!isUser && m.kind == MsgKind.text && !m.thinking) {
+      add(Icons.call_split, 'Branch into a new conversation', () {
+        final branch = AppState.I.branchSessionFrom(session.id, msgIndex);
+        if (branch != null && context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Branched into a new chat'),
+              duration: Duration(milliseconds: 900),
+            ),
+          );
+        }
+      });
     }
     return Padding(
       padding: const EdgeInsets.only(bottom: 8, top: 2),
