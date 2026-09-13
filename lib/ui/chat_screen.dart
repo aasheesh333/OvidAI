@@ -5596,6 +5596,16 @@ class _ApprovalDock extends StatelessWidget {
                 child: const Text('Allow', style: TextStyle(fontSize: 12)),
                 onPressed: () => AgentService.I.approve(true),
               ),
+              if (req.allowAlways)
+                TextButton(
+                  style: TextButton.styleFrom(
+                    foregroundColor: Aether.accent,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    minimumSize: Size.zero,
+                  ),
+                  child: const Text('Always', style: TextStyle(fontSize: 12)),
+                  onPressed: () => AgentService.I.approveAlways(),
+                ),
             ],
           ),
         );

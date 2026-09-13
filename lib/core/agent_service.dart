@@ -352,12 +352,18 @@ class ApprovalRequest {
   /// Free-text note the user attached when refusing (e.g. "Chat about it"),
   /// handed back to the model so it can revise instead of guessing.
   String? note;
+  /// When true the approval card offers a third "Always allow" action that
+  /// remembers the tool for the rest of the session. Only plain tool
+  /// approvals set this — destructive commands, plugin installs, device
+  /// permissions, questions and plan reviews never do.
+  final bool allowAlways;
   ApprovalRequest({
     required this.tool,
     required this.summary,
     required this.detail,
     this.questions,
     this.planBody,
+    this.allowAlways = false,
   });
 }
 
@@ -1303,6 +1309,7 @@ class AgentService extends ChangeNotifier {
   /// Drop a session's run entirely (called from AppState.deleteSession).
   void dropSessionRun(String sessionId) {
     final r = _runs.remove(sessionId);
+    _alwaysAllowedTools.remove(sessionId);
     if (r == null) return;
     r.cancelRequested = true;
     try {
@@ -2920,6 +2927,30 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     if (!req.completer.isCompleted) req.completer.complete(ok);
     notifyListeners();
   }
+
+  /// Approve AND remember the requesting tool for the rest of this session:
+  /// future approvals for the same tool complete immediately without
+  /// prompting. Only requests carrying [ApprovalRequest.allowAlways] record
+  /// — the UI never offers the action otherwise, so destructive commands,
+  /// plugin installs, device permissions, questions and plan reviews can
+  /// never land in memory.
+  void approveAlways() {
+    final req = pendingApproval;
+    pendingApproval = null;
+    if (req == null) return;
+    if (req.allowAlways) {
+      final sid = _runSession?.id ?? AppState.I.activeSession?.id ?? '';
+      _alwaysAllowedTools.putIfAbsent(sid, () => <String>{}).add(req.tool);
+    }
+    if (!req.completer.isCompleted) req.completer.complete(true);
+    notifyListeners();
+  }
+
+  /// Per-session "always allow" memory: session id → remembered tool names.
+  /// Never persisted; entries die with the session (see dropSessionRun) and
+  /// with the process. Destructive commands bypass it by construction (the
+  /// destructive gate prompts before this memory is ever consulted).
+  final Map<String, Set<String>> _alwaysAllowedTools = {};
 
   // ── Provider / endpoint resolution ────────────────────────────────────
   Uri _endpoint(ProviderConfig p) {
@@ -9506,8 +9537,13 @@ ${await _agentsMdBlock()}
       }
     }
 
-    Future<bool> askAndAudit(String t, String s, String d) async {
-      final ok = await _askUser(t, s, d);
+    Future<bool> askAndAudit(
+      String t,
+      String s,
+      String d, {
+      bool allowAlways = false,
+    }) async {
+      final ok = await _askUser(t, s, d, allowAlways: allowAlways);
       if (sessionId != null) {
         await SessionLedger.I.append(sessionId, 'approval', {
           'tool': tool,
@@ -9535,6 +9571,20 @@ ${await _agentsMdBlock()}
     // Their privileges are already bounded by the inherited mode, the
     // read-only gate and the parent's allowed_tools filter.
     if (running != null && running.isSubagent) return true;
+    // "Always allow for this command": per-session memory for plain tool
+    // approvals. Checked after the destructive and subagent gates above,
+    // so a remembered tool never bypasses them.
+    final rememberedSid = sessionId ?? '';
+    if ((_alwaysAllowedTools[rememberedSid]?.contains(tool) ?? false)) {
+      if (sessionId != null) {
+        await SessionLedger.I.append(sessionId, 'approval', {
+          'tool': tool,
+          'ok': true,
+          'via': 'always-allow',
+        });
+      }
+      return true;
+    }
     switch (mode) {
       case AgentMode.drive:
       case AgentMode.control:
@@ -9543,7 +9593,7 @@ ${await _agentsMdBlock()}
       case AgentMode.studio:
         return tool != 'commit'
             ? true
-            : await askAndAudit(tool, summary, detail);
+            : await askAndAudit(tool, summary, detail, allowAlways: true);
       case AgentMode.safe:
         // "Auto-run safe commands" ON → read-only commands skip confirm.
         if (AppState.I.autoRunSafeCommands &&
@@ -9551,7 +9601,7 @@ ${await _agentsMdBlock()}
             _isReadOnlyCommand(summary)) {
           return true;
         }
-        return await askAndAudit(tool, summary, detail);
+        return await askAndAudit(tool, summary, detail, allowAlways: true);
     }
   }
 
@@ -9752,12 +9802,14 @@ ${await _agentsMdBlock()}
     String s,
     String d, {
     String? planBody,
+    bool allowAlways = false,
   }) async {
     final req = ApprovalRequest(
       tool: t,
       summary: s,
       detail: d,
       planBody: planBody,
+      allowAlways: allowAlways,
     );
     pendingApproval = req;
     notifyListeners();
