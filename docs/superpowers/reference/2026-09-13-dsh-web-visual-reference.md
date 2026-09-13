@@ -136,8 +136,32 @@ are expressed as `calc(size + (content-font-size - 14px))`.
   `#cfd3d6`, padding-bottom 8px, transparent, no border.
 - These are **collapsed rows**, not bordered cards.
 
+#### 4.4.1 Reasoning disclosure geometry (measured)
+- Collapsed trigger: `height: 33px`, `border-bottom: .5px solid #ffffff1f`,
+  `color: #cfd3d6`, `cursor: pointer`, `padding: 0 0 8px`, transparent bg.
+- Label: `14px/24px`, ellipsis.
+- Chevron: `16×16`, color `#adb2b8`, `margin-left: 6px`,
+  `transition: transform .1s`, `rotate(-90deg)` collapsed → `0deg` expanded.
+- **Expand/collapse is instant** (content swaps in place); only the chevron
+  rotates over `.1s`. No height animation.
+- Expanded body (`hWmORq_root`): flex column, `14px/24px`,
+  `color: #f9fafb` (primary — NOT muted), borderless, full 680px column.
+- Reasoning text is regular markdown at full size, not a smaller muted font.
+
+#### 4.4.2 Tool / process row geometry (measured)
+- Row (`_row_luwio_16`): `height: 24px`, `overflow: hidden`, flex,
+  align-items center.
+- Leading glyph: `16×16`, color `#adb2b8`, `margin-right: 6px`.
+- Title: `13px/24px`, color `#cfd3d6`.
+- Summary: `13px/20px`, color `#adb2b8`, ellipsis.
+- Separator dot: `2×2px`, color `#81858c`, `margin: 0 8px`, radius 1px.
+- Tool kinds render as short rows: `Write`, `Bash`, `Think`, each with a
+  trailing summary (e.g. `Write package.json +18 -0`).
+- Diff stat: code font, `11px`, color `#81858c`, `margin-left: 10px`.
+
 ### 4.5 Turn error
-- Row: grid, `align-items: start`, gap 8px, padding `2px 0`, 680px, 13/20.
+- Row: grid `10px minmax(0,1fr) auto`, `align-items: start`, gap 8px,
+  padding `2px 0`, 680px, `13px/20px`.
 - Message: color `#cfd3d6`, inline.
 - Title ("This turn failed") + code (e.g. `MISSING_CREDENTIAL`) with a state
   dot (error color `#f25a5a`).
@@ -148,8 +172,46 @@ are expressed as `calc(size + (content-font-size - 14px))`.
   `2 turns 6 steps · 194 tok/s`, `44.1K tok · Cache hit 82%`,
   `4% of context used`.
 - Numbers use compact K/M/B suffixes.
+- To-dos block: `5 completed` / `1 in progress · 4 pending`.
 
-### 4.7 Empty / new-session state
+### 4.8 Live streaming / thinking animations (measured)
+- **State dot chase** (`_dsh-state-dot-chase`): SVG cells, base
+  `opacity: .15`, `animation: 1s ease infinite`, keyframes
+  `0%/12.4% → 1`, `12.5%/24.9% → .6`, `25%/37.4% → .35`,
+  `37.5%/100% → .15`. This is the pulsing "three dots" chase.
+- **Turn-status shimmer** (`EvIC1a_turnStatus`): height 26px, `14px/22px`,
+  `background-clip: text`, `-webkit-text-fill-color: transparent`,
+  `background-size: 250% 100%`, `background-position: 100% 0`,
+  `animation: 1.8s linear infinite` (`background-position → 0 0`).
+  Gradient (exact):
+  `linear-gradient(90deg, #4176e6 0%, #4176e6 40%, #d3e2ff 50%, #4176e6 60%, #4176e6 100%)`.
+  The status text is a rotating phrase (e.g. "Deep diving…"), shimmering
+  blue with a light `#d3e2ff` highlight sweeping left.
+- **Retry shimmer** (`Sixlwa_retry-shimmer`): `1.6s ease-in-out infinite`,
+  `background-position: 100% center → 0 center`.
+- Clock next to status: `13px/20px`, `font-variant-numeric: tabular-nums`,
+  color `#81858c`, `margin-left: 8px`.
+- Entrance animations: session rows `.15s`, turn marks `.15s`, sidebar
+  reveals `.2s`, all `cubic-bezier(.4,0,.2,1)`.
+
+### 4.9 Subagents
+- Rendered inline in the assistant turn as `1 message · 2 subagents`.
+- Each subagent is a markdown list item with a short hex id in inline code
+  (e.g. `` `4785ea0d` ``) plus a one-line description.
+- Inline code chip: code font, bg `#292929`, radius 6px, padding `0 5px`,
+  `border: 1px solid #ffffff0f`.
+- The session title bar shows a `N subagents running` indicator and the
+  breadcrumb shows `/ 2 subagents`.
+- Tool rows for subagents carry a `Deep diving…` status shimmer.
+
+### 4.10 Files changed card
+- Section label `Files changed` (`13px/22px`, color `#adb2b8`).
+- Each file row: file link `13px/24px` color `#cfd3d6` + description +
+  an `Open` action; `Open`/preview actions appear on hover.
+- Empty case: `No files were created — this was a direct response.`
+  (`14px/24px`, margin-top 16px).
+
+### 4.11 Empty / new-session state
 - Headline: **26/32/500**, color `#f9fafb` (e.g. "Into the Unknown").
 - Preview badge: code font **12/18/500**, bg `#34415b`, radius **24px**,
   padding `1px 7px 0`, margin-top 2px, color `#f9fafb`.

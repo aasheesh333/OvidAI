@@ -38,4 +38,24 @@ void main() {
   test('the model picker surfaces a Recent section', () {
     expect(chat.contains("'Recent'"), isTrue);
   });
+
+  test('reasoning disclosure matches the reference geometry', () {
+    // 33px collapsed trigger with a .5px bottom hairline.
+    expect(chat.contains('height: 33'), isTrue);
+    expect(chat.contains('width: 0.5'), isTrue);
+    // Chevron rotates over 100ms (reference .1s).
+    expect(chat.contains('Duration(milliseconds: 100)'), isTrue);
+  });
+
+  test('live status shimmer uses the reference blue gradient', () {
+    // base #4176e6 with a #d3e2ff highlight sweeping across.
+    expect(chat.contains('0xFF4176E6'), isTrue);
+    expect(chat.contains('0xFFD3E2FF'), isTrue);
+    expect(chat.contains('milliseconds: 1800'), isTrue);
+  });
+
+  test('state dot chase is a three-dot 1s ladder', () {
+    expect(chat.contains('milliseconds: 1000'), isTrue);
+    expect(chat.contains('_levels'), isTrue);
+  });
 }

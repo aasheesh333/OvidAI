@@ -96,10 +96,10 @@ void main() {
     expect(find.byKey(reasoningBody), findsNothing);
     expect(find.byKey(toolBody), findsNothing);
 
-    // The chevrons point at rest.
+    // The chevrons point right (collapsed) at rest.
     expect(
       tester.widget<AnimatedRotation>(find.byKey(reasoningChevron)).turns,
-      0.0,
+      -0.25,
     );
     expect(
       tester.widget<AnimatedRotation>(find.byKey(toolChevron)).turns,
@@ -150,7 +150,7 @@ void main() {
     expect(find.byKey(reasoningBody), findsOneWidget);
     expect(
       tester.widget<AnimatedRotation>(find.byKey(reasoningChevron)).turns,
-      0.5,
+      0.0,
     );
 
     await tester.tap(find.byKey(reasoningSummary));
@@ -158,7 +158,7 @@ void main() {
     expect(find.byKey(reasoningBody), findsNothing);
     expect(
       tester.widget<AnimatedRotation>(find.byKey(reasoningChevron)).turns,
-      0.0,
+      -0.25,
     );
   });
 

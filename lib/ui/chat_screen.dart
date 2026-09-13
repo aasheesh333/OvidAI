@@ -155,8 +155,9 @@ class _RowInState extends State<_RowIn> with SingleTickerProviderStateMixin {
   }
 }
 
-/// `ovid-state-dot-chase` — pulsing accent dot used on running tool
-/// and reasoning rows instead of a spinner.
+/// `ovid-state-dot-chase` — three pulsing dots used on running tool and
+/// reasoning rows. Opacity steps 1 → .6 → .35 → .15 over 1s, staggered so
+/// the highlight appears to chase across the dots (matches the reference).
 class _ChaseDot extends StatefulWidget {
   final Color color;
   const _ChaseDot(this.color);
@@ -168,7 +169,7 @@ class _ChaseDotState extends State<_ChaseDot>
     with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 1100),
+    duration: const Duration(milliseconds: 1000),
   )..repeat();
 
   @override
@@ -177,32 +178,44 @@ class _ChaseDotState extends State<_ChaseDot>
     super.dispose();
   }
 
+  // 4-step opacity ladder from the reference keyframes.
+  static const _levels = [1.0, 0.6, 0.35, 0.15];
+
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _c,
-      builder: (_, _) {
-        final phase = 0.5 - (_c.value - 0.5).abs();
-        final op = 0.35 + 0.65 * phase * 2;
-        final scale = 0.8 + 0.35 * phase * 2;
-        return Transform.scale(
-          scale: scale,
-          child: Container(
-            width: 11,
-            height: 11,
-            decoration: BoxDecoration(
-              color: widget.color.withValues(alpha: op.clamp(0.0, 1.0)),
-              shape: BoxShape.circle,
-            ),
-          ),
-        );
-      },
+    return SizedBox(
+      width: 16,
+      height: 16,
+      child: AnimatedBuilder(
+        animation: _c,
+        builder: (_, _) {
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              for (var i = 0; i < 3; i++) ...[
+                if (i > 0) const SizedBox(width: 2),
+                _dot(_levels[(_c.value * 4 + i).floor() % 4]),
+              ],
+            ],
+          );
+        },
+      ),
     );
   }
+
+  Widget _dot(double op) => Container(
+    width: 3.5,
+    height: 3.5,
+    decoration: BoxDecoration(
+      color: widget.color.withValues(alpha: op),
+      shape: BoxShape.circle,
+    ),
+  );
 }
 
-/// `ovid-turn-status-shimmer` — shimmering status text (e.g. the
-/// "Thinking…" label on a live reasoning row).
+/// `ovid-turn-status-shimmer` — a blue gradient sweeps across the status
+/// text (base accent with a light highlight), matching the reference's
+/// 1.8s linear infinite shimmer.
 class _ShimmerText extends StatefulWidget {
   final String text;
   final TextStyle style;
@@ -215,7 +228,7 @@ class _ShimmerTextState extends State<_ShimmerText>
     with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 1400),
+    duration: const Duration(milliseconds: 1800),
   )..repeat();
 
   @override
@@ -228,20 +241,32 @@ class _ShimmerTextState extends State<_ShimmerText>
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: _c,
-      builder: (_, _) {
-        final t = (_c.value * 2) % 1.0;
-        final mix = Color.lerp(
-          Aether.textMuted,
-          Aether.text,
-          (0.5 - (t - 0.5).abs()) * 2,
-        );
-        return Text(
-          widget.text,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: widget.style.copyWith(color: mix),
+      builder: (_, child) {
+        // A 250%-wide gradient swept right→left over 1.8s.
+        final shift = 1.0 - _c.value * 2.5;
+        return ShaderMask(
+          blendMode: BlendMode.srcIn,
+          shaderCallback: (bounds) => LinearGradient(
+            begin: Alignment(shift, 0),
+            end: Alignment(shift + 1.0, 0),
+            colors: const [
+              Color(0xFF4176E6),
+              Color(0xFF4176E6),
+              Color(0xFFD3E2FF),
+              Color(0xFF4176E6),
+              Color(0xFF4176E6),
+            ],
+            stops: const [0.0, 0.4, 0.5, 0.6, 1.0],
+          ).createShader(bounds),
+          child: child,
         );
       },
+      child: Text(
+        widget.text,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: widget.style,
+      ),
     );
   }
 }
@@ -2276,82 +2301,86 @@ class _ReasoningCardState extends State<_ReasoningCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Compact 28px summary — tap to toggle. No border, no background.
-          InkWell(
-            key: const ValueKey('chat-reasoning-summary'),
-            borderRadius: BorderRadius.circular(6),
-            onTap: hasBody ? () => setState(() => _override = !expanded) : null,
-            child: SizedBox(
-              height: 28,
-              child: Row(
-                children: [
-                  if (isStreaming)
-                    const _ChaseDot(Aether.accent)
-                  else
-                    Icon(
-                      Icons.psychology_outlined,
-                      size: 14,
-                      color: Aether.textFaint,
-                    ),
-                  const SizedBox(width: 8),
-                  if (isStreaming)
-                    Expanded(
-                      child: _ShimmerText(
-                        'Thinking…',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Aether.textMuted,
-                          fontWeight: FontWeight.w500,
+          // Compact 33px summary — tap to toggle. A .5px hairline under the
+          // row matches the reference; chevron rotates over 0.1s.
+          Container(
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: Aether.hairlineStrong,
+                  width: 0.5,
+                ),
+              ),
+            ),
+            child: InkWell(
+              key: const ValueKey('chat-reasoning-summary'),
+              borderRadius: BorderRadius.circular(6),
+              onTap: hasBody ? () => setState(() => _override = !expanded) : null,
+              child: SizedBox(
+                height: 33,
+                child: Row(
+                  children: [
+                    if (isStreaming)
+                      const _ChaseDot(Aether.accent)
+                    else
+                      Icon(
+                        Icons.psychology_outlined,
+                        size: 15,
+                        color: Aether.textMuted,
+                      ),
+                    const SizedBox(width: 6),
+                    if (isStreaming)
+                      Expanded(
+                        child: _ShimmerText(
+                          'Thinking…',
+                          style: TextStyle(
+                            fontSize: 14,
+                            height: 24 / 14,
+                            color: Aether.textMuted,
+                          ),
+                        ),
+                      )
+                    else
+                      Expanded(
+                        child: Text(
+                          'Thoughts',
+                          key: const ValueKey('chat-reasoning-title'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 14,
+                            height: 24 / 14,
+                            color: Aether.textMuted,
+                          ),
                         ),
                       ),
-                    )
-                  else
-                    Expanded(
-                      child: Text(
-                        'Thoughts',
-                        key: const ValueKey('chat-reasoning-title'),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 12,
+                    if (hasBody)
+                      AnimatedRotation(
+                        key: const ValueKey('chat-reasoning-chevron'),
+                        turns: expanded ? 0.0 : -0.25,
+                        duration: const Duration(milliseconds: 100),
+                        child: Icon(
+                          Icons.chevron_right,
+                          size: 16,
                           color: Aether.textMuted,
-                          fontWeight: FontWeight.w500,
                         ),
                       ),
-                    ),
-                  if (isStreaming)
-                    Text(
-                      'live',
-                      style: TextStyle(fontSize: 10, color: Aether.textFaint),
-                    ),
-                  if (hasBody)
-                    AnimatedRotation(
-                      key: const ValueKey('chat-reasoning-chevron'),
-                      turns: expanded ? 0.5 : 0.0,
-                      duration: const Duration(milliseconds: 150),
-                      child: Icon(
-                        Icons.expand_more,
-                        size: 16,
-                        color: Aether.textFaint,
-                      ),
-                    ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
-          // A single hairline separates summary from the expanded body.
-          if (expanded && hasBody) Container(height: 1, color: Aether.hairline),
-          // Body — full column width, muted, no heavy border. Reasoning is
-          // apparatus, not prose: smaller and dimmer than the answer.
+          // Body — full column width, regular markdown at primary color
+          // (the reference shows reasoning at the same 14/24 as prose).
           if (expanded && hasBody)
             Container(
               key: const ValueKey('chat-reasoning-body'),
               width: double.infinity,
-              padding: const EdgeInsets.fromLTRB(22, 8, 4, 10),
+              padding: const EdgeInsets.only(top: 8, bottom: 4),
               child: _OvidMarkdown(
                 content: widget.m.content,
-                fontSize: 12.5,
-                color: Aether.textMuted,
+                fontSize: 14,
+                color: Aether.text,
               ),
             ),
         ],

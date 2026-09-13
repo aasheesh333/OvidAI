@@ -126,10 +126,10 @@ void main() {
     expect(find.byKey(reasoningBody), findsNothing);
     expect(find.byKey(toolSummary), findsOneWidget);
     expect(find.byKey(toolBody), findsNothing);
-    // The collapsed summary is a compact 28px line.
+    // The collapsed summary is a compact 33px line (reference geometry).
     expect(
       tester.getSize(find.byKey(reasoningSummary)).height,
-      moreOrLessEquals(28, epsilon: 0.5),
+      moreOrLessEquals(33, epsilon: 0.5),
     );
     // Tapping expands the body in place (proving it is a real disclosure).
     await tester.tap(find.byKey(reasoningSummary));
