@@ -1770,6 +1770,17 @@ class AppState extends ChangeNotifier {
     refresh();
   }
 
+    /// Install an inbuilt (source-less) plugin/MCP row directly: mark it
+  /// installed+enabled and persist. Inbuilt rows ship with the app and have
+  /// no remote source to fetch, so the add-marketplace sheet must never open
+  /// for them.
+  Future<void> installBuiltinPlugin(PluginItem plugin) async {
+    plugin.installed = true;
+    plugin.enabled = true;
+    await persistPluginState();
+    refresh();
+  }
+
   Future<void> enablePlugin(PluginItem plugin) async {
     final runtimeId = plugin.runtimeId;
     if (plugin.runtimeId != null) {
@@ -3932,13 +3943,19 @@ class AppState extends ChangeNotifier {
   ProviderConfig? providerForSession([ChatSession? session]) =>
       providerById((session ?? activeSession)?.providerId);
 
+  /// Resolve a bare model id to its provider **only when unambiguous**.
+  /// Two providers can expose the same model id; silently picking the first
+  /// would send a session's request to the wrong provider. On ambiguity this
+  /// returns null and callers keep the stored `providerId` (or surface a
+  /// chooser) rather than guessing.
   String? _inferProviderId(String model) {
     final modelId = model.split('·').first.trim();
     if (modelId.isEmpty || modelId == 'Select a provider') return null;
-    for (final provider in providers) {
-      if (provider.models.contains(modelId)) return provider.id;
-    }
-    return null;
+    final matches = providers
+        .where((provider) => provider.models.contains(modelId))
+        .toList();
+    if (matches.length != 1) return null;
+    return matches.first.id;
   }
 
   void _restoreSelectedModel() {
@@ -4667,6 +4684,7 @@ class AppState extends ChangeNotifier {
           'https://raw.githack.com/$owner/$name/main/$path',
       ],
     ];
+    String? parseError;
     for (final url in urls) {
       final client = HttpClient()
         ..connectionTimeout = const Duration(seconds: 15);
@@ -4684,15 +4702,26 @@ class AppState extends ChangeNotifier {
             throw Exception('marketplace.json too large');
           }
         }
-        final j =
-            jsonDecode(utf8.decode(builder.takeBytes()))
-                as Map<String, dynamic>;
-        return _mergeMarketplaceCatalog(j, owner, name);
+        try {
+          final j =
+              jsonDecode(utf8.decode(builder.takeBytes()))
+                  as Map<String, dynamic>;
+          return _mergeMarketplaceCatalog(j, owner, name);
+        } catch (e) {
+          // The file WAS found; surface the real parse failure instead of
+          // reporting a false "not found".
+          parseError ??= e.toString();
+          continue;
+        }
       } catch (_) {
         continue;
       } finally {
         client.close(force: true);
       }
+    }
+    if (parseError != null) {
+      return 'Found a marketplace file in $owner/$name but could not parse '
+          'it: $parseError';
     }
     return 'No marketplace.json found in $owner/$name '
         '(tried main, master, .claude-plugin/marketplace.json and mirrors). '
@@ -5139,8 +5168,38 @@ class AppState extends ChangeNotifier {
   /// PR40/Task2: normalize a marketplace plugin-entry `source` to a fetchable
   /// `owner/repo` or resolve relative `./dir` / `/dir` paths against the marketplace
   /// repository (`owner/repo/raw/branch/path`).
-  static String? _githubPluginSource(String? raw, {String? marketplaceRepo}) {
+  static String? _githubPluginSource(dynamic raw, {String? marketplaceRepo}) {
     if (raw == null) return null;
+    // Claude-Code / Codex object form: `{source:"url", url}`,
+    // `{source:"github", repo, ref}`, `{source:"local", path}`. Normalize to
+    // the string forms below instead of throwing a cast error (which the
+    // fetch loop used to swallow as a false "not found").
+    if (raw is Map) {
+      final kind = (raw['source'] as String?)?.toLowerCase();
+      switch (kind) {
+        case 'url':
+          return _githubPluginSource(
+            _repoFromUrl(raw['url'] as String?),
+            marketplaceRepo: marketplaceRepo,
+          );
+        case 'github':
+          return _githubPluginSource(
+            raw['repo'] as String?,
+            marketplaceRepo: marketplaceRepo,
+          );
+        case 'local':
+          return _githubPluginSource(
+            raw['path'] as String?,
+            marketplaceRepo: marketplaceRepo,
+          );
+      }
+      // Unknown object shape — try the common keys before giving up.
+      return _githubPluginSource(
+        raw['repo'] ?? raw['url'] ?? raw['path'],
+        marketplaceRepo: marketplaceRepo,
+      );
+    }
+    if (raw is! String) return null;
     final s = raw.trim();
     if (s.isEmpty) return null;
     if (s.startsWith('.') || s.startsWith('/')) {
@@ -5158,6 +5217,19 @@ class AppState extends ChangeNotifier {
     final normalized = normalizeMarketplace(s);
     if (normalized.split('/').length != 2) return null;
     return normalized;
+  }
+
+  /// Extract `owner/repo` from a git URL (`https://github.com/o/r.git`,
+  /// `git@github.com:o/r.git`, or a bare `o/r`).
+  static String? _repoFromUrl(String? url) {
+    if (url == null) return null;
+    var u = url.trim();
+    if (u.isEmpty) return null;
+    u = u.replaceFirst(RegExp(r'\.git$'), '');
+    final m = RegExp(r'github\.com[/:]([^/]+)/([^/]+)').firstMatch(u);
+    if (m != null) return '${m.group(1)}/${m.group(2)}';
+    if (RegExp(r'^[\w.-]+/[\w.-]+$').hasMatch(u)) return u;
+    return null;
   }
 
   /// Normalize a relative path, dropping `.` segments and resolving `..`
@@ -5180,7 +5252,7 @@ class AppState extends ChangeNotifier {
 
   @visibleForTesting
   static String? githubPluginSourceForTest(
-    String? raw, {
+    dynamic raw, {
     String? marketplaceRepo,
   }) => _githubPluginSource(raw, marketplaceRepo: marketplaceRepo);
 
@@ -5206,7 +5278,7 @@ class AppState extends ChangeNotifier {
           );
           if (existing.source == null && p['source'] != null) {
             existing.source = _githubPluginSource(
-              p['source'] as String?,
+              p['source'],
               marketplaceRepo: '$owner/$repoName',
             );
           }
@@ -5228,7 +5300,7 @@ class AppState extends ChangeNotifier {
             // PR40/Task2: an `owner/repo` source or relative `./dir` source
             // resolved against the marketplace repo allows fetching plugin content.
             source: _githubPluginSource(
-              p['source'] as String?,
+              p['source'],
               marketplaceRepo: '$owner/$repoName',
             ),
             marketplace: '$owner/$repoName',

@@ -113,6 +113,29 @@ void main() {
       expect(branch, contains('exit 2'));
       expect(branch, contains('>&2'));
     });
+
+    test('index fetch tries .gz before .xz and silences expected probes', () {
+      final start = content.indexOf('_fetch_index()');
+      expect(start, greaterThan(0));
+      final body = content.substring(start, content.indexOf('\n}', start));
+      final gz = body.indexOf('.gz');
+      final xz = body.indexOf('.xz');
+      expect(gz, greaterThan(0));
+      expect(xz, greaterThan(0));
+      // The mirror serves .gz but not .xz; probing .xz first printed a
+      // misleading "curl: (22) ... 404" on every update.
+      expect(gz, lessThan(xz), reason: '.gz must be probed before .xz');
+      // Both compressed probes suppress stderr; only the final plain fetch
+      // is allowed to surface an error.
+      expect(
+        RegExp(r'\.gz" -o "\$PKG_IDX/Packages\.gz" 2>/dev/null').hasMatch(body),
+        isTrue,
+      );
+      expect(
+        RegExp(r'\.xz" -o "\$PKG_IDX/Packages\.xz" 2>/dev/null').hasMatch(body),
+        isTrue,
+      );
+    });
   });
 
   group('ovid-pkg runtime behavior', () {
@@ -273,11 +296,11 @@ void main() {
         'prev=""; for a in "\$@"; do [ "\$prev" = "-o" ] && : > "\$a"; '
             'prev="\$a"; done; exit 0',
       );
-      // xz "decompresses" to an empty Packages file (still stale).
+      // gzip "decompresses" to an empty Packages file (still stale).
       writeStub(
         stubs,
-        'xz',
-        'for a in "\$@"; do case "\$a" in *.xz) : > "\${a%.xz}";; esac; '
+        'gzip',
+        'for a in "\$@"; do case "\$a" in *.gz) : > "\${a%.gz}";; esac; '
             'done; exit 0',
       );
 
@@ -304,8 +327,8 @@ void main() {
       );
       writeStub(
         stubs,
-        'xz',
-        'for a in "\$@"; do case "\$a" in *.xz) : > "\${a%.xz}";; esac; '
+        'gzip',
+        'for a in "\$@"; do case "\$a" in *.gz) : > "\${a%.gz}";; esac; '
             'done; exit 0',
       );
 

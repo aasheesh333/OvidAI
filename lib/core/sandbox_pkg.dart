@@ -124,12 +124,16 @@ fi
 # stale index behind a success exit.
 _fetch_index() {
   _url="$1"
-  if curl -fsSL --retry 2 --connect-timeout 25 "$_url.xz" -o "$PKG_IDX/Packages.xz"; then
-    xz -dkf "$PKG_IDX/Packages.xz" || unxz -kf "$PKG_IDX/Packages.xz" || return 1
-  elif curl -fsSL --retry 2 "$_url.gz" -o "$PKG_IDX/Packages.gz"; then
+  # .gz first: the mirror serves Packages.gz (and plain) but not Packages.xz,
+  # so probing .xz first printed a misleading "curl: (22) ... 404" on every
+  # update. Expected probe failures are silenced; only the final plain fetch
+  # surfaces an error.
+  if curl -fsSL --retry 2 --connect-timeout 25 "$_url.gz" -o "$PKG_IDX/Packages.gz" 2>/dev/null; then
     gzip -dkf "$PKG_IDX/Packages.gz" || gunzip -kf "$PKG_IDX/Packages.gz" || return 1
+  elif curl -fsSL --retry 2 --connect-timeout 25 "$_url.xz" -o "$PKG_IDX/Packages.xz" 2>/dev/null; then
+    xz -dkf "$PKG_IDX/Packages.xz" || unxz -kf "$PKG_IDX/Packages.xz" || return 1
   else
-    curl -fsSL --retry 2 "$_url" -o "$PKG_IDX/Packages" || return 1
+    curl -fsSL --retry 2 --connect-timeout 25 "$_url" -o "$PKG_IDX/Packages" || return 1
   fi
   return 0
 }

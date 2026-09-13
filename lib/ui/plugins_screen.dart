@@ -93,6 +93,20 @@ PluginRuntimeStatus? durablePluginStatus(PluginItem p) {
 PluginRuntimeStatus? durableMcpStatus(McpServer s) =>
     AppState.I.statusFor(s.canonicalId);
 
+/// True when [plugin] is an inbuilt (source-less) row that ships with the
+/// app and should install directly rather than opening the add sheet.
+bool _isInbuiltPlugin(PluginItem plugin) {
+  if (plugin.source != null || plugin.marketplace != null) return false;
+  const inbuiltAuthors = {
+    'ovidai',
+    'you',
+    'sandbox',
+    'termux',
+    'modelcontextprotocol',
+  };
+  return inbuiltAuthors.contains(plugin.author);
+}
+
 /// Durable-only status copy for an MCP server (spec §5.3, Task 3): the
 /// persisted canonical label · reason, or the neutral no-record copy.
 /// Never reads serviceStatus or connected.
@@ -1343,15 +1357,28 @@ class PluginDetailScreen extends StatelessWidget {
                       style: TextStyle(fontSize: 13.5),
                     ),
                     onPressed: () async {
-                      // Task 11 (spec §11): ONE inspection/approval flow
-                      // for every source. Catalog rows with a derivable
-                      // source install straight through it; everything
-                      // else opens the single add sheet (Task 2 §5.2).
+                      // ONE inspection/approval flow for every source.
+                      // Catalog rows with a derivable source install
+                      // straight through it; inbuilt (source-less) rows
+                      // install directly; only genuinely unknown rows open
+                      // the single add sheet.
                       final derived = plugin.source != null
                           ? githubPluginSourceFromSourceString(plugin.source!)
                           : null;
                       if (derived != null) {
                         await _runSourceInstall(context, derived, plugin);
+                      } else if (_isInbuiltPlugin(plugin)) {
+                        await app.installBuiltinPlugin(plugin);
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                '${plugin.name} installed',
+                                style: const TextStyle(fontSize: 13),
+                              ),
+                            ),
+                          );
+                        }
                       } else {
                         await showPluginAddSheet(context);
                       }
