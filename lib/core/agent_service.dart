@@ -14,6 +14,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../core/theme.dart';
 import 'format.dart';
+import 'voice_input_service.dart';
 import 'agent_notification_service.dart';
 import 'state.dart';
 import 'sandbox_service.dart';
@@ -939,6 +940,9 @@ class AgentService extends ChangeNotifier {
   static const String deviceOverlayHideMethod = 'deviceOverlayHide';
   static const String deviceOverlayTextMethod = 'deviceOverlayText';
   static const String deviceOverlayStopMethod = 'deviceOverlayStop';
+  static const String deviceOverlayMicMethod = 'deviceOverlayMic';
+  static const String deviceOverlaySetTextMethod = 'deviceOverlaySetText';
+  static const String deviceOverlayMicListeningMethod = 'deviceOverlayMicListening';
 
   static const _overlayNativeChannel = MethodChannel('ovid/native');
   static MethodChannel? _overlayChannelOverrideForTest;
@@ -1044,7 +1048,42 @@ class AgentService extends ChangeNotifier {
       await handleDeviceOverlayStop();
       return true;
     }
+    if (call.method == deviceOverlayMicMethod) {
+      await handleDeviceOverlayMic();
+      return true;
+    }
     return false;
+  }
+
+  /// Overlay mic: toggle on-device dictation; partial transcripts are pushed
+  /// straight into the overlay field, and the mic button reflects the state.
+  Future<void> handleDeviceOverlayMic() async {
+    final voice = VoiceInputService.I;
+    if (voice.isListening) {
+      await voice.stop();
+      try {
+        await _overlayChannel.invokeMethod(
+          deviceOverlayMicListeningMethod,
+          {'listening': false},
+        );
+      } catch (_) {}
+      return;
+    }
+    if (!await voice.isAvailable()) return;
+    final started = await voice.start((text, isFinal) async {
+      try {
+        await _overlayChannel.invokeMethod(
+          deviceOverlaySetTextMethod,
+          {'text': text},
+        );
+      } catch (_) {}
+    });
+    try {
+      await _overlayChannel.invokeMethod(
+        deviceOverlayMicListeningMethod,
+        {'listening': started},
+      );
+    } catch (_) {}
   }
 
   /// Resolve the running session represented by foreground-notification

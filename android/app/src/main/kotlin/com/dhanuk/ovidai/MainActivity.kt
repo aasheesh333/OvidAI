@@ -421,6 +421,16 @@ class MainActivity : FlutterActivity() {
                         val service = deviceService(result) ?: return@setMethodCallHandler
                         completeDeviceAction(result, service.hideOverlay())
                     }
+                    "deviceOverlaySetText" -> {
+                        OvidAccessibilityService.instance
+                            ?.setOverlayInputText(call.argument<String>("text").orEmpty())
+                        result.success(true)
+                    }
+                    "deviceOverlayMicListening" -> {
+                        OvidAccessibilityService.instance
+                            ?.setOverlayMicListening(call.argument<Boolean>("listening") == true)
+                        result.success(true)
+                    }
                     "deviceCopyScreenshot" -> {
                         val sourcePath = call.argument<String>("sourcePath")
                         val directoryPath = call.argument<String>("directoryPath")

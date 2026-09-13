@@ -26,10 +26,10 @@ reviewer, fix rounds max 5, per-plan ledger under `.superpowers/sdd/<plan>/`).
 |----|---------|------|------|--------|
 | P0 | Reliability bug bundle | `specs/2026-09-13-reliability-bug-bundle-design.md` | `plans/2026-09-13-reliability-bug-bundle.md` | IN PROGRESS (ovid-pkg `.gz`-first, apt CRLFile, inbuilt install routing, marketplace object-source + real parse errors, provider ambiguity all done; `gh` install still open) |
 | P1 | DSH web visual parity (home + chat + theme) | `specs/2026-09-13-dsh-visual-parity-design.md` | `plans/2026-09-13-dsh-visual-parity.md` | IN PROGRESS (theme, formatter, hero, hint, questions, recents, transcript geometry, reasoning geometry, live shimmer + 3-dot chase done; DSH feature gaps open) |
-| P2 | Control mode + overlay | `specs/2026-09-13-control-mode-overlay-design.md` | `plans/2026-09-13-control-mode-overlay.md` | IN PROGRESS (one-time disclosure, background-only overlay, lower opacity + stroke, control-mode briefing done; overlay questions + mic open) |
+| P2 | Control mode + overlay | `specs/2026-09-13-control-mode-overlay-design.md` | `plans/2026-09-13-control-mode-overlay.md` | IN PROGRESS (one-time disclosure, background-only overlay, lower opacity + stroke, control-mode briefing, overlay mic done; overlay AI questions open) |
 | P3 | 24/7 background operation | `specs/2026-09-13-background-24-7-design.md` | `plans/2026-09-13-background-24-7.md` | NOT STARTED |
 | P4 | Studio + browser | `specs/2026-09-13-studio-browser-design.md` | `plans/2026-09-13-studio-browser.md` | IN PROGRESS (external GitHub login, login dot, fresh blank tabs done; Studio-mode folder gate + Google sign-in open) |
-| P5 | Voice input (mic) | `specs/2026-09-13-voice-input-design.md` | `plans/2026-09-13-voice-input.md` | NOT STARTED |
+| P5 | Voice input (mic) | `specs/2026-09-13-voice-input-design.md` | `plans/2026-09-13-voice-input.md` | DONE (on-device STT service; composer mic; overlay mic native↔Dart; Kotlin compiles) |
 | P6 | Token efficiency (no-folder) | `specs/2026-09-13-token-efficiency-design.md` | `plans/2026-09-13-token-efficiency.md` | NOT STARTED |
 
 ## Source requirements (verbatim, user 2026-09-12/13)
@@ -97,7 +97,8 @@ deferred gets an explicit note.
 
 | Date | Project | Change | Commit |
 |------|---------|--------|--------|
-| 2026-09-13 | P1 | Deep DSH capture (real 20+ msg vibe-coder session: subagents, file write/edit, live streaming, fold/expand); reasoning 33px + hairline + primary body; blue gradient status shimmer; 3-dot 1s chase | pending |
+| 2026-09-13 | P5 | On-device STT (`speech_to_text`): composer mic + overlay mic native↔Dart; service test seam | pending |
+| 2026-09-13 | P1 | Deep DSH capture (real 20+ msg vibe-coder session: subagents, file write/edit, live streaming, fold/expand); reasoning 33px + hairline + primary body; blue gradient status shimmer; 3-dot 1s chase | ef92047 |
 | 2026-09-13 | P4 | GitHub device login → external browser; Studio login dot (green/red); new-session fresh blank tab | 49cf33a |
 | 2026-09-13 | P2 | One-time control disclosure; background-only overlay; overlay 70% alpha + stroke; control-mode briefing | cc34ae0 |
 | 2026-09-13 | P0 | ovid-pkg `.gz`-first index probe; inbuilt plugin/MCP direct install; marketplace object-form source + real parse errors; provider model-id ambiguity returns null | 34d636e |

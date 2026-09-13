@@ -10,6 +10,7 @@ import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
 import '../core/theme.dart';
 import '../core/format.dart';
+import '../core/voice_input_service.dart';
 import '../core/state.dart';
 import 'sandbox_setup.dart';
 import 'browser_screen.dart';
@@ -3803,10 +3804,73 @@ class _AttachmentChip extends StatelessWidget {
   }
 }
 
+/// Voice-input mic: toggles on-device speech recognition and appends the
+/// recognized text to the composer. Shows a filled accent mic while
+/// listening; honest no-op with a hint when STT is unavailable.
+class _MicButton extends StatefulWidget {
+  final TextEditingController controller;
+  const _MicButton({required this.controller});
+  @override
+  State<_MicButton> createState() => _MicButtonState();
+}
+
+class _MicButtonState extends State<_MicButton> {
+  bool _listening = false;
+
+  @override
+  void dispose() {
+    if (_listening) VoiceInputService.I.cancel();
+    super.dispose();
+  }
+
+  Future<void> _toggle() async {
+    final voice = VoiceInputService.I;
+    if (_listening) {
+      await voice.stop();
+      if (mounted) setState(() => _listening = false);
+      return;
+    }
+    final available = await voice.isAvailable();
+    if (!mounted) return;
+    if (!available) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Speech recognition is not available on this device.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+    final base = widget.controller.text;
+    final started = await voice.start((text, isFinal) {
+      if (!mounted) return;
+      final t = text.trim();
+      if (t.isEmpty) return;
+      widget.controller.text = base.isEmpty ? t : '$base $t';
+      widget.controller.selection = TextSelection.collapsed(
+        offset: widget.controller.text.length,
+      );
+    });
+    if (mounted) setState(() => _listening = started);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: _listening ? 'Stop dictation' : 'Voice',
+      icon: Icon(
+        _listening ? Icons.mic : Icons.mic_none,
+        size: 20,
+        color: _listening ? Aether.accent : Aether.textMuted,
+      ),
+      onPressed: _toggle,
+    );
+  }
+}
+
 class _InputBar extends StatefulWidget {
   final TextEditingController controller;
   final String? sessionId;
-
   /// Startup coordinator observed so runtime plugin skills mounted by the
   /// `skill.mount` item refresh the slash suggestions without rebuilding the
   /// transcript. Defaults to the process singleton.
@@ -4630,15 +4694,7 @@ class _InputBarState extends State<_InputBar> {
                     ),
                   ),
                   // Model selector lives in the header AppBar — not duplicated here.
-                  IconButton(
-                    tooltip: 'Voice',
-                    icon: Icon(
-                      Icons.mic_none,
-                      size: 20,
-                      color: Aether.textMuted,
-                    ),
-                    onPressed: () {},
-                  ),
+                  _MicButton(controller: controller),
                   // ── Stateful primary button (web-IDE InputBar pattern) ──
                   AnimatedBuilder(
                     animation: Listenable.merge([AgentService.I, controller]),

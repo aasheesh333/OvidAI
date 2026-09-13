@@ -256,6 +256,7 @@ class OvidAccessibilityService : AccessibilityService() {
     private var overlayParams: WindowManager.LayoutParams? = null
     private var overlayInput: EditText? = null
     private var overlayActionButton: ImageButton? = null
+    private var overlayMicButton: ImageButton? = null
 
     @Synchronized
     internal fun showOverlay(): DeviceActionResult {
@@ -283,10 +284,11 @@ class OvidAccessibilityService : AccessibilityService() {
         } catch (error: WindowManager.BadTokenException) {
             DeviceActionResult(false, "UNAVAILABLE", "Overlay window was refused: " + error.message)
         } catch (error: Throwable) {
-            overlayView = null
-            overlayParams = null
-            overlayInput = null
-            overlayActionButton = null
+        overlayView = null
+        overlayParams = null
+        overlayInput = null
+        overlayActionButton = null
+        overlayMicButton = null
             DeviceActionResult(false, "UNAVAILABLE", "Overlay could not be shown: " + error.message)
         }
     }
@@ -323,6 +325,27 @@ class OvidAccessibilityService : AccessibilityService() {
     /// Overlay X seam: an empty field is a hard stop for the run.
     internal fun onOverlayStop() {
         overlayEventListener?.invoke("deviceOverlayStop", null)
+    }
+
+    /// Overlay mic seam: ask Dart to toggle on-device dictation.
+    internal fun onOverlayMic() {
+        overlayEventListener?.invoke("deviceOverlayMic", null)
+    }
+
+    /// Push recognized dictation text into the overlay field (from Dart).
+    internal fun setOverlayInputText(text: String) {
+        val input = overlayInput ?: return
+        input.setText(text)
+        input.setSelection(text.length)
+    }
+
+    /// Reflect the dictation listening state on the mic button.
+    internal fun setOverlayMicListening(listening: Boolean) {
+        val button = overlayMicButton ?: return
+        button.imageTintList = ColorStateList.valueOf(
+            if (listening) 0xFF4DA3FF.toInt() else 0xFFB0B0B0.toInt(),
+        )
+        button.contentDescription = if (listening) "Stop dictation" else "Dictate"
     }
 
     private fun removeOverlayNow() {
@@ -396,6 +419,22 @@ class OvidAccessibilityService : AccessibilityService() {
         }
         container.addView(input)
         overlayInput = input
+        // Mic: toggles on-device dictation through Dart. Kept just left of
+        // the X/send action.
+        val mic = ImageButton(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                (32 * density).toInt(),
+                (36 * density).toInt(),
+            )
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            background = null
+            contentDescription = "Dictate"
+            setImageResource(android.R.drawable.ic_btn_speak_now)
+            imageTintList = ColorStateList.valueOf(0xFFB0B0B0.toInt())
+            setOnClickListener { onOverlayMic() }
+        }
+        container.addView(mic)
+        overlayMicButton = mic
         val action = ImageButton(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 (36 * density).toInt(),
