@@ -147,5 +147,11 @@
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="sms"/>
         </intent>
+        <!-- Android 11+ speech recognition (voice input): the on-device
+             RecognitionService must be resolvable or SpeechToText.initialize()
+             returns false even though recognition is available. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
+        </intent>
     </queries>
 </manifest>
