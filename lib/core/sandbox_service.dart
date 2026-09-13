@@ -943,10 +943,10 @@ export PIP_CACHE_DIR="\$HOME/.cache/pip"
   /// SELinux on many devices — so apt would otherwise read
   /// /data/data/com.termux/... → "Permission denied" / "no packaging
   /// system".  An explicit Dir tree makes apt fully prefix-independent.
-  void _writeAptConfig(Directory prefix) {
-    final p = prefix.path;
-    final conf =
-        '''
+  /// Pure apt-config body so tests can pin the HTTPS transport settings
+  /// without a real prefix.
+  @visibleForTesting
+  static String aptConfigText(String p) => '''
 // Ovid sandbox apt config — override the compiled-in Termux prefix.
 Dir "$p";
 Dir::State "$p/var/lib/apt";
@@ -972,9 +972,17 @@ GPkg::Source::No-Advance "false";
 // an explicit CA bundle (Android has no /etc/ssl; the sandbox's bundle
 // lives at etc/tls/cert.pem).  Without this every `apt update` errors
 // with "certificate" failures on HTTPS mirrors.
+// NOTE: do NOT add Acquire::https::CRLFile here. apt parses it as a
+// certificate-REVOCATION list; pointing it at the CA bundle makes every
+// HTTPS fetch die with "Base64 decoding error" before the TLS handshake,
+// which apt reports as the misleading "does not have a Release file" on
+// every mirror. There is no CRL to reference in the sandbox.
 Acquire::https::CAInfo "$p/etc/tls/cert.pem";
-Acquire::https::CRLFile "$p/etc/tls/cert.pem";
 ''';
+
+  void _writeAptConfig(Directory prefix) {
+    final p = prefix.path;
+    final conf = aptConfigText(p);
     try {
       final etc = Directory('$p/etc/apt')..createSync(recursive: true);
       File('${etc.path}/ovid-apt.conf').writeAsStringSync(conf);

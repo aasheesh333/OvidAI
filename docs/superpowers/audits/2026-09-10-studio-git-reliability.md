@@ -205,3 +205,44 @@ Studio/Git set (79/79), the full Flutter suite (955/955), `flutter analyze`
 checklist (§8) is `NOT EXECUTED` because no Android device/emulator is
 attached; on-device release sign-off must therefore remain open until a release
 owner completes it.
+
+## 12. Post-audit addendum — on-device `apt update` root cause (2026-09-12)
+
+A real-device setup log surfaced the failure mode behind §8 row 5. The sandbox's
+generated apt config set:
+
+```
+Acquire::https::CAInfo "/prefix/etc/tls/cert.pem";
+Acquire::https::CRLFile "/prefix/etc/tls/cert.pem";
+```
+
+apt parses `Acquire::https::CRLFile` as a certificate-**revocation** list, not a
+CA bundle. Pointing it at the CA bundle makes every HTTPS fetch die before the
+TLS handshake:
+
+```
+Could not load custom certificate revocation list … (CrlFile option):
+Base64 decoding error.
+E: The repository '… stable Release' does not have a Release file.
+```
+
+Because the failure happens in the CRL load, not the handshake, the
+`_loosenAptTls` fallback (`Verify-Peer`/`Verify-Host false`) cannot help, and
+`_rotateMirror` then cycles all seven mirrors to the same error — exactly the
+device log (`cert/TLS error — relaxed HTTPS verify once` → every mirror →
+`[deb] apt failed`).
+
+Reproduced on the host with a real apt 2.8.3 and a Termux mirror: with
+`CRLFile` set the exact `does not have a Release file` error appears; removing
+only that line makes apt fetch `InRelease` normally.
+
+Fix: `_writeAptConfig` no longer emits `Acquire::https::CRLFile`; the CA bundle
+is still set via `Acquire::https::CAInfo`. `_writeAptConfig` runs on every boot
+(`checkExisting`) and on install, so existing sandboxes self-heal without a
+reinstall. Regression pin: `test/studio_git_reliability_test.dart` →
+`apt https transport config` asserts `CAInfo` is present and no active
+`Acquire::https::CRLFile` directive is written.
+
+Status: automated verification only. §8 row 5 remains `NOT EXECUTED` on a real
+device; this addendum explains the prior failure and the fix but does not claim
+on-device success.

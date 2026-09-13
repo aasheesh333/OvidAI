@@ -407,6 +407,30 @@ void main() {
     });
   });
 
+  group('apt https transport config', () {
+    test('configures the CA bundle and never points CRLFile at it', () {
+      final conf = SandboxService.aptConfigText('/prefix');
+
+      expect(
+        conf,
+        contains('Acquire::https::CAInfo "/prefix/etc/tls/cert.pem";'),
+      );
+      // apt parses Acquire::https::CRLFile as a certificate-REVOCATION
+      // list. Pointing it at the CA bundle makes every HTTPS fetch fail
+      // ("Could not load custom certificate revocation list … Base64
+      // decoding error"), which apt surfaces as the misleading
+      // "does not have a Release file" on every mirror, every retry —
+      // and relaxing Verify-Peer/Host cannot fix it.
+      expect(
+        RegExp(
+          r'^\s*Acquire::https::CRLFile',
+          multiLine: true,
+        ).hasMatch(conf),
+        isFalse,
+      );
+    });
+  });
+
   group('git credential scoping', () {
     late Directory prefix;
 
