@@ -3403,7 +3403,13 @@ libncursesw.so.6.5←./lib/libncurses.so.6
     );
 
     test('CTRL3: device schemas and policy gates are complete', () async {
-      final s = ChatSession(id: 'ctrl3', title: 'S', model: 'm', mode: 'safe');
+      // Device schemas are advertised only in Control mode (P6).
+      final s = ChatSession(
+        id: 'ctrl3',
+        title: 'S',
+        model: 'm',
+        mode: 'control',
+      );
       app.sessions.insert(0, s);
       app.activeSessionId = s.id;
       AgentService.setRunSessionForTest(s.id);
@@ -3459,6 +3465,8 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         ['back', 'home', 'recents', 'notifications', 'quick_settings'],
       );
       expect(schemas['device_screenshot']!['properties'], isEmpty);
+      // Policy gate: read-only mode denies every device tool.
+      s.mode = 'safe';
       for (final name in names) {
         expect(
           await AgentService.I.dispatchForTest(name, const {}),

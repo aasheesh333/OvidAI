@@ -113,6 +113,21 @@ void main() {
 
   group('Task 2: tool schemas', () {
     test('new tools are advertised with closed shapes', () {
+      // Device schemas are advertised only in Control mode (P6).
+      final s = ChatSession(
+        id: 'adv-control',
+        title: 'S',
+        model: 'm',
+        mode: 'control',
+      );
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      addTearDown(() {
+        AgentService.setRunSessionForTest('');
+        app.activeSessionId = null;
+        app.sessions.removeWhere((x) => x.id == s.id);
+      });
       final schemas = <String, Map>{};
       for (final tool in AgentService.I.toolsForTest()) {
         final fn = tool['function'] as Map;

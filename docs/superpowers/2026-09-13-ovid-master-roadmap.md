@@ -30,7 +30,7 @@ reviewer, fix rounds max 5, per-plan ledger under `.superpowers/sdd/<plan>/`).
 | P3 | 24/7 background operation | `specs/2026-09-13-background-24-7-design.md` | `plans/2026-09-13-background-24-7.md` | DONE (boot receiver + keep-alive gate, battery-exemption request, in-app stop; Kotlin compiles) |
 | P4 | Studio + browser | `specs/2026-09-13-studio-browser-design.md` | `plans/2026-09-13-studio-browser.md` | IN PROGRESS (external GitHub login, login dot, fresh blank tabs done; Studio-mode folder gate + Google sign-in open) |
 | P5 | Voice input (mic) | `specs/2026-09-13-voice-input-design.md` | `plans/2026-09-13-voice-input.md` | DONE (on-device STT service; composer mic; overlay mic native↔Dart; Kotlin compiles) |
-| P6 | Token efficiency (no-folder) | `specs/2026-09-13-token-efficiency-design.md` | `plans/2026-09-13-token-efficiency.md` | NOT STARTED |
+| P6 | Token efficiency (no-folder) | `specs/2026-09-13-token-efficiency-design.md` | `plans/2026-09-13-token-efficiency.md` | DONE (device tools omitted outside Control; measured 82 vs 91 tools ≈ 810 tokens/request saved) |
 
 ## Source requirements (verbatim, user 2026-09-12/13)
 
@@ -97,7 +97,8 @@ deferred gets an explicit note.
 
 | Date | Project | Change | Commit |
 |------|---------|--------|--------|
-| 2026-09-13 | P3 | Boot receiver (keep-alive gated), battery-optimization exemption, in-app Stop background service | pending |
+| 2026-09-13 | P6 | Mode-aware tool gate: device_* omitted outside Control (82 vs 91 tools ≈ 810 tok/req saved) | pending |
+| 2026-09-13 | P3 | Boot receiver (keep-alive gated), battery-optimization exemption, in-app Stop background service | e530ec3 |
 | 2026-09-13 | P5 | On-device STT (`speech_to_text`): composer mic + overlay mic native↔Dart; service test seam | d610f91 |
 | 2026-09-13 | P1 | Deep DSH capture (real 20+ msg vibe-coder session: subagents, file write/edit, live streaming, fold/expand); reasoning 33px + hairline + primary body; blue gradient status shimmer; 3-dot 1s chase | ef92047 |
 | 2026-09-13 | P4 | GitHub device login → external browser; Studio login dot (green/red); new-session fresh blank tab | 49cf33a |

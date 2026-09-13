@@ -3056,9 +3056,20 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // gated on the GitHub-sync toggle below. (They used to be added here and
     // again in the gate, so every request carried two identical
     // repo_sync/repo_tree definitions whenever sync was on — the default.)
+    // P6: device_* tools are hard-denied outside Control mode, so they are
+    // omitted from the roster entirely when the running session is not in
+    // Control — a smaller, more honest per-request payload.
+    final runningMode =
+        _runSession?.mode ?? AppState.I.activeSession?.mode;
+    final controlMode = runningMode == AgentMode.control.name;
     for (final t in _coreTools) {
       final fn = t['function'];
       if (fn is Map && _repoToolNames.contains(fn['name'])) continue;
+      if (!controlMode &&
+          fn is Map &&
+          (fn['name'] as String?)?.startsWith('device_') == true) {
+        continue;
+      }
       tools.add(t);
     }
     // Installed plugin tools — dynamically appended
