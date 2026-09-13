@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../core/theme.dart';
 import '../core/github_service.dart';
-import 'browser_screen.dart';
 
 /// GitHub login flow — shown as modal bottom sheet.
 /// Implements OAuth Device Flow (RFC 8628).
@@ -253,15 +253,22 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
                       ? 'https://github.com/login/device'
                       : _verifyUri,
                 );
-                if (!context.mounted) return;
-                await Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => BrowserScreen(
-                      openUrl: uri.toString(),
-                      agentControlled: false,
-                    ),
-                  ),
+                // Open in the user's EXTERNAL browser — the device-flow
+                // verification page must not be trapped in the in-app
+                // WebView.
+                final launched = await launchUrl(
+                  uri,
+                  mode: LaunchMode.externalApplication,
                 );
+                if (!launched) {
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Could not open the browser.'),
+                      behavior: SnackBarBehavior.floating,
+                    ),
+                  );
+                }
               },
             ),
           ),

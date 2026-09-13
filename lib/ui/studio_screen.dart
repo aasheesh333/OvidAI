@@ -535,28 +535,23 @@ class _StudioScreenState extends State<StudioScreen> {
           Padding(
             padding: const EdgeInsets.only(right: 14, left: 4),
             child: AnimatedBuilder(
-              animation: AppState.I,
-              builder: (context, _) => Row(
-                children: [
-                  Container(
-                    width: 7,
-                    height: 7,
+              animation: Listenable.merge([AppState.I, GitHubService.I]),
+              builder: (context, _) {
+                final loggedIn = GitHubService.I.isLoggedIn;
+                return Tooltip(
+                  message: loggedIn
+                      ? 'Signed in to GitHub'
+                      : 'Not signed in to GitHub',
+                  child: Container(
+                    width: 9,
+                    height: 9,
                     decoration: BoxDecoration(
-                      color: AppState.I.sandboxInstalled
-                          ? Aether.success
-                          : Aether.warn,
+                      color: loggedIn ? Aether.success : Aether.dangerC,
                       shape: BoxShape.circle,
                     ),
                   ),
-                  const SizedBox(width: 6),
-                  Text(
-                    AppState.I.sandboxInstalled
-                        ? 'Sandbox ready'
-                        : 'Sandbox pending',
-                    style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
-                  ),
-                ],
-              ),
+                );
+              },
             ),
           ),
         ],

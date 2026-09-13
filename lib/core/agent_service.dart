@@ -1475,7 +1475,10 @@ class AgentService extends ChangeNotifier {
       }
     } catch (_) {}
     if (tabs.isEmpty) {
-      tabs.add(BrowserTab(url: _defaultBrowserUrl));
+      // A brand-new session starts with a FRESH blank tab — browser data
+      // (cookies/logins) is shared app-wide, but tabs are never inherited
+      // from another session.
+      tabs.add(BrowserTab(url: 'about:blank'));
     }
   }
 

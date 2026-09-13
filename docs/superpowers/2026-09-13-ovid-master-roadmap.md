@@ -28,7 +28,7 @@ reviewer, fix rounds max 5, per-plan ledger under `.superpowers/sdd/<plan>/`).
 | P1 | DSH web visual parity (home + chat + theme) | `specs/2026-09-13-dsh-visual-parity-design.md` | `plans/2026-09-13-dsh-visual-parity.md` | IN PROGRESS (theme, formatter, hero pill, hint, question scroll, recents, transcript geometry done; streaming + feature gaps open) |
 | P2 | Control mode + overlay | `specs/2026-09-13-control-mode-overlay-design.md` | `plans/2026-09-13-control-mode-overlay.md` | IN PROGRESS (one-time disclosure, background-only overlay, lower opacity + stroke, control-mode briefing done; overlay questions + mic open) |
 | P3 | 24/7 background operation | `specs/2026-09-13-background-24-7-design.md` | `plans/2026-09-13-background-24-7.md` | NOT STARTED |
-| P4 | Studio + browser | `specs/2026-09-13-studio-browser-design.md` | `plans/2026-09-13-studio-browser.md` | NOT STARTED |
+| P4 | Studio + browser | `specs/2026-09-13-studio-browser-design.md` | `plans/2026-09-13-studio-browser.md` | IN PROGRESS (external GitHub login, login dot, fresh blank tabs done; Studio-mode folder gate + Google sign-in open) |
 | P5 | Voice input (mic) | `specs/2026-09-13-voice-input-design.md` | `plans/2026-09-13-voice-input.md` | NOT STARTED |
 | P6 | Token efficiency (no-folder) | `specs/2026-09-13-token-efficiency-design.md` | `plans/2026-09-13-token-efficiency.md` | NOT STARTED |
 
@@ -97,7 +97,8 @@ deferred gets an explicit note.
 
 | Date | Project | Change | Commit |
 |------|---------|--------|--------|
-| 2026-09-13 | P2 | One-time control disclosure; background-only overlay; overlay 70% alpha + stroke; control-mode briefing | pending |
+| 2026-09-13 | P4 | GitHub device login → external browser; Studio login dot (green/red); new-session fresh blank tab | pending |
+| 2026-09-13 | P2 | One-time control disclosure; background-only overlay; overlay 70% alpha + stroke; control-mode briefing | cc34ae0 |
 | 2026-09-13 | P0 | ovid-pkg `.gz`-first index probe; inbuilt plugin/MCP direct install; marketplace object-form source + real parse errors; provider model-id ambiguity returns null | 34d636e |
 | 2026-09-13 | P1 | DSH reference captured (dark theme tokens, geometry, markdown, empty state) | 13ea40b |
 | 2026-09-13 | P1 | Theme palette → reference ramp; compact-number formatter; hero preview pill removed; composer hint faint; question card scrollable; recent models (max 10); transcript geometry (bubble 22px, code block, markdown line-heights) | pending |
