@@ -24,7 +24,7 @@ reviewer, fix rounds max 5, per-plan ledger under `.superpowers/sdd/<plan>/`).
 
 | ID | Project | Spec | Plan | Status |
 |----|---------|------|------|--------|
-| P0 | Reliability bug bundle | `specs/2026-09-13-reliability-bug-bundle-design.md` | `plans/2026-09-13-reliability-bug-bundle.md` | IN PROGRESS (ovid-pkg `.gz`-first, apt CRLFile, inbuilt install routing, marketplace object-source + real parse errors, provider ambiguity all done; `gh` install still open) |
+| P0 | Reliability bug bundle | `specs/2026-09-13-reliability-bug-bundle-design.md` | `plans/2026-09-13-reliability-bug-bundle.md` | DONE (ovid-pkg `.gz`-first + `dpkg-deb -x` extraction, apt CRLFile, inbuilt install routing, marketplace object-source, provider ambiguity) |
 | P1 | DSH web visual parity (home + chat + theme) | `specs/2026-09-13-dsh-visual-parity-design.md` | `plans/2026-09-13-dsh-visual-parity.md` | IN PROGRESS (theme, formatter, hero, hint, questions, recents, transcript geometry, reasoning geometry, live shimmer + 3-dot chase done; DSH feature gaps open) |
 | P2 | Control mode + overlay | `specs/2026-09-13-control-mode-overlay-design.md` | `plans/2026-09-13-control-mode-overlay.md` | DONE (one-time disclosure, background-only overlay, lower opacity + stroke, control briefing, overlay mic, overlay AI questions) |
 | P3 | 24/7 background operation | `specs/2026-09-13-background-24-7-design.md` | `plans/2026-09-13-background-24-7.md` | DONE (boot receiver + keep-alive gate, battery-exemption request, in-app stop; Kotlin compiles) |
@@ -97,6 +97,7 @@ deferred gets an explicit note.
 
 | Date | Project | Change | Commit |
 |------|---------|--------|--------|
+| 2026-09-13 | P0 | `ovid-pkg install` uses `dpkg-deb -x` into PREFIX (dpkg -i fails on-device) — the `gh` install failure | pending |
 | 2026-09-13 | P2/P4 | Overlay AI questions + answers; in-app browser non-`wv` mobile UA (Google OAuth); Studio-only picker pin | pending |
 | 2026-09-13 | P6 | Mode-aware tool gate: device_* omitted outside Control (82 vs 91 tools ≈ 810 tok/req saved) | pending |
 | 2026-09-13 | P3 | Boot receiver (keep-alive gated), battery-optimization exemption, in-app Stop background service | e530ec3 |

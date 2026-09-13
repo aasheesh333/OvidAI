@@ -83,15 +83,12 @@ void main() {
       expect(stripIdx, lessThan(loopIdx));
     });
 
-    test('runs dpkg to a log then tails it instead of masking the exit', () {
-      // Piping dpkg into tail makes the pipeline status tail's (0), so a
-      // failed install used to look green. The script must redirect to a
-      // log and inspect $? instead. Behavior is pinned by the runtime
-      // "dpkg exit code is propagated" test.
+    test('extracts with dpkg-deb -x into PREFIX (never dpkg -i)', () {
+      // dpkg's compiled-in Termux prefix makes `dpkg -i` fail on-device;
+      // dpkg-deb -x extracts the data archive into our own prefix with no
+      // admindir. Behavior pinned by the runtime extraction-failure test.
+      expect(content, contains(r'dpkg-deb -x'));
       expect(content, contains(r'> "$_dlog" 2>&1'));
-      expect(content, contains(r'tail -8 "$_dlog"'));
-      expect(content, contains(r'rc=$?'));
-      expect(content, contains(r'exit "$rc"'));
       expect(content, isNot(contains('2>&1 | tail')));
     });
 
@@ -260,7 +257,7 @@ void main() {
       expect(out, isNot(contains('binary-armv7l/Packages')));
     });
 
-    test('dpkg exit code is propagated (7)', () async {
+    test('extraction failure is propagated non-zero', () async {
       final idx = File('${tmp.path}/var/cache/ovid-pkg/Packages');
       idx.parent.createSync(recursive: true);
       idx.writeAsStringSync(
@@ -274,7 +271,7 @@ void main() {
         'prev=""; for a in "\$@"; do [ "\$prev" = "-o" ] && : > "\$a"; '
             'prev="\$a"; done; exit 0',
       );
-      writeStub(stubs, 'dpkg', 'echo "dpkg exploded"; exit 7');
+      writeStub(stubs, 'dpkg-deb', 'echo "extract exploded"; exit 7');
 
       final res = await Process.run('/bin/sh', [
         script,
@@ -282,7 +279,8 @@ void main() {
         'ripgrep',
       ], environment: envWith(stubs)).timeout(const Duration(seconds: 30));
 
-      expect(res.exitCode, 7);
+      expect(res.exitCode, isNot(0));
+      expect('${res.stdout}${res.stderr}', contains('extract failed'));
     });
 
     test('install rejects a stale/empty index', () async {

@@ -210,14 +210,22 @@ case "$cmd" in
       exit 0
     fi
     echo "[ovid-pkg] installing$targets"
-    # Run dpkg into a log and tail it afterwards: piping into tail made
-    # every failure look like exit 0 and hid broken installs.
-    _dlog="$PKG_IDX/dpkg.log"
-    dpkg --root="$PREFIX" --admindir="$PREFIX/var/lib/dpkg" \
-      --log="$PREFIX/var/log/dpkg.log" -i $targets > "$_dlog" 2>&1
-    rc=$?
-    tail -8 "$_dlog"
-    [ "$rc" -ne 0 ] && { echo "[ovid-pkg] dpkg failed (exit $rc)" >&2; exit "$rc"; }
+    # dpkg's compiled-in Termux prefix makes `dpkg -i` fail on-device
+    # (Permission denied on the other app's admindir). `dpkg-deb -x`
+    # extracts a .deb's data archive straight into $PREFIX with NO admindir
+    # or status database, which works inside our own writable prefix. The
+    # dependency closure was already resolved + downloaded above.
+    _dlog="$PKG_IDX/extract.log"
+    : > "$_dlog"
+    for _deb in $targets; do
+      if ! dpkg-deb -x "$_deb" "$PREFIX" >> "$_dlog" 2>&1; then
+        tail -8 "$_dlog"
+        echo "[ovid-pkg] extract failed: $(basename "$_deb")" >&2
+        exit 1
+      fi
+    done
+    tail -4 "$_dlog" 2>/dev/null
+    echo "[ovid-pkg] extracted $(echo $targets | wc -w) package(s)"
     [ -n "$missing" ] && { echo "[ovid-pkg] not available:$missing" >&2; exit 1; }
     ;;
   upgrade|full-upgrade)
