@@ -670,6 +670,7 @@ class AgentService extends ChangeNotifier {
       // Hide is unguarded by design: it removes the window even when no
       // session is active, so no invisible touch target survives.
       unawaited(hideDeviceOverlay());
+      unawaited(setOverlayLive(false));
     }
     // An explicit mode set means the plan preset no longer owns the
     // session's read-only mode: clear the remembered pre-plan mode so a
@@ -899,6 +900,7 @@ class AgentService extends ChangeNotifier {
     // Hide is unguarded (always removes the window); a later Control run
     // re-shows it at run start.
     unawaited(hideDeviceOverlay());
+    unawaited(setOverlayLive(false));
     final queuePreserved = r.queue.isNotEmpty;
     _cancelBucket(r);
     return queuePreserved;
@@ -913,6 +915,7 @@ class AgentService extends ChangeNotifier {
     DeviceControlService.I.cancelDeviceActions();
     // Panic-stop path: the floating overlay must come down with the runs.
     unawaited(hideDeviceOverlay());
+    unawaited(setOverlayLive(false));
     // Cancellation releases each run's finally block. Clear continuations
     // first so no bucket can restart queued work during a global panic.
     for (final r in _runs.values) {
@@ -950,6 +953,7 @@ class AgentService extends ChangeNotifier {
   static const String deviceOverlaySetTextMethod = 'deviceOverlaySetText';
   static const String deviceOverlayMicListeningMethod = 'deviceOverlayMicListening';
   static const String deviceOverlaySetPromptMethod = 'deviceOverlaySetPrompt';
+  static const String deviceOverlayLiveMethod = 'deviceOverlayLive';
 
   static const _overlayNativeChannel = MethodChannel('ovid/native');
   static MethodChannel? _overlayChannelOverrideForTest;
@@ -972,6 +976,7 @@ class AgentService extends ChangeNotifier {
   /// Show the floating overlay. Guarded: with no active Control session the
   /// overlay is never shown, and it is only visible while the app is
   /// backgrounded (the overlay exists to steer a minimized app).
+  /// Re-applies the current live state so a re-show mid-run restores the pop.
   Future<void> showDeviceOverlay() async {
     final s = AppState.I.activeSession;
     if (s == null || s.mode != AgentMode.control.name) return;
@@ -979,6 +984,7 @@ class AgentService extends ChangeNotifier {
     try {
       await _overlayChannel.invokeMethod(deviceOverlayShowMethod);
     } catch (_) {}
+    await setOverlayLive(_overlayLive);
   }
 
   /// Hide the floating overlay. Unguarded by design: hiding must always
@@ -986,6 +992,24 @@ class AgentService extends ChangeNotifier {
   Future<void> hideDeviceOverlay() async {
     try {
       await _overlayChannel.invokeMethod(deviceOverlayHideMethod);
+    } catch (_) {}
+  }
+
+  bool _overlayLive = false;
+
+  @visibleForTesting
+  bool get overlayLiveForTest => _overlayLive;
+
+  /// Mark the overlay live (run active) or idle. The native side shows a
+  /// subtle always-on pulse while live. Safe to call with no window: native
+  /// no-ops, the flag is still recorded so the next show restores it.
+  Future<void> setOverlayLive(bool live) async {
+    _overlayLive = live;
+    try {
+      await _overlayChannel.invokeMethod(
+        deviceOverlayLiveMethod,
+        {'live': live},
+      );
     } catch (_) {}
   }
 
@@ -6069,6 +6093,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // paths hide it again.
     if (s.mode == AgentMode.control.name) {
       unawaited(showDeviceOverlay());
+      unawaited(setOverlayLive(true));
     }
     // PR23/Q1: snapshot the model at run start — every LLM call of this
     // run uses it; a mid-run picker switch only affects the next run.
@@ -6745,6 +6770,8 @@ ${await _agentsMdBlock()}
       _appendAssistant('Agent error: $e', session: s);
     } finally {
       activeRunId = null;
+      // Run end always clears the live pop (stream over → overlay idle).
+      unawaited(setOverlayLive(false));
       unawaited(checkpointRunEnd(s.id));
       SandboxService.I.tagRun(null);
       _cancelRequested = false;

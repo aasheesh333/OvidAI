@@ -2,6 +2,10 @@ package com.dhanuk.ovidai
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.animation.Animator
+import android.animation.AnimatorSet
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.annotation.TargetApi
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -257,6 +261,9 @@ class OvidAccessibilityService : AccessibilityService() {
     private var overlayInput: EditText? = null
     private var overlayActionButton: ImageButton? = null
     private var overlayMicButton: ImageButton? = null
+    private var overlayLiveDot: View? = null
+    private var overlayLiveAnimator: ValueAnimator? = null
+    private var overlayActionPulse: Animator? = null
 
     @Synchronized
     internal fun showOverlay(): DeviceActionResult {
@@ -289,6 +296,7 @@ class OvidAccessibilityService : AccessibilityService() {
         overlayInput = null
         overlayActionButton = null
         overlayMicButton = null
+        overlayLiveDot = null
             DeviceActionResult(false, "UNAVAILABLE", "Overlay could not be shown: " + error.message)
         }
     }
@@ -296,10 +304,14 @@ class OvidAccessibilityService : AccessibilityService() {
     @Synchronized
     internal fun hideOverlay(): DeviceActionResult {
         val view = overlayView ?: return DeviceActionResult(true)
+        // Stop the live pulse first: no animator may outlive the window.
+        stopOverlayLivePulse()
         overlayView = null
         overlayParams = null
         overlayInput = null
         overlayActionButton = null
+        overlayMicButton = null
+        overlayLiveDot = null
         return try {
             val windowManager = getSystemService(WINDOW_SERVICE) as? WindowManager
             windowManager?.removeView(view)
@@ -353,12 +365,75 @@ class OvidAccessibilityService : AccessibilityService() {
         overlayInput?.hint = prompt
     }
 
+    /// Live indicator: while a Control run is active the overlay breathes —
+    /// a small status dot fades in and pulses, and the X/send button gets a
+    /// very light scale pop, so the user can tell Ovid is live at a glance.
+    /// Safe with no window (records nothing, touches nothing).
+    internal fun setOverlayLive(live: Boolean) {
+        val button = overlayActionButton ?: return
+        stopOverlayLivePulse()
+        if (!live) return
+        // Status dot: 8dp green circle, alpha breathing 0.35↔1.0.
+        overlayLiveDot?.let {
+            it.visibility = View.VISIBLE
+            it.alpha = 1f
+        }
+        overlayLiveAnimator = ValueAnimator.ofFloat(0.35f, 1f).apply {
+            duration = 1200
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            addUpdateListener { anim ->
+                overlayLiveDot?.alpha = anim.animatedValue as Float
+            }
+            start()
+        }
+        // X pop: deliberately subtle — 1.0↔1.08 scale, 1.0↔0.85 alpha.
+        val scaleX = ObjectAnimator.ofFloat(button, "scaleX", 1f, 1.08f).apply {
+            duration = 1400
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+        }
+        val scaleY = ObjectAnimator.ofFloat(button, "scaleY", 1f, 1.08f).apply {
+            duration = 1400
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+        }
+        val fade = ObjectAnimator.ofFloat(button, "alpha", 1f, 0.85f).apply {
+            duration = 1400
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+        }
+        overlayActionPulse = AnimatorSet().apply {
+            playTogether(scaleX, scaleY, fade)
+            start()
+        }
+    }
+
+    private fun stopOverlayLivePulse() {
+        overlayLiveAnimator?.cancel()
+        overlayLiveAnimator = null
+        overlayActionPulse?.cancel()
+        overlayActionPulse = null
+        overlayLiveDot?.let {
+            it.visibility = View.GONE
+            it.alpha = 1f
+        }
+        overlayActionButton?.let {
+            it.scaleX = 1f
+            it.scaleY = 1f
+            it.alpha = 1f
+        }
+    }
+
     private fun removeOverlayNow() {
         val view = overlayView ?: return
+        stopOverlayLivePulse()
         overlayView = null
         overlayParams = null
         overlayInput = null
         overlayActionButton = null
+        overlayMicButton = null
+        overlayLiveDot = null
         try {
             val windowManager = getSystemService(WINDOW_SERVICE) as? WindowManager
             windowManager?.removeView(view)
@@ -386,6 +461,23 @@ class OvidAccessibilityService : AccessibilityService() {
             }
             elevation = 8 * density
         }
+        // Live status dot: 8dp green circle at the leading edge, shown only
+        // while a Control run is active (pulsed by setOverlayLive).
+        val dotSize = (8 * density).toInt()
+        val liveDot = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dotSize, dotSize).apply {
+                leftMargin = (2 * density).toInt()
+                rightMargin = (2 * density).toInt()
+            }
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0xFF4CAF50.toInt())
+            }
+            visibility = View.GONE
+            contentDescription = "Ovid live"
+        }
+        container.addView(liveDot)
+        overlayLiveDot = liveDot
         container.addView(overlayDragHandle(windowManager, container, density))
         val input = EditText(this).apply {
             layoutParams = LinearLayout.LayoutParams(
@@ -428,8 +520,8 @@ class OvidAccessibilityService : AccessibilityService() {
         // the X/send action.
         val mic = ImageButton(this).apply {
             layoutParams = LinearLayout.LayoutParams(
-                (32 * density).toInt(),
-                (36 * density).toInt(),
+                (44 * density).toInt(),
+                (44 * density).toInt(),
             )
             scaleType = ImageView.ScaleType.CENTER_INSIDE
             background = null
@@ -442,8 +534,8 @@ class OvidAccessibilityService : AccessibilityService() {
         overlayMicButton = mic
         val action = ImageButton(this).apply {
             layoutParams = LinearLayout.LayoutParams(
-                (36 * density).toInt(),
-                (36 * density).toInt(),
+                (44 * density).toInt(),
+                (44 * density).toInt(),
             )
             scaleType = ImageView.ScaleType.CENTER_INSIDE
             background = null

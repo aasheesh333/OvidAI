@@ -437,6 +437,11 @@ class MainActivity : FlutterActivity() {
                             ?.setOverlayPrompt(call.argument<String>("prompt").orEmpty())
                         result.success(true)
                     }
+                    "deviceOverlayLive" -> {
+                        OvidAccessibilityService.instance
+                            ?.setOverlayLive(call.argument<Boolean>("live") == true)
+                        result.success(true)
+                    }
                     "requestBatteryExemption" -> {
                         try {
                             val pm = getSystemService(POWER_SERVICE) as PowerManager
