@@ -7128,7 +7128,7 @@ ${await _agentsMdBlock()}
             '(e.g. DeepSeek, GPT-4o, Claude, Gemini) to use them.',
             session: session,
           );
-          return _callLlm(p, msgs, session, includeTools: false);
+          return await _callLlm(p, msgs, session, includeTools: false);
         }
         final hint = switch (res.statusCode) {
           401 || 403 =>

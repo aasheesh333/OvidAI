@@ -314,7 +314,7 @@ class HookService extends ChangeNotifier {
       }
       final sid = s?.sandboxId ?? s?.id ?? sessionId;
       if (sid.isEmpty) return null;
-      return SandboxService.I.workDirFor(sid);
+      return await SandboxService.I.workDirFor(sid);
     } catch (_) {
       return null;
     }
