@@ -87,7 +87,19 @@ flutter:
   uses-material-design: true
 
   # To add assets to your application, add an assets section, like this:
-  # assets:
+  assets:
+    # Termux apt signing keys (GPG public keys, ~40KB). The non-arm64
+    # bootstrap payloads ship no share/termux-keyring, so the app seeds
+    # trusted.gpg.d from these on every boot (see seedAptKeyring).
+    - assets/termux-keyring/2096779623.gpg
+    - assets/termux-keyring/agnostic-apollo.gpg
+    - assets/termux-keyring/grimler.gpg
+    - assets/termux-keyring/kcubeterm.gpg
+    - assets/termux-keyring/landfillbaby.gpg
+    - assets/termux-keyring/mradityaalok.gpg
+    - assets/termux-keyring/termux-autobuilds.gpg
+    - assets/termux-keyring/termux-pacman.gpg
+    - assets/termux-keyring/thunder-coding.gpg
   #   - images/a_dot_burr.jpeg
   #   - images/a_dot_ham.jpeg
 

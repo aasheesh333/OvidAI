@@ -295,8 +295,10 @@ class SandboxService {
         _installed = true;
         // Existing installs may predate the apt-CA fix: re-assert the
         // CA bundle + apt config on every boot so apt/git over HTTPS
-        // keep working without a reinstall.
+        // keep working without a reinstall. The bundled keyring seed is
+        // unawaited to keep boot fast (9 tiny in-memory assets).
         _writeAptConfig(prefix);
+        unawaited(_ensureBundledAptKeyring(prefix));
         _ensureTlsConfig(prefix);
         _probePythonPath();
         // Self-heal (PR22, relocated PR32): installs made by older builds
@@ -468,6 +470,10 @@ class SandboxService {
     // apt/dpkg have Termux's prefix compiled in and LD_PRELOAD redirect is
     // unreliable — give apt an explicit Dir config rooted at OUR prefix.
     _writeAptConfig(prefix);
+    // Fresh install: await the keyring seed so the eager `apt update`
+    // below verifies on every ABI, including payloads without
+    // share/termux-keyring.
+    await _ensureBundledAptKeyring(prefix);
 
     // ── Remove stale node tarballs from older installs ──
     // Older builds downloaded node-vXX into HOME instead of using apt —
@@ -979,6 +985,63 @@ GPkg::Source::No-Advance "false";
 // every mirror. There is no CRL to reference in the sandbox.
 Acquire::https::CAInfo "$p/etc/tls/cert.pem";
 ''';
+
+  /// Bundled Termux signing-key filenames shipped as app assets
+  /// (`assets/termux-keyring/*.gpg`). GPG public keys are
+  /// architecture-independent, so one set covers every ABI — including the
+  /// non-arm64 payloads that ship no `share/termux-keyring` at all.
+  static const aptKeyringAssetNames = [
+    '2096779623.gpg',
+    'agnostic-apollo.gpg',
+    'grimler.gpg',
+    'kcubeterm.gpg',
+    'landfillbaby.gpg',
+    'mradityaalok.gpg',
+    'termux-autobuilds.gpg',
+    'termux-pacman.gpg',
+    'thunder-coding.gpg',
+  ];
+
+  /// Copy [bundledKeys] (filename → bytes) into [trustedDir] whenever the
+  /// file is missing or empty. Idempotent; never overwrites a non-empty key
+  /// (a payload-linked or previously seeded key always wins). Returns the
+  /// number of keys written.
+  @visibleForTesting
+  static int seedAptKeyring(
+    Directory trustedDir,
+    Map<String, List<int>> bundledKeys,
+  ) {
+    var written = 0;
+    try {
+      trustedDir.createSync(recursive: true);
+      for (final e in bundledKeys.entries) {
+        try {
+          final f = File('${trustedDir.path}/${e.key}');
+          if (f.existsSync() && f.lengthSync() > 0) continue;
+          f.writeAsBytesSync(e.value, flush: true);
+          written++;
+        } catch (_) {}
+      }
+    } catch (_) {}
+    return written;
+  }
+
+  /// Load the bundled keyring assets and seed `$prefix/etc/apt/trusted.gpg.d`.
+  /// Best-effort; runs on boot so devices whose payload lacks
+  /// `share/termux-keyring` (armeabi-v7a, x86_64) still verify apt.
+  Future<void> _ensureBundledAptKeyring(Directory prefix) async {
+    try {
+      final trusted = Directory('${prefix.path}/etc/apt/trusted.gpg.d');
+      final bundled = <String, List<int>>{};
+      for (final name in aptKeyringAssetNames) {
+        try {
+          final data = await rootBundle.load('assets/termux-keyring/$name');
+          bundled[name] = data.buffer.asUint8List();
+        } catch (_) {}
+      }
+      if (bundled.isNotEmpty) seedAptKeyring(trusted, bundled);
+    } catch (_) {}
+  }
 
   void _writeAptConfig(Directory prefix) {
     final p = prefix.path;

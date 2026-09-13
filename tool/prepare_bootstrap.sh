@@ -93,8 +93,25 @@ for termux_abi in "${abis[@]}"; do
     if [ -d "$d/$ad" ]; then
       mkdir -p "$out/$(dirname "$ad")"
       cp -r "$d/$ad" "$out/$ad"
+    else
+      echo "  !! missing asset dir: $ad (ABI $termux_abi)" >&2
     fi
   done
+  # Hard gate: every ABI payload MUST ship the apt signing keys and
+  # terminfo. Silent omission here ships a payload whose every `apt update`
+  # fails with "InRelease is not signed" (no trusted.gpg.d keys) and whose
+  # terminal has no TERM support — exactly the on-device class this guards.
+  key_count=$(find "$out/share/termux-keyring" -maxdepth 1 -name '*.gpg' 2>/dev/null | wc -l)
+  if [ "$key_count" -lt 1 ]; then
+    echo "  ✗ FATAL: $out/share/termux-keyring has no .gpg keys (ABI $termux_abi)" >&2
+    echo "    Refusing to pack a payload apt can never verify." >&2
+    exit 1
+  fi
+  if [ ! -d "$out/share/terminfo" ]; then
+    echo "  ✗ FATAL: $out/share/terminfo missing (ABI $termux_abi)" >&2
+    exit 1
+  fi
+  echo "  ✓ keyring: $key_count .gpg keys + terminfo present"
 
   # dpkg database — without it, apt considers every package "not installed"
   # and re-downloads ~10+ MB of libs already present in the payload.
