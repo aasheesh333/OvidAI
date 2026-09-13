@@ -3462,7 +3462,7 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       ]);
       expect(
         (schemas['device_system_nav']!['properties'] as Map)['action']['enum'],
-        ['back', 'home', 'recents', 'notifications', 'quick_settings'],
+        ['back', 'home', 'recents', 'notifications', 'quick_settings', 'settings'],
       );
       expect(schemas['device_screenshot']!['properties'], isEmpty);
       // Policy gate: read-only mode denies every device tool.

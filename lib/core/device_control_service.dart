@@ -171,6 +171,14 @@ class DeviceControlService {
     () => _channel.invokeMethod<Object?>('deviceSystemNav', {'action': action}),
   );
 
+  Future<Object?> openSettings() => _invokeGuarded(
+    () => _channel.invokeMethod<Object?>('deviceOpenSettings'),
+  );
+
+  Future<Object?> openApp(String packageName) => _invokeGuarded(
+    () => _channel.invokeMethod<Object?>('deviceOpenApp', {'package': packageName}),
+  );
+
   Future<Object?> key(String key) => _invokeGuarded(
     () => _channel.invokeMethod<Object?>('deviceKey', {'key': key}),
   );

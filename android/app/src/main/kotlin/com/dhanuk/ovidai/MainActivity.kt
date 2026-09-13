@@ -318,6 +318,36 @@ class MainActivity : FlutterActivity() {
                             result.error("SETTINGS_FAILED", "Could not open Accessibility settings: ${e.message}", null)
                         }
                     }
+                    "deviceOpenSettings" -> {
+                        try {
+                            val intent = Intent(Settings.ACTION_SETTINGS).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            startActivity(intent)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("SETTINGS_FAILED", "Could not open Settings: ${e.message}", null)
+                        }
+                    }
+                    "deviceOpenApp" -> {
+                        val packageName = call.argument<String>("package")
+                        if (packageName.isNullOrBlank()) {
+                            result.error("BAD_ARGS", "deviceOpenApp requires package name.", null)
+                        } else {
+                            try {
+                                val launchIntent = packageManager.getLaunchIntentForPackage(packageName.trim())
+                                if (launchIntent != null) {
+                                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    startActivity(launchIntent)
+                                    result.success(true)
+                                } else {
+                                    result.error("APP_NOT_FOUND", "App $packageName has no launch intent or is not installed.", null)
+                                }
+                            } catch (e: Exception) {
+                                result.error("LAUNCH_FAILED", "Could not launch app $packageName: ${e.message}", null)
+                            }
+                        }
+                    }
                     "deviceRead" -> {
                         val service = deviceService(result) ?: return@setMethodCallHandler
                         val forceFull = call.argument<Boolean>("full") == true ||

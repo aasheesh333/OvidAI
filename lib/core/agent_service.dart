@@ -3432,7 +3432,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'type': 'function',
       'function': {
         'name': 'device_system_nav',
-        'description': 'Perform Android system navigation.',
+        'description':
+            'Perform Android system navigation: back, home, recents, notifications, quick_settings, or open settings directly.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -3444,10 +3445,31 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
                 'recents',
                 'notifications',
                 'quick_settings',
+                'settings',
               ],
             },
           },
           'required': ['action'],
+          'additionalProperties': false,
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'device_open_app',
+        'description':
+            'Launch an installed Android app directly by its package name or common app ID (e.g. "com.google.android.youtube", "com.android.settings", "com.google.android.apps.photos").',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'package': {
+              'type': 'string',
+              'description':
+                  'Android application package name to open directly (e.g. com.android.settings, com.google.android.youtube).',
+            },
+          },
+          'required': ['package'],
           'additionalProperties': false,
         },
       },
@@ -6287,12 +6309,22 @@ to switch to General or Studio mode.''' : ''}
 ${mode == AgentMode.control ? '''
 CONTROL MODE: the user has granted device control. You ARE expected to operate
 the device and other apps on the user's behalf — this is the point of the mode.
-Use the device_* tools (device_read, device_tap, device_long_press, device_scroll,
-device_type, device_key, device_submit, etc.) to read the accessibility node
-tree and drive the UI. Work step by step: read the screen, act, then re-read to
-confirm. When you need the user to decide or provide input, use ask_user_question
-so it can surface even while the app is backgrounded. Safety guardrails still
-apply — never take destructive or irreversible actions without asking.''' : ''}
+Use the device_* tools to read the accessibility node tree and drive the UI smoothly and superfast.
+ANDROID NAVIGATION & DRIVING PLAYBOOK:
+• System Navigation:
+  - Return to Android launcher/homescreen: `device_system_nav(action: "home")`.
+  - Go back one step: `device_system_nav(action: "back")`.
+  - App switcher/recent tasks: `device_system_nav(action: "recents")`.
+  - Notifications & Quick Settings: `device_system_nav(action: "notifications")` or `device_system_nav(action: "quick_settings")`.
+  - Device Settings: use `device_system_nav(action: "settings")` to jump directly into Android Settings without hunting or searching!
+• Opening Apps:
+  - If you know the package name or standard ID, use `device_open_app(package: "com.example.app")` to launch it immediately.
+  - Common package names: Settings ("com.android.settings"), YouTube ("com.google.android.youtube"), Chrome ("com.android.chrome"), Camera ("com.google.android.GoogleCamera" or system camera), Photos ("com.google.android.apps.photos"), WhatsApp ("com.whatsapp").
+  - Launcher/App Drawer: If launching via home screen, press `device_system_nav(action: "home")`, swipe up from the center to open all apps (`device_swipe: from_x: 540, from_y: 1600, to_x: 540, to_y: 600`), then `device_read` to find the app or the search bar. Type the app name with `device_type` and `device_tap` its icon.
+• Interaction Discipline:
+  - Work step by step: read the screen (`device_read`), locate the target node handle, tap it (`device_tap: node`), and re-read (`device_read`) to confirm.
+  - Never guess blind coordinates if a node handle is present in `device_read`. Node handles are much faster and more accurate.
+  - When you need the user to decide or provide input, use ask_user_question so it can surface even while the app is backgrounded. Safety guardrails still apply — never take destructive or irreversible actions without asking.''' : ''}
 ${s.workspaceFolder == null || s.workspaceFolder!.isEmpty ? '''
 Workspace: per-session sandbox folder (session id: ${s.sandboxId ?? s.id}).
 All files, edits and shell commands happen inside this workspace.''' : '''
@@ -7548,6 +7580,7 @@ ${await _agentsMdBlock()}
       case 'device_type':
       case 'device_swipe':
       case 'device_system_nav':
+      case 'device_open_app':
       case 'device_screenshot':
       case 'device_key':
       case 'device_long_press':
@@ -9686,6 +9719,7 @@ ${await _agentsMdBlock()}
       case 'device_type':
       case 'device_swipe':
       case 'device_system_nav':
+      case 'device_open_app':
       case 'device_screenshot':
       case 'device_key':
       case 'device_long_press':
@@ -11173,12 +11207,20 @@ ${await _agentsMdBlock()}
           return detail;
         case 'device_system_nav':
           final action = args['action'] as String? ?? '';
+          if (action == 'settings') {
+            final settingsResult = await device.openSettings();
+            final settingsCancelled = _cancelledDeviceResult(settingsResult);
+            if (settingsCancelled != null) return settingsCancelled;
+            _emit('shell', 'device_system_nav: opened settings');
+            return 'opened Android Settings directly';
+          }
           const actions = {
             'back',
             'home',
             'recents',
             'notifications',
             'quick_settings',
+            'settings',
           };
           if (!actions.contains(action)) {
             return 'device_system_nav requires action: ${actions.join('|')}.';
@@ -11188,6 +11230,20 @@ ${await _agentsMdBlock()}
           if (navCancelled != null) return navCancelled;
           _emit('shell', 'device_system_nav: $action');
           return 'system navigation: $action';
+        case 'device_open_app':
+          final package = args['package'] as String?;
+          if (package == null || package.trim().isEmpty) {
+            return 'device_open_app requires package.';
+          }
+          final cleanPkg = package.trim();
+          if (_isSensitiveDeviceTarget(cleanPkg)) {
+            return _sensitiveDeviceDenial(cleanPkg);
+          }
+          final openResult = await device.openApp(cleanPkg);
+          final openCancelled = _cancelledDeviceResult(openResult);
+          if (openCancelled != null) return openCancelled;
+          _emit('shell', 'device_open_app: $cleanPkg');
+          return 'launched app: $cleanPkg';
         case 'device_key':
           final key = args['key'] as String?;
           const keys = {
