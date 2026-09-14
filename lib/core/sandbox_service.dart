@@ -299,6 +299,13 @@ class SandboxService {
         // unawaited to keep boot fast (9 tiny in-memory assets).
         _writeAptConfig(prefix);
         unawaited(_ensureBundledAptKeyring(prefix));
+        // Existing installs can still carry the Termux shebang in
+        // bin/apt-key (older builds patched it only after runtimes were
+        // installed). apt 2.8's ExecGPGV execs apt-key for every
+        // `apt update`, so repair that ONE tiny script synchronously here
+        // — cheap, and it makes apt work even before the background
+        // self-heal reaches the full find+sed pass.
+        _repairAptKeyShebang(prefix);
         _ensureTlsConfig(prefix);
         _probePythonPath();
         // Self-heal (PR22, relocated PR32): installs made by older builds
@@ -924,18 +931,63 @@ export PIP_CACHE_DIR="\$HOME/.cache/pip"
     } catch (_) {}
   }
 
+  /// Rewrite a script's Termux-prefix shebang line to [prefix]. Returns the
+  /// rewritten content, or null when [content] is not a script whose FIRST
+  /// line mentions the Termux prefix (so binaries/configs are untouched).
+  ///
+  /// apt 2.8's `ExecGPGV` execs `apt-key` (a `#!/data/data/com.termux/.../sh`
+  /// script). If that shebang is not rewritten before the first `apt update`,
+  /// the kernel cannot find the interpreter, apt-key never runs, and every
+  /// mirror is reported as "InRelease is not signed". Patching here — during
+  /// payload extraction, before anything execs apt — closes that window.
+  @visibleForTesting
+  static String? rewriteTermuxShebang(String content, String prefix) {
+    if (!content.startsWith('#!')) return null;
+    final nl = content.indexOf('\n');
+    final firstLine = nl < 0 ? content : content.substring(0, nl);
+    const termuxUsr = '/data/data/com.termux/files/usr';
+    if (!firstLine.contains(termuxUsr)) return null;
+    final fixed = firstLine
+        .replaceAll('$termuxUsr/', '$prefix/')
+        .replaceAll(termuxUsr, prefix);
+    return nl < 0 ? fixed : fixed + content.substring(nl);
+  }
+
+  /// Repair the `bin/apt-key` shebang in place (fast, single-file).
+  ///
+  /// apt 2.8's `ExecGPGV` execs `apt-key` — a shell script that ships with a
+  /// `#!/data/data/com.termux/files/usr/bin/sh` shebang. A stale shebang
+  /// makes the very first `apt update` fail with "InRelease is not signed"
+  /// on every mirror. This runs on every boot so an existing broken install
+  /// self-repairs without a reinstall. Best-effort and idempotent.
+  void _repairAptKeyShebang(Directory prefix) {
+    try {
+      final f = File('${prefix.path}/bin/apt-key');
+      if (!f.existsSync()) return;
+      final txt = f.readAsStringSync();
+      final fixed = rewriteTermuxShebang(txt, prefix.path);
+      if (fixed != null) f.writeAsStringSync(fixed);
+    } catch (_) {}
+  }
+
   void _rewritePrefixInConfigs(Directory prefix) {
     const termux = '/data/data/com.termux/files/usr';
     final ours = prefix.path;
     for (final entity in prefix.listSync(recursive: true)) {
       if (entity is! File) continue;
       final p = entity.path;
-      // Only patch small text configs (apt, profile) — skip binaries/libs.
-      if (!(p.contains('/etc/') || p.contains('/share/termux'))) continue;
+      final isConfig = p.contains('/etc/') || p.contains('/share/termux');
+      final isScript = p.contains('/bin/') || p.contains('/libexec/');
+      if (!isConfig && !isScript) continue;
       try {
         final size = entity.lengthSync();
         if (size > 256 * 1024) continue;
         final txt = entity.readAsStringSync();
+        if (isScript) {
+          final fixed = rewriteTermuxShebang(txt, ours);
+          if (fixed != null) entity.writeAsStringSync(fixed);
+          continue;
+        }
         if (txt.contains(termux)) {
           entity.writeAsStringSync(txt.replaceAll(termux, ours));
         }
@@ -967,6 +1019,13 @@ Dir::Etc::trusted "$p/etc/apt/trusted.gpg";
 Dir::Etc::trustedparts "$p/etc/apt/trusted.gpg.d";
 Dir::Bin::dpkg "$p/bin/dpkg";
 Dir::Bin::apt-get "$p/bin/apt-get";
+// apt 2.8's signature verifier (ExecGPGV) does NOT exec gpgv directly — it
+// execs `apt-key verify`, whose default path is the COMPILED-IN Termux
+// prefix (/data/data/com.termux/files/usr/bin/apt-key). On devices where
+// the LD_PRELOAD prefix redirect is SELinux-blocked that path is another
+// app's private dir, apt-key never runs, and every mirror is reported as
+// "InRelease is not signed" (exit 100) forever. Point it at OUR prefix.
+Dir::Bin::apt-key "$p/bin/apt-key";
 Dir::Bin::methods "$p/lib/apt/methods";
 Dir::Bin::solvers "$p/lib/apt/solvers";
 Dir::Bin::planners "$p/lib/apt/planners";
@@ -1909,10 +1968,15 @@ audit=false
       }
 
       // 3. Shebangs + exec bits — same treatment as a fresh install.
-      //    Skipped when bin/npx or bin/npm is missing (nothing to patch
-      //    yet — runtimes not installed; _installRuntimesWithRetry will
-      //    do the full pass after installing them).
-      if (File('$p/bin/npm').existsSync() ||
+      //    ALWAYS run: the payload's bin/apt-key must be runnable even
+      //    before any runtime is installed (apt 2.8's ExecGPGV execs
+      //    apt-key for every `apt update`; a stale Termux shebang makes
+      //    every mirror read "InRelease is not signed"). Previously this
+      //    was gated on npm/npx existing, which skipped the repair on a
+      //    sandbox whose runtimes had not installed yet — exactly when
+      //    apt-key was needed most.
+      if (File('$p/bin/apt-key').existsSync() ||
+          File('$p/bin/npm').existsSync() ||
           File('$p/bin/npx').existsSync()) {
         await _patchExtractedShebangs(prefix);
       }

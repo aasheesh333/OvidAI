@@ -429,6 +429,41 @@ void main() {
         isFalse,
       );
     });
+
+    // apt 2.8's ExecGPGV execs `apt-key verify` — not gpgv directly. Its
+    // default path is the COMPILED-IN Termux prefix; on devices where the
+    // LD_PRELOAD redirect is SELinux-blocked that path is another app's
+    // private dir, apt-key never runs, and every mirror reads
+    // "InRelease is not signed" forever. Pin the explicit override.
+    test('points apt-key at the sandbox prefix, never the Termux path', () {
+      final conf = SandboxService.aptConfigText('/prefix');
+      expect(conf, contains('Dir::Bin::apt-key "/prefix/bin/apt-key";'));
+      expect(conf, contains('Dir::Bin::dpkg "/prefix/bin/dpkg";'));
+    });
+
+    test('rewrites a Termux-prefix script shebang to the sandbox prefix', () {
+      const script = '#!/data/data/com.termux/files/usr/bin/sh\nset -e\necho hi\n';
+      final fixed = SandboxService.rewriteTermuxShebang(script, '/prefix');
+      expect(fixed, isNotNull);
+      expect(fixed, startsWith('#!/prefix/bin/sh\n'));
+      expect(fixed, contains('set -e'));
+      expect(fixed, isNot(contains('/data/data/com.termux')));
+    });
+
+    test('rewrites an env-form Termux shebang without touching the body', () {
+      const script =
+          '#!/data/data/com.termux/files/usr/bin/env bash\nX=/data/data/com.termux/files/usr\n';
+      final fixed = SandboxService.rewriteTermuxShebang(script, '/p');
+      expect(fixed, startsWith('#!/p/bin/env bash\n'));
+      // Only the shebang line is rewritten; the body is preserved verbatim.
+      expect(fixed, contains('X=/data/data/com.termux/files/usr'));
+    });
+
+    test('leaves non-scripts and non-Termux scripts untouched', () {
+      expect(SandboxService.rewriteTermuxShebang('#!/bin/sh\necho x', '/p'), isNull);
+      expect(SandboxService.rewriteTermuxShebang('\x7fELF\x02\x01\x01', '/p'), isNull);
+      expect(SandboxService.rewriteTermuxShebang('plain text', '/p'), isNull);
+    });
   });
 
   group('git credential scoping', () {
