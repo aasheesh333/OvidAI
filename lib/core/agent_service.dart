@@ -3366,13 +3366,80 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // The session's preset is an allow/deny composition over the roster
     // above. Unknown preset ids fall back to standard (deny nothing).
     final preset = PresetRegistry.byId(_runSession?.presetId ?? 'standard');
-    return preset.allowedTools.isEmpty && preset.deniedTools.isEmpty
+    final gated = preset.allowedTools.isEmpty && preset.deniedTools.isEmpty
         ? tools
         : tools.where((t) {
             final fn = t['function'];
             final name = fn is Map ? fn['name'] as String? : null;
             return name != null && PresetRegistry.allows(preset, name);
           }).toList();
+    // Request-time schema compactor: shrink only the PROSE (description
+    // fields). Names, parameter names, types, enums, required and defaults
+    // are never touched, so every tool stays fully callable and every
+    // feature keeps working — the payload just carries less redundant text.
+    return gated.map(_compactTool).toList();
+  }
+
+  /// Budgets for the request-time tool-schema compactor (characters).
+  /// Generous enough to keep each tool's actionable lead sentence.
+  static const int toolDescBudget = 160;
+  static const int paramDescBudget = 60;
+
+  /// Shorten [text] to at most [budget] characters at a sentence or word
+  /// boundary. Returns [text] unchanged when it already fits.
+  @visibleForTesting
+  static String compactDescription(String text, int budget) {
+    final t = text.trim();
+    if (t.length <= budget) return t;
+    final slice = t.substring(0, budget);
+    final sentence = slice.lastIndexOf(RegExp(r'[.!?]\s'));
+    final space = slice.lastIndexOf(' ');
+    final cut = sentence >= budget ~/ 2
+        ? sentence + 1
+        : (space > 0 ? space : budget);
+    final base = t.substring(0, cut).trimRight();
+    return '$base…';
+  }
+
+  static Map<String, dynamic> _compactParams(Map<dynamic, dynamic> params) {
+    final out = Map<String, dynamic>.from(params);
+    final props = params['properties'];
+    if (props is Map) {
+      final propsOut = <String, dynamic>{};
+      for (final e in props.entries) {
+        final v = e.value;
+        if (v is Map) {
+          final pOut = Map<String, dynamic>.from(v);
+          final d = v['description'];
+          if (d is String) {
+            pOut['description'] = compactDescription(d, paramDescBudget);
+          }
+          propsOut[e.key.toString()] = pOut;
+        } else {
+          propsOut[e.key.toString()] = v;
+        }
+      }
+      out['properties'] = propsOut;
+    }
+    return out;
+  }
+
+  /// Compact one tool definition's prose without changing its contract.
+  static Map<String, dynamic> _compactTool(Map<String, dynamic> tool) {
+    final fn = tool['function'];
+    if (fn is! Map) {
+      return tool;
+    }
+    final fnOut = Map<String, dynamic>.from(fn);
+    final d = fn['description'];
+    if (d is String) {
+      fnOut['description'] = compactDescription(d, toolDescBudget);
+    }
+    final params = fn['parameters'];
+    if (params is Map) {
+      fnOut['parameters'] = _compactParams(params);
+    }
+    return {'type': tool['type'] ?? 'function', 'function': fnOut};
   }
 
   // Core tools — always available to the agent
@@ -5629,11 +5696,15 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   ///   • the checkpoint replacement as a USER-role message with the exact
   ///     checkpoint preamble + `<compacted-summary>` tags,
   ///   • optional staged-attachments note,
-  ///   • `_replayHistory` (post-checkpoint window).
+  ///   • `_replayHistory` (post-checkpoint window),
+  ///   • the volatile context block (time / goal / reminders / todos) LAST,
+  ///     so the stable system+tools prefix stays byte-identical across turns
+  ///     and provider prefix caching can hit.
   List<Map<String, dynamic>> buildRequestMessages(
     ChatSession s,
     String sys, {
     List<({String name, String path, int size})> atts = const [],
+    String volatile = '',
   }) {
     return [
       {'role': 'system', 'content': sys},
@@ -5662,6 +5733,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
               'the user\'s message.]',
         },
       ..._replayHistory(s),
+      if (volatile.trim().isNotEmpty)
+        {'role': 'system', 'content': volatile.trim()},
     ];
   }
 
@@ -6249,6 +6322,55 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     return 'WORKSPACE INSTRUCTIONS (AGENTS.md — follow unless the user overrides):\n$body';
   }
 
+  /// Volatile per-turn context (time, active goal, reminders, live todos).
+  ///
+  /// Deliberately kept OUT of the system prompt: the system prompt + tool
+  /// schemas are the large, repeated part of every request, and provider
+  /// prefix caching only hits when that prefix is byte-identical. Time and
+  /// the todo list change every turn, so they ride here as the LAST message
+  /// instead — every instruction still reaches the model, but the cacheable
+  /// prefix stays stable.
+  String _volatileContextBlock(ChatSession s) {
+    final buf = StringBuffer();
+    buf.writeln(
+      'Current time: ${_nowLine()} (interpret unqualified dates/times in '
+      'the user\'s zone).',
+    );
+    if (s.goal != null && s.goal!['status'] == 'active') {
+      buf.writeln(
+        'ACTIVE GOAL (round ${s.goal!['round']}): "${s.goal!['objective']}". '
+        'This user message is a goal round — work toward the objective, then '
+        'update_goal with progress. Do not restate the goal; just advance it.',
+      );
+    }
+    if (s.schedules.isNotEmpty) {
+      buf.writeln(
+        'SESSION REMINDERS (${s.schedules.length}): When a [reminder] message '
+        'arrives, treat its prompt as a user request and act on it.',
+      );
+    }
+    if (s.todos.isNotEmpty) {
+      buf.writeln(
+        'SESSION TODOS (${s.todos.length} item${s.todos.length == 1 ? '' : 's'} '
+        '— follow this checklist, do not abandon it):',
+      );
+      for (final t in s.todos) {
+        final mark = t['status'] == 'completed'
+            ? 'x'
+            : t['status'] == 'in_progress'
+            ? '~'
+            : ' ';
+        buf.writeln('- [$mark] ${t['content']}');
+      }
+      buf.writeln(
+        'Work through the todo list. Mark items in_progress BEFORE doing them '
+        'and completed AFTER they are done. If all items are completed, say '
+        'so and give your final answer.',
+      );
+    }
+    return buf.toString().trim();
+  }
+
   Future<void> _runTaskBody(
     String originalPrompt,
     _RunCtx ctx, {
@@ -6406,13 +6528,6 @@ Execution tiers: run_shell picks the best tier automatically.
   command is "not found", tell the user to run the one-time native
   sandbox setup from the Studio screen. Provider/plugin/MCP management
   works the same in every tier via the catalog_* tools.
-${s.goal != null && s.goal!['status'] == 'active' ? '\nACTIVE GOAL (round ${s.goal!['round']}): "${s.goal!['objective']}". This user message is a goal round — work toward the objective, then update_goal with progress. Do not restate the goal; just advance it.' : ''}
-${s.schedules.isNotEmpty ? '\nSESSION REMINDERS (${s.schedules.length}): When a [reminder] message arrives, treat its prompt as a user request and act on it.' : ''}
-${s.todos.isNotEmpty ? '\nSESSION TODOS (${s.todos.length} item${s.todos.length == 1 ? '' : 's'} — follow this checklist, do not abandon it):\n${s.todos.map((t) => '- [${t['status'] == 'completed'
-                  ? 'x'
-                  : t['status'] == 'in_progress'
-                  ? '~'
-                  : ' '}] ${t['content']}').join('\n')}\nWork through the todo list. Mark items in_progress BEFORE doing them and completed AFTER they are done. If all items are completed, say so and give your final answer.' : ''}
 ${s.isSubagent ? '''
 ${(s.agentPersona ?? '').isEmpty ? '' : '\nPERSONA: ${s.agentPersona}\n'}
 ${(s.agentOutputHint ?? '').isEmpty ? '' : '\nREQUIRED FINAL OUTPUT SHAPE: ${s.agentOutputHint}\nYour FINAL message must match this shape exactly — the parent parses it.\n'}
@@ -6429,10 +6544,16 @@ For mid-task updates that should not wait (an early finding, a blocker), call
 report(content) — it reaches the parent as its next-step context.''' : ''}
 ${_presetPersona(s).isEmpty ? '' : '\nAGENT PRESET (${s.presetId}): ${_presetPersona(s)}\n'}
 ${SkillService.I.catalogBlockForSession(s.id).isEmpty ? '' : '\n${SkillService.I.catalogBlockForSession(s.id)}'}
-Current time: ${_nowLine()} (the prompt builder time-context: interpret unqualified dates/times in the user's zone).
 ${AppState.I.replyLanguageHint().isEmpty ? '' : '${AppState.I.replyLanguageHint()}\n'}
 ${await _agentsMdBlock()}
 ''';
+
+    // ── Volatile context (prefix-cache friendly) ──
+    // Time, active goal, reminders and the live todo checklist change often.
+    // Keeping them OUT of the system prompt leaves the (large) system+tools
+    // prefix byte-stable across turns so provider prefix caching can hit;
+    // they are re-attached as the LAST message of every request instead.
+    final volatileCtx = _volatileContextBlock(s);
 
     // ── Context compaction (the compaction engine ovid-compaction-basic parity) ──
     // Pre-step pressure check: measure the envelope against 80% of THIS
@@ -6442,9 +6563,18 @@ ${await _agentsMdBlock()}
 
     // Capture the assembled system prompt for this turn so the user can
     // inspect exactly what the model was told (context visibility parity).
-    s.systemPromptSnapshot = sys;
+    // The volatile context rides as a separate trailing message for prefix
+    // caching, but the snapshot shows the model's complete instruction set.
+    s.systemPromptSnapshot = volatileCtx.trim().isEmpty
+        ? sys
+        : '$sys\n\n$volatileCtx';
 
-    final msgs = buildRequestMessages(s, sys, atts: atts);
+    final msgs = buildRequestMessages(
+      s,
+      sys,
+      atts: atts,
+      volatile: volatileCtx,
+    );
 
     try {
       var overflowRecovered = false;
@@ -6538,7 +6668,7 @@ ${await _agentsMdBlock()}
             // checkpoint is never dropped.
             msgs
               ..clear()
-              ..addAll(buildRequestMessages(s, sys));
+              ..addAll(buildRequestMessages(s, sys, volatile: volatileCtx));
             _emit(
               'think',
               'context overflow — request rebuilt from compacted history '
@@ -6656,15 +6786,22 @@ ${await _agentsMdBlock()}
           final transient = _looksTransientProviderError(err);
           if (transient && turnsWithoutProgress < 6) {
             turnsWithoutProgress++;
-            final wait = Duration(seconds: 5 * turnsWithoutProgress);
+            final wait =
+                runRetryWaitForTest?.call(turnsWithoutProgress) ??
+                Duration(seconds: 5 * turnsWithoutProgress);
             _emit(
               'think',
               'provider hiccup ($err) — retrying in ${wait.inSeconds}s…',
             );
+            // Drop the failed attempt's partial bubble before the run-level
+            // retry, so it can never sit beside the retry's fresh answer.
+            _discardLiveAttempt(s);
             await Future.delayed(wait);
             // Un-cancel any accidental flag? No — user cancel is sacred.
             continue;
           }
+          // Exhausted: never leave a partial bubble next to the error notice.
+          _discardLiveAttempt(s);
           _emit('err', err);
           _appendAssistant(
             '⚠️ $err\n\n'
@@ -6846,7 +6983,7 @@ ${await _agentsMdBlock()}
           if (s.compactedAtCount > preCompact) {
             msgs
               ..clear()
-              ..addAll(buildRequestMessages(s, sys));
+              ..addAll(buildRequestMessages(s, sys, volatile: volatileCtx));
             _emit(
               'think',
               'context compacted — request rebuilt '
@@ -6960,13 +7097,31 @@ ${await _agentsMdBlock()}
     }
   }
 
-  /// Clear per-run streaming buffers (new turn = fresh bubble).
-  void _resetLiveBuffers() {
+  /// Drop the current un-finalized live bubble: remove the partial
+  /// assistant message from its session and clear the streaming buffers.
+  ///
+  /// Used before a retry attempt (so a failed attempt's partial text can
+  /// never be appended to the next attempt's output) and at turn start (so
+  /// a run-level retry never leaves a stale partial bubble behind). When
+  /// [s] is given, only that session's bubble is touched.
+  void _discardLiveAttempt(ChatSession? s) {
+    final m = _liveMsg;
+    final owner = _liveSession;
+    var removed = false;
+    if (m != null && owner != null && (s == null || identical(owner, s))) {
+      removed = owner.messages.remove(m);
+    }
     _liveContent.clear();
     _liveReasoning.clear();
     _liveMsg = null;
     _liveSession = null;
+    if (removed) AppState.I.refresh();
   }
+
+  /// Clear per-run streaming buffers (new turn = fresh bubble). Any
+  /// un-finalized bubble from the previous turn is discarded so it can never
+  /// persist as a leftover partial.
+  void _resetLiveBuffers() => _discardLiveAttempt(null);
 
   /// On user stop: promote whatever streamed so far (partial content kept,
   /// partial reasoning becomes a kept reasoning note) and close the bubble.
@@ -6989,6 +7144,8 @@ ${await _agentsMdBlock()}
     } else {
       m.content = '*⏹ stopped by user*';
     }
+    _liveContent.clear();
+    _liveReasoning.clear();
     _liveSession = null;
     _liveMsg = null;
     AppState.I.refresh();
@@ -7103,6 +7260,37 @@ ${await _agentsMdBlock()}
     };
   }
 
+  /// Test seam: replaces a SINGLE LLM attempt (the retry wrapper still
+  /// runs around it). Null in production.
+  @visibleForTesting
+  static Future<Map<String, dynamic>?> Function(
+    ProviderConfig p,
+    List<Map<String, dynamic>> msgs,
+    ChatSession session,
+    bool includeTools,
+  )?
+  llmOnceForTest;
+
+  /// Test seam: overrides the retry backoff so a retry test never sleeps.
+  @visibleForTesting
+  static List<Duration> retryDelaysForTest = const [
+    Duration(seconds: 3),
+    Duration(seconds: 9),
+    Duration(seconds: 27),
+    Duration(seconds: 60),
+  ];
+
+  /// Test seam: overrides the RUN-LEVEL transient retry wait. Default is
+  /// `5s × attempt`. Null in production.
+  @visibleForTesting
+  static Duration Function(int attempt)? runRetryWaitForTest;
+
+  /// Test seam: stream [text] into the live bubble for [s], exactly like a
+  /// real SSE content delta — lets a test drive the retry/discard contract.
+  @visibleForTesting
+  void streamToBubbleForTest(ChatSession s, String text) =>
+      _streamToBubble(s, text);
+
   Future<Map<String, dynamic>?> _callLlm(
     ProviderConfig p,
     List<Map<String, dynamic>> msgs,
@@ -7112,6 +7300,10 @@ ${await _agentsMdBlock()}
     var lastErr = 'unknown';
     for (var attempt = 0; attempt <= 4; attempt++) {
       if (_cancelRequested) return null;
+      // A failed attempt may have streamed a partial answer into the live
+      // bubble. Discard it before retrying so the next attempt's text is
+      // never appended to the failed attempt's leftovers.
+      if (attempt > 0) _discardLiveAttempt(session);
       final r = await _callLlmOnce(
         p,
         msgs,
@@ -7127,12 +7319,12 @@ ${await _agentsMdBlock()}
       }
       if (attempt < 4) {
         // 3s, 9s, 27s, 60s — exponential-ish backoff.
-        final wait = [3, 9, 27, 60][attempt];
+        final wait = retryDelaysForTest[attempt];
         _emit(
           'think',
-          'retrying ${p.name} in ${wait}s (attempt ${attempt + 2}/5)…',
+          'retrying ${p.name} in ${wait.inSeconds}s (attempt ${attempt + 2}/5)…',
         );
-        await Future.delayed(Duration(seconds: wait));
+        await Future.delayed(wait);
       }
     }
     lastError = lastErr;
@@ -7145,6 +7337,10 @@ ${await _agentsMdBlock()}
     ChatSession session, {
     bool includeTools = true,
   }) async {
+    final onceOverride = llmOnceForTest;
+    if (onceOverride != null) {
+      return onceOverride(p, msgs, session, includeTools);
+    }
     HttpClient? client;
     final ttftWatch = Stopwatch()..start();
     int? ttftMs;
@@ -7476,6 +7672,8 @@ ${await _agentsMdBlock()}
       m.thinking = true;
       m.content = cleanReasoningText(_liveReasoning.toString());
     }
+    _liveContent.clear();
+    _liveReasoning.clear();
     _liveSession = null;
     _liveMsg = null;
     AppState.I.refresh();

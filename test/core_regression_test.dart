@@ -178,10 +178,14 @@ void main() {
 
         // Compaction now carries the long-tail; the transport sends the
         // FULL history (no 12-message slice) — that's what this asserts.
-        expect(sentMessages, hasLength(16));
+        // The last row is the volatile context block (time/todos), appended
+        // separately so the system+tools prefix stays cacheable.
+        expect(sentMessages, hasLength(17));
         expect(sentMessages.first['role'], 'system');
         expect(sentMessages[1]['content'], 'message-0');
-        expect(sentMessages.last['content'], 'message-14');
+        expect(sentMessages[sentMessages.length - 2]['content'], 'message-14');
+        expect(sentMessages.last['role'], 'system');
+        expect(sentMessages.last['content'], contains('Current time:'));
         expect(original.messages.last.content, 'response for original');
         expect(other.messages, isEmpty);
       } finally {
@@ -2341,14 +2345,16 @@ libncursesw.so.6.5←./lib/libncurses.so.6
             .runTask('do the task', sessionId: session.id, freshTurn: false)
             .timeout(const Duration(seconds: 10));
         expect(requestBodies, isNotEmpty);
-        final sys =
-            (requestBodies.first['messages'] as List).firstWhere(
-                  (m) => m['role'] == 'system',
-                )['content']
-                as String;
-        expect(sys, contains('SESSION TODOS'));
-        expect(sys, contains('edit the file'));
-        expect(sys, contains('run tests'));
+        final messages = requestBodies.first['messages'] as List;
+        final payloadText = messages
+            .map((m) => (m as Map)['content']?.toString() ?? '')
+            .join('\n');
+        // Todos ride in the trailing volatile block (prefix-cache friendly),
+        // not in the stable leading system prompt — but they must still
+        // reach the model in the same request.
+        expect(payloadText, contains('SESSION TODOS'));
+        expect(payloadText, contains('edit the file'));
+        expect(payloadText, contains('run tests'));
       } finally {
         provider
           ..baseUrl = originals['baseUrl'] as String
@@ -7156,7 +7162,7 @@ block</pre>
       expect(src, contains('## Next Step'));
       // Overflow rebuild + budget-boundary rebuild reuse the shared
       // assembly (never drop the checkpoint).
-      expect(src, contains('buildRequestMessages(s, sys)'));
+      expect(src, contains('buildRequestMessages(s, sys'));
     });
   });
 

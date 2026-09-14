@@ -117,9 +117,12 @@ void main() {
       expect(src.contains('_SystemPromptRow'), isTrue);
       expect(src.contains("'System prompt'"), isTrue);
       expect(src.contains('chat-system-prompt-row'), isTrue);
-      // Captured in the run body.
+      // Captured in the run body (system prompt plus the trailing
+      // volatile block, so the snapshot still shows the model's complete
+      // instruction set).
       final agent = File('lib/core/agent_service.dart').readAsStringSync();
-      expect(agent.contains('s.systemPromptSnapshot = sys'), isTrue);
+      expect(agent.contains('systemPromptSnapshot'), isTrue);
+      expect(agent.contains('volatileCtx'), isTrue);
     });
   });
 }
