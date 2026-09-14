@@ -100,6 +100,62 @@ void main() {
     });
   });
 
+  group('McpDetailScreen credential setup', () {
+    testWidgets('shows a Set up & connect CTA when credentials are missing', (
+      tester,
+    ) async {
+      final server = McpServer(
+        name: 'cred_mcp',
+        author: 'test',
+        description: 'needs a token',
+        category: 'Custom',
+        command: 'echo',
+        custom: true,
+        envHint: 'API_TOKEN',
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: McpDetailScreen(server: server),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Set up & connect'), findsOneWidget);
+      expect(find.textContaining('API_TOKEN'), findsWidgets);
+    });
+
+    testWidgets('tapping Connect server opens the credential sheet', (
+      tester,
+    ) async {
+      final server = McpServer(
+        name: 'cred_mcp2',
+        author: 'test',
+        description: 'needs a token',
+        category: 'Custom',
+        command: 'echo',
+        custom: true,
+        envHint: 'API_TOKEN',
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: McpDetailScreen(server: server),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Connect server'));
+      await tester.pumpAndSettle();
+
+      // The credential sheet asks for the missing var instead of connecting.
+      expect(find.text('Connect cred_mcp2'), findsOneWidget);
+      expect(find.text('Save & connect'), findsOneWidget);
+    });
+  });
+
   group('PluginCard DSH flow', () {
     testWidgets('inline switch toggles plugin enable/disable', (tester) async {
       final app = AppState.I;

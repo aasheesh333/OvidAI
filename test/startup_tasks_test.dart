@@ -663,6 +663,74 @@ void main() {
     );
 
     test(
+      'a recent failure cools down to skipped instead of failing again',
+      () async {
+        var called = false;
+        final now = DateTime(2026, 9, 14, 12);
+        final task = MarketplaceRefreshTask(
+          id: 'marketplace.refresh',
+          label: 'Refresh plugin marketplaces',
+          timeout: const Duration(seconds: 20),
+          repos: () => const ['only'],
+          refresh: (_) async {
+            called = true;
+            return MarketplaceSyncOutcome.failed;
+          },
+          lastFailedAt: now.subtract(const Duration(hours: 1)),
+          now: () => now,
+        );
+
+        final status = await task.run();
+
+        expect(called, isFalse);
+        expect(status.state, StartupItemState.skipped);
+        expect(status.reason, contains('Retry'));
+      },
+    );
+
+    test('an old failure does not cool down', () async {
+      var called = false;
+      final now = DateTime(2026, 9, 14, 12);
+      final task = MarketplaceRefreshTask(
+        id: 'marketplace.refresh',
+        label: 'Refresh plugin marketplaces',
+        timeout: const Duration(seconds: 20),
+        repos: () => const ['only'],
+        refresh: (_) async {
+          called = true;
+          return MarketplaceSyncOutcome.failed;
+        },
+        lastFailedAt: now.subtract(const Duration(hours: 13)),
+        now: () => now,
+      );
+
+      final status = await task.run();
+
+      expect(called, isTrue);
+      expect(status.state, StartupItemState.failed);
+    });
+
+    test('readiness wiring feeds recent failure memos into both tasks', () async {
+      final now = DateTime.now();
+      SharedPreferences.setMockInitialValues({
+        'startup_last_failure_marketplace.refresh': now
+            .subtract(const Duration(hours: 1))
+            .toIso8601String(),
+        'startup_last_failure_sandbox.selfHeal': now
+            .subtract(const Duration(hours: 1))
+            .toIso8601String(),
+      });
+      final app = AppState.createForTest();
+      final tasks = await app.buildReadinessTasks();
+      final mp = tasks.whereType<MarketplaceRefreshTask>().single;
+      final sb = tasks.whereType<SandboxMaintenanceTask>().single;
+      expect(mp.lastFailedAt, isNotNull);
+      expect(sb.lastFailedAt, isNotNull);
+      expect((await mp.run()).state, StartupItemState.skipped);
+      expect((await sb.run()).state, StartupItemState.skipped);
+    });
+
+    test(
       'a slow repo cannot starve later repos within the item budget',
       () async {
         final visited = <String>[];
@@ -770,6 +838,48 @@ void main() {
       ).run();
       expect(status.state, StartupItemState.ready);
       expect(calls, ['maintain', 'quota']);
+    });
+
+    test(
+      'a recent failure cools down to skipped instead of timing out again',
+      () async {
+        var maintained = false;
+        final now = DateTime(2026, 9, 14, 12);
+        final status = await SandboxMaintenanceTask(
+          id: 'sandbox.selfHeal',
+          label: 'Maintain local sandbox',
+          timeout: const Duration(seconds: 30),
+          isInstalled: () => true,
+          startMaintenance: () async => maintained = true,
+          runtimesVerified: () async => true,
+          installCoreRuntimes: () async => true,
+          enforceQuota: () async {},
+          lastFailedAt: now.subtract(const Duration(hours: 2)),
+          now: () => now,
+        ).run();
+        expect(maintained, isFalse);
+        expect(status.state, StartupItemState.skipped);
+        expect(status.reason, contains('Retry'));
+      },
+    );
+
+    test('an old failure does not cool down', () async {
+      var maintained = false;
+      final now = DateTime(2026, 9, 14, 12);
+      final status = await SandboxMaintenanceTask(
+        id: 'sandbox.selfHeal',
+        label: 'Maintain local sandbox',
+        timeout: const Duration(seconds: 30),
+        isInstalled: () => true,
+        startMaintenance: () async => maintained = true,
+        runtimesVerified: () async => true,
+        installCoreRuntimes: () async => true,
+        enforceQuota: () async {},
+        lastFailedAt: now.subtract(const Duration(hours: 25)),
+        now: () => now,
+      ).run();
+      expect(maintained, isTrue);
+      expect(status.state, StartupItemState.ready);
     });
   });
 

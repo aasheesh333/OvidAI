@@ -1,3 +1,4 @@
+import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
 /// P5 (2026-09-13): on-device speech-to-text for the composer and the
@@ -17,6 +18,26 @@ class VoiceInputService {
   SpeechToText? _speech;
   bool _listening = false;
   bool get isListening => _listening;
+
+  /// Test seam: overrides the microphone permission request.
+  Future<bool> Function()? ensureMicrophonePermissionForTest;
+
+  /// Explicitly request the microphone permission. The overlay only exists
+  /// while the app is backgrounded, where the STT plugin's implicit
+  /// permission prompt never surfaces — so callers (overlay mic, composer)
+  /// must ask first instead of relying on `initialize()`.
+  Future<bool> ensureMicrophonePermission() async {
+    final override = ensureMicrophonePermissionForTest;
+    if (override != null) return override();
+    try {
+      var status = await Permission.microphone.status;
+      if (status.isGranted) return true;
+      status = await Permission.microphone.request();
+      return status.isGranted;
+    } catch (_) {
+      return false;
+    }
+  }
 
   SpeechToText get _plugin => _speech ??= SpeechToText();
 

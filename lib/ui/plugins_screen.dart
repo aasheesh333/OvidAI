@@ -3,8 +3,10 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import '../core/agent_service.dart';
+import '../core/github_service.dart';
 import '../core/hook_service.dart';
 import '../core/mcp_config_parse.dart';
+import '../core/mcp_service.dart';
 import '../core/plugin_manifest.dart';
 import '../core/plugin_registry.dart';
 import '../core/plugin_runtime.dart';
@@ -13,6 +15,7 @@ import '../core/sandbox_service.dart';
 import '../core/startup_coordinator.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
+import 'github_login_sheet.dart';
 import 'plugin_permission_sheet.dart';
 import 'startup_progress_panel.dart';
 
@@ -67,6 +70,29 @@ String? mcpUnsupportedReason(McpServer s) {
         'on-device sandbox and need $needs there';
   }
   return null;
+}
+
+/// What the Connect action must do for an MCP server: connect directly when
+/// nothing is missing, otherwise ask for the required credentials first —
+/// never silently flip to a needsSetup label.
+enum McpCredentialAsk { connectDirectly, askCredentials }
+
+@visibleForTesting
+McpCredentialAsk mcpCredentialAskForTest({required List<String> missing}) =>
+    missing.isEmpty
+        ? McpCredentialAsk.connectDirectly
+        : McpCredentialAsk.askCredentials;
+
+/// Whether the credential sheet should offer the GitHub login as the
+/// first-class path: the GitHub server itself, or any server whose declared
+/// credential is the GitHub token.
+@visibleForTesting
+bool mcpOffersGithubLoginForTest(McpServer server) {
+  if (server.name.trim().toLowerCase() == 'github') return true;
+  return (server.envHint ?? '')
+      .split(',')
+      .map((e) => e.trim())
+      .contains('GITHUB_TOKEN');
 }
 
 /// Durable canonical startup status for a runtime plugin row, or null when
@@ -2170,6 +2196,206 @@ parseMcpConfigForTest(String raw) => [
         ),
     ];
 
+/// Connect an MCP server, asking for required credentials first.
+///
+/// Disconnects are instant. A connect with missing credentials opens the
+/// credential sheet (GitHub login for GitHub-native servers, secure token
+/// fields otherwise) and only then connects — it never silently flips to a
+/// needsSetup label.
+Future<void> connectMcpServer(BuildContext context, McpServer server) async {
+  final app = AppState.I;
+  if (server.connected) {
+    app.toggleMcpServer(server);
+    return;
+  }
+  final missing = await McpService.I.missingCredentialsFor(server);
+  if (!context.mounted) return;
+  if (mcpCredentialAskForTest(missing: missing) ==
+      McpCredentialAsk.connectDirectly) {
+    app.toggleMcpServer(server);
+    return;
+  }
+  final res = await showModalBottomSheet<String>(
+    context: context,
+    backgroundColor: Aether.surface,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+    ),
+    builder: (sheetCtx) => Padding(
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(sheetCtx).viewInsets.bottom,
+      ),
+      child: _McpCredentialSheet(server: server, missing: missing),
+    ),
+  );
+  if (!context.mounted) return;
+  if (res == 'github-login') {
+    showGithubLoginSheet(
+      context,
+      onConnected: () => AppState.I.toggleMcpServer(server),
+    );
+  } else if (res == 'connected') {
+    app.toggleMcpServer(server);
+  }
+}
+
+/// Credential sheet for an MCP server with missing credentials: secure
+/// token fields, plus the GitHub login as the first-class path for
+/// GitHub-native servers. Pops with 'connected' (saved → caller connects)
+/// or 'github-login' (caller opens the GitHub login sheet).
+class _McpCredentialSheet extends StatefulWidget {
+  final McpServer server;
+  final List<String> missing;
+  const _McpCredentialSheet({required this.server, required this.missing});
+
+  @override
+  State<_McpCredentialSheet> createState() => _McpCredentialSheetState();
+}
+
+class _McpCredentialSheetState extends State<_McpCredentialSheet> {
+  late final Map<String, TextEditingController> _controllers;
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _controllers = {
+      for (final k in widget.missing) k: TextEditingController(),
+    };
+  }
+
+  @override
+  void dispose() {
+    for (final c in _controllers.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final values = <String, String>{};
+    for (final e in _controllers.entries) {
+      final v = e.value.text.trim();
+      if (v.isEmpty) {
+        setState(() => _error = '${e.key} is required.');
+        return;
+      }
+      values[e.key] = v;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    await AppState.I.setMcpEnv(widget.server.canonicalId, values);
+    if (!mounted) return;
+    Navigator.pop(context, 'connected');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final offerGithub =
+        mcpOffersGithubLoginForTest(widget.server) &&
+        !GitHubService.I.isLoggedIn;
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(18, 14, 18, 18),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Connect ${widget.server.name}',
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '${widget.server.name} needs ${widget.missing.join(', ')} '
+              'before it can connect. Secrets stay in secure storage on '
+              'this device.',
+              style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+            ),
+            if (offerGithub) ...[
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Aether.accent,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                icon: const Icon(Icons.login, size: 16),
+                label: Text(
+                  GitHubService.I.login == null
+                      ? 'Connect GitHub account'
+                      : 'Connect as ${GitHubService.I.login}',
+                  style: const TextStyle(fontSize: 13.5),
+                ),
+                onPressed: () => Navigator.pop(context, 'github-login'),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'or paste a token manually:',
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+            ],
+            const SizedBox(height: 10),
+            for (final name in widget.missing)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: TextField(
+                  controller: _controllers[name],
+                  obscureText: true,
+                  enableSuggestions: false,
+                  autocorrect: false,
+                  style: const TextStyle(fontSize: 13),
+                  decoration: InputDecoration(
+                    labelText: name,
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+              ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  _error!,
+                  style: TextStyle(fontSize: 12, color: Aether.danger),
+                ),
+              ),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: _saving
+                    ? Aether.surfaceRaised
+                    : Aether.accent,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              icon: _saving
+                  ? const SizedBox(
+                      width: 15,
+                      height: 15,
+                      child: CircularProgressIndicator(strokeWidth: 1.6),
+                    )
+                  : const Icon(Icons.key_outlined, size: 16),
+              label: Text(
+                _saving ? 'Saving…' : 'Save & connect',
+                style: const TextStyle(fontSize: 13.5),
+              ),
+              onPressed: _saving ? null : _save,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// Compact horizontal card for an MCP server.
 class McpCard extends StatelessWidget {
   final McpServer server;
@@ -2248,7 +2474,7 @@ class McpCard extends StatelessWidget {
                     value: server.connected,
                     activeTrackColor: Aether.accent,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    onChanged: (_) => AppState.I.toggleMcpServer(server),
+                    onChanged: (_) => connectMcpServer(context, server),
                   ),
                 ),
                 const SizedBox(width: 4),
@@ -2379,9 +2605,9 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               value: s.connected,
               activeTrackColor: Aether.accent,
               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              onChanged: (_) {
-                app.toggleMcpServer(s);
-                setState(() {});
+              onChanged: (_) async {
+                await connectMcpServer(context, s);
+                if (context.mounted) setState(() {});
               },
             ),
           ),
@@ -2501,7 +2727,10 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                 s.connected ? 'Disconnect' : 'Connect server',
                 style: const TextStyle(fontSize: 13.5),
               ),
-              onPressed: () => app.toggleMcpServer(s),
+              onPressed: () async {
+                await connectMcpServer(context, s);
+                if (context.mounted) setState(() {});
+              },
             ),
           ),
           // Task 10 (spec §10): Android-incompatible desktop servers show
@@ -2545,17 +2774,48 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(color: Aether.warn.withValues(alpha: 0.35)),
               ),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Icon(Icons.key_outlined, size: 15, color: Aether.warn),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      'Needs setup: ${s.envHint} must be configured (secure '
-                      'storage) before this server can connect. It will not '
-                      'start automatically.',
-                      style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.key_outlined,
+                        size: 15,
+                        color: Aether.warn,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Needs setup: ${s.envHint} must be configured '
+                          '(secure storage) before this server can connect. '
+                          'It will not start automatically.',
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            color: Aether.textMuted,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Aether.accent,
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
                     ),
+                    icon: const Icon(Icons.key_outlined, size: 15),
+                    label: const Text(
+                      'Set up & connect',
+                      style: TextStyle(fontSize: 12.5),
+                    ),
+                    onPressed: () async {
+                      await connectMcpServer(context, s);
+                      if (context.mounted) setState(() {});
+                    },
                   ),
                 ],
               ),

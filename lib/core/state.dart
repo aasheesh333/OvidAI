@@ -1482,6 +1482,20 @@ class AppState extends ChangeNotifier {
     if (status.id == 'plugin.activate' && status.state.isTerminal) {
       unawaited(_enqueueProbe(recordTruthfulPluginStatuses));
     }
+    // Failure cooldown for the two noisy environment tasks: a failed or
+    // degraded terminal outcome memoizes now(), so the next launch skips
+    // fast instead of failing again; a ready outcome clears the memo.
+    // Manual Retry clears it too (coordinator onBeforeRetry), so a tap
+    // always runs for real.
+    if (status.id == 'marketplace.refresh' ||
+        status.id == 'sandbox.selfHeal') {
+      if (status.state == StartupItemState.failed ||
+          status.state == StartupItemState.degraded) {
+        unawaited(_writeStartupFailureMemo(status.id, DateTime.now()));
+      } else if (status.state == StartupItemState.ready) {
+        unawaited(_clearStartupFailureMemo(status.id));
+      }
+    }
   }
 
   /// Truthful health for one plugin row. Runtime rows probe their declared
@@ -1997,10 +2011,54 @@ class AppState extends ChangeNotifier {
   Future<List<StartupTask>> buildReadinessTasks() =>
       _readinessTasks ??= _buildReadinessTasks();
 
+  /// Cooldown memo so a startup task that failed recently skips fast
+  /// instead of failing again every launch (12h). Only the two noisy
+  /// environment tasks use it — never MCP/plugin rows.
+  static String startupFailureMemoKey(String id) => 'startup_last_failure_$id';
+
+  /// In-memory copy of the failure memos, loaded once per task build so
+  /// manual Retry can clear them without waiting on prefs.
+  final Map<String, DateTime> _startupFailureMemos = {};
+
+  Future<DateTime?> _readStartupFailureMemo(String id) async {
+    final cached = _startupFailureMemos[id];
+    if (cached != null) return cached;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(startupFailureMemoKey(id));
+      final at = raw == null ? null : DateTime.tryParse(raw);
+      if (at != null) _startupFailureMemos[id] = at;
+      return at;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _writeStartupFailureMemo(String id, DateTime at) async {
+    _startupFailureMemos[id] = at;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(startupFailureMemoKey(id), at.toIso8601String());
+    } catch (_) {}
+  }
+
+  Future<void> _clearStartupFailureMemo(String id) async {
+    _startupFailureMemos.remove(id);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(startupFailureMemoKey(id));
+    } catch (_) {}
+  }
+
   Future<List<StartupTask>> _buildReadinessTasks() async {
     StartupCoordinator.I.statusSink = _onStartupStatus;
+    StartupCoordinator.I.onBeforeRetry = (id) => _clearStartupFailureMemo(id);
     final mcpTasks = await _buildMcpReadinessTasks();
     final pluginTasks = await _buildPluginReadinessTasks();
+    final marketplaceMemo = await _readStartupFailureMemo(
+      'marketplace.refresh',
+    );
+    final sandboxMemo = await _readStartupFailureMemo('sandbox.selfHeal');
     return [
       _LocalHydrationStartupTask(this),
       _PluginSafetyStartupTask(this),
@@ -2016,6 +2074,7 @@ class AppState extends ChangeNotifier {
         ),
         repos: () => List.of(marketplaces),
         refresh: _refreshMarketplaceForStartup,
+        lastFailedAt: marketplaceMemo,
       ),
       _startupTask(
         id: 'github.initialize',
@@ -2048,6 +2107,7 @@ class AppState extends ChangeNotifier {
         installCoreRuntimes: () =>
             SandboxService.I.installCoreRuntimes((_, _, _) {}),
         enforceQuota: _enforceSandboxQuota,
+        lastFailedAt: sandboxMemo,
       ),
     ];
   }

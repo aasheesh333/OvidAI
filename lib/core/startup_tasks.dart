@@ -125,7 +125,10 @@ class MarketplaceRefreshTask implements StartupTask {
     required this.timeout,
     required this.repos,
     required this.refresh,
-  });
+    this.lastFailedAt,
+    this.cooldown = const Duration(hours: 12),
+    DateTime Function()? now,
+  }) : now = now ?? DateTime.now;
 
   @override
   final String id;
@@ -136,6 +139,13 @@ class MarketplaceRefreshTask implements StartupTask {
   final List<String> Function() repos;
   final Future<MarketplaceSyncOutcome> Function(String repo) refresh;
 
+  /// When the last attempt failed recently, skip instead of burning the
+  /// budget and failing again every launch. Manual Retry bypasses this by
+  /// clearing the memo (see AppState), so a stale skip never sticks.
+  final DateTime? lastFailedAt;
+  final Duration cooldown;
+  final DateTime Function() now;
+
   @override
   StartupItemKind get kind => StartupItemKind.marketplace;
 
@@ -144,6 +154,15 @@ class MarketplaceRefreshTask implements StartupTask {
 
   @override
   Future<StartupItemStatus> run() async {
+    final failedAt = lastFailedAt;
+    if (failedAt != null && now().difference(failedAt) < cooldown) {
+      return StartupItemStatus.skipped(
+        id,
+        kind,
+        label,
+        reason: 'Skipped — refresh failed recently; tap Retry to try again',
+      );
+    }
     var worst = MarketplaceSyncOutcome.ready;
     final repos = this.repos();
     // One item covers every registered marketplace. Bound each repo by its
@@ -334,7 +353,10 @@ class SandboxMaintenanceTask implements StartupTask {
     required this.runtimesVerified,
     required this.installCoreRuntimes,
     required this.enforceQuota,
-  });
+    this.lastFailedAt,
+    this.cooldown = const Duration(hours: 12),
+    DateTime Function()? now,
+  }) : now = now ?? DateTime.now;
 
   @override
   final String id;
@@ -348,6 +370,13 @@ class SandboxMaintenanceTask implements StartupTask {
   final Future<bool> Function() installCoreRuntimes;
   final Future<void> Function() enforceQuota;
 
+  /// Same cooldown contract as [MarketplaceRefreshTask]: a recent failure
+  /// skips instead of timing out again every launch; manual Retry bypasses
+  /// it by clearing the memo.
+  final DateTime? lastFailedAt;
+  final Duration cooldown;
+  final DateTime Function() now;
+
   @override
   StartupItemKind get kind => StartupItemKind.sandbox;
 
@@ -356,6 +385,15 @@ class SandboxMaintenanceTask implements StartupTask {
 
   @override
   Future<StartupItemStatus> run() async {
+    final failedAt = lastFailedAt;
+    if (failedAt != null && now().difference(failedAt) < cooldown) {
+      return StartupItemStatus.skipped(
+        id,
+        kind,
+        label,
+        reason: 'Skipped — maintenance failed recently; tap Retry to try again',
+      );
+    }
     if (!isInstalled()) {
       return StartupItemStatus.skipped(
         id,

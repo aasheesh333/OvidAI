@@ -298,6 +298,12 @@ class StartupCoordinator extends ChangeNotifier {
   /// tests that do not need persistence.
   StartupStatusSink? statusSink;
 
+  /// Hook invoked with the item id at the start of a MANUAL retry (the
+  /// panel Retry button). Production wiring clears that item's failure
+  /// cooldown memo so a user-tapped retry always runs for real instead of
+  /// hitting the skip-fast path. Null in unit tests.
+  Future<void> Function(String itemId)? onBeforeRetry;
+
   Completer<void>? _invocationsSettled;
   var _runToken = 0;
   var _deadlineExceeded = false;
@@ -434,6 +440,7 @@ class StartupCoordinator extends ChangeNotifier {
     if (task == null || _runningItemIds.contains(itemId)) return;
     final current = _item(itemId);
     if (!current.state.isTerminal) return;
+    await onBeforeRetry?.call(itemId);
 
     final attempt = current.attempt + 1;
     final runToken = _runToken;

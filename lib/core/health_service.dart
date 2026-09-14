@@ -35,7 +35,10 @@ class HealthCheck {
 class HealthReport {
   final List<HealthCheck> checks;
   const HealthReport(this.checks);
-  int get score => checks.fold<int>(0, (a, c) => a + (c.ok ? c.points : 0));
+  /// Capped at 100 — the screen renders "$score of 100" and a
+  /// `score / 100` progress ring, so raw weights above 100 must clamp.
+  int get score =>
+      checks.fold<int>(0, (a, c) => a + (c.ok ? c.points : 0)).clamp(0, 100);
   List<HealthCheck> get failed => checks.where((c) => !c.ok).toList();
   bool get anyRepairable => failed.any((c) => c.repairable);
 }

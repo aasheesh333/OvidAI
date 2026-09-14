@@ -7684,7 +7684,7 @@ block</pre>
       },
     );
 
-    test('global panic remains explicit while Stop stays session-scoped', () {
+    test('chat Stop is a hard stop; notification Stop stays session-scoped', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       expect(src, contains('void cancelAllRuns()'));
       expect(src, contains('killAllProcesses'));
@@ -7692,9 +7692,11 @@ block</pre>
       expect(src, contains('j.process?.kill(ProcessSignal.sigkill)'));
       // Session Stop must not cascade to subagent children.
       expect(src, isNot(contains('cancelRunFor(kid.id)')));
-      // Chat red button and notification Stop target one session.
+      // Chat red button is a hard force-stop everywhere (queues preserved
+      // so a queued message still sends next).
       final chat = File('lib/ui/chat_screen.dart').readAsStringSync();
-      expect(chat, contains('stopRequested(sessionId: sessionId)'));
+      expect(chat, contains('hardStopAll()'));
+      // Notification Stop still targets the displayed session only.
       final notif = File(
         'lib/core/agent_notification_service.dart',
       ).readAsStringSync();

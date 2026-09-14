@@ -762,7 +762,7 @@ void main() {
     expect(run.runEvents.last.text, 'stopped — all commands and jobs killed');
   });
 
-  testWidgets('rendered chat Stop keeps another session running', (
+  testWidgets('rendered chat Stop halts every session right where it is', (
     tester,
   ) async {
     final sessionA = ChatSession(
@@ -790,10 +790,13 @@ void main() {
     await tester.tap(find.byIcon(Icons.stop_rounded));
     await tester.pump();
 
+    // Hard force-stop: the in-app Stop halts ALL sessions immediately —
+    // single-session isolation lives on in stopRequested (unit-pinned
+    // above), not in the rendered Stop button.
     expect(runA.activeRunId, isNull);
     expect(runA.cancelRequested, isTrue);
-    expect(runB.activeRunId, 'run-b');
-    expect(runB.cancelRequested, isFalse);
+    expect(runB.activeRunId, isNull);
+    expect(runB.cancelRequested, isTrue);
   });
 }
 

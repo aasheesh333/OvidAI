@@ -912,6 +912,37 @@ class AgentService extends ChangeNotifier {
     return queuePreserved;
   }
 
+  /// Hard force-stop EVERYWHERE the agent runs (composer Stop, overlay X,
+  /// notification Stop): every session's run, every subagent, every job and
+  /// every run-scoped process — right where each one is, regardless of
+  /// which session the UI is on. Queues are PRESERVED (unlike [cancelAllRuns],
+  /// the Exit path that clears them) so an already-queued message still
+  /// sends next via each run's finally block. Interactive shells outside
+  /// any run (Studio terminal) are left alone — only run-scoped processes
+  /// die, via each bucket's own cancel.
+  void hardStopAll() {
+    // Invalidate every in-flight device_* call first so no stale native
+    // result lands after the stop.
+    DeviceControlService.I.cancelDeviceActions();
+    // The floating overlay must come down with the runs.
+    unawaited(hideDeviceOverlay());
+    unawaited(setOverlayLive(false));
+    // Mark every live subagent interrupted so parents settle them as
+    // stopped instead of waiting for reports that will never come.
+    for (final sub in _subagents.values) {
+      if (!sub.finished) {
+        sub.interrupted = true;
+        try {
+          AppState.I.setAgentState(sub.sessionId, 'stopped');
+        } catch (_) {}
+      }
+    }
+    for (final r in _runs.values.toList()) {
+      _cancelBucket(r);
+    }
+    notifyListeners();
+  }
+
   /// PR32: stop EVERYTHING (notification Exit / explicit panic stop) —
   /// every session's run, every subagent, every job, every spawned
   /// process. Instant, regardless of which session the UI is on.
@@ -1070,19 +1101,25 @@ class AgentService extends ChangeNotifier {
     }
   }
 
-  /// Overlay X: the composer Stop on the steered session. Routes through
-  /// stopRequested so both Stop branches keep their queue semantics and the
-  /// device generation bump that cancels in-flight device work. Returns
-  /// whether a queued continuation was preserved.
+  /// Overlay X: the composer Stop, wherever the agent runs. Routes through
+  /// [hardStopAll] so every session stops right where it is (with the
+  /// device generation bump that cancels in-flight device work), while
+  /// queues survive so a queued message still sends next. Returns whether
+  /// any queued continuation was preserved. With nothing running and
+  /// nothing queued, stops nothing (no stray generation bump).
   Future<bool> handleDeviceOverlayStop() async {
-    final active = AppState.I.activeSession;
-    if (active != null) return stopRequested(sessionId: active.id);
-    for (final entry in _runs.entries) {
-      if (entry.value.activeRunId != null) {
-        return stopRequested(sessionId: entry.key);
-      }
+    final anythingActive =
+        _runs.values.any((r) => r.activeRunId != null) ||
+        AppState.I.activeSession != null;
+    if (!anythingActive &&
+        _queue.isEmpty &&
+        !_runs.values.any((r) => r.queue.isNotEmpty)) {
+      return false;
     }
-    return false;
+    final hadQueued =
+        _queue.isNotEmpty || _runs.values.any((r) => r.queue.isNotEmpty);
+    hardStopAll();
+    return hadQueued;
   }
 
   /// Native->Dart dispatcher for overlay events. Chainable: returns true
@@ -1118,7 +1155,21 @@ class AgentService extends ChangeNotifier {
       } catch (_) {}
       return;
     }
-    if (!await voice.isAvailable()) return;
+    // Explicit mic permission first: the overlay only exists while the
+    // app is backgrounded, where the STT plugin's implicit permission
+    // prompt never surfaces — without this every tap silently dies.
+    if (!await voice.ensureMicrophonePermission()) {
+      await _overlayMicError(
+        'Microphone permission needed — allow it in Settings to dictate.',
+      );
+      return;
+    }
+    if (!await voice.isAvailable()) {
+      await _overlayMicError(
+        'Speech recognition is not available on this device.',
+      );
+      return;
+    }
     final started = await voice.start((text, isFinal) async {
       try {
         await _overlayChannel.invokeMethod(
@@ -1127,10 +1178,32 @@ class AgentService extends ChangeNotifier {
         );
       } catch (_) {}
     });
+    if (!started) {
+      await _overlayMicError('Could not start dictation — try again.');
+      return;
+    }
     try {
       await _overlayChannel.invokeMethod(
         deviceOverlayMicListeningMethod,
         {'listening': started},
+      );
+    } catch (_) {}
+  }
+
+  /// Overlay mic failure feedback: reset the mic button and explain why in
+  /// the overlay field. A silent return leaves the user tapping a dead
+  /// button with no idea what is wrong.
+  Future<void> _overlayMicError(String message) async {
+    try {
+      await _overlayChannel.invokeMethod(
+        deviceOverlayMicListeningMethod,
+        {'listening': false},
+      );
+    } catch (_) {}
+    try {
+      await _overlayChannel.invokeMethod(
+        deviceOverlaySetTextMethod,
+        {'text': message},
       );
     } catch (_) {}
   }

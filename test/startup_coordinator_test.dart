@@ -329,6 +329,37 @@ void main() {
     },
   );
 
+  test('manual retry fires onBeforeRetry so memos clear first', () async {
+    final coordinator = StartupCoordinator.forTest(
+      deadline: const Duration(seconds: 120),
+    );
+    final seen = <String>[];
+    coordinator.onBeforeRetry = (id) async => seen.add(id);
+    final gate = Completer<StartupItemStatus>();
+    unawaited(
+      coordinator.start([
+        FakeStartupTask(
+          'retryable',
+          kind: StartupItemKind.localState,
+          label: 'Retryable',
+          run: () => gate.future,
+        ),
+      ]),
+    );
+    await Future<void>.delayed(Duration.zero);
+    gate.complete(
+      StartupItemStatus.failed(
+        'retryable',
+        StartupItemKind.localState,
+        'Retryable',
+        reason: 'boom',
+      ),
+    );
+    await coordinator.whenInvocationsSettled();
+    await coordinator.retry('retryable');
+    expect(seen, ['retryable']);
+  });
+
   test(
     'deadline keeps retry locked until the timed-out invocation settles',
     () {

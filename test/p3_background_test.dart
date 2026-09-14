@@ -28,6 +28,25 @@ void main() {
     expect(kt.contains('ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'), isTrue);
   });
 
+  test('foreground service refreshes the wake lock before expiry', () {
+    // The 6h PARTIAL_WAKE_LOCK ceiling must be refreshed on update ticks —
+    // otherwise 24/7 runs silently lose the lock and Doze kills them.
+    final kt = File(
+      'android/app/src/main/kotlin/com/dhanuk/ovidai/AgentForegroundService.kt',
+    ).readAsStringSync();
+    expect(kt.contains('wakeLockAcquiredAt'), isTrue);
+  });
+
+  test('failed foreground start stays sticky so the system restarts it', () {
+    // Only the explicit EXIT path may be NOT_STICKY; a startForeground
+    // failure must stay STICKY so the OS restarts the service instead of
+    // letting the agent die in the background.
+    final kt = File(
+      'android/app/src/main/kotlin/com/dhanuk/ovidai/AgentForegroundService.kt',
+    ).readAsStringSync();
+    expect('START_NOT_STICKY'.allMatches(kt).length, 1);
+  });
+
   test('in-app exit cancels runs and stops the service', () {
     final src = File('lib/core/agent_notification_service.dart').readAsStringSync();
     final idx = src.indexOf('Future<void> agentExit');

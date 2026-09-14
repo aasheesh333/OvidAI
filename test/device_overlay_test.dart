@@ -16,8 +16,8 @@ import 'package:sqlite3/open.dart' show open, OperatingSystem;
 // - Channel contract: Dart->native deviceOverlayShow/deviceOverlayHide;
 //   native->Dart deviceOverlayText(text) + deviceOverlayStop().
 // - Send == composer send: idle starts a run, busy joins the per-session
-//   queue. X == composer Stop: stopRequested (the BUMPED path), never the
-//   legacy unbumped cancelRun.
+//   queue. X == composer Stop: hardStopAll (stops every session right where
+//   it is, with the device bump), never the legacy unbumped cancelRun.
 // - Show-guard: Dart shows only with an active control session.
 // - Native window behavior is source-pinned (no hardware): the window type
 //   MUST be TYPE_ACCESSIBILITY_OVERLAY (no new manifest permission), hidden
@@ -403,13 +403,15 @@ void main() {
       expect(DeviceControlService.I.deviceGenerationForTest, before);
     });
 
-    test('X-routing proof: stopRequested path, never legacy cancelRun', () {
+    test('X-routing proof: hardStopAll path, never legacy cancelRun', () {
       final src = readAgentServiceSource();
       final window = methodWindow(src, 'handleDeviceOverlayStop(');
       expect(
         window,
-        contains('stopRequested'),
-        reason: 'overlay X must route through stopRequested (the BUMPED path)',
+        contains('hardStopAll'),
+        reason:
+            'overlay X must route through hardStopAll (stops every session '
+            'right where it is, with the device bump)',
       );
       expect(
         window.contains('cancelRun'),
@@ -419,7 +421,7 @@ void main() {
       expect(
         window.contains('cancelDeviceActions'),
         isFalse,
-        reason: 'the bump comes from stopRequested itself; no direct call',
+        reason: 'the bump comes from hardStopAll itself; no direct call',
       );
       final stopWindow = methodWindow(src, 'bool stopRequested(');
       expect(

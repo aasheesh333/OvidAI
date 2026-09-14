@@ -10,6 +10,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 
 /**
@@ -26,9 +27,11 @@ import androidx.core.app.NotificationCompat
  *  - ACTION_STOP → broadcasts "ovid.agent.STOP" (AgentService listens,
  *    cancels the active run; identical to tapping Stop in the chat UI).
  *
- * Hardened: any failure inside startForeground is caught and the service
- * stops itself instead of crashing the whole app (previously a missing
- * manifest permission crashed the process on every agent message).
+ * Hardened: any failure inside startForeground is caught instead of
+ * crashing the whole app (previously a missing manifest permission
+ * crashed the process on every agent message) — and the service stays
+ * STICKY so the system restarts it rather than letting the agent die in
+ * the background. Only the explicit Exit action stops it for good.
  */
 class AgentForegroundService : Service() {
 
@@ -42,6 +45,7 @@ class AgentForegroundService : Service() {
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wakeLockAcquiredAt: Long = 0L
     private var lastTitle: String = "Ovid AI"
     private var lastText: String = "Agent is working…"
 
@@ -85,10 +89,13 @@ class AgentForegroundService : Service() {
         } catch (e: Exception) {
             // Permission denial / notification-policy failure must NEVER
             // crash the app — the agent run continues without the
-            // keep-alive notification.
+            // keep-alive notification. Stay STICKY (never NOT_STICKY here)
+            // so the system restarts the service — with a null intent we
+            // re-foreground below from the last title/text — instead of
+            // letting the agent die in the background. Only the explicit
+            // ACTION_EXIT path below is allowed to be NOT_STICKY.
             releaseWakeLock()
-            stopSelf()
-            return START_NOT_STICKY
+            return START_STICKY
         }
         acquireWakeLock()
         // STICKY: if the system kills us under memory pressure, restart —
@@ -98,13 +105,19 @@ class AgentForegroundService : Service() {
 
     private fun acquireWakeLock() {
         try {
-            if (wakeLock?.isHeld == true) return
+            val now = SystemClock.elapsedRealtime()
+            if (wakeLock?.isHeld == true) {
+                // 6h ceiling: refresh before expiry so 24/7 runs never
+                // silently lose the lock (and Doze never throttles them).
+                if (now - wakeLockAcquiredAt < 5 * 60 * 60 * 1000L) return
+                releaseWakeLock()
+            }
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ovid:agent_run").apply {
-                // 6h ceiling; the service re-acquires on update ticks.
                 setReferenceCounted(false)
                 acquire(6 * 60 * 60 * 1000L)
             }
+            wakeLockAcquiredAt = now
         } catch (_: Exception) {}
     }
 
@@ -113,6 +126,7 @@ class AgentForegroundService : Service() {
             wakeLock?.let { if (it.isHeld) it.release() }
         } catch (_: Exception) {}
         wakeLock = null
+        wakeLockAcquiredAt = 0L
     }
 
     override fun onDestroy() {

@@ -1,6 +1,8 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'dart:io';
 
+import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/voice_input_service.dart';
 
 /// P5 (2026-09-13): voice-input service contract.
@@ -46,6 +48,73 @@ void main() {
     await voice.stop();
     expect(stopped, isTrue);
     expect(voice.isListening, isFalse);
+  });
+
+  test('overlay mic never dies silently when STT is unavailable', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    voice.availabilityOverrideForTest = false;
+    voice.ensureMicrophonePermissionForTest = () async => true;
+    final calls = <MethodCall>[];
+    const channel = MethodChannel('ovid/native-mic-test');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          calls.add(call);
+          return null;
+        });
+    AgentService.setOverlayChannelForTest(channel);
+    addTearDown(() {
+      AgentService.setOverlayChannelForTest(null);
+      voice.ensureMicrophonePermissionForTest = null;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    await AgentService.I.handleDeviceOverlayMic();
+
+    // Must reset the mic button AND explain why — never zero channel calls.
+    expect(
+      calls.any(
+        (c) =>
+            c.method == 'deviceOverlayMicListening' &&
+            (c.arguments as Map)['listening'] == false,
+      ),
+      isTrue,
+    );
+    expect(
+      calls.any(
+        (c) =>
+            c.method == 'deviceOverlaySetText' &&
+            ((c.arguments as Map)['text'] as String).isNotEmpty,
+      ),
+      isTrue,
+    );
+  });
+
+  test('overlay mic asks for microphone permission first', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    var asked = false;
+    voice.availabilityOverrideForTest = true;
+    voice.ensureMicrophonePermissionForTest = () async {
+      asked = true;
+      return false;
+    };
+    voice.startOverrideForTest = (_) {
+      fail('must not start listening without microphone permission');
+    };
+    const channel = MethodChannel('ovid/native-mic-test-2');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (_) async => null);
+    AgentService.setOverlayChannelForTest(channel);
+    addTearDown(() {
+      AgentService.setOverlayChannelForTest(null);
+      voice.ensureMicrophonePermissionForTest = null;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    await AgentService.I.handleDeviceOverlayMic();
+
+    expect(asked, isTrue);
   });
 
   test('overlay mic is wired native<->Dart', () {

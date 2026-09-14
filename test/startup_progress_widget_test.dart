@@ -563,7 +563,7 @@ void main() {
     },
   );
 
-  testWidgets('coordinator transitions preserve rendered-session Stop isolation', (
+  testWidgets('coordinator transitions keep working when Stop halts all runs', (
     tester,
   ) async {
     final agent = AgentService.I;
@@ -596,10 +596,13 @@ void main() {
     await tester.tap(find.byIcon(Icons.stop_rounded));
     await tester.pump();
 
+    // Hard force-stop: the rendered Stop halts every session right where
+    // it is (single-session isolation lives on in stopRequested, not in
+    // the Stop button).
     expect(runA.activeRunId, isNull);
     expect(runA.cancelRequested, isTrue);
-    expect(runB.activeRunId, 'run-b');
-    expect(runB.cancelRequested, isFalse);
+    expect(runB.activeRunId, isNull);
+    expect(runB.cancelRequested, isTrue);
 
     agent.dropSessionRun(a.id);
     agent.dropSessionRun(b.id);
