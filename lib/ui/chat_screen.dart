@@ -3727,12 +3727,15 @@ class _MessageView extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // The real generated image, saved in the session workspace.
-          AspectRatio(
-            aspectRatio: 1,
-            child: exists
-                ? Image.file(file, fit: BoxFit.cover,
-                    errorBuilder: (_, _, _) => _imageGenFallback())
-                : _imageGenFallback(),
+          GestureDetector(
+            onTap: exists ? () => _showFullscreenImage(context, file) : null,
+            child: AspectRatio(
+              aspectRatio: 1,
+              child: exists
+                  ? Image.file(file, fit: BoxFit.cover,
+                      errorBuilder: (_, _, _) => _imageGenFallback())
+                  : _imageGenFallback(),
+            ),
           ),
           Padding(
             padding: const EdgeInsets.all(12),
@@ -3748,9 +3751,21 @@ class _MessageView extends StatelessWidget {
                   children: [
                     if (exists) ...[
                       _imageAction(
-                        Icons.open_in_full,
+                        Icons.fullscreen,
+                        'Fullscreen',
+                        () => _showFullscreenImage(context, file),
+                      ),
+                      const SizedBox(width: 14),
+                      _imageAction(
+                        Icons.open_in_new,
                         'Open',
                         () => _openLocalFile(context, m.imagePath!),
+                      ),
+                      const SizedBox(width: 14),
+                      _imageAction(
+                        Icons.share_outlined,
+                        'Share',
+                        () => _shareLocalFile(context, m.imagePath!),
                       ),
                       const SizedBox(width: 14),
                       Text(
@@ -3800,6 +3815,57 @@ class _MessageView extends StatelessWidget {
           ],
         ),
       );
+
+  void _showFullscreenImage(BuildContext context, File file) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        fullscreenDialog: true,
+        builder: (ctx) => Scaffold(
+          backgroundColor: Colors.black,
+          appBar: AppBar(
+            backgroundColor: Colors.black,
+            elevation: 0,
+            iconTheme: const IconThemeData(color: Colors.white),
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.share_outlined, color: Colors.white),
+                tooltip: 'Share',
+                onPressed: () => _shareLocalFile(ctx, file.path),
+              ),
+            ],
+          ),
+          body: Center(
+            child: InteractiveViewer(
+              panEnabled: true,
+              boundaryMargin: const EdgeInsets.all(20),
+              minScale: 0.5,
+              maxScale: 5.0,
+              child: Image.file(file),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _shareLocalFile(BuildContext context, String path) async {
+    try {
+      const channel = MethodChannel('ovid/native');
+      await channel.invokeMethod('shareFile', {
+        'filePath': path,
+        'title': 'Share Generated Image',
+      });
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not share ${path.split('/').last}'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
 
   /// Open a local workspace file with the best-matching app.
   void _openLocalFile(BuildContext context, String path) {
@@ -6025,22 +6091,31 @@ class _StudioFolderChip extends StatelessWidget {
         if (!isStudio) return const SizedBox.shrink();
 
         final folder = (s?.workspaceFolder ?? '').trim();
+        final repo = (AgentService.I.sessionRepoFull ?? '').trim();
         final hasFolder = folder.isNotEmpty;
-        final label = hasFolder ? folder.split('/').last : 'sandbox';
+        final hasRepo = repo.isNotEmpty;
+        final label = hasFolder
+            ? folder.split('/').last
+            : (hasRepo ? repo.split('/').last : 'sandbox');
+        final isConfigured = hasFolder || hasRepo;
 
         return Padding(
           padding: const EdgeInsets.only(right: 6),
           child: GestureDetector(
-            onTap: () => _manageWorkspaceFolder(context),
+            onTap: () {
+              // Open Studio screen directly so user can connect a repo, pick/manage folders, or edit files
+              openStudio(context);
+            },
+            onLongPress: () => _manageWorkspaceFolder(context),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(16),
-                color: hasFolder
+                color: isConfigured
                     ? Aether.accent.withValues(alpha: 0.12)
                     : Aether.surfaceAlt,
                 border: Border.all(
-                  color: hasFolder
+                  color: isConfigured
                       ? Aether.accent.withValues(alpha: 0.5)
                       : Aether.hairline,
                 ),
@@ -6049,11 +6124,13 @@ class _StudioFolderChip extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    hasFolder
-                        ? Icons.folder_special_outlined
-                        : Icons.folder_outlined,
+                    hasRepo
+                        ? Icons.bookmark_border
+                        : (hasFolder
+                            ? Icons.folder_special_outlined
+                            : Icons.folder_outlined),
                     size: 14,
-                    color: hasFolder ? Aether.accent : Aether.textMuted,
+                    color: isConfigured ? Aether.accent : Aether.textMuted,
                   ),
                   const SizedBox(width: 5),
                   ConstrainedBox(
@@ -6066,7 +6143,7 @@ class _StudioFolderChip extends StatelessWidget {
                         fontSize: 13,
                         fontWeight: FontWeight.w500,
                         height: 20 / 13,
-                        color: hasFolder ? Aether.accent : Aether.textMuted,
+                        color: isConfigured ? Aether.accent : Aether.textMuted,
                       ),
                     ),
                   ),

@@ -2295,18 +2295,47 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// cache or the session workspace. Used by chat surfaces (produced-file
   /// chips, inline file references) where only the path is known.
   Future<bool> openWorkspaceFileInStudio(String path) async {
-    final repo = RepoCache.I.read(path);
+    final cleanPath = path.startsWith('./')
+        ? path.substring(2)
+        : (path.startsWith('/') ? path.replaceFirst(RegExp(r'^/+'), '') : path);
+    final repo = RepoCache.I.read(path) ?? RepoCache.I.read(cleanPath);
     if (repo != null) {
-      openStudioFile(path, repo);
+      openStudioFile(cleanPath, repo);
       return true;
     }
     try {
-      final host = await _resolveFsPath(path);
-      if (host == null || host.startsWith('repo:')) return false;
-      final f = File(host);
-      if (!f.existsSync()) return false;
-      openStudioFile(path, await f.readAsString());
-      return true;
+      final host = await _resolveFsPath(path) ?? await _resolveFsPath(cleanPath);
+      if (host != null && host.startsWith('repo:')) {
+        final rel = host.substring('repo:'.length);
+        final content = RepoCache.I.read(rel);
+        if (content != null) {
+          openStudioFile(rel, content);
+          return true;
+        }
+      }
+      if (host != null && !host.startsWith('repo:')) {
+        final f = File(host);
+        if (f.existsSync()) {
+          try {
+            openStudioFile(cleanPath, await f.readAsString());
+            return true;
+          } catch (_) {
+            openStudioFile(cleanPath, '[Binary file]');
+            return true;
+          }
+        }
+      }
+      final direct = File(path);
+      if (direct.existsSync()) {
+        try {
+          openStudioFile(path.split('/').last, await direct.readAsString());
+          return true;
+        } catch (_) {
+          openStudioFile(path.split('/').last, '[Binary file]');
+          return true;
+        }
+      }
+      return false;
     } catch (_) {
       return false;
     }
@@ -9621,6 +9650,7 @@ ${await _agentsMdBlock()}
         'Destructive command needs approval',
         '$detail\n\n⚠ This command is destructive — irreversible '
             'filesystem/device changes. Confirm only if you intended it.',
+        allowAlways: mode == AgentMode.studio,
       );
     }
     // Subagent sessions run unattended — nobody is looking at their
@@ -10425,12 +10455,21 @@ ${await _agentsMdBlock()}
   Future<String?> _resolveFsPath(String rel) async {
     // Repo cache hit?
     if (RepoCache.I.files.containsKey(rel)) return 'repo:$rel';
+    // If absolute path already exists on device directly:
+    if (rel.startsWith('/')) {
+      final direct = File(rel);
+      if (direct.existsSync()) return direct.path;
+    }
     // Host filesystem under session workdir.
     final work = await _sessionWorkDir();
     final safe = containedPath(work, rel);
-    if (safe == null) return null;
-    final f = File(safe);
-    if (f.existsSync()) return f.path;
+    if (safe != null) {
+      final f = File(safe);
+      if (f.existsSync()) return f.path;
+    }
+    // Also try resolving relative to work directly
+    final directRel = File('${work.path}/$rel');
+    if (directRel.existsSync()) return directRel.path;
     return null;
   }
 

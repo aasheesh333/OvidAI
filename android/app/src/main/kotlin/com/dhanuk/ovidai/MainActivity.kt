@@ -337,18 +337,46 @@ class MainActivity : FlutterActivity() {
                         } else {
                             try {
                                 val targetPkg = packageName.trim()
-                                val launchIntent = packageManager.getLaunchIntentForPackage(targetPkg)
+                                val isSelf = targetPkg == "com.dhanuk.ovidai" || targetPkg == this.packageName
+                                val launchIntent = if (isSelf) {
+                                    Intent(this, MainActivity::class.java).apply {
+                                        addFlags(
+                                            Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                                                Intent.FLAG_ACTIVITY_NEW_TASK or
+                                                Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                        )
+                                    }
+                                } else {
+                                    packageManager.getLaunchIntentForPackage(targetPkg)?.apply {
+                                        addFlags(
+                                            Intent.FLAG_ACTIVITY_NEW_TASK or
+                                                Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED or
+                                                Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                        )
+                                    }
+                                }
+
                                 if (launchIntent != null) {
-                                    launchIntent.addFlags(
-                                        Intent.FLAG_ACTIVITY_NEW_TASK or
-                                            Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED or
-                                            Intent.FLAG_ACTIVITY_CLEAR_TOP
-                                    )
-                                    val service = OvidAccessibilityService.instance
-                                    if (service != null) {
-                                        service.startActivity(launchIntent)
+                                    if (isSelf) {
+                                        // Directly start activity on the main thread and via PendingIntent to ensure foregrounding
+                                        try {
+                                            startActivity(launchIntent)
+                                        } catch (_: Throwable) {
+                                            val pi = PendingIntent.getActivity(
+                                                this,
+                                                0,
+                                                launchIntent,
+                                                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                                            )
+                                            pi.send()
+                                        }
                                     } else {
-                                        startActivity(launchIntent)
+                                        val service = OvidAccessibilityService.instance
+                                        if (service != null) {
+                                            service.startActivity(launchIntent)
+                                        } else {
+                                            startActivity(launchIntent)
+                                        }
                                     }
                                     result.success(true)
                                 } else {
@@ -546,6 +574,38 @@ class MainActivity : FlutterActivity() {
                                 result.error(code, "Could not copy screenshot: ${error.message}", error.errno)
                             } catch (error: Throwable) {
                                 result.error("COPY_FAILED", "Could not copy screenshot: ${error.message}", null)
+                            }
+                        }
+                    }
+                    "shareFile" -> {
+                        val filePath = call.argument<String>("filePath")
+                        val title = call.argument<String>("title") ?: "Share"
+                        if (filePath.isNullOrBlank()) {
+                            result.error("BAD_ARGS", "shareFile requires filePath.", null)
+                        } else {
+                            try {
+                                val file = File(filePath)
+                                if (!file.exists()) {
+                                    result.error("FILE_NOT_FOUND", "File does not exist: $filePath", null)
+                                } else {
+                                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                                        this,
+                                        "${applicationContext.packageName}.fileprovider",
+                                        file
+                                    )
+                                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = URLConnection.guessContentTypeFromName(file.name) ?: "*/*"
+                                        putExtra(Intent.EXTRA_STREAM, uri)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    val chooser = Intent.createChooser(shareIntent, title).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    startActivity(chooser)
+                                    result.success(true)
+                                }
+                            } catch (e: Exception) {
+                                result.error("SHARE_FAILED", "Could not share file: ${e.message}", null)
                             }
                         }
                     }

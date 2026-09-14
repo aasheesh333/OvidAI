@@ -87,6 +87,16 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/ovid_accessibility_service" />
         </service>
+        <!-- FileProvider for sharing files and images -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_provider_paths" />
+        </provider>
         <!-- Receiver for the notification's Stop button. -->
         <receiver
             android:name=".AgentStopReceiver"
