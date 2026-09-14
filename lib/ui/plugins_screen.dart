@@ -1041,40 +1041,34 @@ class PluginCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
+                  Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 4,
+                    runSpacing: 4,
                     children: [
-                      Flexible(
-                        child: Text(
-                          plugin.name,
-                          style: const TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                          ),
+                      Text(
+                        plugin.name,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
-                      const SizedBox(width: 8),
                       Tag(plugin.category.toUpperCase(), filled: true),
                       // Task 11 (spec §11): source/format badge —
                       // Claude Code / Codex / MCP / Ovid built-in.
-                      Padding(
-                        padding: const EdgeInsets.only(left: 4),
-                        child: Tag(
-                          PluginCard.sourceFormatLabel(plugin),
-                          filled: false,
-                        ),
+                      Tag(
+                        PluginCard.sourceFormatLabel(plugin),
+                        filled: false,
                       ),
                       // Task 11 (spec §11): activation badge beside the
                       // category tag (This session / Restart to enable
                       // everywhere / Global / Degraded / Failed).
                       if (pluginActivationBadge(plugin) case final b?)
-                        Padding(padding: const EdgeInsets.only(left: 4), child: b),
+                        b,
                       // PR24: hook chips — a plugin with hooks shows which
                       // events it fires (e.g. ON_TURN_START).
                       for (final ev in plugin.hooks.keys)
-                        Padding(
-                          padding: const EdgeInsets.only(left: 4),
-                          child: Tag(ev.toUpperCase(), filled: false),
-                        ),
+                        Tag(ev.toUpperCase(), filled: false),
                     ],
                   ),
                   const SizedBox(height: 3),
