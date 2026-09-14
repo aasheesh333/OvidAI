@@ -1063,8 +1063,10 @@ class PluginCard extends StatelessWidget {
                       // Task 11 (spec §11): activation badge beside the
                       // category tag (This session / Restart to enable
                       // everywhere / Global / Degraded / Failed).
-                      if (pluginActivationBadge(plugin) case final b?)
-                        b,
+                      ...?switch (pluginActivationBadge(plugin)) {
+                        final b? => [b],
+                        null => null,
+                      },
                       // PR24: hook chips — a plugin with hooks shows which
                       // events it fires (e.g. ON_TURN_START).
                       for (final ev in plugin.hooks.keys)
