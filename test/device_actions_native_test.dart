@@ -145,5 +145,23 @@ void main() {
             'deviceTap/deviceType/deviceSwipe/deviceSystemNav + deviceLongPress/deviceScroll',
       );
     });
+
+    test('accessibility service config retrieves interactive windows', () {
+      final configXml = File(
+        'android/app/src/main/res/xml/ovid_accessibility_service.xml',
+      ).readAsStringSync();
+      expect(configXml, contains('flagRetrieveInteractiveWindows'));
+    });
+
+    test('service filters out Ovid overlay window and targets active app window', () {
+      final src = readServiceSource();
+      expect(src, contains('findTargetRootNode'));
+      expect(src, contains('FLAG_NOT_FOCUSABLE'));
+    });
+
+    test('MainActivity launches app with NEW_TASK and task reset flags', () {
+      final src = readMainActivitySource();
+      expect(src, contains('FLAG_ACTIVITY_RESET_TASK_IF_NEEDED'));
+    });
   });
 }

@@ -335,10 +335,20 @@ class MainActivity : FlutterActivity() {
                             result.error("BAD_ARGS", "deviceOpenApp requires package name.", null)
                         } else {
                             try {
-                                val launchIntent = packageManager.getLaunchIntentForPackage(packageName.trim())
+                                val targetPkg = packageName.trim()
+                                val launchIntent = packageManager.getLaunchIntentForPackage(targetPkg)
                                 if (launchIntent != null) {
-                                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    startActivity(launchIntent)
+                                    launchIntent.addFlags(
+                                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                                            Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED or
+                                            Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                    )
+                                    val service = OvidAccessibilityService.instance
+                                    if (service != null) {
+                                        service.startActivity(launchIntent)
+                                    } else {
+                                        startActivity(launchIntent)
+                                    }
                                     result.success(true)
                                 } else {
                                     result.error("APP_NOT_FOUND", "App $packageName has no launch intent or is not installed.", null)

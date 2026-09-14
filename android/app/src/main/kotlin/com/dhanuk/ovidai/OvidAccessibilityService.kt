@@ -34,6 +34,7 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
@@ -346,7 +347,7 @@ class OvidAccessibilityService : AccessibilityService() {
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                 PixelFormat.TRANSLUCENT,
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
@@ -577,9 +578,20 @@ class OvidAccessibilityService : AccessibilityService() {
                 }
             }
             setOnFocusChangeListener { v, hasFocus ->
+                val params = overlayParams
+                val wm = getSystemService(WINDOW_SERVICE) as? WindowManager
                 if (hasFocus) {
+                    if (params != null && wm != null && (params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) != 0) {
+                        params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+                        overlayView?.let { wm.updateViewLayout(it, params) }
+                    }
                     val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
                     imm?.showSoftInput(v, InputMethodManager.SHOW_IMPLICIT)
+                } else {
+                    if (params != null && wm != null && (params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) == 0) {
+                        params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        overlayView?.let { wm.updateViewLayout(it, params) }
+                    }
                 }
             }
         }
@@ -748,6 +760,54 @@ class OvidAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
+    /**
+     * Resolves the target root accessibility node for screen reading and interaction.
+     * If rootInActiveWindow points to our own overlay or is unavailable, we inspect
+     * on-screen interactive windows to find the top-most non-Ovid application window.
+     */
+    internal fun findTargetRootNode(): AccessibilityNodeInfo? {
+        var active = try {
+            rootInActiveWindow
+        } catch (_: Throwable) {
+            null
+        }
+        val myPkg = packageName
+        if (active != null && active.packageName?.toString() != myPkg) {
+            return active
+        }
+
+        // Active window is null or is Ovid's overlay; search interactive windows.
+        try {
+            val windowList = windows
+            if (windowList != null && windowList.isNotEmpty()) {
+                // Look for focused or active non-Ovid application window first.
+                for (w in windowList) {
+                    val wRoot = w.root ?: continue
+                    val pkg = wRoot.packageName?.toString().orEmpty()
+                    if (pkg.isNotEmpty() && pkg != myPkg) {
+                        if (w.isFocused || w.isActive || w.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                            active?.recycle()
+                            return wRoot
+                        }
+                    }
+                    wRoot.recycle()
+                }
+                // Fallback: any non-Ovid window with a valid root
+                for (w in windowList) {
+                    val wRoot = w.root ?: continue
+                    val pkg = wRoot.packageName?.toString().orEmpty()
+                    if (pkg.isNotEmpty() && pkg != myPkg) {
+                        active?.recycle()
+                        return wRoot
+                    }
+                    wRoot.recycle()
+                }
+            }
+        } catch (_: Throwable) {}
+
+        return active
+    }
+
     @Synchronized
     fun readScreen(forceFull: Boolean): Map<String, Any?> {
         val readGeneration = treeCache.beginRead(forceFull)
@@ -761,7 +821,7 @@ class OvidAccessibilityService : AccessibilityService() {
         }
 
         val root = try {
-            rootInActiveWindow
+            findTargetRootNode()
         } catch (error: Throwable) {
             treeCache.abandon(readGeneration)
             return readError(error)
@@ -1036,7 +1096,7 @@ class OvidAccessibilityService : AccessibilityService() {
             treeCache.nodesByHandle[handle]
                 ?: return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
         } else {
-            root = rootInActiveWindow
+            root = findTargetRootNode()
                 ?: return DeviceActionResult(false, "NO_FOCUS", "No active window has a focused input.")
             focusedNode = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             focusedNode
@@ -1123,7 +1183,7 @@ class OvidAccessibilityService : AccessibilityService() {
     }
 
     private fun pressEnterOnFocusedInput(): DeviceActionResult {
-        val root = rootInActiveWindow
+        val root = findTargetRootNode()
             ?: return DeviceActionResult(false, "NO_FOCUS", "No active window has a focused input.")
         try {
             val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
