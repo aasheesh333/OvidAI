@@ -93,6 +93,31 @@ PluginRuntimeStatus? durablePluginStatus(PluginItem p) {
 PluginRuntimeStatus? durableMcpStatus(McpServer s) =>
     AppState.I.statusFor(s.canonicalId);
 
+Future<bool> showDeleteConfirmationDialog(
+  BuildContext context, {
+  required String title,
+  String content = 'This action cannot be undone.',
+}) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text(title),
+      content: Text(content),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: const Text('Delete', style: TextStyle(color: Aether.danger)),
+        ),
+      ],
+    ),
+  );
+  return confirmed == true;
+}
+
 /// True when [plugin] is an inbuilt (source-less) row that ships with the
 /// app and should install directly rather than opening the add sheet.
 bool _isInbuiltPlugin(PluginItem plugin) {
@@ -1096,61 +1121,133 @@ class PluginCard extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            Builder(builder: (_) {
-              if (!plugin.installed) {
-                return Icon(
-                  Icons.download_outlined,
-                  size: 18,
-                  color: Aether.textFaint,
-                );
-              }
-              final durable = durablePluginStatus(plugin);
-              if (durable != null) {
-                return durableStatusIcon(durable);
-              }
-              final status = app.serviceStatus['plugin:${plugin.name}'];
-              if (status != null) {
-                if (status.health == ServiceHealth.connecting) {
-                  return const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Aether.accent,
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (plugin.installed) ...[
+                      SizedBox(
+                        height: 28,
+                        child: Switch(
+                          key: ValueKey('plugin-switch-${plugin.name}'),
+                          value: plugin.enabled,
+                          activeTrackColor: Aether.accent,
+                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          onChanged: (val) async {
+                            PluginRuntimeCallRecorderForTest.record?.call(
+                              val ? 'enable' : 'disable',
+                            );
+                            if (val) {
+                              await app.enablePlugin(plugin);
+                              final tools = AgentService.I.pluginToolNames(plugin);
+                              if (tools.isNotEmpty) {
+                                app.updateServiceStatus(
+                                  'plugin:${plugin.name}',
+                                  ServiceHealth.working,
+                                  detail: 'probe ok · tools: ${tools.join(', ')}',
+                                );
+                              } else {
+                                app.updateServiceStatus(
+                                  'plugin:${plugin.name}',
+                                  ServiceHealth.failed,
+                                  detail:
+                                      'probe failed: contributes no agent tools, '
+                                      'skills, hooks, or MCP servers',
+                                );
+                              }
+                            } else {
+                              await app.disablePlugin(plugin);
+                              app.serviceStatus.remove('plugin:${plugin.name}');
+                              await app.persistPluginState();
+                            }
+                            app.refresh();
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                    IconButton(
+                      key: ValueKey('plugin-delete-${plugin.name}'),
+                      icon: const Icon(Icons.delete_outline, size: 18, color: Aether.danger),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                      tooltip: 'Delete plugin',
+                      onPressed: () async {
+                        final ok = await showDeleteConfirmationDialog(
+                          context,
+                          title: 'Delete ${plugin.name}?',
+                        );
+                        if (!ok) return;
+                        PluginRuntimeCallRecorderForTest.record?.call('uninstall');
+                        await app.uninstallPlugin(plugin);
+                        app.plugins.remove(plugin);
+                        await app.persistPluginState();
+                        app.refresh();
+                      },
                     ),
-                  );
-                } else if (status.health == ServiceHealth.working) {
-                  return const Icon(
-                    Icons.check_circle_outline,
-                    size: 18,
-                    color: Aether.success,
-                  );
-                } else if (status.health == ServiceHealth.failed) {
-                  return Tooltip(
-                    message: status.detail,
-                    child: Icon(
-                      Icons.error_outline,
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Builder(builder: (_) {
+                  if (!plugin.installed) {
+                    return Icon(
+                      Icons.download_outlined,
                       size: 18,
-                      color: Aether.dangerC,
-                    ),
+                      color: Aether.textFaint,
+                    );
+                  }
+                  final durable = durablePluginStatus(plugin);
+                  if (durable != null) {
+                    return durableStatusIcon(durable);
+                  }
+                  final status = app.serviceStatus['plugin:${plugin.name}'];
+                  if (status != null) {
+                    if (status.health == ServiceHealth.connecting) {
+                      return const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Aether.accent,
+                        ),
+                      );
+                    } else if (status.health == ServiceHealth.working) {
+                      return const Icon(
+                        Icons.check_circle_outline,
+                        size: 18,
+                        color: Aether.success,
+                      );
+                    } else if (status.health == ServiceHealth.failed) {
+                      return Tooltip(
+                        message: status.detail,
+                        child: Icon(
+                          Icons.error_outline,
+                          size: 18,
+                          color: Aether.dangerC,
+                        ),
+                      );
+                    }
+                  }
+                  // Runtime rows without a durable record are honestly unknown —
+                  // never a green check derived from installed/enabled flags.
+                  if (plugin.runtimeId != null) {
+                    return Icon(
+                      Icons.help_outline,
+                      size: 18,
+                      color: Aether.textFaint,
+                    );
+                  }
+                  return Icon(
+                    plugin.enabled ? Icons.check_circle : Icons.check_circle_outline,
+                    size: 18,
+                    color: plugin.enabled ? Aether.success : Aether.textFaint,
                   );
-                }
-              }
-              // Runtime rows without a durable record are honestly unknown —
-              // never a green check derived from installed/enabled flags.
-              if (plugin.runtimeId != null) {
-                return Icon(
-                  Icons.help_outline,
-                  size: 18,
-                  color: Aether.textFaint,
-                );
-              }
-              return Icon(
-                plugin.enabled ? Icons.check_circle : Icons.check_circle_outline,
-                size: 18,
-                color: plugin.enabled ? Aether.success : Aether.textFaint,
-              );
-            }),
+                }),
+              ],
+            ),
           ],
         ),
       ),
@@ -1168,7 +1265,76 @@ class PluginDetailScreen extends StatelessWidget {
     final app = AppState.I;
     return Scaffold(
       backgroundColor: Aether.bg,
-      appBar: AppBar(leading: const BackButton(), title: Text(plugin.name)),
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: Text(plugin.name),
+        actions: [
+          if (plugin.installed) ...[
+            SizedBox(
+              height: 28,
+              child: Switch(
+                key: ValueKey('plugin-detail-switch-${plugin.name}'),
+                value: plugin.enabled,
+                activeTrackColor: Aether.accent,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                onChanged: (val) async {
+                  PluginRuntimeCallRecorderForTest.record?.call(
+                    val ? 'enable' : 'disable',
+                  );
+                  if (val) {
+                    await app.enablePlugin(plugin);
+                    final tools = AgentService.I.pluginToolNames(plugin);
+                    if (tools.isNotEmpty) {
+                      app.updateServiceStatus(
+                        'plugin:${plugin.name}',
+                        ServiceHealth.working,
+                        detail: 'probe ok · tools: ${tools.join(', ')}',
+                      );
+                    } else {
+                      app.updateServiceStatus(
+                        'plugin:${plugin.name}',
+                        ServiceHealth.failed,
+                        detail:
+                            'probe failed: contributes no agent tools, '
+                            'skills, hooks, or MCP servers',
+                      );
+                    }
+                  } else {
+                    await app.disablePlugin(plugin);
+                    app.serviceStatus.remove('plugin:${plugin.name}');
+                    await app.persistPluginState();
+                  }
+                  app.refresh();
+                },
+              ),
+            ),
+            const SizedBox(width: 4),
+          ],
+          IconButton(
+            key: ValueKey('plugin-detail-delete-${plugin.name}'),
+            tooltip: 'Delete plugin',
+            icon: const Icon(
+              Icons.delete_outline,
+              size: 19,
+              color: Aether.danger,
+            ),
+            onPressed: () async {
+              final ok = await showDeleteConfirmationDialog(
+                context,
+                title: 'Delete ${plugin.name}?',
+              );
+              if (!ok) return;
+              PluginRuntimeCallRecorderForTest.record?.call('uninstall');
+              await app.uninstallPlugin(plugin);
+              app.plugins.remove(plugin);
+              await app.persistPluginState();
+              app.refresh();
+              if (context.mounted) Navigator.pop(context);
+            },
+          ),
+          const SizedBox(width: 4),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -2079,6 +2245,49 @@ class McpCard extends StatelessWidget {
                   ),
                 ),
                 const Spacer(),
+                SizedBox(
+                  height: 24,
+                  child: Switch(
+                    key: ValueKey('mcp-switch-${server.canonicalId}'),
+                    value: server.connected,
+                    activeTrackColor: Aether.accent,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    onChanged: (_) => AppState.I.toggleMcpServer(server),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                IconButton(
+                  key: ValueKey('mcp-delete-${server.canonicalId}'),
+                  icon: const Icon(Icons.delete_outline, size: 16, color: Aether.danger),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                  tooltip: 'Delete server',
+                  onPressed: () async {
+                    final ok = await showDeleteConfirmationDialog(
+                      context,
+                      title: 'Delete ${server.name}?',
+                    );
+                    if (!ok) return;
+                    await AppState.I.removeMcpServer(server);
+                  },
+                ),
+              ],
+            ),
+            const Spacer(),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    server.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 4),
                 Builder(builder: (_) {
                   final durable = durableMcpStatus(server);
                   if (durable != null) return durableStatusIcon(durable);
@@ -2091,16 +2300,6 @@ class McpCard extends StatelessWidget {
                   );
                 }),
               ],
-            ),
-            const Spacer(),
-            Text(
-              server.name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w600,
-              ),
             ),
             const SizedBox(height: 2),
             Builder(builder: (_) {
@@ -2177,19 +2376,38 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
             icon: const Icon(Icons.edit_outlined, size: 19),
             onPressed: () => _editConfigJson(context, s),
           ),
-          if (s.custom)
-            IconButton(
-              tooltip: 'Remove server',
-              icon: const Icon(
-                Icons.delete_outline,
-                size: 19,
-                color: Aether.danger,
-              ),
-              onPressed: () {
-                app.removeMcpServer(s);
-                Navigator.pop(context);
+          SizedBox(
+            height: 28,
+            child: Switch(
+              key: ValueKey('mcp-detail-switch-${s.canonicalId}'),
+              value: s.connected,
+              activeTrackColor: Aether.accent,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              onChanged: (_) {
+                app.toggleMcpServer(s);
+                setState(() {});
               },
             ),
+          ),
+          const SizedBox(width: 4),
+          IconButton(
+            key: ValueKey('mcp-detail-delete-${s.canonicalId}'),
+            tooltip: 'Delete server',
+            icon: const Icon(
+              Icons.delete_outline,
+              size: 19,
+              color: Aether.danger,
+            ),
+            onPressed: () async {
+              final ok = await showDeleteConfirmationDialog(
+                context,
+                title: 'Delete ${s.name}?',
+              );
+              if (!ok) return;
+              await app.removeMcpServer(s);
+              if (context.mounted) Navigator.pop(context);
+            },
+          ),
           const SizedBox(width: 4),
         ],
       ),
