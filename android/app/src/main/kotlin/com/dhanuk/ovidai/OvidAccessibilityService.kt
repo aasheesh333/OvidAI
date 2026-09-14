@@ -59,11 +59,15 @@ internal fun isAccessibilityServiceConfigured(
     if (!accessibilityEnabled || enabledServicesSetting.isNullOrBlank()) return false
     val expectedFullName = "$packageName/$serviceClassName"
     val expectedShortName = "$packageName/${if (serviceClassName.startsWith(packageName)) serviceClassName.removePrefix(packageName) else serviceClassName}"
+    val simpleClassName = serviceClassName.substringAfterLast('.')
+    val expectedShortDotName = "$packageName/.$simpleClassName"
     val entries = enabledServicesSetting.split(':')
     for (entry in entries) {
         val trimmed = entry.trim()
         if (trimmed.equals(expectedFullName, ignoreCase = true) ||
-            trimmed.equals(expectedShortName, ignoreCase = true)) {
+            trimmed.equals(expectedShortName, ignoreCase = true) ||
+            trimmed.equals(expectedShortDotName, ignoreCase = true) ||
+            (trimmed.startsWith(packageName, ignoreCase = true) && trimmed.endsWith(simpleClassName, ignoreCase = true))) {
             return true
         }
     }
@@ -73,17 +77,22 @@ internal fun isAccessibilityServiceConfigured(
 internal fun isAccessibilityServiceEnabled(context: Context): Boolean {
     if (OvidAccessibilityService.instance != null) return true
 
-    // 1. Query AccessibilityManager for enabled accessibility services
+    val targetClassName = OvidAccessibilityService::class.java.name
+    val simpleClassName = OvidAccessibilityService::class.java.simpleName
+
+    // 1. Query AccessibilityManager for enabled accessibility services (check both enabled and installed)
     try {
         val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
         if (am != null) {
             val enabledServices = am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
             for (service in enabledServices) {
                 val serviceInfo = service.resolveInfo?.serviceInfo ?: continue
-                if (serviceInfo.packageName == context.packageName &&
-                    (serviceInfo.name == OvidAccessibilityService::class.java.name ||
-                     serviceInfo.name == OvidAccessibilityService::class.java.canonicalName ||
-                     serviceInfo.name.endsWith(".OvidAccessibilityService"))) {
+                val sPkg = serviceInfo.packageName
+                val sName = serviceInfo.name ?: ""
+                if (sPkg == context.packageName &&
+                    (sName == targetClassName ||
+                     sName.endsWith(".$simpleClassName") ||
+                     sName.endsWith(simpleClassName))) {
                     return true
                 }
             }
@@ -105,7 +114,7 @@ internal fun isAccessibilityServiceEnabled(context: Context): Boolean {
                 accessibilityEnabled = accessibilityEnabled,
                 enabledServicesSetting = settingValue,
                 packageName = context.packageName,
-                serviceClassName = OvidAccessibilityService::class.java.name,
+                serviceClassName = targetClassName,
             )) {
             return true
         }

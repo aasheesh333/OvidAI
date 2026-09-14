@@ -58,9 +58,15 @@ class MainActivity : FlutterActivity() {
     private fun deviceService(result: MethodChannel.Result): OvidAccessibilityService? {
         var service = OvidAccessibilityService.instance
         if (service == null && isAccessibilityServiceEnabled(this)) {
-            val deadline = android.os.SystemClock.uptimeMillis() + 1000
+            val deadline = android.os.SystemClock.uptimeMillis() + 2500
             while (service == null && android.os.SystemClock.uptimeMillis() < deadline) {
                 android.os.SystemClock.sleep(50)
+                service = OvidAccessibilityService.instance
+            }
+        }
+        if (service == null) {
+            // Also double check if enabled without active instance to give system a moment to bind
+            if (isAccessibilityServiceEnabled(this)) {
                 service = OvidAccessibilityService.instance
             }
         }
