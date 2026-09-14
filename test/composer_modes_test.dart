@@ -156,10 +156,10 @@ void main() {
   });
 
   group('workspace chip', () {
-    testWidgets('no folder/sandbox chip in the composer (Studio-only)',
+    testWidgets('no folder/sandbox chip in non-Studio mode',
         (tester) async {
       final app = AppState.I;
-      final s = ChatSession(id: 'ws', title: 'WS', model: 'm');
+      final s = ChatSession(id: 'ws', title: 'WS', model: 'm', mode: 'auto');
       s.workspaceFolder = '/tmp/some-pinned-folder';
       app.sessions.add(s);
       app.activeSessionId = s.id;
@@ -170,10 +170,27 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 
-      // The folder/sandbox chip is gone from the chatbox: folder selection
-      // lives only in Studio. The pinned folder name must not render.
+      // Non-studio mode: folder chip is hidden
       expect(find.text('some-pinned-folder'), findsNothing);
       expect(find.text('Working folder'), findsNothing);
+    });
+
+    testWidgets('shows sandbox folder chip when in Studio mode',
+        (tester) async {
+      final app = AppState.I;
+      final s = ChatSession(id: 'ws-studio', title: 'WS', model: 'm', mode: 'studio');
+      s.workspaceFolder = '/tmp/some-pinned-folder';
+      app.sessions.add(s);
+      app.activeSessionId = s.id;
+
+      await tester.pumpWidget(
+        MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Studio mode: folder chip is shown with folder basename
+      expect(find.text('some-pinned-folder'), findsOneWidget);
     });
   });
 

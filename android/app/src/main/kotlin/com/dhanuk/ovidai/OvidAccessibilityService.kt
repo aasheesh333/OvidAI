@@ -572,6 +572,9 @@ class OvidAccessibilityService : AccessibilityService() {
                     actionId == EditorInfo.IME_ACTION_DONE
                 ) {
                     onOverlaySend(text?.toString().orEmpty())
+                    clearFocus()
+                    val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+                    imm?.hideSoftInputFromWindow(windowToken, 0)
                     true
                 } else {
                     false
@@ -629,6 +632,9 @@ class OvidAccessibilityService : AccessibilityService() {
                     onOverlayStop()
                 } else {
                     onOverlaySend(current)
+                    overlayInput?.clearFocus()
+                    val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+                    imm?.hideSoftInputFromWindow(overlayInput?.windowToken, 0)
                 }
             }
         }
@@ -772,28 +778,29 @@ class OvidAccessibilityService : AccessibilityService() {
             null
         }
         val myPkg = packageName
+        // If active node is our own overlay or app, do not treat it as the target third-party app
         if (active != null && active.packageName?.toString() != myPkg) {
             return active
         }
 
-        // Active window is null or is Ovid's overlay; search interactive windows.
+        // Active window is null or belongs to Ovid (overlay/app); search interactive windows.
         try {
             val windowList = windows
             if (windowList != null && windowList.isNotEmpty()) {
-                // Look for focused or active non-Ovid application window first.
+                // First pass: find the focused or active APPLICATION window that is not Ovid
                 for (w in windowList) {
+                    if (w.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
                     val wRoot = w.root ?: continue
                     val pkg = wRoot.packageName?.toString().orEmpty()
                     if (pkg.isNotEmpty() && pkg != myPkg) {
-                        if (w.isFocused || w.isActive || w.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
-                            active?.recycle()
-                            return wRoot
-                        }
+                        active?.recycle()
+                        return wRoot
                     }
                     wRoot.recycle()
                 }
-                // Fallback: any non-Ovid window with a valid root
+                // Second pass: any interactive window that is not Ovid and not TYPE_ACCESSIBILITY_OVERLAY
                 for (w in windowList) {
+                    if (w.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
                     val wRoot = w.root ?: continue
                     val pkg = wRoot.packageName?.toString().orEmpty()
                     if (pkg.isNotEmpty() && pkg != myPkg) {

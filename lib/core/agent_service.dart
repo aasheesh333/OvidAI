@@ -6318,9 +6318,11 @@ ANDROID NAVIGATION & DRIVING PLAYBOOK:
   - Notifications & Quick Settings: `device_system_nav(action: "notifications")` or `device_system_nav(action: "quick_settings")`.
   - Device Settings: use `device_system_nav(action: "settings")` to jump directly into Android Settings without hunting or searching!
 • Opening Apps:
-  - If you know the package name or standard ID, use `device_open_app(package: "com.example.app")` to launch it immediately.
-  - Common package names: Settings ("com.android.settings"), YouTube ("com.google.android.youtube"), Chrome ("com.android.chrome"), Camera ("com.google.android.GoogleCamera" or system camera), Photos ("com.google.android.apps.photos"), WhatsApp ("com.whatsapp").
+  - If you know the package name or standard ID, use `device_open_app(package: "com.example.app")` to launch it immediately. NEVER use `am start` in shell (Android denies it).
+  - Common package names: Gmail ("com.google.android.gm"), Settings ("com.android.settings"), YouTube ("com.google.android.youtube"), Chrome ("com.android.chrome"), Camera ("com.google.android.GoogleCamera" or system camera), Photos ("com.google.android.apps.photos"), WhatsApp ("com.whatsapp").
   - Launcher/App Drawer: If launching via home screen, press `device_system_nav(action: "home")`, swipe up from the center to open all apps (`device_swipe: from_x: 540, from_y: 1600, to_x: 540, to_y: 600`), then `device_read` to find the app or the search bar. Type the app name with `device_type` and `device_tap` its icon.
+• Task Completion:
+  - When your device driving task is finished and you are ready to deliver your final response, call `device_open_app(package: "com.dhanuk.ovidai")` or let the run complete so Ovid AI automatically returns to the foreground for the user!
 • Interaction Discipline:
   - Work step by step: read the screen (`device_read`), locate the target node handle, tap it (`device_tap: node`), and re-read (`device_read`) to confirm.
   - Never guess blind coordinates if a node handle is present in `device_read`. Node handles are much faster and more accurate.
@@ -6881,6 +6883,15 @@ ${await _agentsMdBlock()}
       // Unguarded hide only removes the window; non-Control runs never
       // showed one, so this is a no-op for them.
       unawaited(hideDeviceOverlay());
+      // When a Control mode run completes, bring Ovid AI back to foreground
+      // so the user sees the final response immediately.
+      if (ctx.session.mode == AgentMode.control.name) {
+        unawaited(
+          DeviceControlService.I
+              .openApp('com.dhanuk.ovidai')
+              .then((_) {}, onError: (_) {}),
+        );
+      }
       notifyListeners();
       // The queue auto-continue must run on the RUNNING session's queue,
       // not whatever session the UI switched to mid-run.
@@ -7595,6 +7606,13 @@ ${await _agentsMdBlock()}
       case 'run_shell':
         final rawCmd = args['command'] as String;
         final cmd = sanitizeShellCommand(rawCmd);
+        // Intercept raw Android activity launch commands (e.g. `am start -n ...`).
+        // Shell execution runs inside an unprivileged app UID or sandbox where
+        // `am start` triggers: SecurityException: Permission Denial: startActivityAsUser asks to run as user -2
+        // Instruct the agent to use the native `device_open_app` tool instead.
+        if (RegExp(r'\bam\s+start\b').hasMatch(cmd)) {
+          return 'SHELL_RESTRICTION: Do not use `am start` in shell. Android forbids unprivileged shell processes from launching activities (startActivityAsUser permission denial). Use the native `device_open_app(package: "...")` tool instead to launch apps directly!';
+        }
         final isSubagent = _runSession?.isSubagent ?? false;
         if (!isSubagent) {
           final work = await _sessionWorkDir();

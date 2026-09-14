@@ -162,6 +162,7 @@ void main() {
     test('MainActivity launches app with NEW_TASK and task reset flags', () {
       final src = readMainActivitySource();
       expect(src, contains('FLAG_ACTIVITY_RESET_TASK_IF_NEEDED'));
+      expect(src, contains('PendingIntent.getActivity'));
     });
   });
 }

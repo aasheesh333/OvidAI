@@ -4,6 +4,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import android.app.Activity
+import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
@@ -354,6 +355,28 @@ class MainActivity : FlutterActivity() {
                                     result.error("APP_NOT_FOUND", "App $packageName has no launch intent or is not installed.", null)
                                 }
                             } catch (e: Exception) {
+                                // Permanent fix for MIUI / OEM background start restrictions:
+                                // Fall back to PendingIntent send which bypasses background activity start checks.
+                                try {
+                                    val targetPkg = packageName.trim()
+                                    val fallbackIntent = packageManager.getLaunchIntentForPackage(targetPkg)
+                                    if (fallbackIntent != null) {
+                                        fallbackIntent.addFlags(
+                                            Intent.FLAG_ACTIVITY_NEW_TASK or
+                                                Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED or
+                                                Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                        )
+                                        val pi = PendingIntent.getActivity(
+                                            this,
+                                            0,
+                                            fallbackIntent,
+                                            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                                        )
+                                        pi.send()
+                                        result.success(true)
+                                        return@setMethodCallHandler
+                                    }
+                                } catch (_: Throwable) {}
                                 result.error("LAUNCH_FAILED", "Could not launch app $packageName: ${e.message}", null)
                             }
                         }

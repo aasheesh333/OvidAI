@@ -4808,6 +4808,8 @@ class _InputBarState extends State<_InputBar> {
                       scrollDirection: Axis.horizontal,
                       child: Row(
                         children: [
+                          // Studio-only sandbox folder selector chip
+                          const _StudioFolderChip(),
                           // web-IDE plan chip — amber, only while plan mode is on.
                           const _PlanChip(),
                           // web-IDE mode selector — icon + text chip, opens the mode sheet.
@@ -6002,6 +6004,219 @@ class _QuestionsCardState extends State<_QuestionsCard> {
               ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Studio-only sandbox folder chip: visible ONLY when Studio mode is active.
+/// Allows picking or clearing the pinned workspace folder right from the chatbox.
+class _StudioFolderChip extends StatelessWidget {
+  const _StudioFolderChip();
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([AppState.I, AgentService.I]),
+      builder: (_, _) {
+        final s = AppState.I.activeSession;
+        final isStudio = AgentService.I.mode == AgentMode.studio ||
+            (s?.mode == AgentMode.studio.name);
+        if (!isStudio) return const SizedBox.shrink();
+
+        final folder = (s?.workspaceFolder ?? '').trim();
+        final hasFolder = folder.isNotEmpty;
+        final label = hasFolder ? folder.split('/').last : 'sandbox';
+
+        return Padding(
+          padding: const EdgeInsets.only(right: 6),
+          child: GestureDetector(
+            onTap: () => _manageWorkspaceFolder(context),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                color: hasFolder
+                    ? Aether.accent.withValues(alpha: 0.12)
+                    : Aether.surfaceAlt,
+                border: Border.all(
+                  color: hasFolder
+                      ? Aether.accent.withValues(alpha: 0.5)
+                      : Aether.hairline,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    hasFolder
+                        ? Icons.folder_special_outlined
+                        : Icons.folder_outlined,
+                    size: 14,
+                    color: hasFolder ? Aether.accent : Aether.textMuted,
+                  ),
+                  const SizedBox(width: 5),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 100),
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        height: 20 / 13,
+                        color: hasFolder ? Aether.accent : Aether.textMuted,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _manageWorkspaceFolder(BuildContext context) async {
+    final s = AppState.I.activeSession;
+    if (s == null) return;
+    final current = s.workspaceFolder;
+    final hasFolder = current != null && current.isNotEmpty;
+
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const SizedBox(height: 14),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 18),
+              child: Text(
+                'Sandbox folder (Studio)',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
+              child: Text(
+                hasFolder ? current : 'Session sandbox (no pinned folder)',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+            ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.drive_file_move_outline,
+                size: 19,
+                color: Aether.accent,
+              ),
+              title: const Text(
+                'Select working folder',
+                style: TextStyle(fontSize: 13.5),
+              ),
+              onTap: () => Navigator.pop(sheetCtx, 'pick'),
+            ),
+            if (hasFolder)
+              ListTile(
+                dense: true,
+                leading: Icon(
+                  Icons.inventory_2_outlined,
+                  size: 19,
+                  color: Aether.textMuted,
+                ),
+                title: const Text(
+                  'Reset to session sandbox',
+                  style: TextStyle(fontSize: 13.5),
+                ),
+                onTap: () => Navigator.pop(sheetCtx, 'sandbox'),
+              ),
+            const SizedBox(height: 10),
+          ],
+        ),
+      ),
+    );
+
+    if (choice == null || !context.mounted) return;
+    if (choice == 'sandbox') {
+      AppState.I.setSessionWorkspaceFolder(null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Working in the session sandbox.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    String? path;
+    try {
+      path = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: 'Select Studio sandbox folder',
+      );
+    } catch (_) {
+      path = null;
+    }
+    if (path == null || !context.mounted) return;
+    final dir = Directory(path);
+    if (!dir.existsSync()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('That folder is not accessible.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    var writable = false;
+    try {
+      final probe = File('$path/.ovid_probe');
+      probe.writeAsStringSync('ok');
+      probe.deleteSync();
+      writable = true;
+    } catch (_) {}
+
+    if (!writable) {
+      final granted = await AgentService.I.requestAllFilesAccess();
+      if (granted) {
+        try {
+          final probe = File('$path/.ovid_probe');
+          probe.writeAsStringSync('ok');
+          probe.deleteSync();
+          writable = true;
+        } catch (_) {}
+      }
+    }
+
+    if (!context.mounted) return;
+    if (!writable) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'That folder is read-only for Ovid — grant All Files Access or pick another folder.',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    AppState.I.setSessionWorkspaceFolder(path);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Working folder: ${path.split('/').last}'),
+        behavior: SnackBarBehavior.floating,
       ),
     );
   }
