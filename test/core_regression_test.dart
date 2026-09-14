@@ -1566,14 +1566,18 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       () async {
         final app = AppState.I;
         final s = app.mcpServers.firstWhere(
-          (m) => m.name == 'Filesystem',
+          (m) => m.name == 'Postgres',
           orElse: () => app.mcpServers.first,
         );
         final wasConnected = s.connected;
         try {
-          // McpService.connect with no sandbox → returns 'connect failed: …'
+          // McpService.connect with no sandbox / missing credentials → returns 'connect failed: …' or 'degraded: needs configuration'
           final res = await McpService.I.connect(s);
-          expect(res.toLowerCase(), contains('failed'));
+          expect(
+            res.toLowerCase().contains('failed') ||
+                res.toLowerCase().contains('degraded'),
+            isTrue,
+          );
           // And the server is NOT marked connected.
           expect(McpService.I.isConnected(s.name), isFalse);
         } finally {
