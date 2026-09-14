@@ -2389,6 +2389,7 @@ class AppState extends ChangeNotifier {
     await loadProviderCredentials();
     await loadSessions();
     await _loadUsage();
+    await _applyRemovedBuiltinSeeds();
     // Custom MCP servers + plugin install state survive restarts.
     await _loadCustomMcpServers();
     await _loadCustomPlugins();
@@ -3548,6 +3549,9 @@ class AppState extends ChangeNotifier {
   /// history ("poori app history", user-opted).
   static const _kShareMemory = 'ovid_share_session_memory';
   static const _kCustomMcpServers = 'ovid_custom_mcp_servers_v1';
+  static const _kRemovedBuiltinSeeds = 'ovid_removed_builtin_seeds_v1';
+  @visibleForTesting
+  static const kRemovedBuiltinSeeds = _kRemovedBuiltinSeeds;
   static const _kPluginState = 'ovid_plugin_state_v1';
   static const _kCustomPresets = 'ovid_custom_presets';
   static const _kMcpEnvPrefix = 'ovid_mcp_env_';
@@ -5791,6 +5795,9 @@ class AppState extends ChangeNotifier {
 
   Future<void> removeMcpServer(McpServer s) async {
     mcpServers.remove(s);
+    if (!s.custom) {
+      await _recordRemovedBuiltinSeed(s.canonicalId);
+    }
     // Task 4: full teardown — kill the process, cancel any pending
     // reconnect, wipe secure env/headers, and prune the connected intent
     // so a restart never auto-respawns a removed server.
@@ -5868,6 +5875,28 @@ class AppState extends ChangeNotifier {
       await prefs.setStringList(_kCustomMcpServers, customs);
     } catch (_) {}
   }
+
+  Future<void> _recordRemovedBuiltinSeed(String canonicalId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final list = (prefs.getStringList(_kRemovedBuiltinSeeds) ?? []).toSet();
+      list.add(canonicalId);
+      await prefs.setStringList(_kRemovedBuiltinSeeds, list.toList());
+    } catch (_) {}
+  }
+
+  Future<void> _applyRemovedBuiltinSeeds() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final list = prefs.getStringList(_kRemovedBuiltinSeeds);
+      if (list == null || list.isEmpty) return;
+      final set = list.toSet();
+      mcpServers.removeWhere((s) => !s.custom && (set.contains(s.canonicalId) || set.contains(s.name)));
+    } catch (_) {}
+  }
+
+  @visibleForTesting
+  Future<void> reloadRemovedBuiltinSeedsForTest() => _applyRemovedBuiltinSeeds();
 
   /// Test seam: re-run the persisted-custom-MCP-servers load (simulates a
   /// restart without tearing down the whole AppState singleton).
@@ -7173,21 +7202,23 @@ class AppState extends ChangeNotifier {
         description:
             'Read, write and search files in folders you share with the agent.',
         category: 'Official',
-        command: 'npx',
-        args: ['-y', '@modelcontextprotocol/server-filesystem'],
+        command: '',
+        args: const [],
+        transport: 'native',
       ),
       McpServer(
         name: 'GitHub',
         author: 'modelcontextprotocol',
         description:
             'Repos, issues, PRs and actions — full GitHub access for your '
-            'agent. (Pinned @modelcontextprotocol/server-github is '
-            'deprecated upstream; kept because it still installs and '
-            'works. A GITHUB_TOKEN is required.)',
+            'agent. (In-process native execution with GitHub REST API, '
+            'replacing deprecated upstream package. '
+            'Uses your signed-in GitHub account or GITHUB_TOKEN.)',
         category: 'Official',
-        command: 'npx',
-        args: ['-y', '@modelcontextprotocol/server-github'],
+        command: '',
+        args: const [],
         envHint: 'GITHUB_TOKEN',
+        transport: 'native',
       ),
       McpServer(
         name: 'Fetch',
@@ -7195,8 +7226,9 @@ class AppState extends ChangeNotifier {
         description:
             'Fetch web pages and convert them to clean markdown for the model.',
         category: 'Official',
-        command: 'uvx',
-        args: ['mcp-server-fetch'],
+        command: '',
+        args: const [],
+        transport: 'native',
       ),
       McpServer(
         name: 'Memory',
@@ -7204,8 +7236,9 @@ class AppState extends ChangeNotifier {
         description:
             'Long-term memory graph — the agent remembers across sessions.',
         category: 'Official',
-        command: 'npx',
-        args: ['-y', '@modelcontextprotocol/server-memory'],
+        command: '',
+        args: const [],
+        transport: 'native',
       ),
       McpServer(
         name: 'Puppeteer',

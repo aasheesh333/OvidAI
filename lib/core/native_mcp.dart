@@ -3,30 +3,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 import 'github_service.dart';
-import 'mcp_service.dart' hide McpRpcResult;
-
-/// Result of an in-process MCP tool invocation.
-class McpRpcResult {
-  final dynamic value;
-  final String? error;
-  final bool isTimeout;
-
-  const McpRpcResult.ok(this.value)
-      : error = null,
-        isTimeout = false;
-
-  const McpRpcResult.error(String e)
-      : value = null,
-        error = e,
-        isTimeout = false;
-
-  const McpRpcResult.timeout()
-      : value = null,
-        error = null,
-        isTimeout = true;
-
-  bool get isError => error != null;
-}
+import 'mcp_service.dart';
 
 /// Interface for in-process pure-Dart MCP handlers.
 abstract class NativeMcpHandler {

@@ -5,7 +5,10 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 
+import 'github_service.dart';
+import 'native_mcp.dart';
 import 'sandbox_service.dart';
 import 'plugin_manifest.dart';
 import 'plugin_registry.dart';
@@ -144,6 +147,29 @@ class McpService {
   @visibleForTesting
   http.Client? httpClientForTest;
 
+  final Map<String, NativeMcpHandler Function(McpServer server)>
+  _nativeHandlerFactories = {};
+
+  void registerNativeHandler(
+    String serverIdOrName,
+    NativeMcpHandler Function(McpServer server) factory,
+  ) {
+    _nativeHandlerFactories[serverIdOrName.toLowerCase()] = factory;
+  }
+
+  @visibleForTesting
+  void unregisterNativeHandler(String serverIdOrName) {
+    _nativeHandlerFactories.remove(serverIdOrName.toLowerCase());
+  }
+
+  @visibleForTesting
+  void clearNativeHandlers() {
+    _nativeHandlerFactories.clear();
+  }
+
+  @visibleForTesting
+  static String? memoryStoragePathOverrideForTest;
+
   /// Test seam: reconnect backoff timing, shortened so tests run in
   /// milliseconds instead of real seconds.
   @visibleForTesting
@@ -214,6 +240,9 @@ class McpService {
     if (server.transport == 'http') {
       return _connectHttp(server, rs);
     }
+    if (server.transport == 'native') {
+      return _connectNative(server, rs);
+    }
     return _connectStdio(server, rs);
   }
 
@@ -259,9 +288,14 @@ class McpService {
       }
       final missing = await missingCredentialsFor(server);
       if (missing.isNotEmpty) {
+        final reason = (server.transport == 'native' &&
+                (server.name.toLowerCase() == 'github' ||
+                    server.canonicalId.toLowerCase() == 'github'))
+            ? 'Please log in to GitHub or set GITHUB_TOKEN'
+            : 'Needs configuration (${missing.join(', ')})';
         return McpConnectOutcome(
           McpConnectOutcomeKind.needsSetup,
-          'Needs configuration (${missing.join(', ')})',
+          reason,
         );
       }
       if (server.ownerPluginId != null) {
@@ -282,7 +316,9 @@ class McpService {
       _running[key] = rs;
       final message = server.transport == 'http'
           ? await _connectHttp(server, rs, deadline: deadline)
-          : await _connectStdio(server, rs, deadline: deadline);
+          : server.transport == 'native'
+              ? await _connectNative(server, rs, deadline: deadline)
+              : await _connectStdio(server, rs, deadline: deadline);
       if (isConnected(server.canonicalId)) {
         return const McpConnectOutcome(McpConnectOutcomeKind.ready);
       }
@@ -327,6 +363,9 @@ class McpService {
     rs.userDisconnected = true;
     _cancelReconnect(key);
     try {
+      rs.nativeHandler?.dispose();
+    } catch (_) {}
+    try {
       rs.process?.kill();
     } catch (_) {}
   }
@@ -358,13 +397,24 @@ class McpService {
       return 'SSE transport not supported, use Streamable HTTP '
           '(set transport to "http" with a url).';
     }
-    if (server.transport != 'http' && server.transport != 'stdio') {
+    if (server.transport != 'http' &&
+        server.transport != 'stdio' &&
+        server.transport != 'native') {
       return 'Unsupported transport "${server.transport}"';
     }
     return null;
   }
 
   Future<List<String>> _missingCredentials(McpServer server) async {
+    // For native GitHub MCP, credentials can be fulfilled by GitHubService.I.token.
+    if (server.transport == 'native' &&
+        (server.name.toLowerCase() == 'github' ||
+            server.canonicalId.toLowerCase() == 'github')) {
+      final token = GitHubService.I.token;
+      if (token != null && token.trim().isNotEmpty) {
+        return const [];
+      }
+    }
     // Task 10 fix round 1 (finding 2): the credential gate covers BOTH
     // plugin-owned servers (requiredEnvNames/requiredHeaderNames from the
     // normalized manifest) AND ownerless servers that declare credentials
@@ -407,6 +457,143 @@ class McpService {
         .where((n) => n.isNotEmpty)
         .toList();
     return names.isEmpty ? null : names;
+  }
+
+  Future<NativeMcpHandler> _createNativeHandler(McpServer server) async {
+    final customFactory = _nativeHandlerFactories[server.canonicalId.toLowerCase()] ??
+        _nativeHandlerFactories[server.name.toLowerCase()];
+    if (customFactory != null) {
+      return customFactory(server);
+    }
+
+    final id = server.canonicalId.toLowerCase();
+    final name = server.name.toLowerCase();
+
+    if (id == 'github' || name == 'github') {
+      final env = await AppState.I.getMcpEnv(server.canonicalId);
+      final token = env['GITHUB_TOKEN'];
+      return NativeGitHubMcpHandler(
+        token: token,
+        tokenProvider: () => GitHubService.I.token,
+        httpClient: httpClientForTest,
+      );
+    }
+
+    if (id == 'filesystem' || name == 'filesystem') {
+      final root = server.cwd != null && server.cwd!.isNotEmpty
+          ? server.cwd!
+          : Directory.current.path;
+      return NativeFilesystemMcpHandler(rootPath: root);
+    }
+
+    if (id == 'fetch' || name == 'fetch') {
+      return NativeFetchMcpHandler(httpClient: httpClientForTest);
+    }
+
+    if (id == 'memory' || name == 'memory') {
+      File? storageFile;
+      if (memoryStoragePathOverrideForTest != null) {
+        storageFile = File(memoryStoragePathOverrideForTest!);
+      } else {
+        try {
+          final docs = await getApplicationDocumentsDirectory();
+          storageFile = File('${docs.path}/mcp_memory.json');
+        } catch (_) {
+          storageFile = File('${Directory.systemTemp.path}/mcp_memory.json');
+        }
+      }
+      return NativeMemoryMcpHandler(storageFile: storageFile);
+    }
+
+    throw Exception('No native handler found for "${server.name}"');
+  }
+
+  Future<String> _connectNative(
+    McpServer server,
+    _RunningServer rs, {
+    DateTime? deadline,
+  }) async {
+    final key = _key(server);
+    Duration timeoutFor() => deadline == null
+        ? Duration(seconds: server.startupTimeoutS)
+        : _remainingUntil(deadline);
+    Duration phaseTimeout(String phase) {
+      final timeout = timeoutFor();
+      _recordConnectPhase(phase, timeout);
+      return timeout;
+    }
+
+    try {
+      if (deadline != null && !_now().isBefore(deadline)) {
+        throw TimeoutException('MCP handshake timed out', Duration.zero);
+      }
+      final handler = await _createNativeHandler(server);
+      rs.nativeHandler = handler;
+
+      await handler.initialize({
+        'protocolVersion': '2024-11-05',
+        'capabilities': {},
+        'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
+      }).timeout(phaseTimeout('initialize'));
+
+      final tools = await handler.listTools().timeout(phaseTimeout('tools/list'));
+      rs.tools = tools;
+
+      if (!identical(_running[key], rs) || rs.userDisconnected) {
+        await handler.dispose();
+        return 'connect aborted';
+      }
+      rs.handshakeDone = true;
+      _reconnectAttempts.remove(key);
+      return '"${server.name}" connected (native) · ${rs.tools.length} tools';
+    } catch (e) {
+      if (identical(_running[key], rs)) _running.remove(key);
+      try {
+        await rs.nativeHandler?.dispose();
+      } catch (_) {}
+      return 'connect failed: $e';
+    }
+  }
+
+  Future<McpRpcResult> _callNativeTool(
+    _RunningServer rs,
+    String toolName,
+    Map<String, dynamic> args,
+  ) async {
+    final handler = rs.nativeHandler;
+    if (handler == null) {
+      return McpRpcResult.error('native handler not initialized');
+    }
+    try {
+      return await handler
+          .callTool(toolName, args)
+          .timeout(Duration(seconds: _rpcTimeoutSeconds));
+    } on TimeoutException {
+      return const McpRpcResult.timeout();
+    } catch (e) {
+      return McpRpcResult.error('$e');
+    }
+  }
+
+  Future<McpRpcResult> _listNativeTools(_RunningServer rs) async {
+    final handler = rs.nativeHandler;
+    if (handler == null) {
+      return McpRpcResult.error('native handler not initialized');
+    }
+    try {
+      final tools = await handler.listTools();
+      return McpRpcResult.ok({
+        'tools': tools
+            .map((t) => {
+                  'name': t.name,
+                  if (t.description != null) 'description': t.description,
+                  if (t.inputSchema != null) 'inputSchema': t.inputSchema,
+                })
+            .toList(),
+      });
+    } catch (e) {
+      return McpRpcResult.error('$e');
+    }
   }
 
   /// PR41: Streamable-HTTP transport — no process, no sandbox. Every
@@ -768,7 +955,9 @@ class McpService {
     if (rs == null) return;
     final res = rs.server.transport == 'http'
         ? await _rpcHttp(rs, 'tools/list', {})
-        : await _rpc(rs, 'tools/list', {});
+        : rs.server.transport == 'native'
+            ? await _listNativeTools(rs)
+            : await _rpc(rs, 'tools/list', {});
     if (res.isError) return;
     final payload = res.value;
     if (payload is Map<String, dynamic>) {
@@ -804,6 +993,9 @@ class McpService {
     if (rs == null) return;
     rs.userDisconnected = true;
     try {
+      await rs.nativeHandler?.dispose();
+    } catch (_) {}
+    try {
       rs.process?.kill();
     } catch (_) {}
   }
@@ -830,7 +1022,9 @@ class McpService {
             'name': toolName,
             'arguments': args,
           })
-        : await _rpc(rs, 'tools/call', {'name': toolName, 'arguments': args});
+        : rs.server.transport == 'native'
+            ? await _callNativeTool(rs, toolName, args)
+            : await _rpc(rs, 'tools/call', {'name': toolName, 'arguments': args});
     if (res.isTimeout) {
       return 'MCP error: "$toolName" on "$serverName" timed out after '
           '$_rpcTimeoutSeconds s (server may be busy or dead).';
@@ -1249,6 +1443,14 @@ class McpRpcResult {
       error = e,
       isTimeout = false;
   const McpRpcResult._timeout() : value = null, error = null, isTimeout = true;
+
+  const McpRpcResult.ok(this.value) : error = null, isTimeout = false;
+  const McpRpcResult.error(String e)
+    : value = null,
+      error = e,
+      isTimeout = false;
+  const McpRpcResult.timeout() : value = null, error = null, isTimeout = true;
+
   bool get isError => error != null;
 }
 
@@ -1308,6 +1510,7 @@ class McpConnectedTool {
 class _RunningServer {
   final McpServer server;
   Process? process;
+  NativeMcpHandler? nativeHandler;
   bool handshakeDone = false;
   List<McpToolDef> tools = [];
   final stdoutLines = _LineStream();
