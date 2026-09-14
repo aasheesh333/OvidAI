@@ -24,12 +24,11 @@ void main() {
     expect(body.contains("about:blank"), isTrue);
   });
 
-  test('the workspace folder picker lives only in Studio', () {
+  test('the workspace folder picker lives only in Studio and Studio-mode composer', () {
     final studio = File('lib/ui/studio_screen.dart').readAsStringSync();
     expect(studio.contains('getDirectoryPath'), isTrue);
-    // No other screen opens a directory picker.
+    // Non-chat/non-studio screens must not open a directory picker.
     for (final f in [
-      'lib/ui/chat_screen.dart',
       'lib/ui/sidebar.dart',
       'lib/ui/shell.dart',
     ]) {
