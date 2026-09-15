@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -3996,12 +3997,17 @@ class _AttachmentChip extends StatelessWidget {
   }
 }
 
-/// Voice-input mic: toggles on-device speech recognition and appends the
-/// recognized text to the composer. Shows a filled accent mic while
-/// listening; honest no-op with a hint when STT is unavailable.
+/// Voice-input mic (press-to-talk): toggles on-device speech recognition,
+/// shows a stop button while listening, and AUTO-SENDS the final
+/// transcript (silence auto-stops, or tap stop). Honest no-op with a hint
+/// when STT is unavailable.
 class _MicButton extends StatefulWidget {
   final TextEditingController controller;
-  const _MicButton({required this.controller});
+
+  /// Fired with the full transcribed text when dictation ends, so the
+  /// message sends exactly like a typed send.
+  final void Function(String text) onSend;
+  const _MicButton({required this.controller, required this.onSend});
   @override
   State<_MicButton> createState() => _MicButtonState();
 }
@@ -4042,6 +4048,14 @@ class _MicButtonState extends State<_MicButton> {
       widget.controller.selection = TextSelection.collapsed(
         offset: widget.controller.text.length,
       );
+      if (isFinal) {
+        // Dictation ended (silence or stop button): release the service
+        // flag so the next tap starts fresh, then send like typed text.
+        unawaited(voice.stop());
+        final full = widget.controller.text.trim();
+        if (mounted) setState(() => _listening = false);
+        if (full.isNotEmpty) widget.onSend(full);
+      }
     });
     if (mounted) setState(() => _listening = started);
   }
@@ -4885,7 +4899,10 @@ class _InputBarState extends State<_InputBar> {
                     ),
                   ),
                   // Model selector lives in the header AppBar — not duplicated here.
-                  _MicButton(controller: controller),
+                  _MicButton(
+                    controller: controller,
+                    onSend: (_) => widget.onSend(),
+                  ),
                   // ── Stateful primary button (web-IDE InputBar pattern) ──
                   AnimatedBuilder(
                     animation: Listenable.merge([AgentService.I, controller]),
@@ -6570,6 +6587,40 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
 /// ═══════════════ web-IDE style markdown renderer ═══════════════
 /// Fenced code blocks → copyable boxes with lang label + copy btn.
 /// Diff lines (+/-) inside code get green/red gutter coloring.
+/// Resolve a `<font color="...">` value to a [Color]: a small allowlist of
+/// names plus `#rgb`/`#rrggbb` hex. Anything else (including injection
+/// attempts like `red; background:...`) returns null so the caller falls
+/// back to plain body text.
+Color? ovidFontColor(String? raw) {
+  final v = raw?.trim().toLowerCase() ?? '';
+  if (v.isEmpty) return null;
+  switch (v) {
+    case 'red':
+      return Colors.red;
+    case 'green':
+      return Colors.green;
+    case 'blue':
+      return Colors.blue;
+    case 'orange':
+      return Colors.orange;
+    case 'purple':
+      return Colors.purple;
+    case 'yellow':
+      return Colors.yellow;
+    case 'pink':
+      return Colors.pink;
+    case 'cyan':
+      return Colors.cyan;
+  }
+  final hex = RegExp(r'^#([0-9a-f]{3}|[0-9a-f]{6})$').firstMatch(v);
+  if (hex == null) return null;
+  var digits = hex.group(1)!;
+  if (digits.length == 3) {
+    digits = digits.split('').map((c) => '$c$c').join();
+  }
+  return Color(int.parse('ff$digits', radix: 16));
+}
+
 class _OvidMarkdown extends StatelessWidget {
   final String content;
 
@@ -6582,13 +6633,36 @@ class _OvidMarkdown extends StatelessWidget {
 
   static final _fenceRe = RegExp(r'```(\w*)\n([\s\S]*?)```', multiLine: true);
 
+  /// Model-authored color spans: `<font color="...">text</font>`. Split
+  /// before markdown so the color survives (the markdown package leaves
+  /// inline HTML as literal text, which no element builder ever sees).
+  /// Unknown colors fall back to body text via [ovidFontColor].
+  static final _fontRe = RegExp(
+    '<font\\s+color="([^"]+)">([\\s\\S]*?)</font>',
+    multiLine: true,
+  );
+
   @override
   Widget build(BuildContext context) {
     final parts = <Widget>[];
+    void addProse(String text) {
+      var last = 0;
+      for (final match in _fontRe.allMatches(text)) {
+        if (match.start > last) {
+          parts.add(_prose(context, text.substring(last, match.start)));
+        }
+        parts.add(_coloredChunk(match.group(2) ?? '', match.group(1)));
+        last = match.end;
+      }
+      if (last < text.length) {
+        parts.add(_prose(context, text.substring(last)));
+      }
+    }
+
     var last = 0;
     for (final match in _fenceRe.allMatches(content)) {
       if (match.start > last) {
-        parts.add(_prose(context, content.substring(last, match.start)));
+        addProse(content.substring(last, match.start));
       }
       parts.add(
         _OvidCodeBox(
@@ -6599,15 +6673,31 @@ class _OvidMarkdown extends StatelessWidget {
       last = match.end;
     }
     if (last < content.length) {
-      parts.add(_prose(context, content.substring(last)));
+      addProse(content.substring(last));
     }
-    if (parts.isEmpty) parts.add(_prose(context, content));
+    if (parts.isEmpty) addProse(content);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         for (final w in parts)
           Padding(padding: const EdgeInsets.only(bottom: 6), child: w),
       ],
+    );
+  }
+
+  /// One colored run. Plain selectable text in the resolved color — only
+  /// color is honored (no links, scripts, or layout), keeping
+  /// model-authored markup safe.
+  Widget _coloredChunk(String text, String? colorAttr) {
+    if (text.trim().isEmpty) return const SizedBox.shrink();
+    final body = color ?? Aether.text;
+    return SelectableText(
+      text,
+      style: TextStyle(
+        fontSize: fontSize,
+        height: (fontSize + 10) / fontSize,
+        color: ovidFontColor(colorAttr) ?? body,
+      ),
     );
   }
 

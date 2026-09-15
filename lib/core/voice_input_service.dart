@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
@@ -54,11 +55,34 @@ class VoiceInputService {
     }
   }
 
+  /// Default silence auto-stop (user stops speaking) and session cap.
+  static const defaultPauseFor = Duration(seconds: 4);
+  static const defaultListenFor = Duration(seconds: 60);
+
+  /// Listen options for a press-to-talk session. Visible for tests so the
+  /// silence auto-stop and cap stay pinned.
+  @visibleForTesting
+  SpeechListenOptions listenOptionsForTest({
+    Duration? pauseFor,
+    Duration? listenFor,
+    String? localeId,
+  }) => SpeechListenOptions(
+    partialResults: true,
+    cancelOnError: true,
+    listenMode: ListenMode.dictation,
+    localeId: localeId,
+    pauseFor: pauseFor ?? defaultPauseFor,
+    listenFor: listenFor ?? defaultListenFor,
+  );
+
   /// Start listening. [onResult] receives partial and final transcripts.
+  /// Listening auto-stops on silence ([pauseFor]) or at [listenFor].
   /// Returns false when unavailable or already listening.
   Future<bool> start(
     void Function(String text, bool isFinal) onResult, {
     String? localeId,
+    Duration? pauseFor,
+    Duration? listenFor,
   }) async {
     if (_listening) return false;
     if (startOverrideForTest != null) {
@@ -72,10 +96,9 @@ class VoiceInputService {
       _listening = true;
       await _plugin.listen(
         onResult: (r) => onResult(r.recognizedWords, r.finalResult),
-        listenOptions: SpeechListenOptions(
-          partialResults: true,
-          cancelOnError: true,
-          listenMode: ListenMode.dictation,
+        listenOptions: listenOptionsForTest(
+          pauseFor: pauseFor,
+          listenFor: listenFor,
           localeId: localeId,
         ),
       );

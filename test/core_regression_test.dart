@@ -7385,6 +7385,46 @@ block</pre>
       );
     });
 
+    test('manual /compact folds a long session below the auto retain floor',
+        () async {
+      final app = AppState.I;
+      final prov = fakeProvider();
+      app.providers.add(prov);
+      addTearDown(() => app.providers.removeWhere((p) => p.id == 'prov-c29'));
+      // 349 messages ≈ 37k tokens: the 16%-of-window auto retain floor
+      // (160k on a 1M window) can never touch it, but an explicit user
+      // request must still fold it.
+      final s = newCompactSession('c29-long', msgs: 349);
+      s.providerId = prov.id;
+      app.activeSessionId = s.id;
+      addTearDown(() => app.activeSessionId = '');
+      AgentService.I.compactionSummarizerForTest = (sess, from, cutoff) async {
+        return '## Primary Request and Intent\n- long goal';
+      };
+      addTearDown(() => AgentService.I.compactionSummarizerForTest = null);
+
+      final status = await AgentService.I.compactNow(s, prov);
+      expect(status, contains('Session compacted'));
+      expect(s.compactedAtCount, greaterThan(0));
+      expect(s.compactedSummary, contains('long goal'));
+    });
+
+    test('auto-compaction fires on absolute size below 80% of a 1M window',
+        () async {
+      final prov = fakeProvider();
+      // ~107k tokens of history: far below 80% of 1M, above the absolute
+      // floor — must compact instead of growing unboundedly.
+      final s = newCompactSession('c29-abs', msgs: 1000);
+      AgentService.I.compactionSummarizerForTest = (sess, from, cutoff) async {
+        return '## Primary Request and Intent\n- abs goal';
+      };
+      addTearDown(() => AgentService.I.compactionSummarizerForTest = null);
+
+      await AgentService.I.maybeCompactForTest(s, prov);
+      expect(s.compactedSummary, contains('abs goal'));
+      expect(s.compactedAtCount, greaterThan(0));
+    });
+
     test('summarizer failure is reported honestly (nothing changes)', () async {
       final app = AppState.I;
       final s = newCompactSession('c29-fail', msgs: 40);

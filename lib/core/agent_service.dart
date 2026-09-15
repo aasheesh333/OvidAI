@@ -482,6 +482,11 @@ class AgentRun {
   final List<String> queue = [];
   ApprovalRequest? pendingApproval;
   bool planMode = false;
+
+  /// Snapshot of Control mode at run start (PR23/Q1 pattern): the
+  /// return-to-Ovid at run end is owed to Control work even if the user
+  /// flips mode mid-run.
+  bool controlRun = false;
   final Map<int, BgJob> jobs = {};
   int jobCounter = 0;
 
@@ -1171,6 +1176,20 @@ class AgentService extends ChangeNotifier {
       return;
     }
     final started = await voice.start((text, isFinal) async {
+      final t = text.trim();
+      if (t.isEmpty) return;
+      if (isFinal) {
+        // Dictation ended: send like overlay-typed text (sends the run,
+        // or answers a pending question), then clear the field.
+        await handleDeviceOverlayText(t);
+        try {
+          await _overlayChannel.invokeMethod(
+            deviceOverlaySetTextMethod,
+            {'text': ''},
+          );
+        } catch (_) {}
+        return;
+      }
       try {
         await _overlayChannel.invokeMethod(
           deviceOverlaySetTextMethod,
@@ -5653,6 +5672,18 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   static const _compactThresholdRatio = 0.8;
   static const _compactRetainRatio = 0.16;
 
+  /// Absolute auto-compaction trigger (tokens): sessions on huge windows
+  /// compact once past this size instead of growing unboundedly toward 80%
+  /// of 1M. Small-window models are unaffected (their 80% fires first).
+  static const _compactAbsoluteThresholdTokens = 100000;
+
+  /// Manual `/compact` retention: an explicit user request keeps only the
+  /// newest slice verbatim (bounded by messages AND tokens), unlike
+  /// auto-compaction which retains 16% of the model window. A 349-message
+  /// session the auto floor can never touch still folds on demand.
+  static const _manualCompactRetainMessages = 24;
+  static const _manualCompactRetainTokens = 8000;
+
   /// token-meter heuristic: 4 chars ≈ 1 token, +4 tokens of
   /// role/framing overhead per message.
   static int estimateMessageTokens(String text) => text.length ~/ 4 + 4;
@@ -6034,7 +6065,13 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
 
   Future<void> _maybeCompactLocked(ChatSession s, ProviderConfig p) async {
     final window = contextWindowForSession(s);
-    final threshold = (window * _compactThresholdRatio).floor();
+    final ratioThreshold = (window * _compactThresholdRatio).floor();
+    // Size-aware trigger: the lower of 80%-of-window and the absolute
+    // floor, so huge-window sessions compact in time instead of growing
+    // toward 800k tokens. Small windows keep their exact old behavior.
+    final threshold = ratioThreshold < _compactAbsoluteThresholdTokens
+        ? ratioThreshold
+        : _compactAbsoluteThresholdTokens;
     final measured = measuredContextTokens(s, systemPrompt: 'x' * 4000);
     if (measured < threshold) return;
 
@@ -6044,7 +6081,6 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // free; if the pressure drops below threshold afterward, summarize
     // nothing at all — note: "pruner rewrites oversized tool results before
     // range selection… skips summarization when pressure becomes safe".
-    final retain = (window * _compactRetainRatio).floor();
     final pruned = await _pruneOversizedToolDetailsBeforeCompact(s, threshold);
     if (pruned > 0) {
       final after = measuredContextTokens(s, systemPrompt: 'x' * 4000);
@@ -6060,6 +6096,12 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // newest ~16% of the window verbatim (the compaction policy retainRatio), keeping at
     // least 6 recent messages.  Never split the last user message from
     // its tool/reasoning/answer run.
+    // Scale the retain down when the absolute trigger fired: retaining
+    // 16% of 1M (160k) while measured is ~100k would swallow the whole
+    // session and fold nothing.
+    var retain = (window * _compactRetainRatio).floor();
+    final scaled = (measured * 0.25).floor();
+    if (scaled < retain) retain = scaled;
     var tail = 0;
     var cutoff = s.messages.length;
     while (cutoff > s.compactedAtCount) {
@@ -6128,15 +6170,18 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       return 'Compaction is already running in this chat.';
     }
     try {
-      final window = contextWindowForSession(s);
-      // Standard retention policy — same numbers as auto-compaction.
-      final retain = (window * _compactRetainRatio).floor();
+      // Manual retention policy: keep the newest slice verbatim (bounded
+      // by BOTH message count and tokens), always at least 6 recent
+      // messages. An explicit user request must fold even when the
+      // session sits far below the auto-compaction retain floor.
       var tail = 0;
       var cutoff = s.messages.length;
       while (cutoff > s.compactedAtCount) {
         final m = s.messages[cutoff - 1];
-        if (tail >= retain &&
-            s.messages.length - cutoff >= 6 &&
+        final retained = s.messages.length - cutoff;
+        if (retained >= 6 &&
+            (tail >= _manualCompactRetainTokens ||
+                retained >= _manualCompactRetainMessages) &&
             cutoff - s.compactedAtCount >= 4) {
           break;
         }
@@ -6332,6 +6377,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // PR23/Q1: snapshot the model at run start — every LLM call of this
     // run uses it; a mid-run picker switch only affects the next run.
     bucket.modelSnapshot = s.model;
+    // Snapshot Control mode too: the run-end return to Ovid is owed to
+    // Control work even if the mode flips mid-run.
+    bucket.controlRun = s.mode == AgentMode.control.name;
     // PR32: start the foreground service IMMEDIATELY at run start — the
     // event-driven path (first `think` + 600ms debounce) left a window
     // where the user could background the app before the service ever
@@ -6394,6 +6442,37 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     final body = text.length > cap ? '${text.substring(0, cap)}…\n' : text;
     return 'WORKSPACE INSTRUCTIONS (AGENTS.md — follow unless the user overrides):\n$body';
   }
+
+  /// App UI map: where every feature lives, so the agent can guide the
+  /// user with exact steps ("kaha pe kese click karna hai") and drive
+  /// there itself in Control mode with the device_* tools. Static text on
+  /// purpose — it stays in the cacheable system prefix. Verify every line
+  /// against the real navigation before extending it; never invent screens
+  /// or buttons.
+  static const String _appUiMapBlock = '''
+APP UI MAP (guide the user with these exact steps; in Control mode you
+can drive there yourself with the device_* tools):
+• Chat home: sidebar (drawer on phones, left panel on wide screens)
+  lists sessions; the gear icon opens Settings.
+• Top app bar: Background jobs • Studio — code & terminal • Browser —
+  agent & login • New session.
+• AI provider + API key: sidebar gear → Settings → Providers. Models:
+  model selector in the chat header AppBar.
+• Plugins & MCP servers (+ marketplace): chat entry points or Settings
+  → Plugins. MCP detail → Connect; a token need shows "Set up & connect".
+• GitHub login: Studio → connect a repo, or the Connect GitHub account
+  button on the GitHub MCP card.
+• Sandbox install, terminal, files, git: the Studio button (code icon).
+• Device health + Repair: Settings → Device health. Token usage:
+  Settings → Usage. Subagents: entries in chat open the subagent screen.
+• Composer: /slash menu, Attach, mic button, mode chip, send/stop button.
+• Control mode needs the Ovid accessibility service (Android Settings →
+  Accessibility → Ovid AI). Its overlay appears only while the app is
+  backgrounded (text field + send + X stop + mic).
+• Name visible button text exactly as above, one step at a time.''';
+
+  @visibleForTesting
+  static String get appUiMapForTest => _appUiMapBlock;
 
   /// Volatile per-turn context (time, active goal, reminders, live todos).
   ///
@@ -6570,6 +6649,8 @@ explanations, step-by-step
 reasoning, or extra detail when the user explicitly asks for it or the task truly
 requires it. When a task needs commands, pages or file changes, CALL THE TOOLS
 instead of describing them. Prefer many small steps. Verify results before finishing.
+For emphasis you may color key words with <font color="red|green|blue|orange|purple">text</font>
+(use sparingly — warnings red, success green); headings already size text.
 NEVER fake work: do not emit placeholder echo commands (e.g. `echo "Command N executed"`)
 and claim tasks ran. If a sandbox command fails, show its ACTUAL error + fix it
 (or report it to the user honestly) instead of simulating the work.
@@ -6578,6 +6659,7 @@ SHELL COMMAND HYGIENE:
 • When using pipelines with `head` or `tail` (e.g. `| head -5`), do NOT append trailing command names directly without a semicolon.
 • The native sandbox runs on Android bionic ARM64. Precompiled Linux glibc binary Node addons (.node) cannot be loaded directly. If an npm package fails to load a native module, explain this to the user instead of searching for phantom files.
 If the user asks to install a plugin or MCP, use agent_install_plugin or agent_install_mcp.
+$_appUiMapBlock
 Catalog management: you can list/add/remove providers (catalog_list_providers,
 catalog_add_provider, catalog_remove_provider), list plugins/MCP servers
 (catalog_list_plugins, catalog_list_mcp), add/remove MCP servers
@@ -6864,7 +6946,8 @@ ${await _agentsMdBlock()}
                 Duration(seconds: 5 * turnsWithoutProgress);
             _emit(
               'think',
-              'provider hiccup ($err) — retrying in ${wait.inSeconds}s…',
+              'provider hiccup ($err) — retrying in ${wait.inSeconds}s… '
+              '(~${_fmtK(measuredContextTokens(s))} tokens in context)',
             );
             // Drop the failed attempt's partial bubble before the run-level
             // retry, so it can never sit beside the retry's fresh answer.
@@ -7080,6 +7163,9 @@ ${await _agentsMdBlock()}
       _appendAssistant('Agent error: $e', session: s);
     } finally {
       activeRunId = null;
+      // Capture BEFORE the reset below: a user-cancelled run must not yank
+      // the user back to Ovid (they stopped to take over themselves).
+      final userStopped = ctx.run.cancelRequested;
       // Run end always clears the live pop (stream over → overlay idle).
       unawaited(setOverlayLive(false));
       unawaited(checkpointRunEnd(s.id));
@@ -7118,19 +7204,27 @@ ${await _agentsMdBlock()}
       // Foreground notification retires with the run (covers error paths
       // where no 'done'/'err' event ever fires).
       AgentNotificationService.I.agentIdle(sessionId: pinnedSessionId);
+      // When a Control run completes, bring Ovid AI back to foreground
+      // so the user sees the final response immediately. Request the
+      // return BEFORE hiding the overlay: the visible overlay carries
+      // the foreground privilege the return relies on, and hiding first
+      // can drop it. Skipped for user-stopped runs (the user stopped to
+      // take over themselves) and non-Control runs. A failed return
+      // surfaces as a think row instead of vanishing silently.
+      if (ctx.run.controlRun && !userStopped) {
+        try {
+          await DeviceControlService.I.openApp('com.dhanuk.ovidai');
+        } catch (e) {
+          _emit(
+            'think',
+            'could not return to Ovid: ${e.toString().split('\n').first}',
+          );
+        }
+      }
       // Overlay lifecycle: run end brings the floating overlay down.
       // Unguarded hide only removes the window; non-Control runs never
       // showed one, so this is a no-op for them.
       unawaited(hideDeviceOverlay());
-      // When a Control mode run completes, bring Ovid AI back to foreground
-      // so the user sees the final response immediately.
-      if (ctx.session.mode == AgentMode.control.name) {
-        unawaited(
-          DeviceControlService.I
-              .openApp('com.dhanuk.ovidai')
-              .then((_) {}, onError: (_) {}),
-        );
-      }
       notifyListeners();
       // The queue auto-continue must run on the RUNNING session's queue,
       // not whatever session the UI switched to mid-run.
@@ -7383,7 +7477,18 @@ ${await _agentsMdBlock()}
         session,
         includeTools: includeTools,
       );
-      if (r != null) return r;
+      if (r != null) {
+        // Surface recovery so a slow turn reads as "retried and recovered"
+        // instead of an unexplained hang.
+        if (attempt > 0) {
+          _emit(
+            'think',
+            'recovered after ${attempt + 1} attempts '
+            '(last error: ${cleanTruncate(lastErr, 160)})',
+          );
+        }
+        return r;
+      }
       lastErr = lastError ?? lastErr;
       final err = lastError ?? lastErr;
       // Retry ONLY transient errors; auth/model errors surface now.
@@ -7391,11 +7496,14 @@ ${await _agentsMdBlock()}
         return null;
       }
       if (attempt < 4) {
-        // 3s, 9s, 27s, 60s — exponential-ish backoff.
+        // 3s, 9s, 27s, 60s — exponential-ish backoff. The request size
+        // tells a big-payload slow turn apart from a stuck one.
         final wait = retryDelaysForTest[attempt];
+        final kb = jsonEncode(msgs).length ~/ 1024;
         _emit(
           'think',
-          'retrying ${p.name} in ${wait.inSeconds}s (attempt ${attempt + 2}/5)…',
+          'retrying ${p.name} in ${wait.inSeconds}s '
+          '(attempt ${attempt + 2}/5, ~${kb}KB request)…',
         );
         await Future.delayed(wait);
       }
