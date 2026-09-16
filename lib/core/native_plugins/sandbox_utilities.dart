@@ -148,9 +148,19 @@ class ShellHistoryCapability implements NativePluginCapability {
   /// Reads the newest 5000 lines of [file], oldest-first (tail order).
   /// Empty output means the file is absent or has no content yet.
   Future<List<String>> _readLines(String file) async {
-    final out = await _runner(['bash', '-c', 'tail -n 5000 $file']);
+    // Quote the path (history paths may contain spaces); pre-expand a
+    // leading `~` to `$HOME` since tilde does not expand inside quotes.
+    final arg = file.startsWith('~/') ? '\$HOME/${file.substring(2)}' : file;
+    final out = await _runner(['bash', '-c', 'tail -n 5000 "$arg"']);
     if (out.trim().isEmpty) return const [];
-    return out.split('\n');
+    final lines = out.split('\n');
+    // Real `tail` output ends with a newline, which `split` turns into a
+    // trailing empty entry — drop those so `recent` never returns a
+    // phantom blank line as the newest entry.
+    while (lines.isNotEmpty && lines.last.isEmpty) {
+      lines.removeLast();
+    }
+    return lines;
   }
 
   Future<String> _search(String query, int limit) async {

@@ -102,6 +102,58 @@ void main() {
     );
   });
 
+  test('shell history recent ignores the trailing newline from tail',
+      () async {
+    final lines = [for (var i = 0; i < 100; i++) 'cmd-$i'];
+    final cap = ShellHistoryCapability(
+      // Real `tail` output ends with `\n`.
+      runner: fakeHistoryRunner(tailOutput: '${lines.join('\n')}\n'),
+      isSandboxInstalled: () => true,
+    );
+    final out = await cap.callTool('recent', {'limit': 5});
+    expect(
+      out.split('\n'),
+      ['cmd-99', 'cmd-98', 'cmd-97', 'cmd-96', 'cmd-95'],
+    );
+  });
+
+  test('shell history parses limit tolerantly', () async {
+    const lines = ['git status', 'git log', 'git diff'];
+    final cap = ShellHistoryCapability(
+      runner: fakeHistoryRunner(tailOutput: lines.join('\n')),
+      isSandboxInstalled: () => true,
+    );
+    // Numeric strings are accepted like ints.
+    expect(
+      (await cap.callTool('search', {'query': 'git', 'limit': '2'}))
+          .split('\n'),
+      ['git diff', 'git log'],
+    );
+    // Garbage is a user-input error.
+    await expectLater(
+      cap.callTool('search', {'query': 'git', 'limit': 'abc'}),
+      throwsA(isA<FormatException>()),
+    );
+    // Out-of-range clamps to 1..500.
+    expect(
+      (await cap.callTool('search', {'query': 'git', 'limit': 0}))
+          .split('\n'),
+      ['git diff'],
+    );
+  });
+
+  test('shell history truncates oversized output with omission notice',
+      () async {
+    final lines = [for (var i = 0; i < 300; i++) 'cmd-$i ${'x' * 40}'];
+    final cap = ShellHistoryCapability(
+      runner: fakeHistoryRunner(tailOutput: lines.join('\n')),
+      isSandboxInstalled: () => true,
+    );
+    final out = await cap.callTool('recent', {'limit': 300});
+    expect(out, contains('characters omitted'));
+    expect(out.length, lessThan(lines.join('\n').length));
+  });
+
   test('shell history unknown tool throws ArgumentError', () async {
     final cap = ShellHistoryCapability(
       runner: fakeHistoryRunner(tailOutput: ''),
