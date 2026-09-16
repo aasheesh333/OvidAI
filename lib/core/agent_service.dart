@@ -27,6 +27,7 @@ import 'session_lifecycle_service.dart';
 import 'presets.dart';
 import 'hook_service.dart';
 import 'plugin_manifest.dart';
+import 'native_plugin.dart';
 import 'plugin_permissions.dart';
 import 'plugin_registry.dart';
 import 'plugin_runtime.dart';
@@ -3251,6 +3252,14 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// install reporting). Mirrors the `_tools` gate below.
   List<String> _pluginToolNames(PluginItem p) {
     if (!p.installed || !p.enabled) return const [];
+    if (NativePluginRegistry.I.has(p.name)) {
+      final capability = NativePluginRegistry.I.capabilityFor(p.name);
+      if (capability == null) return const [];
+      final slug = NativePluginRegistry.slugify(p.name);
+      return capability.tools
+          .map((t) => 'plugin__${slug}__${t.name}')
+          .toList();
+    }
     if (p.category == 'MCP') {
       // Task 10: honest parity with the roster gate — the proxy tool only
       // exists when the plugin's matching MCP server row does (suffix
@@ -3383,7 +3392,25 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         final proxy = _mcpProxyTool(p);
         if (proxy != null) tools.add(proxy);
       }
-      if (!_seedPluginNames.contains(p.name) && p.category != 'MCP') {
+      if (NativePluginRegistry.I.has(p.name)) {
+        final capability = NativePluginRegistry.I.capabilityFor(p.name);
+        if (capability != null) {
+          final slug = NativePluginRegistry.slugify(p.name);
+          for (final tool in capability.tools) {
+            tools.add({
+              'type': 'function',
+              'function': {
+                'name': 'plugin__${slug}__${tool.name}',
+                'description': '[${p.name}] ${tool.description}',
+                'parameters': tool.inputSchema,
+              },
+            });
+          }
+        }
+      }
+      if (!_seedPluginNames.contains(p.name) &&
+          p.category != 'MCP' &&
+          !NativePluginRegistry.I.has(p.name)) {
         // A REGISTERED normalized manifest is governed by the canonical
         // registry in EVERY session (spec §4.4/§7): its tools appear only
         // where the activation is visible (canonical loop below), and the
@@ -5489,6 +5516,30 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             },
           },
           'required': ['repo'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_configure_plugin',
+        'description':
+            'Configure a native plugin capability (e.g. set API keys or '
+            'settings). Secrets persist securely, other values persist as '
+            'preferences.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'plugin': {
+              'type': 'string',
+              'description': 'Plugin display name, e.g. JSON Visualizer',
+            },
+            'settings': {
+              'type': 'object',
+              'description': 'Setting key to value map',
+            },
+          },
+          'required': ['plugin', 'settings'],
         },
       },
     },
@@ -8696,6 +8747,48 @@ ${await _agentsMdBlock()}
           cleanMcpArgs,
           timeout: callTimeout,
         );
+      case String() when name.startsWith('plugin__'):
+        // Native plugin capability tool: plugin__<slug>__<tool>.
+        // Placed BEFORE the generic `plugin_` case (mirrors the
+        // `mcp__`-before-`mcp_` ordering): a `plugin__x` name also starts
+        // with `plugin_`, so placing it after would make it dead code.
+        // Slugs like `json_visualizer` contain single `_`, so parse by
+        // stripping the `plugin__` prefix then splitting on DOUBLE
+        // underscore `__`. Tool names must never contain `__`.
+        final rest = name.substring('plugin__'.length);
+        final sep = rest.indexOf('__');
+        if (sep <= 0 || sep + 2 >= rest.length) {
+          return 'Plugin tool "$name" is malformed: expected '
+              'plugin__<plugin_slug>__<tool_name>.';
+        }
+        final slug = rest.substring(0, sep);
+        final toolName = rest.substring(sep + 2);
+        if (toolName.isEmpty || toolName.contains('__')) {
+          return 'Plugin tool "$name" is malformed: expected '
+              'plugin__<plugin_slug>__<tool_name>.';
+        }
+        final capability =
+            NativePluginRegistry.I.capabilityForSlug(slug);
+        if (capability == null) {
+          return 'Plugin tool "$name" not found or plugin is disabled.';
+        }
+        if (!capability.tools.any((t) => t.name == toolName)) {
+          return 'Plugin tool "$name" not found or plugin is disabled.';
+        }
+        final pluginMatch = AppState.I.plugins
+            .where(
+              (p) =>
+                  p.installed &&
+                  p.enabled &&
+                  NativePluginRegistry.slugify(p.name) == slug,
+            )
+            .firstOrNull;
+        if (pluginMatch == null) {
+          return 'Plugin tool "$name" not found or plugin is disabled.';
+        }
+        _emit('shell', 'Native plugin $slug → $toolName');
+        final cleanArgs = Map<String, dynamic>.from(args);
+        return await capability.callTool(toolName, cleanArgs);
       case String() when name.startsWith('plugin_'):
         // Canonical namespaced contribution (spec §4.4) — resolved through
         // the registry and enforced for the RUNNING session: another
@@ -9138,6 +9231,38 @@ ${await _agentsMdBlock()}
         final msg = await AppState.I.fetchMarketplaceCatalog(target);
         _emit('done', 'marketplace imported: $target');
         return msg;
+      case 'catalog_configure_plugin':
+        final pluginArg = (args['plugin'] as String?)?.trim() ?? '';
+        if (pluginArg.isEmpty) return 'Missing plugin name.';
+        final rawSettings = args['settings'];
+        final stringSettings = <String, String>{};
+        if (rawSettings is Map) {
+          for (final entry in rawSettings.entries) {
+            stringSettings[entry.key.toString()] =
+                entry.value?.toString() ?? '';
+          }
+        }
+        if (stringSettings.isEmpty) {
+          return 'No settings provided for "$pluginArg". Nothing was configured.';
+        }
+        final targetCapability =
+            NativePluginRegistry.I.capabilityFor(pluginArg) ??
+                NativePluginRegistry.I.capabilityForSlug(pluginArg) ??
+                NativePluginRegistry.I.capabilityForSlug(
+                  NativePluginRegistry.slugify(pluginArg),
+                );
+        if (targetCapability == null) {
+          return 'Plugin "$pluginArg" has no native capability to configure.';
+        }
+        _emit('think', 'configuring plugin: ${targetCapability.pluginName}');
+        // Route through the capability's declared configFields (secret flag)
+        // via capability.configure so a typo'd key doesn't silently land a
+        // secret in prefs: declared secrets persist in secure storage,
+        // everything else in prefs (NativePluginConfigStore contract).
+        await targetCapability.configure(stringSettings);
+        _emit('done', 'plugin configured: ${targetCapability.pluginName}');
+        return 'Plugin "${targetCapability.pluginName}" configured: '
+            '${stringSettings.keys.join(', ')}.';
       case 'browser_click':
         final sel = args['selector'] as String;
         final tab = _activeTab;
@@ -10296,6 +10421,7 @@ ${await _agentsMdBlock()}
       case 'catalog_remove_mcp':
       case 'catalog_add_plugin':
       case 'catalog_add_marketplace':
+      case 'catalog_configure_plugin':
       case 'agent_install_plugin':
       case 'agent_install_mcp':
         return roDenied;
@@ -12473,6 +12599,7 @@ ${await _agentsMdBlock()}
     'agent_install_plugin',
     'agent_install_mcp',
     'catalog_add_marketplace',
+    'catalog_configure_plugin',
     'todo_write',
     'job_start',
     'job_kill',
