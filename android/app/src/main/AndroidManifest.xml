@@ -5,9 +5,12 @@
          startForeground(); the dataSync subtype permission is required on
          API 34+. Missing these crashed the app on every agent message
          (SecurityException: startForeground requires
-         android.permission.FOREGROUND_SERVICE). -->
+         android.permission.FOREGROUND_SERVICE). The specialUse subtype
+         covers the personal-assistant presence itself (not just transfers)
+         and needs its own permission plus the in-service property below. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- 24/7: restart the agent service after a reboot, and ask the user to
          exempt Ovid from battery optimization so OEM killers leave it be. -->
@@ -75,7 +78,11 @@
             android:name=".AgentForegroundService"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="dataSync"/>
+            android:foregroundServiceType="dataSync|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Personal AI coding assistant: keeps the agent run alive while working, driving the device, or listening for reminders, until the user stops it." />
+        </service>
         <service
             android:name=".OvidAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"

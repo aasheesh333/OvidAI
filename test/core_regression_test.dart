@@ -10987,6 +10987,9 @@ url = "https://api.example.com/mcp"
           'http://${server.address.host}:${server.port}';
 
       final a = await freshAppStateForTest();
+      // No default marketplace is seeded (the old seed 404d): the repo is
+      // added explicitly, exactly as a user does with the + button.
+      expect(a.addMarketplace('test/test-marketplace'), isNotNull);
       await a.syncMarketplaceCatalogs();
       await a.setPluginInstalled('real-plugin', true);
       final b = await freshAppStateForTest();
@@ -20187,6 +20190,7 @@ cwd = 'tools'
           description: 'P11 fixture',
           version: '1.0.0',
           category: 'Tool',
+          source: 'p11org/cancel-kit',
         );
         app.plugins.add(row);
 
@@ -20258,19 +20262,14 @@ cwd = 'tools'
         );
         await tester.pump();
 
-        // Source-less non-seed rows open the single add sheet (Task 2
-        // §5.2: GitHub fetch + marketplace add in one sheet; bottom sheet
-        // with repeating progress animation — bounded pumps only, never
+        // The row carries its GitHub source, so Install goes straight to
+        // the single inspection/approval flow (bottom sheet with
+        // repeating progress animation — bounded pumps only, never
         // pumpAndSettle: the sheet animation replays forever and
-        // pumpAndSettle would hang). The GitHub route types a repo and
-        // fetches; the inspection hop does real HTTP IO — runAsync turns
-        // let the real event loop advance it, pumps render the sheet.
+        // pumpAndSettle would hang). The inspection hop does real HTTP
+        // IO — runAsync turns let the real event loop advance it, pumps
+        // render the sheet.
         await tester.tap(find.text('Install'));
-        for (var i = 0; i < 20; i++) {
-          await tester.pump(const Duration(milliseconds: 100));
-        }
-        await tester.enterText(find.byType(TextField), 'p11org/cancel-kit');
-        await tester.tap(find.text('Fetch from GitHub'));
         var sheetFound = false;
         for (var i = 0; i < 50 && !sheetFound; i++) {
           await tester.runAsync(

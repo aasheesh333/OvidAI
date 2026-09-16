@@ -1206,6 +1206,7 @@ class _ChatScreenState extends State<ChatScreen>
                             context,
                             focusCanonicalId: canonicalId,
                           ),
+                          onInstallSandbox: () => openStudio(context),
                         ),
                       ),
                     ),

@@ -2251,6 +2251,13 @@ class AppState extends ChangeNotifier {
         result.reason ?? 'Needs configuration',
         label: server.name,
       );
+    } else if (result.kind == McpConnectOutcomeKind.needsRuntime) {
+      await _recordMcpStatus(
+        canonicalId,
+        StartupItemState.degraded,
+        result.reason ?? 'Needs runtime install',
+        label: server.name,
+      );
     } else if (result.kind == McpConnectOutcomeKind.unsupported) {
       await _recordMcpStatus(
         canonicalId,
@@ -4769,13 +4776,28 @@ class AppState extends ChangeNotifier {
     );
   }
 
+  /// Marketplace repos known unreachable (verified 404): dropped from
+  /// seeds and purged from persisted lists so refresh stops failing
+  /// forever on devices that inherited them.
+  static const deadMarketplaceRepos = {'ovidai/ovid-plugins'};
+
+  @visibleForTesting
+  static List<String> purgedMarketplacesForTest(Iterable<String> repos) =>
+      repos
+          .where((r) => !deadMarketplaceRepos.contains(r.trim()))
+          .toList();
+
   Future<void> _loadMarketplaces() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final list = prefs.getStringList(_kMarketplaces);
       if (list == null || list.isEmpty) return;
-      for (final m in list) {
+      final live = purgedMarketplacesForTest(list);
+      for (final m in live) {
         if (!marketplaces.contains(m)) marketplaces.add(m);
+      }
+      if (live.length != list.length) {
+        await prefs.setStringList(_kMarketplaces, live);
       }
       refresh();
     } catch (_) {}
@@ -4821,7 +4843,7 @@ class AppState extends ChangeNotifier {
     if (normalized.isEmpty) return 'Repository name is empty';
     final parts = normalized.split('/');
     if (parts.length < 2) {
-      return 'Expected owner/repo (e.g. ovidai/ovid-plugins)';
+      return 'Expected owner/repo (e.g. acme/widgets)';
     }
     final owner = parts[0];
     final name = parts[1];
@@ -5624,6 +5646,18 @@ class AppState extends ChangeNotifier {
         await _recordMcpNeedsSetup(s, missing);
         return;
       }
+      // A runtime miss records degraded (amber, actionable) rather than a
+      // red handshake-timeout failure.
+      final needRuntime = await McpService.I.missingRuntimeFor(s);
+      if (needRuntime != null) {
+        await _recordMcpStatus(
+          s.canonicalId,
+          StartupItemState.degraded,
+          'Needs $needRuntime runtime — install it, then reconnect',
+          label: s.name,
+        );
+        return;
+      }
       await _recordMcpFailed(s, detail);
     } catch (_) {}
   }
@@ -6193,6 +6227,26 @@ class AppState extends ChangeNotifier {
         p.migrationRequired = ps['migrationRequired'] as bool? ?? false;
         p.runtimeReason = ps['runtimeReason'] as String?;
       }
+      // Heal fake state from older builds: seed rows without executable
+      // backing (no gated tools, no mapped server) must never stay
+      // installed/enabled — that is exactly what probes red on back
+      // navigation. Idempotent; runs on every hydrate.
+      var healed = false;
+      for (final p in plugins) {
+        if (p.runtimeId != null ||
+            p.source != null ||
+            p.marketplace != null) {
+          continue;
+        }
+        if (!(p.installed || p.enabled)) continue;
+        if (AgentService.builtinPluginHasBacking(p.name)) continue;
+        if (AgentService.mcpServerForPlugin(p) != null) continue;
+        p.installed = false;
+        p.enabled = false;
+        serviceStatus.remove('plugin:${p.name}');
+        healed = true;
+      }
+      if (healed) await persistPluginState();
       refresh();
     } catch (_) {}
   }
@@ -7336,7 +7390,8 @@ class AppState extends ChangeNotifier {
       ),
     ]);
 
-    // user-added marketplaces (Claude Code style)
-    marketplaces.addAll(['ovidai/ovid-plugins']);
+    // No default marketplace: the previous seed (ovidai/ovid-plugins)
+    // 404s, so every fresh install failed refresh forever through no fault
+    // of the user. Users add repos with the + button instead.
   }
 }

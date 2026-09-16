@@ -12,8 +12,10 @@ String startupItemStateLabel(StartupItemState state) => switch (state) {
   StartupItemState.needsSetup => 'Needs setup',
   StartupItemState.migrationRequired => 'Migration required',
   StartupItemState.unsupported => 'Unsupported on this device',
-  StartupItemState.degraded ||
-  StartupItemState.skipped => 'Degraded',
+  StartupItemState.degraded => 'Degraded',
+  // Skipped is informational (not installed / cooled down), never an
+  // error — it must not read as a Degraded warning.
+  StartupItemState.skipped => 'Skipped',
   StartupItemState.failed => 'Failed',
   StartupItemState.disabled => 'Disabled',
 };
@@ -45,6 +47,7 @@ Color _stateColor(StartupItemState state) => switch (state) {
   StartupItemState.failed => Aether.dangerC,
   StartupItemState.unsupported => Aether.dangerC,
   StartupItemState.disabled => Aether.textFaint,
+  StartupItemState.skipped => Aether.textFaint,
   StartupItemState.queued || StartupItemState.running => Aether.accent,
   _ => Aether.accent,
 };
@@ -56,7 +59,8 @@ IconData _stateIcon(StartupItemState state) => switch (state) {
   StartupItemState.needsSetup => Icons.settings_outlined,
   StartupItemState.migrationRequired => Icons.upgrade_outlined,
   StartupItemState.disabled => Icons.power_settings_new,
-  StartupItemState.degraded || StartupItemState.skipped => Icons.warning_amber,
+  StartupItemState.degraded => Icons.warning_amber,
+  StartupItemState.skipped => Icons.info_outline,
   StartupItemState.queued || StartupItemState.running =>
     Icons.hourglass_empty,
 };
@@ -73,6 +77,7 @@ class StartupProgressPanel extends StatefulWidget {
     super.key,
     this.coordinator,
     this.onOpenPlugins,
+    this.onInstallSandbox,
   });
 
   /// Coordinator to observe. Defaults to the process singleton in
@@ -82,6 +87,11 @@ class StartupProgressPanel extends StatefulWidget {
   /// Called with the item's canonical owner id (or null) when the user taps
   /// `Open Plugins`.
   final void Function(String? canonicalId)? onOpenPlugins;
+
+  /// Called when the user taps `Install` on the sandbox row (sandbox not
+  /// installed): the host is expected to open Studio setup. Null hides the
+  /// button (tests, embeds without Studio).
+  final VoidCallback? onInstallSandbox;
 
   @override
   State<StartupProgressPanel> createState() => _StartupProgressPanelState();
@@ -128,13 +138,12 @@ class _StartupProgressPanelState extends State<StartupProgressPanel> {
         final allTerminal = snapshot.readinessComplete;
 
         // Readiness starts post-frame in production: the first build sees an
-        // empty snapshot, then tasks queue on a later notification. Expand the
-        // queue when work appears and auto-collapse once every item is
-        // terminal. A manual toggle while work is in flight is respected
-        // because this only fires on the incomplete→complete transitions.
+        // empty snapshot, then tasks queue on a later notification. The
+        // panel stays collapsed unless the user expands it — the header
+        // row plus warning dot carry the signal. Auto-collapse once every
+        // item is terminal so a stale expansion never sticks.
         if (!allTerminal && !_wasIncomplete) {
           _wasIncomplete = true;
-          _expanded = true;
         } else if (allTerminal && _wasIncomplete) {
           _wasIncomplete = false;
           _expanded = false;
@@ -220,6 +229,13 @@ class _StartupProgressPanelState extends State<StartupProgressPanel> {
                   onOpenPlugins: startupItemOpensPlugins(item.state)
                       ? () => widget.onOpenPlugins?.call(item.ownerId)
                       : null,
+                  // Sandbox-not-installed is actionable (not just
+                  // retryable): one tap opens Studio setup.
+                  onInstallSandbox:
+                      item.id == 'sandbox.selfHeal' &&
+                          widget.onInstallSandbox != null
+                      ? widget.onInstallSandbox
+                      : null,
                 ),
           ],
         );
@@ -235,12 +251,14 @@ class _StartupItemRow extends StatelessWidget {
     required this.onRetry,
     this.onDisable,
     this.onOpenPlugins,
+    this.onInstallSandbox,
   });
 
   final StartupItemStatus item;
   final VoidCallback onRetry;
   final VoidCallback? onDisable;
   final VoidCallback? onOpenPlugins;
+  final VoidCallback? onInstallSandbox;
 
   @override
   Widget build(BuildContext context) {
@@ -296,11 +314,30 @@ class _StartupItemRow extends StatelessWidget {
                     style: TextStyle(fontSize: 11, color: Aether.textFaint),
                   ),
                 ],
-                if (showRetry || onDisable != null || onOpenPlugins != null) ...[
+                if (showRetry ||
+                    onDisable != null ||
+                    onOpenPlugins != null ||
+                    onInstallSandbox != null) ...[
                   const SizedBox(height: 2),
                   Wrap(
                     spacing: 2,
                     children: [
+                      if (onInstallSandbox != null)
+                        TextButton(
+                          key: ValueKey('startup-install-${item.id}'),
+                          onPressed: onInstallSandbox,
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                            ),
+                            minimumSize: const Size(0, 30),
+                          ),
+                          child: const Text(
+                            'Install',
+                            style: TextStyle(fontSize: 11.5),
+                          ),
+                        ),
                       if (showRetry)
                         TextButton(
                           key: ValueKey('startup-retry-${item.id}'),

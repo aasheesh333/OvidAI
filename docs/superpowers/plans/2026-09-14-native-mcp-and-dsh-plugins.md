@@ -109,21 +109,21 @@ git commit -m "feat(mcp): integrate in-process native transport into McpService 
   - Delete button on `McpCard` and `PluginCard` triggering confirmation dialog.
   - Deletion of built-in seeds tracked persistently.
 
-- [ ] **Step 1: Write widget test for inline toggle and delete flow**
+- [x] **Step 1: Write widget test for inline toggle and delete flow**
 Verify tapping switch enables/disables the plugin/MCP, and tapping delete displays dialog and removes the item.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 Run: `/root/flutter/bin/flutter test test/plugins_ui_dsh_flow_test.dart`
 Expected: FAIL
 
-- [ ] **Step 3: Update `lib/ui/plugins_screen.dart`**
+- [x] **Step 3: Update `lib/ui/plugins_screen.dart`**
 Add the inline switch widget and quick delete action with confirmation dialog to `PluginCard`, `McpCard`, and their detail screens.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 Run: `/root/flutter/bin/flutter test test/plugins_ui_dsh_flow_test.dart`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 ```bash
 git add lib/ui/plugins_screen.dart lib/core/state.dart test/plugins_ui_dsh_flow_test.dart
 git commit -m "feat(ui): add dsh web-style inline toggle and quick delete on plugin and mcp cards"
@@ -136,7 +136,7 @@ git commit -m "feat(ui): add dsh web-style inline toggle and quick delete on plu
 **Files:**
 - All modified files
 
-- [ ] **Step 1: Run flutter analyze and tests**
+- [x] **Step 1: Run flutter analyze and tests**
 Run: `/root/flutter/bin/dart analyze` and `/root/flutter/bin/flutter test`
 Expected: 0 errors, all tests pass.
 

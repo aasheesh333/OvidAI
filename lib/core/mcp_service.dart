@@ -231,6 +231,11 @@ class McpService {
       return '"${server.name}" degraded: needs configuration '
           '(${missing.join(', ')})';
     }
+    final needRuntime = await missingRuntimeFor(server);
+    if (needRuntime != null) {
+      return '"${server.name}" needs runtime ($needRuntime) — install '
+          'runtimes, then reconnect';
+    }
     if (server.ownerPluginId != null) {
       server.headers = await AppState.I.getMcpHeaders(server.canonicalId);
     }
@@ -300,6 +305,17 @@ class McpService {
       }
       if (server.ownerPluginId != null) {
         server.headers = await AppState.I.getMcpHeaders(server.canonicalId);
+      }
+      // Runtime gate BEFORE the budget starts: installing node/python takes
+      // minutes, so letting it burn inside the 30s handshake budget
+      // guaranteed a first-enable timeout. Surface it as an actionable
+      // outcome instead.
+      final needRuntime = await missingRuntimeFor(server);
+      if (needRuntime != null) {
+        return McpConnectOutcome(
+          McpConnectOutcomeKind.needsRuntime,
+          'Needs $needRuntime runtime — install it, then reconnect',
+        );
       }
       // Close the pre-reservation timeout window: the credential gate may
       // have consumed the whole budget, so never reserve a slot / spawn a
@@ -389,6 +405,52 @@ class McpService {
   /// spawns a process.
   Future<List<String>> missingCredentialsFor(McpServer server) =>
       _missingCredentials(server);
+
+  /// Test seam: overrides the runtime probe in connect paths so tests
+  /// never touch the real sandbox. Null in production.
+  @visibleForTesting
+  static Future<String?> Function(McpServer server)?
+  missingRuntimeOverrideForTest;
+
+  /// Language runtime (`node`/`python`) a stdio command needs, or null
+  /// when the command needs none. Mirrors the mapping in [_connectStdio]
+  /// so the two can never drift apart.
+  static String? runtimeKindForCommand(String command) {
+    if (command == 'npx' || command == 'node') return 'node';
+    if (command == 'uvx' ||
+        command == 'uv' ||
+        command == 'python' ||
+        command == 'python3') {
+      return 'python';
+    }
+    return null;
+  }
+
+  /// Runtime label a stdio server needs that is NOT installed right now,
+  /// or null when nothing is missing. Fast probe — never installs. Lets
+  /// callers ask for runtimes BEFORE burning the handshake budget (an
+  /// apt install takes minutes; the 30s budget guaranteed a first-enable
+  /// timeout). Returns null when the sandbox itself is missing — the
+  /// stdio path's own sandbox error covers that case.
+  Future<String?> missingRuntimeFor(
+    McpServer server, {
+    Future<bool> Function(String bin)? hasRuntime,
+    bool? sandboxInstalled,
+  }) async {
+    final override = missingRuntimeOverrideForTest;
+    if (override != null) return override(server);
+    if (server.transport != 'stdio') return null;
+    final kind = runtimeKindForCommand(server.command);
+    if (kind == null) return null;
+    if (!(sandboxInstalled ?? SandboxService.I.isInstalled)) return null;
+    try {
+      final probe = hasRuntime ?? SandboxService.I.hasRuntime;
+      if (await probe(server.command)) return null;
+    } catch (_) {
+      return kind;
+    }
+    return kind;
+  }
 
   /// Structural transport gate used by health checks: null when the transport
   /// can run on this device, otherwise the actionable unsupported reason.
@@ -1420,7 +1482,13 @@ class McpService {
 }
 
 /// Truthful outcome of one complete MCP handshake attempt used by startup.
-enum McpConnectOutcomeKind { ready, needsSetup, unsupported, failed }
+enum McpConnectOutcomeKind {
+  ready,
+  needsSetup,
+  needsRuntime,
+  unsupported,
+  failed,
+}
 
 class McpConnectOutcome {
   const McpConnectOutcome(this.kind, [this.reason]);

@@ -101,6 +101,16 @@ void main() {
   });
 
   group('McpDetailScreen credential setup', () {
+    setUp(() {
+      // Widget tests have no sandbox: skip the sandbox gate so the
+      // credential/runtime sheets under test are reachable.
+      mcpSupportGateForTest = (_) => null;
+    });
+
+    tearDown(() {
+      mcpSupportGateForTest = null;
+    });
+
     testWidgets('shows a Set up & connect CTA when credentials are missing', (
       tester,
     ) async {
@@ -153,6 +163,74 @@ void main() {
       // The credential sheet asks for the missing var instead of connecting.
       expect(find.text('Connect cred_mcp2'), findsOneWidget);
       expect(find.text('Save & connect'), findsOneWidget);
+    });
+  });
+
+  group('McpDetailScreen runtime setup', () {
+    setUp(() {
+      mcpSupportGateForTest = (_) => null;
+    });
+
+    tearDown(() {
+      mcpSupportGateForTest = null;
+    });
+
+    testWidgets('missing sandbox offers Studio setup instead of failing', (
+      tester,
+    ) async {
+      mcpSupportGateForTest = null;
+      final server = McpServer(
+        name: 'sandbox_mcp',
+        author: 'test',
+        description: 'needs sandbox',
+        category: 'Custom',
+        command: 'npx',
+        custom: true,
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: McpDetailScreen(server: server),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Connect server'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Sandbox needed'), findsOneWidget);
+      expect(find.text('Open Studio'), findsOneWidget);
+      expect(server.connected, isFalse);
+    });
+
+    testWidgets('missing runtime offers the runtime install sheet', (
+      tester,
+    ) async {
+      McpService.missingRuntimeOverrideForTest = (_) async => 'node';
+      addTearDown(() => McpService.missingRuntimeOverrideForTest = null);
+      final server = McpServer(
+        name: 'runtime_mcp',
+        author: 'test',
+        description: 'needs node',
+        category: 'Custom',
+        command: 'npx',
+        custom: true,
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: McpDetailScreen(server: server),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Connect server'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Install Node.js runtime'), findsOneWidget);
+      expect(server.connected, isFalse);
     });
   });
 

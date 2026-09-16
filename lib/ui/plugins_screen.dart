@@ -17,6 +17,7 @@ import '../core/theme.dart';
 import '../core/state.dart';
 import 'github_login_sheet.dart';
 import 'plugin_permission_sheet.dart';
+import 'sandbox_setup.dart';
 import 'startup_progress_panel.dart';
 
 /// Agent tools a plugin contributes when installed+enabled — mirrors the
@@ -36,12 +37,11 @@ String? _toolGainsFor(PluginItem p) {
   };
   if (seed != null) return seed;
   if (p.category == 'MCP') {
-    // Fix round 1 (Task 10 finding 1): same gating as the roster's
-    // _mcpProxyTool — the proxy tool exists only while the plugin's
-    // matching MCP server row does. No server row → no claimed gain.
-    final hasServer = AppState.I.mcpServers.any(
-      (s) => s.name.toLowerCase() == p.name.toLowerCase(),
-    );
+    // Same suffix-tolerant gating as the roster's _mcpProxyTool — the
+    // proxy tool exists only while the plugin's matching MCP server row
+    // does ('Puppeteer MCP' → server 'Puppeteer'). No server row → no
+    // claimed gain.
+    final hasServer = AgentService.mcpServerForPlugin(p) != null;
     return hasServer ? 'mcp (proxy)' : null;
   }
   final tools = AgentService.I.pluginToolNames(p);
@@ -156,6 +156,64 @@ bool _isInbuiltPlugin(PluginItem plugin) {
     'modelcontextprotocol',
   };
   return inbuiltAuthors.contains(plugin.author);
+}
+
+/// Where the Install button on a catalog row goes. The add-sheet is ONLY
+/// for the explicit + button — tapping Install on a row must resolve to a
+/// real install path, never open the add sheet as a surprise.
+enum PluginInstallKind { githubSource, builtinDirect, mcpServer, unsupported }
+
+@visibleForTesting
+({PluginInstallKind kind, GithubPluginSource? github, McpServer? server})
+pluginInstallRouteForTest(PluginItem plugin) {
+  final source = plugin.source;
+  if (source != null) {
+    // Marketplace rows carry a 'marketplace:owner/repo' source — strip the
+    // scheme before parsing, otherwise it becomes a bogus GitHub owner.
+    final stripped = source.startsWith('marketplace:')
+        ? source.substring('marketplace:'.length)
+        : source;
+    final derived = githubPluginSourceFromSourceString(stripped);
+    if (derived != null) {
+      return (
+        kind: PluginInstallKind.githubSource,
+        github: derived,
+        server: null,
+      );
+    }
+    return (kind: PluginInstallKind.unsupported, github: null, server: null);
+  }
+  if (plugin.marketplace != null) {
+    // Marketplace-listed row without a direct source: install runs through
+    // the marketplace flow, not the GitHub fetch.
+    return (kind: PluginInstallKind.unsupported, github: null, server: null);
+  }
+  // MCP rows that name a real configured server install by connecting it
+  // (credential-aware) instead of flipping a flag that later probes red.
+  if (plugin.category == 'MCP') {
+    final server = AgentService.mcpServerForPlugin(plugin);
+    if (server != null) {
+      return (
+        kind: PluginInstallKind.mcpServer,
+        github: null,
+        server: server,
+      );
+    }
+    return (kind: PluginInstallKind.unsupported, github: null, server: null);
+  }
+  if (_isInbuiltPlugin(plugin)) {
+    // Direct install ONLY with real backing — flag-flipping a backing-less
+    // row is the fake success that probes red on back navigation.
+    if (AgentService.builtinPluginHasBacking(plugin.name)) {
+      return (
+        kind: PluginInstallKind.builtinDirect,
+        github: null,
+        server: null,
+      );
+    }
+    return (kind: PluginInstallKind.unsupported, github: null, server: null);
+  }
+  return (kind: PluginInstallKind.unsupported, github: null, server: null);
 }
 
 /// Durable-only status copy for an MCP server (spec §5.3, Task 3): the
@@ -580,21 +638,16 @@ Future<void> showPluginAddSheet(BuildContext context) {
                             ),
                           ),
                         ),
-                        if (m == 'ovidai/ovid-plugins')
-                          const Tag(
-                            'DEFAULT',
-                            color: Aether.success,
-                            filled: true,
-                          )
-                        else
-                          GestureDetector(
-                            onTap: () => app.removeMarketplace(m),
-                            child: const Icon(
-                              Icons.delete_outline,
-                              size: 16,
-                              color: Aether.danger,
-                            ),
+                        // Every entry — including the legacy default, which
+                        // 404s and is no longer seeded — is removable.
+                        GestureDetector(
+                          onTap: () => app.removeMarketplace(m),
+                          child: const Icon(
+                            Icons.delete_outline,
+                            size: 16,
+                            color: Aether.danger,
                           ),
+                        ),
                       ],
                     ),
                   ),
@@ -1546,29 +1599,47 @@ class PluginDetailScreen extends StatelessWidget {
                     ),
                     onPressed: () async {
                       // ONE inspection/approval flow for every source.
-                      // Catalog rows with a derivable source install
-                      // straight through it; inbuilt (source-less) rows
-                      // install directly; only genuinely unknown rows open
-                      // the single add sheet.
-                      final derived = plugin.source != null
-                          ? githubPluginSourceFromSourceString(plugin.source!)
-                          : null;
-                      if (derived != null) {
-                        await _runSourceInstall(context, derived, plugin);
-                      } else if (_isInbuiltPlugin(plugin)) {
-                        await app.installBuiltinPlugin(plugin);
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                '${plugin.name} installed',
-                                style: const TextStyle(fontSize: 13),
-                              ),
-                            ),
+                      // The add-sheet is ONLY for the explicit + button —
+                      // tapping Install on a row must resolve to a real
+                      // install path, never open the sheet as a surprise.
+                      final route = pluginInstallRouteForTest(plugin);
+                      switch (route.kind) {
+                        case PluginInstallKind.githubSource:
+                          await _runSourceInstall(
+                            context,
+                            route.github!,
+                            plugin,
                           );
-                        }
-                      } else {
-                        await showPluginAddSheet(context);
+                        case PluginInstallKind.mcpServer:
+                          // The row IS the server's catalog entry: connect
+                          // it (asks credentials first when needed).
+                          await connectMcpServer(context, route.server!);
+                        case PluginInstallKind.builtinDirect:
+                          await app.installBuiltinPlugin(plugin);
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  '${plugin.name} installed',
+                                  style: const TextStyle(fontSize: 13),
+                                ),
+                              ),
+                            );
+                          }
+                        case PluginInstallKind.unsupported:
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  '"${plugin.name}" can\'t be installed from '
+                                  'the catalog — add its repo with the + '
+                                  'button instead.',
+                                  style: const TextStyle(fontSize: 13),
+                                ),
+                                behavior: SnackBarBehavior.floating,
+                              ),
+                            );
+                          }
                       }
                     },
                   ),
@@ -2196,6 +2267,12 @@ parseMcpConfigForTest(String raw) => [
         ),
     ];
 
+/// Test seam: overrides the sandbox gate in [connectMcpServer] so widget
+/// tests can exercise the credential/runtime sheets without a sandbox.
+/// Null in production.
+@visibleForTesting
+String? Function(McpServer server)? mcpSupportGateForTest;
+
 /// Connect an MCP server, asking for required credentials first.
 ///
 /// Disconnects are instant. A connect with missing credentials opens the
@@ -2208,36 +2285,91 @@ Future<void> connectMcpServer(BuildContext context, McpServer server) async {
     app.toggleMcpServer(server);
     return;
   }
-  final missing = await McpService.I.missingCredentialsFor(server);
-  if (!context.mounted) return;
-  if (mcpCredentialAskForTest(missing: missing) ==
-      McpCredentialAsk.connectDirectly) {
-    app.toggleMcpServer(server);
+  // Sandbox gate first: stdio servers spawn inside it — attempting the
+  // connect without it burns the handshake budget and records a timeout.
+  // A set test seam fully replaces the gate (including with null).
+  final gate = mcpSupportGateForTest;
+  final unsupported =
+      gate != null ? gate(server) : mcpUnsupportedReason(server);
+  if (unsupported != null) {
+    if (!context.mounted) return;
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        backgroundColor: Aether.surface,
+        title: const Text('Sandbox needed', style: TextStyle(fontSize: 15.5)),
+        content: Text(
+          '${server.name} runs inside the on-device sandbox, which is not '
+          'installed yet. Install it from Studio first (one-time setup), '
+          'then connect.',
+          style: TextStyle(fontSize: 13, color: Aether.textMuted),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(d, true),
+            child: const Text('Open Studio'),
+          ),
+        ],
+      ),
+    );
+    if (go == true && context.mounted) openStudio(context);
     return;
   }
-  final res = await showModalBottomSheet<String>(
-    context: context,
-    backgroundColor: Aether.surface,
-    isScrollControlled: true,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-    ),
-    builder: (sheetCtx) => Padding(
-      padding: EdgeInsets.only(
-        bottom: MediaQuery.of(sheetCtx).viewInsets.bottom,
-      ),
-      child: _McpCredentialSheet(server: server, missing: missing),
-    ),
-  );
+  final missing = await McpService.I.missingCredentialsFor(server);
   if (!context.mounted) return;
-  if (res == 'github-login') {
-    showGithubLoginSheet(
-      context,
-      onConnected: () => AppState.I.toggleMcpServer(server),
+  if (mcpCredentialAskForTest(missing: missing) !=
+      McpCredentialAsk.connectDirectly) {
+    final res = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Aether.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetCtx) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(sheetCtx).viewInsets.bottom,
+        ),
+        child: _McpCredentialSheet(server: server, missing: missing),
+      ),
     );
-  } else if (res == 'connected') {
-    app.toggleMcpServer(server);
+    if (!context.mounted) return;
+    if (res == 'github-login') {
+      showGithubLoginSheet(
+        context,
+        onConnected: () => AppState.I.toggleMcpServer(server),
+      );
+      return;
+    }
+    if (res != 'connected') return;
   }
+  // Runtime gate AFTER credentials: installing node/python takes minutes,
+  // so offer it explicitly instead of burning the handshake budget and
+  // recording a timeout failure.
+  final needRuntime = await McpService.I.missingRuntimeFor(server);
+  if (!context.mounted) return;
+  if (needRuntime != null) {
+    final installed = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: Aether.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetCtx) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(sheetCtx).viewInsets.bottom,
+        ),
+        child: _McpRuntimeInstallSheet(server: server, kind: needRuntime),
+      ),
+    );
+    if (installed != true || !context.mounted) return;
+  }
+  app.toggleMcpServer(server);
 }
 
 /// Credential sheet for an MCP server with missing credentials: secure
@@ -2389,6 +2521,140 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
               ),
               onPressed: _saving ? null : _save,
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Runtime-install sheet for a stdio MCP server whose language runtime
+/// (Node.js/Python) is missing. Installs just that runtime with live log
+/// lines, then pops true so the caller connects. Pops false/null on
+/// cancel or failure — the server row is never flipped optimistically.
+class _McpRuntimeInstallSheet extends StatefulWidget {
+  final McpServer server;
+  final String kind;
+  const _McpRuntimeInstallSheet({required this.server, required this.kind});
+
+  @override
+  State<_McpRuntimeInstallSheet> createState() =>
+      _McpRuntimeInstallSheetState();
+}
+
+class _McpRuntimeInstallSheetState extends State<_McpRuntimeInstallSheet> {
+  bool _installing = false;
+  bool _done = false;
+  bool _ok = false;
+  final List<String> _log = [];
+
+  String get _label => widget.kind == 'node' ? 'Node.js' : 'Python';
+
+  Future<void> _install() async {
+    setState(() {
+      _installing = true;
+    });
+    final ok = await SandboxService.I.ensureRuntime(
+      widget.kind,
+      onLine: (line) {
+        if (!mounted) return;
+        setState(() {
+          _log.add(line);
+          if (_log.length > 30) _log.removeAt(0);
+        });
+      },
+    );
+    if (!mounted) return;
+    setState(() {
+      _installing = false;
+      _done = true;
+      _ok = ok;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(18, 14, 18, 18),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '${widget.server.name} needs $_label',
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'This server runs on $_label, which is not installed in the '
+              'on-device sandbox yet. Install it once (one-time download), '
+              'then the server connects.',
+              style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+            ),
+            if (_log.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Aether.surfaceAlt,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  _log.join('\n'),
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontFamily: Aether.mono,
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 12),
+            if (!_done)
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: _installing
+                      ? Aether.surfaceRaised
+                      : Aether.accent,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                icon: _installing
+                    ? const SizedBox(
+                        width: 15,
+                        height: 15,
+                        child: CircularProgressIndicator(strokeWidth: 1.6),
+                      )
+                    : const Icon(Icons.download_outlined, size: 16),
+                label: Text(
+                  _installing ? 'Installing…' : 'Install $_label runtime',
+                  style: const TextStyle(fontSize: 13.5),
+                ),
+                onPressed: _installing ? null : _install,
+              )
+            else
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: _ok
+                      ? Aether.accent
+                      : Aether.surfaceRaised,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                icon: Icon(
+                  _ok ? Icons.check : Icons.close,
+                  size: 16,
+                ),
+                label: Text(
+                  _ok ? 'Connect server' : 'Close',
+                  style: const TextStyle(fontSize: 13.5),
+                ),
+                onPressed: () => Navigator.pop(context, _ok),
+              ),
           ],
         ),
       ),

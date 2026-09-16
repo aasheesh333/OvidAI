@@ -283,6 +283,14 @@ class McpConnectTask implements StartupTask, StartupOwnedTask {
           label,
           reason: outcome.reason,
         ),
+        // Missing runtimes are actionable, not broken: degraded (amber)
+        // with the install action, never a red timeout.
+        McpConnectOutcomeKind.needsRuntime => StartupItemStatus.degraded(
+          id,
+          kind,
+          label,
+          reason: outcome.reason,
+        ),
         McpConnectOutcomeKind.failed => StartupItemStatus.failed(
           id,
           kind,

@@ -1513,6 +1513,18 @@ class AgentService extends ChangeNotifier {
   static const _browserTabsEnvelopeVersion = 2;
   static const _defaultBrowserUrl = 'https://www.google.com';
 
+  /// True when [uri] is a Google OAuth page that must leave the embedded
+  /// WebView: Google rejects sign-in inside embedded WebViews ("this
+  /// browser or app may not be secure") no matter the user agent. These
+  /// navigations open in the system browser, where the user is typically
+  /// already signed in.
+  static bool googleAuthNeedsExternalBrowser(Uri uri) {
+    if (uri.scheme != 'https') return false;
+    final host = uri.host.toLowerCase();
+    return host == 'accounts.google.com' ||
+        host.endsWith('.accounts.google.com');
+  }
+
   /// Per-session browser bucket: tab list + active index.
   final Map<String, List<BrowserTab>> _sessionBrowsers = {};
   final Map<String, int> _sessionActiveTab = {};
@@ -1565,13 +1577,55 @@ class AgentService extends ChangeNotifier {
   /// on first access (switching to them).
   Future<void> prewarmBrowser() async {
     if (browserTabs.isNotEmpty) return;
+    final key = _browserKey();
     try {
-      // Restore last-session tabs if available.
-      final restored = await _restoreBrowserTabs();
-      if (restored) return;
-      _newTabInternal(_defaultBrowserUrl);
+      // Per-session keys first: restoring the GLOBAL copy here is what
+      // used to seed one session's tabs into another session's blank
+      // bucket (the filled bucket then blocks the correct per-session
+      // restore forever via its isNotEmpty guard).
+      if (await _hasSessionBrowserKeys(key)) {
+        await _restoreSessionTabsIfNeeded(key);
+        if (browserTabs.isNotEmpty) return;
+      }
+    } catch (_) {}
+    try {
+      // Legacy upgrades only: fall back to the global copy when no
+      // per-session record exists anywhere yet.
+      if (!await _anySessionBrowserKeys()) {
+        if (await _restoreBrowserTabs()) return;
+      }
+      if (browserTabs.isEmpty) _newTabInternal(_defaultBrowserUrl);
     } catch (_) {
       if (browserTabs.isEmpty) _newTabInternal(_defaultBrowserUrl);
+    }
+  }
+
+  /// Whether a per-session browser record exists for [sessionId] (v2
+  /// envelope or legacy URL list).
+  Future<bool> _hasSessionBrowserKeys(String sessionId) async {
+    if (sessionId.isEmpty) return false;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.containsKey('$_kBrowserSessionV2Prefix$sessionId') ||
+          prefs.containsKey('$_kBrowserSessionPrefix$sessionId');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Whether ANY per-session browser record exists (v2 envelope or legacy
+  /// URL list). Gates the global-copy fallback in [prewarmBrowser] so a
+  /// stale global copy can never leak into another session.
+  Future<bool> _anySessionBrowserKeys() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getKeys().any(
+        (k) =>
+            k.startsWith(_kBrowserSessionV2Prefix) ||
+            k.startsWith(_kBrowserSessionPrefix),
+      );
+    } catch (_) {
+      return false;
     }
   }
 
@@ -2179,6 +2233,19 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             final url = request.url;
             final uri = Uri.tryParse(url);
             if (uri == null) return NavigationDecision.navigate;
+            if (googleAuthNeedsExternalBrowser(uri)) {
+              // Google sign-in inside the embedded WebView always fails —
+              // hand it to the system browser and stay on the current page.
+              try {
+                await launchUrl(uri, mode: LaunchMode.externalApplication);
+              } catch (_) {}
+              _emit(
+                'shell',
+                'Google sign-in opened in the system browser — complete it '
+                'there, then return to Ovid.',
+              );
+              return NavigationDecision.prevent;
+            }
             if (uri.scheme == 'intent') {
               // intent://<host>/path#Intent;scheme=…;package=…;S.browser_fallback_url=<url>;end
               final fallback = uri.queryParameters['browser_fallback_url'];
@@ -3097,6 +3164,30 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       .replaceAll(RegExp(r'[^a-z0-9_]+'), '_')
       .replaceAll(RegExp(r'^_+|_+$'), '');
 
+  /// Catalog display names carry suffixes the server rows don't
+  /// ('Puppeteer MCP' → server 'Puppeteer', 'Postgres Tools' → 'Postgres').
+  /// Strips one trailing `_mcp`/`_tools` so plugin rows wire to their real
+  /// server instead of silently matching nothing (which used to surface as
+  /// a probe failure after a fake-looking install).
+  @visibleForTesting
+  static String mcpServerKeyForPluginForTest(String pluginName) =>
+      _normTool(pluginName).replaceAll(RegExp(r'(_mcp|_tools)$'), '');
+
+  /// The configured server backing an MCP-category catalog row, if any.
+  /// Public so the plugins UI routes Install to the real server connect.
+  /// Exact normalized names win first (a server literally named 'X MCP'
+  /// still matches row 'X MCP'); otherwise one trailing `_mcp`/`_tools`
+  /// display suffix is forgiven ('Puppeteer MCP' → server 'Puppeteer').
+  static McpServer? mcpServerForPlugin(PluginItem p) {
+    final norm = _normTool(p.name);
+    final stripped = mcpServerKeyForPluginForTest(p.name);
+    for (final s in AppState.I.mcpServers) {
+      final key = _normTool(s.name);
+      if (key == norm || key == stripped) return s;
+    }
+    return null;
+  }
+
   static bool _mcpOwnerVisible(McpServer server, String sessionId) {
     final owner = server.ownerPluginId;
     return owner == null ||
@@ -3116,6 +3207,13 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     'DeepThink Reasoning',
     'Sandbox Runtime',
   };
+
+  /// Whether a source-less catalog row has real executable backing (a gated
+  /// tool family). Rows without backing must never flip installed/enabled —
+  /// that fake success is exactly what later probes red on back navigation.
+  /// Public so the plugins UI and state hydration share the one definition.
+  static bool builtinPluginHasBacking(String name) =>
+      _seedPluginNames.contains(name);
 
   /// True when [p] actually mounts executable agent capability: a dedicated
   /// seed tool, an MCP proxy, declared hooks, or precomputed mounted
@@ -3155,10 +3253,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     if (!p.installed || !p.enabled) return const [];
     if (p.category == 'MCP') {
       // Task 10: honest parity with the roster gate — the proxy tool only
-      // exists when the plugin's matching MCP server row does.
-      final hasServer = AppState.I.mcpServers.any(
-        (s) => s.name.toLowerCase() == p.name.toLowerCase(),
-      );
+      // exists when the plugin's matching MCP server row does (suffix
+      // tolerant, so 'Puppeteer MCP' matches server 'Puppeteer').
+      final hasServer = mcpServerForPlugin(p) != null;
       return hasServer ? const ['mcp (proxy)'] : const [];
     }
     final seed = switch (p.name) {
@@ -5364,7 +5461,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
           'properties': {
             'repo': {
               'type': 'string',
-              'description': 'owner/repo, e.g. ovidai/ovid-plugins',
+              'description': 'owner/repo, e.g. acme/widgets',
             },
           },
           'required': ['repo'],
@@ -5499,9 +5596,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   // while the plugin is installed AND its server actually exists in the
   // catalog; a removed server must not keep advertising its proxy tool.
   Map<String, dynamic>? _mcpProxyTool(PluginItem p) {
-    final hasServer = AppState.I.mcpServers.any(
-      (s) => s.name.toLowerCase() == p.name.toLowerCase(),
-    );
+    // Suffix-tolerant match so 'Puppeteer MCP' wires to server 'Puppeteer'.
+    final hasServer = mcpServerForPlugin(p) != null;
     if (!hasServer) return null;
     final safe = p.name
         .toLowerCase()

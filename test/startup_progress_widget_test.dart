@@ -225,6 +225,10 @@ void main() {
 
       await pumpChat(tester, c, shell: true);
 
+      // Collapsed by default — expand explicitly to reach rows.
+      await tester.tap(find.byKey(const ValueKey('startup-panel-toggle')));
+      await tester.pump();
+
       expect(find.byKey(const ValueKey('startup-progress-bar')), findsOneWidget);
       final composer = find.byKey(const ValueKey('chat-composer'));
       expect(composer, findsOneWidget);
@@ -261,6 +265,9 @@ void main() {
     );
 
     await pumpPanel(tester, c);
+    // Collapsed by default — expand explicitly to reach rows.
+    await tester.tap(find.byKey(const ValueKey('startup-panel-toggle')));
+    await tester.pump();
     expect(find.text('Finishing setup · 0 of 3'), findsOneWidget);
     expect(find.byKey(const ValueKey('startup-item-item0')), findsOneWidget);
 
@@ -397,12 +404,16 @@ void main() {
     );
 
     await pumpPanel(tester, c);
+    // Collapsed by default — expand explicitly to reach rows.
+    await tester.tap(find.byKey(const ValueKey('startup-panel-toggle')));
+    await tester.pump();
 
     expect(find.text('Ready'), findsOneWidget);
     expect(find.text('Needs setup'), findsOneWidget);
     expect(find.text('Migration required'), findsOneWidget);
     expect(find.text('Unsupported on this device'), findsOneWidget);
-    expect(find.text('Degraded'), findsNWidgets(2));
+    expect(find.text('Degraded'), findsOneWidget);
+    expect(find.text('Skipped'), findsOneWidget);
     expect(find.text('Failed'), findsOneWidget);
     expect(find.text('Disabled'), findsOneWidget);
     expect(find.text('Loading'), findsOneWidget);
@@ -535,6 +546,9 @@ void main() {
       );
 
       await pumpChat(tester, c);
+      // Collapsed by default — expand explicitly to reach rows.
+      await tester.tap(find.byKey(const ValueKey('startup-panel-toggle')));
+      await tester.pump();
       expect(find.text('Loading'), findsWidgets);
 
       await tester.pump(const Duration(seconds: 120));
@@ -788,6 +802,9 @@ void main() {
         ),
       );
       await tester.pump();
+      // Collapsed by default — expand explicitly to reach rows.
+      await tester.tap(find.byKey(const ValueKey('startup-panel-toggle')));
+      await tester.pump();
 
       expect(find.bySemanticsLabel('Startup progress'), findsOneWidget);
       final toggle = tester.getSemantics(
@@ -858,7 +875,7 @@ void main() {
   });
 
   testWidgets(
-    'panel expands when tasks queue after an empty first snapshot',
+    'panel stays collapsed when tasks queue; manual expand reveals rows',
     (tester) async {
       // Production readiness starts post-frame: the panel first sees an empty
       // snapshot (readinessComplete is vacuously true), then tasks arrive.
@@ -881,7 +898,14 @@ void main() {
       );
       await tester.pump();
 
+      // Header appears, but rows stay hidden until the user expands.
       expect(find.text('Finishing setup · 0 of 1'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('startup-item-local.hydrate')),
+        findsNothing,
+      );
+      await tester.tap(find.byKey(const ValueKey('startup-panel-toggle')));
+      await tester.pump();
       expect(
         find.byKey(const ValueKey('startup-item-local.hydrate')),
         findsOneWidget,
@@ -1426,4 +1450,89 @@ void main() {
       expect(openedWith, 'legacy:legacy/solo:0');
     },
   );
+
+  group('sandbox install action', () {
+    testWidgets('skipped sandbox row offers one-tap install', (tester) async {
+      var installed = false;
+      final c = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      unawaited(
+        c.start([
+          _Task(
+            'sandbox.selfHeal',
+            kind: StartupItemKind.sandbox,
+            label: 'Maintain local sandbox',
+            run: () async => StartupItemStatus.skipped(
+              'sandbox.selfHeal',
+              StartupItemKind.sandbox,
+              'Maintain local sandbox',
+              reason: 'Sandbox is not installed on this device',
+            ),
+          ),
+        ]),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: StartupProgressPanel(
+                coordinator: c,
+                onInstallSandbox: () => installed = true,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('startup-panel-toggle')));
+      await tester.pump();
+
+      await tester.tap(find.text('Install'));
+      await tester.pump();
+
+      expect(installed, isTrue);
+    });
+  });
+
+  group('collapsed-by-default panel + honest Skipped label', () {
+    test('skipped rows read Skipped, not Degraded', () {
+      expect(startupItemStateLabel(StartupItemState.skipped), 'Skipped');
+      expect(startupItemStateLabel(StartupItemState.degraded), 'Degraded');
+    });
+
+    testWidgets('finishing-setup row never auto-expands', (tester) async {
+      final gate = Completer<StartupItemStatus>();
+      final c = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      unawaited(
+        c.start([
+          _Task(
+            'slow.one',
+            kind: StartupItemKind.localState,
+            label: 'One slow thing',
+            run: () => gate.future,
+          ),
+        ]),
+      );
+      await pumpPanel(tester, c);
+      await tester.pump();
+
+      // Header visible while work runs, but no item rows: collapsed.
+      expect(find.textContaining('Finishing setup'), findsOneWidget);
+      expect(find.text('One slow thing'), findsNothing);
+
+      gate.complete(
+        _ready('slow.one', StartupItemKind.localState, 'One slow thing'),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      // Still collapsed after completion.
+      expect(find.text('One slow thing'), findsNothing);
+    });
+  });
 }

@@ -47,6 +47,21 @@ void main() {
     expect('START_NOT_STICKY'.allMatches(kt).length, 1);
   });
 
+  test('foreground service declares dataSync + specialUse with reason', () {
+    // Android 14+ needs a matching type + permission + property, or the
+    // start throws. The personal-assistant workload is declared under both
+    // dataSync (transfers) and specialUse (assistant presence) so neither
+    // path can crash the service on launch.
+    final m = File('android/app/src/main/AndroidManifest.xml')
+        .readAsStringSync();
+    expect(m.contains('foregroundServiceType="dataSync|specialUse"'), isTrue);
+    expect(
+      m.contains('FOREGROUND_SERVICE_SPECIAL_USE'),
+      isTrue,
+    );
+    expect(m.contains('PROPERTY_SPECIAL_USE_FGS_SUBTYPE'), isTrue);
+  });
+
   test('in-app exit cancels runs and stops the service', () {
     final src = File('lib/core/agent_notification_service.dart').readAsStringSync();
     final idx = src.indexOf('Future<void> agentExit');

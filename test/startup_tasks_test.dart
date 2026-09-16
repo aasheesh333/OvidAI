@@ -710,6 +710,25 @@ void main() {
       expect(status.state, StartupItemState.failed);
     });
 
+    test('no unreachable default marketplace is seeded', () {
+      final app = AppState.createForTest();
+      addTearDown(AppState.resetTestInstance);
+      // ovidai/ovid-plugins 404s: seeding it failed refresh on every
+      // fresh install through no fault of the user.
+      expect(app.marketplaces, isEmpty);
+    });
+
+    test('dead marketplace URLs purge, live ones survive', () {
+      expect(
+        AppState.purgedMarketplacesForTest([
+          'ovidai/ovid-plugins',
+          '  ovidai/ovid-plugins  ',
+          'acme/widgets',
+        ]),
+        ['acme/widgets'],
+      );
+    });
+
     test('readiness wiring feeds recent failure memos into both tasks', () async {
       final now = DateTime.now();
       SharedPreferences.setMockInitialValues({
