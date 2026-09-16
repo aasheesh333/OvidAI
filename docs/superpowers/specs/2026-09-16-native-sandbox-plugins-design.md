@@ -79,7 +79,7 @@ New file: `lib/core/native_plugins/sandbox_utilities.dart` — `SandboxRunner` t
 - `status(path?)` → `git -C <path> status --short --branch`.
 - `log(path?, limit=20)` → `git -C <path> log --oneline -n <limit>` (`limit` tolerant-parsed, 1..200).
 - `branch(path?)` → `git -C <path> branch -a` plus current-branch marker line.
-- `clone(url, path?)` → `git clone <url> [<path>]` run in the sandbox home. `url` required non-empty. `path` is the optional destination directory; when omitted, git derives the directory name from the URL. Default 300s timeout.
+- `clone(url, path?)` → `git clone <url> [<path>]`. `url` required non-empty. `path` is the optional destination directory; when omitted, git derives the directory name from the URL. The command runs with `cwd` = stored `default_path` ?? exec default (sandbox home) — never the not-yet-existing destination. Default 300s timeout.
 - `commit(path?, message)` → `git -C <path> add -A` then `git -C <path> commit -m <message>`. `message` required non-empty (`ArgumentError`). Surfaces git's own error when identity is unconfigured.
 - `push(path?, remote=origin, branch?)` → `git -C <path> push <remote> <branch?>`. Default 300s timeout. Surfaces auth/network errors verbatim.
 - No separate `command -v git` probe: git's own exit-127 stderr is surfaced honestly (fewer round trips, same honesty).
