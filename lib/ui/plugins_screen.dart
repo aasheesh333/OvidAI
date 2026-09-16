@@ -7,6 +7,7 @@ import '../core/github_service.dart';
 import '../core/hook_service.dart';
 import '../core/mcp_config_parse.dart';
 import '../core/mcp_service.dart';
+import '../core/native_plugin.dart';
 import '../core/plugin_manifest.dart';
 import '../core/plugin_registry.dart';
 import '../core/plugin_runtime.dart';
@@ -161,11 +162,20 @@ bool _isInbuiltPlugin(PluginItem plugin) {
 /// Where the Install button on a catalog row goes. The add-sheet is ONLY
 /// for the explicit + button — tapping Install on a row must resolve to a
 /// real install path, never open the add sheet as a surprise.
-enum PluginInstallKind { githubSource, builtinDirect, mcpServer, unsupported }
+enum PluginInstallKind {
+  githubSource,
+  builtinDirect,
+  mcpServer,
+  nativeCapability,
+  unsupported
+}
 
 @visibleForTesting
 ({PluginInstallKind kind, GithubPluginSource? github, McpServer? server})
 pluginInstallRouteForTest(PluginItem plugin) {
+  if (NativePluginRegistry.I.has(plugin.name)) {
+    return (kind: PluginInstallKind.nativeCapability, github: null, server: null);
+  }
   final source = plugin.source;
   if (source != null) {
     // Marketplace rows carry a 'marketplace:owner/repo' source — strip the
@@ -1615,6 +1625,18 @@ class PluginDetailScreen extends StatelessWidget {
                           // it (asks credentials first when needed).
                           await connectMcpServer(context, route.server!);
                         case PluginInstallKind.builtinDirect:
+                          await app.installBuiltinPlugin(plugin);
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  '${plugin.name} installed',
+                                  style: const TextStyle(fontSize: 13),
+                                ),
+                              ),
+                            );
+                          }
+                        case PluginInstallKind.nativeCapability:
                           await app.installBuiltinPlugin(plugin);
                           if (context.mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(

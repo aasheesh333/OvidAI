@@ -1,11 +1,39 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/plugins_screen.dart';
+
+class _TestNativeCapability implements NativePluginCapability {
+  @override
+  final String pluginName;
+  _TestNativeCapability(this.pluginName);
+
+  @override
+  List<NativePluginConfigField> get configFields => const [];
+
+  @override
+  List<NativePluginTool> get tools => const [];
+
+  @override
+  Future<void> configure(Map<String, String> values) async {}
+
+  @override
+  Future<String> callTool(String toolName, Map<String, dynamic> args) async =>
+      'ok:$toolName';
+}
 
 /// Install-button routing: every catalog row must resolve to a REAL install
 /// path. The add-sheet is only for the explicit + button — tapping Install
 /// on a row must never open it as a surprise.
 void main() {
+  setUp(() {
+    NativePluginRegistry.I.clearForTest();
+  });
+
+  tearDown(() {
+    NativePluginRegistry.I.clearForTest();
+  });
+
   PluginItem row({
     String? source,
     String author = 'ovidai',
@@ -59,6 +87,19 @@ void main() {
     final route = pluginInstallRouteForTest(
       row(source: 'justaword', author: 'community'),
     );
+    expect(route.kind, PluginInstallKind.unsupported);
+  });
+
+  test('registered native capability routes to nativeCapability', () {
+    NativePluginRegistry.I.register(
+      _TestNativeCapability('JSON Visualizer'),
+    );
+    final route = pluginInstallRouteForTest(row(name: 'JSON Visualizer'));
+    expect(route.kind, PluginInstallKind.nativeCapability);
+  });
+
+  test('unregistered source-less plugin still routes to unsupported', () {
+    final route = pluginInstallRouteForTest(row(name: 'JSON Visualizer'));
     expect(route.kind, PluginInstallKind.unsupported);
   });
 }
