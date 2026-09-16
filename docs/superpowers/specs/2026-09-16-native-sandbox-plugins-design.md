@@ -39,9 +39,11 @@ This spec defines their in-process native implementations following the NP1 fram
                                 v
 +-------------------------------+----------------------------------+
 |  SandboxRunner typedef:                                        |
-|  Future<String> Function(List<String> args, {String? cwd})       |
-|  default impl: (args, {cwd}) => SandboxService.I.exec(args,      |
-|    cwd: cwd).timeout(effectiveTimeout)                           |
+|  Future<String> Function(                                         |
+|    List<String> args, {String? cwd, Duration? timeout})           |
+|  default impl: (args, {cwd, timeout}) =>                          |
+|    SandboxService.I.exec(args, cwd: cwd)                          |
+|      .timeout(timeout ?? const Duration(seconds: 60))             |
 +--------------------------------+---------------------------------+
                                  |
                                  v
