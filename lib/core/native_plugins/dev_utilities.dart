@@ -76,7 +76,13 @@ class FileConverterCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -262,7 +268,13 @@ class MarkdownEditorCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -382,7 +394,13 @@ class PasswordVaultCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -549,7 +567,13 @@ class EnvManagerCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -747,7 +771,13 @@ class LogAnalyzerCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {

@@ -74,6 +74,14 @@ void main() {
       expect(out, contains('\n  "a": 1'));
     });
 
+    test('format accepts numeric-string indent', () async {
+      final out = await json.callTool('format', {
+        'json_string': '{"a":1}',
+        'indent': '4',
+      });
+      expect(out, contains('\n    "a": 1'));
+    });
+
     test('format rejects invalid JSON', () async {
       await expectLater(
         json.callTool('format', {'json_string': '{oops'}),
@@ -303,6 +311,34 @@ void main() {
           expect(times[i].isAfter(times[i - 1]), isTrue);
         }
       }
+    });
+
+    test('next_runs accepts numeric-string count', () async {
+      final out = await cron.callTool('next_runs', {
+        'expression': '0 9 * * *',
+        'count': '3',
+      });
+      final decoded = jsonDecode(out) as Map<String, dynamic>;
+      expect((decoded['runs'] as List), hasLength(3));
+    });
+
+    test('step range N/S matches N..max stepped by S', () async {
+      final out = await cron.callTool('next_runs', {
+        'expression': '5/15 * * * *',
+        'count': '20',
+      });
+      final decoded = jsonDecode(out) as Map<String, dynamic>;
+      final runs = (decoded['runs'] as List).cast<String>();
+      expect(runs, isNotEmpty);
+      const allowed = {5, 20, 35, 50};
+      final seen = <int>{};
+      for (final r in runs) {
+        final minute = DateTime.parse(r).minute;
+        expect(allowed, contains(minute), reason: 'run $r must match 5/15');
+        seen.add(minute);
+      }
+      // Twenty consecutive matches of a 15-minute step cover all residues.
+      expect(seen, containsAll([5, 20, 35, 50]));
     });
   });
 

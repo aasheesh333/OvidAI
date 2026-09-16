@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 import 'package:ovid_ai/core/native_plugin.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Part C (NP2) pure-Dart utility capabilities: API Tester, Web Scraper Pro,
 /// Prompt Library, DB Designer, and Web Clipper.
@@ -28,6 +29,19 @@ String _requireString(Map<String, dynamic> args, String key) {
     throw ArgumentError('Missing required argument: $key');
   }
   return value.toString();
+}
+
+/// Tolerant double parsing for LLM-supplied numeric args: accepts [num]
+/// directly or a numeric [String] (e.g. `"10"`); anything else is a
+/// user-input error ([FormatException]).
+double _parseDoubleArg(dynamic raw, String key, double fallback) {
+  if (raw == null) return fallback;
+  if (raw is num) return raw.toDouble();
+  final parsed = double.tryParse(raw.toString().trim());
+  if (parsed == null) {
+    throw FormatException('Invalid $key "$raw": expected a number.');
+  }
+  return parsed;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +96,13 @@ class ApiTesterCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -132,7 +152,7 @@ class ApiTesterCapability implements NativePluginCapability {
     }
     final body = args['body']?.toString();
     final timeoutSeconds =
-        (args['timeout_seconds'] as num?)?.toDouble() ?? 10.0;
+        _parseDoubleArg(args['timeout_seconds'], 'timeout_seconds', 10.0);
     if (timeoutSeconds <= 0) {
       throw ArgumentError(
         'Invalid timeout_seconds $timeoutSeconds: must be positive.',
@@ -239,7 +259,13 @@ class WebScraperProCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -342,6 +368,52 @@ List<String> _parseTags(dynamic raw) {
 
 class PromptLibraryCapability implements NativePluginCapability {
   final Map<String, _SavedPrompt> _prompts = {};
+  bool _loaded = false;
+
+  /// Non-secret prefs key backing the prompt cache (prompts are reusable
+  /// templates, never secrets — secure storage must NOT be used here).
+  static const _prefsKey = 'native_plugin_prompt_library__prompts';
+
+  /// Loads persisted prompts once (lazily on first use, since construction
+  /// cannot be async); the in-memory map stays as a cache afterwards.
+  Future<void> _ensureLoaded() async {
+    if (_loaded) return;
+    _loaded = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_prefsKey);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      for (final entry in decoded.entries) {
+        final value = entry.value;
+        if (value is! Map) continue;
+        final prompt = value['prompt']?.toString() ?? '';
+        if (prompt.isEmpty) continue;
+        final tags = [
+          for (final t in (value['tags'] as List? ?? const []))
+            t.toString(),
+        ].where((t) => t.isNotEmpty).toList();
+        _prompts[entry.key.toString()] = _SavedPrompt(prompt, tags);
+      }
+    } catch (_) {
+      // Corrupt or unavailable cache: start empty rather than crash.
+    }
+  }
+
+  Future<void> _persist() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _prefsKey,
+      jsonEncode({
+        for (final entry in _prompts.entries)
+          entry.key: {
+            'prompt': entry.value.prompt,
+            'tags': entry.value.tags,
+          },
+      }),
+    );
+  }
 
   @override
   String get pluginName => 'Prompt Library';
@@ -402,23 +474,37 @@ class PromptLibraryCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
     switch (toolName) {
       case 'save':
-        return _save(
+        await _ensureLoaded();
+        final saved = _save(
           _requireString(args, 'title'),
           _requireString(args, 'prompt'),
           _parseTags(args['tags']),
         );
+        await _persist();
+        return saved;
       case 'get':
+        await _ensureLoaded();
         return _get(_requireString(args, 'title'));
       case 'list':
+        await _ensureLoaded();
         return _list(args['tag']?.toString());
       case 'delete':
-        return _delete(_requireString(args, 'title'));
+        await _ensureLoaded();
+        final deleted = _delete(_requireString(args, 'title'));
+        await _persist();
+        return deleted;
       default:
         throw ArgumentError('Unknown tool: $toolName');
     }
@@ -736,7 +822,13 @@ class DbDesignerCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -929,7 +1021,13 @@ class WebClipperCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -937,7 +1035,7 @@ class WebClipperCapability implements NativePluginCapability {
       case 'clip':
         return _clip(
           _requireString(args, 'url'),
-          (args['timeout_seconds'] as num?)?.toDouble() ?? 10.0,
+          _parseDoubleArg(args['timeout_seconds'], 'timeout_seconds', 10.0),
         );
       default:
         throw ArgumentError('Unknown tool: $toolName');

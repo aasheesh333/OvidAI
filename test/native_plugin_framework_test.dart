@@ -120,6 +120,26 @@ void main() {
     );
   });
 
+  test('save rejects unknown configuration keys', () async {
+    final capability = FakeCapability();
+    NativePluginRegistry.I.register(capability);
+
+    await expectLater(
+      capability.configure({'bogus_key': 'x'}),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    // Nothing from the rejected batch may persist anywhere.
+    final prefs = await SharedPreferences.getInstance();
+    const secure = FlutterSecureStorage();
+    final slug = NativePluginRegistry.I.slugFor(capability.pluginName);
+    expect(prefs.getString('native_plugin_${slug}__bogus_key'), isNull);
+    expect(
+      await secure.read(key: 'native_plugin_${slug}__bogus_key'),
+      isNull,
+    );
+  });
+
   test('slug normalization', () {
     expect(
       NativePluginRegistry.I.slugFor('JSON Visualizer'),

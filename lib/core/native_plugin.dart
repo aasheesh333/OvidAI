@@ -63,18 +63,24 @@ class NativePluginConfigStore {
       'native_plugin_${NativePluginRegistry.slugify(pluginName)}__$key';
 
   /// Persists [values], routing each entry to secure storage or prefs
-  /// based on the matching [fields] declaration. Unknown keys default to
-  /// non-secret prefs storage.
+  /// based on the matching [fields] declaration. Unknown keys throw
+  /// [ArgumentError] and persist nothing (validated before any write).
   Future<void> save({
     required String pluginName,
     required List<NativePluginConfigField> fields,
     required Map<String, String> values,
   }) async {
     final byKey = {for (final f in fields) f.key: f};
+    for (final key in values.keys) {
+      if (!byKey.containsKey(key)) {
+        throw ArgumentError(
+          'Unknown configuration key "$key" for plugin "$pluginName".',
+        );
+      }
+    }
     final prefs = await SharedPreferences.getInstance();
     for (final entry in values.entries) {
-      final field = byKey[entry.key];
-      if (field != null && field.secret) {
+      if (byKey[entry.key]!.secret) {
         await _secure.write(
           key: _secureKey(pluginName, entry.key),
           value: entry.value,

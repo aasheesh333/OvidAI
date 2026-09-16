@@ -96,7 +96,7 @@ abstract class NativePluginCapability {
   String get pluginName;
   List<NativePluginConfigField> get configFields;
   List<NativePluginTool> get tools;
-  Future<Map<String, dynamic>> configure(Map<String, String> values);
+  Future<void> configure(Map<String, String> values);
   Future<String> callTool(String toolName, Map<String, dynamic> args);
 }
 ```

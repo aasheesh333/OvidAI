@@ -34,6 +34,19 @@ bool _optionalBool(Map<String, dynamic> args, String key, bool fallback) {
   return value.toString().toLowerCase() == 'true';
 }
 
+/// Tolerant integer parsing for LLM-supplied numeric args: accepts [num]
+/// directly or a numeric [String] (e.g. `"10"`); anything else is a
+/// user-input error ([FormatException], matching [_parseLength] style).
+int _parseIntArg(dynamic raw, String key, int fallback) {
+  if (raw == null) return fallback;
+  if (raw is num) return raw.toInt();
+  final parsed = int.tryParse(raw.toString().trim());
+  if (parsed == null) {
+    throw FormatException('Invalid $key "$raw": expected an integer.');
+  }
+  return parsed;
+}
+
 // ---------------------------------------------------------------------------
 // JSON Visualizer
 // ---------------------------------------------------------------------------
@@ -98,7 +111,13 @@ class JsonVisualizerCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -106,7 +125,7 @@ class JsonVisualizerCapability implements NativePluginCapability {
       case 'format':
         return _format(
           _requireString(args, 'json_string'),
-          (args['indent'] as num?)?.toInt() ?? 2,
+          _parseIntArg(args['indent'], 'indent', 2),
         );
       case 'minify':
         return _minify(_requireString(args, 'json_string'));
@@ -264,7 +283,13 @@ class RegexBuilderCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -489,7 +514,13 @@ class SqlFormatterCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -735,7 +766,13 @@ class CronDesignerCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -751,7 +788,7 @@ class CronDesignerCapability implements NativePluginCapability {
       case 'next_runs':
         return _nextRuns(
           _requireString(args, 'expression'),
-          (args['count'] as num?)?.toInt() ?? 5,
+          _parseIntArg(args['count'], 'count', 5),
         );
       default:
         throw ArgumentError('Unknown tool: $toolName');
@@ -831,14 +868,14 @@ class CronDesignerCapability implements NativePluginCapability {
     }
   }
 
-  bool _fieldMatches(String field, int value, int min) {
+  bool _fieldMatches(String field, int value, int min, int max) {
     for (final item in field.split(',')) {
       final stepSplit = item.split('/');
       final range = stepSplit[0];
       final step =
           stepSplit.length == 2 ? int.parse(stepSplit[1]) : 1;
       var lo = min;
-      var hi = value;
+      var hi = max;
       var wholeRange = false;
       if (range == '*') {
         wholeRange = true;
@@ -846,6 +883,11 @@ class CronDesignerCapability implements NativePluginCapability {
         final ends = range.split('-');
         lo = int.parse(ends[0]);
         hi = int.parse(ends[1]);
+      } else if (stepSplit.length == 2) {
+        // A bare `N/S` step means the range N..max stepped by S
+        // (cron standard), not just the single value N.
+        lo = int.parse(range);
+        hi = max;
       } else {
         lo = int.parse(range);
         hi = int.parse(range);
@@ -862,12 +904,12 @@ class CronDesignerCapability implements NativePluginCapability {
   }
 
   bool _matches(_CronFields fields, DateTime candidate) {
-    if (!_fieldMatches(fields.minute, candidate.minute, 0)) return false;
-    if (!_fieldMatches(fields.hour, candidate.hour, 0)) return false;
-    if (!_fieldMatches(fields.month, candidate.month, 1)) return false;
-    final domMatch = _fieldMatches(fields.dom, candidate.day, 1);
+    if (!_fieldMatches(fields.minute, candidate.minute, 0, 59)) return false;
+    if (!_fieldMatches(fields.hour, candidate.hour, 0, 23)) return false;
+    if (!_fieldMatches(fields.month, candidate.month, 1, 12)) return false;
+    final domMatch = _fieldMatches(fields.dom, candidate.day, 1, 31);
     final dowMatch =
-        _fieldMatches(fields.dow, candidate.weekday % 7, 0) ||
+        _fieldMatches(fields.dow, candidate.weekday % 7, 0, 7) ||
             (fields.dow != '*' && _dowValueMatchesSunday7(fields, candidate));
     if (fields.dom == '*' && fields.dow == '*') return true;
     if (fields.dom == '*') return dowMatch;
@@ -879,13 +921,25 @@ class CronDesignerCapability implements NativePluginCapability {
     // Accept 7 as Sunday in addition to 0.
     if (candidate.weekday % 7 != 0) return false;
     for (final item in fields.dow.split(',')) {
-      final range = item.split('/')[0];
-      if (range == '7') return true;
+      final stepSplit = item.split('/');
+      final range = stepSplit[0];
+      final step =
+          stepSplit.length == 2 ? int.parse(stepSplit[1]) : 1;
+      if (range == '*') {
+        if ((7 - 0) % step == 0) return true;
+        continue;
+      }
       if (range.contains('-')) {
         final ends = range.split('-');
-        if (int.parse(ends[0]) <= 7 && int.parse(ends[1]) >= 7) {
-          return true;
-        }
+        final lo = int.parse(ends[0]);
+        final hi = int.parse(ends[1]);
+        if (7 >= lo && 7 <= hi && (7 - lo) % step == 0) return true;
+      } else if (stepSplit.length == 2) {
+        // `N/S` means N..7 stepped by S: Sunday matches when aligned.
+        final lo = int.parse(range);
+        if (7 >= lo && (7 - lo) % step == 0) return true;
+      } else if (range == '7') {
+        return true;
       }
     }
     return false;
@@ -1135,7 +1189,13 @@ class ColorPaletteGenCapability implements NativePluginCapability {
       ];
 
   @override
-  Future<void> configure(Map<String, String> values) async {}
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {

@@ -59,6 +59,30 @@ class _FakeJsonCapability implements NativePluginCapability {
   }
 }
 
+class _FakeNoConfigCapability implements NativePluginCapability {
+  @override
+  String get pluginName => 'Cron Designer';
+
+  @override
+  List<NativePluginConfigField> get configFields => const [];
+
+  @override
+  List<NativePluginTool> get tools => const [];
+
+  @override
+  Future<void> configure(Map<String, String> values) async {
+    if (values.isNotEmpty) {
+      throw ArgumentError(
+        'Plugin "$pluginName" has no configurable settings.',
+      );
+    }
+  }
+
+  @override
+  Future<String> callTool(String toolName, Map<String, dynamic> args) async =>
+      'ok';
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -152,5 +176,61 @@ void main() {
       key: 'base_url',
     );
     expect(stored, 'https://example.com');
+
+    // Secret fields must round-trip through secure storage, never prefs.
+    final secretOut = await AgentService.I.dispatchForTest(
+      'catalog_configure_plugin',
+      {
+        'plugin': 'JSON Visualizer',
+        'settings': {'api_key': 'shhh-secret'},
+      },
+    );
+    expect(secretOut, contains('configured'));
+    const secure = FlutterSecureStorage();
+    expect(
+      await secure.read(key: 'native_plugin_json_visualizer__api_key'),
+      'shhh-secret',
+    );
+    final prefs = await SharedPreferences.getInstance();
+    expect(
+      prefs.getString('native_plugin_json_visualizer__api_key'),
+      isNull,
+    );
+  });
+
+  test('catalog_configure_plugin is honest for plugins with no settings',
+      () async {
+    NativePluginRegistry.I.register(_FakeNoConfigCapability());
+
+    final out = await AgentService.I.dispatchForTest(
+      'catalog_configure_plugin',
+      {
+        'plugin': 'Cron Designer',
+        'settings': {'foo': 'bar'},
+      },
+    );
+    expect(out, contains('has no configurable settings'));
+  });
+
+  test('catalog_configure_plugin rejects unknown keys', () async {
+    final row = jsonRow();
+    row.installed = true;
+    row.enabled = true;
+
+    await expectLater(
+      AgentService.I.dispatchForTest(
+        'catalog_configure_plugin',
+        {
+          'plugin': 'JSON Visualizer',
+          'settings': {'typo_key': 'x'},
+        },
+      ),
+      throwsA(isA<ArgumentError>()),
+    );
+    final prefs = await SharedPreferences.getInstance();
+    expect(
+      prefs.getString('native_plugin_json_visualizer__typo_key'),
+      isNull,
+    );
   });
 }

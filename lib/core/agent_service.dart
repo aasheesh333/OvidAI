@@ -9254,6 +9254,10 @@ ${await _agentsMdBlock()}
         if (targetCapability == null) {
           return 'Plugin "$pluginArg" has no native capability to configure.';
         }
+        if (targetCapability.configFields.isEmpty) {
+          return 'Plugin "${targetCapability.pluginName}" has no '
+              'configurable settings. Nothing was configured.';
+        }
         _emit('think', 'configuring plugin: ${targetCapability.pluginName}');
         // Route through the capability's declared configFields (secret flag)
         // via capability.configure so a typo'd key doesn't silently land a

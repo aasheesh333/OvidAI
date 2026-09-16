@@ -5,9 +5,13 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/native_plugins/web_and_db_utilities.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   setUp(() {
+    SharedPreferences.setMockInitialValues({});
     NativePluginRegistry.I.clearForTest();
     registerWebAndDbUtilities();
   });
@@ -113,6 +117,17 @@ void main() {
       final decoded = jsonDecode(out) as Map<String, dynamic>;
       expect(decoded['status'], 201);
       expect(decoded['body'], 'created');
+    });
+
+    test('request accepts numeric-string timeout_seconds', () async {
+      final tester = ApiTesterCapability(
+        client: MockClient((_) async => http.Response('ok', 200)),
+      );
+      final out = await tester.callTool('request', {
+        'url': 'https://example.com/items',
+        'timeout_seconds': '10',
+      });
+      expect((jsonDecode(out) as Map<String, dynamic>)['status'], 200);
     });
 
     test('missing url throws ArgumentError', () async {
@@ -307,6 +322,30 @@ void main() {
         throwsA(isA<ArgumentError>()),
       );
     });
+
+    test('saved prompts survive re-instantiation via prefs', () async {
+      await library.callTool('save', {
+        'title': 'Persist Me',
+        'prompt': 'You are helpful.',
+        'tags': ['test'],
+      });
+      final fresh = PromptLibraryCapability();
+      expect(
+        await fresh.callTool('get', {'title': 'Persist Me'}),
+        'You are helpful.',
+      );
+      final listed = jsonDecode(await fresh.callTool('list', {})) as List;
+      expect(
+        listed.map((e) => (e as Map)['title']),
+        contains('Persist Me'),
+      );
+      await fresh.callTool('delete', {'title': 'Persist Me'});
+      final reloaded = PromptLibraryCapability();
+      await expectLater(
+        reloaded.callTool('get', {'title': 'Persist Me'}),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
   });
 
   group('DB Designer', () {
@@ -442,6 +481,17 @@ void main() {
       expect(out, contains('Welcome'));
       expect(out, contains('[read more](https://example.com/more)'));
       expect(out, isNot(contains('var x = 1')));
+    });
+
+    test('clip accepts numeric-string timeout_seconds', () async {
+      final clipper = WebClipperCapability(
+        client: MockClient((_) async => http.Response(page, 200)),
+      );
+      final out = await clipper.callTool('clip', {
+        'url': 'https://example.com/',
+        'timeout_seconds': '10',
+      });
+      expect(out, contains('# Example Page'));
     });
 
     test('clip reports HTTP errors as FormatException', () async {
