@@ -45,10 +45,15 @@ const _httpMethods = {
 };
 
 class ApiTesterCapability implements NativePluginCapability {
-  ApiTesterCapability({http.Client? client})
-      : _client = client ?? http.Client();
+  ApiTesterCapability({http.Client? client}) : _clientOverride = client;
 
-  final http.Client _client;
+  final http.Client? _clientOverride;
+  http.Client? _lazyClient;
+
+  /// Lazily created so capability *registration* (which happens at app
+  /// boot, and in tests outside a test zone) never touches the HTTP
+  /// stack — the client is only built on first actual tool use.
+  http.Client get _client => _clientOverride ?? (_lazyClient ??= http.Client());
 
   @override
   String get pluginName => 'API Tester';
@@ -890,10 +895,15 @@ String _htmlToMarkdown(String html, String url) {
 }
 
 class WebClipperCapability implements NativePluginCapability {
-  WebClipperCapability({http.Client? client})
-      : _client = client ?? http.Client();
+  WebClipperCapability({http.Client? client}) : _clientOverride = client;
 
-  final http.Client _client;
+  final http.Client? _clientOverride;
+  http.Client? _lazyClient;
+
+  /// Lazily created so capability *registration* (which happens at app
+  /// boot, and in tests outside a test zone) never touches the HTTP
+  /// stack — the client is only built on first actual tool use.
+  http.Client get _client => _clientOverride ?? (_lazyClient ??= http.Client());
 
   @override
   String get pluginName => 'Web Clipper';

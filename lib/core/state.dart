@@ -26,6 +26,9 @@ import 'session_lifecycle_service.dart';
 import 'presets.dart';
 import 'startup_coordinator.dart';
 import 'startup_tasks.dart';
+import 'native_plugins/data_utilities.dart';
+import 'native_plugins/dev_utilities.dart';
+import 'native_plugins/web_and_db_utilities.dart';
 
 const kDeniedControlDomains = <String>[
   'paypal.com',
@@ -1258,6 +1261,21 @@ class _PluginSafetyStartupTask implements StartupTask {
   }
 }
 
+/// Registers every in-process native plugin capability (NP1 framework +
+/// NP2 utility batch: 15 plugins across data, dev, and web/db utilities)
+/// into [NativePluginRegistry].
+///
+/// Called from the [AppState] constructor alongside `_seed`, so the
+/// registry is populated before install routing, the agent roster, and
+/// dispatch consult it — in production and in tests. Idempotent:
+/// registry `register` overwrites by normalized name, so repeated calls
+/// (one per [AppState] test instance) are harmless.
+void registerAllNativePlugins() {
+  registerDataUtilities();
+  registerDevUtilities();
+  registerWebAndDbUtilities();
+}
+
 class AppState extends ChangeNotifier {
   /// Singleton — everything is user-side / on-device.
   static AppState? _testInstance;
@@ -1340,6 +1358,9 @@ class AppState extends ChangeNotifier {
         (encoded) => jsonDecode(encoded) as Map<String, dynamic>;
     _workspaceDeleter = workspaceDeleter ?? SandboxService.I.deleteWorkspace;
     _seed();
+    // NP1/NP2: bootstrap all 15 native plugin capabilities so catalog
+    // install routing, the agent roster, and dispatch see them from boot.
+    registerAllNativePlugins();
     _ensureActiveSession();
   }
 
