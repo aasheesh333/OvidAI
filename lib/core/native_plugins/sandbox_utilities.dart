@@ -5,8 +5,8 @@ import 'package:ovid_ai/core/sandbox_service.dart';
 ///
 /// Sandbox access goes directly through [SandboxService.I.exec] behind the
 /// injectable [SandboxRunner] typedef — one hop, honest errors, hermetic
-/// unit tests via fake runners. Later NP3 tasks append Git Workbench and
-/// PDF Tools to this file.
+/// unit tests via fake runners. Also home to the Git Workbench and
+/// PDF Tools capabilities (NP3 Tasks 2–3).
 typedef SandboxRunner =
     Future<String> Function(
       List<String> args, {
@@ -24,10 +24,12 @@ Future<String> defaultSandboxRunner(
       cwd: cwd,
     ).timeout(timeout ?? const Duration(seconds: 60));
 
-/// Registers every sandbox-backed capability (Shell History, Git Workbench).
+/// Registers every sandbox-backed capability
+/// (Shell History, Git Workbench, PDF Tools).
 void registerSandboxUtilities() {
   NativePluginRegistry.I.register(ShellHistoryCapability());
   NativePluginRegistry.I.register(GitWorkbenchCapability());
+  NativePluginRegistry.I.register(PdfToolsCapability());
 }
 
 /// Tolerant integer parsing for LLM-supplied numeric args: accepts [num]
@@ -436,4 +438,539 @@ class GitWorkbenchCapability implements NativePluginCapability {
     }
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// PDF Tools
+// ---------------------------------------------------------------------------
+
+/// PDF backend resolved per invocation: `pypdf` (python3) preferred,
+// `qpdf` as fallback.
+enum _PdfBackend { pypdf, qpdf }
+
+class PdfToolsCapability implements NativePluginCapability {
+  PdfToolsCapability({
+    SandboxRunner? runner,
+    bool Function()? isSandboxInstalled,
+  })  : _runner = runner ?? defaultSandboxRunner,
+        _isSandboxInstalled =
+            isSandboxInstalled ?? (() => SandboxService.I.isInstalled);
+
+  final SandboxRunner _runner;
+  final bool Function() _isSandboxInstalled;
+
+  static const _notInstalledMessage =
+      'Sandbox is not installed — open Studio once to install it, then retry.';
+  static const _noBackendMessage =
+      'No PDF backend in the sandbox (needs python3+pypdf or qpdf) — install one, then retry.';
+
+  /// Merges `sys.argv[1:-1]` (inputs) into `sys.argv[-1]` (output).
+  static const _mergeScript =
+      'import sys\n'
+      'from pypdf import PdfMerger\n'
+      'merger = PdfMerger()\n'
+      'for path in sys.argv[1:-1]:\n'
+      '    merger.append(path)\n'
+      'merger.write(sys.argv[-1])\n'
+      'merger.close()\n';
+
+  /// Extracts one 1-based inclusive range into a new file.
+  /// Args: input, start, end, output.
+  static const _splitScript =
+      'import sys\n'
+      'from pypdf import PdfReader, PdfWriter\n'
+      'src = sys.argv[1]\n'
+      'start = int(sys.argv[2])\n'
+      'end = int(sys.argv[3])\n'
+      'dst = sys.argv[4]\n'
+      'reader = PdfReader(src)\n'
+      'writer = PdfWriter()\n'
+      'for n in range(start - 1, end):\n'
+      '    writer.add_page(reader.pages[n])\n'
+      "with open(dst, 'wb') as f:\n"
+      '    writer.write(f)\n';
+
+  /// Re-writes the PDF with compressed content streams (best effort).
+  /// Args: input, output.
+  static const _compressScript =
+      'import sys\n'
+      'from pypdf import PdfReader, PdfWriter\n'
+      'reader = PdfReader(sys.argv[1])\n'
+      'writer = PdfWriter()\n'
+      'for page in reader.pages:\n'
+      '    writer.add_page(page)\n'
+      'for page in writer.pages:\n'
+      '    try:\n'
+      '        page.compress_content_streams()\n'
+      '    except Exception:\n'
+      '        pass\n'
+      "with open(sys.argv[2], 'wb') as f:\n"
+      '    writer.write(f)\n';
+
+  /// Prints page text plus a `{pages, chars}` stats line.
+  /// Args: input, spec (`all` or a validated `N`/`N-M` comma list).
+  static const _extractScript =
+      'import sys\n'
+      'from pypdf import PdfReader\n'
+      'reader = PdfReader(sys.argv[1])\n'
+      "spec = sys.argv[2] if len(sys.argv) > 2 else 'all'\n"
+      'total = len(reader.pages)\n'
+      'wanted = list(range(total)) if spec == \'all\' else []\n'
+      "if spec != 'all':\n"
+      "    for part in spec.split(','):\n"
+      '        part = part.strip()\n'
+      "        if '-' in part:\n"
+      "            a, b = part.split('-', 1)\n"
+      '            s, e = int(a), int(b)\n'
+      '        else:\n'
+      '            s = int(part)\n'
+      '            e = s\n'
+      '        for n in range(s - 1, e):\n'
+      '            wanted.append(n)\n'
+      'texts = []\n'
+      'for n in wanted:\n'
+      '    try:\n'
+      "        texts.append(reader.pages[n].extract_text() or '')\n"
+      '    except Exception as err:\n'
+      "        texts.append('[page %d unreadable: %s]' % (n + 1, err))\n"
+      "body = '\\n'.join(texts)\n"
+      'print(body)\n'
+      "print('{pages: %d, chars: %d}' % (len(wanted), len(body)))\n";
+
+  /// Prints page count plus producer/title when readable. Args: input.
+  static const _infoScript =
+      'import sys\n'
+      'from pypdf import PdfReader\n'
+      'reader = PdfReader(sys.argv[1])\n'
+      'meta = reader.metadata\n'
+      "print('pages: %d' % len(reader.pages))\n"
+      "print('producer: %s' % (meta.producer if meta and meta.producer else 'unknown'))\n"
+      "print('title: %s' % (meta.title if meta and meta.title else 'unknown'))\n";
+
+  @override
+  String get pluginName => 'PDF Tools';
+
+  @override
+  List<NativePluginConfigField> get configFields => const [];
+
+  @override
+  List<NativePluginTool> get tools => const [
+        NativePluginTool(
+          name: 'merge',
+          description: 'Merge two or more sandbox PDFs into one output PDF.',
+          inputSchema: {
+            'type': 'object',
+            'properties': {
+              'inputs': {
+                'type': 'array',
+                'items': {'type': 'string'},
+              },
+              'output': {'type': 'string'},
+              'timeout_seconds': {'type': 'integer'},
+            },
+            'required': ['inputs', 'output'],
+          },
+        ),
+        NativePluginTool(
+          name: 'split',
+          description:
+              'Split sandbox PDF pages into one output PDF per range.',
+          inputSchema: {
+            'type': 'object',
+            'properties': {
+              'input': {'type': 'string'},
+              'ranges': {'type': 'string'},
+              'out_prefix': {'type': 'string'},
+              'timeout_seconds': {'type': 'integer'},
+            },
+            'required': ['input', 'ranges'],
+          },
+        ),
+        NativePluginTool(
+          name: 'compress',
+          description:
+              'Re-write a sandbox PDF (best-effort size reduction) and report byte sizes.',
+          inputSchema: {
+            'type': 'object',
+            'properties': {
+              'input': {'type': 'string'},
+              'output': {'type': 'string'},
+              'timeout_seconds': {'type': 'integer'},
+            },
+            'required': ['input', 'output'],
+          },
+        ),
+        NativePluginTool(
+          name: 'extract_text',
+          description: 'Extract text from a sandbox PDF, optionally paged.',
+          inputSchema: {
+            'type': 'object',
+            'properties': {
+              'input': {'type': 'string'},
+              'pages': {'type': 'string'},
+              'timeout_seconds': {'type': 'integer'},
+            },
+            'required': ['input'],
+          },
+        ),
+        NativePluginTool(
+          name: 'info',
+          description:
+              'Show page count, byte size, and producer/title of a sandbox PDF.',
+          inputSchema: {
+            'type': 'object',
+            'properties': {
+              'input': {'type': 'string'},
+              'timeout_seconds': {'type': 'integer'},
+            },
+            'required': ['input'],
+          },
+        ),
+      ];
+
+  @override
+  Future<void> configure(Map<String, String> values) async {}
+
+  @override
+  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+    if (!_isSandboxInstalled()) return _notInstalledMessage;
+    switch (toolName) {
+      case 'merge':
+        {
+          final backend = await _probeBackend();
+          if (backend == null) return _noBackendMessage;
+          final raw = args['inputs'];
+          final inputs = raw is List
+              ? [
+                  for (final e in raw)
+                    e.toString().trim(),
+                ].where((s) => s.isNotEmpty).toList()
+              : const <String>[];
+          if (inputs.length < 2) {
+            throw ArgumentError(
+              'merge needs two or more input PDFs in "inputs".',
+            );
+          }
+          final output = args['output']?.toString().trim() ?? '';
+          if (output.isEmpty) {
+            throw ArgumentError('Missing required argument: output');
+          }
+          final timeout = Duration(seconds: _timeoutSecs(args, 300));
+          final String opOut;
+          if (backend == _PdfBackend.pypdf) {
+            opOut = await _runner(
+              ['python3', '-c', _mergeScript, ...inputs, output],
+              timeout: timeout,
+            );
+          } else {
+            opOut = await _runner(
+              ['qpdf', '--empty', '--pages', ...inputs, '--', output],
+              timeout: timeout,
+            );
+          }
+          final summary =
+              'Merged ${inputs.length} file(s) into $output via ${backend.name}.';
+          return _trimOutput(
+            opOut.trim().isEmpty ? summary : '$summary\n$opOut',
+          );
+        }
+      case 'split':
+        {
+          final backend = await _probeBackend();
+          if (backend == null) return _noBackendMessage;
+          final input = args['input']?.toString().trim() ?? '';
+          if (input.isEmpty) {
+            throw ArgumentError('Missing required argument: input');
+          }
+          final ranges = _parsePageRanges(args['ranges']?.toString() ?? '');
+          final prefixRaw = args['out_prefix']?.toString().trim() ?? '';
+          final prefix =
+              prefixRaw.isEmpty ? _defaultPrefix(input) : prefixRaw;
+          final timeout = Duration(seconds: _timeoutSecs(args, 60));
+          final outs = <String>[];
+          for (var i = 0; i < ranges.length; i++) {
+            final (int start, int end) = ranges[i];
+            final out = '$prefix-${i + 1}.pdf';
+            if (backend == _PdfBackend.pypdf) {
+              await _runner(
+                ['python3', '-c', _splitScript, input, '$start', '$end', out],
+                timeout: timeout,
+              );
+            } else {
+              final range = start == end ? '$start' : '$start-$end';
+              await _runner(
+                ['qpdf', input, '--pages', input, range, '--', out],
+                timeout: timeout,
+              );
+            }
+            outs.add(out);
+          }
+          return _trimOutput(
+            'Wrote ${outs.length} file(s) via ${backend.name}: ${outs.join(', ')}.',
+          );
+        }
+      case 'compress':
+        {
+          final backend = await _probeBackend();
+          if (backend == null) return _noBackendMessage;
+          final input = args['input']?.toString().trim() ?? '';
+          if (input.isEmpty) {
+            throw ArgumentError('Missing required argument: input');
+          }
+          final output = args['output']?.toString().trim() ?? '';
+          if (output.isEmpty) {
+            throw ArgumentError('Missing required argument: output');
+          }
+          final timeout = Duration(seconds: _timeoutSecs(args, 300));
+          if (backend == _PdfBackend.pypdf) {
+            await _runner(
+              ['python3', '-c', _compressScript, input, output],
+              timeout: timeout,
+            );
+          } else {
+            await _runner(
+              [
+                'qpdf',
+                '--linearize',
+                '--object-streams=generate',
+                input,
+                output,
+              ],
+              timeout: timeout,
+            );
+          }
+          final inBytes = await _fileSize(input);
+          final outBytes = await _fileSize(output);
+          final String detail;
+          if (inBytes != null && outBytes != null) {
+            detail = outBytes < inBytes
+                ? 'saved ${inBytes - outBytes} bytes '
+                    '(${(100 * (inBytes - outBytes) / inBytes).toStringAsFixed(1)}%).'
+                : 'no size reduction.';
+          } else {
+            detail = 'size check unavailable.';
+          }
+          return _trimOutput(
+            'Compressed $input → $output: ${inBytes ?? '?'} → ${outBytes ?? '?'} '
+            'bytes ($detail) via ${backend.name}.',
+          );
+        }
+      case 'extract_text':
+        {
+          final backend = await _probeBackend();
+          if (backend == null) return _noBackendMessage;
+          final input = args['input']?.toString().trim() ?? '';
+          if (input.isEmpty) {
+            throw ArgumentError('Missing required argument: input');
+          }
+          final pagesRaw = args['pages']?.toString().trim() ?? '';
+          final timeout = Duration(seconds: _timeoutSecs(args, 60));
+          if (backend == _PdfBackend.pypdf) {
+            final spec = pagesRaw.isEmpty ? 'all' : pagesRaw;
+            // Validates the syntax eagerly (FormatException on malformed).
+            if (pagesRaw.isNotEmpty) _parsePageRanges(pagesRaw);
+            final out = await _runner(
+              ['python3', '-c', _extractScript, input, spec],
+              timeout: timeout,
+            );
+            return _trimOutput(out);
+          }
+          final ranges =
+              pagesRaw.isEmpty ? null : _parsePageRanges(pagesRaw);
+          if (ranges == null) {
+            final out = await _runner(
+              ['pdftotext', '-layout', input, '-'],
+              timeout: timeout,
+            );
+            final pages = out.isEmpty ? 0 : '\f'.allMatches(out).length + 1;
+            return _trimOutput('$out\n{pages: $pages, chars: ${out.length}}');
+          }
+          final bodies = <String>[];
+          var totalPages = 0;
+          for (final (int start, int end) in ranges) {
+            final out = await _runner(
+              [
+                'pdftotext',
+                '-layout',
+                '-f',
+                '$start',
+                '-l',
+                '$end',
+                input,
+                '-',
+              ],
+              timeout: timeout,
+            );
+            bodies.add(out);
+            totalPages += end - start + 1;
+          }
+          final body = bodies.join('\n');
+          return _trimOutput(
+            '$body\n{pages: $totalPages, chars: ${body.length}}',
+          );
+        }
+      case 'info':
+        {
+          final backend = await _probeBackend();
+          if (backend == null) return _noBackendMessage;
+          final input = args['input']?.toString().trim() ?? '';
+          if (input.isEmpty) {
+            throw ArgumentError('Missing required argument: input');
+          }
+          final timeout = Duration(seconds: _timeoutSecs(args, 60));
+          final size = await _fileSize(input);
+          final sizeLine =
+              size == null ? 'size: unknown' : 'size: $size bytes';
+          if (backend == _PdfBackend.pypdf) {
+            final out = await _runner(
+              ['python3', '-c', _infoScript, input],
+              timeout: timeout,
+            );
+            return _trimOutput('$input\n$sizeLine\n${out.trim()}');
+          }
+          final pagesOut = await _runner(
+            ['qpdf', '--show-npages', input],
+            timeout: timeout,
+          );
+          var metaLine = 'producer: unknown\ntitle: unknown';
+          try {
+            final dump = await _runner(
+              [
+                'bash',
+                '-c',
+                'qpdf --show-all-data ${_shQuote(input)} 2>/dev/null | '
+                    'grep -a -m 10 -E "/(Title|Producer|Author|Creator)"',
+              ],
+              timeout: timeout,
+            );
+            final producer =
+                RegExp(r'/Producer\s*\(([^)]*)\)').firstMatch(dump)?.group(1);
+            final title =
+                RegExp(r'/Title\s*\(([^)]*)\)').firstMatch(dump)?.group(1);
+            metaLine =
+                'producer: ${producer ?? 'unknown'}\ntitle: ${title ?? 'unknown'}';
+          } catch (_) {
+            // Best effort only — page count and size still stand.
+          }
+          return _trimOutput(
+            '$input\n$sizeLine\npages: ${pagesOut.trim()}\n$metaLine',
+          );
+        }
+      default:
+        throw ArgumentError('Unknown tool: $toolName');
+    }
+  }
+
+  /// Backend probe per invocation, preference order: pypdf first, then qpdf.
+  /// A probe counts as ok only when the runner returns non-empty output with
+  /// no exec `exit code` failure marker (real exec surfaces failures inline
+  /// instead of throwing; fakes may throw — both mean "backend missing").
+  Future<_PdfBackend?> _probeBackend() async {
+    try {
+      final py = await _runner([
+        'bash',
+        '-c',
+        'command -v python3 && python3 -c "import pypdf"',
+      ]);
+      if (_probeOk(py)) return _PdfBackend.pypdf;
+    } catch (_) {
+      // Missing python3/pypdf — fall through to the qpdf probe.
+    }
+    try {
+      final q = await _runner(['bash', '-c', 'command -v qpdf']);
+      if (_probeOk(q)) return _PdfBackend.qpdf;
+    } catch (_) {
+      // Neither backend exists.
+    }
+    return null;
+  }
+
+  bool _probeOk(String out) =>
+      out.trim().isNotEmpty && !out.contains('exit code');
+
+  /// Parses a comma list of `N` / `N-M` 1-based page ranges. Endpoints use
+  /// the tolerant int parsing convention; anything malformed (including
+  /// `N < 1` and `M < N`) is a [FormatException].
+  List<(int, int)> _parsePageRanges(String raw) {
+    final out = <(int, int)>[];
+    for (final chunk in raw.split(',')) {
+      final part = chunk.trim();
+      if (part.isEmpty) {
+        throw FormatException(
+          'Invalid page ranges "$raw": empty entry (expected "N" or "N-M").',
+        );
+      }
+      if (part.contains('-')) {
+        final ends = part.split('-');
+        if (ends.length != 2) {
+          throw FormatException(
+            'Invalid page ranges "$raw": "$part" (expected "N" or "N-M").',
+          );
+        }
+        final start = _parseIntArg(ends[0].trim(), 'range start', 0);
+        final end = _parseIntArg(ends[1].trim(), 'range end', 0);
+        if (start < 1 || end < 1) {
+          throw FormatException(
+            'Invalid page ranges "$raw": pages are 1-based.',
+          );
+        }
+        if (end < start) {
+          throw FormatException(
+            'Invalid page ranges "$raw": end before start in "$part".',
+          );
+        }
+        out.add((start, end));
+      } else {
+        final page = _parseIntArg(part, 'page', 0);
+        if (page < 1) {
+          throw FormatException(
+            'Invalid page ranges "$raw": pages are 1-based.',
+          );
+        }
+        out.add((page, page));
+      }
+    }
+    if (out.isEmpty) {
+      throw FormatException(
+        'Invalid page ranges "$raw": no ranges given.',
+      );
+    }
+    return out;
+  }
+
+  /// Default split prefix: the input path minus its extension
+  /// (`doc.pdf` → `doc`), preserving any directory.
+  String _defaultPrefix(String input) {
+    final dot = input.lastIndexOf('.');
+    final slash = input.lastIndexOf('/');
+    if (dot > slash) return input.substring(0, dot);
+    return input;
+  }
+
+  /// Honest byte size via `stat -c%s`, falling back to `wc -c` when stat
+  /// fails; null when neither works (caller says so instead of guessing).
+  Future<int?> _fileSize(String path) async {
+    try {
+      final out = await _runner(['stat', '-c%s', path]);
+      final size = int.tryParse(out.trim());
+      if (size != null) return size;
+    } catch (_) {
+      // Fall through to wc.
+    }
+    try {
+      final out = await _runner(['bash', '-c', 'wc -c < ${_shQuote(path)}']);
+      final size = int.tryParse(out.trim().split(RegExp(r'\s+')).first);
+      if (size != null) return size;
+    } catch (_) {
+      // Unknown size — reported honestly by the caller.
+    }
+    return null;
+  }
+
+  /// Single-quote a path for `bash -c` (`'` → `'\''`).
+  String _shQuote(String path) => "'${path.replaceAll("'", "'\\''")}'";
+
+  int _timeoutSecs(Map<String, dynamic> args, int fallback) =>
+      _parseIntArg(args['timeout_seconds'], 'timeout_seconds', fallback)
+          .clamp(5, 600);
 }

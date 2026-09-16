@@ -407,4 +407,178 @@ void main() {
       '--branch',
     ]);
   });
+
+  test('pdf tools presence gate returns the exact Studio message', () async {
+    var called = false;
+    final cap = PdfToolsCapability(
+      runner: (_, {cwd, timeout}) async {
+        called = true;
+        return 'unused';
+      },
+      isSandboxInstalled: () => false,
+    );
+    expect(
+      await cap.callTool('merge', {
+        'inputs': ['/sandbox/home/a.pdf', '/sandbox/home/b.pdf'],
+        'output': '/sandbox/home/out.pdf',
+      }),
+      'Sandbox is not installed — open Studio once to install it, then retry.',
+    );
+    expect(called, isFalse);
+
+    registerSandboxUtilities();
+    expect(NativePluginRegistry.I.has('PDF Tools'), isTrue);
+    expect(
+      NativePluginRegistry.I.capabilityForSlug('pdf_tools'),
+      isA<PdfToolsCapability>(),
+    );
+  });
+
+  test('pdf tools route pypdf-present and qpdf-missing', () async {
+    final seenArgs = <List<String>>[];
+    final seenTimeouts = <Duration?>[];
+    final cap = PdfToolsCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        seenArgs.add(args);
+        seenTimeouts.add(timeout);
+        final cmd = args.join(' ');
+        if (cmd.contains('command -v python3')) return '/usr/bin/python3\n';
+        if (cmd.contains('command -v qpdf')) {
+          throw Exception('qpdf: command not found');
+        }
+        if (args.isNotEmpty && args.first == 'python3') return 'merged-ok';
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    final out = await cap.callTool('merge', {
+      'inputs': ['/sandbox/home/a.pdf', '/sandbox/home/b.pdf'],
+      'output': '/sandbox/home/out.pdf',
+    });
+    expect(out, contains('/sandbox/home/out.pdf'));
+    // pypdf short-circuits: the qpdf probe never runs.
+    expect(
+      seenArgs.any((a) => a.join(' ').contains('command -v qpdf')),
+      isFalse,
+    );
+    // Merge invokes python3, never the qpdf binary.
+    final pythonCalls =
+        seenArgs.where((a) => a.isNotEmpty && a.first == 'python3');
+    expect(pythonCalls, isNotEmpty);
+    expect(
+      seenArgs.where((a) => a.isNotEmpty && a.first == 'qpdf'),
+      isEmpty,
+    );
+    // Merge defaults to a 300s timeout.
+    expect(pythonCalls.first, contains('/sandbox/home/a.pdf'));
+    expect(pythonCalls.first, contains('/sandbox/home/out.pdf'));
+    expect(
+      seenTimeouts[seenArgs.indexOf(pythonCalls.first)],
+      const Duration(seconds: 300),
+    );
+  });
+
+  test('pdf tools report honestly when no backend exists', () async {
+    final cap = PdfToolsCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        final cmd = args.join(' ');
+        if (cmd.contains('command -v python3')) {
+          return '(command exited with exit code 1 and produced no output)';
+        }
+        if (cmd.contains('command -v qpdf')) {
+          throw Exception('qpdf: command not found');
+        }
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    expect(
+      await cap.callTool('info', {'input': '/sandbox/home/a.pdf'}),
+      'No PDF backend in the sandbox (needs python3+pypdf or qpdf) — install one, then retry.',
+    );
+  });
+
+  test('pdf split rejects malformed ranges', () async {
+    final seenArgs = <List<String>>[];
+    final cap = PdfToolsCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        seenArgs.add(args);
+        final cmd = args.join(' ');
+        if (cmd.contains('command -v python3')) return '/usr/bin/python3\n';
+        if (args.isNotEmpty && args.first == 'python3') return 'split-ok';
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    for (final bad in ['a-b', '0', '5-2']) {
+      await expectLater(
+        cap.callTool('split', {'input': '/sandbox/home/a.pdf', 'ranges': bad}),
+        throwsA(isA<FormatException>()),
+      );
+    }
+    final out = await cap.callTool('split', {
+      'input': '/sandbox/home/a.pdf',
+      'ranges': '1,3-4',
+    });
+    expect(out, contains('a-1.pdf'));
+    expect(out, contains('a-2.pdf'));
+  });
+
+  test('pdf merge requires two or more inputs', () async {
+    var pythonCalls = 0;
+    final cap = PdfToolsCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        final cmd = args.join(' ');
+        if (cmd.contains('command -v python3')) return '/usr/bin/python3\n';
+        if (args.isNotEmpty && args.first == 'python3') {
+          pythonCalls++;
+          return 'merged-ok';
+        }
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    await expectLater(
+      cap.callTool('merge', {
+        'inputs': ['/sandbox/home/only.pdf'],
+        'output': '/sandbox/home/out.pdf',
+      }),
+      throwsA(isA<ArgumentError>()),
+    );
+    await expectLater(
+      cap.callTool('merge', {
+        'inputs': <String>[],
+        'output': '/sandbox/home/out.pdf',
+      }),
+      throwsA(isA<ArgumentError>()),
+    );
+    expect(pythonCalls, 0);
+  });
+
+  test('pdf compress reports sizes honestly', () async {
+    Duration? compressTimeout;
+    final cap = PdfToolsCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        final cmd = args.join(' ');
+        if (cmd.contains('command -v python3')) return '/usr/bin/python3\n';
+        if (args.isNotEmpty && args.first == 'python3') {
+          compressTimeout = timeout;
+          return 'rewrite-ok';
+        }
+        if (cmd.contains('stat -c%s')) {
+          if (cmd.contains('in.pdf')) return '12345\n';
+          if (cmd.contains('out.pdf')) return '6789\n';
+        }
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    final out = await cap.callTool('compress', {
+      'input': '/sandbox/home/in.pdf',
+      'output': '/sandbox/home/out.pdf',
+    });
+    expect(out, contains('12345'));
+    expect(out, contains('6789'));
+    expect(compressTimeout, const Duration(seconds: 300));
+  });
 }
