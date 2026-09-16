@@ -6780,32 +6780,11 @@ class AppState extends ChangeNotifier {
         5100,
       ),
       (
-        'Docker-in-Sandbox',
-        'sandbox',
-        'OCI containers inside the sandbox.',
-        'Runtime',
-        7700,
-      ),
-      (
         'Shell History',
         'ovidai',
         'Searchable sandbox terminal history.',
         'Tool',
         3400,
-      ),
-      (
-        'Rust Toolchain',
-        'sandbox',
-        'cargo + rustc prebuilt for the sandbox.',
-        'Runtime',
-        4100,
-      ),
-      (
-        'Go Toolchain',
-        'sandbox',
-        'Go 1.23 toolchain, one tap install.',
-        'Runtime',
-        3900,
       ),
       (
         'Linear Sync',
