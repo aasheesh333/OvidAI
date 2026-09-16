@@ -620,16 +620,19 @@ class McpService {
   Future<McpRpcResult> _callNativeTool(
     _RunningServer rs,
     String toolName,
-    Map<String, dynamic> args,
-  ) async {
+    Map<String, dynamic> args, {
+    Duration? timeout,
+  }) async {
     final handler = rs.nativeHandler;
     if (handler == null) {
       return McpRpcResult.error('native handler not initialized');
     }
+    final effectiveTimeout =
+        timeout ?? Duration(seconds: rs.server.toolTimeoutS);
     try {
       return await handler
           .callTool(toolName, args)
-          .timeout(Duration(seconds: _rpcTimeoutSeconds));
+          .timeout(effectiveTimeout);
     } on TimeoutException {
       return const McpRpcResult.timeout();
     } catch (e) {
@@ -1071,25 +1074,43 @@ class McpService {
   Future<String> callTool(
     String serverName,
     String toolName,
-    Map<String, dynamic> args,
-  ) async {
+    Map<String, dynamic> args, {
+    Duration? timeout,
+  }) async {
     final key = _keyForName(serverName);
     final rs = _running[key];
     if (rs == null) {
       return 'MCP error: server "$serverName" is not connected'
           '${_lastDeathOf(key)}';
     }
+    final effectiveTimeout =
+        timeout ?? Duration(seconds: rs.server.toolTimeoutS);
     final res = rs.server.transport == 'http'
-        ? await _rpcHttp(rs, 'tools/call', {
-            'name': toolName,
-            'arguments': args,
-          })
+        ? await _rpcHttp(
+            rs,
+            'tools/call',
+            {
+              'name': toolName,
+              'arguments': args,
+            },
+            timeout: effectiveTimeout,
+          )
         : rs.server.transport == 'native'
-            ? await _callNativeTool(rs, toolName, args)
-            : await _rpc(rs, 'tools/call', {'name': toolName, 'arguments': args});
+            ? await _callNativeTool(
+                rs,
+                toolName,
+                args,
+                timeout: effectiveTimeout,
+              )
+            : await _rpc(
+                rs,
+                'tools/call',
+                {'name': toolName, 'arguments': args},
+                timeout: effectiveTimeout,
+              );
     if (res.isTimeout) {
       return 'MCP error: "$toolName" on "$serverName" timed out after '
-          '$_rpcTimeoutSeconds s (server may be busy or dead).';
+          '${effectiveTimeout.inSeconds} s (server may be busy or dead).';
     }
     if (res.isError) {
       return 'MCP error: ${res.error}';
@@ -1186,9 +1207,9 @@ class McpService {
   int _nextId = 1;
 
   /// RPC deadline. Tests shorten it so timeout paths run in milliseconds
-  /// instead of the production 30 s.
+  /// instead of the production 60 s.
   @visibleForTesting
-  static int rpcTimeoutSecondsForTest = 30;
+  static int rpcTimeoutSecondsForTest = 60;
   static int get _rpcTimeoutSeconds => rpcTimeoutSecondsForTest;
 
   void _sendNotification(

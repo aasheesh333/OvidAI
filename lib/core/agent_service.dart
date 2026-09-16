@@ -5451,6 +5451,30 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     {
       'type': 'function',
       'function': {
+        'name': 'catalog_set_mcp_timeout',
+        'description':
+            'Adjust the default execution timeout in seconds for an MCP server '
+            '(e.g. increase for slow/heavy tools, decrease for quick ones).',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'server': {
+              'type': 'string',
+              'description': 'Name or canonical id of the MCP server',
+            },
+            'timeout_seconds': {
+              'type': 'integer',
+              'description':
+                  'Execution timeout in seconds (minimum 5, maximum 600)',
+            },
+          },
+          'required': ['server', 'timeout_seconds'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
         'name': 'catalog_add_marketplace',
         'description':
             'Import a plugin marketplace from a GitHub repo (owner/repo with '
@@ -8583,10 +8607,19 @@ ${await _agentsMdBlock()}
           );
         }
         _emit('shell', 'MCP: ${resolved.server.name} → ${resolved.tool.name}');
+        final cleanArgs = Map<String, dynamic>.from(args);
+        final rawTimeout = cleanArgs.remove('_timeout_seconds') ??
+            cleanArgs.remove('_timeout') ??
+            cleanArgs.remove('timeout_seconds');
+        Duration? callTimeout;
+        if (rawTimeout is num && rawTimeout > 0) {
+          callTimeout = Duration(seconds: rawTimeout.toInt().clamp(5, 600));
+        }
         return await McpService.I.callTool(
           resolved.server.canonicalId,
           resolved.tool.name,
-          args,
+          cleanArgs,
+          timeout: callTimeout,
         );
       case String() when name.startsWith('mcp_'):
         final runSid = _runSession?.id ?? '';
@@ -8614,10 +8647,19 @@ ${await _agentsMdBlock()}
             'shell',
             'MCP: ${resolved.server.name} → ${resolved.tool.name}',
           );
+          final cleanArgs = Map<String, dynamic>.from(args);
+          final rawTimeout = cleanArgs.remove('_timeout_seconds') ??
+              cleanArgs.remove('_timeout') ??
+              cleanArgs.remove('timeout_seconds');
+          Duration? callTimeout;
+          if (rawTimeout is num && rawTimeout > 0) {
+            callTimeout = Duration(seconds: rawTimeout.toInt().clamp(5, 600));
+          }
           return await McpService.I.callTool(
             resolved.server.canonicalId,
             resolved.tool.name,
-            args,
+            cleanArgs,
+            timeout: callTimeout,
           );
         }
         // Real MCP proxy — resolve the matched server BY NAME first, then
@@ -8640,7 +8682,20 @@ ${await _agentsMdBlock()}
           final res = await McpService.I.connect(match);
           if (!res.contains('connected')) return res;
         }
-        return await McpService.I.callTool(match.canonicalId, action, mcpArgs);
+        final cleanMcpArgs = Map<String, dynamic>.from(mcpArgs);
+        final rawTimeout = cleanMcpArgs.remove('_timeout_seconds') ??
+            cleanMcpArgs.remove('_timeout') ??
+            cleanMcpArgs.remove('timeout_seconds');
+        Duration? callTimeout;
+        if (rawTimeout is num && rawTimeout > 0) {
+          callTimeout = Duration(seconds: rawTimeout.toInt().clamp(5, 600));
+        }
+        return await McpService.I.callTool(
+          match.canonicalId,
+          action,
+          cleanMcpArgs,
+          timeout: callTimeout,
+        );
       case String() when name.startsWith('plugin_'):
         // Canonical namespaced contribution (spec §4.4) — resolved through
         // the registry and enforced for the RUNNING session: another
@@ -9042,6 +9097,38 @@ ${await _agentsMdBlock()}
         AppState.I.removeMcpServer(match);
         _emit('done', 'MCP server removed: $name');
         return 'MCP server "$name" removed.';
+
+      case 'catalog_set_mcp_timeout':
+        final serverName = (args['server'] as String?)?.trim() ?? '';
+        final timeoutSec = (args['timeout_seconds'] as num?)?.toInt() ?? 60;
+        if (serverName.isEmpty) return 'Missing server name.';
+        final clamped = timeoutSec.clamp(5, 600);
+        final server = AppState.I.mcpServers
+            .where(
+              (s) =>
+                  s.name.toLowerCase() == serverName.toLowerCase() ||
+                  s.canonicalId.toLowerCase() == serverName.toLowerCase(),
+            )
+            .firstOrNull;
+        if (server == null) {
+          return 'MCP server not found: $serverName';
+        }
+        server.toolTimeoutS = clamped;
+        if (server.custom) {
+          AppState.I.updateCustomMcpServer(
+            server,
+            command: server.command,
+            args: server.args,
+            url: server.url,
+            transport: server.transport,
+            headers: server.headers,
+            cwd: server.cwd,
+            startupTimeoutS: server.startupTimeoutS,
+            toolTimeoutS: clamped,
+          );
+        }
+        _emit('done', 'MCP ${server.name} timeout set to ${clamped}s');
+        return 'MCP server "${server.name}" tool execution timeout set to ${clamped}s.';
 
       case 'catalog_add_marketplace':
         final repo = args['repo'] as String;

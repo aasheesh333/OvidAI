@@ -515,6 +515,9 @@ class McpServer {
   /// Production default 30; distinct from the per-call timeout.
   int startupTimeoutS;
 
+  /// Per-tool-call execution timeout in seconds. Default 60 seconds (1 minute).
+  int toolTimeoutS;
+
   McpServer({
     required this.name,
     required this.author,
@@ -535,6 +538,7 @@ class McpServer {
     this.pluginRuntimeRoot,
     this.cwd,
     this.startupTimeoutS = 30,
+    this.toolTimeoutS = 60,
   }) : requiredEnvNames = List.unmodifiable(requiredEnvNames ?? const []),
        requiredHeaderNames = List.unmodifiable(requiredHeaderNames ?? const []);
 
@@ -5527,9 +5531,10 @@ class AppState extends ChangeNotifier {
           transport: isHttp ? 'http' : 'stdio',
           url: isHttp ? urlValue : null,
           headers: headers,
-          cwd: m['cwd'] as String?,
-          startupTimeoutS: (m['startupTimeoutS'] as num?)?.toInt() ?? 30,
-        ),
+            cwd: m['cwd'] as String?,
+            startupTimeoutS: (m['startupTimeoutS'] as num?)?.toInt() ?? 30,
+            toolTimeoutS: (m['toolTimeoutS'] as num?)?.toInt() ?? 60,
+          ),
       );
       // Auth headers are a secret — secure storage, never plaintext prefs.
       if (headers.isNotEmpty) {
@@ -5856,6 +5861,7 @@ class AppState extends ChangeNotifier {
     String? transport,
     String? cwd,
     int? startupTimeoutS,
+    int? toolTimeoutS,
   }) {
     final isHttp =
         transport == 'sse' ||
@@ -5878,6 +5884,7 @@ class AppState extends ChangeNotifier {
       headers: headers,
       cwd: cwd,
       startupTimeoutS: startupTimeoutS ?? 30,
+      toolTimeoutS: toolTimeoutS ?? 60,
     );
     mcpServers.add(server);
     if (headers.isNotEmpty) {
@@ -5917,6 +5924,7 @@ class AppState extends ChangeNotifier {
     Map<String, String> headers = const {},
     String? cwd,
     int? startupTimeoutS,
+    int? toolTimeoutS,
   }) {
     s.command = command.trim();
     s.args = args;
@@ -5926,6 +5934,7 @@ class AppState extends ChangeNotifier {
     s.headers = headers;
     s.cwd = cwd;
     if (startupTimeoutS != null) s.startupTimeoutS = startupTimeoutS;
+    if (toolTimeoutS != null) s.toolTimeoutS = toolTimeoutS;
     if (headers.isNotEmpty) {
       unawaited(setMcpHeaders(s.canonicalId, headers));
     }
@@ -5963,6 +5972,7 @@ class AppState extends ChangeNotifier {
               if (s.url != null) 'url': s.url,
               if (s.cwd != null) 'cwd': s.cwd,
               if (s.startupTimeoutS != 30) 'startupTimeoutS': s.startupTimeoutS,
+              if (s.toolTimeoutS != 60) 'toolTimeoutS': s.toolTimeoutS,
             }),
           )
           .toList();
@@ -6042,6 +6052,7 @@ class AppState extends ChangeNotifier {
             pluginRuntimeRoot: m['pluginRuntimeRoot'] as String?,
             cwd: m['cwd'] as String?,
             startupTimeoutS: (m['startupTimeoutS'] as num?)?.toInt() ?? 30,
+            toolTimeoutS: (m['toolTimeoutS'] as num?)?.toInt() ?? 60,
           ),
         );
       }
