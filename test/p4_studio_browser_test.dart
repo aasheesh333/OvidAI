@@ -17,11 +17,13 @@ void main() {
     expect(src.contains('Aether.dangerC'), isTrue);
   });
 
-  test('a new session starts with a fresh blank tab', () {
+  test('a new session starts with the home page tab, never blank', () {
     final src = File('lib/core/agent_service.dart').readAsStringSync();
     final idx = src.indexOf('Future<void> _restoreSessionTabsIfNeeded');
     final body = src.substring(idx, idx + 1400);
-    expect(body.contains("about:blank"), isTrue);
+    expect(body.contains("about:blank"), isFalse);
+    expect(body.contains("_defaultBrowserUrl"), isTrue);
+    expect(src.contains("static const _defaultBrowserUrl = 'https://www.google.com'"), isTrue);
   });
 
   test('the workspace folder picker lives only in Studio and Studio-mode composer', () {

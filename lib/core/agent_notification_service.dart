@@ -147,7 +147,7 @@ class AgentNotificationService {
   /// are swallowed and after 3 consecutive native failures the feature
   /// disables itself for the session.
   Future<void> agentWorking(String text, {String? sessionId}) async {
-    if (!_supported) return;
+    if (!_supported || !AppState.I.notificationsEnabled) return;
     unawaited(_ensurePermission());
     final clean = _clean(text);
     final h = Object.hash(clean, sessionId);
@@ -205,6 +205,17 @@ class AgentNotificationService {
     _debounce?.cancel();
     _active = _isKeepAlive;
     _displayedStopTargetSessionId = null;
+
+    // Master notification switch OFF: no notification at all — drop any
+    // posted one instead of idling into "Ready & Listening".
+    if (!AppState.I.notificationsEnabled) {
+      _active = false;
+      serviceStopRequestedForTestFlag = true;
+      if (hadNotificationWork) {
+        unawaited(_invoke('agentServiceStop', {}));
+      }
+      return;
+    }
 
     if (_isKeepAlive) {
       // Keep foreground service active so scheduled tasks and message queue fire

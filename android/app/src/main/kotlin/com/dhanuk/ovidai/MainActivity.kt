@@ -566,6 +566,84 @@ class MainActivity : FlutterActivity() {
                             result.success(false)
                         }
                     }
+                    "openAutoStartSettings" -> {
+                        // OEM autostart whitelists (Xiaomi/Oppo/Vivo/OnePlus/
+                        // Huawei/Samsung/Asus/Lenovo/Nokia) are the #1 reason
+                        // Ovid is swiped-killed in the background: the
+                        // battery exemption alone does not stop those ROMs.
+                        // Try each known component; fall back to the app's
+                        // system details page (always resolvable).
+                        try {
+                            val targets = listOf(
+                                ComponentName(
+                                    "com.miui.securitycenter",
+                                    "com.miui.permcenter.autostart.AutoStartManagementActivity"
+                                ),
+                                ComponentName(
+                                    "com.coloros.safecenter",
+                                    "com.coloros.safecenter.permission.startup.StartupAppListActivity"
+                                ),
+                                ComponentName(
+                                    "com.oppo.safe",
+                                    "com.oppo.safe.permission.startup.StartupAppListActivity"
+                                ),
+                                ComponentName(
+                                    "com.vivo.permissionmanager",
+                                    "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
+                                ),
+                                ComponentName(
+                                    "com.oneplus.security",
+                                    "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity"
+                                ),
+                                ComponentName(
+                                    "com.huawei.systemmanager",
+                                    "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"
+                                ),
+                                ComponentName(
+                                    "com.samsung.android.lool",
+                                    "com.samsung.android.sm.ui.battery.BatteryActivity"
+                                ),
+                                ComponentName(
+                                    "com.asus.mobilemanager",
+                                    "com.asus.mobilemanager.autostart.AutoStartActivity"
+                                ),
+                                ComponentName(
+                                    "com.lenovo.security",
+                                    "com.lenovo.security.purebackground.PureBackgroundActivity"
+                                ),
+                                ComponentName(
+                                    "com.nokia.mid",
+                                    "com.nokia.mid.MidActivity"
+                                ),
+                            )
+                            var opened = false
+                            for (component in targets) {
+                                try {
+                                    val intent = Intent().apply {
+                                        setComponent(component)
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    if (intent.resolveActivity(packageManager) != null) {
+                                        startActivity(intent)
+                                        opened = true
+                                        break
+                                    }
+                                } catch (_: Exception) {
+                                }
+                            }
+                            if (!opened) {
+                                startActivity(
+                                    Intent(
+                                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                        Uri.parse("package:$packageName")
+                                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
+                    }
                     "deviceCopyScreenshot" -> {
                         val sourcePath = call.argument<String>("sourcePath")
                         val directoryPath = call.argument<String>("directoryPath")

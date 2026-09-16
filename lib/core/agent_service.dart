@@ -1180,8 +1180,17 @@ class AgentService extends ChangeNotifier {
       final t = text.trim();
       if (t.isEmpty) return;
       if (isFinal) {
-        // Dictation ended: send like overlay-typed text (sends the run,
-        // or answers a pending question), then clear the field.
+        // Dictation ended: release the service AND reset the overlay mic
+        // button (otherwise it stays stuck "on" and the next tap stops a
+        // dead session instead of starting a new one). Then send like
+        // overlay-typed text and clear the field.
+        await voice.stop();
+        try {
+          await _overlayChannel.invokeMethod(
+            deviceOverlayMicListeningMethod,
+            {'listening': false},
+          );
+        } catch (_) {}
         await handleDeviceOverlayText(t);
         try {
           await _overlayChannel.invokeMethod(
@@ -1514,6 +1523,12 @@ class AgentService extends ChangeNotifier {
   static const _browserTabsEnvelopeVersion = 2;
   static const _defaultBrowserUrl = 'https://www.google.com';
 
+  /// A new tab / first browser open is never blank: legacy `about:blank`
+  /// tabs (and empty URLs from old persists) resolve to the home page so
+  /// the WebView always has something to load.
+  static String _homeUrl(String url) =>
+      (url.isEmpty || url == 'about:blank') ? _defaultBrowserUrl : url;
+
   /// True when [uri] is a Google OAuth page that must leave the embedded
   /// WebView: Google rejects sign-in inside embedded WebViews ("this
   /// browser or app may not be secure") no matter the user agent. These
@@ -1665,7 +1680,7 @@ class AgentService extends ChangeNotifier {
         if (item is! Map) continue;
         final url = item['url'];
         if (url is! String || url.isEmpty) continue;
-        final tab = BrowserTab(url: url);
+        final tab = BrowserTab(url: _homeUrl(url));
         final mode = item['desktopMode'];
         if (mode is bool) tab.desktopMode = mode;
         final z = item['userZoom'];
@@ -1700,7 +1715,7 @@ class AgentService extends ChangeNotifier {
         final urls = prefs.getStringList('$_kBrowserSessionPrefix$sessionId');
         if (urls != null && urls.isNotEmpty) {
           for (final u in urls) {
-            tabs.add(BrowserTab(url: u));
+            tabs.add(BrowserTab(url: _homeUrl(u)));
           }
           _sessionActiveTab[sessionId] =
               (prefs.getInt('$_kBrowserActiveTab$sessionId') ?? 0).clamp(
@@ -1711,10 +1726,10 @@ class AgentService extends ChangeNotifier {
       }
     } catch (_) {}
     if (tabs.isEmpty) {
-      // A brand-new session starts with a FRESH blank tab — browser data
-      // (cookies/logins) is shared app-wide, but tabs are never inherited
-      // from another session.
-      tabs.add(BrowserTab(url: 'about:blank'));
+      // A brand-new session starts with a FRESH home-page tab (google.com),
+      // never a blank page — browser data (cookies/logins) is shared
+      // app-wide, but tabs are never inherited from another session.
+      tabs.add(BrowserTab(url: _defaultBrowserUrl));
     }
   }
 
@@ -1741,7 +1756,7 @@ class AgentService extends ChangeNotifier {
       final urls = prefs.getStringList(_kBrowserTabs);
       if (urls == null || urls.isEmpty) return false;
       for (final u in urls) {
-        browserTabs.add(BrowserTab(url: u));
+        browserTabs.add(BrowserTab(url: _homeUrl(u)));
       }
       activeTabIndex = prefs.getInt(_kBrowserActiveTab) ?? 0;
       if (activeTabIndex >= browserTabs.length) activeTabIndex = 0;
@@ -13119,6 +13134,19 @@ ${await _agentsMdBlock()}
     try {
       final channel = MethodChannel('ovid/native');
       final ok = await channel.invokeMethod<bool>('requestBatteryExemption');
+      return ok ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Open the OEM autostart whitelist (or the app's system details page as
+  /// fallback) so Xiaomi/Oppo/Vivo/OnePlus-style ROMs stop swiping Ovid
+  /// away in the background. Returns false when nothing could be opened.
+  Future<bool> openAutoStartSettings() async {
+    try {
+      final channel = MethodChannel('ovid/native');
+      final ok = await channel.invokeMethod<bool>('openAutoStartSettings');
       return ok ?? false;
     } catch (_) {
       return false;

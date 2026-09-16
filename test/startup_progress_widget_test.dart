@@ -290,8 +290,9 @@ void main() {
     );
     await tester.pump();
     await tester.pump();
-    expect(find.text('Finishing setup · 3 of 3'), findsOneWidget);
-    // Auto-collapse once every item is terminal.
+    // Every item benign-terminal (all ready) → the whole bar is gone,
+    // not just collapsed.
+    expect(find.byKey(const ValueKey('startup-panel-toggle')), findsNothing);
     expect(find.byKey(const ValueKey('startup-item-item0')), findsNothing);
     expect(find.byKey(const ValueKey('startup-item-item2')), findsNothing);
   });
@@ -1451,6 +1452,75 @@ void main() {
     },
   );
 
+  group('benign-terminal auto-dismiss', () {
+    testWidgets('bar hides when every item is ready, disabled or skipped', (
+      tester,
+    ) async {
+      final c = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      unawaited(
+        c.start([
+          _Task(
+            'a.ready',
+            kind: StartupItemKind.localState,
+            label: 'A',
+            run: () async => _ready('a.ready', StartupItemKind.localState, 'A'),
+          ),
+          _Task(
+            'b.skipped',
+            kind: StartupItemKind.sandbox,
+            label: 'B',
+            run: () async => StartupItemStatus.skipped(
+              'b.skipped',
+              StartupItemKind.sandbox,
+              'B',
+            ),
+          ),
+        ]),
+      );
+      await pumpPanel(tester, c);
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('startup-panel-toggle')), findsNothing);
+    });
+
+    testWidgets('bar stays when any item failed', (tester) async {
+      final c = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      unawaited(
+        c.start([
+          _Task(
+            'a.ready',
+            kind: StartupItemKind.localState,
+            label: 'A',
+            run: () async => _ready('a.ready', StartupItemKind.localState, 'A'),
+          ),
+          _Task(
+            'b.failed',
+            kind: StartupItemKind.localState,
+            label: 'B',
+            run: () async => StartupItemStatus.failed(
+              'b.failed',
+              StartupItemKind.localState,
+              'B',
+              reason: 'boom',
+            ),
+          ),
+        ]),
+      );
+      await pumpPanel(tester, c);
+      await tester.pump();
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('startup-panel-toggle')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('startup-warning-dot')), findsOneWidget);
+    });
+  });
+
   group('sandbox install action', () {
     testWidgets('skipped sandbox row offers one-tap install', (tester) async {
       var installed = false;
@@ -1468,6 +1538,20 @@ void main() {
               StartupItemKind.sandbox,
               'Maintain local sandbox',
               reason: 'Sandbox is not installed on this device',
+            ),
+          ),
+          // A lone skipped row hides the whole bar (all benign-terminal),
+          // so a companion problem row keeps the panel visible for this
+          // action test.
+          _Task(
+            'other.failing',
+            kind: StartupItemKind.localState,
+            label: 'Other thing',
+            run: () async => StartupItemStatus.failed(
+              'other.failing',
+              StartupItemKind.localState,
+              'Other thing',
+              reason: 'boom',
             ),
           ),
         ]),

@@ -36,9 +36,15 @@ bool startupItemOpensPlugins(StartupItemState state) =>
     state == StartupItemState.needsSetup ||
     state == StartupItemState.migrationRequired;
 
-bool _isProblem(StartupItemState state) =>
-    state != StartupItemState.ready &&
-    state != StartupItemState.disabled &&
+/// States that need no attention: success, user-disabled, or informationally
+/// skipped (not installed / cooled down). Anything else keeps the bar
+/// visible; when every item is benign-terminal the whole bar is gone.
+bool _isBenignTerminal(StartupItemState state) =>
+    state == StartupItemState.ready ||
+    state == StartupItemState.disabled ||
+    state == StartupItemState.skipped;
+
+bool _isProblem(StartupItemState state) => !_isBenignTerminal(state) &&
     state != StartupItemState.queued &&
     state != StartupItemState.running;
 
@@ -152,6 +158,14 @@ class _StartupProgressPanelState extends State<StartupProgressPanel> {
         final completed = snapshot.completed;
         final total = snapshot.total;
         final anyProblem = snapshot.items.any((item) => _isProblem(item.state));
+
+        // Nothing left that needs attention (every item ready, disabled,
+        // or skipped): the bar is gone entirely instead of lingering as
+        // an empty "Finishing setup" shell.
+        if (allTerminal && !anyProblem) {
+          _wasIncomplete = false;
+          return const SizedBox.shrink();
+        }
 
         return Column(
           mainAxisSize: MainAxisSize.min,

@@ -12103,6 +12103,51 @@ You are an expert security auditor reviewing code for vulnerabilities.
       );
 
       test(
+        'NOTIF1: notification master switch gates idle posting and working updates',
+        () async {
+          final notif = AgentNotificationService.I;
+          final app = AppState.I;
+          notif.supportedForTest = true;
+          notif.activeForTest = true;
+          AgentNotificationService.serviceStopRequestedForTestFlag = false;
+          setAnyRunActiveForTest(false);
+          addTearDown(() async {
+            AgentNotificationService.serviceStopRequestedForTestFlag = false;
+            AgentNotificationService.keepAliveOverrideForTest = null;
+            await app.setNotificationsEnabled(true);
+          });
+
+          // Default ON.
+          expect(app.notificationsEnabled, isTrue);
+
+          // OFF: idle stops the service instead of idling into
+          // Ready & Listening.
+          await app.setNotificationsEnabled(false);
+          expect(notif.activeForTest, isFalse);
+          expect(
+            AgentNotificationService.serviceStopRequestedForTestFlag,
+            isTrue,
+          );
+
+          // OFF: working updates are swallowed, never posted.
+          AgentNotificationService.serviceStopRequestedForTestFlag = false;
+          notif.activeForTest = false;
+          await notif.agentWorking('thinking…');
+          expect(notif.activeForTest, isFalse);
+          expect(
+            AgentNotificationService.serviceStopRequestedForTestFlag,
+            isFalse,
+          );
+
+          // ON again: idle re-arms per keep-alive.
+          AgentNotificationService.keepAliveOverrideForTest = true;
+          await app.setNotificationsEnabled(true);
+          await agentIdleForTest();
+          expect(notif.activeForTest, isTrue);
+        },
+      );
+
+      test(
         'STOP2: stopRequested preserves queued continuation only for its session',
         () async {
           final agent = AgentService.I;

@@ -3,8 +3,8 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 import '../core/agent_service.dart';
-import '../core/agent_notification_service.dart';
 import '../core/firebase_service.dart';
 import '../core/hook_service.dart';
 import '../core/presets.dart';
@@ -152,16 +152,6 @@ class SettingsScreen extends StatelessWidget {
             setter: _setShowReasoning,
           ),
 
-          const SectionHeader('Chat'),
-          _settingTile(Icons.dark_mode_outlined, 'Appearance', 'Dark (hacker)'),
-          _settingTile(Icons.translate, 'Language', 'English'),
-          _settingTile(
-            Icons.image_outlined,
-            'Image generation',
-            'Auto · up to 1024px',
-          ),
-          _settingTile(Icons.mic_none, 'Voice input', 'On'),
-
           const SectionHeader('Agents & Sandbox'),          _navTile(
             context,
             Icons.monitor_heart_outlined,
@@ -191,16 +181,6 @@ class SettingsScreen extends StatelessWidget {
             const _PresetsScreen(),
           ),
           const _ShareMemoryTile(),
-          _settingTile(
-            Icons.smart_toy_outlined,
-            'Default agent',
-            'Auto-select by task',
-          ),
-          _settingTile(
-            Icons.public,
-            'In-app browser',
-            'Agent can browse & log in (ask me)',
-          ),
           const _SettingsSwitchTile(
             icon: Icons.folder_shared_outlined,
             title: 'GitHub sync',
@@ -258,12 +238,6 @@ class SettingsScreen extends StatelessWidget {
             ],
             onChanged: _setConversationDisplay,
           ),
-          _settingTile(
-            Icons.security_outlined,
-            'Sandbox',
-            'Ready · isolated on-device',
-          ),
-
           const SectionHeader('Data controls'),
           _navTile(
             context,
@@ -288,8 +262,15 @@ class SettingsScreen extends StatelessWidget {
           const SectionHeader('General'),
           const _KeepAliveToggle(),
           const _ThemeToggle(),
-          const _LocaleTile(),
-          _settingTile(Icons.notifications_outlined, 'Notifications', 'On'),
+          const _SettingsSwitchTile(
+            icon: Icons.notifications_outlined,
+            title: 'Notifications',
+            subtitleOn: 'ON — agent status shows while working',
+            subtitleOff:
+                'OFF — no status notification; background runs may stop',
+            getter: _getNotificationsEnabled,
+            setter: _setNotificationsEnabled,
+          ),
           _settingTile(Icons.info_outline, 'About', 'Ovid AI 0.1.0-demo'),
         ],
       ),
@@ -509,6 +490,9 @@ class _SettingsSwitchTile extends StatelessWidget {
 // ── Static accessors keep the tile declarations const-friendly ──
 bool _getMemoryEnabled() => AppState.I.memoryEnabled;
 Future<void> _setMemoryEnabled(bool v) => AppState.I.setMemoryEnabled(v);
+bool _getNotificationsEnabled() => AppState.I.notificationsEnabled;
+Future<void> _setNotificationsEnabled(bool v) =>
+    AppState.I.setNotificationsEnabled(v);
 bool _getShowReasoning() => AppState.I.showReasoning;
 Future<void> _setShowReasoning(bool v) => AppState.I.setShowReasoning(v);
 bool _getGithubSync() => AppState.I.githubSync;
@@ -530,54 +514,56 @@ String _getConversationDisplay() => AppState.I.conversationDisplay;
 Future<void> _setConversationDisplay(String v) =>
     AppState.I.setConversationDisplay(v);
 
-/// Live on-device storage usage (replaces the hardcoded "214 MB" string).
-class _StorageTile extends StatefulWidget {
-  const _StorageTile();
-  @override
-  State<_StorageTile> createState() => _StorageTileState();
+/// Human-readable byte counts for the Storage screen. Visible for tests.
+String formatStorageBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  final kb = bytes / 1024;
+  if (kb < 1024) return '${kb.toStringAsFixed(kb < 10 ? 1 : 0)} KB';
+  final mb = kb / 1024;
+  if (mb < 1024) return '${mb.toStringAsFixed(mb < 10 ? 1 : 0)} MB';
+  return '${(mb / 1024).toStringAsFixed(1)} GB';
 }
 
-class _StorageTileState extends State<_StorageTile> {
-  String _label = 'Calculating…';
-
-  @override
-  void initState() {
-    super.initState();
-    _measure();
-  }
-
-  Future<void> _measure() async {
+/// Recursively sums a directory tree. Visible for tests.
+Future<int> dirBytes(Directory dir) async {
+  var bytes = 0;
+  final stack = <Directory>[dir];
+  while (stack.isNotEmpty) {
+    final d = stack.removeLast();
     try {
-      final docs = await getApplicationDocumentsDirectory();
-      var bytes = 0;
-      // Walk the app documents tree (sessions, workspaces, previews,
-      // exported repos — everything that counts against user storage).
-      final stack = <Directory>[docs];
-      while (stack.isNotEmpty) {
-        final dir = stack.removeLast();
-        try {
-          await for (final e in dir.list(followLinks: false)) {
-            if (e is File) {
-              try {
-                bytes += await e.length();
-              } catch (_) {}
-            } else if (e is Directory) {
-              stack.add(e);
-            }
-          }
-        } catch (_) {}
+      await for (final e in d.list(followLinks: false)) {
+        if (e is File) {
+          try {
+            bytes += await e.length();
+          } catch (_) {}
+        } else if (e is Directory) {
+          stack.add(e);
+        }
       }
-      final mb = bytes / (1024 * 1024);
-      setState(() {
-        _label = mb >= 1024
-            ? '${(mb / 1024).toStringAsFixed(1)} GB · on-device only'
-            : '${mb.toStringAsFixed(0)} MB · on-device only';
-      });
-    } catch (_) {
-      setState(() => _label = 'On-device only');
-    }
+    } catch (_) {}
   }
+  return bytes;
+}
 
+/// Deletes everything inside [dir] but keeps the dir itself. Returns the
+/// freed byte count (measured before deletion). Visible for tests.
+Future<int> clearDirContents(Directory dir) async {
+  var freed = 0;
+  try {
+    if (!await dir.exists()) return 0;
+    freed = await dirBytes(dir);
+    await for (final e in dir.list(followLinks: false)) {
+      try {
+        await e.delete(recursive: true);
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return freed;
+}
+
+/// Storage row: opens the breakdown screen instead of just re-measuring.
+class _StorageTile extends StatelessWidget {
+  const _StorageTile();
   @override
   Widget build(BuildContext context) {
     return ListTile(
@@ -585,10 +571,248 @@ class _StorageTileState extends State<_StorageTile> {
       leading: Icon(Icons.storage_outlined, size: 19, color: Aether.textMuted),
       title: const Text('Storage', style: TextStyle(fontSize: 14)),
       subtitle: Text(
-        _label,
+        'Usage by section · clear cache & cookies',
         style: TextStyle(fontSize: 12, color: Aether.textFaint),
       ),
-      onTap: _measure,
+      trailing: const Icon(Icons.chevron_right, size: 18),
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const _StorageScreen()),
+      ),
+    );
+  }
+}
+
+/// Per-section on-device storage with working clear actions.
+class _StorageScreen extends StatefulWidget {
+  const _StorageScreen();
+  @override
+  State<_StorageScreen> createState() => _StorageScreenState();
+}
+
+class _StorageScreenState extends State<_StorageScreen> {
+  bool _measuring = true;
+  int _docs = 0;
+  int _cache = 0;
+  int _support = 0;
+  bool _clearing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    setState(() => _measuring = true);
+    try {
+      final results = await Future.wait([
+        getApplicationDocumentsDirectory().then(dirBytes),
+        getTemporaryDirectory().then(dirBytes),
+        getApplicationSupportDirectory().then(dirBytes),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _docs = results[0];
+        _cache = results[1];
+        _support = results[2];
+        _measuring = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _measuring = false);
+    }
+  }
+
+  Future<void> _confirmClearCache() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear cache?'),
+        content: Text(
+          'Frees ${formatStorageBytes(_cache)} of temporary files. '
+          'Chats, settings and downloads are untouched.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Clear'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _clearing = true);
+    try {
+      final freed = await clearDirContents(await getTemporaryDirectory());
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Cache cleared · ${formatStorageBytes(freed)} freed.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _clearing = false);
+      _refresh();
+    }
+  }
+
+  Future<void> _clearCookies() async {
+    setState(() => _clearing = true);
+    try {
+      final cleared = await WebViewCookieManager().clearCookies();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            cleared ? 'Browser cookies cleared.' : 'No browser cookies found.',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not clear cookies on this device.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _clearing = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final total = _docs + _cache + _support;
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: const Text('Storage'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const SectionHeader('On-device usage'),
+          if (_measuring)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 24),
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else ...[
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.chat_bubble_outline,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              title: const Text(
+                'Chats & documents',
+                style: TextStyle(fontSize: 14),
+              ),
+              subtitle: Text(
+                'Sessions, workspaces, previews · managed by Export chats / Delete all data',
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+              trailing: Text(
+                formatStorageBytes(_docs),
+                style: const TextStyle(fontSize: 13),
+              ),
+            ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.cached_outlined,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              title: const Text('Cache', style: TextStyle(fontSize: 14)),
+              subtitle: Text(
+                'Temporary files · safe to clear',
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    formatStorageBytes(_cache),
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(
+                    onPressed: (_clearing || _cache == 0)
+                        ? null
+                        : _confirmClearCache,
+                    child: const Text('Clear'),
+                  ),
+                ],
+              ),
+            ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.folder_outlined,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              title: const Text(
+                'Support files',
+                style: TextStyle(fontSize: 14),
+              ),
+              subtitle: Text(
+                'Required by the app (sandbox, keys) · not deletable here',
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+              trailing: Text(
+                formatStorageBytes(_support),
+                style: const TextStyle(fontSize: 13),
+              ),
+            ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.cookie_outlined,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              title: const Text(
+                'Browser cookies',
+                style: TextStyle(fontSize: 14),
+              ),
+              subtitle: Text(
+                'In-app browser logins & site data',
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+              trailing: TextButton(
+                onPressed: _clearing ? null : _clearCookies,
+                child: const Text('Clear'),
+              ),
+            ),
+            const Divider(height: 24),
+            ListTile(
+              dense: true,
+              title: const Text(
+                'Total',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+              ),
+              trailing: Text(
+                formatStorageBytes(total),
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }
@@ -686,6 +910,9 @@ class _KeepAliveToggle extends StatelessWidget {
             onTap: () async {
               final ok = await AgentService.I.requestBatteryExemption();
               if (!context.mounted) return;
+              // Battery exemption alone does not stop OEM ROMs from
+              // swipe-killing the app — offer the autostart whitelist as
+              // the follow-up step on the same tap flow.
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
                   content: Text(
@@ -694,32 +921,24 @@ class _KeepAliveToggle extends StatelessWidget {
                         : 'Follow the system prompt to allow Ovid to run in the background.',
                   ),
                   behavior: SnackBarBehavior.floating,
-                ),
-              );
-            },
-          ),
-          ListTile(
-            dense: true,
-            leading: Icon(
-              Icons.power_settings_new,
-              size: 19,
-              color: Aether.textMuted,
-            ),
-            title: const Text(
-              'Stop background service',
-              style: TextStyle(fontSize: 14),
-            ),
-            subtitle: Text(
-              'End the foreground service (same as the notification Exit)',
-              style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-            ),
-            onTap: () async {
-              await AgentNotificationService.I.agentExit();
-              if (!context.mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Background service stopped.'),
-                  behavior: SnackBarBehavior.floating,
+                  action: SnackBarAction(
+                    label: 'Autostart',
+                    onPressed: () async {
+                      final opened = await AgentService.I
+                          .openAutoStartSettings();
+                      if (!context.mounted) return;
+                      if (!opened) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'Could not open autostart settings on this device.',
+                            ),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      }
+                    },
+                  ),
                 ),
               );
             },
@@ -754,50 +973,6 @@ class _ThemeToggle extends StatelessWidget {
         value: app.lightTheme,
         activeTrackColor: Aether.accent,
         onChanged: (v) => app.setLightTheme(v),
-      ),
-    );
-  }
-}
-
-/// Reply-language preference (the settings coordinator client-locale parity: system/en/zh).
-/// Drives the REPLY LANGUAGE system-prompt hint — no UI strings change.
-class _LocaleTile extends StatelessWidget {
-  const _LocaleTile();
-
-  @override
-  Widget build(BuildContext context) {
-    final app = AppState.I;
-    return AnimatedBuilder(
-      animation: app,
-      builder: (_, _) => ListTile(
-        dense: true,
-        leading: Icon(
-          Icons.translate_outlined,
-          size: 19,
-          color: Aether.textMuted,
-        ),
-        title: const Text('Reply language', style: TextStyle(fontSize: 14)),
-        subtitle: Text(
-          switch (app.localePref) {
-            'zh' => 'Chinese (简体中文)',
-            'en' => 'English',
-            _ => 'System language (default)',
-          },
-          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-        ),
-        trailing: DropdownButton<String>(
-          value: ['system', 'en', 'zh'].contains(app.localePref)
-              ? app.localePref
-              : 'system',
-          items: const [
-            DropdownMenuItem(value: 'system', child: Text('System')),
-            DropdownMenuItem(value: 'en', child: Text('English')),
-            DropdownMenuItem(value: 'zh', child: Text('中文')),
-          ],
-          onChanged: (v) {
-            if (v != null) app.setLocalePref(v);
-          },
-        ),
       ),
     );
   }

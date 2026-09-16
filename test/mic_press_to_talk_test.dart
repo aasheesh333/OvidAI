@@ -74,9 +74,32 @@ void main() {
 
   test('listen options silence-stop and cap the session', () {
     final o = voice.listenOptionsForTest();
-    expect(o.pauseFor, const Duration(seconds: 4));
+    expect(o.pauseFor, const Duration(seconds: 2));
     expect(o.listenFor, const Duration(seconds: 60));
     expect(o.partialResults, isTrue);
+  });
+
+  testWidgets('silence watchdog stops dictation with no final result', (
+    tester,
+  ) async {
+    // Partial only, then silence: the watchdog must stop the session by
+    // itself (ChatGPT-like end-of-speech) instead of listening forever.
+    var stopped = false;
+    voice.startOverrideForTest = (onResult) {
+      onResult('half a thought', false);
+    };
+    voice.stopOverrideForTest = () => stopped = true;
+
+    final started = await voice.start(
+      (text, isFinal) {},
+      silenceStop: const Duration(milliseconds: 300),
+    );
+    expect(started, isTrue);
+    expect(voice.isListening, isTrue);
+
+    await tester.pump(const Duration(seconds: 1));
+    expect(stopped, isTrue);
+    expect(voice.isListening, isFalse);
   });
 
   testWidgets('composer mic final transcript auto-sends', (tester) async {

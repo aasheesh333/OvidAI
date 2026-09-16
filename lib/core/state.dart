@@ -2684,6 +2684,7 @@ class AppState extends ChangeNotifier {
       localePref = prefs.getString(_kLocale) ?? 'system';
       seenWelcomeVersion = prefs.getString(_kWelcome) ?? '';
       _keepAliveEnabled = prefs.getBool(_kKeepAlivePref) ?? true;
+      _notificationsEnabled = prefs.getBool(_kNotificationsPref) ?? true;
       _controlDisclosureAccepted =
           prefs.getBool(_kControlDisclosure) ?? false;
       chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0).clamp(
@@ -3712,6 +3713,26 @@ class AppState extends ChangeNotifier {
       final p = await SharedPreferences.getInstance();
       await p.setString(_kConversationDisplay, v);
     } catch (_) {}
+  }
+
+  static const _kNotificationsPref = 'ovid_notifications_enabled';
+  bool _notificationsEnabled = true;
+
+  /// Master switch for the agent status notification. OFF means Ovid never
+  /// posts it — no foreground-service presence, so background runs may be
+  /// stopped by the system.
+  bool get notificationsEnabled => _notificationsEnabled;
+  Future<void> setNotificationsEnabled(bool v) async {
+    if (_notificationsEnabled == v) return;
+    _notificationsEnabled = v;
+    notifyListeners();
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setBool(_kNotificationsPref, v);
+    } catch (_) {}
+    if (!v) {
+      AgentNotificationService.I.agentIdle();
+    }
   }
 
   static const _kKeepAlivePref = 'ovid_keep_alive';

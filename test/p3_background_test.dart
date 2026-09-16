@@ -28,6 +28,21 @@ void main() {
     expect(kt.contains('ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'), isTrue);
   });
 
+  test('native exposes an OEM autostart-settings opener with fallback', () {
+    final kt = File(
+      'android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt',
+    ).readAsStringSync();
+    expect(kt.contains('"openAutoStartSettings"'), isTrue);
+    // Known OEM autostart components are tried in order …
+    expect(kt.contains('com.miui.securitycenter'), isTrue);
+    expect(kt.contains('com.coloros.safecenter'), isTrue);
+    expect(kt.contains('com.vivo.permissionmanager'), isTrue);
+    // … with the app-details page as the always-resolvable fallback.
+    expect(kt.contains('ACTION_APPLICATION_DETAILS_SETTINGS'), isTrue);
+    final dart = File('lib/core/agent_service.dart').readAsStringSync();
+    expect(dart.contains('openAutoStartSettings'), isTrue);
+  });
+
   test('foreground service refreshes the wake lock before expiry', () {
     // The 6h PARTIAL_WAKE_LOCK ceiling must be refreshed on update ticks —
     // otherwise 24/7 runs silently lose the lock and Doze kills them.

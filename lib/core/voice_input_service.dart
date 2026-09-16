@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart';
@@ -19,6 +21,14 @@ class VoiceInputService {
   SpeechToText? _speech;
   bool _listening = false;
   bool get isListening => _listening;
+
+  /// Client-side silence watchdog (ChatGPT-like end-of-speech): the
+  /// platform does not always honor [pauseFor], so when no result at all
+  /// has arrived for the silence window the service stops itself — the
+  /// platform answers stop() with a final result, which flows into the
+  /// normal auto-send path. Re-armed on every result; cancelled by
+  /// stop()/cancel().
+  Timer? _silenceTimer;
 
   /// Test seam: overrides the microphone permission request.
   Future<bool> Function()? ensureMicrophonePermissionForTest;
@@ -56,7 +66,8 @@ class VoiceInputService {
   }
 
   /// Default silence auto-stop (user stops speaking) and session cap.
-  static const defaultPauseFor = Duration(seconds: 4);
+  /// ChatGPT-like end-of-speech: ~2s of silence finalizes dictation.
+  static const defaultPauseFor = Duration(seconds: 2);
   static const defaultListenFor = Duration(seconds: 60);
 
   /// Listen options for a press-to-talk session. Visible for tests so the
@@ -76,26 +87,36 @@ class VoiceInputService {
   );
 
   /// Start listening. [onResult] receives partial and final transcripts.
-  /// Listening auto-stops on silence ([pauseFor]) or at [listenFor].
+  /// Listening auto-stops on silence ([pauseFor], enforced by the
+  /// [silenceStop] watchdog as well as the platform) or at [listenFor].
   /// Returns false when unavailable or already listening.
   Future<bool> start(
     void Function(String text, bool isFinal) onResult, {
     String? localeId,
     Duration? pauseFor,
     Duration? listenFor,
+    Duration? silenceStop,
   }) async {
     if (_listening) return false;
+    final silenceWindow = silenceStop ?? pauseFor ?? defaultPauseFor;
+    void guarded(String text, bool isFinal) {
+      _pokeSilenceWatchdog(silenceWindow);
+      onResult(text, isFinal);
+    }
+
     if (startOverrideForTest != null) {
       _listening = true;
-      startOverrideForTest!(onResult);
+      _pokeSilenceWatchdog(silenceWindow);
+      startOverrideForTest!(guarded);
       return true;
     }
     try {
       final ok = await _plugin.initialize();
       if (!ok) return false;
       _listening = true;
+      _pokeSilenceWatchdog(silenceWindow);
       await _plugin.listen(
-        onResult: (r) => onResult(r.recognizedWords, r.finalResult),
+        onResult: (r) => guarded(r.recognizedWords, r.finalResult),
         listenOptions: listenOptionsForTest(
           pauseFor: pauseFor,
           listenFor: listenFor,
@@ -104,12 +125,25 @@ class VoiceInputService {
       );
       return true;
     } catch (_) {
+      _silenceTimer?.cancel();
       _listening = false;
       return false;
     }
   }
 
+  void _pokeSilenceWatchdog(Duration window) {
+    _silenceTimer?.cancel();
+    if (!_listening) return;
+    _silenceTimer = Timer(window, () {
+      if (!_listening) return;
+      // Silence outlasted the window: stop() prompts the platform for
+      // its final result, which auto-sends through the normal path.
+      unawaited(stop());
+    });
+  }
+
   Future<void> stop() async {
+    _silenceTimer?.cancel();
     if (stopOverrideForTest != null) {
       _listening = false;
       stopOverrideForTest!();
@@ -122,6 +156,7 @@ class VoiceInputService {
   }
 
   Future<void> cancel() async {
+    _silenceTimer?.cancel();
     if (stopOverrideForTest != null) {
       _listening = false;
       stopOverrideForTest!();
