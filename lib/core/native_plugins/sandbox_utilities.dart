@@ -24,9 +24,10 @@ Future<String> defaultSandboxRunner(
       cwd: cwd,
     ).timeout(timeout ?? const Duration(seconds: 60));
 
-/// Registers every sandbox-backed capability (this task: Shell History).
+/// Registers every sandbox-backed capability (Shell History, Git Workbench).
 void registerSandboxUtilities() {
   NativePluginRegistry.I.register(ShellHistoryCapability());
+  NativePluginRegistry.I.register(GitWorkbenchCapability());
 }
 
 /// Tolerant integer parsing for LLM-supplied numeric args: accepts [num]
@@ -188,5 +189,251 @@ class ShellHistoryCapability implements NativePluginCapability {
       out.add(lines[i]);
     }
     return out.join('\n');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Git Workbench
+// ---------------------------------------------------------------------------
+
+class GitWorkbenchCapability implements NativePluginCapability {
+  GitWorkbenchCapability({
+    SandboxRunner? runner,
+    bool Function()? isSandboxInstalled,
+  })  : _runner = runner ?? defaultSandboxRunner,
+        _isSandboxInstalled =
+            isSandboxInstalled ?? (() => SandboxService.I.isInstalled);
+
+  final SandboxRunner _runner;
+  final bool Function() _isSandboxInstalled;
+
+  static const _notInstalledMessage =
+      'Sandbox is not installed — open Studio once to install it, then retry.';
+
+  @override
+  String get pluginName => 'Git Workbench';
+
+  @override
+  List<NativePluginConfigField> get configFields => const [
+        NativePluginConfigField(
+          key: 'default_path',
+          label: 'Default working directory',
+          secret: false,
+        ),
+      ];
+
+  @override
+  List<NativePluginTool> get tools => const [
+        NativePluginTool(
+          name: 'status',
+          description: 'Show working-tree status (short format with branch).',
+          inputSchema: {
+            'type': 'object',
+            'properties': {
+              'path': {'type': 'string'},
+              'timeout_seconds': {'type': 'integer'},
+            },
+            'required': [],
+          },
+        ),
+        NativePluginTool(
+          name: 'log',
+          description: 'Show recent commits, one line each.',
+          inputSchema: {
+            'type': 'object',
+            'properties': {
+              'path': {'type': 'string'},
+              'limit': {'type': 'integer'},
+              'timeout_seconds': {'type': 'integer'},
+            },
+            'required': [],
+          },
+        ),
+        NativePluginTool(
+          name: 'branch',
+          description:
+              'List local and remote branches, marking the current one.',
+          inputSchema: {
+            'type': 'object',
+            'properties': {
+              'path': {'type': 'string'},
+              'timeout_seconds': {'type': 'integer'},
+            },
+            'required': [],
+          },
+        ),
+        NativePluginTool(
+          name: 'clone',
+          description: 'Clone a git repository into the sandbox.',
+          inputSchema: {
+            'type': 'object',
+            'properties': {
+              'url': {'type': 'string'},
+              'path': {'type': 'string'},
+              'timeout_seconds': {'type': 'integer'},
+            },
+            'required': ['url'],
+          },
+        ),
+        NativePluginTool(
+          name: 'commit',
+          description: 'Stage all changes and commit with a message.',
+          inputSchema: {
+            'type': 'object',
+            'properties': {
+              'path': {'type': 'string'},
+              'message': {'type': 'string'},
+              'timeout_seconds': {'type': 'integer'},
+            },
+            'required': ['message'],
+          },
+        ),
+        NativePluginTool(
+          name: 'push',
+          description: 'Push commits to a remote.',
+          inputSchema: {
+            'type': 'object',
+            'properties': {
+              'path': {'type': 'string'},
+              'remote': {'type': 'string'},
+              'branch': {'type': 'string'},
+              'timeout_seconds': {'type': 'integer'},
+            },
+            'required': [],
+          },
+        ),
+      ];
+
+  @override
+  Future<void> configure(Map<String, String> values) =>
+      NativePluginConfigStore.I.save(
+        pluginName: pluginName,
+        fields: configFields,
+        values: values,
+      );
+
+  @override
+  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+    if (!_isSandboxInstalled()) return _notInstalledMessage;
+    switch (toolName) {
+      case 'status':
+        final dir = await _resolveDir(args);
+        return _trimOutput(
+          await _runner(
+            _withDir(dir, ['status', '--short', '--branch']),
+            cwd: dir,
+            timeout: Duration(seconds: _timeoutSecs(args, 60)),
+          ),
+        );
+      case 'log':
+        final dir = await _resolveDir(args);
+        final limit = _parseIntArg(args['limit'], 'limit', 20).clamp(1, 200);
+        return _trimOutput(
+          await _runner(
+            _withDir(dir, ['log', '--oneline', '-n', '$limit']),
+            cwd: dir,
+            timeout: Duration(seconds: _timeoutSecs(args, 60)),
+          ),
+        );
+      case 'branch':
+        final dir = await _resolveDir(args);
+        final out = await _runner(
+          _withDir(dir, ['branch', '-a']),
+          cwd: dir,
+          timeout: Duration(seconds: _timeoutSecs(args, 60)),
+        );
+        final current = _parseCurrentBranch(out);
+        if (current == null) return _trimOutput(out);
+        return _trimOutput('${out.trimRight()}\ncurrent: $current');
+      case 'clone':
+        final url = args['url']?.toString().trim() ?? '';
+        if (url.isEmpty) {
+          throw ArgumentError('Missing required argument: url');
+        }
+        final dest = args['path']?.toString().trim();
+        return _trimOutput(
+          await _runner(
+            ['git', 'clone', url, if (dest != null && dest.isNotEmpty) dest],
+            cwd: await _storedDefault(),
+            timeout: Duration(seconds: _timeoutSecs(args, 300)),
+          ),
+        );
+      case 'commit':
+        final message = args['message']?.toString() ?? '';
+        if (message.trim().isEmpty) {
+          throw ArgumentError('Missing required argument: message');
+        }
+        final dir = await _resolveDir(args);
+        final timeout = Duration(seconds: _timeoutSecs(args, 60));
+        final addOut = await _runner(
+          _withDir(dir, ['add', '-A']),
+          cwd: dir,
+          timeout: timeout,
+        );
+        final commitOut = await _runner(
+          _withDir(dir, ['commit', '-m', message]),
+          cwd: dir,
+          timeout: timeout,
+        );
+        final combined = [addOut, commitOut]
+            .where((s) => s.trim().isNotEmpty)
+            .join('\n');
+        return _trimOutput(combined);
+      case 'push':
+        final dir = await _resolveDir(args);
+        final remote = args['remote']?.toString().trim();
+        final remoteName =
+            (remote == null || remote.isEmpty) ? 'origin' : remote;
+        final branch = args['branch']?.toString().trim();
+        return _trimOutput(
+          await _runner(
+            [
+              ..._withDir(dir, ['push', remoteName]),
+              if (branch != null && branch.isNotEmpty) branch,
+            ],
+            cwd: dir,
+            timeout: Duration(seconds: _timeoutSecs(args, 300)),
+          ),
+        );
+      default:
+        throw ArgumentError('Unknown tool: $toolName');
+    }
+  }
+
+  /// Working dir: explicit `path` arg wins, else the stored `default_path`
+  /// pref, else null (exec defaults to the sandbox home).
+  Future<String?> _resolveDir(Map<String, dynamic> args) async {
+    final explicit = args['path']?.toString().trim();
+    if (explicit != null && explicit.isNotEmpty) return explicit;
+    return _storedDefault();
+  }
+
+  Future<String?> _storedDefault() async {
+    final stored = await NativePluginConfigStore.I.read(
+      pluginName: pluginName,
+      key: 'default_path',
+    );
+    final trimmed = stored?.trim() ?? '';
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  /// Prefixes `git -C <dir>` when a working dir is resolved.
+  List<String> _withDir(String? dir, List<String> rest) =>
+      dir == null ? ['git', ...rest] : ['git', '-C', dir, ...rest];
+
+  int _timeoutSecs(Map<String, dynamic> args, int fallback) =>
+      _parseIntArg(args['timeout_seconds'], 'timeout_seconds', fallback)
+          .clamp(5, 600);
+
+  /// Parses the `* <name>` line of `git branch` output.
+  String? _parseCurrentBranch(String output) {
+    for (final line in output.split('\n')) {
+      if (line.startsWith('* ')) {
+        final rest = line.substring(2).trim();
+        if (rest.isEmpty) return null;
+        return rest.split(RegExp(r'\s+')).first;
+      }
+    }
+    return null;
   }
 }

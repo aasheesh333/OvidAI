@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/native_plugins/sandbox_utilities.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Fake [SandboxRunner] keyed on command signature:
 /// - commands containing `HISTFILE` answer the `$HISTFILE` probe
@@ -20,6 +21,7 @@ SandboxRunner fakeHistoryRunner({
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   tearDown(() {
     NativePluginRegistry.I.clearForTest();
   });
@@ -172,5 +174,237 @@ void main() {
       NativePluginRegistry.I.capabilityForSlug('shell_history'),
       isA<ShellHistoryCapability>(),
     );
+  });
+
+  test('git workbench presence gate returns the exact Studio message',
+      () async {
+    var called = false;
+    final cap = GitWorkbenchCapability(
+      runner: (_, {cwd, timeout}) async {
+        called = true;
+        return 'unused';
+      },
+      isSandboxInstalled: () => false,
+    );
+    expect(
+      await cap.callTool('status', {'path': '/sandbox/home/proj'}),
+      'Sandbox is not installed — open Studio once to install it, then retry.',
+    );
+    expect(called, isFalse);
+
+    registerSandboxUtilities();
+    expect(NativePluginRegistry.I.has('Git Workbench'), isTrue);
+    expect(
+      NativePluginRegistry.I.capabilityForSlug('git_workbench'),
+      isA<GitWorkbenchCapability>(),
+    );
+  });
+
+  test('git status/log/branch happy paths', () async {
+    SharedPreferences.setMockInitialValues({});
+    final seenArgs = <List<String>>[];
+    final seenCwd = <String?>[];
+    final seenTimeouts = <Duration?>[];
+    final cap = GitWorkbenchCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        seenArgs.add(args);
+        seenCwd.add(cwd);
+        seenTimeouts.add(timeout);
+        final cmd = args.join(' ');
+        if (cmd.contains('status')) {
+          return '## main...origin/main\n M foo.dart\n';
+        }
+        if (cmd.contains('branch')) {
+          return '* main\n  dev\n  remotes/origin/main\n';
+        }
+        if (cmd.contains('log')) return 'abc1234 first\ndef5678 second\n';
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    const dir = '/sandbox/home/proj';
+
+    final statusOut = await cap.callTool('status', {'path': dir});
+    expect(seenArgs[0], ['git', '-C', dir, 'status', '--short', '--branch']);
+    expect(seenCwd[0], dir);
+    expect(seenTimeouts[0], const Duration(seconds: 60));
+    expect(statusOut, contains('## main'));
+
+    final logOut = await cap.callTool('log', {'path': dir});
+    expect(seenArgs[1], ['git', '-C', dir, 'log', '--oneline', '-n', '20']);
+    expect(logOut, contains('abc1234'));
+
+    // Limit is tolerant-parsed like Task 1 (numeric strings accepted).
+    await cap.callTool('log', {'path': dir, 'limit': '5'});
+    expect(seenArgs[2], ['git', '-C', dir, 'log', '--oneline', '-n', '5']);
+    await expectLater(
+      cap.callTool('log', {'path': dir, 'limit': 'abc'}),
+      throwsA(isA<FormatException>()),
+    );
+
+    final branchOut = await cap.callTool('branch', {'path': dir});
+    expect(seenArgs[3], ['git', '-C', dir, 'branch', '-a']);
+    expect(branchOut, contains('* main'));
+    expect(branchOut, contains('current: main'));
+
+    // Unparseable branch output (no `* ` line) passes through raw.
+    final capRaw = GitWorkbenchCapability(
+      runner: (_, {cwd, timeout}) async => '  main\n  dev\n',
+      isSandboxInstalled: () => true,
+    );
+    expect(
+      await capRaw.callTool('branch', {'path': dir}),
+      isNot(contains('current:')),
+    );
+  });
+
+  test('git clone/commit/push validate args', () async {
+    SharedPreferences.setMockInitialValues({});
+    final seenArgs = <List<String>>[];
+    final seenTimeouts = <Duration?>[];
+    final cap = GitWorkbenchCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        seenArgs.add(args);
+        seenTimeouts.add(timeout);
+        final cmd = args.join(' ');
+        if (cmd.contains('clone')) return 'Cloned into ...';
+        if (args.contains('add')) return 'add-ok';
+        if (cmd.contains('commit')) return '[main abc1234] hello';
+        if (cmd.contains('push')) return 'pushed to origin';
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+
+    await expectLater(
+      cap.callTool('clone', {}),
+      throwsA(isA<ArgumentError>()),
+    );
+    await expectLater(
+      cap.callTool('clone', {'url': '  '}),
+      throwsA(isA<ArgumentError>()),
+    );
+    await expectLater(
+      cap.callTool('commit', {'path': '/sandbox/home/r'}),
+      throwsA(isA<ArgumentError>()),
+    );
+    await expectLater(
+      cap.callTool(
+        'commit',
+        {'path': '/sandbox/home/r', 'message': '  '},
+      ),
+      throwsA(isA<ArgumentError>()),
+    );
+    await expectLater(
+      cap.callTool('nope', {}),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    await cap.callTool('clone', {'url': 'https://example.com/r.git'});
+    expect(seenArgs.last, ['git', 'clone', 'https://example.com/r.git']);
+    expect(seenTimeouts.last, const Duration(seconds: 300));
+
+    await cap.callTool('clone', {
+      'url': 'https://example.com/r.git',
+      'path': '/sandbox/home/r',
+    });
+    expect(seenArgs.last, [
+      'git',
+      'clone',
+      'https://example.com/r.git',
+      '/sandbox/home/r',
+    ]);
+
+    seenArgs.clear();
+    final commitOut = await cap.callTool('commit', {
+      'path': '/sandbox/home/r',
+      'message': 'hello',
+    });
+    expect(seenArgs.length, 2);
+    expect(seenArgs[0], ['git', '-C', '/sandbox/home/r', 'add', '-A']);
+    expect(seenArgs[1], [
+      'git',
+      '-C',
+      '/sandbox/home/r',
+      'commit',
+      '-m',
+      'hello',
+    ]);
+    expect(commitOut, contains('add-ok'));
+    expect(commitOut, contains('hello'));
+
+    await cap.callTool('push', {'path': '/sandbox/home/r'});
+    expect(seenArgs.last, ['git', '-C', '/sandbox/home/r', 'push', 'origin']);
+    expect(seenTimeouts.last, const Duration(seconds: 300));
+
+    await cap.callTool('push', {
+      'path': '/sandbox/home/r',
+      'remote': 'upstream',
+      'branch': 'main',
+    });
+    expect(seenArgs.last, [
+      'git',
+      '-C',
+      '/sandbox/home/r',
+      'push',
+      'upstream',
+      'main',
+    ]);
+  });
+
+  test('git surfaces backend errors verbatim', () async {
+    SharedPreferences.setMockInitialValues({});
+    final cap = GitWorkbenchCapability(
+      runner: (_, {cwd, timeout}) async =>
+          'fatal: not a git repository\n(exit code 128)',
+      isSandboxInstalled: () => true,
+    );
+    final out = await cap.callTool('status', {'path': '/sandbox/home/proj'});
+    expect(out, contains('fatal: not a git repository'));
+    expect(out, contains('(exit code 128)'));
+  });
+
+  test('git default_path falls back and overrides', () async {
+    SharedPreferences.setMockInitialValues({});
+    List<String>? seenArgs;
+    String? seenCwd;
+    final cap = GitWorkbenchCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        seenArgs = args;
+        seenCwd = cwd;
+        return 'ok';
+      },
+      isSandboxInstalled: () => true,
+    );
+
+    // No path arg and no configured default → no cwd (sandbox home).
+    await cap.callTool('status', {});
+    expect(seenCwd, isNull);
+    expect(seenArgs, ['git', 'status', '--short', '--branch']);
+
+    // Configured default_path becomes the working dir.
+    await cap.configure({'default_path': '/sandbox/home/work'});
+    await cap.callTool('status', {});
+    expect(seenCwd, '/sandbox/home/work');
+    expect(seenArgs, [
+      'git',
+      '-C',
+      '/sandbox/home/work',
+      'status',
+      '--short',
+      '--branch',
+    ]);
+
+    // Explicit path arg wins over the configured default.
+    await cap.callTool('status', {'path': '/sandbox/home/other'});
+    expect(seenCwd, '/sandbox/home/other');
+    expect(seenArgs, [
+      'git',
+      '-C',
+      '/sandbox/home/other',
+      'status',
+      '--short',
+      '--branch',
+    ]);
   });
 }
