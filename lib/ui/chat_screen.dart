@@ -6770,37 +6770,45 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
     with WidgetsBindingObserver {
   bool? _enabled;
   String? _error;
+  Timer? _retryTimer;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _refresh();
+    if (AgentService.I.mode == AgentMode.control) {
+      _refresh();
+    }
   }
 
   @override
   void dispose() {
+    _retryTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _refresh();
+    if (state == AppLifecycleState.resumed && AgentService.I.mode == AgentMode.control) {
+      _refresh(isResume: true);
+    }
   }
 
-  Future<void> _refresh() async {
+  Future<void> _refresh({bool isResume = false}) async {
+    if (AgentService.I.mode != AgentMode.control) return;
+    _retryTimer?.cancel();
     final enabled = await DeviceControlService.I.isEnabled().catchError((_) => false);
     if (!mounted) return;
-    if (!enabled && _enabled != true) {
-      // Retry once after 600ms in case the OS is still binding the service on resume
-      await Future.delayed(const Duration(milliseconds: 600));
-      if (!mounted) return;
-      final retryEnabled = await DeviceControlService.I.isEnabled().catchError((_) => false);
-      if (mounted) setState(() => _enabled = retryEnabled);
-      return;
-    }
     if (mounted) setState(() => _enabled = enabled);
+    if (isResume && !enabled && _enabled != true) {
+      // Retry once after 600ms on resume in case the OS is still binding the service
+      _retryTimer = Timer(const Duration(milliseconds: 600), () async {
+        if (!mounted || AgentService.I.mode != AgentMode.control) return;
+        final retryEnabled = await DeviceControlService.I.isEnabled().catchError((_) => false);
+        if (mounted) setState(() => _enabled = retryEnabled);
+      });
+    }
   }
 
   Future<void> _retry() async {
