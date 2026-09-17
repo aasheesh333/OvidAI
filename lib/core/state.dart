@@ -34,6 +34,7 @@ import 'native_plugins/prompt_knowledge.dart';
 import 'native_plugins/rest_descriptors_backend.dart';
 import 'native_plugins/rest_descriptors_comms.dart';
 import 'native_plugins/rest_descriptors_dev.dart';
+import 'native_plugins/rest_descriptors_infra.dart';
 import 'native_plugins/sandbox_utilities.dart';
 import 'native_plugins/web_and_db_utilities.dart';
 
@@ -1289,6 +1290,7 @@ void registerAllNativePlugins() {
   registerComms();
   registerDevPlatforms();
   registerBackend();
+  registerInfra();
 }
 
 class AppState extends ChangeNotifier {
