@@ -32,6 +32,7 @@ import 'native_plugins/misc_utilities.dart';
 import 'native_plugins/prompt_dev.dart';
 import 'native_plugins/prompt_knowledge.dart';
 import 'native_plugins/rest_descriptors_comms.dart';
+import 'native_plugins/rest_descriptors_dev.dart';
 import 'native_plugins/sandbox_utilities.dart';
 import 'native_plugins/web_and_db_utilities.dart';
 
@@ -1268,7 +1269,7 @@ class _PluginSafetyStartupTask implements StartupTask {
 
 /// Registers every in-process native plugin capability (NP1 framework +
 /// NP2 utility batches + NP4 leftover utilities: data, dev, web/db,
-/// sandbox, prompt, misc utilities, and comms API integrations) into
+/// sandbox, prompt, misc utilities, and comms + dev API integrations) into
 /// [NativePluginRegistry].
 ///
 /// Called from the [AppState] constructor alongside `_seed`, so the
@@ -1285,6 +1286,7 @@ void registerAllNativePlugins() {
   registerPromptKnowledge();
   registerMiscUtilities();
   registerComms();
+  registerDevPlatforms();
 }
 
 class AppState extends ChangeNotifier {
