@@ -6827,7 +6827,10 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: AgentService.I,
     builder: (_, _) {
-      if (AgentService.I.mode != AgentMode.control || _enabled != false) {
+    if (_enabled == null) {
+      _refresh();
+    }
+    if (AgentService.I.mode != AgentMode.control || _enabled != false) {
         return const SizedBox.shrink();
       }
       return Column(
