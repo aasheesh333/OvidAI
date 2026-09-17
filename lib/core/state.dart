@@ -2719,10 +2719,25 @@ class AppState extends ChangeNotifier {
   String lastSelectedModel = '';
   String? lastSelectedProviderId;
 
-  /// Most-recently selected models, newest first, capped at 10. Identity is
+  /// Most-recently selected models, newest first. Identity is
   /// `(providerId, model)` so the same model id exposed by two providers
   /// never collides. Surfaced at the top of the model picker.
   final List<({String providerId, String model})> recentModels = [];
+
+  @visibleForTesting
+  static File? recentModelsFileOverrideForTest;
+
+  static Future<File?> _recentModelsJsonFile() async {
+    if (recentModelsFileOverrideForTest != null) {
+      return recentModelsFileOverrideForTest!;
+    }
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      return File('${dir.path}/recent_models.json');
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Last Studio repo (owner/name) and pinned workspace folder — carried into
   /// new sessions so a restart never forces fresh repo/folder selection.
@@ -2735,7 +2750,7 @@ class AppState extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       lastSelectedModel = prefs.getString(_kLastModel) ?? '';
       lastSelectedProviderId = prefs.getString(_kLastProvider);
-      _loadRecentModels(prefs);
+      await _loadRecentModels(prefs);
       lastRepoFull = prefs.getString(_kLastRepo);
       final storedBranch = prefs.getString(_kLastBranch);
       lastBranch = storedBranch ?? 'main';
@@ -2747,6 +2762,19 @@ class AppState extends ChangeNotifier {
         if (s != null && s.model != 'Select a provider') {
           lastSelectedModel = s.model;
           lastSelectedProviderId = s.providerId;
+        }
+      }
+      if (lastSelectedModel.isNotEmpty &&
+          lastSelectedModel != 'Select a provider') {
+        final pId = (lastSelectedProviderId != null && lastSelectedProviderId!.isNotEmpty)
+            ? lastSelectedProviderId
+            : _inferProviderId(lastSelectedModel);
+        if (pId != null &&
+            pId.isNotEmpty &&
+            !recentModels.any(
+              (r) => r.providerId == pId && r.model == lastSelectedModel,
+            )) {
+          recentModels.insert(0, (providerId: pId, model: lastSelectedModel));
         }
       }
       if (lastRepoFull == null || lastRepoFull!.isEmpty) {
@@ -2793,45 +2821,109 @@ class AppState extends ChangeNotifier {
     } catch (_) {}
   }
 
-  void _loadRecentModels(SharedPreferences prefs) {
+  Future<void> _loadRecentModels(SharedPreferences prefs) async {
     try {
       recentModels.clear();
-      final raw = prefs.getString(_kRecentModels);
+      String? raw;
+      try {
+        final file = await _recentModelsJsonFile();
+        if (file != null && await file.exists()) {
+          final content = await file.readAsString();
+          if (content.trim().isNotEmpty) {
+            raw = content;
+          }
+        }
+      } catch (_) {}
+      raw ??= prefs.getString(_kRecentModels);
       if (raw == null || raw.isEmpty) return;
       final decoded = jsonDecode(raw);
-      if (decoded is! List) return;
-      for (final e in decoded) {
-        if (e is Map && e['p'] is String && e['m'] is String) {
-          recentModels.add((providerId: e['p'] as String, model: e['m'] as String));
+      if (decoded is List) {
+        for (final e in decoded) {
+          if (e is Map && e['p'] is String && e['m'] is String) {
+            final p = e['p'] as String;
+            final m = e['m'] as String;
+            if (m.isNotEmpty &&
+                !recentModels.any((r) => r.providerId == p && r.model == m)) {
+              recentModels.add((providerId: p, model: m));
+            }
+          }
+          if (recentModels.length >= 50) break;
         }
-        if (recentModels.length >= 10) break;
+      } else if (decoded is Map) {
+        if (decoded['current'] is Map) {
+          final cur = decoded['current'] as Map;
+          final m = cur['model'] as String?;
+          final p = cur['providerId'] as String?;
+          if (m != null && m.isNotEmpty && lastSelectedModel.isEmpty) {
+            lastSelectedModel = m;
+            lastSelectedProviderId = p;
+          }
+        }
+        final list = decoded['recent'];
+        if (list is List) {
+          for (final e in list) {
+            if (e is Map) {
+              final p = (e['providerId'] ?? e['p']) as String?;
+              final m = (e['model'] ?? e['m']) as String?;
+              if (p != null &&
+                  m != null &&
+                  m.isNotEmpty &&
+                  !recentModels.any((r) => r.providerId == p && r.model == m)) {
+                recentModels.add((providerId: p, model: m));
+              }
+            }
+            if (recentModels.length >= 50) break;
+          }
+        }
       }
     } catch (_) {}
   }
 
+  Future<void> persistRecentModels() => _persistRecentModels();
+
   Future<void> _persistRecentModels() async {
+    final payload = {
+      'current': {
+        'providerId': lastSelectedProviderId ?? '',
+        'model': lastSelectedModel,
+      },
+      'recent': [
+        for (final r in recentModels)
+          {
+            'providerId': r.providerId,
+            'model': r.model,
+            'selectedAt': DateTime.now().toIso8601String(),
+          },
+      ],
+    };
+    final jsonStr = jsonEncode(payload);
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(
-        _kRecentModels,
-        jsonEncode([
-          for (final r in recentModels) {'p': r.providerId, 'm': r.model},
-        ]),
-      );
+      await prefs.setString(_kRecentModels, jsonStr);
+    } catch (_) {}
+    try {
+      final file = await _recentModelsJsonFile();
+      if (file != null) {
+        if (!file.parent.existsSync()) {
+          file.parent.createSync(recursive: true);
+        }
+        await file.writeAsString(jsonStr);
+      }
     } catch (_) {}
   }
 
   /// Record a `(providerId, model)` selection as most-recent (newest first,
-  /// de-duplicated, capped at 10).
+  /// de-duplicated, capped at 50 to track all past selections).
   void _rememberRecentModel(String providerId, String model) {
+    if (model.isEmpty || model == 'Select a provider') return;
     recentModels.removeWhere(
       (r) => r.providerId == providerId && r.model == model,
     );
     recentModels.insert(0, (providerId: providerId, model: model));
-    if (recentModels.length > 10) {
-      recentModels.removeRange(10, recentModels.length);
+    if (recentModels.length > 50) {
+      recentModels.removeRange(50, recentModels.length);
     }
-    _persistRecentModels();
+    unawaited(_persistRecentModels());
   }
 
   /// A persisted workspace folder is only reused while it still exists on

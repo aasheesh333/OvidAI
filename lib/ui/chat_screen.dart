@@ -1895,11 +1895,9 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
     final app = AppState.I;
     final q = _query.toLowerCase();
 
-    return Container(
-      decoration: BoxDecoration(
-        color: Aether.surface,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
+    return Material(
+      color: Aether.surface,
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
       child: Column(
         children: [
           // Drag handle
@@ -1998,20 +1996,39 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                     ),
                   );
                 }
-                // Recent models (newest first, max 10), only when the
-                // provider still exposes the model. Shown at the very top.
-                final recents = q.isEmpty
-                    ? app.recentModels
-                          .where(
-                            (r) =>
-                                app.providerById(r.providerId)?.models.contains(
-                                  r.model,
-                                ) ??
-                                false,
-                          )
-                          .take(10)
-                          .toList()
-                    : <({String providerId, String model})>[];
+                // Recent models: current selected model + all past selected models.
+                final allRecents = <({String providerId, String model})>[];
+                final session = app.activeSession;
+                if (session != null &&
+                    session.model.isNotEmpty &&
+                    session.model != 'Select a provider') {
+                  final pId = session.providerId;
+                  if (pId != null && pId.isNotEmpty) {
+                    allRecents.add((
+                      providerId: pId,
+                      model: session.model,
+                    ));
+                  }
+                }
+                for (final r in app.recentModels) {
+                  if (!allRecents.any(
+                    (item) =>
+                        item.providerId == r.providerId &&
+                        item.model == r.model,
+                  )) {
+                    allRecents.add(r);
+                  }
+                }
+                final recents = allRecents.where((r) {
+                  final p = app.providerById(r.providerId);
+                  if (p == null) return false;
+                  if (q.isEmpty) return true;
+                  final baseModel =
+                      r.model.split('·').first.trim().toLowerCase();
+                  return baseModel.contains(q) ||
+                      r.model.toLowerCase().contains(q) ||
+                      p.name.toLowerCase().contains(q);
+                }).toList();
                 final showRecents = recents.isNotEmpty;
                 return ListView.builder(
                   controller: widget.scrollController,
@@ -2040,6 +2057,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                             _ModelTile(
                               providerId: r.providerId,
                               model: r.model,
+                              isRecent: true,
                             ),
                         ],
                       );
@@ -2129,7 +2147,12 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
 class _ModelTile extends StatelessWidget {
   final String providerId;
   final String model;
-  const _ModelTile({required this.providerId, required this.model});
+  final bool isRecent;
+  const _ModelTile({
+    required this.providerId,
+    required this.model,
+    this.isRecent = false,
+  });
 
   static const _effortModels = [
     'deepseek',
@@ -2154,9 +2177,34 @@ class _ModelTile extends StatelessWidget {
     final app = AppState.I;
     final session = app.activeSession;
     final current = session?.model ?? '';
+    final baseModel = model.split('·').first.trim();
+    final currentBase = current.split('·').first.trim();
+    final isExactMatch = current == model;
     final selected =
         session?.providerId == providerId &&
-        (current == model || current.startsWith('$model ·'));
+        (isExactMatch || currentBase == baseModel);
+
+    final provider = app.providerById(providerId);
+    final providerName = provider?.name ?? providerId;
+
+    Widget buildCurrentBadge() {
+      return Container(
+        margin: const EdgeInsets.only(right: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: Aether.accentSoft,
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: const Text(
+          'CURRENT',
+          style: TextStyle(
+            fontSize: 9.5,
+            fontWeight: FontWeight.w700,
+            color: Aether.accent,
+          ),
+        ),
+      );
+    }
 
     if (!supportsEffort) {
       return ListTile(
@@ -2164,11 +2212,26 @@ class _ModelTile extends StatelessWidget {
         leading: Icon(
           Icons.smart_toy_outlined,
           size: 18,
-          color: Aether.textMuted,
+          color: selected ? Aether.accent : Aether.textMuted,
         ),
-        title: Text(model, style: const TextStyle(fontSize: 13.5)),
+        title: Text(baseModel, style: const TextStyle(fontSize: 13.5)),
+        subtitle: isRecent
+            ? Text(
+                providerName,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: selected ? Aether.accent : Aether.textFaint,
+                ),
+              )
+            : null,
         trailing: selected
-            ? const Icon(Icons.check, size: 18, color: Aether.accent)
+            ? Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (isRecent) buildCurrentBadge(),
+                  const Icon(Icons.check, size: 18, color: Aether.accent),
+                ],
+              )
             : null,
         onTap: () {
           app.setModel(providerId, model);
@@ -2176,6 +2239,10 @@ class _ModelTile extends StatelessWidget {
         },
       );
     }
+
+    final effortVariant = selected && current.contains('·')
+        ? current.split('·').last.trim()
+        : (model.contains('·') ? model.split('·').last.trim() : null);
 
     return Theme(
       data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
@@ -2186,17 +2253,33 @@ class _ModelTile extends StatelessWidget {
         leading: Icon(
           Icons.psychology_outlined,
           size: 18,
-          color: Aether.textMuted,
+          color: selected ? Aether.accent : Aether.textMuted,
         ),
-        title: Text(model, style: const TextStyle(fontSize: 13.5)),
-        subtitle: selected && current.contains('·')
+        title: Text(baseModel, style: const TextStyle(fontSize: 13.5)),
+        subtitle: isRecent
             ? Text(
-                current.split('·').last.trim(),
-                style: const TextStyle(fontSize: 11, color: Aether.accent),
+                effortVariant != null
+                    ? '$providerName · $effortVariant'
+                    : providerName,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: selected ? Aether.accent : Aether.textFaint,
+                ),
               )
-            : null,
+            : (effortVariant != null
+                ? Text(
+                    effortVariant,
+                    style: const TextStyle(fontSize: 11, color: Aether.accent),
+                  )
+                : null),
         trailing: selected
-            ? const Icon(Icons.check, size: 18, color: Aether.accent)
+            ? Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (isRecent) buildCurrentBadge(),
+                  const Icon(Icons.check, size: 18, color: Aether.accent),
+                ],
+              )
             : null,
         children: [
           Wrap(
@@ -2208,11 +2291,15 @@ class _ModelTile extends StatelessWidget {
                   label: Text(v, style: const TextStyle(fontSize: 12)),
                   selected:
                       current ==
-                      (v == 'Medium' ? '$model · Medium' : '$model · $v'),
+                      (v == 'Medium'
+                          ? '$baseModel · Medium'
+                          : '$baseModel · $v'),
                   onSelected: (_) {
                     app.setModel(
                       providerId,
-                      v == 'Medium' ? '$model · Medium' : '$model · $v',
+                      v == 'Medium'
+                          ? '$baseModel · Medium'
+                          : '$baseModel · $v',
                     );
                     Navigator.pop(context);
                   },
@@ -2222,7 +2309,9 @@ class _ModelTile extends StatelessWidget {
                   side: BorderSide(
                     color:
                         current ==
-                            (v == 'Medium' ? '$model · Medium' : '$model · $v')
+                            (v == 'Medium'
+                                ? '$baseModel · Medium'
+                                : '$baseModel · $v')
                         ? Aether.accent
                         : Aether.hairline,
                   ),
