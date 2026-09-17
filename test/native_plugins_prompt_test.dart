@@ -4,6 +4,7 @@ import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/native_plugins/prompt_dev.dart';
 import 'package:ovid_ai/core/native_plugins/prompt_framework.dart';
+import 'package:ovid_ai/core/native_plugins/prompt_knowledge.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -47,6 +48,33 @@ class TestPromptCapability extends NativePromptCapability {
     final name = args['name']?.toString() ?? 'world';
     return 'Greet $name warmly.';
   }
+}
+
+class FanoutFourCapability extends NativePromptCapability {
+  @override
+  String get pluginName => 'Fanout Four';
+
+  @override
+  String get taskSystemPrompt => 'You are a test helper.';
+
+  @override
+  List<NativePluginConfigField> get configFields => const [];
+
+  @override
+  List<NativePluginTool> get tools => const [
+        NativePluginTool(
+          name: 'compare',
+          description: 'Compare.',
+          inputSchema: {'type': 'object'},
+        ),
+      ];
+
+  @override
+  Future<void> configure(Map<String, String> values) async {}
+
+  @override
+  String buildPrompt(String toolName, Map<String, dynamic> args) =>
+      'FANOUT:a,b,c,d|hello';
 }
 
 void main() {
@@ -493,6 +521,504 @@ void main() {
     final cap = ReadmeWriterCapability();
     await cap.configure({});
     final out = await cap.callTool('generate', {'repo_name': 'r'});
+    expect(out, contains('through the agent'));
+  });
+
+  // --- Task 3: knowledge/productivity prompt plugins ---
+
+  test('Translate Pro prompt embeds bounded input, schema requires text+target',
+      () {
+    final cap = TranslateProCapability();
+    expect(cap.pluginName, 'Translate Pro');
+    expect(NativePluginRegistry.slugify(cap.pluginName), 'translate_pro');
+    final prompt = cap.buildPrompt('translate', {
+      'text': 'Hello world',
+      'target_lang': 'French',
+      'source_lang': 'English',
+    });
+    expect(prompt, contains('Hello world'));
+    expect(prompt, contains('French'));
+    expect(prompt, contains('English'));
+    expect(requiredOf(cap, 'translate'), containsAll(['text', 'target_lang']));
+  });
+
+  test('Study Mode flashcards prompt demands Q/A shape with count', () {
+    final cap = StudyModeCapability();
+    expect(cap.pluginName, 'Study Mode');
+    expect(NativePluginRegistry.slugify(cap.pluginName), 'study_mode');
+    final prompt = cap.buildPrompt('flashcards', {
+      'text': 'Photosynthesis converts light to energy',
+      'count': 3,
+    });
+    expect(prompt, contains('Photosynthesis converts light to energy'));
+    expect(prompt, contains('3'));
+    expect(prompt, contains('Q:'));
+    expect(prompt, contains('A:'));
+    expect(requiredOf(cap, 'flashcards'), contains('text'));
+  });
+
+  test('Study Mode quiz prompt demands MCQs with an answer key', () {
+    final cap = StudyModeCapability();
+    final prompt = cap.buildPrompt('quiz', {
+      'text': 'The mitochondria is the powerhouse',
+      'count': 2,
+    });
+    expect(prompt, contains('mitochondria'));
+    expect(prompt, contains('2'));
+    expect(prompt, contains('answer key'));
+    expect(requiredOf(cap, 'quiz'), contains('text'));
+  });
+
+  test('Meeting Notes prompt embeds transcript, demands decisions+actions',
+      () {
+    final cap = MeetingNotesCapability();
+    expect(cap.pluginName, 'Meeting Notes');
+    expect(NativePluginRegistry.slugify(cap.pluginName), 'meeting_notes');
+    final prompt = cap.buildPrompt('summarize', {
+      'transcript': 'Ada: ship it Friday. Bo: I will own the rollout.',
+    });
+    expect(prompt, contains('ship it Friday'));
+    expect(prompt, contains('decision'));
+    expect(prompt, contains('action item'));
+    expect(requiredOf(cap, 'summarize'), contains('transcript'));
+  });
+
+  test('Meeting Notes truncates long transcripts with omission notice', () {
+    final cap = MeetingNotesCapability();
+    final prompt = cap.buildPrompt('summarize', {'transcript': 'x' * 13000});
+    expect(prompt, contains('characters omitted'));
+  });
+
+  test('Data Analyst stats correctness on a 3-column CSV fixture', () {
+    final cap = DataAnalystCapability();
+    expect(cap.pluginName, 'Data Analyst');
+    expect(NativePluginRegistry.slugify(cap.pluginName), 'data_analyst');
+    const csv = 'name,age,score\nalice,10,1.5\nbob,20,2.5';
+    final prompt = cap.buildPrompt('analyze', {'csv_text': csv});
+    expect(prompt, contains('name'));
+    expect(prompt, contains('age'));
+    expect(prompt, contains('score'));
+    expect(prompt, contains('Rows: 2'));
+    expect(prompt, contains('min 10'));
+    expect(prompt, contains('max 20'));
+    expect(prompt, contains('mean 15'));
+    expect(prompt, contains('1.5'));
+    expect(prompt, contains('2.5'));
+    expect(requiredOf(cap, 'analyze'), contains('csv_text'));
+  });
+
+  test('Issue Triager prompt demands strict area/severity/priority/labels',
+      () {
+    final cap = IssueTriagerCapability();
+    expect(cap.pluginName, 'Issue Triager');
+    expect(NativePluginRegistry.slugify(cap.pluginName), 'issue_triager');
+    final prompt = cap.buildPrompt('triage', {
+      'title': 'Crash on launch',
+      'body': 'App exits immediately on Android 14',
+    });
+    expect(prompt, contains('Crash on launch'));
+    expect(prompt, contains('Android 14'));
+    expect(prompt, contains('area:'));
+    expect(prompt, contains('severity:'));
+    expect(prompt, contains('priority:'));
+    expect(prompt, contains('labels:'));
+    expect(requiredOf(cap, 'triage'), contains('title'));
+  });
+
+  test('Release Notes prompt embeds PR list, demands highlights+upgrade notes',
+      () {
+    final cap = ReleaseNotesCapability();
+    expect(cap.pluginName, 'Release Notes');
+    expect(NativePluginRegistry.slugify(cap.pluginName), 'release_notes');
+    final prompt = cap.buildPrompt('generate', {
+      'pr_list': '#41 fix login crash\n#42 add dark mode',
+    });
+    expect(prompt, contains('#41 fix login crash'));
+    expect(prompt, contains('#42 add dark mode'));
+    expect(prompt.toLowerCase(), contains('upgrade'));
+    expect(requiredOf(cap, 'generate'), contains('pr_list'));
+  });
+
+  test('Calendar parse_reminder demands strict JSON title/when_text', () {
+    final cap = CalendarTasksCapability();
+    expect(cap.pluginName, 'Calendar & Tasks');
+    expect(NativePluginRegistry.slugify(cap.pluginName), 'calendar_tasks');
+    final prompt = cap.buildPrompt('parse_reminder', {
+      'text': 'Remind me to call mom tomorrow at 6pm',
+    });
+    expect(prompt, contains('call mom'));
+    expect(prompt, contains('title'));
+    expect(prompt, contains('when_text'));
+    expect(prompt.toLowerCase(), contains('json'));
+    expect(requiredOf(cap, 'parse_reminder'), contains('text'));
+  });
+
+  test('Calendar list_help returns static syntax help without arguments', () {
+    final cap = CalendarTasksCapability();
+    final prompt = cap.buildPrompt('list_help', {});
+    expect(prompt.toLowerCase(), contains('reminder'));
+    expect(prompt, contains('parse_reminder'));
+  });
+
+  test('Multi-Model Compare encodes a FANOUT envelope, rejects 4 models',
+      () {
+    final cap = MultiModelCompareCapability();
+    expect(cap.pluginName, 'Multi-Model Compare');
+    expect(
+      NativePluginRegistry.slugify(cap.pluginName),
+      'multi_model_compare',
+    );
+    final prompt = cap.buildPrompt('compare', {
+      'prompt': 'Summarize X',
+      'models': ['m-a', 'm-b'],
+    });
+    expect(prompt.startsWith('FANOUT:'), isTrue);
+    expect(prompt, contains('m-a'));
+    expect(prompt, contains('m-b'));
+    expect(prompt, contains('Summarize X'));
+    expect(requiredOf(cap, 'compare'), contains('prompt'));
+    expect(
+      () => cap.buildPrompt('compare', {
+        'prompt': 'hi',
+        'models': ['a', 'b', 'c', 'd'],
+      }),
+      throwsArgumentError,
+    );
+    expect(
+      () => cap.buildPrompt('compare', {'prompt': '   '}),
+      throwsArgumentError,
+    );
+  });
+
+  test('Translate Pro end-to-end dispatch returns echo marker', () async {
+    installSessionWithProvider('prompt-prov');
+    registerPromptKnowledge();
+    installDevRow('Translate Pro');
+    final out = await dispatchEcho(
+      'plugin__translate_pro__translate',
+      {'text': 'Hello', 'target_lang': 'French'},
+    );
+    expect(out, contains('ECHO:'));
+  });
+
+  test('Study Mode flashcards end-to-end dispatch returns echo marker',
+      () async {
+    installSessionWithProvider('prompt-prov');
+    registerPromptKnowledge();
+    installDevRow('Study Mode');
+    final out = await dispatchEcho(
+      'plugin__study_mode__flashcards',
+      {'text': 'Photosynthesis basics'},
+    );
+    expect(out, contains('ECHO:'));
+  });
+
+  test('Study Mode quiz end-to-end dispatch returns echo marker', () async {
+    installSessionWithProvider('prompt-prov');
+    registerPromptKnowledge();
+    installDevRow('Study Mode');
+    final out = await dispatchEcho(
+      'plugin__study_mode__quiz',
+      {'text': 'Mitochondria basics'},
+    );
+    expect(out, contains('ECHO:'));
+  });
+
+  test('Meeting Notes end-to-end dispatch returns echo marker', () async {
+    installSessionWithProvider('prompt-prov');
+    registerPromptKnowledge();
+    installDevRow('Meeting Notes');
+    final out = await dispatchEcho(
+      'plugin__meeting_notes__summarize',
+      {'transcript': 'Ada: ship it.'},
+    );
+    expect(out, contains('ECHO:'));
+  });
+
+  test('Data Analyst end-to-end dispatch returns echo marker', () async {
+    installSessionWithProvider('prompt-prov');
+    registerPromptKnowledge();
+    installDevRow('Data Analyst');
+    final out = await dispatchEcho(
+      'plugin__data_analyst__analyze',
+      {'csv_text': 'a,b\n1,2\n3,4'},
+    );
+    expect(out, contains('ECHO:'));
+  });
+
+  test('Issue Triager end-to-end dispatch returns echo marker', () async {
+    installSessionWithProvider('prompt-prov');
+    registerPromptKnowledge();
+    installDevRow('Issue Triager');
+    final out = await dispatchEcho(
+      'plugin__issue_triager__triage',
+      {'title': 'Crash on launch'},
+    );
+    expect(out, contains('ECHO:'));
+  });
+
+  test('Release Notes end-to-end dispatch returns echo marker', () async {
+    installSessionWithProvider('prompt-prov');
+    registerPromptKnowledge();
+    installDevRow('Release Notes');
+    final out = await dispatchEcho(
+      'plugin__release_notes__generate',
+      {'pr_list': '#1 fix x'},
+    );
+    expect(out, contains('ECHO:'));
+  });
+
+  test('Calendar parse_reminder end-to-end dispatch returns echo marker',
+      () async {
+    installSessionWithProvider('prompt-prov');
+    registerPromptKnowledge();
+    installDevRow('Calendar & Tasks');
+    final out = await dispatchEcho(
+      'plugin__calendar_tasks__parse_reminder',
+      {'text': 'Call mom tomorrow'},
+    );
+    expect(out, contains('ECHO:'));
+  });
+
+  test('Calendar list_help end-to-end dispatch returns echo marker', () async {
+    installSessionWithProvider('prompt-prov');
+    registerPromptKnowledge();
+    installDevRow('Calendar & Tasks');
+    final out = await dispatchEcho(
+      'plugin__calendar_tasks__list_help',
+      {},
+    );
+    expect(out, contains('ECHO:'));
+  });
+
+  test('Multi-Model Compare end-to-end dispatch returns echo marker',
+      () async {
+    installSessionWithProvider('prompt-prov');
+    registerPromptKnowledge();
+    installDevRow('Multi-Model Compare');
+    final out = await dispatchEcho(
+      'plugin__multi_model_compare__compare',
+      {
+        'prompt': 'Summarize X',
+        'models': ['prompt-prov'],
+      },
+    );
+    expect(out, contains('ECHO:'));
+  });
+
+  test('compare fan-out calls each model once with labeled sections',
+      () async {
+    installSessionWithProvider('cmp-a');
+    installSessionWithProvider('cmp-b');
+    registerPromptKnowledge();
+    installDevRow('Multi-Model Compare');
+    final calls = <String>[];
+    AgentService.promptLlmForTest = (p, msgs, sess) async {
+      calls.add(p.id);
+      return {
+        'choices': [
+          {
+            'message': {'content': 'ANS-${p.id}'},
+          },
+        ],
+      };
+    };
+    final out = await AgentService.I.dispatchForTest(
+      'plugin__multi_model_compare__compare',
+      {
+        'prompt': 'Summarize X',
+        'models': ['cmp-a', 'cmp-b'],
+      },
+    );
+    expect(calls, ['cmp-a', 'cmp-b']);
+    expect(out, contains('## cmp-a'));
+    expect(out, contains('## cmp-b'));
+    expect(out, contains('ANS-cmp-a'));
+    expect(out, contains('ANS-cmp-b'));
+  });
+
+  test('compare fan-out without models falls back to the session provider',
+      () async {
+    installSessionWithProvider('prompt-prov');
+    registerPromptKnowledge();
+    installDevRow('Multi-Model Compare');
+    final calls = <String>[];
+    AgentService.promptLlmForTest = (p, msgs, sess) async {
+      calls.add(p.id);
+      return {
+        'choices': [
+          {
+            'message': {'content': 'SOLO'},
+          },
+        ],
+      };
+    };
+    final out = await AgentService.I.dispatchForTest(
+      'plugin__multi_model_compare__compare',
+      {'prompt': 'Summarize X'},
+    );
+    expect(calls, ['prompt-prov']);
+    expect(out, contains('## prompt-prov'));
+    expect(out, contains('SOLO'));
+  });
+
+  test('compare fan-out keeps one section on per-model failure', () async {
+    installSessionWithProvider('cmp-a');
+    installSessionWithProvider('cmp-b');
+    registerPromptKnowledge();
+    installDevRow('Multi-Model Compare');
+    AgentService.promptLlmForTest = (p, msgs, sess) async {
+      if (p.id == 'cmp-b') return null;
+      return {
+        'choices': [
+          {
+            'message': {'content': 'OK-A'},
+          },
+        ],
+      };
+    };
+    final out = await AgentService.I.dispatchForTest(
+      'plugin__multi_model_compare__compare',
+      {
+        'prompt': 'Summarize X',
+        'models': ['cmp-a', 'cmp-b'],
+      },
+    );
+    expect(out, contains('## cmp-a'));
+    expect(out, contains('OK-A'));
+    expect(out, contains('## cmp-b'));
+    expect(out, contains('Model call failed'));
+  });
+
+  test('compare fan-out reports a shortfall line for unknown models',
+      () async {
+    installSessionWithProvider('cmp-a');
+    registerPromptKnowledge();
+    installDevRow('Multi-Model Compare');
+    AgentService.promptLlmForTest = (p, msgs, sess) async => {
+          'choices': [
+            {
+              'message': {'content': 'OK-A'},
+            },
+          ],
+        };
+    final out = await AgentService.I.dispatchForTest(
+      'plugin__multi_model_compare__compare',
+      {
+        'prompt': 'Summarize X',
+        'models': ['cmp-a', 'ghost-x'],
+      },
+    );
+    expect(out, contains('## cmp-a'));
+    expect(out, contains('OK-A'));
+    expect(out, contains('## ghost-x'));
+    expect(out, contains('No configured provider'));
+  });
+
+  test('compare fan-out rejects more than 3 models agent-side', () async {
+    installSessionWithProvider('prompt-prov');
+    NativePluginRegistry.I.register(FanoutFourCapability());
+    installDevRow('Fanout Four');
+    var called = false;
+    AgentService.promptLlmForTest = (p, msgs, sess) async {
+      called = true;
+      return {
+        'choices': [
+          {
+            'message': {'content': 'SHOULD NOT HAPPEN'},
+          },
+        ],
+      };
+    };
+    final out = await AgentService.I.dispatchForTest(
+      'plugin__fanout_four__compare',
+      {},
+    );
+    expect(called, isFalse);
+    expect(out, contains('at most 3'));
+  });
+
+  test('prompt knowledge capabilities reject unknown tools with ArgumentError',
+      () {
+    final caps = <NativePromptCapability>[
+      TranslateProCapability(),
+      StudyModeCapability(),
+      MeetingNotesCapability(),
+      DataAnalystCapability(),
+      IssueTriagerCapability(),
+      ReleaseNotesCapability(),
+      CalendarTasksCapability(),
+      MultiModelCompareCapability(),
+    ];
+    for (final cap in caps) {
+      expect(
+        () => cap.buildPrompt('nope', {}),
+        throwsArgumentError,
+        reason: '${cap.pluginName} should reject unknown tool',
+      );
+      expect(cap.configFields, isEmpty);
+      expect(cap.maxInputChars, 12000);
+    }
+  });
+
+  test('knowledge plugins reject blank required args with ArgumentError', () {
+    expect(
+      () => TranslateProCapability().buildPrompt('translate', {
+        'text': '',
+        'target_lang': 'French',
+      }),
+      throwsArgumentError,
+    );
+    expect(
+      () => MeetingNotesCapability().buildPrompt('summarize', {}),
+      throwsArgumentError,
+    );
+    expect(
+      () => DataAnalystCapability().buildPrompt('analyze', {'csv_text': ''}),
+      throwsArgumentError,
+    );
+    expect(
+      () => IssueTriagerCapability().buildPrompt('triage', {'title': '  '}),
+      throwsArgumentError,
+    );
+    expect(
+      () => ReleaseNotesCapability().buildPrompt('generate', {}),
+      throwsArgumentError,
+    );
+    expect(
+      () => CalendarTasksCapability().buildPrompt('parse_reminder', {}),
+      throwsArgumentError,
+    );
+  });
+
+  test('registerPromptKnowledge registers all eight knowledge plugins', () {
+    registerPromptKnowledge();
+    for (final name in [
+      'Translate Pro',
+      'Study Mode',
+      'Meeting Notes',
+      'Data Analyst',
+      'Issue Triager',
+      'Release Notes',
+      'Calendar & Tasks',
+      'Multi-Model Compare',
+    ]) {
+      expect(
+        NativePluginRegistry.I.has(name),
+        isTrue,
+        reason: '$name should be registered',
+      );
+    }
+  });
+
+  test('prompt knowledge configure no-ops and callTool defers to the agent',
+      () async {
+    final cap = TranslateProCapability();
+    await cap.configure({});
+    final out = await cap.callTool('translate', {
+      'text': 'hi',
+      'target_lang': 'French',
+    });
     expect(out, contains('through the agent'));
   });
 }

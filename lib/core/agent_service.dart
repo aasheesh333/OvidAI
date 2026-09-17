@@ -7560,9 +7560,18 @@ ${await _agentsMdBlock()}
     if (session == null || p == null || !p.isConfigured) {
       return 'No provider configured for this session.';
     }
+    final userContent = cap.buildPrompt(toolName, args);
+    // NP5 Task 3 (plan-mandated framework exception): Multi-Model Compare
+    // encodes a `FANOUT:<idA>,<idB>|<prompt>` envelope in its user message.
+    // Fan out here with sequential sub-calls — one per distinct model, at
+    // most 3 — and return `## <model>` sections with per-model failure
+    // lines instead of a single answer.
+    if (userContent.startsWith('FANOUT:')) {
+      return _runPromptFanOut(cap, userContent, session, p);
+    }
     final msgs = [
       {'role': 'system', 'content': cap.taskSystemPrompt},
-      {'role': 'user', 'content': cap.buildPrompt(toolName, args)},
+      {'role': 'user', 'content': userContent},
     ];
     final override = promptLlmForTest;
     final r = override != null
@@ -7578,6 +7587,117 @@ ${await _agentsMdBlock()}
     final text = (raw as String? ?? '').trim();
     if (text.isEmpty) return 'The model returned no text.';
     return text;
+  }
+
+  /// Multi-model fan-out for the `FANOUT:` envelope (NP5 Task 3).
+  ///
+  /// [envelope] is `FANOUT:<idA>,<idB>|<prompt>` as built by
+  /// `MultiModelCompareCapability.buildPrompt`. Each requested id resolves
+  /// via `AppState.I.providerById` (falling back to a bare-model-id lookup
+  /// across configured providers); an empty id list falls back to the
+  /// session provider plus the 2 most-recent distinct configured providers
+  /// (never repeated). Sub-calls run sequentially through the same
+  /// `promptLlmForTest ?? _callLlm(..., includeTools: false)` path as
+  /// [runPromptTool]. The result is one `## <model>` section per model with
+  /// honest per-model failure lines and shortfall lines for ids no
+  /// configured provider covers.
+  Future<String> _runPromptFanOut(
+    NativePromptCapability cap,
+    String envelope,
+    ChatSession session,
+    ProviderConfig sessionProvider,
+  ) async {
+    final rest = envelope.substring('FANOUT:'.length);
+    final bar = rest.indexOf('|');
+    final modelsPart = bar < 0 ? rest : rest.substring(0, bar);
+    final prompt = bar < 0 ? '' : rest.substring(bar + 1);
+    if (prompt.trim().isEmpty) {
+      return 'Multi-model compare received an empty prompt.';
+    }
+    final seen = <String>{};
+    final requested = <String>[];
+    for (final part in modelsPart.split(',')) {
+      final id = part.trim();
+      if (id.isEmpty || !seen.add(id)) continue;
+      requested.add(id);
+    }
+    if (requested.length > 3) {
+      return 'Multi-model compare supports at most 3 models '
+          '(got ${requested.length}).';
+    }
+
+    final targets = <({String label, ProviderConfig provider})>[];
+    final shortfall = <String>[];
+    if (requested.isEmpty) {
+      targets.add((label: sessionProvider.id, provider: sessionProvider));
+      for (final recent in AppState.I.recentModels) {
+        if (targets.length >= 3) break;
+        if (recent.providerId == sessionProvider.id) continue;
+        if (targets.any((t) => t.provider.id == recent.providerId)) continue;
+        final rp = AppState.I.providerById(recent.providerId);
+        if (rp == null || !rp.isConfigured) continue;
+        targets.add((label: rp.id, provider: rp));
+      }
+    } else {
+      for (final id in requested) {
+        final direct = AppState.I.providerById(id);
+        if (direct != null && direct.isConfigured) {
+          targets.add((label: id, provider: direct));
+          continue;
+        }
+        ProviderConfig? match;
+        for (final prov in AppState.I.providers) {
+          if (prov.isConfigured && prov.models.contains(id)) {
+            match = prov;
+            break;
+          }
+        }
+        if (match != null) {
+          targets.add((label: id, provider: match));
+        } else {
+          shortfall.add(id);
+        }
+      }
+    }
+
+    final override = promptLlmForTest;
+    Future<String> answerFor(ProviderConfig target, String label) async {
+      final subMsgs = [
+        {'role': 'system', 'content': cap.taskSystemPrompt},
+        {'role': 'user', 'content': prompt},
+      ];
+      Map<String, dynamic>? r;
+      try {
+        r = override != null
+            ? await override(target, subMsgs, session)
+            : await _callLlm(target, subMsgs, session, includeTools: false);
+      } catch (e) {
+        return '## $label\nModel call failed: $e.';
+      }
+      if (r == null) {
+        return '## $label\nModel call failed: ${lastError ?? 'unknown'}.';
+      }
+      final choices =
+          (r['choices'] as List?)?.whereType<Map>().toList() ?? [];
+      final raw = choices.isEmpty
+          ? null
+          : choices.first['message']?['content'];
+      final text = (raw as String? ?? '').trim();
+      if (text.isEmpty) return '## $label\nThe model returned no text.';
+      return '## $label\n$text';
+    }
+
+    final sections = <String>[];
+    for (final t in targets) {
+      sections.add(await answerFor(t.provider, t.label));
+    }
+    for (final miss in shortfall) {
+      sections.add('## $miss\nNo configured provider found for "$miss".');
+    }
+    if (sections.isEmpty) {
+      return 'Multi-model compare found no configured provider to run on.';
+    }
+    return sections.join('\n\n');
   }
 
   Future<void> maybeGenerateSessionTitle(ChatSession s) async {
