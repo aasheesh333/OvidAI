@@ -1223,6 +1223,35 @@ void main() {
       expect(first, contains('X-Amz-Expires=3600'));
     });
 
+    test('s3PresignedGetUrl matches the frozen SigV4 presign vector', () {
+      // Known-answer vector for SigV4 query-auth presigning. Frozen input:
+      // examplebucket/test.txt, us-east-1, 20130524T000000Z, expires 86400,
+      // AWS documentation-style test credentials (never real secrets).
+      // Expected signature e88bfc86…2633 was derived INDEPENDENTLY of the
+      // Dart signer: a hand-written Python stdlib (hashlib/hmac) chain over
+      // the spec canonical request, cross-checked byte-for-byte against
+      // botocore's S3SigV4QueryAuth with time frozen to 2013-05-24T00:00:00Z
+      // (both agree). A deterministically wrong signer would fail here.
+      expect(
+        s3PresignedGetUrl(
+          accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+          secretAccessKey: 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY',
+          region: 'us-east-1',
+          bucket: 'examplebucket',
+          key: 'test.txt',
+          expiresSeconds: 86400,
+          amzDate: DateTime.utc(2013, 5, 24),
+        ),
+        'https://examplebucket.s3.us-east-1.amazonaws.com/test.txt'
+        '?X-Amz-Algorithm=AWS4-HMAC-SHA256'
+        '&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request'
+        '&X-Amz-Date=20130524T000000Z'
+        '&X-Amz-Expires=86400'
+        '&X-Amz-SignedHeaders=host'
+        '&X-Amz-Signature=e88bfc86a6838bda6e6b842bfd69edd8741f6aedb0459e1275be0713ad3e2633',
+      );
+    });
+
     test('missing secret key gates and never leaks the secret', () async {
       var called = false;
       final cap = await capFor(
