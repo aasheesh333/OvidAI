@@ -28,6 +28,8 @@ import 'startup_coordinator.dart';
 import 'startup_tasks.dart';
 import 'native_plugins/data_utilities.dart';
 import 'native_plugins/dev_utilities.dart';
+import 'native_plugins/prompt_dev.dart';
+import 'native_plugins/prompt_knowledge.dart';
 import 'native_plugins/sandbox_utilities.dart';
 import 'native_plugins/web_and_db_utilities.dart';
 
@@ -1276,6 +1278,8 @@ void registerAllNativePlugins() {
   registerDevUtilities();
   registerWebAndDbUtilities();
   registerSandboxUtilities();
+  registerPromptDev();
+  registerPromptKnowledge();
 }
 
 class AppState extends ChangeNotifier {

@@ -1021,4 +1021,95 @@ void main() {
     });
     expect(out, contains('through the agent'));
   });
+
+  // --- Task 4: registration wiring + roster halves (NP1 Task-3 pattern) ---
+
+  test('registerAllNativePlugins wires all sixteen prompt plugins', () {
+    registerPromptDev();
+    registerPromptKnowledge();
+    const allSixteen = [
+      'README Writer',
+      'Changelog Gen',
+      'Commit Msg Helper',
+      'Test Writer',
+      'Code Review AI',
+      'Git Diff Explain',
+      'PR Reviewer',
+      'Tailwind Helper',
+      'Translate Pro',
+      'Study Mode',
+      'Meeting Notes',
+      'Data Analyst',
+      'Issue Triager',
+      'Release Notes',
+      'Calendar & Tasks',
+      'Multi-Model Compare',
+    ];
+    for (final name in allSixteen) {
+      expect(
+        NativePluginRegistry.I.has(name),
+        isTrue,
+        reason: '$name should be registered',
+      );
+    }
+    // Wiring truth: the app boot path registers all sixteen too.
+    NativePluginRegistry.I.clearForTest();
+    registerAllNativePlugins();
+    for (final name in allSixteen) {
+      expect(
+        NativePluginRegistry.I.has(name),
+        isTrue,
+        reason: '$name should be wired via registerAllNativePlugins',
+      );
+    }
+    // Roster truth (NP1 Task-3 pattern): an installed+enabled dev row
+    // advertises plugin__readme_writer__generate; disabled it does not.
+    List<String> rosterNames() => AgentService.I.toolsForTest()
+        .map((t) => ((t['function'] as Map)['name']).toString())
+        .toList();
+    final devRow =
+        AppState.I.plugins.firstWhere((p) => p.name == 'README Writer');
+    final devInstalled = devRow.installed;
+    final devEnabled = devRow.enabled;
+    addTearDown(() {
+      devRow.installed = devInstalled;
+      devRow.enabled = devEnabled;
+    });
+    devRow.installed = true;
+    devRow.enabled = true;
+    expect(rosterNames(), contains('plugin__readme_writer__generate'));
+    expect(
+      AgentService.I.pluginToolNames(devRow),
+      contains('plugin__readme_writer__generate'),
+    );
+    devRow.enabled = false;
+    expect(
+      rosterNames(),
+      isNot(contains('plugin__readme_writer__generate')),
+    );
+    expect(AgentService.I.pluginToolNames(devRow), isEmpty);
+    // Roster truth (NP1 Task-3 pattern): an installed+enabled knowledge row
+    // advertises plugin__translate_pro__translate; disabled it does not.
+    final knowRow =
+        AppState.I.plugins.firstWhere((p) => p.name == 'Translate Pro');
+    final knowInstalled = knowRow.installed;
+    final knowEnabled = knowRow.enabled;
+    addTearDown(() {
+      knowRow.installed = knowInstalled;
+      knowRow.enabled = knowEnabled;
+    });
+    knowRow.installed = true;
+    knowRow.enabled = true;
+    expect(rosterNames(), contains('plugin__translate_pro__translate'));
+    expect(
+      AgentService.I.pluginToolNames(knowRow),
+      contains('plugin__translate_pro__translate'),
+    );
+    knowRow.enabled = false;
+    expect(
+      rosterNames(),
+      isNot(contains('plugin__translate_pro__translate')),
+    );
+    expect(AgentService.I.pluginToolNames(knowRow), isEmpty);
+  });
 }
