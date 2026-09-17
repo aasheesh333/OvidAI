@@ -28,6 +28,7 @@ import 'presets.dart';
 import 'hook_service.dart';
 import 'plugin_manifest.dart';
 import 'native_plugin.dart';
+import 'native_plugins/prompt_framework.dart';
 import 'plugin_permissions.dart';
 import 'plugin_registry.dart';
 import 'plugin_runtime.dart';
@@ -7531,6 +7532,52 @@ ${await _agentsMdBlock()}
   static void resetTitleStateForTest() {
     _titledSessions.clear();
     titleLlmForTest = null;
+    promptLlmForTest = null;
+  }
+
+  /// Test seam: replaces the prompt-capability sub-model call (NP5).
+  /// Null in production.
+  @visibleForTesting
+  static Future<Map<String, dynamic>?> Function(
+    ProviderConfig p,
+    List<Map<String, dynamic>> msgs,
+    ChatSession session,
+  )?
+  promptLlmForTest;
+
+  /// Execute a prompt-backed capability tool through a live model (NP5).
+  ///
+  /// Mirrors the title-generation `_callLlm(..., includeTools: false)`
+  /// pattern: an invisible helper call (no streaming, no tools, no
+  /// transcript writes). Honest failures only — never a fake success.
+  Future<String> runPromptTool(
+    NativePromptCapability cap,
+    String toolName,
+    Map<String, dynamic> args,
+  ) async {
+    final session = _runSession ?? AppState.I.activeSession;
+    final p = AppState.I.providerForSession(session);
+    if (session == null || p == null || !p.isConfigured) {
+      return 'No provider configured for this session.';
+    }
+    final msgs = [
+      {'role': 'system', 'content': cap.taskSystemPrompt},
+      {'role': 'user', 'content': cap.buildPrompt(toolName, args)},
+    ];
+    final override = promptLlmForTest;
+    final r = override != null
+        ? await override(p, msgs, session)
+        : await _callLlm(p, msgs, session, includeTools: false);
+    if (r == null) {
+      return 'Model call failed: ${lastError ?? 'unknown'}.';
+    }
+    final choices = (r['choices'] as List?)?.whereType<Map>().toList() ?? [];
+    final raw = choices.isEmpty
+        ? null
+        : choices.first['message']?['content'];
+    final text = (raw as String? ?? '').trim();
+    if (text.isEmpty) return 'The model returned no text.';
+    return text;
   }
 
   Future<void> maybeGenerateSessionTitle(ChatSession s) async {
@@ -8803,6 +8850,9 @@ ${await _agentsMdBlock()}
         }
         _emit('shell', 'Native plugin $slug → $toolName');
         final cleanArgs = Map<String, dynamic>.from(args);
+        if (capability is NativePromptCapability) {
+          return runPromptTool(capability, toolName, cleanArgs);
+        }
         return await capability.callTool(toolName, cleanArgs);
       case String() when name.startsWith('plugin_'):
         // Canonical namespaced contribution (spec §4.4) — resolved through
