@@ -175,9 +175,11 @@ class DeviceControlService {
     () => _channel.invokeMethod<Object?>('deviceOpenSettings'),
   );
 
-  Future<Object?> openApp(String packageName) => _invokeGuarded(
-    () => _channel.invokeMethod<Object?>('deviceOpenApp', {'package': packageName}),
-  );
+  Future<Object?> openApp(String packageName, {String? sessionId}) {
+    final Map<String, dynamic> args = {'package': packageName};
+    if (sessionId != null) args['sessionId'] = sessionId;
+    return _invokeGuarded(() => _channel.invokeMethod<Object?>('deviceOpenApp', args));
+  }
 
   Future<Object?> key(String key) => _invokeGuarded(
     () => _channel.invokeMethod<Object?>('deviceKey', {'key': key}),

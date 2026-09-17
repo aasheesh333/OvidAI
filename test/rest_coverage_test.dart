@@ -42,9 +42,6 @@ void main() {
 
       // Management UI
       'MCP Server Hub',
-
-      // Deferred in spec (requires composer screenshot attach flow)
-      'Screen Awareness',
     };
 
     final missing = <String>[];

@@ -2952,25 +2952,10 @@ class _DetailBodyState extends State<_DetailBody> {
               ),
             ),
           ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 340),
+            constraints: const BoxConstraints(maxHeight: 380),
             child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(10, 4, 10, 8),
-              child: isDiff
-                  ? Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: shown.map((l) => _DiffLine(l)).toList(),
-                    )
-                  : Text(
-                      shown.join('\n'),
-                      style: TextStyle(
-                        fontFamily: Aether.mono,
-                        fontSize: 11.5,
-                        height: 1.45,
-                        color: m.toolState == 'error'
-                            ? Aether.dangerC
-                            : Aether.text,
-                      ),
-                    ),
+              child: _buildRichDetail(m, isDiff, shown, detail),
             ),
           ),
           if (capped)
@@ -2984,6 +2969,185 @@ class _DetailBodyState extends State<_DetailBody> {
                 ),
               ),
             ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRichDetail(Message m, bool isDiff, List<String> shown, String detail) {
+    // 1. Model Compare result format: sections starting with "## <model_name>"
+    if ((m.toolName ?? '').contains('compare') && detail.contains('## ')) {
+      return _ModelCompareView(content: detail);
+    }
+    // 2. Color Palette result format: hex codes like "#FF5733" or "complementary: #..."
+    if ((m.toolName ?? '').contains('color_palette') && detail.contains('#')) {
+      return _ColorPaletteView(content: detail);
+    }
+    // Default diff or text view
+    if (isDiff) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: shown.map((l) => _DiffLine(l)).toList(),
+      );
+    }
+    return Text(
+      shown.join('\n'),
+      style: TextStyle(
+        fontFamily: Aether.mono,
+        fontSize: 11.5,
+        height: 1.45,
+        color: m.toolState == 'error'
+            ? Aether.dangerC
+            : Aether.text,
+      ),
+    );
+  }
+}
+
+class _ModelCompareView extends StatefulWidget {
+  final String content;
+  const _ModelCompareView({required this.content});
+
+  @override
+  State<_ModelCompareView> createState() => _ModelCompareViewState();
+}
+
+class _ModelCompareViewState extends State<_ModelCompareView> {
+  int _selectedTab = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    // Parse "## <model>\n<output>" blocks
+    final sections = <({String model, String output})>[];
+    final parts = widget.content.split(RegExp(r'(?=^##\s+)', multiLine: true));
+    for (final p in parts) {
+      final trimmed = p.trim();
+      if (!trimmed.startsWith('## ')) continue;
+      final lines = trimmed.split('\n');
+      final modelTitle = lines.first.substring(3).trim();
+      final body = lines.sublist(1).join('\n').trim();
+      sections.add((model: modelTitle, output: body));
+    }
+
+    if (sections.isEmpty) {
+      return Text(widget.content, style: TextStyle(fontFamily: Aether.mono, fontSize: 11.5));
+    }
+
+    final activeIdx = _selectedTab.clamp(0, sections.length - 1);
+    final active = sections[activeIdx];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: [
+              for (int i = 0; i < sections.length; i++) ...[
+                ChoiceChip(
+                  label: Text(
+                    sections[i].model,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: i == activeIdx ? FontWeight.w700 : FontWeight.w500,
+                    ),
+                  ),
+                  selected: i == activeIdx,
+                  onSelected: (_) => setState(() => _selectedTab = i),
+                  selectedColor: Aether.accentSoft,
+                  backgroundColor: Aether.surfaceAlt,
+                  showCheckmark: false,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                const SizedBox(width: 6),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Aether.surfaceAlt,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Aether.hairline),
+          ),
+          child: SelectableText(
+            active.output,
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.5,
+              color: Aether.text,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ColorPaletteView extends StatelessWidget {
+  final String content;
+  const _ColorPaletteView({required this.content});
+
+  @override
+  Widget build(BuildContext context) {
+    final hexMatches = RegExp(r'#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b').allMatches(content).map((m) => m.group(0)!).toSet().toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (hexMatches.isNotEmpty) ...[
+          Text('Palette Swatches', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Aether.textMuted)),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final hex in hexMatches)
+                _buildSwatch(context, hex),
+            ],
+          ),
+          const SizedBox(height: 10),
+        ],
+        SelectableText(
+          content,
+          style: TextStyle(fontFamily: Aether.mono, fontSize: 11.5, height: 1.45),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSwatch(BuildContext context, String hex) {
+    Color? color;
+    try {
+      var raw = hex.replaceAll('#', '');
+      if (raw.length == 3) raw = raw.split('').map((c) => '$c$c').join();
+      color = Color(int.parse('FF$raw', radix: 16));
+    } catch (_) {}
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: Aether.surfaceAlt,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 14,
+            height: 14,
+            decoration: BoxDecoration(
+              color: color ?? Colors.grey,
+              borderRadius: BorderRadius.circular(3),
+              border: Border.all(color: Colors.white24, width: 0.5),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(hex, style: const TextStyle(fontFamily: Aether.mono, fontSize: 11)),
         ],
       ),
     );
@@ -6627,6 +6791,15 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
 
   Future<void> _refresh() async {
     final enabled = await DeviceControlService.I.isEnabled().catchError((_) => false);
+    if (!mounted) return;
+    if (!enabled && _enabled != true) {
+      // Retry once after 600ms in case the OS is still binding the service on resume
+      await Future.delayed(const Duration(milliseconds: 600));
+      if (!mounted) return;
+      final retryEnabled = await DeviceControlService.I.isEnabled().catchError((_) => false);
+      if (mounted) setState(() => _enabled = retryEnabled);
+      return;
+    }
     if (mounted) setState(() => _enabled = enabled);
   }
 

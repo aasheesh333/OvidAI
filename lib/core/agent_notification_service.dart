@@ -112,6 +112,11 @@ class AgentNotificationService {
         if (_onExitCallback != null) {
           _onExitCallback!();
         }
+      } else if (call.method == 'onSelectSession') {
+        final sid = call.arguments as String?;
+        if (sid != null && sid.isNotEmpty) {
+          AppState.I.selectSession(sid);
+        }
       }
       return null;
     });

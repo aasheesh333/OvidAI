@@ -7405,7 +7405,12 @@ ${await _agentsMdBlock()}
       // surfaces as a think row instead of vanishing silently.
       if (ctx.run.controlRun && !userStopped) {
         try {
-          await DeviceControlService.I.openApp('com.dhanuk.ovidai');
+          // Select session in AppState so UI and transcript stay on current task session
+          AppState.I.selectSession(pinnedSessionId);
+          await DeviceControlService.I.openApp(
+            'com.dhanuk.ovidai',
+            sessionId: pinnedSessionId,
+          );
         } catch (e) {
           _emit(
             'think',

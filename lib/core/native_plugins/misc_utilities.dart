@@ -8,6 +8,7 @@ import 'package:crypto/crypto.dart' as crypto;
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import 'package:ovid_ai/core/device_control_service.dart';
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:qr/qr.dart';
 
@@ -38,6 +39,7 @@ void registerMiscUtilities() {
   NativePluginRegistry.I.register(IconLibraryCapability());
   NativePluginRegistry.I.register(FontPreviewCapability());
   NativePluginRegistry.I.register(AudioNotesCapability());
+  NativePluginRegistry.I.register(ScreenAwarenessCapability());
 }
 
 String _requireString(Map<String, dynamic> args, String key) {
@@ -1379,5 +1381,45 @@ class AudioNotesCapability implements NativePluginCapability {
       );
     }
     return _trimOutput(text);
+  }
+}
+
+class ScreenAwarenessCapability implements NativePluginCapability {
+  @override
+  String get pluginName => 'Screen Awareness';
+
+  @override
+  List<NativePluginConfigField> get configFields => const [];
+
+  @override
+  List<NativePluginTool> get tools => const [
+        NativePluginTool(
+          name: 'read_screen',
+          description: 'Read the currently active screen UI elements and text',
+          inputSchema: {
+            'type': 'object',
+            'properties': {
+              'full': {'type': 'boolean', 'description': 'Read full window hierarchy'},
+            },
+          },
+        ),
+      ];
+
+  @override
+  Future<void> configure(Map<String, String> values) async {}
+
+  @override
+  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+    if (toolName != 'read_screen') {
+      throw ArgumentError('Unknown tool "$toolName" for $pluginName.');
+    }
+    // Reads screen directly via the device accessibility service bridge
+    try {
+      final full = args['full'] == true;
+      final raw = await DeviceControlService.I.read(full: full);
+      return _trimOutput(raw);
+    } catch (e) {
+      return 'Could not read screen: $e. Ensure Control mode and Accessibility service are enabled.';
+    }
   }
 }

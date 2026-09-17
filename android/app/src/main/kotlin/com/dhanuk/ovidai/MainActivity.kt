@@ -58,24 +58,27 @@ class MainActivity : FlutterActivity() {
     private fun deviceService(result: MethodChannel.Result): OvidAccessibilityService? {
         var service = OvidAccessibilityService.instance
         if (service == null && isAccessibilityServiceEnabled(this)) {
-            val deadline = android.os.SystemClock.uptimeMillis() + 2500
+            // Android often keeps the accessibility service process or intent pending
+            // until an accessibility action or window state change occurs.
+            // Wait up to 5000ms with progressive polling so users don't have to toggle off/on.
+            val deadline = android.os.SystemClock.uptimeMillis() + 5000
             while (service == null && android.os.SystemClock.uptimeMillis() < deadline) {
-                android.os.SystemClock.sleep(50)
+                android.os.SystemClock.sleep(100)
                 service = OvidAccessibilityService.instance
             }
         }
         if (service == null) {
-            // Also double check if enabled without active instance to give system a moment to bind
-            if (isAccessibilityServiceEnabled(this)) {
-                service = OvidAccessibilityService.instance
-            }
+            // Check once more in case it bound right at the deadline
+            service = OvidAccessibilityService.instance
         }
         if (service == null) {
-            result.error(
-                "SERVICE_DISABLED",
-                "Control mode needs the Ovid accessibility service. Enable it in Settings > Accessibility > Ovid.",
-                null,
-            )
+            val configured = isAccessibilityServiceEnabled(this)
+            val msg = if (configured) {
+                "Ovid accessibility service is enabled in settings but still connecting. Please wait a moment or try again."
+            } else {
+                "Control mode needs the Ovid accessibility service. Enable it in Settings > Accessibility > Ovid."
+            }
+            result.error("SERVICE_DISABLED", msg, null)
         }
         return service
     }
@@ -338,6 +341,7 @@ class MainActivity : FlutterActivity() {
                     }
                     "deviceOpenApp" -> {
                         val packageName = call.argument<String>("package")
+                        val sessionId = call.argument<String>("sessionId")
                         if (packageName.isNullOrBlank()) {
                             result.error("BAD_ARGS", "deviceOpenApp requires package name.", null)
                         } else {
@@ -346,6 +350,9 @@ class MainActivity : FlutterActivity() {
                                 val isSelf = targetPkg == "com.dhanuk.ovidai" || targetPkg == this.packageName
                                 val launchIntent = if (isSelf) {
                                     Intent(this, MainActivity::class.java).apply {
+                                        if (!sessionId.isNullOrBlank()) {
+                                            putExtra("sessionId", sessionId)
+                                        }
                                         addFlags(
                                             Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
                                                 Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -864,6 +871,17 @@ class MainActivity : FlutterActivity() {
         Thread {
             safExportCoordinator.complete(destination)
         }.start()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val sid = intent.getStringExtra("sessionId")
+        if (!sid.isNullOrBlank()) {
+            flutterEngine?.dartExecutor?.binaryMessenger?.let { messenger ->
+                MethodChannel(messenger, channelName).invokeMethod("onSelectSession", sid)
+            }
+        }
     }
 
     override fun onDestroy() {

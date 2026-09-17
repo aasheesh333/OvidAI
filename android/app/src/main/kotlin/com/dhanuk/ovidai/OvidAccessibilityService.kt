@@ -748,6 +748,14 @@ class OvidAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         treeCache.markDirty()
+        val info = serviceInfo ?: AccessibilityServiceInfo()
+        info.flags = info.flags or
+            AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+            AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+        info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+        info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+        info.notificationTimeout = 50
+        serviceInfo = info
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
