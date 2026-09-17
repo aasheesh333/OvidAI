@@ -28,6 +28,7 @@ import 'startup_coordinator.dart';
 import 'startup_tasks.dart';
 import 'native_plugins/data_utilities.dart';
 import 'native_plugins/dev_utilities.dart';
+import 'native_plugins/misc_utilities.dart';
 import 'native_plugins/prompt_dev.dart';
 import 'native_plugins/prompt_knowledge.dart';
 import 'native_plugins/sandbox_utilities.dart';
@@ -1265,8 +1266,8 @@ class _PluginSafetyStartupTask implements StartupTask {
 }
 
 /// Registers every in-process native plugin capability (NP1 framework +
-/// NP2 utility batch: 15 plugins across data, dev, and web/db utilities)
-/// into [NativePluginRegistry].
+/// NP2 utility batches + NP4 leftover utilities: data, dev, web/db,
+/// sandbox, prompt, and misc utilities) into [NativePluginRegistry].
 ///
 /// Called from the [AppState] constructor alongside `_seed`, so the
 /// registry is populated before install routing, the agent roster, and
@@ -1280,6 +1281,7 @@ void registerAllNativePlugins() {
   registerSandboxUtilities();
   registerPromptDev();
   registerPromptKnowledge();
+  registerMiscUtilities();
 }
 
 class AppState extends ChangeNotifier {
@@ -1364,7 +1366,7 @@ class AppState extends ChangeNotifier {
         (encoded) => jsonDecode(encoded) as Map<String, dynamic>;
     _workspaceDeleter = workspaceDeleter ?? SandboxService.I.deleteWorkspace;
     _seed();
-    // NP1/NP2: bootstrap all 15 native plugin capabilities so catalog
+    // NP1/NP2/NP4: bootstrap all native plugin capabilities so catalog
     // install routing, the agent roster, and dispatch see them from boot.
     registerAllNativePlugins();
     _ensureActiveSession();
