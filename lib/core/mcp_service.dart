@@ -617,6 +617,14 @@ class McpService {
     }
   }
 
+  static Duration _effectiveToolTimeout(McpServer server, Duration? customTimeout) {
+    if (customTimeout != null) return customTimeout;
+    if (rpcTimeoutSecondsForTest < server.toolTimeoutS) {
+      return Duration(seconds: rpcTimeoutSecondsForTest);
+    }
+    return Duration(seconds: server.toolTimeoutS);
+  }
+
   Future<McpRpcResult> _callNativeTool(
     _RunningServer rs,
     String toolName,
@@ -627,8 +635,7 @@ class McpService {
     if (handler == null) {
       return McpRpcResult.error('native handler not initialized');
     }
-    final effectiveTimeout =
-        timeout ?? Duration(seconds: rs.server.toolTimeoutS);
+    final effectiveTimeout = _effectiveToolTimeout(rs.server, timeout);
     try {
       return await handler
           .callTool(toolName, args)
@@ -1083,8 +1090,7 @@ class McpService {
       return 'MCP error: server "$serverName" is not connected'
           '${_lastDeathOf(key)}';
     }
-    final effectiveTimeout =
-        timeout ?? Duration(seconds: rs.server.toolTimeoutS);
+    final effectiveTimeout = _effectiveToolTimeout(rs.server, timeout);
     final res = rs.server.transport == 'http'
         ? await _rpcHttp(
             rs,
