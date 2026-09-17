@@ -581,4 +581,256 @@ void main() {
     expect(out, contains('6789'));
     expect(compressTimeout, const Duration(seconds: 300));
   });
+
+  test('pdf qpdf split arg shapes', () async {
+    final seenArgs = <List<String>>[];
+    final cap = PdfToolsCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        final cmd = args.join(' ');
+        if (cmd.contains('command -v python3')) {
+          return '(command exited with exit code 1 and produced no output)';
+        }
+        if (cmd.contains('command -v qpdf')) return '/usr/bin/qpdf\n';
+        if (args.isNotEmpty && args.first == 'qpdf') {
+          seenArgs.add(args);
+          return '';
+        }
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    final out = await cap.callTool('split', {
+      'input': '/sandbox/home/a.pdf',
+      'ranges': '1,3-4',
+    });
+    expect(seenArgs.length, 2);
+    expect(seenArgs[0], [
+      'qpdf',
+      '/sandbox/home/a.pdf',
+      '--pages',
+      '/sandbox/home/a.pdf',
+      '1',
+      '--',
+      '/sandbox/home/a-1.pdf',
+    ]);
+    expect(seenArgs[1], [
+      'qpdf',
+      '/sandbox/home/a.pdf',
+      '--pages',
+      '/sandbox/home/a.pdf',
+      '3-4',
+      '--',
+      '/sandbox/home/a-2.pdf',
+    ]);
+    expect(out, contains('a-1.pdf'));
+    expect(out, contains('a-2.pdf'));
+  });
+
+  test('pdf qpdf compress arg shape', () async {
+    final seenArgs = <List<String>>[];
+    final cap = PdfToolsCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        final cmd = args.join(' ');
+        if (cmd.contains('command -v python3')) {
+          return '(command exited with exit code 1 and produced no output)';
+        }
+        if (cmd.contains('command -v qpdf')) return '/usr/bin/qpdf\n';
+        if (args.isNotEmpty && args.first == 'qpdf') {
+          seenArgs.add(args);
+          return '';
+        }
+        if (cmd.contains('stat -c%s')) {
+          if (cmd.contains('in.pdf')) return '1000\n';
+          if (cmd.contains('out.pdf')) return '900\n';
+        }
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    final out = await cap.callTool('compress', {
+      'input': '/sandbox/home/in.pdf',
+      'output': '/sandbox/home/out.pdf',
+    });
+    expect(seenArgs.single, [
+      'qpdf',
+      '--linearize',
+      '--object-streams=generate',
+      '/sandbox/home/in.pdf',
+      '/sandbox/home/out.pdf',
+    ]);
+    expect(out, contains('1000'));
+    expect(out, contains('900'));
+  });
+
+  test('pdf qpdf extract_text happy paths use pdftotext', () async {
+    final seenArgs = <List<String>>[];
+    PdfToolsCapability capWith({required String pdftotextOut}) {
+      return PdfToolsCapability(
+        runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+          final cmd = args.join(' ');
+          if (cmd.contains('command -v python3')) {
+            return '(command exited with exit code 1 and produced no output)';
+          }
+          if (cmd.contains('command -v qpdf')) return '/usr/bin/qpdf\n';
+          if (cmd.contains('command -v pdftotext')) {
+            return '/usr/bin/pdftotext\n';
+          }
+          if (args.isNotEmpty && args.first == 'pdftotext') {
+            seenArgs.add(args);
+            return pdftotextOut;
+          }
+          throw ArgumentError('unexpected sandbox command: $cmd');
+        },
+        isSandboxInstalled: () => true,
+      );
+    }
+
+    // All-pages shape: pdftotext -layout input -.
+    seenArgs.clear();
+    final allOut = await capWith(pdftotextOut: 'hello').callTool(
+      'extract_text',
+      {'input': '/sandbox/home/a.pdf'},
+    );
+    expect(seenArgs.single, [
+      'pdftotext',
+      '-layout',
+      '/sandbox/home/a.pdf',
+      '-',
+    ]);
+    expect(allOut, contains('hello'));
+    expect(allOut, contains('{pages: 1, chars: 5}'));
+
+    // Ranged shape: pdftotext -layout -f N -l M input -.
+    seenArgs.clear();
+    final rangeOut = await capWith(pdftotextOut: 'page-one').callTool(
+      'extract_text',
+      {'input': '/sandbox/home/a.pdf', 'pages': '1'},
+    );
+    expect(seenArgs.single, [
+      'pdftotext',
+      '-layout',
+      '-f',
+      '1',
+      '-l',
+      '1',
+      '/sandbox/home/a.pdf',
+      '-',
+    ]);
+    expect(rangeOut, contains('page-one'));
+    expect(rangeOut, contains('{pages: 1, chars: 8}'));
+  });
+
+  test('pdf qpdf info arg shape', () async {
+    final seenArgs = <List<String>>[];
+    final cap = PdfToolsCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        final cmd = args.join(' ');
+        if (cmd.contains('command -v python3')) {
+          return '(command exited with exit code 1 and produced no output)';
+        }
+        if (cmd.contains('command -v qpdf')) return '/usr/bin/qpdf\n';
+        if (args.length >= 2 &&
+            args[0] == 'qpdf' &&
+            args[1] == '--show-npages') {
+          seenArgs.add(args);
+          return '7\n';
+        }
+        if (cmd.contains('stat -c%s')) return '4242\n';
+        if (cmd.contains('qpdf --show-all-data')) return '';
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    final out = await cap.callTool('info', {'input': '/sandbox/home/a.pdf'});
+    expect(seenArgs.single, ['qpdf', '--show-npages', '/sandbox/home/a.pdf']);
+    expect(out, contains('7'));
+    expect(out, contains('4242'));
+  });
+
+  test('pdf qpdf-only extract_text without pdftotext is honest', () async {
+    var pdftotextCalls = 0;
+    final cap = PdfToolsCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        final cmd = args.join(' ');
+        if (cmd.contains('command -v python3')) {
+          return '(command exited with exit code 1 and produced no output)';
+        }
+        if (cmd.contains('command -v qpdf')) return '/usr/bin/qpdf\n';
+        if (cmd.contains('command -v pdftotext')) {
+          return '(command exited with exit code 1 and produced no output)';
+        }
+        if (args.isNotEmpty && args.first == 'pdftotext') {
+          pdftotextCalls++;
+          return 'pdftotext: command not found\n(exit code 127)';
+        }
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    final out = await cap.callTool('extract_text', {
+      'input': '/sandbox/home/a.pdf',
+    });
+    expect(out, contains('No PDF backend for extract_text'));
+    expect(out, isNot(contains('{pages:')));
+    expect(out, isNot(contains('chars:')));
+    expect(pdftotextCalls, 0);
+  });
+
+  test('pdf split/compress surface backend failures instead of success',
+      () async {
+    final failCap = PdfToolsCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        final cmd = args.join(' ');
+        if (cmd.contains('command -v python3')) return '/usr/bin/python3\n';
+        if (args.isNotEmpty && args.first == 'python3') {
+          return 'qpdf failed: bad range\n(exit code 3)';
+        }
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    final splitOut = await failCap.callTool('split', {
+      'input': '/sandbox/home/a.pdf',
+      'ranges': '1',
+    });
+    expect(splitOut, contains('(exit code 3)'));
+    expect(splitOut, isNot(contains('Wrote')));
+
+    final compressCap = PdfToolsCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        final cmd = args.join(' ');
+        if (cmd.contains('command -v python3')) return '/usr/bin/python3\n';
+        if (args.isNotEmpty && args.first == 'python3') {
+          return 'compress failed\n(exit code 2)';
+        }
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    final compressOut = await compressCap.callTool('compress', {
+      'input': '/sandbox/home/in.pdf',
+      'output': '/sandbox/home/out.pdf',
+    });
+    expect(compressOut, contains('(exit code 2)'));
+    expect(compressOut, isNot(contains('Compressed')));
+  });
+
+  test('pdf extract_text truncates oversized output with omission notice',
+      () async {
+    final big = 'x' * 7000;
+    final cap = PdfToolsCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        final cmd = args.join(' ');
+        if (cmd.contains('command -v python3')) return '/usr/bin/python3\n';
+        if (args.isNotEmpty && args.first == 'python3') return big;
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    final out = await cap.callTool('extract_text', {
+      'input': '/sandbox/home/a.pdf',
+    });
+    expect(out, contains('characters omitted'));
+    expect(out.length, lessThan(big.length));
+  });
 }

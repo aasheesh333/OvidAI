@@ -463,6 +463,8 @@ class PdfToolsCapability implements NativePluginCapability {
       'Sandbox is not installed — open Studio once to install it, then retry.';
   static const _noBackendMessage =
       'No PDF backend in the sandbox (needs python3+pypdf or qpdf) — install one, then retry.';
+  static const _noExtractBackendMessage =
+      'No PDF backend for extract_text in the sandbox (needs python3+pypdf or pdftotext) — install one, then retry.';
 
   /// Merges `sys.argv[1:-1]` (inputs) into `sys.argv[-1]` (output).
   static const _mergeScript =
@@ -688,25 +690,32 @@ class PdfToolsCapability implements NativePluginCapability {
               prefixRaw.isEmpty ? _defaultPrefix(input) : prefixRaw;
           final timeout = Duration(seconds: _timeoutSecs(args, 60));
           final outs = <String>[];
+          final opOuts = <String>[];
           for (var i = 0; i < ranges.length; i++) {
             final (int start, int end) = ranges[i];
             final out = '$prefix-${i + 1}.pdf';
+            final String opOut;
             if (backend == _PdfBackend.pypdf) {
-              await _runner(
+              opOut = await _runner(
                 ['python3', '-c', _splitScript, input, '$start', '$end', out],
                 timeout: timeout,
               );
             } else {
               final range = start == end ? '$start' : '$start-$end';
-              await _runner(
+              opOut = await _runner(
                 ['qpdf', input, '--pages', input, range, '--', out],
                 timeout: timeout,
               );
             }
+            if (_isExecFailure(opOut)) return _trimOutput(opOut);
+            if (opOut.trim().isNotEmpty) opOuts.add(opOut);
             outs.add(out);
           }
+          final summary =
+              'Wrote ${outs.length} file(s) via ${backend.name}: ${outs.join(', ')}.';
+          final combined = opOuts.join('\n');
           return _trimOutput(
-            'Wrote ${outs.length} file(s) via ${backend.name}: ${outs.join(', ')}.',
+            combined.isEmpty ? summary : '$summary\n$combined',
           );
         }
       case 'compress':
@@ -722,13 +731,14 @@ class PdfToolsCapability implements NativePluginCapability {
             throw ArgumentError('Missing required argument: output');
           }
           final timeout = Duration(seconds: _timeoutSecs(args, 300));
+          final String opOut;
           if (backend == _PdfBackend.pypdf) {
-            await _runner(
+            opOut = await _runner(
               ['python3', '-c', _compressScript, input, output],
               timeout: timeout,
             );
           } else {
-            await _runner(
+            opOut = await _runner(
               [
                 'qpdf',
                 '--linearize',
@@ -739,6 +749,7 @@ class PdfToolsCapability implements NativePluginCapability {
               timeout: timeout,
             );
           }
+          if (_isExecFailure(opOut)) return _trimOutput(opOut);
           final inBytes = await _fileSize(input);
           final outBytes = await _fileSize(output);
           final String detail;
@@ -750,9 +761,11 @@ class PdfToolsCapability implements NativePluginCapability {
           } else {
             detail = 'size check unavailable.';
           }
+          final summary =
+              'Compressed $input → $output: ${inBytes ?? '?'} → ${outBytes ?? '?'} '
+              'bytes ($detail) via ${backend.name}.';
           return _trimOutput(
-            'Compressed $input → $output: ${inBytes ?? '?'} → ${outBytes ?? '?'} '
-            'bytes ($detail) via ${backend.name}.',
+            opOut.trim().isEmpty ? summary : '$summary\n$opOut',
           );
         }
       case 'extract_text':
@@ -777,11 +790,13 @@ class PdfToolsCapability implements NativePluginCapability {
           }
           final ranges =
               pagesRaw.isEmpty ? null : _parsePageRanges(pagesRaw);
+          if (!await _hasPdftotext()) return _noExtractBackendMessage;
           if (ranges == null) {
             final out = await _runner(
               ['pdftotext', '-layout', input, '-'],
               timeout: timeout,
             );
+            if (_isExecFailure(out)) return _trimOutput(out);
             final pages = out.isEmpty ? 0 : '\f'.allMatches(out).length + 1;
             return _trimOutput('$out\n{pages: $pages, chars: ${out.length}}');
           }
@@ -801,6 +816,7 @@ class PdfToolsCapability implements NativePluginCapability {
               ],
               timeout: timeout,
             );
+            if (_isExecFailure(out)) return _trimOutput(out);
             bodies.add(out);
             totalPages += end - start + 1;
           }
@@ -887,6 +903,23 @@ class PdfToolsCapability implements NativePluginCapability {
 
   bool _probeOk(String out) =>
       out.trim().isNotEmpty && !out.contains('exit code');
+
+  /// True when [out] carries the exec failure marker (`(exit code N)`).
+  /// Real exec surfaces non-zero exits inline instead of throwing.
+  bool _isExecFailure(String out) => out.contains('exit code');
+
+  /// `pdftotext` (poppler) probe for the qpdf extract_text path. The qpdf
+  /// probe never checked it, so a qpdf-only sandbox without poppler used to
+  /// run `pdftotext`, then fabricate `{pages, chars}` stats from the
+  /// exit-127 error text. Missing now returns an honest message instead.
+  Future<bool> _hasPdftotext() async {
+    try {
+      final out = await _runner(['bash', '-c', 'command -v pdftotext']);
+      return _probeOk(out);
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// Parses a comma list of `N` / `N-M` 1-based page ranges. Endpoints use
   /// the tolerant int parsing convention; anything malformed (including
