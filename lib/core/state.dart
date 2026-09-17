@@ -28,6 +28,7 @@ import 'startup_coordinator.dart';
 import 'startup_tasks.dart';
 import 'native_plugins/data_utilities.dart';
 import 'native_plugins/dev_utilities.dart';
+import 'native_plugins/sandbox_utilities.dart';
 import 'native_plugins/web_and_db_utilities.dart';
 
 const kDeniedControlDomains = <String>[
@@ -1274,6 +1275,7 @@ void registerAllNativePlugins() {
   registerDataUtilities();
   registerDevUtilities();
   registerWebAndDbUtilities();
+  registerSandboxUtilities();
 }
 
 class AppState extends ChangeNotifier {

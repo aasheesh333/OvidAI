@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/native_plugins/sandbox_utilities.dart';
+import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Fake [SandboxRunner] keyed on command signature:
@@ -832,5 +834,44 @@ void main() {
     });
     expect(out, contains('characters omitted'));
     expect(out.length, lessThan(big.length));
+  });
+
+  test('sandbox capabilities register and route through install truth',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    registerSandboxUtilities();
+    addTearDown(NativePluginRegistry.I.clearForTest);
+    for (final name in ['Shell History', 'Git Workbench', 'PDF Tools']) {
+      expect(NativePluginRegistry.I.has(name), isTrue);
+    }
+    // Wiring truth: the app boot path registers the sandbox trio too.
+    NativePluginRegistry.I.clearForTest();
+    registerAllNativePlugins();
+    for (final name in ['Shell History', 'Git Workbench', 'PDF Tools']) {
+      expect(NativePluginRegistry.I.has(name), isTrue);
+    }
+    // Roster truth (Task-3 pattern): an installed+enabled row advertises
+    // plugin__git_workbench__clone; disabled it does not.
+    final row =
+        AppState.I.plugins.firstWhere((p) => p.name == 'Git Workbench');
+    final wasInstalled = row.installed;
+    final wasEnabled = row.enabled;
+    addTearDown(() {
+      row.installed = wasInstalled;
+      row.enabled = wasEnabled;
+    });
+    List<String> rosterNames() => AgentService.I.toolsForTest()
+        .map((t) => ((t['function'] as Map)['name']).toString())
+        .toList();
+    row.installed = true;
+    row.enabled = true;
+    expect(rosterNames(), contains('plugin__git_workbench__clone'));
+    expect(
+      AgentService.I.pluginToolNames(row),
+      contains('plugin__git_workbench__clone'),
+    );
+    row.enabled = false;
+    expect(rosterNames(), isNot(contains('plugin__git_workbench__clone')));
+    expect(AgentService.I.pluginToolNames(row), isEmpty);
   });
 }

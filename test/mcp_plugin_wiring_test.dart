@@ -1,6 +1,7 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/plugins_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -108,9 +109,14 @@ void main() {
       version: '1.0.0',
       category: 'Tool',
     );
+    // NP3 Task 4: boot wiring registers the sandbox-backed Git Workbench
+    // capability, so it routes through the NP1 native-capability install
+    // truth instead of unsupported.
+    registerAllNativePlugins();
+    addTearDown(NativePluginRegistry.I.clearForTest);
     expect(
       pluginInstallRouteForTest(gitBench).kind,
-      PluginInstallKind.unsupported,
+      PluginInstallKind.nativeCapability,
     );
   });
 
