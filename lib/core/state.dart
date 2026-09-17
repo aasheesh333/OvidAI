@@ -31,6 +31,7 @@ import 'native_plugins/dev_utilities.dart';
 import 'native_plugins/misc_utilities.dart';
 import 'native_plugins/prompt_dev.dart';
 import 'native_plugins/prompt_knowledge.dart';
+import 'native_plugins/rest_descriptors_aimedia.dart';
 import 'native_plugins/rest_descriptors_backend.dart';
 import 'native_plugins/rest_descriptors_comms.dart';
 import 'native_plugins/rest_descriptors_dev.dart';
@@ -1291,6 +1292,7 @@ void registerAllNativePlugins() {
   registerDevPlatforms();
   registerBackend();
   registerInfra();
+  registerAiMedia();
 }
 
 class AppState extends ChangeNotifier {
