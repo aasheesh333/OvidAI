@@ -89,18 +89,18 @@ void main() {
     expect(urls.single.contains('old-session'), isFalse);
   });
 
-  test('Google OAuth hosts open outside the embedded WebView', () {
+  test('Google OAuth hosts stay within the embedded WebView without external redirect', () {
     expect(
       AgentService.googleAuthNeedsExternalBrowser(
         Uri.parse('https://accounts.google.com/o/oauth2/v2/auth?x=1'),
       ),
-      isTrue,
+      isFalse,
     );
     expect(
       AgentService.googleAuthNeedsExternalBrowser(
         Uri.parse('https://sub.accounts.google.com/signin'),
       ),
-      isTrue,
+      isFalse,
     );
     expect(
       AgentService.googleAuthNeedsExternalBrowser(

@@ -1530,17 +1530,10 @@ class AgentService extends ChangeNotifier {
   static String _homeUrl(String url) =>
       (url.isEmpty || url == 'about:blank') ? _defaultBrowserUrl : url;
 
-  /// True when [uri] is a Google OAuth page that must leave the embedded
-  /// WebView: Google rejects sign-in inside embedded WebViews ("this
-  /// browser or app may not be secure") no matter the user agent. These
-  /// navigations open in the system browser, where the user is typically
-  /// already signed in.
-  static bool googleAuthNeedsExternalBrowser(Uri uri) {
-    if (uri.scheme != 'https') return false;
-    final host = uri.host.toLowerCase();
-    return host == 'accounts.google.com' ||
-        host.endsWith('.accounts.google.com');
-  }
+  /// Whether [uri] is forced to open in an external browser.
+  /// All web navigations (including Google sign-in and accounts.google.com)
+  /// stay inside the in-app browser WebView using its clean Chrome mobile user agent.
+  static bool googleAuthNeedsExternalBrowser(Uri uri) => false;
 
   /// Per-session browser bucket: tab list + active index.
   final Map<String, List<BrowserTab>> _sessionBrowsers = {};
