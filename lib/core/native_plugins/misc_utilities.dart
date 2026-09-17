@@ -28,8 +28,8 @@ import 'package:qr/qr.dart';
 ///
 /// QR rendering uses `package:qr` for the matrix plus a minimal in-file PNG
 /// encoder (grayscale, `dart:io` zlib); SSH keys use `package:cryptography`
-/// with real OpenSSH wire encodings (`ssh-ed25519` / `ssh-rsa` public lines,
-/// `openssh-key-v1` / PKCS#1 PEM private blocks).
+/// (ed25519) with real OpenSSH wire encodings (`ssh-ed25519` public lines,
+/// `openssh-key-v1` PEM private blocks).
 void registerMiscUtilities() {
   NativePluginRegistry.I.register(QrGeneratorCapability());
   NativePluginRegistry.I.register(SshKeyManagerCapability());
@@ -337,21 +337,10 @@ class QrGeneratorCapability implements NativePluginCapability {
 // SSH Key Manager
 // ---------------------------------------------------------------------------
 
-/// SSH wire-format helpers (RFC 4251 strings/mpints + OpenSSH key blobs).
+/// SSH wire-format helpers (RFC 4251 strings + OpenSSH key blobs).
 List<int> _sshString(List<int> bytes) {
   final out = ByteData(4)..setUint32(0, bytes.length);
   return [...out.buffer.asUint8List(), ...bytes];
-}
-
-List<int> _sshMpint(List<int> bigEndian) {
-  var bytes = bigEndian.toList();
-  while (bytes.length > 1 && bytes.first == 0) {
-    bytes = bytes.sublist(1);
-  }
-  if (bytes.isNotEmpty && (bytes.first & 0x80) != 0) {
-    bytes = [0, ...bytes];
-  }
-  return _sshString(bytes);
 }
 
 String _sshPublicLine(String keyType, List<int> blob, String comment) =>
@@ -394,144 +383,6 @@ String _pemArmor(String label, List<int> der) {
   return '-----BEGIN $label-----\n${lines.join('\n')}\n-----END $label-----\n';
 }
 
-BigInt _os2ip(List<int> bytes) {
-  var value = BigInt.zero;
-  for (final b in bytes) {
-    value = (value << 8) | BigInt.from(b);
-  }
-  return value;
-}
-
-List<int> _i2osp(BigInt value, [int? length]) {
-  if (value == BigInt.zero) return List<int>.filled(length ?? 1, 0);
-  final bytes = <int>[];
-  var v = value;
-  while (v > BigInt.zero) {
-    bytes.add((v & BigInt.from(0xFF)).toInt());
-    v >>= 8;
-  }
-  final out = bytes.reversed.toList();
-  if (length != null) {
-    while (out.length < length) {
-      out.insert(0, 0);
-    }
-  }
-  return out;
-}
-
-List<int> _derLength(int length) {
-  if (length < 0x80) return [length];
-  final bytes = _i2osp(BigInt.from(length));
-  return [0x80 | bytes.length, ...bytes];
-}
-
-List<int> _derInteger(BigInt value) {
-  var bytes = _i2osp(value);
-  if (bytes.isNotEmpty && (bytes.first & 0x80) != 0) {
-    bytes = [0, ...bytes];
-  }
-  return [0x02, ..._derLength(bytes.length), ...bytes];
-}
-
-List<int> _derSequence(List<List<int>> parts) {
-  final body = parts.expand((p) => p).toList();
-  return [0x30, ..._derLength(body.length), ...body];
-}
-
-class _RsaKey {
-  _RsaKey(this.n, this.e, this.d, this.p, this.q, this.dp, this.dq, this.qi);
-  final BigInt n;
-  final BigInt e;
-  final BigInt d;
-  final BigInt p;
-  final BigInt q;
-  final BigInt dp;
-  final BigInt dq;
-  final BigInt qi;
-}
-
-const _mrSmallPrimes = [
-  3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47
-];
-
-BigInt _randomBigIntBelow(BigInt limit, math.Random random) {
-  final byteLen = (limit.bitLength + 7) ~/ 8;
-  while (true) {
-    final bytes = List<int>.generate(byteLen, (_) => random.nextInt(256));
-    final value = _os2ip(bytes);
-    if (value >= BigInt.two && value < limit) return value;
-  }
-}
-
-/// Miller-Rabin primality test with [rounds] random bases (after small
-/// trial division). Error rate per composite is at most 4^-rounds.
-bool _isProbablePrime(BigInt n, int rounds, math.Random random) {
-  if (n == BigInt.two) return true;
-  if (n < BigInt.two || n.isEven) return false;
-  for (final p in _mrSmallPrimes) {
-    final b = BigInt.from(p);
-    if (n == b) return true;
-    if (n % b == BigInt.zero) return false;
-  }
-  var d = n - BigInt.one;
-  var r = 0;
-  while (d.isEven) {
-    d >>= 1;
-    r++;
-  }
-  outer:
-  for (var i = 0; i < rounds; i++) {
-    final a = _randomBigIntBelow(n - BigInt.two, random) + BigInt.one;
-    var x = a.modPow(d, n);
-    if (x == BigInt.one || x == n - BigInt.one) continue;
-    for (var j = 1; j < r; j++) {
-      x = x.modPow(BigInt.two, n);
-      if (x == n - BigInt.one) continue outer;
-      if (x == BigInt.one) return false;
-    }
-    return false;
-  }
-  return true;
-}
-
-BigInt _generatePrime(int bits, math.Random random) {
-  final byteLen = (bits + 7) ~/ 8;
-  while (true) {
-    final bytes = List<int>.generate(byteLen, (_) => random.nextInt(256));
-    bytes[0] |= 0x80; // exact bit length
-    bytes[bytes.length - 1] |= 0x01; // odd
-    final candidate = _os2ip(bytes);
-    if (candidate.bitLength != bits) continue;
-    if (_isProbablePrime(candidate, 16, random)) return candidate;
-  }
-}
-
-/// Generates a 2048-bit RSA key (e = 65537) with `Random.secure` primes.
-_RsaKey _generateRsa2048() {
-  final random = math.Random.secure();
-  final e = BigInt.from(65537);
-  while (true) {
-    final p = _generatePrime(1024, random);
-    final q = _generatePrime(1024, random);
-    if (p == q) continue;
-    final n = p * q;
-    if (n.bitLength != 2048) continue;
-    final phi = (p - BigInt.one) * (q - BigInt.one);
-    if (phi % e == BigInt.zero) continue;
-    final d = e.modInverse(phi);
-    return _RsaKey(
-      n,
-      e,
-      d,
-      p,
-      q,
-      d % (p - BigInt.one),
-      d % (q - BigInt.one),
-      q.modInverse(p),
-    );
-  }
-}
-
 class SshKeyManagerCapability implements NativePluginCapability {
   SshKeyManagerCapability({FlutterSecureStorage? secureStorage})
       : _secure = secureStorage ?? const FlutterSecureStorage();
@@ -551,9 +402,8 @@ class SshKeyManagerCapability implements NativePluginCapability {
         NativePluginTool(
           name: 'generate',
           description:
-              'Generate an SSH key pair (ed25519 or rsa-2048). Keys are '
-              'returned, never stored unless save is called. RSA-2048 '
-              'generation can take a while (pure-Dart keygen).',
+              'Generate an ed25519 SSH key pair. Keys are returned, never '
+              'stored unless save is called.',
           inputSchema: {
             'type': 'object',
             'properties': {
@@ -645,10 +495,12 @@ class SshKeyManagerCapability implements NativePluginCapability {
       case 'ed25519':
         return _generateEd25519();
       case 'rsa':
-        return _generateRsa();
+        throw ArgumentError(
+          'RSA key generation is not supported on this device — use ed25519.',
+        );
       default:
         throw ArgumentError(
-          'Unknown key type "$type": expected "ed25519" or "rsa".',
+          'Unknown key type "$type": expected "ed25519".',
         );
     }
   }
@@ -712,60 +564,6 @@ class SshKeyManagerCapability implements NativePluginCapability {
 
   List<int> _uint32(int value) =>
       (ByteData(4)..setUint32(0, value)).buffer.asUint8List();
-
-  Future<String> _generateRsa() async {
-    // NOTE: package:cryptography's VM RSA implementation throws
-    // UnimplementedError for key generation, so RSA primes are generated
-    // here in pure Dart (Miller-Rabin + Random.secure) and encoded with
-    // the same OpenSSH helpers as ed25519.
-    final rsa = _generateRsa2048();
-    final blob = [
-      ..._sshString(ascii.encode('ssh-rsa')),
-      ..._sshMpint(_i2osp(rsa.e)),
-      ..._sshMpint(_i2osp(rsa.n)),
-    ];
-    final publicLine = _sshPublicLine('ssh-rsa', blob, 'ovid-ai');
-    final privatePem = _pkcs1Pem(
-      rsa.n,
-      rsa.e,
-      rsa.d,
-      rsa.p,
-      rsa.q,
-      rsa.dp,
-      rsa.dq,
-      rsa.qi,
-    );
-    return jsonEncode({
-      'type': 'rsa',
-      'public_key': publicLine,
-      'private_key': privatePem,
-    });
-  }
-
-  /// PKCS#1 (`RSA PRIVATE KEY`) PEM: parseable by OpenSSH and OpenSSL.
-  String _pkcs1Pem(
-    BigInt n,
-    BigInt e,
-    BigInt d,
-    BigInt p,
-    BigInt q,
-    BigInt dp,
-    BigInt dq,
-    BigInt qi,
-  ) {
-    final der = _derSequence([
-      _derInteger(BigInt.zero),
-      _derInteger(n),
-      _derInteger(e),
-      _derInteger(d),
-      _derInteger(p),
-      _derInteger(q),
-      _derInteger(dp),
-      _derInteger(dq),
-      _derInteger(qi),
-    ]);
-    return _pemArmor('RSA PRIVATE KEY', der);
-  }
 
   String _storageKey(String name) => '$_prefix$name';
 

@@ -157,6 +157,14 @@ void main() {
       );
     });
 
+    test('generate rejects rsa as unsupported on this device', () async {
+      final ssh = SshKeyManagerCapability();
+      await expectLater(
+        ssh.callTool('generate', {'type': 'rsa'}),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
     test('save/get/list round-trip through the vault', () async {
       final ssh = SshKeyManagerCapability();
       final gen = jsonDecode(
