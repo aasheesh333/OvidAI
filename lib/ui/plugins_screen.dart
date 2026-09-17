@@ -223,6 +223,13 @@ pluginInstallRouteForTest(PluginItem plugin) {
     }
     return (kind: PluginInstallKind.unsupported, github: null, server: null);
   }
+  if (plugin.author == 'you') {
+    return (
+      kind: PluginInstallKind.builtinDirect,
+      github: null,
+      server: null,
+    );
+  }
   return (kind: PluginInstallKind.unsupported, github: null, server: null);
 }
 

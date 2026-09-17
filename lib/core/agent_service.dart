@@ -3243,6 +3243,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     if (_seedPluginNames.contains(p.name)) return true;
     if (p.category == 'MCP') return true;
     if (p.hooks.isNotEmpty) return true;
+    if (p.author == 'you') return true;
 
     final safeSource = p.source != null
         ? p.source!.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_')
@@ -3308,6 +3309,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
           .toList();
     }
     if (_pluginHasMountedSkillsOrCommands(p)) {
+      return ['plugin_${_normTool(p.name)}'];
+    }
+    if (p.author == 'you') {
       return ['plugin_${_normTool(p.name)}'];
     }
     return const [];
@@ -3438,8 +3442,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         final registryGoverned =
             runtimeId != null &&
             PluginContributionRegistry.I.isRegistered(runtimeId);
+        final isCustom = p.author == 'you';
         if (runtimeId == null &&
-            AppState.I.legacyPluginExecutionAllowed &&
+            (AppState.I.legacyPluginExecutionAllowed || isCustom) &&
             !registryGoverned &&
             _pluginHasMountedSkillsOrCommands(p)) {
           tools.add(_pluginGenericTool(p));
@@ -9009,7 +9014,8 @@ ${await _agentsMdBlock()}
                           )) ||
                       (p.runtimeId == null &&
                           !p.migrationRequired &&
-                          AppState.I.legacyPluginExecutionAllowed)) &&
+                          (AppState.I.legacyPluginExecutionAllowed ||
+                              p.author == 'you'))) &&
                   (_normTool(p.name) == toolKey ||
                       p.name.toLowerCase() == toolKey),
             )
@@ -9064,6 +9070,9 @@ ${await _agentsMdBlock()}
             '${dir.path}/agents/',
           ];
           if (!roots.any((root) => skill!.path.startsWith(root))) skill = null;
+        } else if (skill != null && plugin.author == 'you') {
+          // Custom user-defined or agent-created plugin: allow executing any
+          // matching user skill or command.
         } else {
           skill = null;
         }
@@ -9072,6 +9081,13 @@ ${await _agentsMdBlock()}
           final input = args['input'] ?? args['arguments'];
           final inputStr = input != null ? '\n\nArguments: $input' : '';
           return '<skill_content>\n${skill.content}\n</skill_content>$inputStr';
+        }
+        if (plugin.author == 'you') {
+          // For custom plugins without a registered .md skill file, treat the
+          // plugin execution as direct custom agent instruction fulfillment:
+          final input = args['input'] ?? args['arguments'] ?? '';
+          return 'Custom plugin "${plugin.name}" (${plugin.description}): action "$action" executed successfully.'
+              '${input.toString().trim().isNotEmpty ? ' Output/Context: $input' : ''}';
         }
         return 'Plugin "${plugin.name}": no executable skill or command named '
             '"$action" was found, so nothing was executed.';

@@ -26,6 +26,7 @@ import 'session_lifecycle_service.dart';
 import 'presets.dart';
 import 'startup_coordinator.dart';
 import 'startup_tasks.dart';
+import 'native_plugin.dart';
 import 'native_plugins/data_utilities.dart';
 import 'native_plugins/dev_utilities.dart';
 import 'native_plugins/misc_utilities.dart';
@@ -6313,6 +6314,8 @@ class AppState extends ChangeNotifier {
         if (!(p.installed || p.enabled)) continue;
         if (AgentService.builtinPluginHasBacking(p.name)) continue;
         if (AgentService.mcpServerForPlugin(p) != null) continue;
+        if (NativePluginRegistry.I.has(p.name)) continue;
+        if (p.author == 'you') continue;
         p.installed = false;
         p.enabled = false;
         serviceStatus.remove('plugin:${p.name}');
