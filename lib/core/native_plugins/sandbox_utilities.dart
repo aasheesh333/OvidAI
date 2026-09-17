@@ -361,8 +361,8 @@ class GitWorkbenchCapability implements NativePluginCapability {
           ),
         );
       case 'commit':
-        final message = args['message']?.toString() ?? '';
-        if (message.trim().isEmpty) {
+        final message = (args['message']?.toString() ?? '').trim();
+        if (message.isEmpty) {
           throw ArgumentError('Missing required argument: message');
         }
         final dir = await _resolveDir(args);
@@ -670,6 +670,7 @@ class PdfToolsCapability implements NativePluginCapability {
               timeout: timeout,
             );
           }
+          if (_isExecFailure(opOut)) return _trimOutput(opOut);
           final summary =
               'Merged ${inputs.length} file(s) into $output via ${backend.name}.';
           return _trimOutput(
@@ -842,6 +843,7 @@ class PdfToolsCapability implements NativePluginCapability {
               ['python3', '-c', _infoScript, input],
               timeout: timeout,
             );
+            if (_isExecFailure(out)) return _trimOutput(out);
             return _trimOutput('$input\n$sizeLine\n${out.trim()}');
           }
           final pagesOut = await _runner(

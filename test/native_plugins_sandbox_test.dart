@@ -817,6 +817,26 @@ void main() {
     expect(compressOut, isNot(contains('Compressed')));
   });
 
+  test('pdf merge surfaces backend failure instead of success', () async {
+    final cap = PdfToolsCapability(
+      runner: (List<String> args, {String? cwd, Duration? timeout}) async {
+        final cmd = args.join(' ');
+        if (cmd.contains('command -v python3')) return '/usr/bin/python3\n';
+        if (args.isNotEmpty && args.first == 'python3') {
+          return 'merge failed: missing input\n(exit code 1)';
+        }
+        throw ArgumentError('unexpected sandbox command: $cmd');
+      },
+      isSandboxInstalled: () => true,
+    );
+    final out = await cap.callTool('merge', {
+      'inputs': ['/sandbox/home/a.pdf', '/sandbox/home/b.pdf'],
+      'output': '/sandbox/home/out.pdf',
+    });
+    expect(out, contains('(exit code 1)'));
+    expect(out, isNot(contains('Merged')));
+  });
+
   test('pdf extract_text truncates oversized output with omission notice',
       () async {
     final big = 'x' * 7000;
