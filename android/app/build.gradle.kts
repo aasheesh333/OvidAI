@@ -110,4 +110,10 @@ flutter {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    // Desktop-mode client hints: WebSettingsCompat.setUserAgentMetadata and
+    // WebViewCompat.addDocumentStartJavaScript live here. webview_flutter_android
+    // depends on webkit with `implementation`, so it is NOT on this module's
+    // compile classpath — declare it explicitly. Version matches the
+    // webview_flutter_android pin so the resolved graph stays single-version.
+    implementation("androidx.webkit:webkit:1.12.0")
 }
