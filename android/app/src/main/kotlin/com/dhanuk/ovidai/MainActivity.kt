@@ -74,31 +74,29 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun deviceService(result: MethodChannel.Result): OvidAccessibilityService? {
-        var service = OvidAccessibilityService.instance
-        if (service == null && isAccessibilityServiceEnabled(this)) {
-            // Android often keeps the accessibility service process or intent pending
-            // until an accessibility action or window state change occurs.
-            // Wait up to 5000ms with progressive polling so users don't have to toggle off/on.
-            val deadline = android.os.SystemClock.uptimeMillis() + 5000
-            while (service == null && android.os.SystemClock.uptimeMillis() < deadline) {
-                android.os.SystemClock.sleep(100)
-                service = OvidAccessibilityService.instance
-            }
+        val service = OvidAccessibilityService.instance
+        if (service != null) return service
+        if (!isAccessibilityServiceEnabled(this)) {
+            result.error(
+                "SERVICE_DISABLED",
+                "Control mode needs the Ovid accessibility service. Enable it in Settings > Accessibility > Ovid.",
+                null,
+            )
+            return null
         }
-        if (service == null) {
-            // Check once more in case it bound right at the deadline
-            service = OvidAccessibilityService.instance
-        }
-        if (service == null) {
-            val configured = isAccessibilityServiceEnabled(this)
-            val msg = if (configured) {
-                "Ovid accessibility service is enabled in settings but still connecting. Please wait a moment or try again."
-            } else {
-                "Control mode needs the Ovid accessibility service. Enable it in Settings > Accessibility > Ovid."
-            }
-            result.error("SERVICE_DISABLED", msg, null)
-        }
-        return service
+        // Enabled in settings but not yet bound — typical right after the app
+        // process restarts, while the OS rebinds asynchronously. NEVER block
+        // the main thread waiting here: onServiceConnected is delivered on
+        // this same thread, so waiting would starve the very bind being
+        // waited on (and risk an ANR), leaving the service permanently
+        // "gone" until the user toggles it. Answer immediately; the Dart
+        // side retries with backoff while the bind lands.
+        result.error(
+            "SERVICE_CONNECTING",
+            "Ovid accessibility service is still connecting after app restart. Retrying automatically — no need to toggle it off and on.",
+            null,
+        )
+        return null
     }
 
     private fun completeDeviceAction(

@@ -63,6 +63,16 @@ class DeviceControlService {
 
   int _deviceGeneration = 0;
 
+  /// Backoff between SERVICE_CONNECTING retries (transient accessibility
+  /// re-bind window after app restart). Tests shorten it; production waits
+  /// ~5s total so a slow rebind still lands without hammering the channel.
+  @visibleForTesting
+  static List<Duration> connectingRetryDelaysForTest = const [
+    Duration(milliseconds: 800),
+    Duration(milliseconds: 1600),
+    Duration(milliseconds: 2400),
+  ];
+
   @visibleForTesting
   int get deviceGenerationForTest => _deviceGeneration;
 
@@ -85,17 +95,39 @@ class DeviceControlService {
   /// landing after a [beginDeviceGeneration]/[cancelDeviceActions] bump is
   /// replaced by [cancelledSupersededMessage]; anything else propagates
   /// untouched (errors rethrow so honest native failures still surface).
+  ///
+  /// One exception to immediate rethrow: [PlatformException] with code
+  /// `SERVICE_CONNECTING` (accessibility service enabled in settings but
+  /// not yet rebound after app restart) is retried with backoff — the main
+  /// thread stays free so the OS bind can actually land. A Stop/new-run
+  /// generation bump during the wait still wins immediately.
   Future<Object?> _invokeGuarded(Future<Object?> Function() invoke) async {
     final generation = _deviceGeneration;
-    late final Object? result;
-    try {
-      result = await invoke();
-    } catch (_) {
-      if (generation != _deviceGeneration) return cancelledSupersededMessage;
-      rethrow;
+    var connectingRetries = 0;
+    while (true) {
+      try {
+        final result = await invoke();
+        if (generation != _deviceGeneration) return cancelledSupersededMessage;
+        return result;
+      } on PlatformException catch (e) {
+        if (e.code == 'SERVICE_CONNECTING' &&
+            connectingRetries < connectingRetryDelaysForTest.length) {
+          await Future.delayed(
+            connectingRetryDelaysForTest[connectingRetries],
+          );
+          connectingRetries++;
+          if (generation != _deviceGeneration) {
+            return cancelledSupersededMessage;
+          }
+          continue;
+        }
+        if (generation != _deviceGeneration) return cancelledSupersededMessage;
+        rethrow;
+      } catch (_) {
+        if (generation != _deviceGeneration) return cancelledSupersededMessage;
+        rethrow;
+      }
     }
-    if (generation != _deviceGeneration) return cancelledSupersededMessage;
-    return result;
   }
 
   @visibleForTesting
@@ -119,11 +151,16 @@ class DeviceControlService {
   // device_read/deviceRead stays unguarded: reads are fast and the
   // pre-action verification read must reflect the live foreground app.
   Future<Map<String, dynamic>> readRaw({bool full = false}) async {
-    final result = await _channel.invokeMapMethod<String, dynamic>(
-      'deviceRead',
-      {'mode': full ? 'full' : 'delta', 'full': full},
+    // Routed through the guarded invoke so reads share the
+    // SERVICE_CONNECTING retry behavior with every other device action.
+    final result = await _invokeGuarded(
+      () => _channel.invokeMapMethod<String, dynamic>(
+        'deviceRead',
+        {'mode': full ? 'full' : 'delta', 'full': full},
+      ),
     );
-    return result ??
+    final map = result as Map<String, dynamic>?;
+    return map ??
         const {'status': 'error', 'message': 'No device read result.'};
   }
 
