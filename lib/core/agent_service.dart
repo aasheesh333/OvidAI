@@ -92,6 +92,16 @@ class BrowserTab {
   // ("this browser is not secure"); a clean mobile UA lets sign-in work.
   static const mobileUserAgent =
       'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36';
+
+  /// Forced layout viewport width (CSS px) for media queries. Desktop mode
+  /// pins this to [desktopLogicalWidth] so `window.innerWidth` reports a
+  /// large screen even on a phone — UA + viewport flags alone leave pages
+  /// with `width=device-width` meta laying out at device width. Null means
+  /// device width (mobile default). In-memory only; restores default from
+  /// the tab's mode.
+  static const int desktopLogicalWidth = 1280;
+  int? viewportWidth;
+
   bool desktopMode;
 
   BrowserTab({required this.url, bool? desktopMode})
@@ -2061,6 +2071,15 @@ class AgentService extends ChangeNotifier {
   static String browserZoomScriptForTest(double scale) =>
       'document.documentElement.style.zoom = "$scale";';
 
+  /// Effective layout viewport width for [tab]: an explicit resize value
+  /// wins, else desktop mode pins [BrowserTab.desktopLogicalWidth], else
+  /// null (device width). Pure so desktop-width routing is unit-testable
+  /// without a WebView platform.
+  @visibleForTesting
+  static int? viewportWidthForTest(BrowserTab tab) =>
+      tab.viewportWidth ??
+      (tab.desktopMode ? BrowserTab.desktopLogicalWidth : null);
+
   /// Inject the tab's user-controlled visual zoom into the live page.
   /// Zoom is a per-document CSS property — setting [BrowserTab.userZoom]
   /// alone changes nothing on screen, and every navigation/reload wipes
@@ -2112,6 +2131,9 @@ class AgentService extends ChangeNotifier {
     bool reload = true,
   }) async {
     tab.desktopMode = desktop;
+    // The mode owns the forced width: desktop pins 1280, mobile clears it
+    // (an explicit browser_resize wins again on the next resize call).
+    tab.viewportWidth = desktop ? BrowserTab.desktopLogicalWidth : null;
     // WebSettings.setUseWideViewPort takes effect at initialization / load
     // time, so recreate the controller fresh with the new viewport settings
     // and UA. Recreating first avoids applying to the OLD WebView, which is
@@ -2122,7 +2144,11 @@ class AgentService extends ChangeNotifier {
     // identity and is applied on the next controller init.
     await recreateControllerForDesktopToggle(tab, reload: reload);
     if (tab.controller == null) {
-      await applyDesktopViewport(desktop, tabId: tab.id);
+      await applyDesktopViewport(
+        desktop,
+        tabId: tab.id,
+        logicalWidth: viewportWidthForTest(tab),
+      );
     }
   }
 
@@ -2184,6 +2210,21 @@ class AgentService extends ChangeNotifier {
             }
             notifyListeners();
             _persistBrowserTabs();
+            // Re-apply the forced layout width: navigations load a fresh
+            // document, wiping the DOM-injected viewport meta. Without this
+            // every link click drops a desktop tab back to device width.
+            // Mobile tabs (null width) skip the channel call entirely.
+            final forcedWidth = viewportWidthForTest(tab);
+            if (forcedWidth != null) {
+              unawaited(
+                applyDesktopViewport(
+                  tab.desktopMode,
+                  tabId: tab.id,
+                  webViewIdentifier: webViewIdentifierFor(tab),
+                  logicalWidth: forcedWidth,
+                ),
+              );
+            }
             // Re-apply the user's visual zoom: every navigation/reload resets
             // the document's CSS zoom, so the readable scale (`userZoom`, never
             // a viewport-derived factor) must be re-injected on every page load.
@@ -2348,11 +2389,15 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       }
       // Platform wide viewport setting before initial load (desktop or mobile
       // reset). Target only this tab's fresh WebView — no cross-tab leak.
+      // Desktop tabs also force the 1280px layout width here; every later
+      // navigation re-applies it on page finish (navigations wipe the
+      // DOM-injected meta).
       unawaited(
         applyDesktopViewport(
           tab.desktopMode,
           tabId: tab.id,
           webViewIdentifier: webViewIdentifierFor(tab),
+          logicalWidth: viewportWidthForTest(tab),
         ),
       );
       final previewPath = tab.localPreviewPath;
@@ -7397,18 +7442,39 @@ ${await _agentsMdBlock()}
       // take over themselves) and non-Control runs. A failed return
       // surfaces as a think row instead of vanishing silently.
       if (ctx.run.controlRun && !userStopped) {
+        // Pin the task session first (own try block): a selection-side
+        // failure must never skip the launch, and a failed launch must
+        // never roll the selection back — a manual tap still lands on the
+        // right session either way.
         try {
           // Select session in AppState so UI and transcript stay on current task session
           AppState.I.selectSession(pinnedSessionId);
+        } catch (e) {
+          _emit(
+            'think',
+            'could not switch to the task session: '
+            '${e.toString().split('\n').first}',
+          );
+        }
+        try {
           await DeviceControlService.I.openApp(
             'com.dhanuk.ovidai',
             sessionId: pinnedSessionId,
           );
         } catch (e) {
-          _emit(
-            'think',
-            'could not return to Ovid: ${e.toString().split('\n').first}',
-          );
+          // Native reports LAUNCH_BLOCKED when the OS swallows the launch
+          // without throwing: name the tap-back path instead of going
+          // silent (the notification lands on the pinned session above).
+          var msg =
+              'could not return to Ovid: ${e.toString().split('\n').first}';
+          if (e is PlatformException && e.code == 'LAUNCH_BLOCKED') {
+            final detail = (e.message ?? '').trim();
+            msg = detail.isNotEmpty
+                ? '$detail Tap the Ovid notification to return to the task session.'
+                : 'Ovid could not come to the foreground. Tap the Ovid '
+                    'notification to return to the task session.';
+          }
+          _emit('think', msg);
         }
       }
       // Overlay lifecycle: run end brings the floating overlay down.
@@ -9542,6 +9608,10 @@ ${await _agentsMdBlock()}
         // Logical viewport width for media queries. `zoom` is the logical
         // factor that keeps logicalWidth == w; it is NOT a visual scale.
         tab.zoom = (BrowserTab.devW / w).clamp(0.25, 3.0);
+        // Remember the width on the tab so navigations (which wipe the
+        // DOM-injected meta) re-apply it on page finish. A later mode
+        // toggle resets to that mode's default.
+        tab.viewportWidth = w;
         // Drive the layout viewport through the per-tab native API (wide
         // viewport + requested width). The injected CSS scale stays
         // `userZoom` only — resize must never shrink the readable content.
