@@ -43,6 +43,19 @@ void main() {
     expect(dart.contains('openAutoStartSettings'), isTrue);
   });
 
+  test('self-launch verifies the foreground landing, never silent success',
+      () {
+    // Android 10+ can swallow a background startActivity without throwing:
+    // MainActivity must poll for the actual foreground state, retry once,
+    // and report LAUNCH_BLOCKED instead of success(true) when Ovid never
+    // lands — otherwise Control-mode return silently strands the user.
+    final kt = File(
+      'android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt',
+    ).readAsStringSync();
+    expect(kt.contains('LAUNCH_BLOCKED'), isTrue);
+    expect(kt.contains('IMPORTANCE_FOREGROUND'), isTrue);
+  });
+
   test('foreground service refreshes the wake lock before expiry', () {
     // The 6h PARTIAL_WAKE_LOCK ceiling must be refreshed on update ticks —
     // otherwise 24/7 runs silently lose the lock and Doze kills them.

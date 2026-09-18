@@ -135,6 +135,53 @@ void main() {
     expect(openedOvid(), isTrue);
   });
 
+  test('deviceOpenApp carries the running session id', () async {
+    final s = controlSession('return-session-id');
+    succeed('done');
+
+    await AgentService.I
+        .runTask('hi', sessionId: s.id)
+        .timeout(const Duration(seconds: 20));
+
+    final openCall = deviceCalls.firstWhere((c) => c.method == 'deviceOpenApp');
+    expect((openCall.arguments as Map)['sessionId'], s.id);
+  });
+
+  test('blocked launch surfaces a tap-notification hint, overlay still hides',
+      () async {
+    final s = controlSession('return-blocked');
+    succeed('done');
+    const deviceChannel = MethodChannel('ovid/device-blocked-test');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(deviceChannel, (call) async {
+      deviceCalls.add(call);
+      if (call.method == 'deviceOpenApp') {
+        throw PlatformException(
+          code: 'LAUNCH_BLOCKED',
+          message: 'Ovid could not come to the foreground.',
+        );
+      }
+      return true;
+    });
+    DeviceControlService.setMethodChannelForTest(deviceChannel);
+
+    await AgentService.I
+        .runTask('hi', sessionId: s.id)
+        .timeout(const Duration(seconds: 20));
+
+    final thinks = AgentService.I
+        .runBucketForTest(s.id)
+        .runEvents
+        .where((e) => e.kind == 'think')
+        .map((e) => e.text)
+        .join('\n');
+    expect(thinks, contains('Tap the Ovid notification'));
+    expect(
+      overlayCalls.any((c) => c.method == 'deviceOverlayHide'),
+      isTrue,
+    );
+  });
+
   test('user-cancelled run does not yank the user back', () async {
     final s = controlSession('return-stop');
     AgentService.llmOnceForTest = (p, msgs, session, includeTools) async {

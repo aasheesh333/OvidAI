@@ -4,6 +4,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Intent
@@ -52,6 +53,23 @@ class MainActivity : FlutterActivity() {
 
         override fun error(code: String, message: String) {
             runOnUiThread { result.error(code, message, null) }
+        }
+    }
+
+    /// True when our own process is currently the foreground app. Used to
+    /// verify a self-launch actually landed: Android 10+ background-start
+    /// restrictions can swallow startActivity without throwing.
+    private fun isAppForegroundedNow(): Boolean {
+        return try {
+            val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+            val processes = am.runningAppProcesses ?: return false
+            processes.any {
+                it.processName == packageName &&
+                    it.importance ==
+                        ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+            }
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -371,18 +389,58 @@ class MainActivity : FlutterActivity() {
 
                                 if (launchIntent != null) {
                                     if (isSelf) {
-                                        // Directly start activity on the main thread and via PendingIntent to ensure foregrounding
+                                        // Request the launch, then VERIFY Ovid actually
+                                        // reaches the foreground: Android 10+
+                                        // background-start restrictions can swallow
+                                        // startActivity without throwing, which used
+                                        // to report success while the user stayed in
+                                        // the other app. Poll off the channel thread
+                                        // (never block it), retry once, and report
+                                        // LAUNCH_BLOCKED when it never lands so Dart
+                                        // can say so instead of going silent.
                                         try {
                                             startActivity(launchIntent)
                                         } catch (_: Throwable) {
-                                            val pi = PendingIntent.getActivity(
-                                                this,
-                                                0,
-                                                launchIntent,
-                                                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-                                            )
-                                            pi.send()
+                                            try {
+                                                val pi = PendingIntent.getActivity(
+                                                    this,
+                                                    0,
+                                                    launchIntent,
+                                                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                                                )
+                                                pi.send()
+                                            } catch (_: Throwable) {}
                                         }
+                                        Thread {
+                                            val deadline =
+                                                android.os.SystemClock.uptimeMillis() + 3500
+                                            var retried = false
+                                            var landed = isAppForegroundedNow()
+                                            while (!landed &&
+                                                android.os.SystemClock.uptimeMillis() < deadline
+                                            ) {
+                                                android.os.SystemClock.sleep(250)
+                                                if (!retried) {
+                                                    try {
+                                                        startActivity(launchIntent)
+                                                    } catch (_: Throwable) {}
+                                                    retried = true
+                                                }
+                                                landed = isAppForegroundedNow()
+                                            }
+                                            runOnUiThread {
+                                                if (landed) {
+                                                    result.success(true)
+                                                } else {
+                                                    result.error(
+                                                        "LAUNCH_BLOCKED",
+                                                        "Ovid could not come to the foreground (the system blocked the launch).",
+                                                        null,
+                                                    )
+                                                }
+                                            }
+                                        }.start()
+                                        return@setMethodCallHandler
                                     } else {
                                         val service = OvidAccessibilityService.instance
                                         if (service != null) {
