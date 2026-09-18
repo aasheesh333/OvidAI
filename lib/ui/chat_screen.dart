@@ -6739,6 +6739,21 @@ Future<void> _enableControlMode(BuildContext context) async {
     app.controlDisclosureAccepted = true;
   }
   AgentService.I.setMode(AgentMode.control);
+  // Battery exemption once: control mode means permanent presence, which
+  // Doze/OEM killers will end without the exemption. Asked only on first
+  // enable, and only when not already exempt — never a nag.
+  if (!app.controlBatteryPromptShown) {
+    await app.markControlBatteryPromptShown();
+    bool exempt = true;
+    try {
+      exempt = (await DeviceControlService.I.backgroundHealth()).batteryExempt;
+    } catch (_) {}
+    if (!exempt) {
+      try {
+        await AgentService.I.requestBatteryExemption();
+      } catch (_) {}
+    }
+  }
   // Only deep-link to Settings when the accessibility service is not yet
   // enabled — an already-granted service must not re-open Settings.
   var enabled = false;
@@ -6771,6 +6786,8 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
   bool? _enabled;
   String? _error;
   Timer? _retryTimer;
+  bool? _batteryExempt;
+  String _manufacturer = '';
 
   @override
   void initState() {
@@ -6809,6 +6826,20 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
         if (mounted) setState(() => _enabled = retryEnabled);
       });
     }
+    await _refreshHealth();
+  }
+
+  /// Background-health snapshot for OEM-killer guidance. Fail-closed toward
+  /// silence: an unreadable state hides the guidance row instead of nagging.
+  Future<void> _refreshHealth() async {
+    try {
+      final health = await DeviceControlService.I.backgroundHealth();
+      if (!mounted || AgentService.I.mode != AgentMode.control) return;
+      setState(() {
+        _batteryExempt = health.batteryExempt;
+        _manufacturer = health.manufacturer;
+      });
+    } catch (_) {}
   }
 
   Future<void> _retry() async {
@@ -6830,23 +6861,56 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
     if (_enabled == null) {
       _refresh();
     }
-    if (AgentService.I.mode != AgentMode.control || _enabled != false) {
+    if (AgentService.I.mode != AgentMode.control) {
+        return const SizedBox.shrink();
+      }
+      final showOffWarning = _enabled == false;
+      // OEM-killer guidance: service is up, but this ROM kills background
+      // apps without the battery exemption. Pixel-class ROMs never match.
+      final showHealthGuidance =
+          _enabled == true &&
+          _batteryExempt == false &&
+          DeviceControlService.isKillerOem(_manufacturer);
+      if (!showOffWarning && !showHealthGuidance) {
         return const SizedBox.shrink();
       }
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(Icons.warning_amber_rounded, size: 15, color: Aether.warn),
-              const SizedBox(width: 5),
-              Expanded(child: Text('Control service is off', style: TextStyle(fontSize: 11, color: Aether.warn))),
-              TextButton(
-                onPressed: _retry,
-                child: const Text('Open Accessibility Settings'),
-              ),
-            ],
-          ),
+          if (showOffWarning)
+            Row(
+              children: [
+                Icon(Icons.warning_amber_rounded, size: 15, color: Aether.warn),
+                const SizedBox(width: 5),
+                Expanded(child: Text('Control service is off', style: TextStyle(fontSize: 11, color: Aether.warn))),
+                TextButton(
+                  onPressed: _retry,
+                  child: const Text('Open Accessibility Settings'),
+                ),
+              ],
+            ),
+          if (showHealthGuidance)
+            Row(
+              children: [
+                Icon(Icons.battery_alert_outlined, size: 15, color: Aether.warn),
+                const SizedBox(width: 5),
+                const Expanded(
+                  child: Text(
+                    'This device may kill Ovid in the background — exempt it to stay present',
+                    style: TextStyle(fontSize: 11, color: Aether.warn),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () async {
+                    try {
+                      await AgentService.I.requestBatteryExemption();
+                    } catch (_) {}
+                    await _refreshHealth();
+                  },
+                  child: const Text('Fix'),
+                ),
+              ],
+            ),
           if (_error != null)
             Padding(
               padding: const EdgeInsets.only(left: 20),

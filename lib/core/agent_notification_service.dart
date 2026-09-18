@@ -39,6 +39,18 @@ class AgentNotificationService {
   bool get _isKeepAlive =>
       keepAliveOverrideForTest ?? AppState.I.keepAliveEnabled;
 
+  /// True while any session sits in control mode — the user's explicit
+  /// "stay present" intent, independent of the keep-alive toggle.
+  bool _isControlModeActive() {
+    try {
+      return AppState.I.sessions.any(
+        (s) => s.mode == AgentMode.control.name,
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
   @visibleForTesting
   static bool Function()? anyRunActiveOverrideForTest;
 
@@ -219,6 +231,24 @@ class AgentNotificationService {
       if (hadNotificationWork) {
         unawaited(_invoke('agentServiceStop', {}));
       }
+      return;
+    }
+
+    // Control-mode presence lock: an explicit control session means the
+    // user wants Ovid permanently present — idle gaps between runs must
+    // never stop the service. Only explicit Exit, control-mode off, or the
+    // master notification switch off ends presence.
+    if (_isControlModeActive()) {
+      unawaited(
+        _invoke('agentServiceUpdate', {
+          'title': 'Ovid AI',
+          'text': 'Control mode active',
+        }).then((ok) {
+          if (ok && _committedGeneration == barrier && !_isAnyRunActive()) {
+            _active = true;
+          }
+        }),
+      );
       return;
     }
 

@@ -2707,6 +2707,8 @@ class AppState extends ChangeNotifier {
       _notificationsEnabled = prefs.getBool(_kNotificationsPref) ?? true;
       _controlDisclosureAccepted =
           prefs.getBool(_kControlDisclosure) ?? false;
+      controlBatteryPromptShown =
+          prefs.getBool(_kControlBatteryPrompt) ?? false;
       chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0).clamp(
         chatFontScaleMin,
         chatFontScaleMax,
@@ -3883,6 +3885,20 @@ class AppState extends ChangeNotifier {
     try {
       final p = await SharedPreferences.getInstance();
       await p.setBool(_kControlDisclosure, v);
+    } catch (_) {}
+  }
+
+  /// Battery-exemption prompt shown once on first Control-mode enable, so
+  /// we never nag. Loaded with the other control prefs at startup.
+  static const _kControlBatteryPrompt = 'ovid_control_battery_prompt_shown';
+  bool controlBatteryPromptShown = false;
+
+  Future<void> markControlBatteryPromptShown() async {
+    controlBatteryPromptShown = true;
+    notifyListeners();
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setBool(_kControlBatteryPrompt, true);
     } catch (_) {}
   }
 

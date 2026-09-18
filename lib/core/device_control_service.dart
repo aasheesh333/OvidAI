@@ -31,6 +31,22 @@ class ScreenshotCopyException implements Exception {
   String toString() => message;
 }
 
+/// One-shot background-health snapshot from the native side.
+class BackgroundHealth {
+  final String manufacturer;
+  final bool batteryExempt;
+
+  const BackgroundHealth({
+    required this.manufacturer,
+    required this.batteryExempt,
+  });
+
+  /// Guidance is worthwhile only on killer-OEM ROMs lacking the exemption.
+  bool get needsOemGuidance =>
+      !batteryExempt &&
+      DeviceControlService.isKillerOem(manufacturer);
+}
+
 class DeviceControlService {
   DeviceControlService._();
 
@@ -368,10 +384,12 @@ class DeviceControlService {
     final out = StringBuffer();
     if (packageName.isNotEmpty) out.writeln('package: $packageName');
     for (final row in added) {
-      out.writeln('${full ? '' : '+ '}${_formatNode(row)}');
+      out.writeln(
+        '${full ? '' : '+ '}${_formatNode(row, packageName: packageName)}',
+      );
     }
     for (final row in changed) {
-      out.writeln('~ ${_formatNode(row)}');
+      out.writeln('~ ${_formatNode(row, packageName: packageName)}');
     }
     for (final handle in removed) {
       out.writeln('- [$handle]');
@@ -389,7 +407,7 @@ class DeviceControlService {
       if (row is Map) Map<String, dynamic>.from(row),
   ];
 
-  static String _formatNode(Map<String, dynamic> row) {
+  static String _formatNode(Map<String, dynamic> row, {String packageName = ''}) {
     final handle = (row['handle'] as num?)?.toInt() ?? 0;
     final className = row['class']?.toString().trim() ?? '';
     final text = row['text']?.toString().trim() ?? '';
@@ -409,6 +427,13 @@ class DeviceControlService {
       ])
         if (row[name] == true) name,
     ];
+    final role = iconRoleForTest(
+      packageName: packageName,
+      className: className,
+      text: text,
+      description: description,
+      viewId: viewId,
+    );
     return [
       '[$handle]',
       if (className.isNotEmpty) className,
@@ -416,14 +441,184 @@ class DeviceControlService {
       if (description.isNotEmpty)
         'desc="${description.replaceAll('"', r'\"')}"',
       if (viewId.isNotEmpty) 'id=$viewId',
+      if (role != null) 'icon="$role"',
       if (bounds.isNotEmpty) 'bounds=($bounds)',
       ...flags,
     ].join(' ');
   }
 
+  /// Icon role for a graphic widget, or null when nothing can be inferred.
+  /// Only image widgets get roles (a TextView saying "Search results" is
+  /// not a search icon). Package-scoped entries win over generic ones so
+  /// the same keyword can mean different things in different apps. The
+  /// table is data (extend without touching matching logic).
+  @visibleForTesting
+  static String? iconRoleForTest({
+    required String packageName,
+    required String className,
+    required String text,
+    required String description,
+    required String viewId,
+  }) {
+    final cls = className.toLowerCase();
+    if (!cls.contains('imagebutton') && !cls.contains('imageview')) {
+      return null;
+    }
+    final haystack =
+        '$cls ${text.toLowerCase()} ${description.toLowerCase()} ${viewId.toLowerCase()}';
+    final pkg = packageName.trim().toLowerCase();
+    for (final entry in _iconRoles) {
+      if (entry.$1.isNotEmpty && entry.$1 != pkg) continue;
+      if (haystack.contains(entry.$2)) return entry.$3;
+    }
+    return null;
+  }
+
+  /// (package scope, keyword, label). Package-scoped rows come first so
+  /// they win over the generic fallbacks below.
+  static const _iconRoles = [
+    // Per-app refinements.
+    ('com.instagram.android', 'direct', 'direct inbox'),
+    ('com.instagram.android', 'reels', 'reels'),
+    ('com.instagram.android', 'your_story', 'your story'),
+    ('com.whatsapp', 'status', 'status tab'),
+    ('com.whatsapp', 'chats', 'chats tab'),
+    ('com.whatsapp', 'calls', 'calls tab'),
+    ('com.google.android.youtube', 'shorts', 'shorts'),
+    ('com.google.android.youtube', 'library', 'library'),
+    ('com.android.chrome', 'tab_switcher', 'open tabs'),
+    ('com.android.settings', 'wifi', 'wi-fi'),
+    ('com.android.settings', 'bluetooth', 'bluetooth'),
+    ('com.android.settings', 'apps', 'apps list'),
+    // Generic fallbacks (any app).
+    ('', 'navigate_up', 'back button'),
+    ('', 'arrow_back', 'back button'),
+    ('', 'more_vert', 'more options'),
+    ('', 'morevert', 'more options'),
+    ('', 'overflow', 'more options'),
+    ('', 'paper_plane', 'send'),
+    ('', 'bookmark', 'save'),
+    ('', 'videocam', 'video'),
+    ('', 'navigate', 'back button'),
+    ('', 'share', 'share'),
+    ('', 'search', 'search'),
+    ('', 'settings', 'settings'),
+    ('', 'gear', 'settings'),
+    ('', 'send', 'send'),
+    ('', 'back', 'back button'),
+    ('', 'close', 'close'),
+    ('', 'clear', 'close'),
+    ('', 'play', 'play'),
+    ('', 'pause', 'pause'),
+    ('', 'mic', 'mic'),
+    ('', 'camera', 'camera'),
+    ('', 'phone', 'call'),
+    ('', 'call', 'call'),
+    ('', 'video', 'video'),
+    ('', 'message', 'message'),
+    ('', 'comment', 'comment'),
+    ('', 'heart', 'like button'),
+    ('', 'favorite', 'like button'),
+    ('', 'like', 'like button'),
+    ('', 'home', 'home'),
+    ('', 'bell', 'notifications'),
+    ('', 'notification', 'notifications'),
+    ('', 'person', 'profile'),
+    ('', 'profile', 'profile'),
+    ('', 'account', 'profile'),
+    ('', 'avatar', 'profile'),
+    ('', 'pencil', 'edit'),
+    ('', 'compose', 'edit'),
+    ('', 'edit', 'edit'),
+    ('', 'trash', 'delete'),
+    ('', 'delete', 'delete'),
+    ('', 'plus', 'add'),
+    ('', 'add', 'add'),
+    ('', 'check', 'done'),
+    ('', 'done', 'done'),
+    ('', 'tick', 'done'),
+    ('', 'refresh', 'refresh'),
+    ('', 'sync', 'refresh'),
+    ('', 'download', 'download'),
+    ('', 'upload', 'upload'),
+    ('', 'star', 'save'),
+    ('', 'save', 'save'),
+    ('', 'location', 'location'),
+    ('', 'pin', 'location'),
+    ('', 'map', 'location'),
+    ('', 'calendar', 'calendar'),
+    ('', 'clock', 'clock'),
+    ('', 'time', 'clock'),
+    ('', 'schedule', 'clock'),
+    ('', 'volume', 'volume'),
+    ('', 'lock', 'lock'),
+    ('', 'grid', 'app drawer'),
+    ('', 'apps', 'app drawer'),
+    ('', 'drawer', 'app drawer'),
+    ('', 'list', 'list'),
+    ('', 'filter', 'sort'),
+    ('', 'sort', 'sort'),
+    ('', 'info', 'help'),
+    ('', 'help', 'help'),
+    ('', 'logout', 'logout'),
+    ('', 'exit', 'logout'),
+    ('', 'story', 'story'),
+    ('', 'reel', 'reels'),
+    ('', 'fullscreen', 'fullscreen'),
+    ('', 'expand', 'fullscreen'),
+  ];
+
   @visibleForTesting
   static bool isSensitiveTargetForTest({String? packageName, String? url}) {
     return isSensitiveTarget(packageName: packageName, url: url);
+  }
+
+  @visibleForTesting
+  static bool isKillerOemForTest(String manufacturer) =>
+      isKillerOem(manufacturer);
+
+  /// True for OEM ROMs known to force-kill background apps even with a
+  /// foreground service (autostart whitelists, task killers). Used to show
+  /// background-health guidance only where it matters — Pixel-class ROMs
+  /// never see the nag.
+  static bool isKillerOem(String manufacturer) {
+    final m = manufacturer.trim().toLowerCase();
+    if (m.isEmpty) return false;
+    const killers = [
+      'xiaomi',
+      'redmi',
+      'poco',
+      'oppo',
+      'realme',
+      'oneplus',
+      'vivo',
+      'iqoo',
+      'huawei',
+      'honor',
+      'samsung',
+      'asus',
+      'infinix',
+      'tecno',
+    ];
+    return killers.any((k) => m == k || m.startsWith('$k ') || m.contains(' $k'));
+  }
+
+  /// One-shot background-health snapshot: device manufacturer plus whether
+  /// the OS battery-optimization exemption is granted. Pure check — never
+  /// opens system UI (that is `requestBatteryExemption`'s job).
+  Future<BackgroundHealth> backgroundHealth() async {
+    try {
+      final m = await _channel.invokeMapMethod<String, dynamic>(
+        'getBackgroundHealth',
+      );
+      return BackgroundHealth(
+        manufacturer: m?['manufacturer']?.toString() ?? '',
+        batteryExempt: m?['batteryExempt'] == true,
+      );
+    } catch (_) {
+      // Fail closed toward silence: an unreadable state must not nag.
+      return const BackgroundHealth(manufacturer: '', batteryExempt: true);
+    }
   }
 
   static bool isSensitiveTarget({String? packageName, String? url}) {

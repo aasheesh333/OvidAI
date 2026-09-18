@@ -7,23 +7,39 @@ import android.app.Activity
 import android.app.ActivityManager
 import android.app.PendingIntent
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.ImageReader
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.system.Os
 import android.system.OsConstants
 import android.system.ErrnoException
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.net.URLConnection
 import java.util.zip.ZipFile
 
 class MainActivity : FlutterActivity() {
     private val channelName = "ovid/native"
     private val safExportRequestCode = 7407
+    private val screenCaptureRequestCode = 7408
+
+    /// Pending screenshot result while the OS screen-capture consent dialog
+    /// (pre-Android-11 MediaProjection route) is on screen. Single-flight:
+    /// a second capture attempt while one is pending gets SCREENSHOT_BUSY.
+    private var pendingScreenshotResult: MethodChannel.Result? = null
     private val safExportCoordinator = SafExportCoordinator<ParcelFileDescriptor, Uri> { source, destination ->
         val output = contentResolver.openOutputStream(destination, "w")
             ?: throw IllegalStateException("Destination could not be opened")
@@ -97,6 +113,151 @@ class MainActivity : FlutterActivity() {
             null,
         )
         return null
+    }
+
+    /// Pre-Android-11 screenshot route: MediaProjection needs a one-time OS
+    /// consent dialog, so the MethodChannel result is parked until
+    /// onActivityResult delivers the grant/denial. Same cache-file success
+    /// contract as the accessibility-service path.
+    private fun requestLegacyScreenshot(result: MethodChannel.Result) {
+        try {
+            if (pendingScreenshotResult != null) {
+                result.error(
+                    "SCREENSHOT_BUSY",
+                    "Another screenshot capture is already in progress.",
+                    null,
+                )
+                return
+            }
+            val manager =
+                getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+            if (manager == null) {
+                result.error(
+                    "SCREENSHOT_FAILED",
+                    "Screen capture is unavailable on this device.",
+                    null,
+                )
+                return
+            }
+            pendingScreenshotResult = result
+            try {
+                startActivityForResult(
+                    manager.createScreenCaptureIntent(),
+                    screenCaptureRequestCode,
+                )
+            } catch (e: Exception) {
+                pendingScreenshotResult = null
+                result.error(
+                    "SCREENSHOT_FAILED",
+                    "Could not request screen-capture permission: ${e.message}",
+                    null,
+                )
+            }
+        } catch (e: Exception) {
+            result.error(
+                "SCREENSHOT_FAILED",
+                e.message ?: "Screenshot could not be started.",
+                null,
+            )
+        }
+    }
+
+    /// Drains one MediaProjection frame into the shared device-captures
+    /// cache. Runs off the main thread; always releases the virtual
+    /// display, projection, and reader, and always settles the result.
+    private fun captureLegacyScreenshot(
+        result: MethodChannel.Result,
+        resultCode: Int,
+        data: Intent,
+    ) {
+        Thread {
+            var projection: MediaProjection? = null
+            var virtualDisplay: VirtualDisplay? = null
+            var reader: ImageReader? = null
+            var bitmap: Bitmap? = null
+            try {
+                val manager =
+                    getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                projection = manager.getMediaProjection(resultCode, data)
+                val metrics = resources.displayMetrics
+                val width = metrics.widthPixels
+                val height = metrics.heightPixels
+                reader = ImageReader.newInstance(
+                    width, height, PixelFormat.RGBA_8888, 2,
+                )
+                virtualDisplay = projection.createVirtualDisplay(
+                    "ovid-capture",
+                    width, height, metrics.densityDpi,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    reader.surface, null, null,
+                )
+                var image = reader.acquireLatestImage()
+                val deadline = SystemClock.uptimeMillis() + 3000
+                while (image == null && SystemClock.uptimeMillis() < deadline) {
+                    SystemClock.sleep(100)
+                    image = reader.acquireLatestImage()
+                }
+                val frame = image
+                    ?: throw IllegalStateException("No screen frame arrived.")
+                try {
+                    val planes = frame.planes
+                    val buffer = planes[0].buffer
+                    val pixelStride = planes[0].pixelStride
+                    val rowStride = planes[0].rowStride
+                    val rowPadding = rowStride - pixelStride * width
+                    var raw = Bitmap.createBitmap(
+                        width + rowPadding / pixelStride,
+                        height,
+                        Bitmap.Config.ARGB_8888,
+                    )
+                    raw.copyPixelsFromBuffer(buffer)
+                    bitmap = if (rowPadding > 0) {
+                        val cropped = Bitmap.createBitmap(raw, 0, 0, width, height)
+                        raw.recycle()
+                        cropped
+                    } else {
+                        raw
+                    }
+                    val directory = File(cacheDir, "device-captures")
+                    if (!directory.exists() && !directory.mkdirs()) {
+                        throw IllegalStateException("Could not create screenshot cache")
+                    }
+                    val file = File(directory, "screen-${System.currentTimeMillis()}.png")
+                    FileOutputStream(file).use { output ->
+                        if (!bitmap!!.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                            throw IllegalStateException("Could not encode screenshot")
+                        }
+                    }
+                    val path = file.absolutePath
+                    runOnUiThread { result.success(path) }
+                } finally {
+                    try {
+                        frame.close()
+                    } catch (_: Exception) {}
+                }
+            } catch (e: Throwable) {
+                runOnUiThread {
+                    result.error(
+                        "SCREENSHOT_FAILED",
+                        e.message ?: "Screenshot could not be captured.",
+                        null,
+                    )
+                }
+            } finally {
+                try {
+                    bitmap?.recycle()
+                } catch (_: Exception) {}
+                try {
+                    virtualDisplay?.release()
+                } catch (_: Exception) {}
+                try {
+                    projection?.stop()
+                } catch (_: Exception) {}
+                try {
+                    reader?.close()
+                } catch (_: Exception) {}
+            }
+        }.start()
     }
 
     private fun completeDeviceAction(
@@ -581,8 +742,16 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     "deviceScreenshot" -> {
-                        val service = deviceService(result) ?: return@setMethodCallHandler
-                        service.takeScreen(result)
+                        // Android 11+ uses the accessibility-service capture;
+                        // older releases go through the MediaProjection consent
+                        // flow below (same cache-file success contract).
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            val service =
+                                deviceService(result) ?: return@setMethodCallHandler
+                            service.takeScreen(result)
+                        } else {
+                            requestLegacyScreenshot(result)
+                        }
                     }
                     "deviceOverlayShow" -> {
                         val service = deviceService(result) ?: return@setMethodCallHandler
@@ -627,6 +796,32 @@ class MainActivity : FlutterActivity() {
                             }
                         } catch (e: Exception) {
                             result.success(false)
+                        }
+                    }
+                    "getBackgroundHealth" -> {
+                        // Pure check for background-health guidance: reports
+                        // the manufacturer plus the battery-exemption state
+                        // WITHOUT opening any system UI (unlike
+                        // requestBatteryExemption above).
+                        try {
+                            val exempt = try {
+                                val pm = getSystemService(POWER_SERVICE) as PowerManager
+                                pm.isIgnoringBatteryOptimizations(packageName)
+                            } catch (_: Exception) {
+                                true
+                            }
+                            result.success(
+                                mapOf(
+                                    "manufacturer" to (Build.MANUFACTURER ?: ""),
+                                    "batteryExempt" to exempt,
+                                ),
+                            )
+                        } catch (e: Exception) {
+                            result.error(
+                                "HEALTH_FAILED",
+                                e.message ?: "Could not read background health.",
+                                null,
+                            )
                         }
                     }
                     "openAutoStartSettings" -> {
@@ -913,6 +1108,24 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == screenCaptureRequestCode) {
+            val pending = pendingScreenshotResult
+            pendingScreenshotResult = null
+            if (pending == null) {
+                super.onActivityResult(requestCode, resultCode, data)
+                return
+            }
+            if (resultCode != Activity.RESULT_OK || data == null) {
+                pending.error(
+                    "SCREENSHOT_DENIED",
+                    "Screen-capture permission was denied.",
+                    null,
+                )
+                return
+            }
+            captureLegacyScreenshot(pending, resultCode, data)
+            return
+        }
         if (requestCode != safExportRequestCode) {
             super.onActivityResult(requestCode, resultCode, data)
             return
