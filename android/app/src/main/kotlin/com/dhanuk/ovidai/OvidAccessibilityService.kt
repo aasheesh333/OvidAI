@@ -785,8 +785,19 @@ class OvidAccessibilityService : AccessibilityService() {
 
     /**
      * Resolves the target root accessibility node for screen reading and interaction.
-     * If rootInActiveWindow points to our own overlay or is unavailable, we inspect
-     * on-screen interactive windows to find the top-most non-Ovid application window.
+     *
+     * Priority:
+     * 1. The active window, when it belongs to a third-party app (driving
+     *    other apps — unchanged fast path).
+     * 2. The focused APPLICATION window, when the active window is stale or
+     *    null: a focused third-party app wins; otherwise our own MainActivity
+     *    wins (the user is looking at Ovid itself and asked about its screen).
+     * 3. Legacy fallbacks: top-most non-Ovid application window, then any
+     *    interactive non-Ovid non-overlay window, then whatever is active.
+     *
+     * Our floating overlay (TYPE_ACCESSIBILITY_OVERLAY) is never returned:
+     * reading it would feed the agent its own input box instead of the
+     * screen. Our MainActivity (TYPE_APPLICATION, Ovid package) IS readable.
      */
     internal fun findTargetRootNode(): AccessibilityNodeInfo? {
         var active = try {
@@ -795,15 +806,51 @@ class OvidAccessibilityService : AccessibilityService() {
             null
         }
         val myPkg = packageName
-        // If active node is our own overlay or app, do not treat it as the target third-party app
+        // Fast path unchanged: driving a third-party app.
         if (active != null && active.packageName?.toString() != myPkg) {
             return active
         }
 
-        // Active window is null or belongs to Ovid (overlay/app); search interactive windows.
+        // Active window is null, stale, or belongs to Ovid (overlay/app);
+        // resolve through the focused APPLICATION window.
         try {
             val windowList = windows
             if (windowList != null && windowList.isNotEmpty()) {
+                val activeWindowId = try {
+                    active?.windowId
+                } catch (_: Throwable) {
+                    null
+                }
+                // Our own MainActivity window, kept aside: returned only when
+                // no third-party app window is focused. Never the overlay
+                // (overlay windows are TYPE_ACCESSIBILITY_OVERLAY, filtered
+                // by the type check below).
+                var ownAppRoot: AccessibilityNodeInfo? = null
+                for (w in windowList) {
+                    if (w.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+                    val focusedOrActive =
+                        w.isFocused || (activeWindowId != null && w.id == activeWindowId)
+                    if (!focusedOrActive) continue
+                    val wRoot = w.root ?: continue
+                    val pkg = wRoot.packageName?.toString().orEmpty()
+                    if (pkg.isEmpty()) {
+                        wRoot.recycle()
+                        continue
+                    }
+                    if (pkg != myPkg) {
+                        active?.recycle()
+                        return wRoot
+                    }
+                    if (ownAppRoot == null) {
+                        ownAppRoot = wRoot
+                    } else {
+                        wRoot.recycle()
+                    }
+                }
+                if (ownAppRoot != null) {
+                    active?.recycle()
+                    return ownAppRoot
+                }
                 // First pass: find the focused or active APPLICATION window that is not Ovid
                 for (w in windowList) {
                     if (w.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue

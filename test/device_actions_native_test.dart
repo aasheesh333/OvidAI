@@ -159,6 +159,21 @@ void main() {
       expect(src, contains('FLAG_NOT_FOCUSABLE'));
     });
 
+    test('screen read falls back to the focused Ovid window, never the overlay', () {
+      final src = readServiceSource();
+      // Resolution walks the focused APPLICATION window and keeps Ovid's
+      // own MainActivity as a fallback so the agent can read the app UI.
+      expect(src, contains('w.isFocused'));
+      expect(src, contains('w.id == activeWindowId'));
+      expect(src, contains('ownAppRoot'));
+      // The floating overlay is explicitly excluded from every pass.
+      expect(src, contains('TYPE_ACCESSIBILITY_OVERLAY'));
+      expect(
+        RegExp('TYPE_ACCESSIBILITY_OVERLAY').allMatches(src).length,
+        greaterThanOrEqualTo(2),
+      );
+    });
+
     test('MainActivity launches app with NEW_TASK and task reset flags', () {
       final src = readMainActivitySource();
       expect(src, contains('FLAG_ACTIVITY_RESET_TASK_IF_NEEDED'));
