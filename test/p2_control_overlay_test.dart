@@ -20,8 +20,11 @@ void main() {
     expect(state.contains('ovid_control_disclosure_accepted'), isTrue);
     // The enable path consults the persisted flag before showing the dialog.
     final idx = chat.indexOf('Future<void> _enableControlMode');
-    final body = chat.substring(idx, idx + 1600);
+    // Window covers the disclosure check, the one-time battery-exemption
+    // prompt, and the accessibility deep-link below it.
+    final body = chat.substring(idx, idx + 2600);
     expect(body.contains('controlDisclosureAccepted'), isTrue);
+    expect(body.contains('controlBatteryPromptShown'), isTrue);
     // And only deep-links to Settings when the service is not enabled.
     expect(body.contains('isEnabled()'), isTrue);
   });
