@@ -34,7 +34,7 @@ class Aether {
   static const _hairlineStrongL = Color(0xFFCFCFD8);
   static const _textL = Color(0xFF0F1115);
   static const _textMutedL = Color(0xFF545557);
-  static const _textFaintL = Color(0xFF81858C);
+  static const _textFaintL = Color(0xFF5B5F66);
   static const _codeBgL = Color(0xFFF5F5F5);
 
   static Color get bg => dark ? _bgD : _bgL;
@@ -57,9 +57,12 @@ class Aether {
   static const warn = Color(0xFFF59E0B);
   static const danger = Color(0xFFF25A5A);
 
-  // Light-mode readable variants for success/danger on white surfaces.
+  // Light-mode readable variants for links/chips/buttons on white surfaces.
+  static Color get accentC => dark ? accent : const Color(0xFF2563EB);
   static Color get successC => dark ? success : const Color(0xFF1FA05F);
   static Color get dangerC => dark ? danger : const Color(0xFFD23B33);
+  static Color get successLight => dark ? success : const Color(0xFF15803D);
+  static Color get warnLight => dark ? warn : const Color(0xFFB45309);
 
   static const mono = 'JetBrainsMono';
 
@@ -76,8 +79,10 @@ class Aether {
       colorScheme: (dark ? const ColorScheme.dark() : const ColorScheme.light())
           .copyWith(
             surface: surface,
-            primary: accent,
-            secondary: accent,
+            primary: dark ? accent : accentC,
+            onPrimary: Colors.white,
+            secondary: dark ? accent : accentC,
+            tertiary: dark ? accent : accentC,
             onSurface: text,
             error: dangerC,
           ),
@@ -147,17 +152,18 @@ class Aether {
 /// Small labeled tag (e.g. "FREE", "BYOK").
 class Tag extends StatelessWidget {
   final String label;
-  final Color color;
+  final Color? color;
   final bool filled;
   const Tag(
     this.label, {
     super.key,
-    this.color = const Color(0xFF9B9BA4),
+    this.color,
     this.filled = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    final color = this.color ?? Aether.textMuted;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
       decoration: BoxDecoration(

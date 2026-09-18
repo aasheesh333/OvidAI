@@ -1,6 +1,8 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'secure_store.dart';
+
 /// A single tool exposed by a native plugin capability.
 class NativePluginTool {
   final String name;
@@ -50,7 +52,7 @@ abstract class NativePluginCapability {
 /// `native_plugin_<slug>__<field_key>`.
 class NativePluginConfigStore {
   NativePluginConfigStore({FlutterSecureStorage? secureStorage})
-      : _secure = secureStorage ?? const FlutterSecureStorage();
+      : _secure = secureStorage ?? ovidSecureStorage();
 
   static final NativePluginConfigStore I = NativePluginConfigStore();
 

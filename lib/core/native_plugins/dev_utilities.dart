@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:ovid_ai/core/native_plugin.dart';
+import 'package:ovid_ai/core/secure_store.dart';
 
 /// Part B (NP2) pure-Dart utility capabilities: File Converter,
 /// Markdown Editor, Password Vault, Env Manager, and Log Analyzer.
@@ -332,7 +333,7 @@ class MarkdownEditorCapability implements NativePluginCapability {
 
 class PasswordVaultCapability implements NativePluginCapability {
   PasswordVaultCapability({FlutterSecureStorage? secureStorage})
-      : _secure = secureStorage ?? const FlutterSecureStorage();
+      : _secure = secureStorage ?? ovidSecureStorage();
 
   final FlutterSecureStorage _secure;
 

@@ -5,7 +5,6 @@ import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'agent_notification_service.dart';
@@ -20,6 +19,8 @@ import 'plugin_permissions.dart';
 import 'plugin_registry.dart';
 import 'plugin_runtime.dart';
 import 'plugin_source_resolver.dart';
+import 'secure_store.dart';
+import 'security_service.dart';
 import 'theme.dart';
 import 'sandbox_service.dart';
 import 'session_lifecycle_service.dart';
@@ -74,6 +75,24 @@ const kControlModeDisclosure =
 
 /// ---------- Models ----------
 
+/// Wire format a provider speaks. OpenAI-compatible is the default; Anthropic
+/// uses a different endpoint, auth header, body shape, SSE events and tool
+/// schema, so the transport must know which one to build.
+enum ApiFormat {
+  openai,
+  anthropic;
+
+  static ApiFormat parse(String? raw) {
+    final v = (raw ?? '').trim().toLowerCase();
+    if (v == 'anthropic' || v == 'claude' || v == 'messages') {
+      return ApiFormat.anthropic;
+    }
+    return ApiFormat.openai;
+  }
+
+  String get wire => name;
+}
+
 class ProviderConfig {
   final String id;
   String name;
@@ -87,6 +106,11 @@ class ProviderConfig {
   bool connected;
   final bool requiresApiKey;
 
+  /// OpenAI-compatible vs native Anthropic Messages API. Defaults to
+  /// [ApiFormat.openai]; the seed catalog marks Anthropic explicitly and
+  /// [resolveApiFormat] auto-detects from the base URL for user-added rows.
+  ApiFormat apiFormat;
+
   ProviderConfig({
     String? id,
     required this.name,
@@ -99,11 +123,22 @@ class ProviderConfig {
     this.selectedModel,
     this.connected = false,
     this.requiresApiKey = true,
+    ApiFormat? apiFormat,
   }) : id = id ?? _slug(name),
-       models = models ?? [];
+       models = models ?? [],
+       apiFormat = apiFormat ?? ApiFormat.openai;
 
   bool get hasKey => apiKey.trim().isNotEmpty;
   bool get isConfigured => !requiresApiKey || hasKey;
+
+  /// Effective wire format: an explicit Anthropic setting always wins;
+  /// otherwise a base URL that points at the Anthropic host implies the
+  /// native Messages API even for legacy rows persisted before [apiFormat].
+  ApiFormat get effectiveApiFormat =>
+      apiFormat == ApiFormat.anthropic ||
+              baseUrl.toLowerCase().contains('anthropic.com')
+          ? ApiFormat.anthropic
+          : ApiFormat.openai;
 
   /// Returns the API key with all whitespace and control characters
   /// removed.  This is the value that should be used in HTTP headers —
@@ -122,6 +157,7 @@ class ProviderConfig {
     'custom': custom,
     'models': models,
     'requiresApiKey': requiresApiKey,
+    'apiFormat': apiFormat.wire,
   };
 }
 
@@ -1919,7 +1955,7 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  static const _secureStorage = FlutterSecureStorage();
+  static final _secureStorage = ovidSecureStorage();
   static const _providerKeyPrefix = 'ovid_provider_key_';
   Future<void>? _initialization;
   Future<void>? _firstFrameInitialization;
@@ -1968,6 +2004,11 @@ class AppState extends ChangeNotifier {
   Completer<void>? _persistCompleter;
   Future<void>? _persistScheduledFuture;
   Future<bool>? _persistWriteInFlight;
+
+  /// B4: true when the most recent session write failed. Chat history is not
+  /// durable while this is set; the UI can surface it and a later successful
+  /// write clears it.
+  bool lastSessionPersistFailed = false;
 
   /// Trailing debounce window for coalescing session writes. Defaults to zero
   /// (microtask) so tests leave no wall-clock Timer pending; production opts in
@@ -2691,6 +2732,7 @@ class AppState extends ChangeNotifier {
       maxOutputTokens = prefs.getInt(_kMaxOutputTokens) ?? 0;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
       lightTheme = prefs.getBool(_kTheme) ?? false;
+      secureScreen = prefs.getBool(_kSecureScreen) ?? false;
       memoryEnabled = prefs.getBool(_kMemoryEnabled) ?? true;
       showReasoning = prefs.getBool(_kShowReasoning) ?? true;
       githubSync = prefs.getBool(_kGithubSync) ?? true;
@@ -2975,6 +3017,10 @@ class AppState extends ChangeNotifier {
           existing
             ..baseUrl = entry['baseUrl'] as String? ?? existing.baseUrl
             ..models = hasStoredModels ? models : existing.models;
+          final fmt = entry['apiFormat'];
+          if (fmt is String && fmt.isNotEmpty) {
+            existing.apiFormat = ApiFormat.parse(fmt);
+          }
           continue;
         }
         if (entry['custom'] != true) continue;
@@ -2990,6 +3036,7 @@ class AppState extends ChangeNotifier {
             isFree: entry['isFree'] as bool? ?? false,
             models: models,
             requiresApiKey: entry['requiresApiKey'] as bool? ?? true,
+            apiFormat: ApiFormat.parse(entry['apiFormat'] as String?),
           ),
         );
       }
@@ -3544,12 +3591,17 @@ class AppState extends ChangeNotifier {
       }
       _dirtySessionIds.removeAll(dirtySnapshot);
       await _awaitWorkspaceDeletions();
+      lastSessionPersistFailed = false;
       return true;
     } catch (_) {
       // A failed write must not leave the derivative caches claiming the
       // changes are durable; force a full re-encode next time. Returning false
       // stops the coalescing loop from retrying forever.
       _invalidateSessionPersistenceCache();
+      // B4: record the failure so callers/UI can tell chat history is not
+      // durable (previously the awaited future always completed as success).
+      lastSessionPersistFailed = true;
+      notifyListeners();
       return false;
     }
   }
@@ -3768,6 +3820,11 @@ class AppState extends ChangeNotifier {
   static const _kTheme = 'ovid_light_theme';
   bool lightTheme = false;
 
+  /// Block screenshots + recents thumbnails (FLAG_SECURE). Off by default so
+  /// the user opts in; applied on launch and toggle via SecurityService.
+  static const _kSecureScreen = 'ovid_secure_screen';
+  bool secureScreen = false;
+
   // ── User settings that gate REAL features (persisted, Settings screen) ──
   /// Memory plugin (RAG "Memory" toggle): writes + searches across sessions.
   static const _kMemoryEnabled = 'ovid_memory_enabled';
@@ -3974,6 +4031,19 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kTheme, v);
+    } catch (_) {}
+  }
+
+  /// Toggle screenshot protection (FLAG_SECURE) and persist the choice.
+  Future<void> setSecureScreen(bool v) async {
+    secureScreen = v;
+    notifyListeners();
+    try {
+      await SecurityService.I.setSecureScreen(v);
+    } catch (_) {}
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kSecureScreen, v);
     } catch (_) {}
   }
 
@@ -4605,6 +4675,7 @@ class AppState extends ChangeNotifier {
     required String name,
     required String baseUrl,
     String apiKey = '',
+    ApiFormat? apiFormat,
   }) async {
     final normalizedName = name.trim();
     final normalizedUrl = baseUrl.trim();
@@ -4625,6 +4696,7 @@ class AppState extends ChangeNotifier {
       apiKey: apiKey.trim(),
       custom: true,
       requiresApiKey: apiKey.trim().isNotEmpty,
+      apiFormat: apiFormat,
     );
     try {
       await updateProviderApiKey(provider, provider.apiKey);
@@ -4640,6 +4712,128 @@ class AppState extends ChangeNotifier {
   void updateProviderBaseUrl(ProviderConfig provider, String value) {
     provider.baseUrl = value.trim();
     persistProviderState();
+  }
+
+  // ── Agent full-control helpers (catalog_* tools) ──────────────────────
+  // The agent must be able to do everything the UI can: read a provider,
+  // rename it, repoint its base URL, flip the wire format, set/clear the
+  // key, and add/remove individual model ids. Each helper returns an error
+  // string or null so the tool layer can surface a real reason.
+
+  /// Update a provider's display name (id is stable, never renamed).
+  Future<String?> updateProviderName(ProviderConfig provider, String value) async {
+    final v = value.trim();
+    if (v.isEmpty) return 'Provider name cannot be empty.';
+    provider.name = v;
+    refresh();
+    await persistProviderState();
+    return null;
+  }
+
+  /// Update a provider's description.
+  Future<String?> updateProviderDescription(
+    ProviderConfig provider,
+    String value,
+  ) async {
+    provider.description = value.trim();
+    refresh();
+    await persistProviderState();
+    return null;
+  }
+
+  /// Repoint a provider's base URL, validating it is an absolute URL.
+  Future<String?> updateProviderBaseUrlChecked(
+    ProviderConfig provider,
+    String value,
+  ) async {
+    final v = value.trim();
+    final uri = Uri.tryParse(v);
+    if (uri == null || !uri.hasScheme || !uri.hasAuthority) {
+      return 'Enter a valid absolute base URL.';
+    }
+    provider.baseUrl = v;
+    refresh();
+    await persistProviderState();
+    return null;
+  }
+
+  /// Flip the wire format (OpenAI-compatible vs native Anthropic).
+  Future<String?> updateProviderApiFormat(
+    ProviderConfig provider,
+    ApiFormat format,
+  ) async {
+    provider.apiFormat = format;
+    refresh();
+    await persistProviderState();
+    return null;
+  }
+
+  /// Add a model id to a provider (dedup). Empty ids are rejected.
+  Future<String?> addProviderModel(ProviderConfig provider, String modelId) async {
+    final m = modelId.trim();
+    if (m.isEmpty) return 'Model id cannot be empty.';
+    if (provider.models.contains(m)) {
+      return '"$m" is already listed for ${provider.name}.';
+    }
+    provider.models.add(m);
+    refresh();
+    await persistProviderState();
+    return null;
+  }
+
+  /// Remove a model id. If it is the active session model, clear the
+  /// selection so no session is left pointing at a removed model.
+  Future<String?> removeProviderModel(
+    ProviderConfig provider,
+    String modelId,
+  ) async {
+    final m = modelId.trim();
+    if (!provider.models.remove(m)) {
+      return '"$m" is not listed for ${provider.name}.';
+    }
+    if (provider.selectedModel == m) provider.selectedModel = null;
+    for (final s in sessions) {
+      if (s.providerId == provider.id && s.model == m) {
+        s.model = 'Select a provider';
+        _markSessionDirty(s.id);
+      }
+    }
+    refresh();
+    await persistProviderState();
+    await persistSessions();
+    return null;
+  }
+
+  /// Clear a stored API key for any provider (built-in or custom).
+  Future<String?> clearProviderApiKey(ProviderConfig provider) async {
+    provider.apiKey = '';
+    refresh();
+    try {
+      await _secureStorage.delete(key: '$_providerKeyPrefix${provider.id}');
+    } catch (_) {
+      return 'The stored key could not be removed from secure storage.';
+    }
+    await persistProviderState();
+    return null;
+  }
+
+  /// Resolve a provider by id OR case-insensitive name, so the agent can
+  /// say `provider_id: "Anthropic"` without knowing the slug.
+  ProviderConfig? resolveProvider(String ref) {
+    final r = ref.trim();
+    if (r.isEmpty) return null;
+    final byId = providerById(r);
+    if (byId != null) return byId;
+    final lower = r.toLowerCase();
+    for (final p in providers) {
+      if (p.name.toLowerCase() == lower) return p;
+    }
+    for (final p in providers) {
+      if (p.name.toLowerCase().contains(lower) || p.id.contains(lower)) {
+        return p;
+      }
+    }
+    return null;
   }
 
   /// Remove a custom provider by id. Returns an error string on failure,
@@ -6609,6 +6803,7 @@ class AppState extends ChangeNotifier {
         name: 'Anthropic',
         description: 'Claude Opus, Sonnet and Haiku family.',
         baseUrl: 'https://api.anthropic.com/v1',
+        apiFormat: ApiFormat.anthropic,
         models: [
           'claude-sonnet-4-20250514',
           'claude-opus-4-20250514',

@@ -2313,15 +2313,16 @@ audit=false
   // ═════════════════════════════════════════════════════════════════
   final Map<String, bool> _runtimeEnsured = {};
 
-  /// apt minus TLS flakiness: run an apt sub-command; on cert/TLS/GPG
-  /// failure, append an insecure-HTTPS override once and retry (some
-  /// devices/builds ship a broken ca-certificates symlink after the
-  /// Termux→ours prefix rewrite — this self-heals existing installs).
-  /// apt minus TLS flakiness AND dead-mirror days: run an apt sub-command.
-  /// On a cert/TLS/GPG error → loosen HTTPS verification once and retry.
-  /// On a fetch/lookup failure → rotate to the next known-good mirror,
-  /// refresh the index, and retry the operation.  The caller ALWAYS sees
-  /// the final exit code — no silent success on a half-dead mirror.
+  /// apt with resilient-but-secure retries: run an apt sub-command; on a
+  /// cert/TLS/GPG error OR a fetch/lookup failure → rotate to the next
+  /// known-good mirror, refresh the index, and retry the operation.
+  /// A certificate/TLS failure is NEVER a reason to disable HTTPS
+  /// verification — doing so would make every future apt install
+  /// MITM-able.  Instead it is treated like a bad mirror; if the error
+  /// persists the sandbox CA bundle is broken and the honest apt error is
+  /// returned (reinstall the sandbox to repair it).
+  /// The caller ALWAYS sees the final exit code — no silent success on a
+  /// half-dead mirror.
   Future<(int, String)> _aptChecked(
     String sub, {
     required Duration timeout,
@@ -2330,15 +2331,24 @@ audit=false
     Future<(int, String)> run() =>
         execChecked(['bash', '-c', 'apt $sub']).timeout(timeout);
     var (code, out) = await run();
+    var rotated = false;
     if (code != 0 && _looksLikeAptTls(out)) {
-      onLine?.call('[apt] cert/TLS error — relaxed HTTPS verify once');
-      await _loosenAptTls();
-      (code, out) = await run();
+      onLine?.call(
+        '[apt] cert/TLS error — sandbox CA bundle may be broken; rotating '
+        'mirror (HTTPS verification stays enabled)',
+      );
+      _mirrorIdx = (_mirrorIdx + 1) % _aptMirrors.length;
+      final prefix = _prefix;
+      if (prefix != null) _writeSourcesList(prefix, _aptMirrors[_mirrorIdx]);
+      rotated = true;
     }
-    if (code != 0 && _rotateMirror(out)) {
+    if (code != 0 && !rotated && _rotateMirror(out)) {
       onLine?.call(
         '[apt] mirror dead/stale — rotated to ${_aptMirrors[_mirrorIdx]}',
       );
+      rotated = true;
+    }
+    if (rotated) {
       final (uCode, uOut) = await execChecked([
         'bash',
         '-c',
@@ -2363,33 +2373,6 @@ audit=false
         l.contains('gnutls') ||
         l.contains('gpg: ') ||
         l.contains('repo has no release file');
-  }
-
-  bool _aptTlsLoosened = false;
-
-  /// Permanently relax apt HTTPS verification for THIS sandbox prefix
-  /// (idempotent; mirrors the packaged config at next writeAptConfig call).
-  Future<void> _loosenAptTls() async {
-    if (_aptTlsLoosened) return;
-    _aptTlsLoosened = true;
-    try {
-      final p = _prefix!.path;
-      const extra =
-          '// Auto-added after apt certificate/TLS failure.\n'
-          'Acquire::https::Verify-Peer "false";\n'
-          'Acquire::https::Verify-Host "false";\n';
-      for (final f in [
-        File('$p/etc/apt/ovid-apt.conf'),
-        File('$p/etc/apt/apt.conf'),
-      ]) {
-        try {
-          final cur = f.existsSync() ? f.readAsStringSync() : '';
-          if (!cur.contains('Verify-Peer')) {
-            f.writeAsStringSync('$cur$extra');
-          }
-        } catch (_) {}
-      }
-    } catch (_) {}
   }
 
   /// Ensure `nodejs`+`npm` (npx) or `python`+`uv` (uvx) are installed.

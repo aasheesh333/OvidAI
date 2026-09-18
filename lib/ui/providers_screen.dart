@@ -201,7 +201,6 @@ class _ProviderCardState extends State<ProviderCard> {
   late final TextEditingController _keyController;
   late final TextEditingController _urlController;
   Timer? _keyPersistTimer;
-  Timer? _urlPersistTimer;
   bool _deleting = false;
 
   ProviderConfig get provider => widget.provider;
@@ -226,7 +225,6 @@ class _ProviderCardState extends State<ProviderCard> {
   @override
   void dispose() {
     _keyPersistTimer?.cancel();
-    _urlPersistTimer?.cancel();
     if (!_deleting) {
       unawaited(
         AppState.I
@@ -240,12 +238,56 @@ class _ProviderCardState extends State<ProviderCard> {
     super.dispose();
   }
 
-  void _updateBaseUrl(String value) {
-    provider.baseUrl = value.trim();
-    _urlPersistTimer?.cancel();
-    _urlPersistTimer = Timer(const Duration(milliseconds: 400), () {
-      AppState.I.persistProviderState();
-    });
+  Future<void> _editBaseUrl() async {
+    final controller = TextEditingController(text: provider.baseUrl);
+    final messenger = ScaffoldMessenger.of(context);
+    final value = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text(
+          'Edit base URL',
+          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+        ),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
+          decoration: const InputDecoration(hintText: 'https://…/v1'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, controller.text),
+            child: const Text(
+              'Save',
+              style: TextStyle(color: Aether.accent),
+            ),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (value == null || !mounted) return;
+    final error = await AppState.I.updateProviderBaseUrlChecked(provider, value);
+    if (!mounted) return;
+    if (error != null) {
+      messenger.showSnackBar(SnackBar(content: Text(error)));
+      return;
+    }
+    _urlController.text = provider.baseUrl;
+  }
+
+  Future<void> _updateApiFormat(ApiFormat format) async {
+    if (format == provider.apiFormat) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final error = await AppState.I.updateProviderApiFormat(provider, format);
+    if (!mounted) return;
+    if (error != null) {
+      messenger.showSnackBar(SnackBar(content: Text(error)));
+    }
   }
 
   void _updateApiKey(String value) {
@@ -288,7 +330,6 @@ class _ProviderCardState extends State<ProviderCard> {
     if (confirmed != true || !mounted) return;
 
     _keyPersistTimer?.cancel();
-    _urlPersistTimer?.cancel();
     _deleting = true;
     final error =
         await (removeCustomProviderForTest?.call(provider.id) ??
@@ -418,24 +459,68 @@ class _ProviderCardState extends State<ProviderCard> {
                 ),
               ),
               const SizedBox(height: 10),
-              // Base URL — inbuilt me read-only (already filled); custom me editable.
               TextField(
-                readOnly: !provider.custom,
+                readOnly: true,
                 style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
                 controller: _urlController,
-                onChanged: _updateBaseUrl,
                 decoration: InputDecoration(
                   hintText: 'Base URL',
-                  helperText: provider.custom ? null : 'Inbuilt — locked',
-                  helperStyle: TextStyle(fontSize: 10, color: Aether.textFaint),
-                  suffixIcon: provider.custom
-                      ? null
-                      : Icon(
-                          Icons.lock_outline,
-                          size: 14,
-                          color: Aether.textFaint,
+                  suffixIcon: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (!provider.custom)
+                        Tooltip(
+                          message: 'Known-good built-in default — editable',
+                          child: Icon(
+                            Icons.lock_outline,
+                            size: 14,
+                            color: Aether.textFaint,
+                          ),
                         ),
+                      IconButton(
+                        tooltip: 'Edit base URL',
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(Icons.edit_outlined, size: 16),
+                        color: Aether.textMuted,
+                        onPressed: _editBaseUrl,
+                      ),
+                    ],
+                  ),
                 ),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Text(
+                    'API format',
+                    style: TextStyle(fontSize: 12, color: Aether.textMuted),
+                  ),
+                  const Spacer(),
+                  SegmentedButton<ApiFormat>(
+                    style: SegmentedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      textStyle: const TextStyle(fontSize: 11.5),
+                      foregroundColor: Aether.textMuted,
+                      selectedForegroundColor: Aether.accent,
+                      selectedBackgroundColor: Aether.accentSoft,
+                      side: BorderSide(color: Aether.hairlineStrong),
+                    ),
+                    segments: const [
+                      ButtonSegment(
+                        value: ApiFormat.openai,
+                        label: Text('OpenAI-compatible'),
+                      ),
+                      ButtonSegment(
+                        value: ApiFormat.anthropic,
+                        label: Text('Anthropic'),
+                      ),
+                    ],
+                    selected: {provider.effectiveApiFormat},
+                    showSelectedIcon: false,
+                    onSelectionChanged: (selection) =>
+                        _updateApiFormat(selection.first),
+                  ),
+                ],
               ),
               const SizedBox(height: 10),
               Row(

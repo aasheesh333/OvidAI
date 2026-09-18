@@ -148,11 +148,8 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload obfuscation symbols
-        if: env.signing == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: Ovid-symbols
-          path: build/symbols
-          if-no-files-found: ignore
-          retention-days: 30
+      # NOTE: `--split-debug-info=build/symbols` produces Dart deobfuscation
+      # symbols. These are intentionally NOT uploaded as a workflow artifact:
+      # publishing them would defeat the `--obfuscate` build. They exist only
+      # as ephemeral files on the runner and must be archived privately (or
+      # uploaded to Crashlytics) if symbolication is ever needed.

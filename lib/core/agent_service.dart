@@ -5399,27 +5399,24 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'catalog_add_provider',
         'description':
-            'Add a custom OpenAI-compatible provider. Use when the user asks '
-            'to add/set up a new provider (e.g. "add OpenRouter", "use a '
-            'custom API endpoint"). The api_key comes from the user message.',
+            'Add a provider (OpenAI-compatible or native Anthropic). Key comes '
+            'from the user message.',
         'parameters': {
           'type': 'object',
           'properties': {
             'name': {'type': 'string'},
-            'base_url': {
-              'type': 'string',
-              'description':
-                  'OpenAI-compatible base URL, e.g. https://api.example.com/v1',
-            },
-            'api_key': {
-              'type': 'string',
-              'description':
-                  'API key from the user (optional for local servers)',
-            },
+            'base_url': {'type': 'string'},
+            'api_key': {'type': 'string'},
             'models': {
               'type': 'array',
               'items': {'type': 'string'},
-              'description': 'Initial model IDs to register',
+            },
+            'api_format': {
+              'type': 'string',
+              'enum': ['openai', 'anthropic'],
+              'description':
+                  'anthropic = /v1/messages + x-api-key; openai default. '
+                  'Auto-detected from base_url.',
             },
           },
           'required': ['name', 'base_url'],
@@ -5429,10 +5426,132 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     {
       'type': 'function',
       'function': {
+        'name': 'catalog_get_provider',
+        'description': 'Read one provider: url, format, key status, models.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'provider_id': {'type': 'string'},
+          },
+          'required': ['provider_id'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_update_provider',
+        'description':
+            'Update a provider name, description, base URL and/or API format.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'provider_id': {'type': 'string'},
+            'name': {'type': 'string'},
+            'description': {'type': 'string'},
+            'base_url': {'type': 'string'},
+            'api_format': {
+              'type': 'string',
+              'enum': ['openai', 'anthropic'],
+            },
+          },
+          'required': ['provider_id'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_set_provider_key',
+        'description': 'Set/replace the stored API key for any provider.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'provider_id': {'type': 'string'},
+            'api_key': {'type': 'string'},
+          },
+          'required': ['provider_id', 'api_key'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_clear_provider_key',
+        'description': 'Delete the stored API key for a provider.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'provider_id': {'type': 'string'},
+          },
+          'required': ['provider_id'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_add_provider_model',
+        'description': 'Add a model id to a provider.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'provider_id': {'type': 'string'},
+            'model': {'type': 'string'},
+          },
+          'required': ['provider_id', 'model'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_remove_provider_model',
+        'description': 'Remove a model id from a provider.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'provider_id': {'type': 'string'},
+            'model': {'type': 'string'},
+          },
+          'required': ['provider_id', 'model'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_list_models',
+        'description': 'List model ids for one provider, or all providers.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'provider_id': {'type': 'string'},
+          },
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'catalog_select_model',
+        'description': 'Set the active provider + model for this session.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'provider_id': {'type': 'string'},
+            'model': {'type': 'string'},
+          },
+          'required': ['provider_id', 'model'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
         'name': 'catalog_remove_provider',
         'description':
-            'Remove a custom provider by id. Use when the user asks to delete '
-            'a provider they added.',
+            'Remove a custom provider. Built-ins only allow key clearing.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -6892,10 +7011,15 @@ SHELL COMMAND HYGIENE:
 • The native sandbox runs on Android bionic ARM64. Precompiled Linux glibc binary Node addons (.node) cannot be loaded directly. If an npm package fails to load a native module, explain this to the user instead of searching for phantom files.
 If the user asks to install a plugin or MCP, use agent_install_plugin or agent_install_mcp.
 $_appUiMapBlock
-Catalog management: you can list/add/remove providers (catalog_list_providers,
-catalog_add_provider, catalog_remove_provider), list plugins/MCP servers
-(catalog_list_plugins, catalog_list_mcp), add/remove MCP servers
-(catalog_add_mcp, catalog_remove_mcp), and import plugin marketplaces from
+Catalog management: you have FULL provider control — list (catalog_list_providers,
+catalog_get_provider), add (catalog_add_provider, supports both OpenAI-compatible
+and native Anthropic via api_format), update name/description/base URL/API format
+(catalog_update_provider), set or clear the API key (catalog_set_provider_key,
+catalog_clear_provider_key), add/remove individual models (catalog_add_provider_model,
+catalog_remove_provider_model), list models (catalog_list_models), select the active
+model (catalog_select_model), and remove custom providers (catalog_remove_provider).
+Also list plugins/MCP servers (catalog_list_plugins, catalog_list_mcp), add/remove MCP
+servers (catalog_add_mcp, catalog_remove_mcp), and import plugin marketplaces from
 GitHub repos (catalog_add_marketplace). When the user asks to change provider
 settings, add a provider with their key, or manage plugins/MCP — use these
 tools to do it live, don't just explain how.
@@ -7272,14 +7396,33 @@ ${await _agentsMdBlock()}
         for (final tc in toolCalls) {
           final fn = tc['function'];
           final name = fn['name'];
-          final args =
-              jsonDecode(fn['arguments'] ?? '{}') as Map<String, dynamic>;
+          // B2: never let a malformed/truncated tool-arg fragment abort the
+          // whole run. Parse defensively and surface a recoverable tool
+          // error the model can correct on the next turn.
+          Map<String, dynamic> args = <String, dynamic>{};
+          Object? argError;
+          try {
+            final decoded = jsonDecode((fn['arguments'] ?? '{}').toString());
+            if (decoded is Map) {
+              args = decoded.cast<String, dynamic>();
+            } else {
+              argError = 'arguments must be a JSON object';
+            }
+          } catch (e) {
+            argError = e;
+          }
           // ToolRow parity: live tool card in the chat stream.
           final toolMsg = _silentTools.contains(name)
               ? null
               : _toolStart(name, _toolArgSummary(name, args));
           String result;
           try {
+            if (argError != null) {
+              result =
+                  'tool error: invalid arguments JSON for "$name" '
+                  '($argError). Re-issue the call with a complete, valid JSON '
+                  'object.';
+            } else {
             // Per-tool cooperative timeout budget (PR18, reference
             // tool-call-timeout-policy): each tool gets a deadline; slow
             // tools surface a structured timeout error the model can read.
@@ -7291,6 +7434,7 @@ ${await _agentsMdBlock()}
                   '— narrow the request (smaller path/pattern/range) and '
                   'retry, or continue without it.',
             );
+            }
             if (toolMsg != null) {
               _toolFinish(
                 state: result.startsWith('DENIED')
@@ -7946,6 +8090,12 @@ ${await _agentsMdBlock()}
     if (onceOverride != null) {
       return onceOverride(p, msgs, session, includeTools);
     }
+    // Native Anthropic Messages API is a different transport (endpoint,
+    // auth header, body shape, SSE events, tool schema). Route it to its
+    // own builder so the OpenAI path stays untouched.
+    if (p.effectiveApiFormat == ApiFormat.anthropic) {
+      return _callAnthropicOnce(p, msgs, session, includeTools: includeTools);
+    }
     HttpClient? client;
     final ttftWatch = Stopwatch()..start();
     int? ttftMs;
@@ -8283,6 +8433,407 @@ ${await _agentsMdBlock()}
     _liveMsg = null;
     AppState.I.refresh();
     AppState.I.persistSessions();
+  }
+
+  // ── ANTHROPIC NATIVE MESSAGES API ─────────────────────────────────────
+  // The Anthropic wire format differs from OpenAI-compatible endpoints:
+  //   • endpoint  POST {base}/messages
+  //   • auth      x-api-key: <key>  + anthropic-version: 2023-06-01
+  //   • body      {model, max_tokens, system, messages, tools, stream}
+  //   • system    top-level `system` string, NOT a role in messages
+  //   • tools     [{name, description, input_schema}] (not nested under
+  //               `function`, and `parameters` → `input_schema`)
+  //   • stream    content_block_delta / text_delta / input_json_delta /
+  //               message_delta(usage) — no `[DONE]`, no `choices`
+  //   • tool use  assistant `tool_use` blocks → user `tool_result` blocks
+  // The parser normalizes everything back into the SAME internal message
+  // shape the OpenAI path produces, so the agent loop above is unchanged.
+
+  Uri _anthropicEndpoint(ProviderConfig p) {
+    var b = p.baseUrl.replaceAll(RegExp(r'/+$'), '');
+    // A base URL that already ends in /messages is used verbatim; otherwise
+    // append /messages. Handles both .../v1 and bare host forms.
+    if (b.endsWith('/messages')) return Uri.parse(b);
+    return Uri.parse('$b/messages');
+  }
+
+  /// Convert the internal (OpenAI-shaped) request messages into Anthropic's
+  /// `system` + `messages` pair. System entries collapse into one string;
+  /// tool results become `user` turns carrying `tool_result` blocks; an
+  /// assistant turn with tool_calls becomes `tool_use` blocks.
+  @visibleForTesting
+  ({String system, List<Map<String, dynamic>> messages})
+      anthropicRequestMessagesForTest(List<Map<String, dynamic>> msgs) =>
+          _anthropicRequestMessages(msgs);
+
+  ({String system, List<Map<String, dynamic>> messages})
+      _anthropicRequestMessages(List<Map<String, dynamic>> msgs) {
+    final system = StringBuffer();
+    final out = <Map<String, dynamic>>[];
+    for (final m in msgs) {
+      final role = m['role'];
+      if (role == 'system') {
+        final c = m['content'];
+        if (c is String && c.trim().isNotEmpty) {
+          if (system.isNotEmpty) system.write('\n\n');
+          system.write(c);
+        }
+        continue;
+      }
+      if (role == 'tool') {
+        // Anthropic expects tool_result blocks inside a user turn.
+        final block = {
+          'type': 'tool_result',
+          'tool_use_id': m['tool_call_id'] ?? '',
+          'content': (m['content'] ?? '').toString(),
+        };
+        final last = out.isNotEmpty ? out.last : null;
+        if (last != null &&
+            last['role'] == 'user' &&
+            last['_toolResults'] == true) {
+          (last['content'] as List).add(block);
+        } else {
+          out.add({
+            'role': 'user',
+            'content': [block],
+            '_toolResults': true,
+          });
+        }
+        continue;
+      }
+      if (role == 'assistant') {
+        final tcs = m['tool_calls'] as List?;
+        final content = m['content'];
+        final blocks = <Map<String, dynamic>>[];
+        if (content is String && content.isNotEmpty) {
+          blocks.add({'type': 'text', 'text': content});
+        }
+        if (tcs != null) {
+          for (final tc in tcs) {
+            if (tc is! Map) continue;
+            final fn = tc['function'];
+            final name = fn is Map ? fn['name'] : null;
+            final rawArgs = fn is Map ? fn['arguments'] : null;
+            dynamic input;
+            if (rawArgs is String && rawArgs.trim().isNotEmpty) {
+              try {
+                input = jsonDecode(rawArgs);
+              } catch (_) {
+                input = <String, dynamic>{};
+              }
+            }
+            blocks.add({
+              'type': 'tool_use',
+              'id': tc['id'] ?? '',
+              'name': name ?? '',
+              'input': input ?? <String, dynamic>{},
+            });
+          }
+        }
+        if (blocks.isEmpty) continue;
+        out.add({'role': 'assistant', 'content': blocks});
+        continue;
+      }
+      // user (and anything else) — pass text through.
+      final content = m['content'];
+      out.add({
+        'role': 'user',
+        'content': content is String
+            ? content
+            : (content ?? '').toString(),
+      });
+    }
+    // Anthropic rejects `_toolResults` helper keys — strip them now.
+    for (final m in out) {
+      m.remove('_toolResults');
+    }
+    return (system: system.toString(), messages: out);
+  }
+
+  /// Convert the OpenAI function-calling tool roster into Anthropic tools.
+  @visibleForTesting
+  List<Map<String, dynamic>> anthropicToolsForTest(
+    List<Map<String, dynamic>> tools,
+  ) => _anthropicTools(tools);
+
+  List<Map<String, dynamic>> _anthropicTools(
+    List<Map<String, dynamic>> tools,
+  ) {
+    final out = <Map<String, dynamic>>[];
+    for (final t in tools) {
+      final fn = t['function'];
+      if (fn is! Map) continue;
+      out.add({
+        'name': fn['name'],
+        'description': fn['description'] ?? '',
+        'input_schema': fn['parameters'] ?? {'type': 'object', 'properties': {}},
+      });
+    }
+    return out;
+  }
+
+  Future<Map<String, dynamic>?> _callAnthropicOnce(
+    ProviderConfig p,
+    List<Map<String, dynamic>> msgs,
+    ChatSession session, {
+    bool includeTools = true,
+  }) async {
+    HttpClient? client;
+    final ttftWatch = Stopwatch()..start();
+    int? ttftMs;
+    try {
+      client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 20);
+      _runResolved.activeClient = client;
+      final req = await client
+          .postUrl(_anthropicEndpoint(p))
+          .timeout(
+            const Duration(seconds: 20),
+            onTimeout: () => throw Exception('connect timeout'),
+          );
+      _activeRequest = req;
+      if (_cancelRequested) {
+        client.close(force: true);
+        _runResolved.activeClient = null;
+        _activeRequest = null;
+        return null;
+      }
+      final key = p.cleanApiKey;
+      if (key.isNotEmpty) req.headers.set('x-api-key', key);
+      req.headers.set('anthropic-version', '2023-06-01');
+      req.headers.set('Content-Type', 'application/json');
+      req.headers.set('Accept', 'text/event-stream');
+
+      final raw = _runResolved.modelSnapshot ?? session.model;
+      final effMatch = RegExp(
+        r'·\s*(low|medium|high)$',
+        caseSensitive: false,
+      ).firstMatch(raw);
+      final modelId = effMatch != null
+          ? raw.substring(0, effMatch.start).trim()
+          : raw;
+      final effort = effMatch?.group(1)?.toLowerCase();
+
+      final converted = _anthropicRequestMessages(msgs);
+      final maxOut = AppState.I.maxOutputTokens;
+      final body = <String, dynamic>{
+        'model': modelId,
+        // Anthropic REQUIRES max_tokens. Use the user cap when set, else a
+        // sane ceiling that still fits every current Claude model.
+        'max_tokens': maxOut > 0 ? maxOut : 8192,
+        'stream': true,
+        if (converted.system.isNotEmpty) 'system': converted.system,
+        'messages': converted.messages,
+      };
+      final toolList = includeTools ? _anthropicTools(_tools) : const <Map<String, dynamic>>[];
+      if (toolList.isNotEmpty) body['tools'] = toolList;
+      if (effort == 'high') {
+        body['thinking'] = {'type': 'enabled', 'budget_tokens': 4096};
+      }
+
+      final bodyBytes = utf8.encode(jsonEncode(body));
+      req.headers.contentLength = bodyBytes.length;
+      req.add(bodyBytes);
+
+      final idleBudget = Duration(seconds: AppState.I.responseTimeoutSec);
+      final res = await req.close().timeout(
+        idleBudget,
+        onTimeout: () {
+          lastError =
+              'no response from ${p.name} for '
+              '${AppState.I.responseTimeoutSec}s — Settings me '
+              'Increase "AI response timeout" or check the provider';
+          throw TimeoutException(lastError ?? 'first-byte timeout');
+        },
+      );
+      if (res.statusCode != 200) {
+        final data = <int>[];
+        await for (final c in res) {
+          data.addAll(c);
+          if (data.length > 65536) break;
+        }
+        final txt = utf8.decode(data, allowMalformed: true);
+        client.close(force: true);
+        final hint = switch (res.statusCode) {
+          401 || 403 =>
+            'API key invalid or expired — re-enter the key in Settings → ${p.name}.',
+          404 =>
+            'Model "$modelId" not found on this endpoint — pick it again from the model picker.',
+          429 => 'Rate limited — wait a moment and retry.',
+          >= 500 => 'Provider server issue (${p.name}) — retry in a moment.',
+          _ => '',
+        };
+        lastError =
+            'HTTP ${res.statusCode} ${p.name} · $modelId\n'
+            '${hint.isNotEmpty ? '$hint\n' : ''}${cleanTruncate(txt, 180)}';
+        _emit(
+          'err',
+          'LLM ${res.statusCode}: ${txt.substring(0, txt.length.clamp(0, 300))}',
+        );
+        return null;
+      }
+
+      // ── Anthropic SSE parse ──
+      final contentBuf = StringBuffer();
+      final reasoningBuf = StringBuffer();
+      // index → {id, name, arguments(String, accumulated JSON)}
+      final toolBlocks = <int, Map<String, dynamic>>{};
+      String? finishReason;
+      Map<String, dynamic>? usage;
+
+      await for (final rawLine
+          in res
+              .cast<List<int>>()
+              .transform(SseLineSplitter(maxBytes: 8 * 1024 * 1024))
+              .transform(
+                _IdleResetTimeout(idleBudget, (msg) {
+                  lastError =
+                      'model stream idle for ${idleBudget.inSeconds}s — Settings '
+                      'me timeout badhayein';
+                  return TimeoutException(lastError ?? 'model stream timeout');
+                }),
+              )) {
+        final line = rawLine.trim();
+        if (line.isEmpty || !line.startsWith('data:')) continue;
+        final payload = line.substring(5).trim();
+        if (payload.isEmpty || payload == '[DONE]') continue;
+        if (_cancelRequested) break;
+
+        Map<String, dynamic>? j;
+        try {
+          j = jsonDecode(payload) as Map<String, dynamic>;
+        } catch (_) {
+          continue;
+        }
+        final type = j['type'] as String?;
+        switch (type) {
+          case 'message_start':
+            final m = j['message'];
+            if (m is Map && m['usage'] is Map) {
+              usage = Map<String, dynamic>.from(m['usage'] as Map);
+            }
+          case 'content_block_start':
+            final idx = (j['index'] as num?)?.toInt() ?? 0;
+            final block = j['content_block'];
+            if (block is Map && block['type'] == 'tool_use') {
+              toolBlocks[idx] = {
+                'id': block['id'] ?? 'call_$idx',
+                'type': 'function',
+                'function': {
+                  'name': block['name'] ?? '',
+                  'arguments': '',
+                },
+              };
+            }
+          case 'content_block_delta':
+            final idx = (j['index'] as num?)?.toInt() ?? 0;
+            final delta = j['delta'];
+            if (delta is! Map) break;
+            final dType = delta['type'] as String?;
+            if (dType == 'text_delta') {
+              final t = delta['text'];
+              if (t is String && t.isNotEmpty) {
+                ttftMs ??= ttftWatch.elapsedMilliseconds;
+                contentBuf.write(t);
+                _streamToBubble(session, t);
+              }
+            } else if (dType == 'thinking_delta') {
+              final t = delta['thinking'];
+              if (t is String && t.isNotEmpty) {
+                ttftMs ??= ttftWatch.elapsedMilliseconds;
+                reasoningBuf.write(t);
+                _streamReasoning(session, t);
+              }
+            } else if (dType == 'input_json_delta') {
+              final partial = delta['partial_json'];
+              final acc = toolBlocks.putIfAbsent(idx, () {
+                return {
+                  'id': 'call_$idx',
+                  'type': 'function',
+                  'function': {'name': '', 'arguments': ''},
+                };
+              });
+              if (partial is String) {
+                acc['function']['arguments'] =
+                    '${acc['function']['arguments']}$partial';
+              }
+            }
+          case 'message_delta':
+            final d = j['delta'];
+            if (d is Map && d['stop_reason'] is String) {
+              finishReason = d['stop_reason'] as String;
+            }
+            final u = j['usage'];
+            if (u is Map) {
+              final merged = <String, dynamic>{...?usage};
+              for (final e in u.entries) {
+                merged[e.key.toString()] = e.value;
+              }
+              usage = merged;
+            }
+          case 'error':
+            final err = j['error'];
+            lastError = err is Map
+                ? (err['message']?.toString() ?? 'Anthropic stream error')
+                : 'Anthropic stream error';
+            _emit('err', lastError!);
+            return null;
+        }
+      }
+
+      client.close();
+      client = null;
+      _activeRequest = null;
+
+      if (contentBuf.isEmpty && reasoningBuf.isEmpty && toolBlocks.isEmpty) {
+        lastError ??= 'empty response from ${modelId.isEmpty ? 'model' : modelId}';
+        _emit('err', lastError!);
+        return null;
+      }
+      return {
+        'role': 'assistant',
+        'content': contentBuf.toString(),
+        if (reasoningBuf.isNotEmpty)
+          'reasoning_content': reasoningBuf.toString(),
+        if (toolBlocks.isNotEmpty) 'tool_calls': toolBlocks.values.toList(),
+        'finish_reason': ?finishReason,
+        'usage': ?_normalizeAnthropicUsage(usage),
+        'elapsedMs': DateTime.now()
+            .difference(_runStart ?? DateTime.now())
+            .inMilliseconds,
+        'ttftMs': ?ttftMs,
+      };
+    } catch (e) {
+      if (_cancelRequested) return null;
+      lastError = 'stream error: $e';
+      _emit('err', lastError!);
+      return null;
+    } finally {
+      _activeRequest = null;
+      _runResolved.activeClient = null;
+      client?.close(force: true);
+    }
+  }
+
+  /// Anthropic reports `input_tokens`/`output_tokens`; the rest of the app
+  /// meters on `prompt_tokens`/`completion_tokens`. Normalize so Usage and
+  /// the context ring stay correct for Claude runs.
+  Map<String, dynamic>? _normalizeAnthropicUsage(
+    Map<String, dynamic>? usage,
+  ) {
+    if (usage == null) return null;
+    final input = (usage['input_tokens'] as num?)?.toInt() ?? 0;
+    final output = (usage['output_tokens'] as num?)?.toInt() ?? 0;
+    final cacheRead = (usage['cache_read_input_tokens'] as num?)?.toInt() ?? 0;
+    final cacheWrite =
+        (usage['cache_creation_input_tokens'] as num?)?.toInt() ?? 0;
+    return {
+      'prompt_tokens': input + cacheRead + cacheWrite,
+      'completion_tokens': output,
+      'total_tokens': input + cacheRead + cacheWrite + output,
+      'cache_read_tokens': cacheRead,
+      'cache_write_tokens': cacheWrite,
+    };
   }
 
   // ── TOOL DISPATCH (with mode-based approvals) ─────────────────────────
@@ -9333,6 +9884,7 @@ ${await _agentsMdBlock()}
             .map((p) {
               final key = p.hasKey ? 'key ✓' : 'no key';
               return '${p.name} (${p.id}) — $key · ${p.models.length} models '
+                  '· ${p.effectiveApiFormat.wire} '
                   '${p.isConfigured ? '' : '· NOT CONFIGURED'}';
             })
             .join('\n'));
@@ -9344,11 +9896,13 @@ ${await _agentsMdBlock()}
         final models =
             (args['models'] as List?)?.whereType<String>().toList() ??
             <String>[];
+        final formatArg = args['api_format'] as String?;
         _emit('think', 'adding provider: $name');
         final err = await AppState.I.addCustomProvider(
           name: name,
           baseUrl: baseUrl,
           apiKey: apiKey,
+          apiFormat: formatArg == null ? null : ApiFormat.parse(formatArg),
         );
         if (err != null) return 'Provider add failed: $err';
         // Optionally append models to the newly created provider.
@@ -9363,8 +9917,128 @@ ${await _agentsMdBlock()}
           }
         }
         _emit('done', 'provider added: $name');
-        return 'Provider "$name" added (${models.length} models). '
-            'User can now select it in the model picker.';
+        return 'Provider "$name" added (${models.length} models, '
+            '${formatArg ?? 'auto'}). User can now select it in the model picker.';
+
+      case 'catalog_get_provider':
+        final ref = args['provider_id'] as String;
+        final p = AppState.I.resolveProvider(ref);
+        if (p == null) return 'Provider not found: $ref';
+        return 'Provider ${p.name}\n'
+            '  id: ${p.id}\n'
+            '  description: ${p.description}\n'
+            '  base_url: ${p.baseUrl}\n'
+            '  api_format: ${p.effectiveApiFormat.wire}\n'
+            '  api_key: ${p.hasKey ? 'set' : 'not set'}\n'
+            '  custom: ${p.custom}\n'
+            '  models (${p.models.length}): ${p.models.join(', ')}';
+
+      case 'catalog_update_provider':
+        final ref = args['provider_id'] as String;
+        final p = AppState.I.resolveProvider(ref);
+        if (p == null) return 'Provider not found: $ref';
+        final changes = <String>[];
+        final newName = args['name'] as String?;
+        if (newName != null) {
+          final e = await AppState.I.updateProviderName(p, newName);
+          if (e != null) return 'Update failed: $e';
+          changes.add('name="$newName"');
+        }
+        final newDesc = args['description'] as String?;
+        if (newDesc != null) {
+          await AppState.I.updateProviderDescription(p, newDesc);
+          changes.add('description');
+        }
+        final newUrl = args['base_url'] as String?;
+        if (newUrl != null) {
+          final e = await AppState.I.updateProviderBaseUrlChecked(p, newUrl);
+          if (e != null) return 'Update failed: $e';
+          changes.add('base_url="$newUrl"');
+        }
+        final newFormat = args['api_format'] as String?;
+        if (newFormat != null) {
+          await AppState.I.updateProviderApiFormat(
+            p,
+            ApiFormat.parse(newFormat),
+          );
+          changes.add('api_format=${ApiFormat.parse(newFormat).wire}');
+        }
+        if (changes.isEmpty) return 'No changes given for ${p.name}.';
+        _emit('done', 'provider updated: ${p.id}');
+        return 'Provider "${p.name}" updated: ${changes.join(', ')}.';
+
+      case 'catalog_set_provider_key':
+        final ref = args['provider_id'] as String;
+        final p = AppState.I.resolveProvider(ref);
+        if (p == null) return 'Provider not found: $ref';
+        final key = args['api_key'] as String;
+        try {
+          await AppState.I.updateProviderApiKey(p, key);
+        } catch (e) {
+          return 'Storing the key failed: $e';
+        }
+        _emit('done', 'key set: ${p.id}');
+        return 'API key stored for "${p.name}".';
+
+      case 'catalog_clear_provider_key':
+        final ref = args['provider_id'] as String;
+        final p = AppState.I.resolveProvider(ref);
+        if (p == null) return 'Provider not found: $ref';
+        final e = await AppState.I.clearProviderApiKey(p);
+        if (e != null) return 'Clear failed: $e';
+        _emit('done', 'key cleared: ${p.id}');
+        return 'API key cleared for "${p.name}".';
+
+      case 'catalog_add_provider_model':
+        final ref = args['provider_id'] as String;
+        final p = AppState.I.resolveProvider(ref);
+        if (p == null) return 'Provider not found: $ref';
+        final e = await AppState.I.addProviderModel(p, args['model'] as String);
+        if (e != null) return 'Add model failed: $e';
+        return 'Model "${args['model']}" added to ${p.name}.';
+
+      case 'catalog_remove_provider_model':
+        final ref = args['provider_id'] as String;
+        final p = AppState.I.resolveProvider(ref);
+        if (p == null) return 'Provider not found: $ref';
+        final e = await AppState.I.removeProviderModel(
+          p,
+          args['model'] as String,
+        );
+        if (e != null) return 'Remove model failed: $e';
+        return 'Model "${args['model']}" removed from ${p.name}.';
+
+      case 'catalog_list_models':
+        final ref = args['provider_id'] as String?;
+        if (ref != null && ref.trim().isNotEmpty) {
+          final p = AppState.I.resolveProvider(ref);
+          if (p == null) return 'Provider not found: $ref';
+          return p.models.isEmpty
+              ? '${p.name} has no models registered.'
+              : '${p.name} (${p.effectiveApiFormat.wire}):\n'
+                    '${p.models.map((m) => '- $m').join('\n')}';
+        }
+        return AppState.I.providers
+            .map(
+              (p) =>
+                  '${p.name} (${p.effectiveApiFormat.wire}): '
+                  '${p.models.isEmpty ? '(none)' : p.models.join(', ')}',
+            )
+            .join('\n');
+
+      case 'catalog_select_model':
+        final ref = args['provider_id'] as String;
+        final p = AppState.I.resolveProvider(ref);
+        if (p == null) return 'Provider not found: $ref';
+        final model = args['model'] as String;
+        if (p.models.isNotEmpty && !p.models.contains(model)) {
+          // Allow it but make the omission explicit — the user may have
+          // just pasted a model id the provider serves but we haven't listed.
+          await AppState.I.addProviderModel(p, model);
+        }
+        AppState.I.setModel(p.id, model);
+        _emit('done', 'model selected: ${p.id} · $model');
+        return 'Active model set to "${p.name} · $model".';
 
       case 'catalog_remove_provider':
         final pid = args['provider_id'] as String;
@@ -10692,6 +11366,12 @@ ${await _agentsMdBlock()}
       case 'job_kill':
       case 'catalog_add_provider':
       case 'catalog_remove_provider':
+      case 'catalog_update_provider':
+      case 'catalog_set_provider_key':
+      case 'catalog_clear_provider_key':
+      case 'catalog_add_provider_model':
+      case 'catalog_remove_provider_model':
+      case 'catalog_select_model':
       case 'catalog_add_mcp':
       case 'catalog_remove_mcp':
       case 'catalog_add_plugin':
@@ -12868,6 +13548,12 @@ ${await _agentsMdBlock()}
     'request_permission',
     'catalog_add_provider',
     'catalog_remove_provider',
+    'catalog_update_provider',
+    'catalog_set_provider_key',
+    'catalog_clear_provider_key',
+    'catalog_add_provider_model',
+    'catalog_remove_provider_model',
+    'catalog_select_model',
     'catalog_add_mcp',
     'catalog_remove_mcp',
     'catalog_add_plugin',

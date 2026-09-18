@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'repo_cache.dart';
 import 'sandbox_service.dart';
+import 'secure_store.dart';
 
 class GitHubDeviceAuthorization {
   final String deviceCode;
@@ -48,7 +48,7 @@ class GitHubService extends ChangeNotifier {
   static const _tokenUrl = 'https://github.com/login/oauth/access_token';
   static const _apiBase = 'https://api.github.com';
   static const _tokenStorageKey = 'ovid_github_token';
-  static const _secureStorage = FlutterSecureStorage();
+  static final _secureStorage = ovidSecureStorage();
   static const _requestTimeout = Duration(seconds: 20);
 
   String? _token;

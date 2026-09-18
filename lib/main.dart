@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'core/security_service.dart';
 import 'core/state.dart';
 import 'core/theme.dart';
 import 'ui/sandbox_setup.dart';
@@ -13,6 +14,11 @@ Future<void> main() async {
   await AppState.I.initializeForFirstFrame();
   // Apply persisted theme BEFORE first frame (no dark flash on light).
   Aether.dark = !AppState.I.lightTheme;
+  // Apply the persisted screenshot-protection preference before first paint
+  // so protected content is never captured in a recents thumbnail.
+  if (AppState.I.secureScreen) {
+    unawaited(SecurityService.I.setSecureScreen(true));
+  }
   runApp(
     OvidApp(
       sandboxReady: AppState.I.sandboxInstalled || AppState.I.sandboxSkipped,

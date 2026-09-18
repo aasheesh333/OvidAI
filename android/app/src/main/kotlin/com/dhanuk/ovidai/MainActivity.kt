@@ -22,6 +22,7 @@ import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.WindowManager
 import android.system.Os
 import android.system.OsConstants
 import android.system.ErrnoException
@@ -496,6 +497,17 @@ class MainActivity : FlutterActivity() {
                     }
                     "getSecurityStatus" -> {
                         result.success(SecurityCheck.getDeviceSecuritySummary(this))
+                    }
+                    "setSecureScreen" -> {
+                        val enabled = call.argument<Boolean>("enabled") ?: false
+                        runOnUiThread {
+                            if (enabled) {
+                                window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                            } else {
+                                window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                            }
+                        }
+                        result.success(true)
                     }
                     "deviceOpenAccessibilitySettings" -> {
                         try {

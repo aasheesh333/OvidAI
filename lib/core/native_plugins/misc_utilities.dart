@@ -10,6 +10,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:ovid_ai/core/device_control_service.dart';
 import 'package:ovid_ai/core/native_plugin.dart';
+import 'package:ovid_ai/core/secure_store.dart';
 import 'package:qr/qr.dart';
 
 /// NP2b leftover utility capabilities (NP4 Task 2): QR Generator,
@@ -387,7 +388,7 @@ String _pemArmor(String label, List<int> der) {
 
 class SshKeyManagerCapability implements NativePluginCapability {
   SshKeyManagerCapability({FlutterSecureStorage? secureStorage})
-      : _secure = secureStorage ?? const FlutterSecureStorage();
+      : _secure = secureStorage ?? ovidSecureStorage();
 
   final FlutterSecureStorage _secure;
 

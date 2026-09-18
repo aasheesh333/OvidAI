@@ -11,10 +11,10 @@ library;
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'plugin_manifest.dart';
+import 'secure_store.dart';
 
 /// Preferences key for the persisted grant map (plugin id → grant JSON).
 /// Deliberately separate from `ovid_plugin_state_v1` — grants own their
@@ -251,7 +251,7 @@ Set<PluginCapability> capabilityDelta({
 /// they live in secure storage under `_kPluginSecretPrefix` keys and
 /// [revoke] deletes exactly the revoked plugin's owned secrets.
 class PluginPermissionStore {
-  static const _secureStorage = FlutterSecureStorage();
+  static final _secureStorage = ovidSecureStorage();
 
   /// Loads the grant for (plugin id, digest) — null when this exact
   /// manifest version was never approved.

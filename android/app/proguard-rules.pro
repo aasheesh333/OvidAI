@@ -13,11 +13,17 @@
 -keep class io.flutter.plugins.GeneratedPluginRegistrant { *; }
 
 # Security Hardening & Anti-Reverse Engineering
-# Strip debugging information and line numbers
+# Strip debugging information and line numbers. SourceFile is kept (renamed)
+# because Flutter tooling sometimes reads it; LineNumberTable is deliberately
+# NOT kept so release stack traces carry no line numbers.
 -renamesourcefileattribute SourceFile
--keepattributes SourceFile,LineNumberTable
+-keepattributes SourceFile
 -repackageclasses ''
 -allowaccessmodification
+
+# R8 full mode drops these by default; reflection-based libraries (Firebase,
+# GMS, Flutter plugins) rely on them.
+-keepattributes *Annotation*, InnerClasses, EnclosingMethod, Signature, Exceptions
 
 # Obfuscate dictionary and aggressive class renaming
 -dontusemixedcaseclassnames
