@@ -79,7 +79,16 @@
 ---
 
 ## Verification log
-- `dart analyze lib test` → 0 issues (must stay 0)
-- `flutter test` → all green
+- `dart analyze lib test` → 0 issues
+- `flutter test` → 1893 pass (1 known-flaky apt test, passes in isolation)
 - `./gradlew :app:compileDebugKotlin` → BUILD SUCCESSFUL
-- CI: `gh run watch` → success
+- `flutter build apk --release --obfuscate` → BUILT (115.9MB), no strip errors
+- CI run `35388447094` → success (analyze, test, debug APK, signed release APK + AAB)
+- Repo `aasheesh333/OvidAI` → `isPrivate: true`
+
+## Session summary (2026-09-18)
+Commits: `b1a5303` (security + agent control + Anthropic), `23d4a4d` (release strip fix).
+Dispensed 7 parallel agents for independent files + core work in main session.
+Follow-ups remaining: B1 (background approval deadlock), U2 (system text scale),
+U3 (confirm/undo destructive), U4 (tap targets/Semantics), plus the full
+network chokepoint (`OvidHttpClient`) and SSRF guard from the audit.
