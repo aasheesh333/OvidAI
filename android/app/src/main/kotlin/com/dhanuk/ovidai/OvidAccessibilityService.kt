@@ -1459,15 +1459,13 @@ private object Api30Actions {
                     }
 
                     override fun onFailure(errorCode: Int) {
+                        // TakeScreenshotCallback defines only INTERNAL_ERROR
+                        // and INVALID_DISPLAY; anything else is future-proofed
+                        // through the else branch rather than a named constant
+                        // that may not exist on this compile SDK.
                         val reason = when (errorCode) {
                             AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_DISPLAY ->
                                 "invalid display"
-                            AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_REGION ->
-                                "invalid capture region"
-                            AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_ROTATION ->
-                                "invalid rotation"
-                            AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_VIEW ->
-                                "no capturable view (secure window?)"
                             AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR ->
                                 "internal error"
                             else -> "error code $errorCode"

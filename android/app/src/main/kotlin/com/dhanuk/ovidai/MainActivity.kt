@@ -178,24 +178,30 @@ class MainActivity : FlutterActivity() {
             try {
                 val manager =
                     getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                projection = manager.getMediaProjection(resultCode, data)
+                val activeProjection =
+                    manager.getMediaProjection(resultCode, data)
+                    ?: throw IllegalStateException(
+                        "Screen capture was not granted.",
+                    )
+                projection = activeProjection
                 val metrics = resources.displayMetrics
                 val width = metrics.widthPixels
                 val height = metrics.heightPixels
-                reader = ImageReader.newInstance(
+                val activeReader = ImageReader.newInstance(
                     width, height, PixelFormat.RGBA_8888, 2,
                 )
-                virtualDisplay = projection.createVirtualDisplay(
+                reader = activeReader
+                virtualDisplay = activeProjection.createVirtualDisplay(
                     "ovid-capture",
                     width, height, metrics.densityDpi,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    reader.surface, null, null,
+                    activeReader.surface, null, null,
                 )
-                var image = reader.acquireLatestImage()
+                var image = activeReader.acquireLatestImage()
                 val deadline = SystemClock.uptimeMillis() + 3000
                 while (image == null && SystemClock.uptimeMillis() < deadline) {
                     SystemClock.sleep(100)
-                    image = reader.acquireLatestImage()
+                    image = activeReader.acquireLatestImage()
                 }
                 val frame = image
                     ?: throw IllegalStateException("No screen frame arrived.")
