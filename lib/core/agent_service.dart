@@ -3724,7 +3724,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'device_read',
         'description':
-            'Read the foreground screen as accessibility nodes. Delta is default; this never takes a screenshot.',
+            'Read the foreground screen as accessibility nodes. Delta is default; this never takes a screenshot. '
+            'Each row shows [handle], the inferred icon role (icon="…"), visible text, bounds and flags — '
+            'drive with device_tap node handles, and guide the user by naming the visible icon labels.',
         'parameters': {
           'type': 'object',
           'properties': {

@@ -1459,9 +1459,22 @@ private object Api30Actions {
                     }
 
                     override fun onFailure(errorCode: Int) {
+                        val reason = when (errorCode) {
+                            AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_DISPLAY ->
+                                "invalid display"
+                            AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_REGION ->
+                                "invalid capture region"
+                            AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_ROTATION ->
+                                "invalid rotation"
+                            AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_VIEW ->
+                                "no capturable view (secure window?)"
+                            AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR ->
+                                "internal error"
+                            else -> "error code $errorCode"
+                        }
                         result.error(
                             "SCREENSHOT_FAILED",
-                            "Android screenshot failed with code $errorCode.",
+                            "Android screenshot failed: $reason.",
                             errorCode,
                         )
                     }
