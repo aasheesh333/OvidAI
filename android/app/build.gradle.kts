@@ -28,6 +28,19 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    packaging {
+        jniLibs {
+            // libovid_bootstrap.so is NOT an ELF library — it is a zip archive
+            // of the Termux payload shipped with an .so name so Android
+            // packages it into jniLibs (nativeLibraryDir is the only
+            // exec-allowed path for targetSdk 29+). llvm-strip cannot parse
+            // it ("not recognized as a valid object file") and its retry loop
+            // ballooned the build dir until the runner hit "No space left on
+            // device". Keep its debug symbols so AGP skips the strip step.
+            keepDebugSymbols += "**/libovid_bootstrap.so"
+        }
+    }
+
     defaultConfig {
         applicationId = "com.dhanuk.ovidai"
         // Android 6.0 remains supported by the app shell.

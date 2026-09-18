@@ -107,6 +107,17 @@ jobs:
       - name: Build debug APK
         run: flutter build apk --debug --dart-define=OVID_BUILD=${{ github.sha }}
 
+      - name: Free disk before release build
+        if: env.signing == 'true'
+        run: |
+          # The release build recompiles everything; the debug build's
+          # intermediates plus the NDK toolchain leave the runner tight on
+          # space (llvm-strip once died with "No space left on device").
+          # Drop only regenerable intermediates — the debug APK itself is
+          # kept for the rename/upload step below.
+          rm -rf build/app/intermediates build/app/tmp build/app/kotlin
+          df -h /
+
       - name: Build signed release APK + AAB
         if: env.signing == 'true'
         run: |
