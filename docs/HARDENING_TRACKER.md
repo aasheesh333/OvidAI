@@ -4,7 +4,8 @@
 > Rule: every item ends with evidence (test name / commit / CI run). No "done" without evidence.
 
 ## Goal
-1. Make the repo **private** (done) and stop publishing deobfuscation symbols.
+1. Stop publishing deobfuscation symbols. (Repo visibility was later flipped
+   to PUBLIC at the owner's request — see the public-repo checklist below.)
 2. Let the **AI agent do everything** on Ovid: add/remove/update providers, set keys, set base URL,
    set API format, add/remove models, select model, manage MCP/plugins, and read back state.
 3. **Anthropic native API** support alongside OpenAI-compatible for every provider (base URL + format).
@@ -16,7 +17,7 @@
 
 | # | Item | File | Status | Evidence |
 |---|------|------|--------|----------|
-| S1 | Repo private | GitHub | DONE | `gh repo view` → `isPrivate:true` |
+| S1 | Repo visibility | GitHub | PUBLIC (owner request) | branch protection on `main`; actions pinned to SHAs + allowlisted; secrets never committed |
 | S2 | Stop publishing symbols artifact | `.github/workflows/build.yml` | DONE | grep: no upload step; YAML valid |
 | S3 | Remove permanent apt TLS loosening | `lib/core/sandbox_service.dart` | DONE | grep Verify-Peer → none; 49 tests pass |
 | S4 | Harden FlutterSecureStorage AndroidOptions | `lib/core/secure_store.dart` + 6 call sites | DONE | grep `const FlutterSecureStorage()` → none |
@@ -100,7 +101,9 @@ forced at document start.
 - `./gradlew :app:compileDebugKotlin` → BUILD SUCCESSFUL
 - `flutter build apk --release --obfuscate` → BUILT (115.9MB), no strip errors
 - CI runs `35388447094` and `35390511950` → success
-- Repo `aasheesh333/OvidAI` → `isPrivate: true`
+- Repo `aasheesh333/OvidAI` → `visibility: PUBLIC` (owner request); confidential
+docs removed from HEAD; signing key + Firebase config should be treated as
+exposed and rotated; git-history purge still pending.
 
 ## Independent verification pass (2026-09-18, post-claim)
 Re-checked every tracker item against source. Found and fixed 2 overclaims:

@@ -241,3 +241,66 @@ release APK + AAB + artifact uploads).
   pagination, `notifications/cancelled`, `DELETE` session end), Phase D skill
   `allowed-tools` enforcement + supporting-file exposure, Phase E architecture
   consolidation, and the P1/P2 partial-parity list.
+
+---
+
+## Execution status — round 2 (2026-09-19)
+
+Commits `84993ae`, `34c20ca`, `0c76468`. Full suite **2031 green** (verified
+three consecutive runs), analyze clean, CI `35459645737` fully green
+(debug APK + signed release APK + AAB + artifact uploads).
+
+### Done
+- **MCP Streamable HTTP completeness:** `MCP-Protocol-Version` on every
+  post-initialize request (negotiated value), initialize result parsed
+  (version + capabilities), `tools/list` pagination with a bounded cursor
+  loop, `notifications/cancelled` on timeout, `DELETE` session on disconnect,
+  and `structuredContent` / `audio` / `resource.blob` tool results.
+- **Skill tool-scoping:** a loaded skill's `allowed-tools` scopes the run;
+  out-of-scope tools are refused with an instructive message and the `skill`
+  tool stays open so the model can switch. Applied to both the `skill` tool
+  and plugin-contribution paths.
+- **Skill supporting files:** bundled files are surfaced with the skill
+  content (small text inlined, larger listed with a readable path).
+- **Skill parsing:** YAML block scalars (`>`/`|`) and block-list
+  `allowed-tools`; root `.md` allowlist so `AGENTS.md`/`README.md` are not
+  ingested as skills; `Skill.sourcePath` distinguishes the markdown file from
+  its bundle directory.
+- **Skill hot reload:** an edited/added/removed workspace `SKILL.md` is picked
+  up on the next load via a catalog fingerprint (root + source-file mtimes).
+- **Slash-command arguments:** `$ARGUMENTS`, `$@`, `$1..$N` substitution with
+  `\$` escaping; the legacy trailer is kept only when the body has no
+  placeholders (no regression for existing commands).
+- **MCP memory isolation:** per-server stores (`mcp-memory/<id>.json`) with a
+  one-time copy of the legacy shared graph.
+- **Capability inference:** single source of truth (adapter delegates to the
+  public inference point); `workspaceWrite`/`sessionRead`/`sessionWrite`/
+  `deviceControl` are explicit-only and never guessed, so existing grants and
+  manifest digests stay valid.
+- **Plugin format badge:** derived from the runtime manifest, so a Codex
+  plugin no longer renders as `[CC]`.
+- **Hook approval sheet:** discloses that payload secrets are redacted before
+  a hook runs.
+- **Test reliability:** fixed the intermittent `studio_git_reliability` test
+  (package:test's 30s default per-test timeout fired under full-suite load,
+  then teardown deleted the temp dir mid-run); it now has an explicit
+  per-test timeout.
+
+### Deliberately deferred (with reasons)
+- **Architecture consolidation (Phase E #28):** collapsing the three parallel
+  plugin systems into one manifest source of truth is a large, high-risk
+  refactor. The parity fixes above remove the user-visible consequences of the
+  split; the refactor should be done incrementally behind the existing 2031
+  tests, not as a big-bang change.
+- **Prompt-type hook execution (P7):** real [CC] prompt hooks invoke the model.
+  This is a new capability with cost/latency implications and needs its own
+  design.
+- **Expanded hook blocking (P8):** blocking is limited to `pre_tool` and
+  `permission_request`. Widening it changes what can stop a run and needs a
+  product decision.
+- **`.claude-plugin/marketplace.json` metadata (P5):** metadata-only; the
+  adapter already selects and parses the plugin correctly.
+- **Plugin agent `model`/`tools` frontmatter + dispatchable workspace agents
+  (P4/P5):** needs a subagent-dispatch design pass.
+- **History purge + key rotation + `usehoplite` downscoping:** owner actions
+  (see the public-repo checklist).
