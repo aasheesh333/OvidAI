@@ -204,6 +204,68 @@ class HookService extends ChangeNotifier {
 
   // ── Hook resolution ──────────────────────────────────────────────────
 
+  /// Upper bound on a declared matcher. Real matchers are short (`*`, a tool
+  /// name, a `|`-alternation); anything longer is treated as hostile and the
+  /// hook is skipped rather than compiled.
+  static const int maxMatcherLength = 256;
+
+  /// Whether [matcher] is safe to compile. Rejects oversized patterns and
+  /// nested quantifiers (`(a+)+`, `(.*)*`) — the classic catastrophic-
+  /// backtracking shapes that can hang the isolate (ReDoS). Empty and `*`
+  /// are safe (they mean "match all").
+  static bool isSafeMatcher(String matcher) {
+    if (matcher.isEmpty || matcher == '*') return true;
+    if (matcher.length > maxMatcherLength) return false;
+    // A quantifier applied to a group that itself contains a quantifier.
+    if (RegExp(r'\([^)]*[*+?][^)]*\)[*+?]').hasMatch(matcher)) return false;
+    return true;
+  }
+
+  /// Redact secret-looking values from a hook payload before it reaches a
+  /// plugin. A `pre_tool` payload carries the raw tool args — including
+  /// provider API keys from `catalog_set_provider_key` — and any plugin with
+  /// the observe capability could otherwise exfiltrate them.
+  static Map<String, dynamic> redactHookPayload(Map<String, dynamic> payload) {
+    return _redactValue(payload) as Map<String, dynamic>;
+  }
+
+  static const Set<String> _secretKeyMarkers = {
+    'apikey',
+    'api_key',
+    'key',
+    'token',
+    'secret',
+    'password',
+    'passwd',
+    'authorization',
+    'auth',
+    'credential',
+    'private_key',
+    'access_key',
+  };
+
+  static bool _isSecretKey(String key) {
+    final k = key.toLowerCase().replaceAll(RegExp(r'[^a-z0-9_]'), '');
+    for (final m in _secretKeyMarkers) {
+      if (k == m || k.endsWith('_$m') || k.contains(m)) return true;
+    }
+    return false;
+  }
+
+  static Object? _redactValue(Object? value, {String? key}) {
+    if (key != null && _isSecretKey(key)) return '[redacted]';
+    if (value is Map) {
+      return {
+        for (final e in value.entries)
+          e.key.toString(): _redactValue(e.value, key: e.key.toString()),
+      };
+    }
+    if (value is List) {
+      return [for (final v in value) _redactValue(v)];
+    }
+    return value;
+  }
+
   /// One resolved hook invocation target.
   ///
   /// [CC] matchers are event-specific: tool events match the tool name, but
@@ -217,6 +279,7 @@ class HookService extends ChangeNotifier {
     Map<String, dynamic> payload,
   ) {
     if (matcher == null || matcher.isEmpty || matcher == '*') return true;
+    if (!isSafeMatcher(matcher)) return false;
     final subject = _matcherSubject(canonicalEvent, payload);
     // Anchor the whole-string alternatives so `startup` does not match
     // `startupx`, but still allow a plain substring for tool names.
@@ -586,7 +649,7 @@ class HookService extends ChangeNotifier {
     final payloadJson = jsonEncode({
       'event': canonical,
       'session': sessionId,
-      ...payload,
+      ...redactHookPayload(payload),
     });
     final cwd = await _sessionWorkDir(sessionId);
     final collected = <String>[];
@@ -774,7 +837,7 @@ class HookService extends ChangeNotifier {
     final payloadJson = jsonEncode({
       'event': canonical,
       'session': sessionId,
-      ...payload,
+      ...redactHookPayload(payload),
     });
     final cwd = await _sessionWorkDir(sessionId);
     for (final (pluginId, hook, declaredEvent) in hooks) {

@@ -12,6 +12,7 @@ import 'agent_service.dart' show AgentService;
 import 'firebase_service.dart';
 import 'github_service.dart';
 import 'hook_service.dart';
+import 'mcp_config_parse.dart';
 import 'mcp_service.dart';
 import 'plugin_adapters.dart';
 import 'plugin_manifest.dart';
@@ -5865,10 +5866,20 @@ class AppState extends ChangeNotifier {
   ) {
     final hooks = <String, String>{};
     final matchers = <String, String>{};
+    // A declared name is kept when it maps to a canonical event. Legacy
+    // `on_*` names keep their own key (historical firing sites depend on
+    // it); CC-native names store under the canonical event.
+    String? keyFor(String name) {
+      final ev = name.trim();
+      final canonical = canonicalHookEvent(ev);
+      if (canonical == null) return null;
+      return PluginItem.hookEvents.contains(ev) ? ev : canonical;
+    }
+
     if (raw is Map) {
       raw.forEach((k, v) {
-        final ev = (k as String).trim();
-        if (!PluginItem.hookEvents.contains(ev)) return;
+        final ev = keyFor(k as String);
+        if (ev == null) return;
         String? cmd;
         String? matcher;
         if (v is String) {
@@ -5886,9 +5897,11 @@ class AppState extends ChangeNotifier {
     } else if (raw is List) {
       for (final e in raw) {
         if (e is! Map) continue;
-        final ev = (e['event'] as String?)?.trim();
+        final rawEvent = (e['event'] as String?)?.trim();
+        if (rawEvent == null) continue;
+        final ev = keyFor(rawEvent);
+        if (ev == null) continue;
         final cmd = e['command'] as String?;
-        if (ev == null || !PluginItem.hookEvents.contains(ev)) continue;
         if (cmd == null || cmd.trim().isEmpty) continue;
         hooks[ev] = cmd.trim();
         final m = e['matcher'] as String?;
@@ -5905,20 +5918,30 @@ class AppState extends ChangeNotifier {
   /// fire time). Map AND list-of-{event,command} forms are accepted.
   Map<String, String> _parsePluginHooks(dynamic raw) {
     final out = <String, String>{};
+    // Legacy `on_*` names keep their own key; CC-native names store under
+    // the canonical event (mirrors _collectHookDefs).
+    String? keyFor(String name) {
+      final ev = name.trim();
+      final canonical = canonicalHookEvent(ev);
+      if (canonical == null) return null;
+      return PluginItem.hookEvents.contains(ev) ? ev : canonical;
+    }
+
     if (raw is Map) {
       raw.forEach((k, v) {
-        final ev = (k as String).trim();
+        final ev = keyFor(k.toString());
         final cmd = v as String?;
-        if (cmd == null || cmd.trim().isEmpty) return;
-        if (PluginItem.hookEvents.contains(ev)) out[ev] = cmd.trim();
+        if (ev == null || cmd == null || cmd.trim().isEmpty) return;
+        out[ev] = cmd.trim();
       });
     } else if (raw is List) {
       for (final e in raw) {
         if (e is! Map) continue;
-        final ev = (e['event'] as String?)?.trim();
+        final rawEvent = (e['event'] as String?)?.trim();
         final cmd = e['command'] as String?;
-        if (ev == null || cmd == null || cmd.trim().isEmpty) continue;
-        if (PluginItem.hookEvents.contains(ev)) out[ev] = cmd.trim();
+        if (rawEvent == null || cmd == null || cmd.trim().isEmpty) continue;
+        final ev = keyFor(rawEvent);
+        if (ev != null) out[ev] = cmd.trim();
       }
     }
     return out;
@@ -6015,6 +6038,49 @@ class AppState extends ChangeNotifier {
     String? marketplaceRepo,
   }) => _githubPluginSource(raw, marketplaceRepo: marketplaceRepo);
 
+  /// Add one imported, ownerless (custom) MCP row to the roster. Returns the
+  /// created server, or null when the name is empty or already present. Auth
+  /// headers are secret — they go to secure storage, never the roster file.
+  McpServer? _addImportedMcpRow({
+    required String name,
+    required String author,
+    required String description,
+    required String category,
+    required String command,
+    required List<String> args,
+    String? envHint,
+    required String source,
+    required String transport,
+    String? url,
+    Map<String, String> headers = const {},
+    String? cwd,
+    int startupTimeoutS = 30,
+    int toolTimeoutS = 60,
+  }) {
+    if (name.isEmpty) return null;
+    if (mcpServers.any((e) => e.name == name)) return null;
+    final server = McpServer(
+      name: name,
+      author: author,
+      description: description,
+      category: category,
+      command: command,
+      args: args,
+      envHint: envHint,
+      source: source,
+      custom: true,
+      transport: transport,
+      url: url,
+      headers: headers,
+      cwd: cwd,
+      startupTimeoutS: startupTimeoutS,
+      toolTimeoutS: toolTimeoutS,
+    );
+    mcpServers.add(server);
+    if (headers.isNotEmpty) unawaited(setMcpHeaders(name, headers));
+    return server;
+  }
+
   /// `mcpServers`, plus Claude Code `plugins` entries.
   String _mergeMarketplaceCatalog(
     Map<String, dynamic> j,
@@ -6072,8 +6138,6 @@ class AppState extends ChangeNotifier {
     // ── mcpServers — list form AND map form (Codex/Claude Desktop) ──
     void importMcp(Map m, String? fallbackName) {
       final mname = (m['name'] as String?) ?? fallbackName ?? '';
-      if (mname.isEmpty) return;
-      if (mcpServers.any((e) => e.name == mname)) return;
       // PR41: an entry with `url` (and no `command`) is a Streamable-HTTP
       // server — Claude Desktop / Codex all use this exact shape
       // for a remote MCP server (`{"url": "https://...", "headers": {…}}`).
@@ -6084,34 +6148,27 @@ class AppState extends ChangeNotifier {
             (k, v) => MapEntry(k.toString(), v.toString()),
           ) ??
           const <String, String>{};
-      mcpServers.add(
-        McpServer(
-          name: mname,
-          author: m['author'] as String? ?? owner,
-          description: m['description'] as String? ?? '',
-          category: m['category'] as String? ?? 'Community',
-          command: (m['command'] as String?) ?? (m['cmd'] as String?) ?? 'npx',
-          args: (m['args'] as List?)?.whereType<String>().toList() ?? const [],
-          envHint:
-              (m['envHint'] as String?) ??
-              ((m['env'] as Map?)?.keys.isNotEmpty == true
-                  ? (m['env'] as Map).keys.first as String?
-                  : null),
-          source: 'marketplace:$owner/$repoName',
-          custom: true,
-          transport: isHttp ? 'http' : 'stdio',
-          url: isHttp ? urlValue : null,
-          headers: headers,
-            cwd: m['cwd'] as String?,
-            startupTimeoutS: (m['startupTimeoutS'] as num?)?.toInt() ?? 30,
-            toolTimeoutS: (m['toolTimeoutS'] as num?)?.toInt() ?? 60,
-          ),
+      final server = _addImportedMcpRow(
+        name: mname,
+        author: m['author'] as String? ?? owner,
+        description: m['description'] as String? ?? '',
+        category: m['category'] as String? ?? 'Community',
+        command: (m['command'] as String?) ?? (m['cmd'] as String?) ?? 'npx',
+        args: (m['args'] as List?)?.whereType<String>().toList() ?? const [],
+        envHint:
+            (m['envHint'] as String?) ??
+            ((m['env'] as Map?)?.keys.isNotEmpty == true
+                ? (m['env'] as Map).keys.first as String?
+                : null),
+        source: 'marketplace:$owner/$repoName',
+        transport: isHttp ? 'http' : 'stdio',
+        url: isHttp ? urlValue : null,
+        headers: headers,
+        cwd: m['cwd'] as String?,
+        startupTimeoutS: (m['startupTimeoutS'] as num?)?.toInt() ?? 30,
+        toolTimeoutS: (m['toolTimeoutS'] as num?)?.toInt() ?? 60,
       );
-      // Auth headers are a secret — secure storage, never plaintext prefs.
-      if (headers.isNotEmpty) {
-        unawaited(setMcpHeaders(mname, headers));
-      }
-      importedMcps++;
+      if (server != null) importedMcps++;
     }
 
     final mcpList = j['mcpServers'];
@@ -6143,6 +6200,72 @@ class AppState extends ChangeNotifier {
     }
     return 'Imported $importedPlugins plugin(s) and $importedMcps MCP '
         'server(s) from $owner/$repoName';
+  }
+
+  /// Read a [CC] settings document (`~/.claude.json` /
+  /// `.claude/settings.json`) and mount its `mcpServers`, the same way
+  /// [_mergeMarketplaceCatalog] mounts imported servers. Honors
+  /// `enableAllProjectMcpServers`, `enabledMcpjsonServers`, and
+  /// `disabledMcpjsonServers` (disabled always wins; an allowlist only
+  /// applies when non-empty and `enableAllProjectMcpServers` is not set).
+  /// Unsupported SSE entries are skipped rather than mounted dead.
+  /// Returns the number of servers mounted. Never throws.
+  Future<int> importMcpFromSettings(
+    String json, {
+    String source = 'settings',
+  }) async {
+    try {
+      final decoded = jsonDecode(json);
+      if (decoded is! Map) return 0;
+      final j = decoded.cast<String, dynamic>();
+      final servers = j['mcpServers'];
+      if (servers is! Map) return 0;
+      final enableAll = j['enableAllProjectMcpServers'] == true;
+      final enabled =
+          (j['enabledMcpjsonServers'] as List?)?.whereType<String>().toSet() ??
+          const <String>{};
+      final disabled =
+          (j['disabledMcpjsonServers'] as List?)?.whereType<String>().toSet() ??
+          const <String>{};
+      var mounted = 0;
+      for (final entry in servers.entries) {
+        final value = entry.value;
+        if (value is! Map) continue;
+        final name = entry.key.toString();
+        if (disabled.contains(name)) continue;
+        if (!enableAll && enabled.isNotEmpty && !enabled.contains(name)) {
+          continue;
+        }
+        final parsed = importedMcpFromJson(
+          name,
+          value.cast<String, dynamic>(),
+        );
+        if (parsed.type == 'sse') continue;
+        final server = _addImportedMcpRow(
+          name: name,
+          author: 'settings',
+          description: '',
+          category: 'Custom',
+          command: parsed.command,
+          args: parsed.args,
+          envHint: parsed.env.keys.isNotEmpty ? parsed.env.keys.first : null,
+          source: source,
+          transport: parsed.type,
+          url: parsed.url,
+          headers: parsed.headers,
+          cwd: parsed.cwd,
+          startupTimeoutS: parsed.startupTimeoutS ?? 30,
+        );
+        if (server != null) mounted++;
+      }
+      if (mounted > 0) {
+        await _persistCustomMcpServers();
+        refresh();
+      }
+      return mounted;
+    } catch (_) {
+      return 0;
+    }
   }
 
   /// ---------- MCP servers ----------
@@ -6418,7 +6541,11 @@ class AppState extends ChangeNotifier {
   /// retries; lazy connect covers them on tool call.
   Future<void> reconnectMcpServers() => reconnectServices();
 
-  void addCustomMcpServer({
+  /// Add a user-defined MCP server. Returns null on success, or an
+  /// actionable reason when the requested transport is unsupported (SSE is
+  /// not implemented — Streamable HTTP replaces it). An unsupported request
+  /// never creates a permanently-dead row.
+  String? addCustomMcpServer({
     required String name,
     required String command,
     List<String> args = const [],
@@ -6434,9 +6561,7 @@ class AppState extends ChangeNotifier {
     int? startupTimeoutS,
     int? toolTimeoutS,
   }) {
-    final isHttp =
-        transport == 'sse' ||
-        ((url != null && url.isNotEmpty) && transport != 'stdio');
+    final isHttp = (url != null && url.isNotEmpty) && transport != 'stdio';
     final resolvedTransport = transport ?? (isHttp ? 'http' : 'stdio');
     final server = McpServer(
       name: name.trim(),
@@ -6457,12 +6582,15 @@ class AppState extends ChangeNotifier {
       startupTimeoutS: startupTimeoutS ?? 30,
       toolTimeoutS: toolTimeoutS ?? 60,
     );
+    final unsupported = McpService.I.unsupportedTransportReason(server);
+    if (unsupported != null) return unsupported;
     mcpServers.add(server);
     if (headers.isNotEmpty) {
       unawaited(setMcpHeaders(server.canonicalId, headers));
     }
     _persistCustomMcpServers();
     refresh();
+    return null;
   }
 
   Future<void> removeMcpServer(McpServer s) async {

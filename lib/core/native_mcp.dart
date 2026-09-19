@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
 import 'github_service.dart';
@@ -19,7 +20,9 @@ class NativeGitHubMcpHandler implements NativeMcpHandler {
   final String? Function()? tokenProvider;
   final http.Client? httpClient;
 
-  http.Client get _client => httpClient ?? http.Client();
+  http.Client? _ownedClient;
+
+  http.Client get _client => httpClient ?? (_ownedClient ??= http.Client());
 
   NativeGitHubMcpHandler({
     this.token,
@@ -496,9 +499,8 @@ class NativeGitHubMcpHandler implements NativeMcpHandler {
 
   @override
   Future<void> dispose() async {
-    if (httpClient != null) {
-      httpClient!.close();
-    }
+    httpClient?.close();
+    _ownedClient?.close();
   }
 }
 
@@ -807,11 +809,75 @@ class NativeFilesystemMcpHandler implements NativeMcpHandler {
 
 /// In-process Fetch MCP handler for retrieving and converting web content.
 class NativeFetchMcpHandler implements NativeMcpHandler {
+  static const int _maxResponseBytes = 2 * 1024 * 1024;
+  static const int _maxRedirects = 5;
+
   final http.Client? httpClient;
+  final Set<String> allowedHosts;
 
-  http.Client get _client => httpClient ?? http.Client();
+  http.Client? _ownedClient;
 
-  NativeFetchMcpHandler({this.httpClient});
+  http.Client get _client => httpClient ?? (_ownedClient ??= http.Client());
+
+  NativeFetchMcpHandler({this.httpClient, Set<String>? allowedHosts})
+      : allowedHosts = {
+          for (final h in allowedHosts ?? const <String>{}) h.toLowerCase(),
+        };
+
+  static bool _isPrivateIpv4(InternetAddress address) {
+    final b = address.rawAddress;
+    if (b.length != 4) return false;
+    if (b[0] == 10) return true;
+    if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;
+    if (b[0] == 192 && b[1] == 168) return true;
+    return false;
+  }
+
+  static bool _isBlockedAddress(InternetAddress address) {
+    if (address.isLoopback || address.isLinkLocal) return true;
+    if (address.type == InternetAddressType.IPv4) return _isPrivateIpv4(address);
+    final b = address.rawAddress;
+    if (b.length == 16 && (b[0] & 0xfe) == 0xfc) return true;
+    return false;
+  }
+
+  String? _urlPolicyError(Uri uri) {
+    final scheme = uri.scheme.toLowerCase();
+    if (scheme != 'http' && scheme != 'https') {
+      return 'Blocked URL: only http and https schemes are allowed';
+    }
+    final host = uri.host;
+    if (host.isEmpty) {
+      return 'Blocked URL: missing host';
+    }
+    final lower = host.toLowerCase();
+    if (allowedHosts.contains(lower)) return null;
+    if (lower == 'localhost' || lower.endsWith('.localhost') || lower.endsWith('.local')) {
+      return 'Blocked URL: host "$host" is not allowed';
+    }
+    final address = InternetAddress.tryParse(host);
+    if (address != null && _isBlockedAddress(address)) {
+      return 'Blocked URL: host "$host" resolves to a non-public address';
+    }
+    return null;
+  }
+
+  static bool _isRedirect(int statusCode) {
+    return statusCode == 301 || statusCode == 302 || statusCode == 303 || statusCode == 307 || statusCode == 308;
+  }
+
+  static Future<List<int>> _readCapped(Stream<List<int>> stream, int limit) async {
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in stream) {
+      final remaining = limit - builder.length;
+      if (chunk.length >= remaining) {
+        builder.add(chunk.sublist(0, remaining));
+        break;
+      }
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
+  }
 
   @override
   Future<Map<String, dynamic>> initialize(Map<String, dynamic> params) async {
@@ -920,33 +986,65 @@ class NativeFetchMcpHandler implements NativeMcpHandler {
     final raw = args['raw'] as bool? ?? false;
     final maxLength = args['max_length'] as int?;
 
+    Uri uri;
     try {
-      final uri = Uri.parse(urlStr);
-      final response = await _client.get(uri, headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; OvidAI/1.0)',
-      });
+      uri = Uri.parse(urlStr);
+    } catch (_) {
+      return const McpRpcResult.error('Fetch error: invalid URL');
+    }
 
-      if (response.statusCode >= 400) {
+    final policyError = _urlPolicyError(uri);
+    if (policyError != null) {
+      return McpRpcResult.error(policyError);
+    }
+
+    try {
+      var current = uri;
+      for (var redirects = 0;; redirects++) {
+        final request = http.Request('GET', current)
+          ..followRedirects = false
+          ..headers['User-Agent'] = 'Mozilla/5.0 (compatible; OvidAI/1.0)';
+        final response = await _client.send(request);
+
+        final location = response.headers['location'];
+        if (_isRedirect(response.statusCode) && location != null) {
+          await response.stream.drain<void>();
+          if (redirects >= _maxRedirects) {
+            return const McpRpcResult.error('Fetch error: too many redirects');
+          }
+          final next = current.resolve(location);
+          final redirectError = _urlPolicyError(next);
+          if (redirectError != null) {
+            return McpRpcResult.error('Blocked redirect: $redirectError');
+          }
+          current = next;
+          continue;
+        }
+
+        final bytes = await _readCapped(response.stream, _maxResponseBytes);
+        if (response.statusCode >= 400) {
+          return McpRpcResult.ok({
+            'content': [
+              {'type': 'text', 'text': 'HTTP error ${response.statusCode}: ${response.reasonPhrase}'}
+            ],
+            'isError': true,
+          });
+        }
+
+        final body = utf8.decode(bytes, allowMalformed: true);
+        var text = raw ? body : _htmlToMarkdown(body);
+
+        if (maxLength != null && maxLength > 0 && text.length > maxLength) {
+          text = '${text.substring(0, maxLength)}\n\n... [truncated]';
+        }
+
         return McpRpcResult.ok({
           'content': [
-            {'type': 'text', 'text': 'HTTP error ${response.statusCode}: ${response.reasonPhrase}'}
+            {'type': 'text', 'text': text}
           ],
-          'isError': true,
+          'isError': false,
         });
       }
-
-      var text = raw ? response.body : _htmlToMarkdown(response.body);
-
-      if (maxLength != null && maxLength > 0 && text.length > maxLength) {
-        text = '${text.substring(0, maxLength)}\n\n... [truncated]';
-      }
-
-      return McpRpcResult.ok({
-        'content': [
-          {'type': 'text', 'text': text}
-        ],
-        'isError': false,
-      });
     } catch (e) {
       return McpRpcResult.error('Fetch error: $e');
     }
@@ -954,9 +1052,8 @@ class NativeFetchMcpHandler implements NativeMcpHandler {
 
   @override
   Future<void> dispose() async {
-    if (httpClient != null) {
-      httpClient!.close();
-    }
+    httpClient?.close();
+    _ownedClient?.close();
   }
 }
 

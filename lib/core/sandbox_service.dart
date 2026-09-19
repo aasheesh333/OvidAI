@@ -2595,6 +2595,12 @@ audit=false
     Directory? hostWorkDir,
     Map<String, String>? env,
   }) async {
+    final denial = checkPolicy(
+      args,
+      cwd: hostWorkDir?.path,
+      hostWorkDir: hostWorkDir,
+    );
+    if (denial != null) throw Exception(denial);
     if (_prefix == null) {
       final ok = await checkExisting();
       if (!ok) {

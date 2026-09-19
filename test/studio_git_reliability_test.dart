@@ -396,11 +396,14 @@ void main() {
       };
 
       for (final verb in const ['upgrade', 'full-upgrade']) {
+        // The assertion is about exit code + stderr (script correctness), not
+        // latency. A 30s cap intermittently timed out under full-suite
+        // parallel load, so allow a generous budget.
         final res = await Process.run(
           '/bin/sh',
           ['${tmp.path}/bin/ovid-pkg', verb],
           environment: env,
-        ).timeout(const Duration(seconds: 30));
+        ).timeout(const Duration(seconds: 90));
         expect(res.exitCode, isNot(0), reason: '$verb must not silently succeed');
         expect(res.stderr, contains('not supported'));
       }
