@@ -192,3 +192,52 @@ Ordered so each phase is independently shippable and verifiable. TDD for every i
 - Not adding new user-facing plugin features before parity is correct.
 - Not silently dropping features: every "unsupported" claim in README must either
   become supported or be removed from the docs.
+
+---
+
+## Execution status (2026-09-19)
+
+Shipped in commits `5598f9e`, `da3d7ba`, `619abc9` (branch
+`hoplite/gortyn-77773150`). Full suite **1980 green**, analyze clean,
+Kotlin compiles, CI run `35449961081` fully green (debug APK + signed
+release APK + AAB + artifact uploads).
+
+### Done
+- **Public-repo security:** repo made public per request; branch protection
+  on `main` (1 review + `build` status check, no force-push/delete); CI actions
+  pinned to SHAs; actions restricted to GitHub-owned + verified + two
+  allowlisted patterns; LICENSE, SECURITY.md, CODEOWNERS, THIRD_PARTY_NOTICES;
+  confidential roadmap/PDF and competitor-reference docs removed from HEAD.
+- **[CC] runtime parity (the reported bug):** a real `obra/superpowers`-shaped
+  plugin now works end to end — SessionStart context is captured and injected
+  as a standing system message; matchers are event-aware (SessionStart matches
+  the session source, `*` matches all); `CLAUDE_PLUGIN_ROOT` is exported;
+  hook/script executables keep `+x` after extraction.
+- **Codex:** identity derived from source id when absent; hooks parsed
+  (inline TOML + `hooks/hooks.json`); `.agents/skills`, `.agents/personas`,
+  `.claude/skills|commands|agents`, `.codex/skills` all mount; root-only TOML
+  scalars stop nested-key identity spoofing.
+- **Hooks:** prompt hooks are never coerced to shell; canonical-id duplicates
+  dedupe instead of crashing publish; oversized/nested-quantifier matchers
+  refused (ReDoS); payloads redact secret-named keys.
+- **MCP:** `${VAR}` / `${VAR:-default}` interpolation in args/env/url/headers/
+  cwd; per-server timeout no longer capped at 60 s; settings-level `mcpServers`
+  with enable/disable lists; SSE rejected honestly at add.
+- **Security:** Native Fetch URL policy + streamed read cap + reused client;
+  `SandboxService.spawn` enforces the sandbox policy; legacy CC hook names
+  preserved; serialized grant/activation stores (lost-update races fixed);
+  install durability failure surfaced.
+
+### Deferred (needs a human decision)
+- **History purge + key rotation:** the confidential docs were removed from
+  HEAD but remain in git history. Purging requires `git filter-repo` +
+  force-push, and the Android release signing key + Firebase config should be
+  treated as exposed and rotated. This is destructive/irreversible, so it is
+  left to the owner.
+- **`usehoplite` app permissions:** the third-party GitHub App still has
+  `workflows`/`contents`/`administration`/`actions` write. Revoking or
+  downscoping it is an owner action on the GitHub App installation.
+- **Remaining plan items:** Phase C streamable-HTTP completeness (GET SSE,
+  pagination, `notifications/cancelled`, `DELETE` session end), Phase D skill
+  `allowed-tools` enforcement + supporting-file exposure, Phase E architecture
+  consolidation, and the P1/P2 partial-parity list.
