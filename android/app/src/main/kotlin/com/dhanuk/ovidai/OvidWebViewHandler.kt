@@ -51,6 +51,15 @@ class OvidWebViewHandler(
      */
     private val featureShimHandlers = WeakHashMap<WebView, ScriptHandler>()
 
+    /**
+     * Forced-width viewport script per WebView, as (width, handler). A
+     * document-start script applies to EVERY new document, so the desktop
+     * layout survives navigation/reload — unlike a post-load DOM mutation,
+     * which the fresh document wipes and which runs after the page's own
+     * "is this mobile?" detection.
+     */
+    private val viewportHandlers = WeakHashMap<WebView, Pair<Int, ScriptHandler>>()
+
     constructor(messenger: BinaryMessenger) : this(null, null, messenger)
 
     fun setup(activity: Activity) {
@@ -68,6 +77,7 @@ class OvidWebViewHandler(
                 val tabId = call.argument<Number>("tabId")?.toInt()
                 val identifier = call.argument<Number>("webViewIdentifier")?.toLong()
                 val logicalWidth = call.argument<Number>("logicalWidth")?.toInt()
+                val userAgent = call.argument<String>("userAgent")
                 val webView = resolveWebView(identifier)
                 val act = activity
                 if (webView == null || act == null) {
@@ -82,9 +92,15 @@ class OvidWebViewHandler(
                 }
                 act.runOnUiThread {
                     applySettings(webView.settings, enabled)
-                    if (logicalWidth != null && logicalWidth > 0) {
-                        applyLogicalViewport(webView, logicalWidth)
+                    // Re-assert the UA on every call. The desktop UA used to be
+                    // set once (Dart's first-load gate), so any controller/view
+                    // recreation silently reverted the tab to mobile.
+                    if (!userAgent.isNullOrBlank()) {
+                        try {
+                            webView.settings.userAgentString = userAgent
+                        } catch (_: Throwable) {}
                     }
+                    applyLogicalViewport(webView, logicalWidth)
                     applyUserAgentMetadata(webView, enabled)
                     applyFeatureShim(webView, enabled)
                     result.success(
@@ -130,24 +146,99 @@ class OvidWebViewHandler(
     }
 
     /**
-     * Set the layout viewport width used for media queries (browser_resize).
-     * Wide viewport honors the page viewport meta; forcing `width=<n>` makes
-     * the layout viewport that exact CSS-pixel width without changing the
-     * visual scale — the Dart side owns the visual zoom (userZoom).
+     * Force the layout viewport width used for media queries (browser_resize
+     * and desktop mode).
+     *
+     * Desktop mode pins `width=1280` so `window.innerWidth` reports a large
+     * screen even when the page ships `width=device-width`. This MUST be a
+     * document-start script: a post-load DOM mutation runs after the page's
+     * own mobile-detection code and is wiped by every navigation, which is
+     * exactly why sites kept showing "better on a large screen" after a link
+     * click or reload. A null/0 width clears any previous force so a mobile
+     * tab lays out at its own viewport meta again.
      */
-    private fun applyLogicalViewport(webView: WebView, logicalWidth: Int) {
+    private fun applyLogicalViewport(webView: WebView, logicalWidth: Int?) {
+        // Mobile: drop any forced width so the page's own meta wins.
+        if (logicalWidth == null || logicalWidth <= 0) {
+            removeViewportScript(webView)
+            try {
+                webView.evaluateJavascript(clearViewportScript(), null)
+            } catch (_: Throwable) {}
+            return
+        }
+        // Already forcing this exact width — the document-start script
+        // persists across navigations, so there is nothing to re-install.
+        val existing = viewportHandlers[webView]
+        if (existing != null && existing.first == logicalWidth) return
+        removeViewportScript(webView)
+
         val settings = webView.settings
         settings.useWideViewPort = true
         settings.loadWithOverviewMode = false
-        val js = "(function(){" +
-            "var m=document.querySelector('meta[name=viewport]');" +
-            "if(!m){m=document.createElement('meta');" +
-            "m.setAttribute('name','viewport');" +
-            "(document.head||document.documentElement).appendChild(m);}" +
-            "m.setAttribute('content','width=$logicalWidth');" +
-            "})();"
-        webView.evaluateJavascript(js, null)
+
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            try {
+                val handler = WebViewCompat.addDocumentStartJavaScript(
+                    webView,
+                    viewportScript(logicalWidth),
+                    setOf("*")
+                )
+                viewportHandlers[webView] = logicalWidth to handler
+                return
+            } catch (_: Throwable) {
+                // Fall through to the best-effort post-load path.
+            }
+        }
+        try {
+            webView.evaluateJavascript(viewportScript(logicalWidth), null)
+        } catch (_: Throwable) {}
     }
+
+    private fun removeViewportScript(webView: WebView) {
+        val handler = viewportHandlers.remove(webView)?.second ?: return
+        try {
+            handler.remove()
+        } catch (_: Throwable) {}
+    }
+
+    /**
+     * Document-start script: runs before the page's own scripts, so detection
+     * sees the wide layout from the first read. Re-asserts on DOMContentLoaded
+     * and load because the parser can append the page's own viewport meta
+     * AFTER document-start (last meta wins in Chromium).
+     */
+    private fun viewportScript(width: Int): String = """
+(function(){
+  var W = $width;
+  function apply(){
+    try {
+      var head = document.head || document.documentElement;
+      if (!head) return;
+      var m = document.querySelector('meta[name=viewport]');
+      if (!m) {
+        m = document.createElement('meta');
+        m.setAttribute('name', 'viewport');
+        head.appendChild(m);
+      }
+      if (m.getAttribute('content') !== 'width=' + W) {
+        m.setAttribute('content', 'width=' + W);
+      }
+    } catch (e) {}
+  }
+  apply();
+  document.addEventListener('DOMContentLoaded', apply, {once: true});
+  window.addEventListener('load', apply, {once: true});
+})();
+"""
+
+    private fun clearViewportScript(): String = """
+(function(){
+  try {
+    var m = document.querySelector('meta[name=viewport]');
+    if (m) m.setAttribute('content', 'width=device-width, initial-scale=1');
+  } catch (e) {}
+})();
+"""
 
     /**
      * Spoof the User-Agent Client Hints metadata, the signal `Sec-CH-UA-*`

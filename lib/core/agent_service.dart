@@ -2046,6 +2046,7 @@ class AgentService extends ChangeNotifier {
     int? tabId,
     int? webViewIdentifier,
     int? logicalWidth,
+    String? userAgent,
   }) async {
     try {
       final args = <String, dynamic>{'enabled': enabled};
@@ -2054,6 +2055,7 @@ class AgentService extends ChangeNotifier {
         args['webViewIdentifier'] = webViewIdentifier;
       }
       if (logicalWidth != null) args['logicalWidth'] = logicalWidth;
+      if (userAgent != null) args['userAgent'] = userAgent;
       final res = await _webviewChannel.invokeMapMethod<String, dynamic>(
         'setDesktopViewport',
         args,
@@ -2063,6 +2065,14 @@ class AgentService extends ChangeNotifier {
       return false;
     }
   }
+
+  /// The UA string a tab should present, from its own mode (never global
+  /// state). Desktop tabs must keep the desktop UA on every navigation, not
+  /// just the first load.
+  @visibleForTesting
+  static String userAgentForTest(BrowserTab tab) => tab.desktopMode
+      ? BrowserTab.desktopUserAgent
+      : BrowserTab.mobileUserAgent;
 
   /// The JS that applies a tab's visual scale. A pure builder so the injected
   /// value ([BrowserTab.userZoom], never the viewport-derived logical `zoom`)
@@ -2193,6 +2203,21 @@ class AgentService extends ChangeNotifier {
               ..title = null
               ..loading = true
               ..progress = 0;
+            // Re-assert the tab's desktop/mobile settings at the START of
+            // every navigation, not just the first load. A fresh document
+            // must carry the desktop UA + forced viewport before its own
+            // scripts run, otherwise the site detects mobile and gates.
+            // Mobile tabs send no logicalWidth (device width wins) but still
+            // re-assert the mobile UA. Scoped to this tab's WebView.
+            unawaited(
+              applyDesktopViewport(
+                tab.desktopMode,
+                tabId: tab.id,
+                webViewIdentifier: webViewIdentifierFor(tab),
+                logicalWidth: viewportWidthForTest(tab),
+                userAgent: userAgentForTest(tab),
+              ),
+            );
             notifyListeners();
           },
           onProgress: (p) {
@@ -2213,18 +2238,17 @@ class AgentService extends ChangeNotifier {
             // Re-apply the forced layout width: navigations load a fresh
             // document, wiping the DOM-injected viewport meta. Without this
             // every link click drops a desktop tab back to device width.
-            // Mobile tabs (null width) skip the channel call entirely.
-            final forcedWidth = viewportWidthForTest(tab);
-            if (forcedWidth != null) {
-              unawaited(
-                applyDesktopViewport(
-                  tab.desktopMode,
-                  tabId: tab.id,
-                  webViewIdentifier: webViewIdentifierFor(tab),
-                  logicalWidth: forcedWidth,
-                ),
-              );
-            }
+            // Mobile tabs (null width) send no width but still re-assert the
+            // mobile UA/client hints. Scoped to this tab's WebView.
+            unawaited(
+              applyDesktopViewport(
+                tab.desktopMode,
+                tabId: tab.id,
+                webViewIdentifier: webViewIdentifierFor(tab),
+                logicalWidth: viewportWidthForTest(tab),
+                userAgent: userAgentForTest(tab),
+              ),
+            );
             // Re-apply the user's visual zoom: every navigation/reload resets
             // the document's CSS zoom, so the readable scale (`userZoom`, never
             // a viewport-derived factor) must be re-injected on every page load.
@@ -2390,14 +2414,15 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       // Platform wide viewport setting before initial load (desktop or mobile
       // reset). Target only this tab's fresh WebView — no cross-tab leak.
       // Desktop tabs also force the 1280px layout width here; every later
-      // navigation re-applies it on page finish (navigations wipe the
-      // DOM-injected meta).
+      // navigation re-applies it (page start AND finish) so a fresh document
+      // never lays out at device width.
       unawaited(
         applyDesktopViewport(
           tab.desktopMode,
           tabId: tab.id,
           webViewIdentifier: webViewIdentifierFor(tab),
           logicalWidth: viewportWidthForTest(tab),
+          userAgent: userAgentForTest(tab),
         ),
       );
       final previewPath = tab.localPreviewPath;

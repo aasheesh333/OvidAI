@@ -75,6 +75,22 @@
 | U3 | Confirm/undo on destructive actions | TODO (follow-up) | |
 | U4 | 48dp tap targets + Semantics labels | TODO (follow-up) | |
 
+## P5 — Browser desktop-mode regression (reported)
+
+| # | Item | Status | Evidence |
+|---|------|--------|----------|
+| BR1 | Desktop UA re-asserted on every navigation (was first-load only) | DONE | `onPageStarted`/`onPageFinished`/`controllerForTab` pass `userAgent`; native sets `userAgentString` |
+| BR2 | Forced viewport is a document-start script, not a post-load DOM mutation | DONE | `applyLogicalViewport` uses `addDocumentStartJavaScript` + `DOCUMENT_START_SCRIPT`; re-asserts on DOMContentLoaded/load |
+| BR3 | Per-tab viewport script replaced (never stacked); mobile clears the force | DONE | `viewportHandlers` WeakHashMap; `clearViewportScript` |
+| BR4 | Tests | DONE | `test/browser_desktop_navigation_test.dart` (10) |
+
+Root cause: desktop mode was applied as a post-load DOM mutation at `onPageFinished`
+and the UA only once at first load, so every navigation/reload produced a fresh
+document that laid out at device width and tripped the site's mobile gate before
+the fix ran. Now both are re-asserted per navigation and window.innerWidth is
+forced at document start.
+
+
 
 ---
 
