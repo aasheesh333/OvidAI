@@ -79,15 +79,25 @@ class DeviceControlService {
 
   int _deviceGeneration = 0;
 
-  /// Backoff between SERVICE_CONNECTING retries (transient accessibility
-  /// re-bind window after app restart). Tests shorten it; production waits
-  /// ~5s total so a slow rebind still lands without hammering the channel.
+  /// Base of the capped exponential backoff between SERVICE_CONNECTING
+  /// retries (transient accessibility re-bind window after app restart).
+  /// Doubles each attempt up to [connectingRetryMaxDelayForTest]. Tests
+  /// shorten these to run deterministically.
   @visibleForTesting
-  static List<Duration> connectingRetryDelaysForTest = const [
-    Duration(milliseconds: 800),
-    Duration(milliseconds: 1600),
-    Duration(milliseconds: 2400),
-  ];
+  static Duration connectingRetryBaseDelayForTest = const Duration(
+    milliseconds: 500,
+  );
+
+  /// Ceiling for the exponential backoff above.
+  @visibleForTesting
+  static Duration connectingRetryMaxDelayForTest = const Duration(seconds: 5);
+
+  /// Total time the SERVICE_CONNECTING retries may spend waiting before the
+  /// call gives up. Generous on purpose: Android can take a while to rebind
+  /// an enabled accessibility service after a process restart, and a manual
+  /// toggle is exactly what this budget exists to avoid.
+  @visibleForTesting
+  static Duration connectingRetryBudgetForTest = const Duration(seconds: 90);
 
   @visibleForTesting
   int get deviceGenerationForTest => _deviceGeneration;
@@ -114,24 +124,34 @@ class DeviceControlService {
   ///
   /// One exception to immediate rethrow: [PlatformException] with code
   /// `SERVICE_CONNECTING` (accessibility service enabled in settings but
-  /// not yet rebound after app restart) is retried with backoff — the main
-  /// thread stays free so the OS bind can actually land. A Stop/new-run
-  /// generation bump during the wait still wins immediately.
+  /// not yet rebound after app restart) is retried with capped exponential
+  /// backoff for up to [connectingRetryBudgetForTest] — the main thread stays
+  /// free so the OS bind can actually land. A Stop/new-run generation bump
+  /// during the wait still wins immediately. When the budget is exhausted the
+  /// error distinguishes a still-connecting service (retry later) from one
+  /// that is genuinely disabled (enable it in Settings).
   Future<Object?> _invokeGuarded(Future<Object?> Function() invoke) async {
     final generation = _deviceGeneration;
-    var connectingRetries = 0;
+    var attempt = 0;
+    var waited = Duration.zero;
     while (true) {
       try {
         final result = await invoke();
         if (generation != _deviceGeneration) return cancelledSupersededMessage;
         return result;
       } on PlatformException catch (e) {
-        if (e.code == 'SERVICE_CONNECTING' &&
-            connectingRetries < connectingRetryDelaysForTest.length) {
-          await Future.delayed(
-            connectingRetryDelaysForTest[connectingRetries],
-          );
-          connectingRetries++;
+        if (e.code == 'SERVICE_CONNECTING') {
+          final delay = _connectingDelayForAttempt(attempt);
+          if (waited + delay >= connectingRetryBudgetForTest) {
+            final exhausted = await _connectingExhaustedError();
+            if (generation != _deviceGeneration) {
+              return cancelledSupersededMessage;
+            }
+            throw exhausted;
+          }
+          waited += delay;
+          if (delay > Duration.zero) await Future.delayed(delay);
+          attempt++;
           if (generation != _deviceGeneration) {
             return cancelledSupersededMessage;
           }
@@ -144,6 +164,66 @@ class DeviceControlService {
         rethrow;
       }
     }
+  }
+
+  Duration _connectingDelayForAttempt(int attempt) {
+    final shift = attempt > 20 ? 20 : attempt;
+    final baseMs = connectingRetryBaseDelayForTest.inMilliseconds;
+    final maxMs = connectingRetryMaxDelayForTest.inMilliseconds;
+    final scaled = baseMs * (1 << shift);
+    return Duration(milliseconds: scaled > maxMs ? maxMs : scaled);
+  }
+
+  /// Budget-exhausted error. The state is re-read so a service that is
+  /// genuinely disabled gets the Settings guidance while a slow rebind gets
+  /// a wait/retry message — never a dead end that demands a manual toggle.
+  Future<PlatformException> _connectingExhaustedError() async {
+    if (await serviceState() == 'disabled') {
+      return PlatformException(
+        code: 'SERVICE_DISABLED',
+        message:
+            'Control mode needs the Ovid accessibility service. Enable it in Settings > Accessibility > Ovid.',
+      );
+    }
+    return PlatformException(
+      code: 'SERVICE_CONNECTING',
+      message:
+          'Ovid accessibility service is still reconnecting after the app restarted. Wait a moment and retry — it should bind on its own.',
+    );
+  }
+
+  /// Three-state native accessibility status: `disabled` (off in Settings),
+  /// `connecting` (enabled but not yet rebound), or `bound`. Fails closed to
+  /// `disabled` when the channel is unreadable.
+  Future<String> serviceState() async {
+    try {
+      final state = await _channel.invokeMethod<String>('deviceServiceState');
+      if (state == 'bound' || state == 'connecting' || state == 'disabled') {
+        return state!;
+      }
+    } catch (_) {}
+    return 'disabled';
+  }
+
+  /// Absorbs an in-progress accessibility rebind. Intended for app-resume
+  /// callers: when the state is `connecting`, waits with the same capped
+  /// backoff until bound or the budget is exhausted. Non-throwing.
+  Future<void> refreshServiceBinding() async {
+    try {
+      if (await serviceState() != 'connecting') return;
+      final generation = _deviceGeneration;
+      var attempt = 0;
+      var waited = Duration.zero;
+      while (true) {
+        final delay = _connectingDelayForAttempt(attempt);
+        if (waited + delay >= connectingRetryBudgetForTest) return;
+        waited += delay;
+        if (delay > Duration.zero) await Future.delayed(delay);
+        if (generation != _deviceGeneration) return;
+        if (await serviceState() != 'connecting') return;
+        attempt++;
+      }
+    } catch (_) {}
   }
 
   @visibleForTesting

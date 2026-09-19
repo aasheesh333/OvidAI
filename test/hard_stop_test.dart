@@ -37,7 +37,8 @@ void main() {
     app.activeSessionId = null;
   });
 
-  test('hardStopAll stops every session run but preserves queues', () async {
+  test('hardStopAll stops every session run and promotes its queued next',
+      () async {
     final sessionA = ChatSession(
       id: 'hard-a',
       title: 'A',
@@ -79,9 +80,16 @@ void main() {
     expect(runB.activeRunId, isNull);
     expect(runA.cancelRequested, isTrue);
     expect(runB.cancelRequested, isTrue);
-    // Queues survive so the queued message still sends next.
-    expect(runA.queue, ['next in A']);
+    // Stop with queued work starts the next message immediately: A's queued
+    // message is promoted out of the queue (and lands in the transcript);
+    // B had nothing queued.
+    expect(runA.queue, isEmpty);
     expect(runB.queue, isEmpty);
+    expect(
+      sessionA.messages.map((m) => m.content),
+      contains('next in A'),
+      reason: 'the promoted message becomes a real user row',
+    );
     // Run-scoped processes were killed in both sessions.
     await expectLater(
       processA.exitCode.timeout(const Duration(seconds: 3)),

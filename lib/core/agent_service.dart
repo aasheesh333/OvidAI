@@ -492,6 +492,11 @@ class AgentRun {
   HttpClientRequest? activeRequest;
   HttpClient? activeClient;
   final List<String> queue = [];
+
+  /// Stable id per queued message, index-aligned with [queue]. The UI keys
+  /// rows by id so a delete/steer/edit cannot rebind another row's State.
+  final List<int> queueIds = [];
+  int nextQueueId = 0;
   ApprovalRequest? pendingApproval;
   bool planMode = false;
 
@@ -826,6 +831,39 @@ class AgentService extends ChangeNotifier {
   set _activeRequest(HttpClientRequest? v) => _runResolved.activeRequest = v;
   List<String> get _queue => _runResolved.queue;
 
+  /// Keep [AgentRun.queueIds] index-aligned with [AgentRun.queue]. Entries
+  /// appended directly (subagent deliveries, tests) are backfilled here so
+  /// every queued message always has a stable id.
+  void _syncQueueIds(AgentRun run) {
+    if (run.queueIds.length == run.queue.length) return;
+    if (run.queueIds.length > run.queue.length) {
+      run.queueIds.removeRange(run.queue.length, run.queueIds.length);
+      return;
+    }
+    while (run.queueIds.length < run.queue.length) {
+      run.queueIds.add(run.nextQueueId++);
+    }
+  }
+
+  /// Append [text] to [run]'s queue with a fresh stable id.
+  void _queueAdd(AgentRun run, String text) {
+    _syncQueueIds(run);
+    run.queue.add(text);
+    run.queueIds.add(run.nextQueueId++);
+  }
+
+  /// Remove the queue entry at [index] from both the text and id lists.
+  String _queueRemoveAt(AgentRun run, int index) {
+    _syncQueueIds(run);
+    run.queueIds.removeAt(index);
+    return run.queue.removeAt(index);
+  }
+
+  void _queueClear(AgentRun run) {
+    run.queue.clear();
+    run.queueIds.clear();
+  }
+
   /// UI view: the ACTIVE session's queue (per-session isolation test).
   List<String> get queuedMessages => List.unmodifiable(_run.queue);
 
@@ -934,8 +972,14 @@ class AgentService extends ChangeNotifier {
     // re-shows it at run start.
     unawaited(hideDeviceOverlay());
     unawaited(setOverlayLive(false));
+    // Only a RUNNING session promotes its queue on Stop; an idle session
+    // with queued text must keep it (nothing to interrupt).
+    final wasActive = r.activeRunId != null;
     final queuePreserved = r.queue.isNotEmpty;
     _cancelBucket(r);
+    // Stop with queued work: start the next message immediately rather than
+    // waiting for the cancelled run to finish unwinding.
+    if (wasActive && queuePreserved) _scheduleQueuedContinuation(sessionId);
     return queuePreserved;
   }
 
@@ -964,8 +1008,18 @@ class AgentService extends ChangeNotifier {
         } catch (_) {}
       }
     }
-    for (final r in _runs.values.toList()) {
-      _cancelBucket(r);
+    final withQueue = <String>[];
+    for (final entry in _runs.entries.toList()) {
+      // Only RUNNING sessions promote their queue on Stop — an idle session
+      // with queued text keeps it (hardStopAll must be a no-op there).
+      if (entry.value.activeRunId != null && entry.value.queue.isNotEmpty) {
+        withQueue.add(entry.key);
+      }
+      _cancelBucket(entry.value);
+    }
+    // Stop-with-queue promotes each session's next queued message at once.
+    for (final sessionId in withQueue) {
+      _scheduleQueuedContinuation(sessionId);
     }
     notifyListeners();
   }
@@ -983,7 +1037,7 @@ class AgentService extends ChangeNotifier {
     // Cancellation releases each run's finally block. Clear continuations
     // first so no bucket can restart queued work during a global panic.
     for (final r in _runs.values) {
-      r.queue.clear();
+      _queueClear(r);
     }
     for (final r in _runs.values.toList()) {
       _cancelBucket(r);
@@ -1036,6 +1090,27 @@ class AgentService extends ChangeNotifier {
   @visibleForTesting
   Future<void> Function(String text, ChatSession session)?
   overlayRunStarterForTest;
+
+  /// Test seam: replaces the actual run start for a queued continuation.
+  /// Signature: (sessionId, text). Null in production.
+  @visibleForTesting
+  Future<void> Function(String sessionId, String text)?
+  queuedRunStarterForTest;
+
+  /// Retry delays when a queued continuation cannot start yet (the previous
+  /// run is still unwinding and `runTask` would refuse re-entry). The message
+  /// is already out of the queue, so it must never be dropped.
+  @visibleForTesting
+  static List<Duration> queuedContinuationRetryDelaysForTest = const [
+    Duration(milliseconds: 250),
+    Duration(milliseconds: 500),
+    Duration(milliseconds: 1000),
+    Duration(milliseconds: 2000),
+  ];
+
+  /// Sessions with a queued continuation already in flight — prevents a
+  /// double-promote when Stop and the run's finally both try to schedule.
+  final Set<String> _continuationScheduled = {};
 
   /// Show the floating overlay. Guarded: with no active Control session the
   /// overlay is never shown, and it is only visible while the app is
@@ -1298,7 +1373,7 @@ class AgentService extends ChangeNotifier {
     for (final id in sessionIds) {
       final r = _runs[id];
       if (r == null) continue;
-      r.queue.clear();
+      _queueClear(r);
       _cancelBucket(r);
     }
   }
@@ -1459,9 +1534,78 @@ class AgentService extends ChangeNotifier {
   /// Enqueue a message to run after the current turn completes.
   void enqueueMessage(String text) {
     if (text.trim().isEmpty) return;
-    _queue.add(text);
+    _queueAdd(_runResolved, text);
     _emit('think', 'queued message ${_queue.length}');
     notifyListeners();
+  }
+
+  /// Promote the head of [sessionId]'s queue into a new run.
+  ///
+  /// Called when a run ends (completed or stopped) and by Stop itself, so a
+  /// queued message starts immediately on Stop instead of waiting for the
+  /// unwind. Exactly one message is promoted per run: the rest stay queued
+  /// and start when the new run ends. Idempotent per session while in flight.
+  void _scheduleQueuedContinuation(String sessionId) {
+    final run = _runs[sessionId];
+    if (run == null || run.queue.isEmpty) return;
+    if (!_continuationScheduled.add(sessionId)) return;
+    final text = _queueRemoveAt(run, 0);
+    notifyListeners();
+    unawaited(_startQueuedContinuation(sessionId, text));
+  }
+
+  Future<void> _startQueuedContinuation(
+    String sessionId,
+    String text,
+  ) async {
+    try {
+      var target = AppState.I.sessionById(sessionId);
+      if (target == null) {
+        // Session deleted — fall back to the active session so the message
+        // is never lost.
+        AppState.I.sendMessage(text);
+        target = AppState.I.activeSession;
+      } else {
+        target.messages.add(Message(role: 'user', content: text));
+        if (target.title == 'New chat' || target.title.isEmpty) {
+          target.title = AppState.autoTitle(text);
+        }
+        AppState.I.refresh();
+        AppState.I.persistSessions();
+      }
+      final targetId = target?.id;
+      if (targetId == null) return;
+
+      final starter = queuedRunStarterForTest;
+      final delays = queuedContinuationRetryDelaysForTest;
+      for (var attempt = 0; ; attempt++) {
+        try {
+          if (starter != null) {
+            await starter(targetId, text);
+          } else {
+            // Run in the background — never yank the user out of whatever
+            // session they are reading. PR23/M6: expand @refs here too.
+            unawaited(
+              runTask(
+                text,
+                sessionId: targetId,
+                freshTurn: false,
+                expandRefsFor: target,
+              ),
+            );
+          }
+          return;
+        } catch (e) {
+          if (attempt >= delays.length) {
+            _emit('err', 'queued message could not start: $e');
+            return;
+          }
+          await Future.delayed(delays[attempt]);
+        }
+      }
+    } finally {
+      _continuationScheduled.remove(sessionId);
+    }
   }
 
   /// Edit a queued message in place.
@@ -1479,24 +1623,88 @@ class AgentService extends ChangeNotifier {
     if (index < 0 || index >= _queue.length) return;
     final msg = _queue.removeAt(index);
     _queue.insert(0, msg);
+    _syncQueueIds(_runResolved);
+    notifyListeners();
+  }
+
+  /// Stable ids for [sessionId]'s queued messages (index-aligned with
+  /// [queuedMessagesFor]). The queue dock keys its rows by these.
+  List<int> queuedMessageIdsFor(String sessionId) {
+    final run = _runs[sessionId];
+    if (run == null) return const [];
+    _syncQueueIds(run);
+    return List.unmodifiable(run.queueIds);
+  }
+
+  /// Index of the queued message with [id] in [sessionId]'s queue, or -1.
+  int _queueIndexOfId(String sessionId, int id) {
+    final run = _runs[sessionId];
+    if (run == null) return -1;
+    _syncQueueIds(run);
+    return run.queueIds.indexOf(id);
+  }
+
+  /// Delete the queued message with stable [id].
+  void removeQueuedMessageById(int id) {
+    final run = _runResolved;
+    final index = _queueIndexOfId(run.runKey ?? '', id);
+    if (index < 0) {
+      // Fall back to the resolved bucket's own ids (active session).
+      _syncQueueIds(run);
+      final local = run.queueIds.indexOf(id);
+      if (local < 0) return;
+      _queueRemoveAt(run, local);
+    } else {
+      _queueRemoveAt(run, index);
+    }
+    notifyListeners();
+  }
+
+  /// Edit the queued message with stable [id].
+  void editQueuedMessageById(int id, String newText) {
+    if (newText.trim().isEmpty) return;
+    final run = _runResolved;
+    _syncQueueIds(run);
+    var index = run.queueIds.indexOf(id);
+    if (index < 0 && run.runKey != null) {
+      index = _queueIndexOfId(run.runKey!, id);
+    }
+    if (index < 0 || index >= run.queue.length) return;
+    run.queue[index] = newText;
+    notifyListeners();
+  }
+
+  /// Steer the queued message with stable [id] to the front.
+  void steerQueuedMessageById(int id) {
+    final run = _runResolved;
+    _syncQueueIds(run);
+    var index = run.queueIds.indexOf(id);
+    if (index < 0 && run.runKey != null) {
+      index = _queueIndexOfId(run.runKey!, id);
+    }
+    if (index < 0 || index >= run.queue.length) return;
+    final msg = run.queue.removeAt(index);
+    final msgId = run.queueIds.removeAt(index);
+    run.queue.insert(0, msg);
+    run.queueIds.insert(0, msgId);
     notifyListeners();
   }
 
   /// Test seam: enqueue without a live run.
   @visibleForTesting
-  void queueMessageForTest(String text) => _queue.add(text);
+  void queueMessageForTest(String text) => _queueAdd(_runResolved, text);
 
   /// Remove a message from the queue.
   void removeQueuedMessage(int index) {
     if (index < 0 || index >= _queue.length) return;
-    _queue.removeAt(index);
+    _queueRemoveAt(_runResolved, index);
     notifyListeners();
   }
 
   /// Test-only helper to reset the queue between tests.
   @visibleForTesting
   void clearQueueForTest() {
-    _queue.clear();
+    _queueClear(_runResolved);
     _cancelRequested = false;
     activeRunId = null;
     notifyListeners();
@@ -5963,7 +6171,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   Future<void> _drainQueueIntoMsgs(List<Map<String, dynamic>> msgs) async {
     if (_queue.isEmpty) return;
     while (_queue.isNotEmpty) {
-      final queued = _queue.removeAt(0);
+      final queued = _queueRemoveAt(_runResolved, 0);
       // Record in the RUNNING session — never the active one (the user
       // may have switched chats since the message was queued).
       final target = _runSession;
@@ -7750,41 +7958,10 @@ ${await _agentsMdBlock()}
       // showed one, so this is a no-op for them.
       unawaited(hideDeviceOverlay());
       notifyListeners();
-      // The queue auto-continue must run on the RUNNING session's queue,
-      // not whatever session the UI switched to mid-run.
-      if (pinned.queue.isNotEmpty) {
-        final next = pinned.queue.removeAt(0);
-        Future.delayed(const Duration(milliseconds: 250), () {
-          // Route the queued message to the RUNNING session — never the
-          // currently-active one (session-bleed fix). Fall back to the
-          // active session only if the original was deleted.
-          final target = AppState.I.sessionById(pinnedSessionId);
-          if (target != null) {
-            target.messages.add(Message(role: 'user', content: next));
-            if (target.title == 'New chat' || target.title.isEmpty) {
-              target.title = AppState.autoTitle(next);
-            }
-            AppState.I.refresh();
-            AppState.I.persistSessions();
-            // Run the continuation in the background — do NOT yank the
-            // user out of the session they're currently reading. The web
-            // client shows a badge on the busy session instead.
-            // PR23/M6: expand @refs in queued continuations too.
-            unawaited(
-              runTask(
-                next,
-                sessionId: target.id,
-                freshTurn: false,
-                expandRefsFor: target,
-              ),
-            );
-          } else {
-            // Session was deleted — fall back to the active session.
-            AppState.I.sendMessage(next);
-            unawaited(runTask(next, freshTurn: false, expandRefsFor: target));
-          }
-        });
-      }
+      // Queue auto-continue. On a Stop the scheduler already promoted the
+      // next message (idempotent, so this is a no-op then); on a normal
+      // completion this starts it now. Either way the queue can never stall.
+      _scheduleQueuedContinuation(pinnedSessionId);
     }
   }
 
@@ -14031,7 +14208,8 @@ ${await _agentsMdBlock()}
         // acted on). A background session is brought to the user first.
         if (busyFor(s.id)) {
           // Busy — queue joins THIS session's run (the message queue queue behavior).
-          _runs[s.id]?.queue.add(delivery);
+          final targetRun = _runs[s.id];
+          if (targetRun != null) _queueAdd(targetRun, delivery);
           _emit('think', 'queued reminder for running session ${s.title}');
         } else {
           if (AppState.I.activeSessionId != s.id) {
@@ -14937,7 +15115,8 @@ ${await _agentsMdBlock()}
       return 'reported quietly — the parent reads it on its next turn.';
     }
     if (busyFor(parent.id)) {
-      _runs[parent.id]?.queue.add(report);
+      final parentRun = _runs[parent.id];
+      if (parentRun != null) _queueAdd(parentRun, report);
       _emit('think', 'steered parent with report from ${sub.id}');
       return 'reported — queued into the parent\'s current run.';
     }
@@ -15488,7 +15667,8 @@ ${await _agentsMdBlock()}
       // Busy — the notice joins the parent's CURRENT run queue
       // steering into the nearest step boundary: it does not open a second
       // concurrent run.
-      _runs[parent.id]?.queue.add(notice);
+      final noticeRun = _runs[parent.id];
+      if (noticeRun != null) _queueAdd(noticeRun, notice);
       _emit('think', 'queued settlement notice for ${sub.id} → parent');
     } else {
       // Idle — one ordinary later turn.

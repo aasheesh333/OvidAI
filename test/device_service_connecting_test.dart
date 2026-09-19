@@ -15,20 +15,26 @@ void main() {
   const channel = MethodChannel('ovid/service-connecting-test');
 
   setUp(() {
-    DeviceControlService.connectingRetryDelaysForTest = [
-      Duration.zero,
-      Duration.zero,
-      Duration.zero,
-    ];
+    DeviceControlService.connectingRetryBaseDelayForTest =
+        const Duration(milliseconds: 1);
+    DeviceControlService.connectingRetryMaxDelayForTest =
+        const Duration(milliseconds: 1);
+    DeviceControlService.connectingRetryBudgetForTest = const Duration(
+      seconds: 1,
+    );
     DeviceControlService.setMethodChannelForTest(channel);
   });
 
   tearDown(() {
-    DeviceControlService.connectingRetryDelaysForTest = const [
-      Duration(milliseconds: 800),
-      Duration(milliseconds: 1600),
-      Duration(milliseconds: 2400),
-    ];
+    DeviceControlService.connectingRetryBaseDelayForTest = const Duration(
+      milliseconds: 500,
+    );
+    DeviceControlService.connectingRetryMaxDelayForTest = const Duration(
+      seconds: 5,
+    );
+    DeviceControlService.connectingRetryBudgetForTest = const Duration(
+      seconds: 90,
+    );
     DeviceControlService.setMethodChannelForTest(null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
@@ -52,11 +58,14 @@ void main() {
     expect(calls, 3, reason: 'initial attempt + 2 retries');
   });
 
-  test('persistent SERVICE_CONNECTING surfaces after retries are exhausted',
+  test('persistent SERVICE_CONNECTING surfaces after the budget is exhausted',
       () async {
+    DeviceControlService.connectingRetryBudgetForTest =
+        const Duration(milliseconds: 5);
     var calls = 0;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'deviceServiceState') return 'connecting';
       calls++;
       throw connecting();
     });
@@ -71,7 +80,7 @@ void main() {
         ),
       ),
     );
-    expect(calls, 4, reason: 'initial attempt + 3 retries');
+    expect(calls, 5, reason: 'initial attempt + 4 backoff retries');
   });
 
   test('a stop during retries reports superseded, not the native error',

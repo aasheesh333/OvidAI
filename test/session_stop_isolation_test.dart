@@ -43,6 +43,7 @@ void main() {
       agent.dropSessionRun(sessionId);
     }
     sandbox.killAllProcesses();
+    agent.queuedRunStarterForTest = null;
     await PtyPool.I.discardAllShells();
     AgentNotificationService.I.resetForTest();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -203,12 +204,21 @@ void main() {
         ..queue.add('keep B queued')
         ..statusLine = 'B still working';
 
+      // Do not actually start the promoted run in the test.
+      agent.queuedRunStarterForTest = (_, _) async {};
+
       final queuePreserved = agent.stopRequested(sessionId: sessionA.id);
 
       expect(queuePreserved, isTrue);
       expect(runA.activeRunId, isNull);
       expect(runA.cancelRequested, isTrue);
-      expect(runA.queue, ['resume A']);
+      // Stop on a RUNNING session promotes its queued message immediately.
+      expect(runA.queue, isEmpty);
+      expect(
+        sessionA.messages.map((m) => m.content),
+        contains('resume A'),
+      );
+      // The OTHER session is completely untouched, queue included.
       expect(runB.activeRunId, 'run-b');
       expect(runB.cancelRequested, isFalse);
       expect(runB.queue, ['keep B queued']);

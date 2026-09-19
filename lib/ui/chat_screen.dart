@@ -1262,7 +1262,10 @@ class _ChatScreenState extends State<ChatScreen>
                     const _GoalBar(),
                     const _TodoDock(),
                     const _StatsLine(),
-                    _QueueDock(onEdited: () => setState(() {})),
+                    _QueueDock(
+                      sessionId: AppState.I.activeSessionId,
+                      onEdited: () => setState(() {}),
+                    ),
                     const _ApprovalDock(),
                   ],
                 );
@@ -5702,8 +5705,9 @@ class _TodoDockState extends State<_TodoDock> {
 }
 
 class _QueueDock extends StatelessWidget {
+  final String? sessionId;
   final VoidCallback onEdited;
-  const _QueueDock({required this.onEdited});
+  const _QueueDock({this.sessionId, required this.onEdited});
 
   @override
   Widget build(BuildContext context) {
@@ -5711,8 +5715,14 @@ class _QueueDock extends StatelessWidget {
     return AnimatedBuilder(
       animation: agent,
       builder: (_, _) {
-        final queue = agent.queuedMessages;
+        final sid = sessionId;
+        final queue = sid == null
+            ? agent.queuedMessages
+            : agent.queuedMessagesFor(sid);
         if (queue.isEmpty) return const SizedBox.shrink();
+        final ids = sid == null
+            ? const <int>[]
+            : agent.queuedMessageIdsFor(sid);
         return SafeArea(
           top: false,
           child: Container(
@@ -5745,21 +5755,43 @@ class _QueueDock extends StatelessWidget {
                     GestureDetector(
                       onTap: () {
                         for (var i = queue.length - 1; i >= 0; i--) {
-                          agent.removeQueuedMessage(i);
+                          if (ids.length == queue.length) {
+                            agent.removeQueuedMessageById(ids[i]);
+                          } else {
+                            agent.removeQueuedMessage(i);
+                          }
                         }
                         onEdited();
                       },
-                      child: Text(
-                        'Clear all',
-                        style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 6,
+                        ),
+                        child: Text(
+                          'Clear all',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Aether.textFaint,
+                          ),
+                        ),
                       ),
                     ),
                   ],
                 ),
                 const SizedBox(height: 6),
-                // Queued message rows
+                // Queued message rows — keyed by the message's stable id so
+                // a delete/steer/edit never rebinds another row's State.
                 for (var i = 0; i < queue.length; i++)
-                  _QueueRow(index: i, text: queue[i], onEdited: onEdited),
+                  _QueueRow(
+                    key: ValueKey(
+                      ids.length == queue.length ? ids[i] : 'q-$i',
+                    ),
+                    id: ids.length == queue.length ? ids[i] : null,
+                    index: i,
+                    text: queue[i],
+                    onEdited: onEdited,
+                  ),
               ],
             ),
           ),
@@ -5770,10 +5802,13 @@ class _QueueDock extends StatelessWidget {
 }
 
 class _QueueRow extends StatefulWidget {
+  final int? id;
   final int index;
   final String text;
   final VoidCallback onEdited;
   const _QueueRow({
+    super.key,
+    this.id,
     required this.index,
     required this.text,
     required this.onEdited,
@@ -5791,6 +5826,39 @@ class _QueueRowState extends State<_QueueRow> {
   void initState() {
     super.initState();
     _ctrl = TextEditingController(text: widget.text);
+  }
+
+  @override
+  void didUpdateWidget(_QueueRow old) {
+    super.didUpdateWidget(old);
+    // The row is keyed by id, so this State belongs to the same message.
+    // Only resync the buffer when not actively editing, so a reorder while
+    // editing never clobbers what the user typed.
+    if (!_editing && old.text != widget.text) {
+      _ctrl.text = widget.text;
+    }
+  }
+
+  void _delete() {
+    final agent = AgentService.I;
+    final id = widget.id;
+    if (id != null) {
+      agent.removeQueuedMessageById(id);
+    } else {
+      agent.removeQueuedMessage(widget.index);
+    }
+    widget.onEdited();
+  }
+
+  void _steer() {
+    final agent = AgentService.I;
+    final id = widget.id;
+    if (id != null) {
+      agent.steerQueuedMessageById(id);
+    } else {
+      agent.steerQueuedMessage(widget.index);
+    }
+    widget.onEdited();
   }
 
   @override
@@ -5824,7 +5892,12 @@ class _QueueRowState extends State<_QueueRow> {
                   ),
                 ),
                 onSubmitted: (v) {
-                  agent.editQueuedMessage(widget.index, v);
+                  final id = widget.id;
+                  if (id != null) {
+                    agent.editQueuedMessageById(id, v);
+                  } else {
+                    agent.editQueuedMessage(widget.index, v);
+                  }
                   setState(() => _editing = false);
                   widget.onEdited();
                 },
@@ -5850,51 +5923,61 @@ class _QueueRowState extends State<_QueueRow> {
               style: TextStyle(fontSize: 12.5, color: Aether.text),
             ),
           ),
-          // Strict-steer (the queue steering parity): pull this row to the front so the
-          // running turn injects it on the very next request.
-          GestureDetector(
-            onTap: () {
-              agent.steerQueuedMessage(widget.index);
-              widget.onEdited();
-            },
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-              child: Icon(
-                Icons.fast_forward_outlined,
-                size: 14,
-                color: Aether.accent,
-              ),
-            ),
+          // Strict-steer (the queue steering parity): pull this row to the
+          // front so the running turn injects it on the very next request.
+          _QueueAction(
+            icon: Icons.fast_forward_outlined,
+            color: Aether.accent,
+            tooltip: 'Send next',
+            onTap: _steer,
           ),
-          GestureDetector(
+          _QueueAction(
+            icon: Icons.edit_outlined,
+            color: Aether.textMuted,
+            tooltip: 'Edit',
             onTap: () {
               _ctrl.text = widget.text;
               setState(() => _editing = true);
             },
-            child: Padding(
-              padding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-              child: Icon(
-                Icons.edit_outlined,
-                size: 14,
-                color: Aether.textMuted,
-              ),
-            ),
           ),
-          GestureDetector(
-            onTap: () {
-              agent.removeQueuedMessage(widget.index);
-              widget.onEdited();
-            },
-            child: Padding(
-              padding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-              child: Icon(
-                Icons.delete_outline,
-                size: 14,
-                color: Aether.textMuted,
-              ),
-            ),
+          _QueueAction(
+            icon: Icons.delete_outline,
+            color: Aether.textMuted,
+            tooltip: 'Delete',
+            onTap: _delete,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A queue-row action with a real 48dp tap target (the old rows used ~26px
+/// GestureDetectors, which were easy to miss).
+class _QueueAction extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String tooltip;
+  final VoidCallback onTap;
+  const _QueueAction({
+    required this.icon,
+    required this.color,
+    required this.tooltip,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: SizedBox(
+          width: 48,
+          height: 48,
+          child: Center(child: Icon(icon, size: 16, color: color)),
+        ),
       ),
     );
   }

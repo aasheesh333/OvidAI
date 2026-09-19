@@ -90,6 +90,15 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /// Three-state accessibility status: `bound` (instance alive), `disabled`
+    /// (not enabled in Settings), or `connecting` (enabled in Settings but the
+    /// OS has not rebound our process yet). Pure read — never blocks the main
+    /// thread waiting for a bind.
+    private fun deviceServiceState(): String {
+        if (OvidAccessibilityService.instance != null) return "bound"
+        return if (isAccessibilityServiceEnabled(this)) "connecting" else "disabled"
+    }
+
     private fun deviceService(result: MethodChannel.Result): OvidAccessibilityService? {
         val service = OvidAccessibilityService.instance
         if (service != null) return service
@@ -494,6 +503,9 @@ class MainActivity : FlutterActivity() {
                     }
                     "deviceServiceEnabled" -> {
                         result.success(isAccessibilityServiceEnabled(this))
+                    }
+                    "deviceServiceState" -> {
+                        result.success(deviceServiceState())
                     }
                     "getSecurityStatus" -> {
                         result.success(SecurityCheck.getDeviceSecuritySummary(this))
