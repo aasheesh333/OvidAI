@@ -361,7 +361,7 @@ class _SessionTile extends StatelessWidget {
                       app.selectSession(session.id);
                       Navigator.maybePop(context);
                     },
-                    onLongPress: () => _rename(context),
+                    onLongPress: () => _showActions(context),
                     child: Padding(
                       padding: const EdgeInsets.fromLTRB(12, 11, 4, 11),
                       child: Row(
@@ -476,6 +476,70 @@ class _SessionTile extends StatelessWidget {
       ),
     );
     if (confirmed == true) AppState.I.deleteSession(session.id);
+  }
+
+  void _showActions(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.edit_outlined,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              title: const Text('Rename', style: TextStyle(fontSize: 13.5)),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                _rename(context);
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(
+                Icons.auto_awesome_outlined,
+                size: 19,
+                color: Aether.accent,
+              ),
+              title: const Text(
+                'Regenerate title',
+                style: TextStyle(fontSize: 13.5),
+              ),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                _regenerateTitle(context);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _regenerateTitle(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final previous = session.title;
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('Generating title…'),
+        duration: Duration(seconds: 2),
+      ),
+    );
+    await AgentService.I.regenerateSessionTitle(session);
+    if (session.title == previous) {
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Could not generate a title')),
+      );
+    }
   }
 
   void _rename(BuildContext context) {

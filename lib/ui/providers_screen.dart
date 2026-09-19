@@ -708,7 +708,7 @@ class _ProviderCardState extends State<ProviderCard> {
                       for (final m in provider.models.take(8))
                         _ModelChip(
                           model: m,
-                          providerName: provider.name,
+                          provider: provider,
                           onRemove: () {
                             AppState.I.removeModel(provider.id, m);
                           },
@@ -744,15 +744,14 @@ class _ProviderCardState extends State<ProviderCard> {
   }
 }
 
-/// Model chip with a remove (×) icon — lets users delete fetched
-/// or manually added model IDs.
+/// Model chip with a vision-support indicator and a remove (×) icon.
 class _ModelChip extends StatefulWidget {
   final String model;
-  final String providerName;
+  final ProviderConfig provider;
   final VoidCallback onRemove;
   const _ModelChip({
     required this.model,
-    required this.providerName,
+    required this.provider,
     required this.onRemove,
   });
 
@@ -763,8 +762,34 @@ class _ModelChip extends StatefulWidget {
 class _ModelChipState extends State<_ModelChip> {
   bool _confirming = false;
 
+  void _cycleVision() {
+    final current = widget.provider.modelVisionSupport(widget.model);
+    final next = current == null ? true : (current ? false : null);
+    widget.provider.setModelVisionSupport(widget.model, next);
+    AppState.I.refresh();
+    AppState.I.persistProviderState();
+  }
+
   @override
   Widget build(BuildContext context) {
+    final vision = widget.provider.modelVisionSupport(widget.model);
+    final IconData visionIcon;
+    final Color visionColor;
+    final String visionTooltip;
+    if (vision == true) {
+      visionIcon = Icons.image_outlined;
+      visionColor = Aether.accent;
+      visionTooltip = 'Image support: On (forced)';
+    } else if (vision == false) {
+      visionIcon = Icons.text_fields;
+      visionColor = Aether.textMuted;
+      visionTooltip = 'Image support: Off (forced)';
+    } else {
+      visionIcon = Icons.help_outline;
+      visionColor = Aether.textFaint;
+      visionTooltip = 'Image support: Auto (detected)';
+    }
+
     return Container(
       padding: const EdgeInsets.only(left: 9, top: 4.5, bottom: 4.5),
       decoration: BoxDecoration(
@@ -787,7 +812,20 @@ class _ModelChipState extends State<_ModelChip> {
               color: _confirming ? Aether.danger : Aether.textMuted,
             ),
           ),
-          const SizedBox(width: 6),
+          const SizedBox(width: 4),
+          Tooltip(
+            message: visionTooltip,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _cycleVision,
+              child: SizedBox(
+                width: 40,
+                height: 40,
+                child: Icon(visionIcon, size: 15, color: visionColor),
+              ),
+            ),
+          ),
+          const SizedBox(width: 2),
           GestureDetector(
             onTap: () {
               if (_confirming) {

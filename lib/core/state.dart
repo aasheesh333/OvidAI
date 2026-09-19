@@ -112,6 +112,43 @@ class ProviderConfig {
   /// [resolveApiFormat] auto-detects from the base URL for user-added rows.
   ApiFormat apiFormat;
 
+  /// Per-model vision override. `true` = force vision-capable, `false` =
+  /// force text-only, absent = auto-detect. Lets a user enable a model whose
+  /// id the allowlist cannot parse (custom/aggregator endpoints) without
+  /// loosening detection for every other model.
+  final Map<String, bool> _visionOverrides = {};
+
+  bool? modelVisionSupport(String model) => _visionOverrides[model.trim()];
+
+  /// Set (or clear, with `null`) the vision override for [model].
+  void setModelVisionSupport(String model, bool? supported) {
+    final key = model.trim();
+    if (key.isEmpty) return;
+    if (supported == null) {
+      _visionOverrides.remove(key);
+    } else {
+      _visionOverrides[key] = supported;
+    }
+  }
+
+  Map<String, bool> get visionOverrides =>
+      Map.unmodifiable(_visionOverrides);
+
+  /// Merge a persisted provider row (used by [AppState.loadProviderState]).
+  void applyPersistedJson(Map<String, dynamic> entry) {
+    baseUrl = entry['baseUrl'] as String? ?? baseUrl;
+    final fmt = entry['apiFormat'];
+    if (fmt is String && fmt.isNotEmpty) apiFormat = ApiFormat.parse(fmt);
+    final raw = entry['visionOverrides'];
+    if (raw is Map) {
+      _visionOverrides.clear();
+      for (final e in raw.entries) {
+        final v = e.value;
+        if (v is bool) _visionOverrides[e.key.toString()] = v;
+      }
+    }
+  }
+
   ProviderConfig({
     String? id,
     required this.name,
@@ -159,6 +196,8 @@ class ProviderConfig {
     'models': models,
     'requiresApiKey': requiresApiKey,
     'apiFormat': apiFormat.wire,
+    if (_visionOverrides.isNotEmpty)
+      'visionOverrides': Map<String, bool>.from(_visionOverrides),
   };
 }
 
@@ -1095,6 +1134,10 @@ class ChatSession {
   /// global usage ledger: the composer must never show another session's data.
   final SessionAnalytics analytics;
 
+  /// True once an LLM title has been generated for this session. Persisted so
+  /// a restart never re-titles (and a manual regenerate can force it again).
+  bool titleGenerated;
+
   ChatSession({
     required this.id,
     required this.title,
@@ -1126,6 +1169,7 @@ class ChatSession {
     List<Map<String, dynamic>>? schedules,
     DateTime? createdAt,
     SessionAnalytics? analytics,
+    this.titleGenerated = false,
   }) : agentAllowedTools = agentAllowedTools ?? [],
        messages = messages ?? [],
        todos = todos ?? [],
@@ -1191,6 +1235,7 @@ class ChatSession {
           ? Map<String, dynamic>.from(j['analytics'] as Map)
           : null,
     ),
+    titleGenerated: j['titleGenerated'] as bool? ?? false,
   );
 
   Map<String, dynamic> toJson() => {
@@ -1228,6 +1273,7 @@ class ChatSession {
     'messages': messages.map((m) => m.toJson()).toList(),
     'createdAt': createdAt.toIso8601String(),
     'analytics': analytics.toJson(),
+    if (titleGenerated) 'titleGenerated': true,
   };
 
   void recordAnalytics({
@@ -3201,10 +3247,7 @@ class AppState extends ChangeNotifier {
           existing
             ..baseUrl = entry['baseUrl'] as String? ?? existing.baseUrl
             ..models = hasStoredModels ? models : existing.models;
-          final fmt = entry['apiFormat'];
-          if (fmt is String && fmt.isNotEmpty) {
-            existing.apiFormat = ApiFormat.parse(fmt);
-          }
+          existing.applyPersistedJson(entry);
           continue;
         }
         if (entry['custom'] != true) continue;

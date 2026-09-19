@@ -3946,7 +3946,7 @@ libncursesw.so.6.5←./lib/libncurses.so.6
           'device_screenshot',
           {},
         );
-        expect(result, contains('current model cannot read images'));
+        expect(result, contains('not marked vision-capable'));
         final messages = <Map<String, dynamic>>[];
         AgentService.I.appendPendingVisionMessagesForTest(messages);
         expect(messages, isEmpty);

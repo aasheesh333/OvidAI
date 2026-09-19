@@ -8214,19 +8214,55 @@ ${await _agentsMdBlock()}
     return sections.join('\n\n');
   }
 
+  /// Dynamic session title (ChatGPT/Gemini style).
+  ///
+  /// Runs after the first real exchange and replaces the heuristic title with
+  /// an LLM one. Skipped when a title was already generated (persisted flag),
+  /// when the user renamed the session, or when there is no assistant turn
+  /// yet. A failure leaves the heuristic in place and does NOT set the flag,
+  /// so a later run retries.
   Future<void> maybeGenerateSessionTitle(ChatSession s) async {
-    // Only once per session, only after a real exchange, only when the title
-    // is still the heuristic one.
-    if (_titledSessions.contains(s.id)) return;
+    if (s.titleGenerated) return;
     if (s.messages.where((m) => m.role == 'assistant').isEmpty) return;
-    if (s.title != 'New chat' &&
-        !s.title.endsWith('…') &&
-        s.title != AppState.autoTitle(s.messages.first.content)) {
-      return; // user renamed it — never touch a human title
-    }
+    if (_isUserTitle(s)) return; // user renamed it — never touch a human title
+    if (_titledSessions.contains(s.id)) return;
     _titledSessions.add(s.id);
+    final title = await _generateTitleFor(s);
+    if (title != null) {
+      s.title = title;
+      s.titleGenerated = true;
+      AppState.I.refresh();
+      AppState.I.persistSessions();
+    } else {
+      // Allow a later attempt (the in-flight guard is released).
+      _titledSessions.remove(s.id);
+    }
+  }
+
+  /// Force a fresh LLM title, overwriting even a user rename (explicit user
+  /// action from the UI).
+  Future<void> regenerateSessionTitle(ChatSession s) async {
+    final title = await _generateTitleFor(s);
+    if (title == null) return;
+    s.title = title;
+    s.titleGenerated = true;
+    AppState.I.refresh();
+    AppState.I.persistSessions();
+  }
+
+  /// True when [s]'s title was set by the user (or is not the heuristic one).
+  bool _isUserTitle(ChatSession s) {
+    if (s.messages.isEmpty) return false;
+    return s.title != 'New chat' &&
+        !s.title.endsWith('…') &&
+        s.title != AppState.autoTitle(s.messages.first.content);
+  }
+
+  /// One cheap non-tool LLM call producing a cleaned title, or null on any
+  /// failure / unusable reply.
+  Future<String?> _generateTitleFor(ChatSession s) async {
     final p = AppState.I.providerById(s.providerId);
-    if (p == null || !p.hasKey) return;
+    if (p == null || !p.hasKey) return null;
     try {
       final firstExchange = s.messages
           .take(6)
@@ -8251,20 +8287,33 @@ ${await _agentsMdBlock()}
           ? await override(p, titleMsgs, s)
           : await _callLlm(p, titleMsgs, s, includeTools: false);
       final choices = (r?['choices'] as List?)?.whereType<Map>().toList() ?? [];
-      if (choices.isEmpty) return;
-      final raw = choices.first['message']?['content'];
-      var title = (raw as String? ?? '').trim();
-      if (title.startsWith('"') && title.endsWith('"')) {
-        title = title.substring(1, title.length - 1);
-      }
-      title = title.replaceAll('\n', ' ').trim();
-      if (title.isEmpty || title.length > 60) return;
-      s.title = title;
-      AppState.I.refresh();
-      AppState.I.persistSessions();
+      if (choices.isEmpty) return null;
+      return cleanSessionTitle(choices.first['message']?['content'] as String?);
     } catch (_) {
-      // Heuristic title stays — this is a cosmetic best-effort.
+      return null;
     }
+  }
+
+  /// Normalize a raw model reply into a usable title, or null when it is not
+  /// acceptable. Strips a `Title:` prefix, wrapping quotes, trailing
+  /// punctuation, and collapses whitespace; rejects empty/over-long results.
+  @visibleForTesting
+  static String? cleanSessionTitle(String? raw) {
+    if (raw == null) return null;
+    var t = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (t.isEmpty) return null;
+    // Quotes may wrap a `Title:` prefix, so peel quotes → prefix → quotes →
+    // trailing punctuation, in that order.
+    const quoteEdge = "^[\"'“”‘’]+|[\"'“”‘’]+\$";
+    t = t.replaceAll(RegExp(quoteEdge), '').trim();
+    t = t.replaceFirst(
+      RegExp(r'^(?:title|subject)\s*[:\-]\s*', caseSensitive: false),
+      '',
+    );
+    t = t.replaceAll(RegExp(quoteEdge), '').trim();
+    t = t.replaceAll(RegExp(r'[.,;:!]+$'), '').trim();
+    if (t.isEmpty || t.length > 60) return null;
+    return t;
   }
 
   /// Per-tool cooperative timeout budgets (PR18, parity). Network and
@@ -12945,7 +12994,9 @@ ${await _agentsMdBlock()}
     );
     if (!staged) {
       return 'IMAGE $path ($source): ${bytes.length} bytes, .$ext raster. '
-          'The current model cannot read images. Switch to a vision-capable model.';
+          'The current model is not marked vision-capable. Switch to a '
+          'vision model, or enable "Supports images" for this model in '
+          'Settings → Providers.';
     }
     return 'IMAGE $path ($source): ${bytes.length} bytes, .$ext raster; '
         'attached to the next model request as image data.';
@@ -13024,6 +13075,13 @@ ${await _agentsMdBlock()}
       'llama-4-scout',
     };
     if (exact.contains(id)) return true;
+    // Common vision families the exact set does not enumerate. Kept narrow
+    // (a real `-vl`/`-vision`/`llava` token) so a text model is never
+    // mistaken for a vision model.
+    if (RegExp(r'(?:^|[-_/])(?:vl|vision|llava|pixtral|moondream)\d*(?:$|[-_.])')
+        .hasMatch(id)) {
+      return true;
+    }
     return RegExp(r'^gpt-4o(?:-mini)?-\d{4}-\d{2}-\d{2}$').hasMatch(id) ||
         RegExp(
           r'^gpt-4\.1(?:-(?:mini|nano))?-\d{4}-\d{2}-\d{2}$',
@@ -13034,6 +13092,19 @@ ${await _agentsMdBlock()}
         RegExp(r'^qwen(?:2(?:\.5)?|3)-vl(?:-[a-z0-9.-]+)?$').hasMatch(id);
   }
 
+  /// Vision support for [model] with the owning [provider]'s per-model
+  /// override applied. The override wins in both directions; absent, the
+  /// strict auto-detection decides.
+  @visibleForTesting
+  static bool modelSupportsImagesResolved(
+    String model,
+    ProviderConfig? provider,
+  ) {
+    final override = provider?.modelVisionSupport(_baseModelOf(model));
+    if (override != null) return override;
+    return modelSupportsImages(model);
+  }
+
   bool _stageVisionImage({
     required String path,
     required List<int> bytes,
@@ -13041,7 +13112,8 @@ ${await _agentsMdBlock()}
     required String reason,
   }) {
     final model = _runResolved.modelSnapshot ?? _runSession?.model ?? '';
-    if (!modelSupportsImages(model)) return false;
+    final provider = AppState.I.providerById(_runSession?.providerId);
+    if (!modelSupportsImagesResolved(model, provider)) return false;
     final mime = switch (extension.toLowerCase()) {
       'jpg' || 'jpeg' => 'image/jpeg',
       'webp' => 'image/webp',
@@ -13350,8 +13422,11 @@ ${await _agentsMdBlock()}
             extension: 'png',
             reason: 'device_screenshot',
           )) {
-            return 'Screenshot saved to ${copied.path}, but the current model cannot read images. '
-                'Switch to a vision-capable model or use device_read/device_system_nav.';
+            return 'Screenshot saved to ${copied.path}, but the current model '
+                'is not marked vision-capable. Switch to a vision model, '
+                'enable "Supports images" for this model in Settings → '
+                'Providers, or use device_read/device_system_nav to act '
+                'without the image.';
           }
           return 'Screenshot saved to ${copied.path} and attached to the next model request. '
               'The image pixels are available before choosing coordinates.';
