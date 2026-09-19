@@ -575,6 +575,13 @@ class AgentRun {
   int analyticsToolMsRecorded = 0;
   int analyticsLlmMsRecorded = 0;
 
+  /// When a skill that declares `allowed-tools` is loaded, only those tools
+  /// may be dispatched for the rest of the run — the [CC] skill-scoping
+  /// semantics. Null means no restriction (the common case). The `skill`
+  /// tool itself is always permitted so the model can switch skills.
+  Set<String>? activeSkillTools;
+  String? activeSkillName;
+
   /// Latest human-readable progress line for this run ("retrying in 9s…",
   /// "context compacted", "running npm test"). The event log was never
   /// rendered anywhere, so retries and backoffs were invisible; the composer
@@ -6964,6 +6971,9 @@ can drive there yourself with the device_* tools):
     _runResolved.produced.clear(); // "Produced" panel resets per run
     _runResolved.pendingVisionMessages.clear();
     _runResolved.toolCallCounts.clear(); // repeat-tool reminder is per turn
+    // A skill's tool restriction is scoped to the run that loaded it.
+    _runResolved.activeSkillTools = null;
+    _runResolved.activeSkillName = null;
     ctx.run.runEvents.clear();
     // todo dock: the checklist is cleared at the start of each USER
     // turn — a stale list from an earlier task must not steer this one.
@@ -9055,6 +9065,17 @@ ${await _agentsMdBlock()}
   }
 
   Future<String> _dispatchInner(String name, Map<String, dynamic> args) async {
+    // ── Skill tool-scope gate (the [CC] skill `allowed-tools` semantics) ──
+    // A loaded skill that declares `allowed-tools` restricts the tools usable
+    // for the rest of the run. The `skill` tool is always allowed so the model
+    // can load another skill (which replaces the scope).
+    final skillTools = _runResolved.activeSkillTools;
+    if (skillTools != null && name != 'skill' && !skillTools.contains(name)) {
+      return 'SKILL SCOPE ACTIVE ("${_runResolved.activeSkillName ?? 'skill'}"): '
+          'its allowed-tools are ${skillTools.join(', ')}. Tool "$name" is not '
+          'permitted right now. Use an allowed tool, or call the `skill` tool '
+          'to load a different skill (which replaces this scope).';
+    }
     // ── Plan mode enforcement (the plan mode gate exit_plan_mode flow) ──
     // While planning, only read-only tools are allowed.  The AI must
     // present its plan via exit_plan_mode and get user approval first.
@@ -14400,7 +14421,15 @@ ${await _agentsMdBlock()}
             'the current manifest for this session. Nothing was executed.';
       }
       _emit('think', 'skill loaded: ${skill.name}');
-      return '<skill_content>\n${skill.content}\n</skill_content>';
+      // A skill that declares `allowed-tools` scopes the run to those tools.
+      if (skill.allowedTools.isNotEmpty) {
+        _runResolved.activeSkillTools = skill.allowedTools.toSet();
+        _runResolved.activeSkillName = skill.name;
+      } else {
+        _runResolved.activeSkillTools = null;
+        _runResolved.activeSkillName = null;
+      }
+      return _skillContentWithFiles(skill);
     }
     if (compatibilityMode && name.startsWith('plugin:')) {
       final contribution = registry.contributionByCanonicalId(name);
@@ -14417,6 +14446,48 @@ ${await _agentsMdBlock()}
     final catalog = SkillService.I.catalogBlockForSession(runSid);
     return 'Skill "$name" not found.\n\n'
         '${catalog.isEmpty ? 'No skills are installed yet.' : catalog}';
+  }
+
+  /// Per-file cap for a skill's bundled supporting file when it is inlined
+  /// into the loaded skill content.
+  static const int kSkillSupportingFileInlineCap = 8 * 1024;
+
+  /// Total cap across all inlined supporting files (keeps one large bundle
+  /// from crowding out the conversation).
+  static const int kSkillSupportingTotalInlineCap = 32 * 1024;
+
+  /// Render a loaded skill as `<skill_content>` plus its bundled supporting
+  /// files. Real [CC] skills ship scripts/templates alongside `SKILL.md` and
+  /// reference them by relative path; without this the model never saw them.
+  /// Small text files are inlined; larger ones are listed so the model can
+  /// read them from [Skill.dirPath] via the filesystem tools.
+  Future<String> _skillContentWithFiles(Skill skill) async {
+    final buf = StringBuffer('<skill_content>\n${skill.content}\n');
+    final files = SkillService.I.supportingFilesFor(skill);
+    if (files.isEmpty) {
+      buf.write('</skill_content>');
+      return buf.toString();
+    }
+    buf.writeln('\n<skill_files>');
+    var budget = kSkillSupportingTotalInlineCap;
+    for (final rel in files) {
+      if (budget <= 0) {
+        buf.writeln('- $rel (not inlined — read it from ${skill.dirPath})');
+        continue;
+      }
+      final content = await SkillService.I.readSupportingFile(skill, rel);
+      if (content == null) continue;
+      final clipped = content.length > kSkillSupportingFileInlineCap
+          ? '${content.substring(0, kSkillSupportingFileInlineCap)}\n'
+                '[truncated]'
+          : content;
+      budget -= clipped.length;
+      buf
+        ..writeln('--- $rel ---')
+        ..writeln(clipped);
+    }
+    buf.write('</skill_files>\n</skill_content>');
+    return buf.toString();
   }
 
   /// Honest session-scope refusal (spec §7): names the contribution, its
@@ -14495,9 +14566,18 @@ ${await _agentsMdBlock()}
             'its current declaration. Nothing was executed.';
       }
       _emit('think', 'plugin ${c.pluginId} ${c.kindLabel}: ${c.name}');
+      // Same scoping + bundled-file surfacing as the `skill` tool path.
+      if (mounted.allowedTools.isNotEmpty) {
+        _runResolved.activeSkillTools = mounted.allowedTools.toSet();
+        _runResolved.activeSkillName = mounted.name;
+      } else {
+        _runResolved.activeSkillTools = null;
+        _runResolved.activeSkillName = null;
+      }
       final input = args['input'] ?? args['arguments'];
       final inputStr = input != null ? '\n\nArguments: $input' : '';
-      return '<skill_content>\n${mounted.content}\n</skill_content>$inputStr';
+      final content = await _skillContentWithFiles(mounted);
+      return '$content$inputStr';
     }
     if (_runSessionOverrideForTest == null ||
         SkillService.I.hasSnapshotForSession(runSid)) {

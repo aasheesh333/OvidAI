@@ -125,6 +125,22 @@ class McpService {
     return rs != null && rs.handshakeDone;
   }
 
+  /// Test seam: the MCP protocol version negotiated for [serverName]'s HTTP
+  /// session (null until `initialize` completes).
+  @visibleForTesting
+  String? protocolVersionForTest(String serverName) =>
+      _running[_keyForName(serverName)]?.protocolVersion;
+
+  /// Test seam: capabilities advertised in [serverName]'s initialize result.
+  @visibleForTesting
+  Map<String, dynamic> capabilitiesForTest(String serverName) =>
+      _running[_keyForName(serverName)]?.capabilities ?? const {};
+
+  /// Test seam: the remembered `Mcp-Session-Id` for [serverName].
+  @visibleForTesting
+  String? httpSessionIdForTest(String serverName) =>
+      _running[_keyForName(serverName)]?.sessionId;
+
   /// Inline cap for a tool result handed to the model. Oversized output is
   /// trimmed head+tail with an exact omission notice (spill-style).
   @visibleForTesting
@@ -141,6 +157,24 @@ class McpService {
     final omitted = text.length - _maxToolResultChars;
     return '$head\n\n[…$omitted characters omitted — ask again with a '
         'narrower query to see the middle…]\n\n$tail';
+  }
+
+  /// Decoded byte length of a base64 content block, so binary payloads can
+  /// be reported by size instead of dropped. Falls back to the base64
+  /// arithmetic when the data isn't valid base64.
+  static int _base64ByteLength(String data) {
+    try {
+      return base64Decode(data).length;
+    } catch (_) {
+      final clean = data.replaceAll(RegExp(r'\s'), '');
+      final padding = clean.endsWith('==')
+          ? 2
+          : clean.endsWith('=')
+          ? 1
+          : 0;
+      final length = (clean.length * 3 ~/ 4) - padding;
+      return length < 0 ? 0 : length;
+    }
   }
 
   /// Test seam: replace the HTTP client used by the 'http' transport.
@@ -724,33 +758,18 @@ class McpService {
       if (initResult.isError) {
         throw Exception('initialize failed: ${initResult.error}');
       }
+      _rememberInitializeResult(rs, initResult.value);
       await _sendNotificationHttp(
         rs,
         'notifications/initialized',
         {},
         timeout: phaseTimeout('notifications/initialized'),
       );
-      final toolsResult = await _rpcHttp(
-        rs,
-        'tools/list',
-        {},
-        timeout: phaseTimeout('tools/list'),
-      );
-      if (toolsResult.isTimeout) {
-        throw TimeoutException('tools/list timed out', timeoutFor());
-      }
-      if (toolsResult.isError) {
-        throw Exception('tools/list failed: ${toolsResult.error}');
-      }
-      final payload = toolsResult.value;
-      if (payload is Map<String, dynamic>) {
-        rs.tools =
-            (payload['tools'] as List?)
-                ?.whereType<Map>()
-                .map((t) => McpToolDef.fromJson(t.cast<String, dynamic>()))
-                .toList() ??
-            <McpToolDef>[];
-      }
+      rs.tools = await _listToolsHttp(
+            rs,
+            timeout: phaseTimeout('tools/list'),
+          ) ??
+          <McpToolDef>[];
       // A budget abort may have detached this attempt — never mark it ready.
       if (!identical(_running[key], rs) || rs.userDisconnected) {
         return 'connect aborted';
@@ -762,6 +781,70 @@ class McpService {
       if (identical(_running[key], rs)) _running.remove(key);
       return 'connect failed: $e';
     }
+  }
+
+  /// Capture the `initialize` result's negotiated protocol version and
+  /// capabilities. The version falls back to `2024-11-05` when the server
+  /// omits it; the handshake success criteria are unchanged.
+  static void _rememberInitializeResult(_RunningServer rs, dynamic value) {
+    var version = '2024-11-05';
+    if (value is Map<String, dynamic>) {
+      final negotiated = value['protocolVersion'];
+      if (negotiated is String && negotiated.isNotEmpty) {
+        version = negotiated;
+      }
+      final capabilities = value['capabilities'];
+      if (capabilities is Map<String, dynamic>) {
+        rs.capabilities = capabilities;
+      }
+    }
+    rs.protocolVersion = version;
+  }
+
+  /// Upper bound on `tools/list` pages, so a hostile server that always
+  /// returns a `nextCursor` can't make discovery loop forever.
+  static const _maxToolListPages = 50;
+
+  /// `tools/list` over Streamable HTTP, following a non-empty `nextCursor`
+  /// until the server stops paginating and merging every page. Throws on
+  /// timeout/error so the handshake keeps its existing error surfacing;
+  /// returns null when the first page isn't a JSON object.
+  Future<List<McpToolDef>?> _listToolsHttp(
+    _RunningServer rs, {
+    Duration? timeout,
+  }) async {
+    final tools = <McpToolDef>[];
+    var sawMap = false;
+    String? cursor;
+    for (var page = 0; page < _maxToolListPages; page++) {
+      final res = await _rpcHttp(
+        rs,
+        'tools/list',
+        {'cursor': ?cursor},
+        timeout: timeout,
+      );
+      if (res.isTimeout) {
+        throw TimeoutException('tools/list timed out', timeout);
+      }
+      if (res.isError) {
+        throw Exception('tools/list failed: ${res.error}');
+      }
+      final payload = res.value;
+      if (payload is! Map<String, dynamic>) break;
+      sawMap = true;
+      final pageTools = payload['tools'];
+      if (pageTools is List) {
+        tools.addAll(
+          pageTools
+              .whereType<Map>()
+              .map((t) => McpToolDef.fromJson(t.cast<String, dynamic>())),
+        );
+      }
+      final next = payload['nextCursor'];
+      if (next is! String || next.isEmpty) break;
+      cursor = next;
+    }
+    return sawMap ? tools : null;
   }
 
   Future<String> _connectStdio(
@@ -1040,11 +1123,16 @@ class McpService {
   Future<void> _rediscoverTools(String serverName) async {
     final rs = _running[serverName];
     if (rs == null) return;
-    final res = rs.server.transport == 'http'
-        ? await _rpcHttp(rs, 'tools/list', {})
-        : rs.server.transport == 'native'
-            ? await _listNativeTools(rs)
-            : await _rpc(rs, 'tools/list', {});
+    if (rs.server.transport == 'http') {
+      try {
+        final merged = await _listToolsHttp(rs);
+        if (merged != null) rs.tools = merged;
+      } catch (_) {}
+      return;
+    }
+    final res = rs.server.transport == 'native'
+        ? await _listNativeTools(rs)
+        : await _rpc(rs, 'tools/list', {});
     if (res.isError) return;
     final payload = res.value;
     if (payload is Map<String, dynamic>) {
@@ -1072,19 +1160,28 @@ class McpService {
     _attachStdioStreams(rs, key, process);
   }
 
-  /// Kill a server process. Safe to call when not connected.
+  /// Kill a server process. Safe to call when not connected. For a
+  /// Streamable-HTTP server with a remembered session, best-effort DELETE the
+  /// endpoint so the server can terminate that session.
   Future<void> disconnect(String serverName) async {
     final key = _keyForName(serverName);
     final rs = _running.remove(key);
     _cancelReconnect(key);
     if (rs == null) return;
     rs.userDisconnected = true;
+    // Start the DELETE before the first await so it captures the currently
+    // configured HTTP client (a test may clear the injected client between
+    // this synchronous call and the request below).
+    final sessionDelete = rs.server.transport == 'http' && rs.sessionId != null
+        ? _deleteHttpSession(rs)
+        : null;
     try {
       await rs.nativeHandler?.dispose();
     } catch (_) {}
     try {
       rs.process?.kill();
     } catch (_) {}
+    if (sessionDelete != null) await sessionDelete;
   }
 
   /// Call a tool on a connected server. Returns the text result.
@@ -1115,6 +1212,7 @@ class McpService {
               'arguments': args,
             },
             timeout: effectiveTimeout,
+            cancelOnTimeout: true,
           )
         : rs.server.transport == 'native'
             ? await _callNativeTool(
@@ -1150,15 +1248,32 @@ class McpService {
             if (t is String && t.trim().isNotEmpty) parts.add(t);
           } else if (type == 'resource') {
             final r = c['resource'];
-            if (r is Map && r['text'] is String) {
-              parts.add('[resource] ${r['text']}');
+            if (r is Map) {
+              if (r['text'] is String) {
+                parts.add('[resource] ${r['text']}');
+              } else if (r['blob'] is String) {
+                final mime = r['mimeType'] ?? 'application/octet-stream';
+                parts.add(
+                  '[resource content returned — $mime, '
+                  '${_base64ByteLength(r['blob'] as String)} bytes]',
+                );
+              }
             }
           } else if (type == 'image') {
             // Images can't reach a text-only model context; note them so
             // the model knows something was produced.
             parts.add('[image content returned — not displayable here]');
+          } else if (type == 'audio') {
+            final mime = c['mimeType'] ?? 'audio/*';
+            final data = c['data'];
+            parts.add(
+              '[audio content returned — $mime, '
+              '${data is String ? _base64ByteLength(data) : 0} bytes]',
+            );
           }
         }
+        final structured = payload['structuredContent'];
+        if (structured != null) parts.add(jsonEncode(structured));
         final text = parts.join('\n');
         if (flagged) return 'MCP error: ${_trimResult(text)}';
         return _trimResult(text);
@@ -1272,6 +1387,8 @@ class McpService {
               'Content-Type': 'application/json',
               'Accept': 'application/json, text/event-stream',
               if (rs.sessionId != null) 'Mcp-Session-Id': rs.sessionId!,
+              if (rs.protocolVersion != null)
+                'MCP-Protocol-Version': rs.protocolVersion!,
               ...rs.server.headers,
             },
             body: jsonEncode({
@@ -1289,6 +1406,15 @@ class McpService {
     }
   }
 
+  /// Best-effort `notifications/cancelled` for a request that timed out, so a
+  /// busy server can stop working on it. Fire-and-forget — it never masks or
+  /// replaces the timeout error the caller already surfaced.
+  Future<void> _sendCancelledHttp(_RunningServer rs, int requestId) =>
+      _sendNotificationHttp(rs, 'notifications/cancelled', {
+        'requestId': requestId,
+        'reason': 'request timed out',
+      });
+
   /// PR41: Streamable-HTTP JSON-RPC request/response — one POST per call,
   /// same [McpRpcResult] contract as the stdio [_rpc] so every downstream
   /// consumer (callTool's content parsing, timeout/error surfacing) is
@@ -1301,6 +1427,7 @@ class McpService {
     String method,
     Map<String, dynamic> params, {
     Duration? timeout,
+    bool cancelOnTimeout = false,
   }) async {
     final url = rs.server.url;
     if (url == null) {
@@ -1316,6 +1443,8 @@ class McpService {
               'Content-Type': 'application/json',
               'Accept': 'application/json, text/event-stream',
               if (rs.sessionId != null) 'Mcp-Session-Id': rs.sessionId!,
+              if (method != 'initialize' && rs.protocolVersion != null)
+                'MCP-Protocol-Version': rs.protocolVersion!,
               ...rs.server.headers,
             },
             body: jsonEncode({
@@ -1369,6 +1498,11 @@ class McpService {
       }
       return McpRpcResult._ok(j['result']);
     } on TimeoutException {
+      if (cancelOnTimeout) {
+        // Best-effort only: the timeout error below is still the caller's
+        // result, and cancellation never throws into this path.
+        unawaited(_sendCancelledHttp(rs, id));
+      }
       return const McpRpcResult._timeout();
     } catch (e) {
       // Connection-level failure (refused, DNS, socket) — the server is
@@ -1394,6 +1528,33 @@ class McpService {
       }
     }
     if (sid != null && sid.isNotEmpty) rs.sessionId = sid;
+  }
+
+  /// Best-effort HTTP DELETE terminating a Streamable-HTTP session. Never
+  /// throws — a server that can't be reached still disconnects locally.
+  Future<void> _deleteHttpSession(_RunningServer rs) async {
+    final url = rs.server.url;
+    final sessionId = rs.sessionId;
+    if (url == null || sessionId == null) return;
+    final injected = httpClientForTest;
+    final client = injected ?? http.Client();
+    try {
+      await client
+          .delete(
+            Uri.parse(url),
+            headers: {
+              'Mcp-Session-Id': sessionId,
+              if (rs.protocolVersion != null)
+                'MCP-Protocol-Version': rs.protocolVersion!,
+              ...rs.server.headers,
+            },
+          )
+          .timeout(Duration(seconds: rs.server.startupTimeoutS));
+    } catch (_) {
+      // Best-effort teardown: never let a dead endpoint block disconnect.
+    } finally {
+      if (injected == null) client.close();
+    }
   }
 
   /// Parse a `text/event-stream` body into the JSON-RPC response whose `id`
@@ -1631,6 +1792,15 @@ class _RunningServer {
   /// Streamable-HTTP session id (`Mcp-Session-Id`), remembered from the
   /// initialize response and echoed on subsequent requests.
   String? sessionId;
+
+  /// Protocol version negotiated by `initialize` (server value, or the
+  /// `2024-11-05` default when the server omits it). Sent as the
+  /// `MCP-Protocol-Version` header on every request after the handshake.
+  String? protocolVersion;
+
+  /// Capabilities advertised in the `initialize` result, kept for
+  /// diagnostics. Empty until the handshake completes.
+  Map<String, dynamic> capabilities = const {};
 
   /// PR41: set by [McpService.disconnect] BEFORE killing the process, so
   /// the death watcher can tell a user-initiated disconnect apart from an

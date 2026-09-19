@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'plugin_manifest.dart';
@@ -24,6 +25,11 @@ class Skill {
   final String whenToUse;
   final String content;
   final String path;
+
+  /// Directory that [supportingFiles] and [SkillService.readSupportingFile]
+  /// resolve against. Null for in-memory declarations with no file location.
+  final String? dirPath;
+
   final bool modelInvocable;
   final bool userInvocable;
   final List<String> allowedTools;
@@ -50,6 +56,7 @@ class Skill {
     required this.whenToUse,
     required this.content,
     required this.path,
+    this.dirPath,
     required this.modelInvocable,
     required this.userInvocable,
     List<String> allowedTools = const [],
@@ -372,6 +379,10 @@ class SkillService {
             output: target,
           );
         } else if (entity is File && entity.path.endsWith('.md')) {
+          if (depth == 0 &&
+              kNonSkillRootDocs.contains(_fileName(entity.path))) {
+            continue;
+          }
           final isAgent =
               entity.path.contains('/agents/') ||
               entity.path.contains('\\agents\\') ||
@@ -414,18 +425,10 @@ class SkillService {
       if (raw.startsWith('---')) {
         final end = raw.indexOf('\n---', 3);
         if (end > 0) {
-          final fm = raw.substring(3, end);
-          for (final line in fm.split('\n')) {
-            final idx = line.indexOf(':');
-            if (idx < 0) continue;
-            final key = line.substring(0, idx).trim();
-            var value = line.substring(idx + 1).trim();
-            if (value.startsWith('"') && value.endsWith('"')) {
-              value = value.substring(1, value.length - 1);
-            } else if (value.startsWith("'") && value.endsWith("'")) {
-              value = value.substring(1, value.length - 1);
-            }
-            frontmatter[key] = value;
+          frontmatter.addAll(_parseFrontmatter(raw.substring(3, end)));
+          for (final entry in frontmatter.entries) {
+            final key = entry.key;
+            final value = entry.value;
             switch (key) {
               case 'name':
                 if (value.isNotEmpty) name = value;
@@ -438,17 +441,7 @@ class SkillService {
               case 'user-invocable':
                 userInvocable = value.toLowerCase() == 'true';
               case 'allowed-tools' || 'allowed_tools' || 'tools':
-                var s = value;
-                if (s.startsWith('[') && s.endsWith(']')) {
-                  s = s.substring(1, s.length - 1);
-                }
-                allowedTools = s
-                    .split(',')
-                    .map(
-                      (e) => e.trim().replaceAll('"', '').replaceAll("'", ""),
-                    )
-                    .where((e) => e.isNotEmpty)
-                    .toList();
+                allowedTools = _parseToolList(value);
               case 'argument-hint' || 'argument_hint':
                 argumentHint = value;
               case 'model':
@@ -478,6 +471,7 @@ class SkillService {
         whenToUse: whenToUse,
         content: content,
         path: path,
+        dirPath: file.parent.path,
         modelInvocable: modelInvocable,
         userInvocable: userInvocable,
         allowedTools: allowedTools,
@@ -644,6 +638,13 @@ class SkillService {
     return idx < 0 ? noExt : noExt.substring(idx + 1);
   }
 
+  String _fileName(String path) {
+    final slash = path.lastIndexOf('/');
+    final backslash = path.lastIndexOf('\\');
+    final cut = slash > backslash ? slash : backslash;
+    return cut < 0 ? path : path.substring(cut + 1);
+  }
+
   Skill? find(String name) {
     for (final s in _skills) {
       if (s.name.toLowerCase() == name.toLowerCase()) return s;
@@ -685,6 +686,43 @@ class SkillService {
   /// Test seam: parse a single SKILL.md file through the real frontmatter
   /// parser without registering a root.
   Future<Skill?> parseForTest(File file, String path) => _parse(file, path);
+
+  /// Resolves [relativePath] against [skill]'s own directory and returns the
+  /// file's UTF-8 content, or null when the path is unsafe (traversal,
+  /// absolute, drive letter, symlink escape), missing, or unreadable.
+  /// Content over [kSupportingFileMaxBytes] is truncated and followed by a
+  /// note stating the original byte count.
+  Future<String?> readSupportingFile(Skill skill, String relativePath) async {
+    final base = skill.dirPath;
+    if (base == null || base.isEmpty) return null;
+    final String rootReal;
+    try {
+      rootReal = Directory(base).resolveSymbolicLinksSync();
+    } catch (_) {
+      return null;
+    }
+    final file = _containedRegularFile(rootReal, relativePath);
+    if (file == null) return null;
+    try {
+      final bytes = await file.readAsBytes();
+      if (bytes.length <= kSupportingFileMaxBytes) {
+        return utf8.decode(bytes, allowMalformed: true);
+      }
+      final head = utf8.decode(
+        bytes.sublist(0, kSupportingFileMaxBytes),
+        allowMalformed: true,
+      );
+      return '$head\n\n[truncated: showing first $kSupportingFileMaxBytes '
+          'of ${bytes.length} bytes]';
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Bundle-relative supporting files discovered for [skill]. Empty for flat
+  /// skills and in-memory declarations.
+  List<String> supportingFilesFor(Skill skill) =>
+      List.unmodifiable(skill.supportingFiles);
 
   /// Catalog block injected into the system prompt.
   String catalogBlock({int maxDescChars = 500}) {
@@ -758,6 +796,90 @@ class SkillAliasResolution {
       List.unmodifiable(matches.map((m) => m.providerId));
 }
 
+/// Parses the body of a `---`-fenced frontmatter block into top-level
+/// `key: value` pairs. Supports quoted and bare scalars (values may contain
+/// colons), folded (`>`) and literal (`|`) block scalars, and a bare
+/// `key:` followed by an indented `- item` block list (items are joined with
+/// newlines so list consumers can split on whitespace).
+Map<String, String> _parseFrontmatter(String block) {
+  final result = <String, String>{};
+  final lines = block.split('\n');
+  var index = 0;
+  while (index < lines.length) {
+    final line = lines[index];
+    index++;
+    if (line.trim().isEmpty) continue;
+    final match = RegExp(r'^([^:\s][^:]*):(.*)$').firstMatch(line);
+    if (match == null) continue;
+    final key = match.group(1)!.trim();
+    final rest = match.group(2)!.trim();
+    final folded = rest == '>' || rest == '>-' || rest == '>+';
+    final literal = rest == '|' || rest == '|-' || rest == '|+';
+    if (folded || literal) {
+      final collected = <String>[];
+      while (index < lines.length) {
+        final next = lines[index];
+        if (next.trim().isEmpty) {
+          collected.add('');
+          index++;
+          continue;
+        }
+        if (!next.startsWith(' ') && !next.startsWith('\t')) break;
+        collected.add(next.replaceFirst(RegExp(r'^[ \t]+'), ''));
+        index++;
+      }
+      while (collected.isNotEmpty && collected.last.isEmpty) {
+        collected.removeLast();
+      }
+      result[key] = literal
+          ? collected.join('\n')
+          : collected.where((entry) => entry.isNotEmpty).join(' ');
+      continue;
+    }
+    if (rest.isEmpty) {
+      final items = <String>[];
+      final resume = index;
+      while (index < lines.length) {
+        final item = RegExp(r'^\s+-\s+(.*)$').firstMatch(lines[index]);
+        if (item == null) break;
+        items.add(_unquote(item.group(1)!.trim()));
+        index++;
+      }
+      if (items.isNotEmpty) {
+        result[key] = items.join('\n');
+        continue;
+      }
+      index = resume;
+    }
+    result[key] = _unquote(rest);
+  }
+  return result;
+}
+
+String _unquote(String value) {
+  if (value.length >= 2) {
+    if (value.startsWith('"') && value.endsWith('"')) {
+      return value.substring(1, value.length - 1);
+    }
+    if (value.startsWith("'") && value.endsWith("'")) {
+      return value.substring(1, value.length - 1);
+    }
+  }
+  return value;
+}
+
+List<String> _parseToolList(String value) {
+  var body = value.trim();
+  if (body.startsWith('[') && body.endsWith(']')) {
+    body = body.substring(1, body.length - 1);
+  }
+  return body
+      .split(RegExp(r'[,\s]+'))
+      .map((entry) => entry.trim().replaceAll('"', '').replaceAll("'", ""))
+      .where((entry) => entry.isNotEmpty)
+      .toList();
+}
+
 /// Strips a leading `---`-fenced YAML frontmatter block and returns the
 /// trimmed body; returns [raw] unchanged when there is no fenced block.
 /// One shared rule for the skills scanner and the agent's canonical
@@ -771,6 +893,23 @@ String stripMarkdownFrontmatter(String raw) {
 
 /// Maximum directory depth a bundle walk will descend.
 const int kBundleScanMaxDepth = 12;
+
+/// Hard cap on bytes returned by [SkillService.readSupportingFile]; longer
+/// content is truncated with an honest byte-count note.
+const int kSupportingFileMaxBytes = 64 * 1024;
+
+/// Documentation files that live directly in a scanned root and must never
+/// be ingested as flat skills. Bundle files (`<dir>/SKILL.md`,
+/// `<dir>/AGENT.md`) are unaffected — this only gates depth-0 `.md` files.
+const Set<String> kNonSkillRootDocs = {
+  'AGENTS.md',
+  'README.md',
+  'CHANGELOG.md',
+  'CONTRIBUTING.md',
+  'CODE_OF_CONDUCT.md',
+  'LICENSE.md',
+  'SECURITY.md',
+};
 
 /// Every non-`SKILL.md` file shipped inside a bundle directory, as sorted
 /// `[dir]`-relative paths. A subdirectory containing its own `SKILL.md` is a

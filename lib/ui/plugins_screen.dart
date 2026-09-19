@@ -1070,9 +1070,29 @@ class PluginCard extends StatelessWidget {
       : 'Available';
 
   /// Task 11 (spec §11): source/format badge — Claude Code, Codex, MCP,
-  /// or Ovid built-in. Catalog rows derive it from `marketplaceId` /
-  /// category; MCP-category rows are always MCP.
+  /// or Ovid built-in. Rows with a runtime install derive the badge from
+  /// their normalized manifest format; catalog-only rows fall back to the
+  /// marketplace / category heuristic (MCP-category rows are always MCP).
   static String sourceFormatLabel(PluginItem p) {
+    final runtimeId = p.runtimeId;
+    final format = runtimeId == null
+        ? null
+        : PluginContributionRegistry.I.manifestFor(runtimeId)?.format;
+    return formatLabelFor(format, _catalogFormatLabel(p));
+  }
+
+  /// Maps a normalized manifest [format] to its badge label, falling
+  /// back to [catalogLabel] when the row has no runtime manifest.
+  @visibleForTesting
+  static String formatLabelFor(PluginFormat? format, String catalogLabel) =>
+      switch (format) {
+        PluginFormat.claudeCode => 'Claude Code',
+        PluginFormat.codex => 'Codex',
+        PluginFormat.genericMcp => 'MCP',
+        null => catalogLabel,
+      };
+
+  static String _catalogFormatLabel(PluginItem p) {
     if (p.category == 'MCP') return 'MCP';
     if (p.author == 'ovidai' || p.author == 'you') return 'Ovid built-in';
     if (p.marketplace != null || p.source != null) return 'Claude Code';
