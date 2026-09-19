@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'mcp_config_parse.dart';
 import 'plugin_manifest.dart';
+import 'plugin_permissions.dart';
 import 'skills.dart';
 import 'state.dart' show shellSplitArgs;
 
@@ -499,24 +500,25 @@ void _requirePublisherIdentity(_Build b, String idField) {
 }
 
 /// Derive the minimum capability set from what the manifest actually
-/// declares (spec §5.1) — never a blanket grant.
+/// declares (spec §5.1) — never a blanket grant. Delegates to the single
+/// public inference point so the adapters and the approval/runtime side
+/// can never drift.
 Set<PluginCapability> _inferCapabilities(_Build b) {
-  final caps = <PluginCapability>{};
-  if (b.commands.isNotEmpty || b.skills.isNotEmpty || b.agents.isNotEmpty) {
-    caps.add(PluginCapability.workspaceRead);
-  }
-  for (final h in b.hooks) {
-    caps.add(PluginCapability.hooksObserve);
-    if (h.type == 'command') caps.add(PluginCapability.shellExecute);
-    if (h.canBlock) caps.add(PluginCapability.hooksBlock);
-  }
-  for (final s in b.mcpServers) {
-    caps.add(PluginCapability.mcpRegister);
-    if (s.transport == 'stdio') caps.add(PluginCapability.processSpawn);
-    if (s.transport == 'http') caps.add(PluginCapability.networkConnect);
-  }
-  if (b.envNames.isNotEmpty) caps.add(PluginCapability.environmentRead);
-  return caps;
+  return inferRequestedCapabilities(
+    NormalizedPluginManifest(
+      id: b.pluginId,
+      name: '',
+      version: '',
+      format: PluginFormat.genericMcp,
+      rootPath: b.root.path,
+      commands: List.unmodifiable(b.commands),
+      skills: List.unmodifiable(b.skills),
+      agents: List.unmodifiable(b.agents),
+      hooks: List.unmodifiable(b.hooks),
+      mcpServers: List.unmodifiable(b.mcpServers),
+      environmentReadNames: Set.unmodifiable(b.envNames),
+    ),
+  );
 }
 
 NormalizedPluginManifest _finish(

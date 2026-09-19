@@ -49,10 +49,20 @@ String pluginManifestDigest(NormalizedPluginManifest manifest) {
 /// declares — the same inspection rules the adapters apply (spec §5.1),
 /// rebuilt here from the normalized records so approvals always cover
 /// what the manifest requests, even when constructed directly.
+///
+/// Explicitly declared [NormalizedPluginManifest.requestedCapabilities]
+/// are always retained. The source plugin formats carry no capability
+/// declaration field, so [PluginCapability.workspaceWrite],
+/// [PluginCapability.sessionRead], [PluginCapability.sessionWrite], and
+/// [PluginCapability.deviceControl] are ONLY ever requested this way: the
+/// contribution shape (hooks, MCP declarations) cannot reliably imply a
+/// server's tool surface, session access, or device control, so inferring
+/// them would over-grant — and would change adapter manifest digests and
+/// the grant gate's required set, invalidating existing approvals.
 Set<PluginCapability> inferRequestedCapabilities(
   NormalizedPluginManifest manifest,
 ) {
-  final caps = <PluginCapability>{};
+  final caps = <PluginCapability>{...manifest.requestedCapabilities};
   if (manifest.commands.isNotEmpty ||
       manifest.skills.isNotEmpty ||
       manifest.agents.isNotEmpty) {
@@ -174,7 +184,8 @@ List<CapabilityExplanation> explainCapabilities(
   for (final h in manifest.hooks) {
     add(
       PluginCapability.hooksObserve,
-      'Registers lifecycle hooks (${h.event})',
+      'Registers lifecycle hooks (${h.event}) — sees tool names and redacted '
+      'payloads (secrets are stripped before a hook runs)',
       h.path,
     );
     if (h.type == 'command') {

@@ -1610,14 +1610,21 @@ class _ChatScreenState extends State<ChatScreen>
                             return;
                           }
                           _input.clear();
-                          final argsText = parsed.args.isEmpty
-                              ? ''
-                              : '\n\nUser instruction: ${parsed.args}';
+                          final content = AgentService
+                              .substituteCommandArguments(
+                                skill.content,
+                                parsed.args,
+                              );
+                          final argsText = AgentService.commandArgumentTrailer(
+                            skill.content,
+                            parsed.args,
+                            'User instruction',
+                          );
                           if (context.mounted) {
                             _sendPrompt(
                               context,
                               s,
-                              '<skill_content>\n${skill.content}\n</skill_content>'
+                              '<skill_content>\n$content\n</skill_content>'
                               '$argsText',
                             );
                           }

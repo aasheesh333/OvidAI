@@ -204,6 +204,14 @@ class McpService {
   @visibleForTesting
   static String? memoryStoragePathOverrideForTest;
 
+  /// Test seam: resolve (migrating the legacy shared store when present) the
+  /// per-server memory store under [docsPath].
+  @visibleForTesting
+  static Future<File> memoryStorageFileForTest(
+    String docsPath,
+    McpServer server,
+  ) => _resolveMemoryStorageFile(docsPath, server);
+
   /// Test seam: reconnect backoff timing, shortened so tests run in
   /// milliseconds instead of real seconds.
   @visibleForTesting
@@ -555,6 +563,30 @@ class McpService {
     return names.isEmpty ? null : names;
   }
 
+  /// Per-server memory store path. The server id is sanitized with the same
+  /// stable encoder used for provider tool names, so ownerless and
+  /// plugin-owned servers never share a knowledge graph.
+  static String _memoryStoragePath(String docsPath, McpServer server) =>
+      '$docsPath/mcp-memory/${_providerEncode(server.canonicalId)}.json';
+
+  /// Resolves the per-server memory store, seeding it once from the legacy
+  /// shared `mcp_memory.json` so existing graphs survive the split. The
+  /// legacy file is copied, never moved.
+  static Future<File> _resolveMemoryStorageFile(
+    String docsPath,
+    McpServer server,
+  ) async {
+    final file = File(_memoryStoragePath(docsPath, server));
+    final legacy = File('$docsPath/mcp_memory.json');
+    if (!await file.exists() && await legacy.exists()) {
+      try {
+        await file.parent.create(recursive: true);
+        await legacy.copy(file.path);
+      } catch (_) {}
+    }
+    return file;
+  }
+
   Future<NativeMcpHandler> _createNativeHandler(McpServer server) async {
     final customFactory = _nativeHandlerFactories[server.canonicalId.toLowerCase()] ??
         _nativeHandlerFactories[server.name.toLowerCase()];
@@ -593,9 +625,12 @@ class McpService {
       } else {
         try {
           final docs = await getApplicationDocumentsDirectory();
-          storageFile = File('${docs.path}/mcp_memory.json');
+          storageFile = await _resolveMemoryStorageFile(docs.path, server);
         } catch (_) {
-          storageFile = File('${Directory.systemTemp.path}/mcp_memory.json');
+          storageFile = await _resolveMemoryStorageFile(
+            Directory.systemTemp.path,
+            server,
+          );
         }
       }
       return NativeMemoryMcpHandler(storageFile: storageFile);

@@ -14390,6 +14390,81 @@ ${await _agentsMdBlock()}
     return _resolveChildMode(mode, modeName);
   }
 
+  /// [CC] slash-command argument substitution: `$ARGUMENTS` and `$@` become
+  /// the full argument string, `$1`…`$N` become whitespace-split positional
+  /// arguments, and `\$` escapes a literal dollar sign. An out-of-range
+  /// positional placeholder is left as-is.
+  static String substituteCommandArguments(String body, String rawArgs) {
+    if (!body.contains(r'$')) return body;
+    final trimmed = rawArgs.trim();
+    final args = trimmed.isEmpty
+        ? const <String>[]
+        : trimmed.split(RegExp(r'\s+'));
+    final out = StringBuffer();
+    var i = 0;
+    while (i < body.length) {
+      final ch = body[i];
+      if (ch == '\\' && i + 1 < body.length && body[i + 1] == r'$') {
+        out.write(r'$');
+        i += 2;
+        continue;
+      }
+      if (ch == r'$') {
+        if (body.startsWith(r'$ARGUMENTS', i)) {
+          out.write(rawArgs);
+          i += r'$ARGUMENTS'.length;
+          continue;
+        }
+        if (body.startsWith(r'$@', i)) {
+          out.write(rawArgs);
+          i += 2;
+          continue;
+        }
+        final match = RegExp(r'^\$(\d+)').firstMatch(body.substring(i));
+        if (match != null) {
+          final index = int.parse(match.group(1)!);
+          if (index >= 1 && index <= args.length) {
+            out.write(args[index - 1]);
+            i += match.group(0)!.length;
+            continue;
+          }
+        }
+      }
+      out.write(ch);
+      i++;
+    }
+    return out.toString();
+  }
+
+  static bool _hasCommandArgumentPlaceholders(String body) {
+    for (var i = 0; i < body.length; i++) {
+      if (body[i] == '\\') {
+        i++;
+        continue;
+      }
+      if (body[i] != r'$') continue;
+      final rest = body.substring(i + 1);
+      if (rest.startsWith('ARGUMENTS') || rest.startsWith('@')) return true;
+      if (rest.isNotEmpty) {
+        final c = rest.codeUnitAt(0);
+        if (c >= 0x30 && c <= 0x39) return true;
+      }
+    }
+    return false;
+  }
+
+  /// The legacy trailer appended when a command/skill body declares no
+  /// argument placeholders. Empty when the body substitutes its own
+  /// placeholders or when there are no arguments.
+  static String commandArgumentTrailer(
+    String body,
+    String rawArgs,
+    String label,
+  ) {
+    if (rawArgs.isEmpty || _hasCommandArgumentPlaceholders(body)) return '';
+    return '\n\n$label: $rawArgs';
+  }
+
   Future<String> _handleSkill(Map<String, dynamic> args) async {
     final name = (args['name'] as String).trim();
     if (name.isEmpty) return 'skill name is required';
@@ -14432,7 +14507,8 @@ ${await _agentsMdBlock()}
         _runResolved.activeSkillTools = null;
         _runResolved.activeSkillName = null;
       }
-      return _skillContentWithFiles(skill);
+      final input = args['input'] ?? args['arguments'];
+      return _skillContentWithFiles(skill, rawArgs: input?.toString() ?? '');
     }
     if (compatibilityMode && name.startsWith('plugin:')) {
       final contribution = registry.contributionByCanonicalId(name);
@@ -14464,8 +14540,12 @@ ${await _agentsMdBlock()}
   /// reference them by relative path; without this the model never saw them.
   /// Small text files are inlined; larger ones are listed so the model can
   /// read them from [Skill.dirPath] via the filesystem tools.
-  Future<String> _skillContentWithFiles(Skill skill) async {
-    final buf = StringBuffer('<skill_content>\n${skill.content}\n');
+  Future<String> _skillContentWithFiles(
+    Skill skill, {
+    String rawArgs = '',
+  }) async {
+    final content = substituteCommandArguments(skill.content, rawArgs);
+    final buf = StringBuffer('<skill_content>\n$content\n');
     final files = SkillService.I.supportingFilesFor(skill);
     if (files.isEmpty) {
       buf.write('</skill_content>');
@@ -14578,9 +14658,10 @@ ${await _agentsMdBlock()}
         _runResolved.activeSkillName = null;
       }
       final input = args['input'] ?? args['arguments'];
-      final inputStr = input != null ? '\n\nArguments: $input' : '';
-      final content = await _skillContentWithFiles(mounted);
-      return '$content$inputStr';
+      final rawArgs = input?.toString() ?? '';
+      final content = await _skillContentWithFiles(mounted, rawArgs: rawArgs);
+      return '$content'
+          '${commandArgumentTrailer(mounted.content, rawArgs, 'Arguments')}';
     }
     if (_runSessionOverrideForTest == null ||
         SkillService.I.hasSnapshotForSession(runSid)) {
@@ -14613,8 +14694,10 @@ ${await _agentsMdBlock()}
           'was executed.';
     }
     final input = args['input'] ?? args['arguments'];
-    final inputStr = input != null ? '\n\nArguments: $input' : '';
-    return '<skill_content>\n$body\n</skill_content>$inputStr';
+    final rawArgs = input?.toString() ?? '';
+    final content = substituteCommandArguments(body, rawArgs);
+    final inputStr = commandArgumentTrailer(body, rawArgs, 'Arguments');
+    return '<skill_content>\n$content\n</skill_content>$inputStr';
   }
 
   // ── Subagents ─────────────────────────────────────────────────────────

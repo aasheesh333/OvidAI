@@ -379,7 +379,15 @@ void main() {
   });
 
   group('ovid-pkg honesty', () {
-    test('apt upgrade and full-upgrade fail non-zero with a stderr message', () async {
+    // The assertion is about the script's exit code + stderr (correctness),
+    // not latency. package:test's 30s default per-test timeout intermittently
+    // fired under full-suite parallel load; when it did, teardown removed the
+    // temp dir while the process was still starting, which then failed with
+    // "cannot open …: No such file" instead of the real result.
+    test(
+      'apt upgrade and full-upgrade fail non-zero with a stderr message',
+      timeout: const Timeout(Duration(minutes: 3)),
+      () async {
       final tmp = Directory.systemTemp.createTempSync('ovid-e2e-pkg');
       addTearDown(() {
         if (tmp.existsSync()) tmp.deleteSync(recursive: true);
@@ -395,19 +403,21 @@ void main() {
         'PATH': Platform.environment['PATH'] ?? '/usr/bin:/bin',
       };
 
-      for (final verb in const ['upgrade', 'full-upgrade']) {
-        // The assertion is about exit code + stderr (script correctness), not
-        // latency. A 30s cap intermittently timed out under full-suite
-        // parallel load, so allow a generous budget.
-        final res = await Process.run(
-          '/bin/sh',
-          ['${tmp.path}/bin/ovid-pkg', verb],
-          environment: env,
-        ).timeout(const Duration(seconds: 90));
-        expect(res.exitCode, isNot(0), reason: '$verb must not silently succeed');
-        expect(res.stderr, contains('not supported'));
-      }
-    });
+        for (final verb in const ['upgrade', 'full-upgrade']) {
+          final res = await Process.run(
+            '/bin/sh',
+            ['${tmp.path}/bin/ovid-pkg', verb],
+            environment: env,
+          ).timeout(const Duration(seconds: 90));
+          expect(
+            res.exitCode,
+            isNot(0),
+            reason: '$verb must not silently succeed',
+          );
+          expect(res.stderr, contains('not supported'));
+        }
+      },
+    );
   });
 
   group('apt https transport config', () {
