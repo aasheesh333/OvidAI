@@ -304,3 +304,34 @@ three consecutive runs), analyze clean, CI `35459645737` fully green
   (P4/P5):** needs a subagent-dispatch design pass.
 - **History purge + key rotation + `usehoplite` downscoping:** owner actions
   (see the public-repo checklist).
+
+---
+
+## Blocker report triage (2026-09-19, verified against real code)
+
+A report claimed 6 blockers after installing `obra/superpowers`. Verified
+each against the current tree (commit `9680c1f`) by reproducing failures and
+running the real pipeline:
+
+| # | Claim | Verdict | Evidence |
+|---|-------|---------|----------|
+| 1 | No session-start hook → plugin inert | **STALE — already fixed** | `hook_service.dart` `sessionContextFor`/`extractHookContext` + `CLAUDE_PLUGIN_ROOT`; injected in `agent_service.dart:7436`. Implemented in `da3d7ba`. |
+| 2 | No skill registry → `skill()` not found | **STALE — already fixed** | `_scanPluginMount` + `PluginCatalogMount` mounts plugin skills per session (`da3d7ba`). |
+| 3 | `marketplace.json` casts object fields to String | **REAL — fixed** | Reproduced `_Map<String, dynamic>` → `String?` at `state.dart`; now tolerant via `_marketplaceString`. |
+| 4 | Plugin action dispatch is a stub (silent success) | **REAL — fixed** | Reproduced: unknown action returned "executed successfully". Now honest + lists real actions. |
+| 5 | No real install mechanism from a repo | **REAL — fixed** | Added `agent_install_plugin(repo:)` + `catalog_add_plugin(source:)`; `catalog_add_plugin` previously only made a row. |
+| 6 | Sandbox dependency / ARM64 native modules | **PARTIAL** | Sandbox gating is real; native `.node` on bionic ARM64 is a genuine limitation (needs an honest message). |
+
+Root cause of the "inert plugin" experience: the agent reached for
+`catalog_add_plugin`, which only created a catalog row and never installed —
+so no skills mounted and no hooks registered. The install path is now wired.
+
+**End-to-end proof:** `test/plugin_e2e_install_test.dart` inspects the real
+plugin, grants, installs, mounts 15 skills for a session, and fires the
+SessionStart hook to produce injectable context with `CLAUDE_PLUGIN_ROOT`
+resolved. `test/marketplace_import_test.dart`,
+`test/plugin_action_dispatch_test.dart`,
+`test/plugin_direct_repo_install_test.dart` cover the fixes.
+
+Still open from the report: the ARM64 native-module message (item 6) and the
+porting-guide `references/ovid-tools.md` tool-mapping deliverable.
