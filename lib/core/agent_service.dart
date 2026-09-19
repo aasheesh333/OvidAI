@@ -14400,7 +14400,10 @@ ${await _agentsMdBlock()}
         !SkillService.I.hasSnapshotForSession(runSid);
     if (compatibilityMode) {
       await _refreshCompatibilitySkillRoots();
-    } else if (!SkillService.I.hasSnapshotForSession(runSid)) {
+    } else if (!SkillService.I.hasSnapshotForSession(runSid) ||
+        SkillService.I.isSessionCatalogStale(runSid)) {
+      // Hot reload: an edited/added/removed workspace SKILL.md is picked up
+      // on the next load instead of requiring a manual refresh.
       await _refreshSkillRoots(runSid);
     }
     // Unique-alias resolution (spec §4.4): an exact provider id (canonical

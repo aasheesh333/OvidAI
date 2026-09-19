@@ -30,6 +30,11 @@ class Skill {
   /// resolve against. Null for in-memory declarations with no file location.
   final String? dirPath;
 
+  /// Absolute path of the source markdown file (`SKILL.md`/`AGENT.md`/flat
+  /// `.md`). Null for in-memory declarations. Used for hot-reload change
+  /// detection, since [path] may be a bundle DIRECTORY.
+  final String? sourcePath;
+
   final bool modelInvocable;
   final bool userInvocable;
   final List<String> allowedTools;
@@ -57,6 +62,7 @@ class Skill {
     required this.content,
     required this.path,
     this.dirPath,
+    this.sourcePath,
     required this.modelInvocable,
     required this.userInvocable,
     List<String> allowedTools = const [],
@@ -115,6 +121,14 @@ class SkillCatalogSnapshot {
   final int generation;
   final List<Skill> skills;
 
+  /// The scanned roots this snapshot was built from (workspace skill dirs).
+  /// Kept so a later call can cheaply detect that a `SKILL.md` was edited and
+  /// re-scan instead of serving a stale catalog.
+  final List<String> roots;
+
+  /// Fingerprint of the root dirs + parsed skill files at publish time.
+  final String fingerprint;
+
   /// Non-fatal findings raised while building this snapshot (for example a
   /// plugin declaring the same canonical contribution id twice). Publishing
   /// never throws for these; the caller surfaces them as a compatibility
@@ -125,8 +139,11 @@ class SkillCatalogSnapshot {
     required this.sessionId,
     required this.generation,
     required List<Skill> skills,
+    List<String> roots = const [],
+    this.fingerprint = '',
     List<String> compatibilityNotes = const [],
   }) : skills = List.unmodifiable(skills),
+       roots = List.unmodifiable(roots),
        compatibilityNotes = List.unmodifiable(compatibilityNotes);
 
   List<Skill> get userSkills =>
@@ -219,8 +236,9 @@ class SkillService {
     final generation = reserved.generation;
     await beforeScan?.call();
 
+    final rootList = roots.toList();
     final candidate = <Skill>[];
-    for (final root in roots) {
+    for (final root in rootList) {
       final dir = Directory(root);
       if (!dir.existsSync()) continue;
       await _scanDir(dir, output: candidate);
@@ -256,8 +274,56 @@ class SkillService {
       sessionId: sessionId,
       generation: generation,
       skills: deduped,
+      roots: rootList,
+      fingerprint: computeCatalogFingerprint(rootList, deduped),
       compatibilityNotes: notes,
     );
+  }
+
+  /// Cheap change-detection fingerprint: the mtime of every scanned root plus
+  /// every parsed skill file. A `SKILL.md` edit or a new/removed bundle
+  /// changes it, so a stale snapshot can be re-scanned on demand.
+  static String computeCatalogFingerprint(
+    List<String> roots,
+    List<Skill> skills,
+  ) {
+    final sb = StringBuffer();
+    int mtime(String path, {required bool dir}) {
+      try {
+        final t = dir ? Directory(path) : File(path);
+        if (!t.existsSync()) return -1;
+        return t.statSync().modified.millisecondsSinceEpoch;
+      } catch (_) {
+        return -1;
+      }
+    }
+
+    for (final r in roots) {
+      sb
+        ..write(r)
+        ..write(':')
+        ..write(mtime(r, dir: true))
+        ..write(';');
+    }
+    for (final s in skills) {
+      final file = s.sourcePath ?? s.path;
+      sb
+        ..write(file)
+        ..write(':')
+        ..write(mtime(file, dir: false))
+        ..write(';');
+    }
+    return sb.toString();
+  }
+
+  /// True when [sessionId]'s published catalog no longer matches the files on
+  /// disk (a workspace skill was edited/added/removed). Callers re-scan.
+  bool isSessionCatalogStale(String sessionId) {
+    final snapshot = _sessionSnapshots[sessionId];
+    if (snapshot == null) return true;
+    if (snapshot.roots.isEmpty) return false;
+    return computeCatalogFingerprint(snapshot.roots, snapshot.skills) !=
+        snapshot.fingerprint;
   }
 
   void invalidateSession(String sessionId) {
@@ -291,6 +357,7 @@ class SkillService {
         skills: snapshot.skills
             .where((skill) => skill.pluginId != pluginId)
             .toList(),
+        roots: snapshot.roots,
         compatibilityNotes: snapshot.compatibilityNotes,
       );
     }
@@ -472,6 +539,7 @@ class SkillService {
         content: content,
         path: path,
         dirPath: file.parent.path,
+        sourcePath: file.path,
         modelInvocable: modelInvocable,
         userInvocable: userInvocable,
         allowedTools: allowedTools,
