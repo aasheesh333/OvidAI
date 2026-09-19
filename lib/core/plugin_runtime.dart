@@ -32,6 +32,7 @@
 /// to the registration/rollback seams below.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -132,10 +133,10 @@ class PluginRuntimeStatus {
   final String? reason;
   final DateTime updatedAt;
 
-  /// Scrubbed, capped diagnostic lines. Dormant in this task: the coordinator
-  /// and probe surfaces do not currently emit per-item logs, so production
-  /// records carry an empty list. The field and its caps/scrubbing are
-  /// retained for Task 8/9 diagnostics so the wire shape stays stable.
+  /// Scrubbed, capped diagnostic lines. Install transactions attach their
+  /// dependency logs via [PluginRuntimeStatusStore.attachInstallLogs] and
+  /// the store merges them into the next durable record; the caps/scrubbing
+  /// keep the persisted wire shape bounded and secret-free.
   final List<String> logs;
   final int wireVersion;
 
@@ -199,6 +200,7 @@ class PluginRuntimeStatusStore {
 
   final Map<String, PluginRuntimeStatus> _statuses = {};
   final Set<String> _removed = {};
+  final Map<String, List<String>> _installLogs = {};
   Future<void> _writeChain = Future<void>.value();
   bool _blocked = false;
   int _persistCount = 0;
@@ -218,6 +220,7 @@ class PluginRuntimeStatusStore {
   void resetForTest() {
     _statuses.clear();
     _removed.clear();
+    _installLogs.clear();
     _blocked = false;
     _writeChain = Future<void>.value();
     _persistCount = 0;
@@ -229,6 +232,7 @@ class PluginRuntimeStatusStore {
     _blocked = false;
     _statuses.clear();
     _removed.clear();
+    _installLogs.clear();
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(kPluginRuntimeStatusPrefKey);
@@ -256,9 +260,17 @@ class PluginRuntimeStatusStore {
 
   PluginRuntimeStatus? statusFor(String canonicalId) => _statuses[canonicalId];
 
+  /// Attaches [logs] from a completed install transaction to [canonicalId]'s
+  /// next durable record. Noncanonical ids and empty lists are ignored.
+  void attachInstallLogs(String canonicalId, List<String> logs) {
+    if (logs.isEmpty || !isCanonicalRuntimeStatusId(canonicalId)) return;
+    _installLogs[canonicalId] = _capLogs(logs);
+  }
+
   /// Records a terminal status. Non-terminal states, noncanonical ids, stale
   /// writes older than the current record, and writes to a removed id are
   /// ignored. [revive] clears an uninstall tombstone for a fresh install.
+  /// Pending install logs are merged in when the incoming record carries none.
   Future<void> record(PluginRuntimeStatus status, {bool revive = false}) {
     if (_blocked) return Future<void>.value();
     if (!status.state.isTerminal) return Future<void>.value();
@@ -266,7 +278,16 @@ class PluginRuntimeStatusStore {
       return Future<void>.value();
     }
     if (revive) _removed.remove(status.pluginId);
-    if (_removed.contains(status.pluginId)) return Future<void>.value();
+    if (_removed.contains(status.pluginId)) {
+      _installLogs.remove(status.pluginId);
+      return Future<void>.value();
+    }
+
+    final existing = _statuses[status.pluginId];
+    final attached = _installLogs.remove(status.pluginId);
+    final sourceLogs = status.logs.isNotEmpty
+        ? status.logs
+        : (attached ?? existing?.logs ?? const <String>[]);
 
     final scrubbed = PluginRuntimeStatus(
       pluginId: status.pluginId,
@@ -275,11 +296,10 @@ class PluginRuntimeStatusStore {
           ? null
           : redactStartupError(status.reason!),
       updatedAt: status.updatedAt,
-      logs: _capLogs(status.logs),
+      logs: _capLogs(sourceLogs),
       wireVersion: status.wireVersion,
     );
 
-    final existing = _statuses[scrubbed.pluginId];
     if (existing != null) {
       if (scrubbed.updatedAt.isBefore(existing.updatedAt)) {
         return Future<void>.value();
@@ -302,6 +322,7 @@ class PluginRuntimeStatusStore {
       return Future<void>.value();
     }
     _removed.add(canonicalId);
+    _installLogs.remove(canonicalId);
     if (_statuses.remove(canonicalId) == null) {
       return Future<void>.value();
     }
@@ -313,6 +334,7 @@ class PluginRuntimeStatusStore {
   Future<void> clear() {
     _statuses.clear();
     _removed.clear();
+    _installLogs.clear();
     _blocked = true;
     return _enqueueWrite();
   }
@@ -592,6 +614,40 @@ class PluginRuntimeManager extends ChangeNotifier {
   Future<void>? _bootActivation;
   Object? _bootActivationToken;
 
+  /// Serializes activation-entry and canonical-row mutations so a concurrent
+  /// install cannot load a stale map and clobber a sibling's record. The
+  /// lock is null while idle, so no cross-operation future is retained.
+  Future<void>? _entriesLock;
+  Future<void>? _rowsLock;
+
+  Future<void> _withEntriesLock(Future<void> Function() action) async {
+    while (_entriesLock != null) {
+      await _entriesLock;
+    }
+    final completer = Completer<void>();
+    _entriesLock = completer.future;
+    try {
+      await action();
+    } finally {
+      _entriesLock = null;
+      completer.complete();
+    }
+  }
+
+  Future<void> _withRowsLock(Future<void> Function() action) async {
+    while (_rowsLock != null) {
+      await _rowsLock;
+    }
+    final completer = Completer<void>();
+    _rowsLock = completer.future;
+    try {
+      await action();
+    } finally {
+      _rowsLock = null;
+      completer.complete();
+    }
+  }
+
   /// Test seams (resolver/dep-service injection), mirroring the
   /// `AppState.pluginCacheRootOverrideForTest` convention.
   @visibleForTesting
@@ -627,6 +683,11 @@ class PluginRuntimeManager extends ChangeNotifier {
 
   @visibleForTesting
   static bool failCanonicalRowsWriteForTest = false;
+
+  /// Test seam: forces the activation-entry prefs write to fail so the
+  /// post-commit durability path is exercised.
+  @visibleForTesting
+  static bool failActivationWriteForTest = false;
 
   PluginDependencyService _deps() =>
       depsForTest ??
@@ -673,6 +734,26 @@ class PluginRuntimeManager extends ChangeNotifier {
     return NormalizedPluginManifest.fromJson(j);
   }
 
+  /// Restore the executable bit on a plugin's `hooks/` and `scripts/` files.
+  ///
+  /// Archive extraction writes bytes only, so real [CC] plugins whose hook
+  /// entrypoints are committed `100755` (e.g. `obra/superpowers`'
+  /// `hooks/run-hook.cmd`) would otherwise fail with "Permission denied"
+  /// when the hook runner execs them directly. Best-effort: a platform
+  /// without `chmod` simply skips it.
+  @visibleForTesting
+  static Future<void> ensureHookScriptsExecutable(Directory root) async {
+    for (final name in const ['hooks', 'scripts']) {
+      final dir = Directory('${root.path}/$name');
+      if (!dir.existsSync()) continue;
+      try {
+        await Process.run('chmod', ['-R', 'a+x', dir.path]);
+      } catch (_) {
+        // No chmod available — hooks fall back to their own interpreter.
+      }
+    }
+  }
+
   // ── persisted install map ─────────────────────────────────────────
 
   Future<Map<String, PluginInstallEntry>> _loadEntries() async {
@@ -705,8 +786,29 @@ class PluginRuntimeManager extends ChangeNotifier {
   Future<void> _saveEntries(
     Map<String, PluginInstallEntry> entries, {
     bool reportFailure = false,
+  }) => _withEntriesLock(
+    () => _persistEntries(entries, reportFailure: reportFailure),
+  );
+
+  /// Runs a fresh load → [mutate] → persist transaction under the entries
+  /// lock, so concurrent mutations always build on the latest map.
+  Future<void> _mutateEntries(
+    void Function(Map<String, PluginInstallEntry> entries) mutate, {
+    bool reportFailure = false,
+  }) => _withEntriesLock(() async {
+    final entries = await _loadEntries();
+    mutate(entries);
+    await _persistEntries(entries, reportFailure: reportFailure);
+  });
+
+  Future<void> _persistEntries(
+    Map<String, PluginInstallEntry> entries, {
+    bool reportFailure = false,
   }) async {
     try {
+      if (failActivationWriteForTest) {
+        throw StateError('Injected plugin activation write failure');
+      }
       final prefs = await SharedPreferences.getInstance();
       final written = await prefs.setString(
         kPluginActivationPrefKey,
@@ -749,21 +851,19 @@ class PluginRuntimeManager extends ChangeNotifier {
   }) async {
     final entry = (await _loadEntries())[pluginId];
     if (entry == null) return;
-    final rows = await _loadRows();
-    final current = _catalogRowFor(pluginId);
-    rows[pluginId] = _runtimeRow(
-      pluginId,
-      entry,
-      stored: current ?? rows[pluginId],
-      catalog: rows[pluginId],
-    );
-    await _saveRows(rows, reportFailure: reportFailure);
+    await _mutateRows((rows) {
+      final current = _catalogRowFor(pluginId);
+      rows[pluginId] = _runtimeRow(
+        pluginId,
+        entry,
+        stored: current ?? rows[pluginId],
+        catalog: rows[pluginId],
+      );
+    }, reportFailure: reportFailure);
   }
 
-  Future<void> _removeRuntimeRow(String pluginId) async {
-    final rows = await _loadRows();
-    if (rows.remove(pluginId) != null) await _saveRows(rows);
-  }
+  Future<void> _removeRuntimeRow(String pluginId) =>
+      _mutateRows((rows) => rows.remove(pluginId));
 
   Future<Map<String, PluginItem>> _loadRows() async {
     try {
@@ -790,6 +890,24 @@ class PluginRuntimeManager extends ChangeNotifier {
   }
 
   Future<void> _saveRows(
+    Map<String, PluginItem> rows, {
+    bool reportFailure = false,
+  }) => _withRowsLock(
+    () => _persistRows(rows, reportFailure: reportFailure),
+  );
+
+  /// Runs a fresh load → [mutate] → persist transaction under the rows
+  /// lock, so concurrent mutations always build on the latest map.
+  Future<void> _mutateRows(
+    void Function(Map<String, PluginItem> rows) mutate, {
+    bool reportFailure = false,
+  }) => _withRowsLock(() async {
+    final rows = await _loadRows();
+    mutate(rows);
+    await _persistRows(rows, reportFailure: reportFailure);
+  });
+
+  Future<void> _persistRows(
     Map<String, PluginItem> rows, {
     bool reportFailure = false,
   }) async {
@@ -1605,6 +1723,7 @@ class PluginRuntimeManager extends ChangeNotifier {
     // …then the atomic rename — THE COMMIT POINT (spec step 8). The
     // prior version stays fully intact until the new content is in
     // place; a failure restores it.
+    await ensureHookScriptsExecutable(staging);
     try {
       if (failRenameForTest) {
         throw const FileSystemException('injected rename failure');
@@ -1689,10 +1808,45 @@ class PluginRuntimeManager extends ChangeNotifier {
       );
     }
 
-    final entries = await _loadEntries();
-    final old = entries[manifest.id];
-    entries[manifest.id] = entry;
-    await _saveEntries(entries);
+    PluginInstallEntry? old;
+    try {
+      await _mutateEntries((entries) {
+        old = entries[manifest.id];
+        entries[manifest.id] = entry;
+      }, reportFailure: true);
+    } catch (error) {
+      // The atomic commit already happened, but without a durable
+      // activation record the install would be silently orphaned on the
+      // next boot. Surface it: restore the prior registration in-session,
+      // record a terminal failure carrying the transaction logs, and fail.
+      PluginContributionRegistry.I.unregisterPlugin(manifest.id);
+      if (prior != null) {
+        PluginContributionRegistry.I.register(
+          prior.manifest,
+          activation: prior.activation.state,
+          immediateSessionId: prior.activation.immediateSessionId,
+        );
+      }
+      final logs = [
+        ...depResult.logs,
+        'failed to persist plugin activation record: $error',
+      ];
+      PluginRuntimeStatusStore.I.attachInstallLogs(manifest.id, logs);
+      await PluginRuntimeStatusStore.I.record(
+        PluginRuntimeStatus(
+          pluginId: manifest.id,
+          state: StartupItemState.failed,
+          reason: _kFailedActivationReason,
+        ),
+        revive: true,
+      );
+      return PluginInstallResult(
+        status: PluginInstallStatus.failed,
+        error: 'failed to persist plugin activation record: $error',
+        logs: logs,
+      );
+    }
+    PluginRuntimeStatusStore.I.attachInstallLogs(manifest.id, depResult.logs);
 
     if (scope == PluginActivation.sessionActive ||
         scope == PluginActivation.globalActive ||
@@ -1702,12 +1856,13 @@ class PluginRuntimeManager extends ChangeNotifier {
 
     // Prior-version cleanup happens only AFTER the new version is fully
     // committed (a failed upgrade above never reaches this).
-    if (old != null && old.contentDir != contentDir.path) {
+    final previous = old;
+    if (previous != null && previous.contentDir != contentDir.path) {
       try {
-        final d = Directory(old.contentDir);
+        final d = Directory(previous.contentDir);
         if (d.existsSync()) d.deleteSync(recursive: true);
       } catch (_) {}
-      await deps.removeVersion(manifest.id, old.version);
+      await deps.removeVersion(manifest.id, previous.version);
     }
 
     notifyListeners();

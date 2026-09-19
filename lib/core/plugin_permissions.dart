@@ -8,6 +8,7 @@
 /// under owner-scoped keys and never appear in any JSON/preferences blob.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
@@ -253,6 +254,26 @@ Set<PluginCapability> capabilityDelta({
 class PluginPermissionStore {
   static final _secureStorage = ovidSecureStorage();
 
+  /// Serializes every grant write (process-wide, because callers create
+  /// short-lived store instances) so concurrent approvals/revokes cannot
+  /// interleave their read-modify-write and clobber each other. The lock is
+  /// null while idle, so no cross-operation future is retained.
+  static Future<void>? _writeLock;
+
+  static Future<void> _withWriteLock(Future<void> Function() action) async {
+    while (_writeLock != null) {
+      await _writeLock;
+    }
+    final completer = Completer<void>();
+    _writeLock = completer.future;
+    try {
+      await action();
+    } finally {
+      _writeLock = null;
+      completer.complete();
+    }
+  }
+
   /// Loads the grant for (plugin id, digest) — null when this exact
   /// manifest version was never approved.
   Future<PluginPermissionGrant?> load(String pluginId, String digest) async {
@@ -308,13 +329,15 @@ class PluginPermissionStore {
   }
 
   /// Persists [grant] (replacing any previous record for its plugin id).
-  Future<void> save(PluginPermissionGrant grant) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final map = _readMap(prefs);
-      map[grant.pluginId] = jsonEncode(grant.toJson());
-      await prefs.setString(kPluginGrantsPrefKey, jsonEncode(map));
-    } catch (_) {}
+  Future<void> save(PluginPermissionGrant grant) {
+    return _withWriteLock(() async {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final map = _readMap(prefs);
+        map[grant.pluginId] = jsonEncode(grant.toJson());
+        await prefs.setString(kPluginGrantsPrefKey, jsonEncode(map));
+      } catch (_) {}
+    });
   }
 
   /// Removes the plugin's grant AND every plugin-owned secret from
@@ -322,22 +345,24 @@ class PluginPermissionStore {
   /// immediately disables affected contributions (spec §5.1) — the
   /// runtime reacts to the missing grant; sibling plugins' secrets are
   /// untouched.
-  Future<void> revoke(String pluginId) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final map = _readMap(prefs);
-      map.remove(pluginId);
-      await prefs.setString(kPluginGrantsPrefKey, jsonEncode(map));
-    } catch (_) {}
-    try {
-      final owned = await _secureStorage.readAll();
-      final prefix = '$_kPluginSecretPrefix$pluginId/';
-      for (final key in owned.keys) {
-        if (key.startsWith(prefix)) {
-          await _secureStorage.delete(key: key);
+  Future<void> revoke(String pluginId) {
+    return _withWriteLock(() async {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final map = _readMap(prefs);
+        map.remove(pluginId);
+        await prefs.setString(kPluginGrantsPrefKey, jsonEncode(map));
+      } catch (_) {}
+      try {
+        final owned = await _secureStorage.readAll();
+        final prefix = '$_kPluginSecretPrefix$pluginId/';
+        for (final key in owned.keys) {
+          if (key.startsWith(prefix)) {
+            await _secureStorage.delete(key: key);
+          }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    });
   }
 
   /// Reads the raw persisted grant map; corrupted JSON yields an empty

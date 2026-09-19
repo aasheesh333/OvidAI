@@ -617,13 +617,28 @@ class McpService {
     }
   }
 
-  static Duration _effectiveToolTimeout(McpServer server, Duration? customTimeout) {
+  /// Upper bound for a per-server tool timeout (the range
+  /// `catalog_set_mcp_timeout` advertises).
+  static const _maxToolTimeoutSeconds = 600;
+
+  static Duration _effectiveToolTimeout(
+    McpServer server,
+    Duration? customTimeout,
+  ) {
     if (customTimeout != null) return customTimeout;
-    if (rpcTimeoutSecondsForTest < server.toolTimeoutS) {
-      return Duration(seconds: rpcTimeoutSecondsForTest);
-    }
-    return Duration(seconds: server.toolTimeoutS);
+    final override = rpcTimeoutSecondsForTest;
+    if (override != null) return Duration(seconds: override);
+    final seconds = server.toolTimeoutS
+        .clamp(1, _maxToolTimeoutSeconds)
+        .toInt();
+    return Duration(seconds: seconds);
   }
+
+  @visibleForTesting
+  static Duration effectiveToolTimeoutForTest(
+    McpServer server, [
+    Duration? customTimeout,
+  ]) => _effectiveToolTimeout(server, customTimeout);
 
   Future<McpRpcResult> _callNativeTool(
     _RunningServer rs,
@@ -1213,10 +1228,12 @@ class McpService {
   int _nextId = 1;
 
   /// RPC deadline. Tests shorten it so timeout paths run in milliseconds
-  /// instead of the production 60 s.
+  /// instead of the production 60 s. Null in production so the per-server
+  /// [McpServer.toolTimeoutS] governs tool calls; a non-null value is an
+  /// explicit test override that takes precedence.
   @visibleForTesting
-  static int rpcTimeoutSecondsForTest = 60;
-  static int get _rpcTimeoutSeconds => rpcTimeoutSecondsForTest;
+  static int? rpcTimeoutSecondsForTest;
+  static int get _rpcTimeoutSeconds => rpcTimeoutSecondsForTest ?? 60;
 
   void _sendNotification(
     _RunningServer rs,

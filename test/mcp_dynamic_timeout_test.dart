@@ -51,6 +51,7 @@ void main() {
   tearDown(() async {
     await McpService.I.disconnectAll();
     McpService.I.clearNativeHandlers();
+    McpService.rpcTimeoutSecondsForTest = null;
     AppState.resetTestInstance();
   });
 
@@ -64,6 +65,49 @@ void main() {
     );
     expect(server.toolTimeoutS, 60);
     expect(server.startupTimeoutS, 30);
+  });
+
+  test('per-server toolTimeoutS above 60s is honored (H1)', () {
+    McpService.rpcTimeoutSecondsForTest = null;
+    final server = McpServer(
+      name: 'slow-srv',
+      author: 'test',
+      description: 'desc',
+      category: 'Custom',
+      command: 'npx',
+      toolTimeoutS: 120,
+    );
+    expect(
+      McpService.effectiveToolTimeoutForTest(server).inSeconds,
+      120,
+      reason: 'the 60s test-seam default must not cap a larger server setting',
+    );
+  });
+
+  test('toolTimeoutS is bounded to 600s (H1)', () {
+    McpService.rpcTimeoutSecondsForTest = null;
+    final server = McpServer(
+      name: 'absurd-srv',
+      author: 'test',
+      description: 'desc',
+      category: 'Custom',
+      command: 'npx',
+      toolTimeoutS: 9999,
+    );
+    expect(McpService.effectiveToolTimeoutForTest(server).inSeconds, 600);
+  });
+
+  test('an explicit test override still wins over toolTimeoutS (H1)', () {
+    McpService.rpcTimeoutSecondsForTest = 1;
+    final server = McpServer(
+      name: 'override-srv',
+      author: 'test',
+      description: 'desc',
+      category: 'Custom',
+      command: 'npx',
+      toolTimeoutS: 120,
+    );
+    expect(McpService.effectiveToolTimeoutForTest(server).inSeconds, 1);
   });
 
   test('callTool respects per-call custom timeout', () async {

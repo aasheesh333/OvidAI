@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'state.dart' show shellSplitArgs;
 
@@ -49,28 +50,55 @@ class ImportedMcp {
   });
 }
 
+final _mcpVarPattern = RegExp(r'\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}');
+
+/// Expand `${VAR}` / `${VAR:-default}` references in an MCP config value
+/// against [env] (both [CC] `.mcp.json` and Codex `config.toml` rely on
+/// this). A reference whose variable has a non-empty value is replaced by
+/// that value; otherwise the `:-default` is used when present and
+/// [allowDefault] is true. A reference with neither a value nor an allowed
+/// default is left intact as the literal `${VAR}` so the credential gate can
+/// still detect the required name.
+String interpolateMcpValue(
+  String value,
+  Map<String, String> env, {
+  bool allowDefault = true,
+}) {
+  if (!value.contains(r'${')) return value;
+  return value.replaceAllMapped(_mcpVarPattern, (match) {
+    final resolved = env[match.group(1)!];
+    if (resolved != null && resolved.isNotEmpty) return resolved;
+    if (allowDefault && match.group(2) != null) return match.group(3) ?? '';
+    return match.group(0)!;
+  });
+}
+
 /// Parse a pasted MCP config. Accepts the `mcpServers` map ([CC] /
 /// claude_desktop / standard shape), a bare top-level JSON array, the
 /// `mcp_servers`/`servers` aliases, and Codex's TOML `[mcp_servers.<name>]`
 /// blocks (single or double quotes, multi-line `args`, `[.env]`/`[.headers]`
 /// sub-tables, `cwd`/`type`).
-List<ImportedMcp> parseMcpConfig(String raw) {
+///
+/// [env] supplies `${VAR}` / `${VAR:-default}` values; it defaults to the
+/// process environment.
+List<ImportedMcp> parseMcpConfig(String raw, {Map<String, String>? env}) {
+  final resolvedEnv = env ?? Platform.environment;
   final trimmed = raw.trim();
   if (trimmed.isEmpty) return const [];
   if (trimmed.startsWith('{')) {
-    return _parseMcpJson(trimmed);
+    return _parseMcpJson(trimmed, resolvedEnv);
   }
   if (trimmed.startsWith('[')) {
     // Ambiguous: a JSON array OR a TOML `[mcp_servers.foo]` block. A TOML
     // section never decodes as JSON, so try JSON first and fall back to
     // TOML when it doesn't parse.
-    final asJson = _parseMcpJson(trimmed);
+    final asJson = _parseMcpJson(trimmed, resolvedEnv);
     if (asJson.isNotEmpty) return asJson;
   }
-  return _parseMcpToml(trimmed);
+  return _parseMcpToml(trimmed, resolvedEnv);
 }
 
-List<ImportedMcp> _parseMcpJson(String raw) {
+List<ImportedMcp> _parseMcpJson(String raw, Map<String, String> env) {
   final out = <ImportedMcp>[];
   dynamic decoded;
   try {
@@ -83,7 +111,9 @@ List<ImportedMcp> _parseMcpJson(String raw) {
       if (e is Map) {
         final name = (e['name'] as String? ?? '').trim();
         if (name.isNotEmpty) {
-          out.add(importedMcpFromJson(name, e.cast<String, dynamic>()));
+          out.add(
+            importedMcpFromJson(name, e.cast<String, dynamic>(), env: env),
+          );
         }
       }
     }
@@ -97,7 +127,11 @@ List<ImportedMcp> _parseMcpJson(String raw) {
       final v = e.value;
       if (v is Map) {
         out.add(
-          importedMcpFromJson(e.key.toString(), v.cast<String, dynamic>()),
+          importedMcpFromJson(
+            e.key.toString(),
+            v.cast<String, dynamic>(),
+            env: env,
+          ),
         );
       }
     }
@@ -106,7 +140,9 @@ List<ImportedMcp> _parseMcpJson(String raw) {
       if (v is Map) {
         final name = (v['name'] as String? ?? '').trim();
         if (name.isNotEmpty) {
-          out.add(importedMcpFromJson(name, v.cast<String, dynamic>()));
+          out.add(
+            importedMcpFromJson(name, v.cast<String, dynamic>(), env: env),
+          );
         }
       }
     }
@@ -135,9 +171,19 @@ const _knownMcpJsonKeys = {
   'startup_timeout_s',
 };
 
-/// Map one JSON server entry into an [ImportedMcp].
-ImportedMcp importedMcpFromJson(String name, Map<String, dynamic> v) {
-  final url = (v['url'] as String?)?.trim();
+/// Map one JSON server entry into an [ImportedMcp]. [env] supplies
+/// `${VAR}` / `${VAR:-default}` values; it defaults to the process
+/// environment.
+ImportedMcp importedMcpFromJson(
+  String name,
+  Map<String, dynamic> v, {
+  Map<String, String>? env,
+}) {
+  final resolvedEnv = env ?? Platform.environment;
+  final rawUrl = (v['url'] as String?)?.trim();
+  final url = rawUrl == null
+      ? null
+      : interpolateMcpValue(rawUrl, resolvedEnv);
   final explicitType = ((v['transport'] as String?) ?? (v['type'] as String?))
       ?.trim()
       .toLowerCase();
@@ -150,17 +196,18 @@ ImportedMcp importedMcpFromJson(String name, Map<String, dynamic> v) {
       : argsRaw is String
       ? shellSplitArgs(argsRaw)
       : <String>[];
+  final rawCwd = (v['cwd'] as String?)?.trim();
   return ImportedMcp(
     name: name,
     command:
         (v['command'] as String?) ??
         (v['cmd'] as String?) ??
         (type == 'stdio' ? 'npx' : ''),
-    args: args,
-    env: mcpStringMap(v['env']),
+    args: [for (final a in args) interpolateMcpValue(a, resolvedEnv)],
+    env: mcpStringMap(v['env'], env: resolvedEnv),
     url: url != null && url.isNotEmpty ? url : null,
-    headers: mcpStringMap(v['headers']),
-    cwd: (v['cwd'] as String?)?.trim(),
+    headers: mcpStringMap(v['headers'], env: resolvedEnv),
+    cwd: rawCwd == null ? null : interpolateMcpValue(rawCwd, resolvedEnv),
     type: type,
     startupTimeoutS:
         (v['timeout'] as num?)?.toInt() ??
@@ -173,9 +220,14 @@ ImportedMcp importedMcpFromJson(String name, Map<String, dynamic> v) {
   );
 }
 
-Map<String, String> mcpStringMap(dynamic m) {
+Map<String, String> mcpStringMap(
+  dynamic m, {
+  Map<String, String> env = const {},
+}) {
   if (m is! Map) return const {};
-  return m.map((k, v) => MapEntry(k.toString(), v.toString()));
+  return m.map(
+    (k, v) => MapEntry(k.toString(), interpolateMcpValue(v.toString(), env)),
+  );
 }
 
 /// Mutable accumulator for one TOML `[mcp_servers.<name>]` block.
@@ -194,7 +246,7 @@ class _TomlServerAgg {
   _TomlServerAgg(this.name);
 }
 
-List<ImportedMcp> _parseMcpToml(String raw) {
+List<ImportedMcp> _parseMcpToml(String raw, Map<String, String> env) {
   final servers = <String, _TomlServerAgg>{};
   _TomlServerAgg serverFor(String name) =>
       servers.putIfAbsent(name, () => _TomlServerAgg(name));
@@ -300,22 +352,29 @@ List<ImportedMcp> _parseMcpToml(String raw) {
     }
   }
 
-  return [for (final a in servers.values) _importedFromToml(a)];
+  return [for (final a in servers.values) _importedFromToml(a, env)];
 }
 
-ImportedMcp _importedFromToml(_TomlServerAgg a) {
-  final url = a.url;
+ImportedMcp _importedFromToml(_TomlServerAgg a, Map<String, String> env) {
+  final rawUrl = a.url;
+  final url = rawUrl == null ? null : interpolateMcpValue(rawUrl, env);
   final resolvedType = a.type != null && a.type!.isNotEmpty
       ? a.type!
       : (url != null && url.isNotEmpty ? 'http' : 'stdio');
   return ImportedMcp(
     name: a.name,
     command: resolvedType == 'stdio' ? a.command : '',
-    args: a.args,
-    env: a.env,
+    args: [for (final arg in a.args) interpolateMcpValue(arg, env)],
+    env: {
+      for (final e in a.env.entries)
+        e.key: interpolateMcpValue(e.value, env),
+    },
     url: url != null && url.isNotEmpty ? url : null,
-    headers: a.headers,
-    cwd: a.cwd,
+    headers: {
+      for (final e in a.headers.entries)
+        e.key: interpolateMcpValue(e.value, env),
+    },
+    cwd: a.cwd == null ? null : interpolateMcpValue(a.cwd!, env),
     type: resolvedType,
     startupTimeoutS: a.timeout,
     ignoredKeys: a.ignoredKeys,

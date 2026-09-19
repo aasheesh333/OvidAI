@@ -362,37 +362,203 @@ void main() {
     expect(service.skillsForSession('A'), isEmpty);
   });
 
-  test('duplicate canonical ids reject the candidate snapshot', () async {
-    write('commands/one.md', 'ONE');
-    write('commands/two.md', 'TWO');
+  test(
+    'duplicate canonical ids dedupe deterministically without crashing',
+    () async {
+      write('commands/one.md', 'ONE');
+      write('commands/two.md', 'TWO');
+      final manifest = NormalizedPluginManifest(
+        id: 'acme/duplicate',
+        name: 'Duplicate',
+        version: '1.0.0',
+        format: PluginFormat.claudeCode,
+        rootPath: root.path,
+        commands: const [
+          PluginCommand(
+            pluginId: 'acme/duplicate',
+            name: 'same',
+            path: 'commands/one.md',
+          ),
+          PluginCommand(
+            pluginId: 'acme/duplicate',
+            name: 'same',
+            path: 'commands/two.md',
+          ),
+        ],
+      );
+      final service = SkillService.forTest();
+
+      await service.publishSessionCatalog(
+        'A',
+        mounts: [PluginCatalogMount(root.path, manifest)],
+      );
+
+      final snapshot = service.snapshotForSession('A');
+      expect(snapshot.skills, hasLength(1));
+      expect(snapshot.skills.single.path, endsWith('commands/one.md'));
+      expect(
+        snapshot.skills.single.canonicalId,
+        'plugin:acme/duplicate/command:same',
+      );
+      expect(snapshot.compatibilityNotes, hasLength(1));
+      expect(
+        snapshot.compatibilityNotes.single,
+        contains('plugin:acme/duplicate/command:same'),
+      );
+    },
+  );
+
+  test(
+    'Codex .agents/skills and .agents/personas mount as their canonical kind',
+    () async {
+      write(
+        '.agents/skills/migrate/SKILL.md',
+        '---\nname: db-migrate\n---\nMIGRATE',
+      );
+      write('.agents/skills/migrate/examples/schema.sql', 'select 1;');
+      write(
+        '.agents/personas/architect.md',
+        '---\nname: system-architect\n---\nARCHITECT',
+      );
+      final manifest = NormalizedPluginManifest(
+        id: 'acme/codex-kit',
+        name: 'Codex Kit',
+        version: '1.0.0',
+        format: PluginFormat.codex,
+        rootPath: root.path,
+        skills: const [
+          PluginSkill(
+            pluginId: 'acme/codex-kit',
+            name: 'db-migrate',
+            path: '.agents/skills/migrate/SKILL.md',
+            supportingFiles: ['.agents/skills/migrate/examples/schema.sql'],
+          ),
+        ],
+        agents: const [
+          PluginAgent(
+            pluginId: 'acme/codex-kit',
+            name: 'system-architect',
+            path: '.agents/personas/architect.md',
+          ),
+        ],
+      );
+      final service = SkillService.forTest();
+
+      await service.publishSessionCatalog(
+        'A',
+        mounts: [PluginCatalogMount(root.path, manifest)],
+      );
+
+      final snapshot = service.snapshotForSession('A');
+      expect(
+        snapshot.skills.map((entry) => entry.canonicalId).toList()..sort(),
+        [
+          'plugin:acme/codex-kit/agent:system-architect',
+          'plugin:acme/codex-kit/skill:db-migrate',
+        ],
+      );
+      final skill = snapshot
+          .resolveAlias('plugin:acme/codex-kit/skill:db-migrate')
+          .unique!;
+      expect(skill.kind, SkillContributionKind.skill);
+      expect(skill.supportingFiles, ['examples/schema.sql']);
+      final agent = snapshot
+          .resolveAlias('plugin:acme/codex-kit/agent:system-architect')
+          .unique!;
+      expect(agent.kind, SkillContributionKind.agent);
+    },
+  );
+
+  test(
+    'workspace .claude and .codex contribution roots match their kinds',
+    () async {
+      write('.claude/skills/review/SKILL.md', '---\nname: review\n---\nREVIEW');
+      write('.claude/commands/deploy.md', '---\nname: deploy\n---\nDEPLOY');
+      write('.claude/agents/tester.md', '---\nname: tester\n---\nTESTER');
+      write('.codex/skills/lint/SKILL.md', '---\nname: lint\n---\nLINT');
+      final manifest = NormalizedPluginManifest(
+        id: 'acme/roots',
+        name: 'Roots',
+        version: '1.0.0',
+        format: PluginFormat.claudeCode,
+        rootPath: root.path,
+        commands: const [
+          PluginCommand(
+            pluginId: 'acme/roots',
+            name: 'deploy',
+            path: '.claude/commands/deploy.md',
+          ),
+        ],
+        skills: const [
+          PluginSkill(
+            pluginId: 'acme/roots',
+            name: 'review',
+            path: '.claude/skills/review/SKILL.md',
+          ),
+          PluginSkill(
+            pluginId: 'acme/roots',
+            name: 'lint',
+            path: '.codex/skills/lint/SKILL.md',
+          ),
+        ],
+        agents: const [
+          PluginAgent(
+            pluginId: 'acme/roots',
+            name: 'tester',
+            path: '.claude/agents/tester.md',
+          ),
+        ],
+      );
+      final service = SkillService.forTest();
+
+      await service.publishSessionCatalog(
+        'A',
+        mounts: [PluginCatalogMount(root.path, manifest)],
+      );
+
+      expect({
+        for (final skill in service.skillsForSession('A'))
+          skill.canonicalId!: skill.kind,
+      }, {
+        'plugin:acme/roots/command:deploy': SkillContributionKind.command,
+        'plugin:acme/roots/skill:review': SkillContributionKind.skill,
+        'plugin:acme/roots/skill:lint': SkillContributionKind.skill,
+        'plugin:acme/roots/agent:tester': SkillContributionKind.agent,
+      });
+    },
+  );
+
+  test('unlisted dot-root layouts stay unmounted', () async {
+    write('.codex/agents/rogue.md', '---\nname: rogue\n---\nROGUE');
+    write('.agents/commands/rogue.md', '---\nname: rogue\n---\nROGUE');
     final manifest = NormalizedPluginManifest(
-      id: 'acme/duplicate',
-      name: 'Duplicate',
+      id: 'acme/precise',
+      name: 'Precise',
       version: '1.0.0',
       format: PluginFormat.claudeCode,
       rootPath: root.path,
       commands: const [
         PluginCommand(
-          pluginId: 'acme/duplicate',
-          name: 'same',
-          path: 'commands/one.md',
+          pluginId: 'acme/precise',
+          name: 'rogue',
+          path: '.agents/commands/rogue.md',
         ),
-        PluginCommand(
-          pluginId: 'acme/duplicate',
-          name: 'same',
-          path: 'commands/two.md',
+      ],
+      agents: const [
+        PluginAgent(
+          pluginId: 'acme/precise',
+          name: 'rogue',
+          path: '.codex/agents/rogue.md',
         ),
       ],
     );
     final service = SkillService.forTest();
 
-    await expectLater(
-      service.publishSessionCatalog(
-        'A',
-        mounts: [PluginCatalogMount(root.path, manifest)],
-      ),
-      throwsStateError,
+    await service.publishSessionCatalog(
+      'A',
+      mounts: [PluginCatalogMount(root.path, manifest)],
     );
+
     expect(service.skillsForSession('A'), isEmpty);
   });
 

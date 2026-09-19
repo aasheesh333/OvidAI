@@ -7211,6 +7211,17 @@ ${await _agentsMdBlock()}
             });
           }
         }
+        // SessionStart context (real [CC] plugins inject a skill here, e.g.
+        // `obra/superpowers`). The hook ran once at session start; its
+        // extracted context is standing for the session and rides at the
+        // front of every request, before per-request hook notes.
+        final sessionCtx = HookService.I.sessionContextFor(s.id);
+        if (sessionCtx.isNotEmpty) {
+          msgs.insert(0, {
+            'role': 'system',
+            'content': sessionCtx,
+          });
+        }
         var msg = await _callLlm(p, msgs, s);
         // Task 8 (spec §8.1): post_request — observe-only hook after every
         // LLM response (fire-and-forget; output is never injected).
@@ -14067,6 +14078,13 @@ ${await _agentsMdBlock()}
         '${work.path}/.agents/skills',
         '${work.path}/agents',
         '${work.path}/.agents',
+        // Project-local [CC] and Codex conventions: a repo checked out into
+        // the workspace can carry its own skills/commands/agents, exactly as
+        // it would for the real harnesses.
+        '${work.path}/.claude/skills',
+        '${work.path}/.claude/commands',
+        '${work.path}/.claude/agents',
+        '${work.path}/.codex/skills',
       ]);
     } catch (_) {}
     final mounts = <PluginCatalogMount>[];

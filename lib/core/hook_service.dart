@@ -66,6 +66,67 @@ class HookService extends ChangeNotifier {
   /// Max nested distinct-event hook executions (depth cap, §8.2).
   static const int maxDepth = 4;
 
+  /// Per-session context injected by a `session_start` hook, keyed by session
+  /// id. A [CC] plugin's SessionStart hook returns the text that becomes the
+  /// session's standing context (e.g. `superpowers` injects its intro skill);
+  /// the run loop reads this to prepend it. Bounded so a hostile hook cannot
+  /// blow up the prompt.
+  static const int maxSessionContextChars = 8192;
+  final Map<String, String> _sessionContexts = {};
+
+  /// The `session_start` context a hook produced for [sessionId], or ''.
+  String sessionContextFor(String sessionId) =>
+      _sessionContexts[sessionId] ?? '';
+
+  /// Extract the injectable context from a hook's stdout, honoring the three
+  /// output shapes real plugins use:
+  ///   • [CC]:     `{"hookSpecificOutput":{"additionalContext":"…"}}`
+  ///   • Cursor:  `{"additional_context":"…"}`
+  ///   • SDK:     `{"additionalContext":"…"}`
+  /// Non-JSON output is treated as plain context; a JSON object without a
+  /// context field yields ''.
+  static String extractHookContext(String stdout) {
+    final t = stdout.trim();
+    if (t.isEmpty) return '';
+    if (t.startsWith('{') && t.endsWith('}')) {
+      try {
+        final j = jsonDecode(t);
+        if (j is Map) {
+          final nested = j['hookSpecificOutput'];
+          if (nested is Map && nested['additionalContext'] is String) {
+            return (nested['additionalContext'] as String).trim();
+          }
+          for (final key in const [
+            'additional_context',
+            'additionalContext',
+            'context',
+          ]) {
+            final v = j[key];
+            if (v is String && v.trim().isNotEmpty) return v.trim();
+          }
+          return '';
+        }
+      } catch (_) {
+        // Not JSON after all — fall through to raw text.
+      }
+    }
+    return t;
+  }
+
+  /// Reset the per-session context map + test seams (isolated tests).
+  @visibleForTesting
+  void resetForTest() {
+    _sessionContexts.clear();
+    executorForTest = null;
+    gateExecutorForTest = null;
+    execTimeoutForTest = null;
+    _consecutiveFails.clear();
+    _tripped.clear();
+    _firingEvents.clear();
+    fired = 0;
+    failed = 0;
+  }
+
   /// Restore the persisted kill-switch (call once at boot).
   Future<void> loadEnabled() async {
     try {
@@ -144,13 +205,54 @@ class HookService extends ChangeNotifier {
   // ── Hook resolution ──────────────────────────────────────────────────
 
   /// One resolved hook invocation target.
-  static bool _matcherApplies(String? matcher, Map<String, dynamic> payload) {
-    if (matcher == null || matcher.isEmpty) return true;
-    final tool = payload['tool']?.toString() ?? '';
+  ///
+  /// [CC] matchers are event-specific: tool events match the tool name, but
+  /// `SessionStart` matches the session SOURCE (`startup`/`resume`/`clear`/
+  /// `compact`). Matching every event against `payload['tool']` silently
+  /// dropped every SessionStart hook (e.g. `superpowers` declares
+  /// `startup|clear|compact`). `*` and empty mean "all".
+  static bool _matcherApplies(
+    String canonicalEvent,
+    String? matcher,
+    Map<String, dynamic> payload,
+  ) {
+    if (matcher == null || matcher.isEmpty || matcher == '*') return true;
+    final subject = _matcherSubject(canonicalEvent, payload);
+    // Anchor the whole-string alternatives so `startup` does not match
+    // `startupx`, but still allow a plain substring for tool names.
     try {
-      return RegExp(matcher).hasMatch(tool);
+      return RegExp(matcher).hasMatch(subject);
     } catch (_) {
       return false; // malformed matcher → skip (fail-open)
+    }
+  }
+
+  /// The string a matcher runs against for [canonicalEvent].
+  static String _matcherSubject(
+    String canonicalEvent,
+    Map<String, dynamic> payload,
+  ) {
+    if (canonicalEvent == 'session_start' ||
+        canonicalEvent == 'session_end') {
+      final reason = payload['reason']?.toString() ?? '';
+      return _ccSessionSource(reason);
+    }
+    return payload['tool']?.toString() ?? '';
+  }
+
+  /// Map Ovid's session-start reason onto the [CC] source token a plugin's
+  /// matcher expects. Ovid has no `clear`/`compact` start reasons yet, so
+  /// those alternatives simply never match here.
+  static String _ccSessionSource(String reason) {
+    switch (reason) {
+      case 'created':
+      case 'implicit':
+      case 'subagent':
+        return 'startup';
+      case 'restored':
+        return 'resume';
+      default:
+        return reason;
     }
   }
 
@@ -353,6 +455,7 @@ class HookService extends ChangeNotifier {
     String? model,
   }) {
     final pluginName = _displayName(pluginId);
+    final root = _rootPathFor(pluginId, hook);
     return {
       // Legacy env contract: the DECLARED name (a hook that registered
       // on_turn_start sees "on_turn_start"), never the internal prefix.
@@ -366,9 +469,16 @@ class HookService extends ChangeNotifier {
       'PLUGIN_SESSION': sessionId,
       'PLUGIN_MODEL': model ?? '',
       'PLUGIN_PAYLOAD': cleanHookJson(payloadJson),
-      'PLUGIN_ROOT': _rootPathFor(pluginId, hook),
+      'PLUGIN_ROOT': root,
       'PLUGIN_STORAGE': storage,
       'PLUGIN_WORKSPACE': workspace,
+      // Host-harness aliases. Real [CC] plugins interpolate
+      // `${CLAUDE_PLUGIN_ROOT}` into their hook commands (e.g.
+      // `obra/superpowers` runs `"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd"`);
+      // without this the command expands to `/hooks/...` and fails. Setting
+      // the CC name also steers polyglot hooks to their CC output shape.
+      'CLAUDE_PLUGIN_ROOT': root,
+      'OVID_PLUGIN_ROOT': root,
     };
   }
 
@@ -443,7 +553,7 @@ class HookService extends ChangeNotifier {
 
     _firingEvents.add(guardKey);
     try {
-      return await runZoned(
+      final result = await runZoned(
         () => _runHooks(
           sessionId: sessionId,
           canonical: canonical,
@@ -453,6 +563,14 @@ class HookService extends ChangeNotifier {
         ),
         zoneValues: {_depthKey: chainDepth + 1},
       );
+      // A SessionStart hook's output is the session's standing context
+      // (real [CC] plugins inject a skill here). Extract it once and hold it
+      // for the run loop, which prepends it to the request.
+      if (canonical == 'session_start' && result.isNotEmpty) {
+        final ctx = extractHookContext(result);
+        if (ctx.isNotEmpty) _sessionContexts[sessionId] = ctx;
+      }
+      return result;
     } finally {
       _firingEvents.remove(guardKey);
     }
@@ -473,7 +591,7 @@ class HookService extends ChangeNotifier {
     final cwd = await _sessionWorkDir(sessionId);
     final collected = <String>[];
     for (final (pluginId, hook, declaredEvent) in hooks) {
-      if (!_matcherApplies(hook.matcher, payload)) continue;
+      if (!_matcherApplies(canonical, hook.matcher, payload)) continue;
       if (_tripped.contains('$pluginId|$sessionId')) continue;
       if (hook.type != 'command') {
         // Prompt hooks have no shell runtime ("where implementable",
@@ -556,8 +674,13 @@ class HookService extends ChangeNotifier {
       }
     }
     final joined = collected.join('\n');
-    if (joined.length > 2048) {
-      return '${joined.substring(0, 2048)}\n[hook output truncated]';
+    // session_start output becomes standing session context, so it gets the
+    // larger context cap; other events are short injections (≤2 KB).
+    final cap = canonical == 'session_start'
+        ? maxSessionContextChars
+        : 2048;
+    if (joined.length > cap) {
+      return '${joined.substring(0, cap)}\n[hook output truncated]';
     }
     return joined;
   }
@@ -655,7 +778,7 @@ class HookService extends ChangeNotifier {
     });
     final cwd = await _sessionWorkDir(sessionId);
     for (final (pluginId, hook, declaredEvent) in hooks) {
-      if (!_matcherApplies(hook.matcher, payload)) continue;
+      if (!_matcherApplies(canonical, hook.matcher, payload)) continue;
       if (_tripped.contains('$pluginId|$sessionId')) continue;
       if (hook.type != 'command') continue;
       final storage = await _pluginStorageDir(pluginId);

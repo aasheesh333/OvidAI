@@ -127,6 +127,12 @@ String _relative(Directory root, String path) {
   return path.startsWith(base) ? path.substring(base.length) : path;
 }
 
+String _basename(String path) {
+  final p = path.replaceAll('\\', '/').replaceAll(RegExp(r'/+$'), '');
+  final i = p.lastIndexOf('/');
+  return i >= 0 && i < p.length - 1 ? p.substring(i + 1) : p;
+}
+
 Map<String, dynamic> _readJsonMap(File file) {
   try {
     final decoded = jsonDecode(file.readAsStringSync());
@@ -222,7 +228,6 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
     b.unknown['hooks.${e.key}'] = e.value;
   }
   if (events is! Map) return;
-  var ordinal = 0;
 
   void add({
     required String event,
@@ -237,7 +242,7 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
       PluginHook(
         pluginId: b.pluginId,
         event: event,
-        ordinal: ordinal++,
+        ordinal: b.hooks.length,
         type: type,
         payload: payload,
         matcher: matcher,
@@ -278,11 +283,21 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
       for (final hook in inner) {
         if (hook is! Map) continue;
         final map = hook.cast<String, dynamic>();
-        final type = (map['type'] as String?)?.trim().isNotEmpty == true
-            ? (map['type'] as String).trim()
+        final explicitType = (map['type'] as String?)?.trim();
+        final command = map['command'] as String?;
+        final prompt = map['prompt'] as String?;
+        final hasCommand = command != null && command.trim().isNotEmpty;
+        final hasPrompt = prompt != null && prompt.trim().isNotEmpty;
+        // An explicit `type` wins; otherwise a prompt payload must never be
+        // coerced into a shell command, so `prompt` alone means prompt.
+        final type = explicitType != null && explicitType.isNotEmpty
+            ? explicitType
+            : hasCommand
+            ? 'command'
+            : hasPrompt
+            ? 'prompt'
             : 'command';
-        final payload =
-            (map['command'] as String?) ?? (map['prompt'] as String?) ?? '';
+        final payload = command ?? prompt ?? '';
         add(
           event: event,
           type: type,
@@ -304,6 +319,60 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
       }
     }
   }
+}
+
+/// Parse Codex inline `[[hooks.<Event>]]` / `[[hooks.<Event>.hooks]]`
+/// tables into the `{'hooks': {...}}` shape [CC] `hooks.json` uses, so
+/// [_addHooks] normalizes both identically (Codex hooks guide).
+Map<String, dynamic> _parseCodexInlineHooks(String config) {
+  final handlerHeader = RegExp(
+    r'^\[\[\s*hooks\s*\.\s*([A-Za-z0-9_]+)\s*\.\s*hooks\s*\]\]$',
+  );
+  final eventHeader = RegExp(r'^\[\[\s*hooks\s*\.\s*([A-Za-z0-9_]+)\s*\]\]$');
+  final assignment = RegExp(r'^([A-Za-z0-9_]+)\s*=\s*(.+)$');
+  final events = <String, List<Map<String, dynamic>>>{};
+  Map<String, dynamic>? group;
+  Map<String, dynamic>? handler;
+  for (final rawLine in config.split('\n')) {
+    final line = rawLine.trim();
+    if (line.isEmpty || line.startsWith('#')) continue;
+    if (handlerHeader.hasMatch(line)) {
+      if (group == null) continue;
+      handler = <String, dynamic>{};
+      (group['hooks'] as List).add(handler);
+      continue;
+    }
+    final eventMatch = eventHeader.firstMatch(line);
+    if (eventMatch != null) {
+      group = <String, dynamic>{'hooks': <dynamic>[]};
+      events.putIfAbsent(eventMatch.group(1)!, () => []).add(group);
+      handler = null;
+      continue;
+    }
+    if (line.startsWith('[')) {
+      group = null;
+      handler = null;
+      continue;
+    }
+    final assignmentMatch = assignment.firstMatch(line);
+    final target = handler ?? group;
+    if (assignmentMatch == null || target == null) continue;
+    target[assignmentMatch.group(1)!] = _tomlScalar(assignmentMatch.group(2)!);
+  }
+  if (events.isEmpty) return const {};
+  return {
+    'hooks': {
+      for (final e in events.entries)
+        e.key: [for (final g in e.value) Map<String, dynamic>.from(g)],
+    },
+  };
+}
+
+Object? _tomlScalar(String value) {
+  final v = value.trim();
+  if (v == 'true') return true;
+  if (v == 'false') return false;
+  return int.tryParse(v) ?? unquoteToml(v);
 }
 
 /// Map parsed MCP entries into scrubbed [PluginMcpServer] records, adding a
@@ -562,17 +631,30 @@ class CodexPluginAdapter {
     final config = configFile.existsSync()
         ? configFile.readAsStringSync()
         : '';
+    // Only the root TOML table may name the plugin: a `name`/`publisher`
+    // nested inside an `[mcp_servers.*]` (or any other) table must not
+    // spoof the manifest identity.
+    final rootConfig = config.split(RegExp(r'^\[', multiLine: true)).first;
     String scalar(String key) {
       final m = RegExp(
         '^\\s*$key\\s*=\\s*(.+)\$',
         multiLine: true,
-      ).firstMatch(config);
+      ).firstMatch(rootConfig);
       return m == null ? '' : unquoteToml(m.group(1)!.trim());
     }
 
-    final name = scalar('name');
+    // Stock Codex configs declare no `name`/`publisher`; derive a stable,
+    // slug-safe identity from the source id instead of failing.
+    final sourceId = _slug(_basename(root.path));
+    final fallbackName = sourceId.isEmpty ? 'plugin' : sourceId;
+    final explicitName = scalar('name');
+    final explicitPublisher = scalar('publisher');
+    final name = explicitName.isNotEmpty ? explicitName : fallbackName;
     final b = _Build(
-      NormalizedPluginManifest.canonicalId(scalar('publisher'), name),
+      NormalizedPluginManifest.canonicalId(
+        explicitPublisher.isNotEmpty ? explicitPublisher : 'codex',
+        name,
+      ),
       root,
     );
     _requirePublisherIdentity(b, 'config.toml:publisher');
@@ -588,7 +670,7 @@ class CodexPluginAdapter {
     for (final m in RegExp(
       r'^\s*([A-Za-z0-9_]+)\s*=\s*(.+)$',
       multiLine: true,
-    ).allMatches(config.split(RegExp(r'^\[', multiLine: true)).first)) {
+    ).allMatches(rootConfig)) {
       final key = m.group(1)!;
       if (const {'name', 'version', 'publisher'}.contains(key)) continue;
       b.unknown['config.$key'] = unquoteToml(m.group(2)!.trim());
@@ -600,6 +682,14 @@ class CodexPluginAdapter {
       Directory('${root.path}/.agents/personas'),
       asAgent: true,
     );
+
+    // Codex lifecycle hooks: plugin-bundled `hooks/hooks.json` plus inline
+    // `[[hooks.<Event>]]` tables, normalized through the shared [_addHooks].
+    _addHooks(b, _parseCodexInlineHooks(config), 'config.toml');
+    final codexHooksFile = File('${root.path}/hooks/hooks.json');
+    if (codexHooksFile.existsSync()) {
+      _addHooks(b, _readJsonMap(codexHooksFile), 'hooks/hooks.json');
+    }
 
     if (config.isNotEmpty) {
       _addMcp(b, parseMcpConfig(config), 'config.toml');

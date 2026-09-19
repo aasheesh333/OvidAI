@@ -108,11 +108,19 @@ class SkillCatalogSnapshot {
   final int generation;
   final List<Skill> skills;
 
+  /// Non-fatal findings raised while building this snapshot (for example a
+  /// plugin declaring the same canonical contribution id twice). Publishing
+  /// never throws for these; the caller surfaces them as a compatibility
+  /// warning instead.
+  final List<String> compatibilityNotes;
+
   SkillCatalogSnapshot({
     required this.sessionId,
     required this.generation,
     required List<Skill> skills,
-  }) : skills = List.unmodifiable(skills);
+    List<String> compatibilityNotes = const [],
+  }) : skills = List.unmodifiable(skills),
+       compatibilityNotes = List.unmodifiable(compatibilityNotes);
 
   List<Skill> get userSkills =>
       List.unmodifiable(skills.where((skill) => skill.userInvocable));
@@ -214,18 +222,34 @@ class SkillService {
       await _scanPluginMount(mount, candidate);
     }
     if (_sessionGenerations[sessionId] != generation) return;
-    candidate.sort((a, b) => a.providerId.compareTo(b.providerId));
-    final canonical = <String>{};
+    // Dedupe BEFORE sorting: canonical ids are install-order first-wins, and
+    // Dart's sort is not stable, so a post-sort dedupe would be arbitrary.
+    final notes = <String>[];
+    final keptByCanonical = <String, Skill>{};
+    final deduped = <Skill>[];
     for (final skill in candidate) {
       final id = skill.canonicalId;
-      if (id != null && !canonical.add(id)) {
-        throw StateError('Duplicate plugin contribution id: $id');
+      if (id == null) {
+        deduped.add(skill);
+        continue;
       }
+      final kept = keptByCanonical[id];
+      if (kept != null) {
+        notes.add(
+          'Duplicate plugin contribution id $id at ${skill.path}; '
+          'keeping ${kept.path}',
+        );
+        continue;
+      }
+      keptByCanonical[id] = skill;
+      deduped.add(skill);
     }
+    deduped.sort((a, b) => a.providerId.compareTo(b.providerId));
     _sessionSnapshots[sessionId] = SkillCatalogSnapshot(
       sessionId: sessionId,
       generation: generation,
-      skills: candidate,
+      skills: deduped,
+      compatibilityNotes: notes,
     );
   }
 
@@ -260,6 +284,7 @@ class SkillService {
         skills: snapshot.skills
             .where((skill) => skill.pluginId != pluginId)
             .toList(),
+        compatibilityNotes: snapshot.compatibilityNotes,
       );
     }
   }
@@ -564,14 +589,22 @@ class SkillService {
     if (!_strictRelativePath(path)) return false;
     return switch (kind) {
       SkillContributionKind.command =>
-        path.startsWith('commands/') &&
+        (path.startsWith('commands/') ||
+                path.startsWith('.claude/commands/')) &&
             path.endsWith('.md') &&
             !path.endsWith('/SKILL.md') &&
             !path.endsWith('/AGENT.md'),
       SkillContributionKind.skill =>
-        path.startsWith('skills/') && path.endsWith('/SKILL.md'),
+        (path.startsWith('skills/') ||
+                path.startsWith('.agents/skills/') ||
+                path.startsWith('.claude/skills/') ||
+                path.startsWith('.codex/skills/')) &&
+            path.endsWith('/SKILL.md'),
       SkillContributionKind.agent =>
-        path.startsWith('agents/') && path.endsWith('.md'),
+        (path.startsWith('agents/') ||
+                path.startsWith('.agents/personas/') ||
+                path.startsWith('.claude/agents/')) &&
+            path.endsWith('.md'),
     };
   }
 
