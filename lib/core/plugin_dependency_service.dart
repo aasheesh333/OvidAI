@@ -507,6 +507,23 @@ class PluginDependencyService {
             'package manager ($tail)';
       }
     }
+    if (kind == 'npm') {
+      // npm packages that ship (or try to build) a native addon fail on
+      // Android because the platform is bionic, not glibc — a prebuilt
+      // Linux `.node` cannot load and `node-gyp` has no Android target.
+      // Say that plainly instead of surfacing a raw gyp stack.
+      final l = out.toLowerCase();
+      if (l.contains('node-gyp') ||
+          l.contains('gyp err') ||
+          l.contains('prebuild-install') ||
+          l.contains('not a valid elf') ||
+          l.contains('invalid elf header') ||
+          l.contains('cannot open shared object')) {
+        return 'package "${dep.name}" needs a native addon that cannot run '
+            'on Android/${SandboxService.I.deviceArch} (bionic, not glibc). '
+            'This plugin is desktop-only for that dependency ($tail)';
+      }
+    }
     return tail;
   }
 }
