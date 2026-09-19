@@ -279,6 +279,7 @@ class SettingsScreen extends StatelessWidget {
             getter: _getSecureScreen,
             setter: _setSecureScreen,
           ),
+          const _DeviceIntegrityTile(),
           _settingTile(Icons.info_outline, 'About', 'Ovid AI 0.1.0-demo'),
         ],
       ),
@@ -489,6 +490,56 @@ class _SettingsSwitchTile extends StatelessWidget {
             ),
           ),
           onTap: setter == null ? null : () => setter!(!getter()),
+        );
+      },
+    );
+  }
+}
+
+/// Shows the native device-integrity probe (root / hooking / debugger) and a
+/// plain-language status. Tapping re-runs the probe.
+class _DeviceIntegrityTile extends StatelessWidget {
+  const _DeviceIntegrityTile();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    return AnimatedBuilder(
+      animation: app,
+      builder: (_, _) {
+        final s = app.deviceSecurity;
+        final compromised = app.deviceEnvironmentCompromised;
+        final String detail;
+        if (!app.securityChecked) {
+          detail = 'Checking device integrity…';
+        } else if (!compromised) {
+          detail = 'OK — no root, hooking framework, or debugger detected';
+        } else {
+          final flags = <String>[
+            if (s['isRooted'] == true) 'rooted',
+            if (s['isHookingFrameworkPresent'] == true) 'hooking framework',
+            if (s['isDebuggerAttached'] == true) 'debugger attached',
+          ];
+          detail = 'At risk — ${flags.join(', ')}. Stored keys can be read.';
+        }
+        return ListTile(
+          dense: true,
+          leading: Icon(
+            compromised
+                ? Icons.gpp_maybe_outlined
+                : Icons.verified_user_outlined,
+            size: 19,
+            color: compromised ? Aether.warnLight : Aether.successLight,
+          ),
+          title: const Text(
+            'Device integrity',
+            style: TextStyle(fontSize: 14),
+          ),
+          subtitle: Text(
+            detail,
+            style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+          ),
+          onTap: () => app.refreshDeviceSecurity(),
         );
       },
     );

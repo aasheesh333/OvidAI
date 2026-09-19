@@ -546,7 +546,7 @@ class _StudioScreenState extends State<StudioScreen> {
                     width: 9,
                     height: 9,
                     decoration: BoxDecoration(
-                      color: loggedIn ? Aether.success : Aether.dangerC,
+                      color: loggedIn ? Aether.successLight : Aether.dangerC,
                       shape: BoxShape.circle,
                     ),
                   ),
@@ -569,14 +569,14 @@ class _StudioScreenState extends State<StudioScreen> {
             if (_syncError != null)
               Container(
                 width: double.infinity,
-                color: Aether.warn.withValues(alpha: 0.12),
+                color: Aether.warnLight.withValues(alpha: 0.12),
                 padding: const EdgeInsets.symmetric(
                   horizontal: 12,
                   vertical: 6,
                 ),
                 child: Text(
                   'Sync failed: $_syncError',
-                  style: TextStyle(fontSize: 11.5, color: Aether.warn),
+                  style: TextStyle(fontSize: 11.5, color: Aether.warnLight),
                 ),
               ),
             Expanded(
@@ -832,7 +832,7 @@ class _FileTree extends StatelessWidget {
                           ? Icons.cloud_done_outlined
                           : Icons.cloud_off_outlined,
                       size: 13,
-                      color: cache.isReady ? Aether.success : Aether.textFaint,
+                      color: cache.isReady ? Aether.successLight : Aether.textFaint,
                     ),
                     const SizedBox(width: 7),
                     Expanded(
@@ -1061,7 +1061,7 @@ class _EditorState extends State<_Editor> {
                   Icon(
                     _dirty ? Icons.circle : Icons.edit_note,
                     size: 12,
-                    color: _dirty ? Aether.warn : Aether.accent,
+                    color: _dirty ? Aether.warnLight : Aether.accent,
                   ),
                   const SizedBox(width: 6),
                   Expanded(
@@ -1448,7 +1448,7 @@ class _TerminalPaneState extends State<_TerminalPane> {
                           : l.startsWith('⚠')
                           ? Aether.danger
                           : l.endsWith('✓') || l.startsWith('✓')
-                          ? Aether.success
+                          ? Aether.successLight
                           : Aether.textMuted,
                     ),
                   );

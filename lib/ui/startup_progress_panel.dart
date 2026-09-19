@@ -49,7 +49,7 @@ bool _isProblem(StartupItemState state) => !_isBenignTerminal(state) &&
     state != StartupItemState.running;
 
 Color _stateColor(StartupItemState state) => switch (state) {
-  StartupItemState.ready => Aether.success,
+  StartupItemState.ready => Aether.successLight,
   StartupItemState.failed => Aether.dangerC,
   StartupItemState.unsupported => Aether.dangerC,
   StartupItemState.disabled => Aether.textFaint,

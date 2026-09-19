@@ -118,10 +118,10 @@ class _SubagentScreenState extends State<SubagentScreen> {
                 IconButton(
                   tooltip: 'Stop this subagent',
                   visualDensity: VisualDensity.compact,
-                  icon: const Icon(
+                  icon: Icon(
                     Icons.stop_circle_outlined,
                     size: 20,
-                    color: Aether.warn,
+                    color: Aether.warnLight,
                   ),
                   onPressed: () => agent.stopSubagentRun(s.id),
                 ),
@@ -271,9 +271,9 @@ class _StatusStrip extends StatelessWidget {
   Widget build(BuildContext context) {
     final color = switch (state) {
       'running' => Aether.accent,
-      'stopped' || 'stopping' => Aether.warn,
+      'stopped' || 'stopping' => Aether.warnLight,
       'failed' => Aether.danger,
-      _ => Aether.success,
+      _ => Aether.successLight,
     };
     final bits = <String>[
       state,
@@ -358,7 +358,7 @@ class _Composer extends StatelessWidget {
             if (running)
               TextButton(
                 style: TextButton.styleFrom(
-                  foregroundColor: Aether.warn,
+                  foregroundColor: Aether.warnLight,
                   minimumSize: Size.zero,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 10,
@@ -411,10 +411,10 @@ class _Composer extends StatelessWidget {
                 IconButton(
                   tooltip: 'Stop',
                   visualDensity: VisualDensity.compact,
-                  icon: const Icon(
+                  icon: Icon(
                     Icons.stop_circle_outlined,
                     size: 20,
-                    color: Aether.warn,
+                    color: Aether.warnLight,
                   ),
                   onPressed: onStop,
                 ),
@@ -517,9 +517,9 @@ class _CatalogRow extends StatelessWidget {
     final state = running ? 'running' : (session.agentState ?? 'finished');
     final color = switch (state) {
       'running' => Aether.accent,
-      'stopped' || 'stopping' => Aether.warn,
+      'stopped' || 'stopping' => Aether.warnLight,
       'failed' => Aether.danger,
-      _ => Aether.success,
+      _ => Aether.successLight,
     };
     final grandchildren = AppState.I.childrenOf(session.id).length;
     return ListTile(

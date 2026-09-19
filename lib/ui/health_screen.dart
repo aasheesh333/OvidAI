@@ -56,11 +56,11 @@ class _HealthScreenState extends State<HealthScreen> {
   }
 
   Color _scoreColor(int s) => s >= 90
-      ? Aether.success
+      ? Aether.successLight
       : s >= 70
       ? Aether.accent
       : s >= 45
-      ? Aether.warn
+      ? Aether.warnLight
       : Aether.dangerC;
 
   String _scoreLabel(int s) => s >= 90
@@ -242,10 +242,10 @@ class _HealthScreenState extends State<HealthScreen> {
                                   ),
                                 )
                               else if (entry.value.health == ServiceHealth.working)
-                                const Icon(
+                                Icon(
                                   Icons.check_circle_outline,
                                   size: 16,
-                                  color: Aether.success,
+                                  color: Aether.successLight,
                                 )
                               else
                                 Tooltip(
@@ -284,7 +284,7 @@ class _HealthScreenState extends State<HealthScreen> {
                                   fontFamily: Aether.mono,
                                   fontWeight: FontWeight.w600,
                                   color: entry.value.health == ServiceHealth.working
-                                      ? Aether.success
+                                      ? Aether.successLight
                                       : entry.value.health == ServiceHealth.connecting
                                           ? Aether.accent
                                           : Aether.dangerC,
@@ -393,7 +393,7 @@ class _HealthScreenState extends State<HealthScreen> {
                       Icon(
                         c.ok ? Icons.check_circle_outline : Icons.error_outline,
                         size: 17,
-                        color: c.ok ? Aether.success : Aether.dangerC,
+                        color: c.ok ? Aether.successLight : Aether.dangerC,
                       ),
                       const SizedBox(width: 10),
                       Expanded(
@@ -428,7 +428,7 @@ class _HealthScreenState extends State<HealthScreen> {
                         style: TextStyle(
                           fontSize: 11,
                           fontFamily: Aether.mono,
-                          color: c.ok ? Aether.success : Aether.textFaint,
+                          color: c.ok ? Aether.successLight : Aether.textFaint,
                         ),
                       ),
                     ],

@@ -330,8 +330,8 @@ class _StatsLine extends StatelessWidget {
         final ringColor = frac >= 0.8
             ? Aether.dangerC
             : frac >= 0.55
-            ? Aether.warn
-            : Aether.success;
+            ? Aether.warnLight
+            : Aether.successLight;
         return Container(
           width: double.infinity,
           padding: const EdgeInsets.fromLTRB(16, 3, 16, 3),
@@ -458,8 +458,8 @@ class _StatsLine extends StatelessWidget {
                       color: frac >= 0.8
                           ? Aether.dangerC
                           : frac >= 0.55
-                          ? Aether.warn
-                          : Aether.success,
+                          ? Aether.warnLight
+                          : Aether.successLight,
                     ),
                   ),
                 ],
@@ -476,14 +476,14 @@ class _StatsLine extends StatelessWidget {
                 label: 'Tools',
                 value: tool,
                 total: window,
-                color: Aether.warn,
+                color: Aether.warnLight,
               ),
               const SizedBox(height: 10),
               _MeterBreakdownBar(
                 label: 'Messages',
                 value: msgs,
                 total: window,
-                color: Aether.success,
+                color: Aether.successLight,
               ),
               const SizedBox(height: 14),
               Text(
@@ -1124,7 +1124,7 @@ class _ChatScreenState extends State<ChatScreen>
                   final a = AgentService.I;
                   final dotColor = a.browserBusy
                       ? Aether.accent
-                      : (a.browserReady ? Aether.success : Aether.textFaint);
+                      : (a.browserReady ? Aether.successLight : Aether.textFaint);
                   return Stack(
                     alignment: Alignment.center,
                     children: [
@@ -1804,9 +1804,9 @@ class _ChatScreenState extends State<ChatScreen>
                                       shape: BoxShape.circle,
                                       color: switch (j.state) {
                                         'running' => Aether.accent,
-                                        'stopping' => Aether.warn,
+                                        'stopping' => Aether.warnLight,
                                         'pending' => Aether.textFaint,
-                                        _ => Aether.success,
+                                        _ => Aether.successLight,
                                       },
                                     ),
                                   ),
@@ -2091,9 +2091,9 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                                 ),
                                 const SizedBox(width: 8),
                                 if (p.isFree)
-                                  const Tag(
+                                  Tag(
                                     'FREE',
-                                    color: Aether.success,
+                                    color: Aether.successLight,
                                     filled: true,
                                   ),
                                 const SizedBox(width: 6),
@@ -2701,7 +2701,7 @@ class _ToolCardState extends State<_ToolCard>
                       else if (m.toolState == 'unknown')
                         _StateDot(Aether.textFaint)
                       else if (stopped)
-                        _StateDot(Aether.warn)
+                        _StateDot(Aether.warnLight)
                       else if (running)
                         const _ChaseDot(Aether.accent)
                       else
@@ -2757,7 +2757,7 @@ class _ToolCardState extends State<_ToolCard>
                             style: TextStyle(
                               fontSize: 10,
                               fontFamily: Aether.mono,
-                              color: Aether.success,
+                              color: Aether.successLight,
                             ),
                           ),
                         ],
@@ -3516,10 +3516,10 @@ class _ProducedFilesCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(
+              Icon(
                 Icons.upload_file_outlined,
                 size: 13,
-                color: Aether.success,
+                color: Aether.successLight,
               ),
               const SizedBox(width: 6),
               Text(
@@ -5316,9 +5316,9 @@ class _GoalBar extends StatelessWidget {
         final round = (g['round'] as num?)?.toInt() ?? 0;
         final color = switch (status) {
           'active' => Aether.accent,
-          'paused' => Aether.warn,
+          'paused' => Aether.warnLight,
           'blocked' => Aether.danger,
-          _ => Aether.success, // complete
+          _ => Aether.successLight, // complete
         };
         return Container(
           margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
@@ -5553,8 +5553,8 @@ class _TodoDockState extends State<_TodoDock> {
                           child: LinearProgressIndicator(
                             value: todos.isEmpty ? 0 : done / todos.length,
                             backgroundColor: Aether.hairline,
-                            valueColor: const AlwaysStoppedAnimation(
-                              Aether.success,
+                            valueColor: AlwaysStoppedAnimation(
+                              Aether.successLight,
                             ),
                           ),
                         ),
@@ -5585,7 +5585,7 @@ class _TodoDockState extends State<_TodoDock> {
                                   : Icons.radio_button_unchecked,
                               size: 14,
                               color: status == 'completed'
-                                  ? Aether.success
+                                  ? Aether.successLight
                                   : status == 'in_progress'
                                   ? Aether.accent
                                   : Aether.textFaint,
@@ -5845,14 +5845,14 @@ class _CopyButtonState extends State<_CopyButton> {
             Icon(
               copied ? Icons.check : Icons.copy_outlined,
               size: 14,
-              color: copied ? Aether.success : Aether.textFaint,
+              color: copied ? Aether.successLight : Aether.textFaint,
             ),
             const SizedBox(width: 6),
             Text(
               copied ? 'Copied' : 'Copy',
               style: TextStyle(
                 fontSize: 11,
-                color: copied ? Aether.success : Aether.textFaint,
+                color: copied ? Aether.successLight : Aether.textFaint,
               ),
             ),
           ],
@@ -5888,16 +5888,16 @@ class _ApprovalDock extends StatelessWidget {
           margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
-            color: Aether.warn.withValues(alpha: 0.08),
+            color: Aether.warnLight.withValues(alpha: 0.08),
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Aether.warn.withValues(alpha: 0.4)),
+            border: Border.all(color: Aether.warnLight.withValues(alpha: 0.4)),
           ),
           child: Row(
             children: [
-              const Icon(
+              Icon(
                 Icons.warning_amber_rounded,
                 size: 16,
-                color: Aether.warn,
+                color: Aether.warnLight,
               ),
               const SizedBox(width: 10),
               Expanded(
@@ -5927,7 +5927,7 @@ class _ApprovalDock extends StatelessWidget {
               ),
               TextButton(
                 style: TextButton.styleFrom(
-                  foregroundColor: Aether.success,
+                  foregroundColor: Aether.successLight,
                   padding: const EdgeInsets.symmetric(horizontal: 8),
                   minimumSize: Size.zero,
                 ),
@@ -6592,14 +6592,14 @@ class _PlanChip extends StatelessWidget {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
             decoration: BoxDecoration(
-              color: Aether.warn.withValues(alpha: 0.12),
+              color: Aether.warnLight.withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Aether.warn.withValues(alpha: 0.45)),
+              border: Border.all(color: Aether.warnLight.withValues(alpha: 0.45)),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.architecture, size: 14, color: Aether.warn),
+                Icon(Icons.architecture, size: 14, color: Aether.warnLight),
                 const SizedBox(width: 6),
                 Text(
                   'Plan',
@@ -6607,7 +6607,7 @@ class _PlanChip extends StatelessWidget {
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
                     height: 20 / 13,
-                    color: Aether.warn,
+                    color: Aether.warnLight,
                   ),
                 ),
               ],
@@ -6880,9 +6880,9 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
           if (showOffWarning)
             Row(
               children: [
-                Icon(Icons.warning_amber_rounded, size: 15, color: Aether.warn),
+                Icon(Icons.warning_amber_rounded, size: 15, color: Aether.warnLight),
                 const SizedBox(width: 5),
-                Expanded(child: Text('Control service is off', style: TextStyle(fontSize: 11, color: Aether.warn))),
+                Expanded(child: Text('Control service is off', style: TextStyle(fontSize: 11, color: Aether.warnLight))),
                 TextButton(
                   onPressed: _retry,
                   child: const Text('Open Accessibility Settings'),
@@ -6892,12 +6892,12 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
           if (showHealthGuidance)
             Row(
               children: [
-                Icon(Icons.battery_alert_outlined, size: 15, color: Aether.warn),
+                Icon(Icons.battery_alert_outlined, size: 15, color: Aether.warnLight),
                 const SizedBox(width: 5),
-                const Expanded(
+                Expanded(
                   child: Text(
                     'This device may kill Ovid in the background — exempt it to stay present',
-                    style: TextStyle(fontSize: 11, color: Aether.warn),
+                    style: TextStyle(fontSize: 11, color: Aether.warnLight),
                   ),
                 ),
                 TextButton(
@@ -7266,7 +7266,7 @@ class _DiffLines extends StatelessWidget {
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1.5),
             color: l.startsWith('+')
-                ? Aether.success.withValues(alpha: 0.10)
+                ? Aether.successLight.withValues(alpha: 0.10)
                 : l.startsWith('-')
                 ? Aether.danger.withValues(alpha: 0.10)
                 : Colors.transparent,
@@ -7277,7 +7277,7 @@ class _DiffLines extends StatelessWidget {
                 fontSize: 12,
                 height: 1.5,
                 color: l.startsWith('+')
-                    ? Aether.success
+                    ? Aether.successLight
                     : l.startsWith('-')
                     ? Aether.danger
                     : Aether.textMuted,

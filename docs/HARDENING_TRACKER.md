@@ -21,7 +21,7 @@
 | S3 | Remove permanent apt TLS loosening | `lib/core/sandbox_service.dart` | DONE | grep Verify-Peer → none; 49 tests pass |
 | S4 | Harden FlutterSecureStorage AndroidOptions | `lib/core/secure_store.dart` + 6 call sites | DONE | grep `const FlutterSecureStorage()` → none |
 | S5 | FLAG_SECURE toggle (block recents/screenshot) | `MainActivity.kt`, `security_service.dart`, `state.dart`, `settings_screen.dart` | DONE | Kotlin BUILD SUCCESSFUL; Settings row added |
-| S6 | Wire SecurityCheck (root/Frida/debugger) to Dart | `security_service.dart` | DONE | `SecurityService.I.status()` + cached getters |
+| S6 | Wire SecurityCheck (root/Frida/debugger) to Dart | `security_service.dart` + `state.dart` + `settings_screen.dart` | DONE (verified) | `_initializeReadiness` → `refreshDeviceSecurity()`; Settings "Device integrity" row; `test/security_device_integrity_test.dart` (5) |
 | S7 | ProGuard/R8 hardening + no debug info in release | `proguard-rules.pro` | DONE | `minifyReleaseWithR8` BUILD SUCCESSFUL |
 | S8 | FileProvider narrowed (root-path removed) | `file_provider_paths.xml` | DONE | XML valid |
 | S9 | `usesCleartextTraffic=false` | `AndroidManifest.xml` | DONE | XML valid |
@@ -70,7 +70,7 @@
 
 | # | Item | Status | Evidence |
 |---|------|--------|----------|
-| U1 | Light-theme contrast + `onPrimary` | DONE | p1_visual_parity pass; ratios logged |
+| U1 | Light-theme contrast + `onPrimary` | DONE (verified) | textFaint `#5B5F66`; accentC/successLight/warnLight applied at 87 UI call sites; onPrimary set; p1_visual_parity pass |
 | U2 | Respect system text scale in chat | TODO (follow-up) | |
 | U3 | Confirm/undo on destructive actions | TODO (follow-up) | |
 | U4 | 48dp tap targets + Semantics labels | TODO (follow-up) | |
@@ -80,11 +80,21 @@
 
 ## Verification log
 - `dart analyze lib test` → 0 issues
-- `flutter test` → 1893 pass (1 known-flaky apt test, passes in isolation)
+- `flutter test` → 1899 pass, all green
 - `./gradlew :app:compileDebugKotlin` → BUILD SUCCESSFUL
 - `flutter build apk --release --obfuscate` → BUILT (115.9MB), no strip errors
-- CI run `35388447094` → success (analyze, test, debug APK, signed release APK + AAB)
+- CI runs `35388447094` and `35390511950` → success
 - Repo `aasheesh333/OvidAI` → `isPrivate: true`
+
+## Independent verification pass (2026-09-18, post-claim)
+Re-checked every tracker item against source. Found and fixed 2 overclaims:
+1. S6 "wired" was false — `SecurityService.status()` was never called (dead code
+   moved from Kotlin to Dart). Now consumed in `_initializeReadiness` and shown
+   in Settings; covered by `test/security_device_integrity_test.dart`.
+2. U1 "successLight/warnLight added" but unused — the light-mode success/warn
+   contrast failures remained at call sites. Now applied across 87 UI sites
+   (dark values unchanged, so dark mode is pixel-identical).
+
 
 ## Session summary (2026-09-18)
 Commits: `b1a5303` (security + agent control + Anthropic), `23d4a4d` (release strip fix).

@@ -2489,6 +2489,10 @@ class AppState extends ChangeNotifier {
       _readinessStartedSignal.complete();
     }
     await initializeForFirstFrame();
+    // Device integrity probe (root / hooking framework / debugger). Best
+    // effort and non-blocking for the rest of readiness — a missing native
+    // handler degrades to an empty result, never a failure.
+    unawaited(refreshDeviceSecurity());
     final tasks = await buildReadinessTasks();
     try {
       await StartupCoordinator.I.start(tasks);
@@ -3824,6 +3828,30 @@ class AppState extends ChangeNotifier {
   /// the user opts in; applied on launch and toggle via SecurityService.
   static const _kSecureScreen = 'ovid_secure_screen';
   bool secureScreen = false;
+
+  /// Native device-integrity probe results (root / hooking framework /
+  /// debugger). Refreshed at readiness; drives the Settings integrity row
+  /// and a compromise warning. Empty until the first probe settles.
+  Map<String, dynamic> deviceSecurity = const {};
+  bool securityChecked = false;
+
+  /// True when the native probe reports a rooted device, an active hooking
+  /// framework, or an attached debugger — the conditions under which stored
+  /// secrets can be extracted by another process.
+  bool get deviceEnvironmentCompromised =>
+      deviceSecurity['isRooted'] == true ||
+      deviceSecurity['isHookingFrameworkPresent'] == true ||
+      deviceSecurity['isDebuggerAttached'] == true;
+
+  Future<void> refreshDeviceSecurity() async {
+    try {
+      deviceSecurity = await SecurityService.I.refresh();
+    } catch (_) {
+      deviceSecurity = const {};
+    }
+    securityChecked = true;
+    notifyListeners();
+  }
 
   // ── User settings that gate REAL features (persisted, Settings screen) ──
   /// Memory plugin (RAG "Memory" toggle): writes + searches across sessions.

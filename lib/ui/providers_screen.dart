@@ -394,7 +394,7 @@ class _ProviderCardState extends State<ProviderCard> {
                 ),
                 const SizedBox(width: 8),
                 if (provider.isFree)
-                  const Tag('FREE', color: Aether.success, filled: true)
+                  Tag('FREE', color: Aether.successLight, filled: true)
                 else if (provider.hasKey)
                   const Tag('CONNECTED', color: Aether.accent, filled: true)
                 else
@@ -450,10 +450,10 @@ class _ProviderCardState extends State<ProviderCard> {
                       ? 'Free tier API key — stored securely on this device'
                       : 'API key — stored securely on this device',
                   suffixIcon: provider.hasKey
-                      ? const Icon(
+                      ? Icon(
                           Icons.check_circle,
                           size: 17,
-                          color: Aether.success,
+                          color: Aether.successLight,
                         )
                       : null,
                 ),

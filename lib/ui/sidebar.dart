@@ -523,7 +523,7 @@ class _ConnectionChip extends StatelessWidget {
       builder: (_, _) {
         final c = ConnectionService.I;
         final color = switch (c.status) {
-          ConnectionStatus.online => Aether.success,
+          ConnectionStatus.online => Aether.successLight,
           ConnectionStatus.offline => Aether.danger,
           ConnectionStatus.checking => Aether.textFaint,
         };

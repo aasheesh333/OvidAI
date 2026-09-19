@@ -253,10 +253,10 @@ Widget durableStatusIcon(PluginRuntimeStatus status) {
       : '$label · ${status.reason}';
   switch (status.state) {
     case StartupItemState.ready:
-      return const Icon(
+      return Icon(
         Icons.check_circle_outline,
         size: 18,
-        color: Aether.success,
+        color: Aether.successLight,
       );
     case StartupItemState.queued:
     case StartupItemState.running:
@@ -437,10 +437,10 @@ Widget? pluginActivationBadge(PluginItem plugin) {
     PluginActivation.sessionActive => ('This session', Aether.accent),
     PluginActivation.pendingGlobal => (
       'Restart to enable everywhere',
-      Aether.warn,
+      Aether.warnLight,
     ),
-    PluginActivation.globalActive => ('Global', Aether.success),
-    PluginActivation.degraded => ('Degraded', Aether.warn),
+    PluginActivation.globalActive => ('Global', Aether.successLight),
+    PluginActivation.degraded => ('Degraded', Aether.warnLight),
     PluginActivation.failed => ('Failed', Aether.danger),
     PluginActivation.disabled => (null, null),
   };
@@ -1307,10 +1307,10 @@ class PluginCard extends StatelessWidget {
                         ),
                       );
                     } else if (status.health == ServiceHealth.working) {
-                      return const Icon(
+                      return Icon(
                         Icons.check_circle_outline,
                         size: 18,
-                        color: Aether.success,
+                        color: Aether.successLight,
                       );
                     } else if (status.health == ServiceHealth.failed) {
                       return Tooltip(
@@ -1335,7 +1335,7 @@ class PluginCard extends StatelessWidget {
                   return Icon(
                     plugin.enabled ? Icons.check_circle : Icons.check_circle_outline,
                     size: 18,
-                    color: plugin.enabled ? Aether.success : Aether.textFaint,
+                    color: plugin.enabled ? Aether.successLight : Aether.textFaint,
                   );
                 }),
               ],
@@ -2031,7 +2031,7 @@ class _DiagRow extends StatelessWidget {
           Icon(
             warn ? Icons.warning_amber_outlined : Icons.check_circle_outline,
             size: 14,
-            color: warn ? Aether.warn : Aether.textFaint,
+            color: warn ? Aether.warnLight : Aether.textFaint,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -2175,10 +2175,10 @@ class _Perm extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
       child: Row(
         children: [
-          const Icon(
+          Icon(
             Icons.verified_user_outlined,
             size: 14,
-            color: Aether.success,
+            color: Aether.successLight,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -2733,7 +2733,7 @@ class McpCard extends StatelessWidget {
                 case StartupItemState.degraded:
                 case StartupItemState.migrationRequired:
                 case StartupItemState.skipped:
-                  return Aether.warn.withValues(alpha: 0.45);
+                  return Aether.warnLight.withValues(alpha: 0.45);
                 case StartupItemState.disabled:
                 case StartupItemState.queued:
                 case StartupItemState.running:
@@ -2831,7 +2831,7 @@ class McpCard extends StatelessWidget {
                   style: TextStyle(
                     fontSize: 10.5,
                     color: durable.state == StartupItemState.ready
-                        ? Aether.success
+                        ? Aether.successLight
                         : Aether.textMuted,
                   ),
                 );
@@ -2988,7 +2988,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                         style: TextStyle(
                           fontSize: 11.5,
                           color: durable.state == StartupItemState.ready
-                              ? Aether.success
+                              ? Aether.successLight
                               : Aether.textMuted,
                         ),
                       );
@@ -3067,17 +3067,17 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               decoration: BoxDecoration(
                 color: Aether.surfaceAlt,
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Aether.warn.withValues(alpha: 0.35)),
+                border: Border.all(color: Aether.warnLight.withValues(alpha: 0.35)),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Row(
                     children: [
-                      const Icon(
+                      Icon(
                         Icons.key_outlined,
                         size: 15,
-                        color: Aether.warn,
+                        color: Aether.warnLight,
                       ),
                       const SizedBox(width: 10),
                       Expanded(
@@ -3170,7 +3170,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.key_outlined, size: 15, color: Aether.warn),
+                  Icon(Icons.key_outlined, size: 15, color: Aether.warnLight),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(

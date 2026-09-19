@@ -51,10 +51,10 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
 
   Color _colorFor(String? kind) => switch (kind) {
     'turn_start' => Aether.accent,
-    'turn_end' => Aether.success,
+    'turn_end' => Aether.successLight,
     'tool_start' => Aether.textMuted,
     'tool_end' => Aether.textMuted,
-    'checkpoint' => Aether.warn,
+    'checkpoint' => Aether.warnLight,
     'note' => Aether.danger,
     _ => Aether.textFaint,
   };

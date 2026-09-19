@@ -134,7 +134,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
     if (l.startsWith('⚠') || l.toLowerCase().contains('error')) {
       return Aether.danger;
     }
-    if (l.endsWith('✓') || l.startsWith('✓')) return Aether.success;
+    if (l.endsWith('✓') || l.startsWith('✓')) return Aether.successLight;
     return Aether.textMuted;
   }
 
@@ -457,16 +457,16 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                   width: 72,
                   height: 72,
                   decoration: BoxDecoration(
-                    color: Aether.success.withValues(alpha: 0.12),
+                    color: Aether.successLight.withValues(alpha: 0.12),
                     shape: BoxShape.circle,
                     border: Border.all(
-                      color: Aether.success.withValues(alpha: 0.5),
+                      color: Aether.successLight.withValues(alpha: 0.5),
                     ),
                   ),
-                  child: const Icon(
+                  child: Icon(
                     Icons.check_rounded,
                     size: 38,
-                    color: Aether.success,
+                    color: Aether.successLight,
                   ),
                 ),
               ),
@@ -497,7 +497,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
               runSpacing: 8,
               alignment: WrapAlignment.center,
               children: [
-                Tag('NATIVE BIONIC', color: Aether.success, filled: true),
+                Tag('NATIVE BIONIC', color: Aether.successLight, filled: true),
                 Tag('NODE + PYTHON', color: Aether.textMuted),
                 Tag('NO ROOT', color: Aether.textMuted),
               ],

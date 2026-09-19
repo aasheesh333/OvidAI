@@ -335,7 +335,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                             color: tab?.localPreviewPath != null
                                 ? Aether.accent
                                 : (tab?.url ?? '').startsWith('https')
-                                ? Aether.success
+                                ? Aether.successLight
                                 : Aether.textFaint,
                           ),
                           prefixIconConstraints: const BoxConstraints(
@@ -418,7 +418,7 @@ class _AgentDot extends StatelessWidget {
     return Container(
       width: 10,
       height: 10,
-      decoration: BoxDecoration(color: Aether.success, shape: BoxShape.circle),
+      decoration: BoxDecoration(color: Aether.successLight, shape: BoxShape.circle),
     );
   }
 }

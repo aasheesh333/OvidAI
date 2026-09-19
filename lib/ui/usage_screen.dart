@@ -164,7 +164,7 @@ class UsageScreen extends StatelessWidget {
   Color _colorFor(String name) {
     final n = name.toLowerCase();
     if (n.contains('openai')) return const Color(0xFF4CC9E8);
-    if (n.contains('anthropic')) return Aether.warn;
+    if (n.contains('anthropic')) return Aether.warnLight;
     if (n.contains('gemini') || n.contains('google')) return Aether.accent;
     if (n.contains('deepseek')) return const Color(0xFF9B7BFF);
     return Aether.textMuted;
