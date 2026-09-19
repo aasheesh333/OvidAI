@@ -836,6 +836,135 @@ class MemoryItem {
   };
 }
 
+class SessionAnalytics {
+  int inputTokens;
+  int outputTokens;
+  int turns;
+  int toolCalls;
+  int toolMs;
+  int llmMs;
+  int ttftMs;
+  int ttftSamples;
+  int decodeTokens;
+  int cacheReadTokens;
+  int cacheWriteTokens;
+  int contextTokens;
+  int contextLimit;
+  int contextSystemTokens;
+  int contextToolTokens;
+  int contextMessageTokens;
+  double estimatedCostUsd;
+
+  SessionAnalytics({
+    this.inputTokens = 0,
+    this.outputTokens = 0,
+    this.turns = 0,
+    this.toolCalls = 0,
+    this.toolMs = 0,
+    this.llmMs = 0,
+    this.ttftMs = 0,
+    this.ttftSamples = 0,
+    this.decodeTokens = 0,
+    this.cacheReadTokens = 0,
+    this.cacheWriteTokens = 0,
+    this.contextTokens = 0,
+    this.contextLimit = 0,
+    this.contextSystemTokens = 0,
+    this.contextToolTokens = 0,
+    this.contextMessageTokens = 0,
+    this.estimatedCostUsd = 0,
+  });
+
+  int get averageTtftMs => ttftSamples == 0 ? 0 : ttftMs ~/ ttftSamples;
+  double get decodeTokensPerSecond =>
+      llmMs <= 0 ? 0 : decodeTokens / (llmMs / 1000);
+  double get contextFraction => contextLimit <= 0
+      ? 0
+      : (contextTokens / contextLimit).clamp(0.0, 1.0);
+
+  void add({
+    int inputTokens = 0,
+    int outputTokens = 0,
+    int turns = 0,
+    int toolCalls = 0,
+    int toolMs = 0,
+    int llmMs = 0,
+    int ttftMs = 0,
+    int ttftSamples = 0,
+    int decodeTokens = 0,
+    int cacheReadTokens = 0,
+    int cacheWriteTokens = 0,
+    int contextTokens = 0,
+    int contextLimit = 0,
+    int contextSystemTokens = 0,
+    int contextToolTokens = 0,
+    int contextMessageTokens = 0,
+    double estimatedCostUsd = 0,
+  }) {
+    this.inputTokens += inputTokens;
+    this.outputTokens += outputTokens;
+    this.turns += turns;
+    this.toolCalls += toolCalls;
+    this.toolMs += toolMs;
+    this.llmMs += llmMs;
+    this.ttftMs += ttftMs;
+    this.ttftSamples += ttftSamples;
+    this.decodeTokens += decodeTokens;
+    this.cacheReadTokens += cacheReadTokens;
+    this.cacheWriteTokens += cacheWriteTokens;
+    if (contextTokens > 0) this.contextTokens = contextTokens;
+    if (contextLimit > 0) this.contextLimit = contextLimit;
+    if (contextSystemTokens > 0) this.contextSystemTokens = contextSystemTokens;
+    if (contextToolTokens > 0) this.contextToolTokens = contextToolTokens;
+    if (contextMessageTokens > 0) this.contextMessageTokens = contextMessageTokens;
+    this.estimatedCostUsd += estimatedCostUsd;
+  }
+
+  Map<String, dynamic> toJson() => {
+    'inputTokens': inputTokens,
+    'outputTokens': outputTokens,
+    'turns': turns,
+    'toolCalls': toolCalls,
+    'toolMs': toolMs,
+    'llmMs': llmMs,
+    'ttftMs': ttftMs,
+    'ttftSamples': ttftSamples,
+    'decodeTokens': decodeTokens,
+    'cacheReadTokens': cacheReadTokens,
+    'cacheWriteTokens': cacheWriteTokens,
+    'contextTokens': contextTokens,
+    'contextLimit': contextLimit,
+    'contextSystemTokens': contextSystemTokens,
+    'contextToolTokens': contextToolTokens,
+    'contextMessageTokens': contextMessageTokens,
+    'estimatedCostUsd': estimatedCostUsd,
+  };
+
+  factory SessionAnalytics.fromJson(Map<String, dynamic>? json) {
+    final j = json ?? const <String, dynamic>{};
+    int i(String key) => (j[key] as num?)?.toInt() ?? 0;
+    return SessionAnalytics(
+      inputTokens: i('inputTokens'),
+      outputTokens: i('outputTokens'),
+      turns: i('turns'),
+      toolCalls: i('toolCalls'),
+      toolMs: i('toolMs'),
+      llmMs: i('llmMs'),
+      ttftMs: i('ttftMs'),
+      ttftSamples: i('ttftSamples'),
+      decodeTokens: i('decodeTokens'),
+      cacheReadTokens: i('cacheReadTokens'),
+      cacheWriteTokens: i('cacheWriteTokens'),
+      contextTokens: i('contextTokens'),
+      contextLimit: i('contextLimit'),
+      contextSystemTokens: i('contextSystemTokens'),
+      contextToolTokens: i('contextToolTokens'),
+      contextMessageTokens: i('contextMessageTokens'),
+      estimatedCostUsd: (j['estimatedCostUsd'] as num?)?.toDouble() ?? 0,
+    );
+  }
+}
+
 class ChatSession {
   final String id;
   String title;
@@ -961,6 +1090,10 @@ class ChatSession {
   /// see exactly what the model was told (context visibility parity).
   String? systemPromptSnapshot;
 
+  /// Durable per-session analytics. This is intentionally separate from the
+  /// global usage ledger: the composer must never show another session's data.
+  final SessionAnalytics analytics;
+
   ChatSession({
     required this.id,
     required this.title,
@@ -991,11 +1124,13 @@ class ChatSession {
     List<Map<String, String>>? todos,
     List<Map<String, dynamic>>? schedules,
     DateTime? createdAt,
+    SessionAnalytics? analytics,
   }) : agentAllowedTools = agentAllowedTools ?? [],
        messages = messages ?? [],
        todos = todos ?? [],
        schedules = schedules ?? [],
-       createdAt = createdAt ?? DateTime.now() {
+       createdAt = createdAt ?? DateTime.now(),
+       analytics = analytics ?? SessionAnalytics() {
     sandboxId ??= id;
   }
 
@@ -1050,6 +1185,11 @@ class ChatSession {
     createdAt: j['createdAt'] != null
         ? DateTime.tryParse(j['createdAt'] as String) ?? DateTime.now()
         : DateTime.now(),
+    analytics: SessionAnalytics.fromJson(
+      j['analytics'] is Map
+          ? Map<String, dynamic>.from(j['analytics'] as Map)
+          : null,
+    ),
   );
 
   Map<String, dynamic> toJson() => {
@@ -1086,7 +1226,46 @@ class ChatSession {
     'todos': todos,
     'messages': messages.map((m) => m.toJson()).toList(),
     'createdAt': createdAt.toIso8601String(),
+    'analytics': analytics.toJson(),
   };
+
+  void recordAnalytics({
+    int inputTokens = 0,
+    int outputTokens = 0,
+    int turns = 0,
+    int toolCalls = 0,
+    int toolMs = 0,
+    int llmMs = 0,
+    int ttftMs = 0,
+    int ttftSamples = 0,
+    int decodeTokens = 0,
+    int cacheReadTokens = 0,
+    int cacheWriteTokens = 0,
+    int contextTokens = 0,
+    int contextLimit = 0,
+    int contextSystemTokens = 0,
+    int contextToolTokens = 0,
+    int contextMessageTokens = 0,
+    double estimatedCostUsd = 0,
+  }) => analytics.add(
+    inputTokens: inputTokens,
+    outputTokens: outputTokens,
+    turns: turns,
+    toolCalls: toolCalls,
+    toolMs: toolMs,
+    llmMs: llmMs,
+    ttftMs: ttftMs,
+    ttftSamples: ttftSamples,
+    decodeTokens: decodeTokens,
+    cacheReadTokens: cacheReadTokens,
+    cacheWriteTokens: cacheWriteTokens,
+    contextTokens: contextTokens,
+    contextLimit: contextLimit,
+    contextSystemTokens: contextSystemTokens,
+    contextToolTokens: contextToolTokens,
+    contextMessageTokens: contextMessageTokens,
+    estimatedCostUsd: estimatedCostUsd,
+  );
 }
 
 /// ---------- App state ----------

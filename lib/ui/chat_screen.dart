@@ -303,36 +303,36 @@ class _StatsLine extends StatelessWidget {
   const _StatsLine();
 
   String _fmtTok(int t) => formatCompactCount(t);
+  String _fmtCost(double usd) => usd >= 1
+      ? '\$${usd.toStringAsFixed(2)}'
+      : '\$${usd.toStringAsFixed(usd >= 0.01 ? 3 : 4)}';
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: Listenable.merge([AppState.I, AgentService.I]),
       builder: (_, _) {
-        final usage = AppState.I.usageLog;
         final s = AppState.I.activeSession;
         if (s == null) return const SizedBox.shrink();
-        final today = usage.where((e) {
-          final d = e.time;
-          final now = DateTime.now();
-          return d.year == now.year && d.month == now.month && d.day == now.day;
-        }).toList();
-        final input = usage.fold<int>(0, (a, e) => a + e.promptTokens);
-        final output = usage.fold<int>(0, (a, e) => a + e.completionTokens);
+        final analytics = s.analytics;
         // footer ring — % of THIS model's context window in use,
         // measured from the last billed promptTokens (exact) or the
         // chars/4 heuristic fallback.
         final window = AgentService.contextWindowForSession(s);
-        final used = AgentService.I.measuredContextTokens(s);
+        final used = analytics.contextTokens > 0
+            ? analytics.contextTokens
+            : AgentService.I.measuredContextTokens(s);
         final frac = (used / window).clamp(0.0, 1.0);
         final pct = frac * 100;
-        if (usage.isEmpty && used == 0) return const SizedBox.shrink();
+        if (analytics.turns == 0 && used == 0) return const SizedBox.shrink();
         final ringColor = frac >= 0.8
             ? Aether.dangerC
             : frac >= 0.55
             ? Aether.warnLight
             : Aether.successLight;
-        return Container(
+        return GestureDetector(
+          onTap: () => _showSessionAnalytics(context, s),
+          child: Container(
           width: double.infinity,
           padding: const EdgeInsets.fromLTRB(16, 3, 16, 3),
           child: Row(
@@ -341,18 +341,18 @@ class _StatsLine extends StatelessWidget {
               Flexible(
                 child: Text(
                   [
-                    '${today.length} turn${today.length == 1 ? '' : 's'} today',
-                    if (AgentService.I.lastRunElapsedMs != null)
-                      'last ${formatCompactDuration(Duration(milliseconds: AgentService.I.lastRunElapsedMs!))}',
-                    'Input ${_fmtTok(input)} tok · Output ${_fmtTok(output)} tok',
-                    if (AgentService.I.sessionDecodeTokens > 0)
-                      'decode ${_fmtTok(AgentService.I.sessionDecodeTokens)} tok',
-                    if (AgentService.I.sessionDecodeTokPerSec > 0)
-                      '${AgentService.I.sessionDecodeTokPerSec.toStringAsFixed(1)} tok/s',
-                    if (AgentService.I.sessionCacheReadTokens > 0)
-                      'cache ${_fmtTok(AgentService.I.sessionCacheReadTokens)} tok',
-                    if (AgentService.I.sessionAvgTtftMs > 0)
-                      'ttft ~${AgentService.I.sessionAvgTtftMs} ms',
+                    '${analytics.turns} turn${analytics.turns == 1 ? '' : 's'}',
+                    if (analytics.llmMs > 0)
+                      'LLM ${formatCompactDuration(Duration(milliseconds: analytics.llmMs))}',
+                    'Input ${_fmtTok(analytics.inputTokens)} tok · Output ${_fmtTok(analytics.outputTokens)} tok',
+                    if (analytics.decodeTokensPerSecond > 0)
+                      '${analytics.decodeTokensPerSecond.toStringAsFixed(1)} tok/s',
+                    if (analytics.cacheReadTokens > 0)
+                      'cache ${_fmtTok(analytics.cacheReadTokens)} tok',
+                    if (analytics.averageTtftMs > 0)
+                      'ttft ~${analytics.averageTtftMs} ms',
+                    if (analytics.estimatedCostUsd > 0)
+                      '≈ ${_fmtCost(analytics.estimatedCostUsd)}',
                     if (s.compactedSummary != null) 'compacted',
                   ].join('  |  '),
                   maxLines: 1,
@@ -367,9 +367,8 @@ class _StatsLine extends StatelessWidget {
               Tooltip(
                 message:
                     '${pct.toStringAsFixed(0)}% of ${_fmtTok(window)} context used · '
-                    'breakdown: sys ${_fmtTok(AgentService.I.sessionSystemTokens)} · '
-                    'tool ${_fmtTok(AgentService.I.sessionToolTokens)} · '
-                    'msgs ${_fmtTok(AgentService.I.sessionMessageTokens)} · '
+                    'session input ${_fmtTok(analytics.inputTokens)} · '
+                    'session output ${_fmtTok(analytics.outputTokens)} · '
                     'tap for details',
                 child: GestureDetector(
                   onTap: () => _showContextMeter(
@@ -406,10 +405,85 @@ class _StatsLine extends StatelessWidget {
               ),
             ],
           ),
+        ),
         );
       },
     );
   }
+
+  void _showSessionAnalytics(BuildContext context, ChatSession session) {
+    final a = session.analytics;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Aether.bg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Session analytics',
+                style: TextStyle(
+                  color: Aether.text,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '${session.title} · ${session.model}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: Aether.textMuted, fontSize: 11),
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  _analyticsMetric('Input', '${_fmtTok(a.inputTokens)} tok'),
+                  _analyticsMetric('Output', '${_fmtTok(a.outputTokens)} tok'),
+                  _analyticsMetric('Context', '${_fmtTok(a.contextTokens)} / ${_fmtTok(a.contextLimit)}'),
+                  _analyticsMetric('Turns', '${a.turns}'),
+                  _analyticsMetric('Tools', '${a.toolCalls} · ${formatCompactDuration(Duration(milliseconds: a.toolMs))}'),
+                  _analyticsMetric('TTFT', a.averageTtftMs == 0 ? '—' : '${a.averageTtftMs} ms'),
+                  _analyticsMetric('Decode', a.decodeTokensPerSecond == 0 ? '—' : '${a.decodeTokensPerSecond.toStringAsFixed(1)} tok/s'),
+                  _analyticsMetric('Est. cost', a.estimatedCostUsd == 0 ? '—' : _fmtCost(a.estimatedCostUsd)),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Cost is an approximate public list-price estimate. Custom or unknown models show no invented price.',
+                style: TextStyle(color: Aether.textFaint, fontSize: 10.5),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _analyticsMetric(String label, String value) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+    decoration: BoxDecoration(
+      color: Aether.surfaceAlt,
+      borderRadius: BorderRadius.circular(9),
+      border: Border.all(color: Aether.hairline),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: TextStyle(color: Aether.textFaint, fontSize: 10)),
+        const SizedBox(height: 2),
+        Text(value, style: TextStyle(color: Aether.text, fontSize: 12, fontWeight: FontWeight.w600)),
+      ],
+    ),
+  );
 
   /// Context meter sheet (the context breakdown sheet parity): window usage,
   /// segmented sys/tools/messages bars with a cache-read overlay and a
@@ -420,10 +494,11 @@ class _StatsLine extends StatelessWidget {
     required int used,
   }) {
     final agent = AgentService.I;
-    final sys = agent.sessionSystemTokens;
-    final tool = agent.sessionToolTokens;
-    final msgs = agent.sessionMessageTokens;
-    final cache = agent.sessionCacheReadTokens;
+    final analytics = AppState.I.activeSession?.analytics;
+    final sys = analytics?.contextSystemTokens ?? agent.sessionSystemTokens;
+    final tool = analytics?.contextToolTokens ?? agent.sessionToolTokens;
+    final msgs = analytics?.contextMessageTokens ?? agent.sessionMessageTokens;
+    final cache = analytics?.cacheReadTokens ?? agent.sessionCacheReadTokens;
     final frac = (used / window).clamp(0.0, 1.0);
     showModalBottomSheet<void>(
       context: context,

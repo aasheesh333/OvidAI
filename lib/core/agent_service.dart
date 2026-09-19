@@ -571,6 +571,9 @@ class AgentRun {
   int systemTokens = 0;
   int toolTokens = 0;
   int messageTokens = 0;
+  int analyticsStepsRecorded = 0;
+  int analyticsToolMsRecorded = 0;
+  int analyticsLlmMsRecorded = 0;
 
   /// Latest human-readable progress line for this run ("retrying in 9s…",
   /// "context compacted", "running npm test"). The event log was never
@@ -6064,6 +6067,42 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// role/framing overhead per message.
   static int estimateMessageTokens(String text) => text.length ~/ 4 + 4;
 
+  /// Approximate public list price in USD for one model request. Unknown or
+  /// custom models return null rather than inventing a misleading amount.
+  @visibleForTesting
+  static double? estimatedCostForModel(
+    String model,
+    int inputTokens,
+    int outputTokens,
+  ) {
+    final m = model.split('·').first.trim().toLowerCase();
+    const prices = <String, (double, double)>{
+      'claude-opus': (15, 75),
+      'claude-sonnet': (3, 15),
+      'claude-haiku': (0.8, 4),
+      'gpt-4o-mini': (0.15, 0.6),
+      'gpt-4o': (2.5, 10),
+      'gpt-4.1': (2, 8),
+      'o3-mini': (1.1, 4.4),
+      'deepseek-reasoner': (0.55, 2.19),
+      'deepseek-chat': (0.27, 1.1),
+      'gemini-2.5-pro': (1.25, 10),
+      'gemini-2.5-flash': (0.3, 2.5),
+      'gemini-2.0-flash': (0.1, 0.4),
+      'grok': (3, 15),
+      'mistral': (2, 6),
+      'qwen': (0.35, 1.4),
+      'llama': (0.18, 0.18),
+    };
+    for (final entry in prices.entries) {
+      if (m.contains(entry.key)) {
+        return inputTokens / 1e6 * entry.value.$1 +
+            outputTokens / 1e6 * entry.value.$2;
+      }
+    }
+    return null;
+  }
+
   /// Measured context usage for [s]: the LAST billed promptTokens when we
   /// have one (exact ground truth — the provider counts what we actually
   /// sent), otherwise the chars/4 heuristic over system+history.
@@ -7306,6 +7345,43 @@ ${await _agentsMdBlock()}
               duration: Duration.zero,
             ),
           );
+          final toolDelta = _runResolved.toolMs -
+              _runResolved.analyticsToolMsRecorded;
+          final llmDelta = _runResolved.llmMs -
+              _runResolved.analyticsLlmMsRecorded;
+          final stepDelta = _runResolved.steps -
+              _runResolved.analyticsStepsRecorded;
+          final cost = estimatedCostForModel(
+            _baseModelOf(s.model),
+            pt,
+            ct,
+          );
+          s.recordAnalytics(
+            inputTokens: pt,
+            outputTokens: ct,
+            turns: 1,
+            toolCalls: stepDelta,
+            toolMs: toolDelta,
+            llmMs: llmDelta,
+            ttftMs: ttft,
+            ttftSamples: ttft > 0 ? 1 : 0,
+            decodeTokens: ct,
+            cacheReadTokens:
+                (details?['cached_tokens'] as num?)?.toInt() ??
+                (u?['cache_read_tokens'] as num?)?.toInt() ??
+                0,
+            cacheWriteTokens: (u?['cache_write_tokens'] as num?)?.toInt() ?? 0,
+            contextTokens: pt,
+            contextLimit: contextWindowForSession(s),
+            contextSystemTokens: sysTok,
+            contextToolTokens: toolTok,
+            contextMessageTokens: msgTok,
+            estimatedCostUsd: cost ?? 0,
+          );
+          _runResolved.analyticsToolMsRecorded = _runResolved.toolMs;
+          _runResolved.analyticsLlmMsRecorded = _runResolved.llmMs;
+          _runResolved.analyticsStepsRecorded = _runResolved.steps;
+          AppState.I.persistSessions();
         }
         if (_cancelRequested) {
           // Surface a clean "stopped" message instead of the failure text.

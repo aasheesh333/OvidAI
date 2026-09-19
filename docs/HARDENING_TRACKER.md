@@ -118,3 +118,13 @@ Dispensed 7 parallel agents for independent files + core work in main session.
 Follow-ups remaining: B1 (background approval deadlock), U2 (system text scale),
 U3 (confirm/undo destructive), U4 (tap targets/Semantics), plus the full
 network chokepoint (`OvidHttpClient`) and SSRF guard from the audit.
+
+## P6 — Session analytics (reported)
+
+| # | Item | Status | Evidence |
+|---|------|--------|----------|
+| AN1 | Replace global composer totals with current-session totals | DONE | `_StatsLine` reads `ChatSession.analytics` |
+| AN2 | Persist analytics with each session | DONE | `ChatSession.toJson/fromJson`; round-trip test |
+| AN3 | Advanced metrics and approximate pricing | DONE | input/output/context/turns/tools/latency/TTFT/decode/cache/cost |
+| AN4 | Expandable analytics sheet above composer | DONE | tap the stats line → Session analytics |
+| AN5 | Session isolation and pricing tests | DONE | `test/session_analytics_test.dart` |
