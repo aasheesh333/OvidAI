@@ -45,14 +45,19 @@ void main() {
       reason: 'Custom plugin tool must be in agent roster',
     );
 
-    // 3. Executed via agent tool dispatch
+    // 3. Dispatched via the agent tool. A custom plugin with no mounted
+    // skill/command file has nothing to execute, so the tool must say so
+    // honestly — it must NEVER synthesise success (the old stub answered
+    // every action, including non-existent ones, with "executed
+    // successfully" and no content).
     final execRes = await AgentService.I.dispatchForTest(customToolName, {
       'action': 'doSpecialThing',
       'input': 'my custom input payload',
     });
-    expect(execRes, contains('Custom plugin "My Super Custom Helper"'));
     expect(execRes, contains('doSpecialThing'));
     expect(execRes, contains('my custom input payload'));
+    expect(execRes.toLowerCase(), isNot(contains('executed successfully')));
+    expect(execRes.toLowerCase(), contains('nothing was executed'));
 
     // 4. Test rehydration / restart survival
     // Calling internal _loadPluginState to ensure fake-state healing does not remove custom plugin

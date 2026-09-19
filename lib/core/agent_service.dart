@@ -3519,6 +3519,87 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// pure in-memory lookup — no blocking filesystem scan and no ".json
   /// exists" overclaim (a bare plugin.json/hooks.json is not an executable
   /// action, so it must not claim capability).
+  /// Install a catalog row through the real runtime pipeline using its own
+  /// declared source, returning an honest status message. Shared by
+  /// `agent_install_plugin` and `catalog_add_plugin(source:)` so a row with a
+  /// GitHub source always gets a real install instead of a silent flag flip.
+  Future<String> _installPluginRow(
+    PluginItem row, {
+    PluginSource? source,
+    String? localPath,
+    String? localZipPath,
+  }) async {
+    final app = AppState.I;
+    final runtimeResult = await app.installPlugin(
+      row,
+      source: localPath != null && localPath.isNotEmpty
+          ? LocalFolderPluginSource(localPath)
+          : localZipPath != null && localZipPath.isNotEmpty
+          ? ZipPluginSource(localZipPath)
+          : source,
+      origin: PluginInstallOrigin.agent,
+      sessionId: _runSession?.id,
+    );
+    if (runtimeResult == null) {
+      return 'Plugin "${row.name}": no installable source is declared, so '
+          'nothing was installed.';
+    }
+    if (runtimeResult.status == PluginInstallStatus.failed) {
+      final approval = await _approvePluginInstallAndRetry(
+        row,
+        localPath: localPath,
+        localZipPath: localZipPath,
+        error: runtimeResult.error ?? 'unknown error',
+      );
+      if (approval != null) return approval;
+      return 'install failed: ${runtimeResult.error ?? 'unknown error'}';
+    }
+    final sid = _runSession?.id ?? '';
+    final scopeNote = sid.isEmpty
+        ? 'installed (activates globally after one restart)'
+        : 'installed ✓ — active in this session only (id $sid); activates '
+              'globally after one restart';
+    final parts = <String>[
+      scopeNote,
+      if (runtimeResult.degradedNames.isNotEmpty)
+        'optional dependencies unavailable: '
+            '${runtimeResult.degradedNames.join(', ')}',
+    ];
+    return 'Plugin "${row.name}" ${parts.join(' · ')} '
+        '(id ${row.runtimeId}).';
+  }
+
+  /// Names of the skill/command contributions a legacy plugin row actually
+  /// mounts, used to tell the model what it CAN run instead of faking success.
+  List<String> _pluginActionNames(PluginItem p) {
+    final safeSource = p.source != null
+        ? p.source!.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_')
+        : '';
+    final safeName = _normTool(p.name);
+    final sessionId = _runSession?.id;
+    final mounted = sessionId == null
+        ? SkillService.I.skills
+        : SkillService.I.skillsForSession(sessionId);
+    final names = <String>{};
+    for (final s in mounted) {
+      final matchesSource =
+          safeSource.isNotEmpty && s.path.contains(safeSource);
+      final matchesName =
+          s.path.contains(safeName) || s.name.contains(safeName);
+      if (matchesSource || matchesName) names.add(s.name);
+    }
+    // A registered normalized plugin exposes canonical contribution names.
+    final runtimeId = p.runtimeId;
+    if (runtimeId != null &&
+        PluginContributionRegistry.I.isRegistered(runtimeId)) {
+      for (final c in PluginContributionRegistry.I
+          .toolContributionsForPlugin(runtimeId)) {
+        names.add(c.name);
+      }
+    }
+    return names.toList()..sort();
+  }
+
   bool _pluginHasMountedSkillsOrCommands(PluginItem p) {
     if (!p.installed || !p.enabled) return false;
     if (_seedPluginNames.contains(p.name)) return true;
@@ -5588,25 +5669,16 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'agent_install_plugin',
         'description':
-            'Install a plugin by name. Use when the user asks to add a plugin/tool.',
+            'Install a plugin by catalog name, or from a GitHub repo with '
+            '`repo: "owner/name"` (no marketplace needed).',
         'parameters': {
           'type': 'object',
           'properties': {
             'plugin_name': {'type': 'string'},
-            'local_path': {
-              'type': 'string',
-              'description':
-                  'Optional: install from a local plugin folder instead of '
-                  'the catalog row\'s GitHub source.',
-            },
-            'local_zip_path': {
-              'type': 'string',
-              'description':
-                  'Optional: install from a local .zip plugin archive '
-                  'instead of the catalog row\'s GitHub source.',
-            },
+            'repo': {'type': 'string'},
+            'local_path': {'type': 'string'},
+            'local_zip_path': {'type': 'string'},
           },
-          'required': ['plugin_name'],
         },
       },
     },
@@ -5864,19 +5936,15 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'catalog_add_plugin',
         'description':
-            'Create a custom plugin definition (name + description + '
-            'category). Use when the user wants to add a plugin that is '
-            'not in the catalog. The plugin appears in Plugins and '
-            'persists across restarts.',
+            'Add a plugin. With `source` ("owner/repo") it installs from '
+            'GitHub; without, it creates a custom definition.',
         'parameters': {
           'type': 'object',
           'properties': {
             'name': {'type': 'string'},
             'description': {'type': 'string'},
-            'category': {
-              'type': 'string',
-              'description': 'Agent / Tool / MCP / Runtime / Custom',
-            },
+            'category': {'type': 'string'},
+            'source': {'type': 'string'},
           },
           'required': ['name', 'description'],
         },
@@ -10059,23 +10127,66 @@ ${await _agentsMdBlock()}
           return '<skill_content>\n${skill.content}\n</skill_content>$inputStr';
         }
         if (plugin.author == 'you') {
-          // For custom plugins without a registered .md skill file, treat the
-          // plugin execution as direct custom agent instruction fulfillment:
+          // A custom plugin with no mounted skill/command file has nothing to
+          // execute. The old code answered EVERY action with "executed
+          // successfully" and no content — a stub that reports success
+          // regardless of input, so the model believed work happened when
+          // nothing did. Be honest: list what IS available and say nothing ran.
           final input = args['input'] ?? args['arguments'] ?? '';
-          return 'Custom plugin "${plugin.name}" (${plugin.description}): action "$action" executed successfully.'
-              '${input.toString().trim().isNotEmpty ? ' Output/Context: $input' : ''}';
+          final available = _pluginActionNames(plugin);
+          return 'Plugin "${plugin.name}": action "$action" is not an '
+              'executable contribution — no skill or command by that name is '
+              'mounted, so nothing was executed.'
+              '${available.isEmpty ? '' : ' Available actions: ${available.join(', ')}.'}'
+              '${input.toString().trim().isNotEmpty ? '\n\nInput received: $input' : ''}';
         }
         return 'Plugin "${plugin.name}": no executable skill or command named '
             '"$action" was found, so nothing was executed.';
       case 'agent_install_plugin':
-        final pluginName = args['plugin_name'] as String;
-        _emit('think', 'installing plugin: $pluginName');
+        final pluginName = (args['plugin_name'] as String? ?? '').trim();
+        final repoArg = (args['repo'] as String? ?? '').trim();
+        // Direct GitHub install: `repo: owner/name` needs no catalog row, so
+        // any [CC]/Codex plugin can be installed straight from its repo.
+        final directSource = repoArg.isEmpty
+            ? null
+            : githubPluginSourceFromSourceString(repoArg);
+        if (repoArg.isNotEmpty && directSource == null) {
+          return 'Invalid repo "$repoArg" — expected "owner/name".';
+        }
+        if (pluginName.isEmpty && directSource == null) {
+          return 'agent_install_plugin needs a plugin_name or a repo.';
+        }
+        _emit(
+          'think',
+          'installing plugin: ${directSource != null ? repoArg : pluginName}',
+        );
         try {
           final app = AppState.I;
-          final match = app.plugins
-              .where((p) => p.name.toLowerCase() == pluginName.toLowerCase())
-              .firstOrNull;
+          PluginItem? match = pluginName.isEmpty
+              ? null
+              : app.plugins
+                    .where(
+                      (p) => p.name.toLowerCase() == pluginName.toLowerCase(),
+                    )
+                    .firstOrNull;
+          if (directSource != null) {
+            // Reuse an existing row for this repo, else create a transient
+            // one so the runtime install has a row to bind to.
+            match ??= app.plugins
+                .where((p) => p.source == directSource.sourceId)
+                .firstOrNull;
+            match ??= PluginItem(
+              name: repoArg,
+              author: directSource.owner,
+              description: 'Installed from $repoArg',
+              version: '1.0',
+              category: 'Tool',
+              source: directSource.sourceId,
+            );
+            if (!app.plugins.contains(match)) app.plugins.add(match);
+          }
           if (match == null) return 'Plugin not found: $pluginName';
+          final target = match;
 
           // Task 7 (spec §7): production installs route through the
           // atomic runtime manager with the agent origin + the RUNNING
@@ -10085,12 +10196,12 @@ ${await _agentsMdBlock()}
           final localPath = args['local_path'] as String?;
           final localZipPath = args['local_zip_path'] as String?;
           final runtimeResult = await app.installPlugin(
-            match,
+            target,
             source: localPath != null && localPath.isNotEmpty
                 ? LocalFolderPluginSource(localPath)
                 : localZipPath != null && localZipPath.isNotEmpty
                 ? ZipPluginSource(localZipPath)
-                : null,
+                : directSource,
             origin: PluginInstallOrigin.agent,
             sessionId: _runSession?.id,
           );
@@ -10127,11 +10238,11 @@ ${await _agentsMdBlock()}
                     '${runtimeResult.degradedNames.join(', ')}',
             ];
             return 'Plugin "$pluginName" ${parts.join(' · ')} '
-                '(id ${match.runtimeId}).';
+                '(id ${target.runtimeId}).';
           }
 
-          match.installed = true;
-          match.enabled = true;
+          target.installed = true;
+          target.enabled = true;
           app.persistPluginState();
           app.refresh();
           _emit('done', 'installed $pluginName');
@@ -10140,9 +10251,9 @@ ${await _agentsMdBlock()}
           // its real server right away, exactly like the Plugins screen
           // Install button — a flag flip with no live connection would be
           // a lie to the model.
-          if (match.category == 'MCP') {
+          if (target.category == 'MCP') {
             final server = app.mcpServers
-                .where((s) => s.name == match.name)
+                .where((s) => s.name == target.name)
                 .firstOrNull;
             if (server == null) {
               return 'Plugin "$pluginName" installed, but no MCP server by '
@@ -10168,14 +10279,14 @@ ${await _agentsMdBlock()}
           // "0 fetched" rather than failing the install.
           var fetchedFiles = 0;
           var mountedMcps = 0;
-          if (match.source != null) {
-            fetchedFiles = await AppState.I.fetchPluginContent(match.source!);
+          if (target.source != null) {
+            fetchedFiles = await AppState.I.fetchPluginContent(target.source!);
             if (fetchedFiles > 0) {
               await refreshSkills(sessionId: _runSession?.id);
               // P3: a plugin can ship .mcp.json — register its declared
               // MCP servers so they auto-connect on next launch.
               mountedMcps = await AppState.I.mountPluginMcpServers(
-                match.source!,
+                target.source!,
               );
               // Task 3: register hooks/hooks.json (matcher + JSON decision
               // hooks) from the fetched plugin content.
@@ -10189,7 +10300,7 @@ ${await _agentsMdBlock()}
           if (fetchedFiles > 0) {
             parts.add(
               '$fetchedFiles command/skill file(s) fetched from '
-              '${match.source} — check /-menu for new commands',
+              '${target.source} — check /-menu for new commands',
             );
           }
           if (mountedMcps > 0) {
@@ -10467,13 +10578,26 @@ ${await _agentsMdBlock()}
         final name = args['name'] as String;
         final desc = args['description'] as String;
         final category = args['category'] as String? ?? 'Custom';
+        final sourceArg = (args['source'] as String? ?? '').trim();
         _emit('think', 'creating plugin: $name');
         AppState.I.addCustomPlugin(
           name: name,
           description: desc,
           category: category,
+          source: sourceArg.isEmpty ? null : sourceArg,
         );
         _emit('done', 'plugin created: $name');
+        // A source-bearing row is installable right away — chain the real
+        // install so "add this plugin from GitHub" is one step, not a row
+        // that silently does nothing.
+        if (sourceArg.isNotEmpty) {
+          final created = AppState.I.plugins
+              .where((p) => p.name == name)
+              .firstOrNull;
+          if (created != null) {
+            return await _installPluginRow(created);
+          }
+        }
         return 'Plugin "$name" created and enabled ✓ — visible in Plugins, '
             'persists across restarts.';
 

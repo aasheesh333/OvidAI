@@ -2306,6 +2306,11 @@ class AppState extends ChangeNotifier {
 
   bool get legacyPluginExecutionAllowed => _pluginSafetyReconciled;
 
+  /// Test seam: mark the plugin-safety reconciliation as done so tests can
+  /// exercise the legacy dispatcher without a full async boot.
+  @visibleForTesting
+  void markPluginSafetyReconciledForTest() => _pluginSafetyReconciled = true;
+
   Future<void> initialize() => _initialization ??= initializeReadiness();
 
   Future<void> initializeForFirstFrame() =>
@@ -5466,10 +5471,15 @@ class AppState extends ChangeNotifier {
     }
     final owner = parts[0];
     final name = parts[1];
+    // Discovery paths across the real ecosystem: repo root, [CC]'s
+    // `.claude-plugin/`, and the `.agents/plugins/` location many plugins
+    // (e.g. obra/superpowers) actually use.
     final paths = [
       'marketplace.json',
       'plugins.json',
       '.claude-plugin/marketplace.json',
+      '.agents/plugins/marketplace.json',
+      '.claude/marketplace.json',
     ];
     final urls = <String>[
       // Test override (a local mock server) wins over the real network.
@@ -5993,6 +6003,24 @@ class AppState extends ChangeNotifier {
   /// PR40/Task2: normalize a marketplace plugin-entry `source` to a fetchable
   /// `owner/repo` or resolve relative `./dir` / `/dir` paths against the marketplace
   /// repository (`owner/repo/raw/branch/path`).
+  /// Coerce a marketplace field that the ecosystem may express as a string OR
+  /// an object. [CC]'s spec types `owner`/`author` as `{name, email}` objects,
+  /// while other marketplaces use bare strings; a strict `as String?` cast
+  /// threw and aborted the whole import. Objects resolve to their `name`
+  /// (falling back to `displayName`/`email`), everything else to null.
+  static String? _marketplaceString(dynamic v) {
+    if (v == null) return null;
+    if (v is String) return v;
+    if (v is num || v is bool) return v.toString();
+    if (v is Map) {
+      for (final key in const ['name', 'displayName', 'title', 'email']) {
+        final s = v[key];
+        if (s is String && s.trim().isNotEmpty) return s;
+      }
+    }
+    return null;
+  }
+
   static String? _githubPluginSource(dynamic raw, {String? marketplaceRepo}) {
     if (raw == null) return null;
     // Claude-Code / Codex object form: `{source:"url", url}`,
@@ -6138,7 +6166,7 @@ class AppState extends ChangeNotifier {
     if (pluginList is List) {
       for (final p in pluginList) {
         if (p is! Map) continue;
-        final pname = p['name'] as String?;
+        final pname = _marketplaceString(p['name']);
         if (pname == null || pname.isEmpty) continue;
         if (plugins.any((e) => e.runtimeId == null && e.name == pname)) {
           final existing = plugins.firstWhere(
@@ -6155,10 +6183,10 @@ class AppState extends ChangeNotifier {
         plugins.add(
           PluginItem(
             name: pname,
-            author: p['author'] as String? ?? owner,
-            description: p['description'] as String? ?? '',
-            version: p['version'] as String? ?? '1.0',
-            category: p['category'] as String? ?? 'Tool',
+            author: _marketplaceString(p['author']) ?? owner,
+            description: _marketplaceString(p['description']) ?? '',
+            version: _marketplaceString(p['version']) ?? '1.0',
+            category: _marketplaceString(p['category']) ?? 'Tool',
             installed: false,
             enabled: false,
             installs: p['installs'] as int? ?? 0,
@@ -6180,11 +6208,11 @@ class AppState extends ChangeNotifier {
 
     // ── mcpServers — list form AND map form (Codex/Claude Desktop) ──
     void importMcp(Map m, String? fallbackName) {
-      final mname = (m['name'] as String?) ?? fallbackName ?? '';
+      final mname = _marketplaceString(m['name']) ?? fallbackName ?? '';
       // PR41: an entry with `url` (and no `command`) is a Streamable-HTTP
       // server — Claude Desktop / Codex all use this exact shape
       // for a remote MCP server (`{"url": "https://...", "headers": {…}}`).
-      final urlValue = m['url'] as String?;
+      final urlValue = _marketplaceString(m['url']);
       final isHttp = urlValue != null && urlValue.isNotEmpty;
       final headers =
           (m['headers'] as Map?)?.map(
@@ -6193,10 +6221,13 @@ class AppState extends ChangeNotifier {
           const <String, String>{};
       final server = _addImportedMcpRow(
         name: mname,
-        author: m['author'] as String? ?? owner,
-        description: m['description'] as String? ?? '',
-        category: m['category'] as String? ?? 'Community',
-        command: (m['command'] as String?) ?? (m['cmd'] as String?) ?? 'npx',
+        author: _marketplaceString(m['author']) ?? owner,
+        description: _marketplaceString(m['description']) ?? '',
+        category: _marketplaceString(m['category']) ?? 'Community',
+        command:
+            _marketplaceString(m['command']) ??
+            _marketplaceString(m['cmd']) ??
+            'npx',
         args: (m['args'] as List?)?.whereType<String>().toList() ?? const [],
         envHint:
             (m['envHint'] as String?) ??
@@ -6819,6 +6850,7 @@ class AppState extends ChangeNotifier {
     required String name,
     required String description,
     String category = 'Custom',
+    String? source,
   }) {
     if (plugins.any((p) => p.name.toLowerCase() == name.toLowerCase())) {
       return; // already exists — no dupes
@@ -6831,6 +6863,9 @@ class AppState extends ChangeNotifier {
         description: description,
         version: '1.0.0',
         category: category,
+        // A GitHub `owner/repo` (or marketplace) source makes the row
+        // installable through the real runtime pipeline.
+        source: source,
         installed: true,
         enabled: true,
         installs: 0,
