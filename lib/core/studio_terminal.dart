@@ -29,6 +29,13 @@ class StudioShellSession extends ChangeNotifier {
   String? _pendingToken;
   String? _shellSid;
   bool _disposed = false;
+  Timer? _watchdog;
+
+  /// A command that never returns must not wedge the terminal forever. When
+  /// this elapses the tab stops the spinner, reports it, and drops the shell
+  /// so the next command starts a fresh one. Overridable for tests.
+  @visibleForTesting
+  static Duration runTimeoutForTest = const Duration(minutes: 5);
 
   /// Start a command in the UI (echo the prompt + mark busy).
   void begin(String display) {
@@ -95,12 +102,52 @@ class StudioShellSession extends ChangeNotifier {
     _pendingToken = token;
     s.writeStdin('$cmd\n');
     s.writeStdin('echo "$token"\n');
+    // Watchdog: a hung command (blocking read, interactive prompt, runaway
+    // process) otherwise leaves busy=true and the input disabled forever.
+    _watchdog?.cancel();
+    _watchdog = Timer(runTimeoutForTest, () {
+      if (_disposed || !busy || _pendingToken != token) return;
+      _pendingToken = null;
+      busy = false;
+      dead = true;
+      history.add(
+        '⚠ command exceeded ${runTimeoutForTest.inSeconds}s — stopped. '
+        'Next command starts a fresh shell.',
+      );
+      final sid = _shellSid ?? sessionId;
+      if (sid != null) {
+        unawaited(
+          PtyPool.I.discard(sid, tab: tabId, owner: PtyPool.studioOwner),
+        );
+      }
+      shell = null;
+      _notify();
+    });
     return true;
+  }
+
+  /// User-facing abort: stop the spinner and drop the shell so the next
+  /// command starts fresh. Safe to call when nothing is running.
+  void cancel() {
+    _watchdog?.cancel();
+    _watchdog = null;
+    _pendingToken = null;
+    busy = false;
+    final sid = _shellSid ?? sessionId;
+    if (sid != null) {
+      unawaited(
+        PtyPool.I.discard(sid, tab: tabId, owner: PtyPool.studioOwner),
+      );
+    }
+    shell = null;
+    _notify();
   }
 
   void _onOutput(PtyShell s, String line) {
     if (!identical(shell, s)) return;
     if (_pendingToken != null && line.trim() == _pendingToken) {
+      _watchdog?.cancel();
+      _watchdog = null;
       _pendingToken = null;
       busy = false;
       _notify();
@@ -114,6 +161,8 @@ class StudioShellSession extends ChangeNotifier {
     if (!identical(shell, s)) return;
     // The shell died mid-command (exit, crash, or killed): stop the spinner
     // and tell the user, then let the next command recreate a fresh shell.
+    _watchdog?.cancel();
+    _watchdog = null;
     shell = null;
     _pendingToken = null;
     dead = true;
@@ -130,6 +179,8 @@ class StudioShellSession extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _watchdog?.cancel();
+    _watchdog = null;
     final sid = _shellSid ?? sessionId;
     sub?.cancel();
     sub = null;

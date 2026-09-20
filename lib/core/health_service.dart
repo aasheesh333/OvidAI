@@ -239,6 +239,27 @@ class HealthService extends ChangeNotifier {
           repairable: true,
         ),
       );
+      // proot Ubuntu (glibc tools: flutter, prebuilt binaries). Informational
+      // — the native sandbox covers the common case; this surfaces whether
+      // the fallback userland exists and how often it was needed.
+      final proot = await sandbox.prootStatus();
+      out.add(
+        HealthCheck(
+          name: 'proot Ubuntu (glibc tools)',
+          points: 0,
+          ok: proot.provisioned && proot.prootBinary,
+          detail: proot.provisioned && proot.prootBinary
+              ? 'Provisioned — glibc-only tools (e.g. Flutter) can run.'
+              : proot.fallbackTriggers > 0
+              ? '${proot.fallbackTriggers} command(s) needed glibc; Ubuntu '
+                    'userland not provisioned yet — it installs on demand '
+                    '(~30 MB) or from a glibc command.'
+              : 'Not provisioned (optional). Installs on demand for '
+                    'glibc-only tools.',
+          repairable: false,
+        ),
+      );
+
       // Workspace writable.
       var wsOk = false;
       var wsDetail = 'Session workspace is readable and writable.';

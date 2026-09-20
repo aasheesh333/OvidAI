@@ -1485,14 +1485,18 @@ class _TerminalPaneState extends State<_TerminalPane> {
                           size: 16,
                           color: Aether.accent,
                         ),
+                        // While a command runs the suffix is a Stop button —
+                        // a hung command must never wedge the terminal.
                         suffixIcon: s.busy
-                            ? const SizedBox(
-                                width: 14,
-                                height: 14,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 1.5,
-                                  color: Aether.accent,
+                            ? IconButton(
+                                tooltip: 'Stop command',
+                                visualDensity: VisualDensity.compact,
+                                icon: const Icon(
+                                  Icons.stop_circle_outlined,
+                                  size: 16,
+                                  color: Aether.danger,
                                 ),
+                                onPressed: () => setState(s.cancel),
                               )
                             : null,
                       ),

@@ -116,4 +116,49 @@ void main() {
     expect(a.dead, isFalse, reason: 'agent stop must not kill studio tabs');
     expect(b.dead, isFalse);
   });
+
+  test('a hung command is stopped by the watchdog, not wedged forever',
+      () async {
+    final original = StudioShellSession.runTimeoutForTest;
+    StudioShellSession.runTimeoutForTest = const Duration(milliseconds: 250);
+    addTearDown(() => StudioShellSession.runTimeoutForTest = original);
+
+    final s = StudioShellSession(tabId: 'u-hang');
+    addTearDown(s.dispose);
+
+    s.begin('sleep 30');
+    expect(
+      await s.runPersistent('sleep 30', sid: 'sess-hang', spawner: _spawnShell),
+      isTrue,
+    );
+    expect(s.busy, isTrue);
+
+    await _waitFor(
+      () => !s.busy,
+      timeout: const Duration(seconds: 3),
+      reason: 'watchdog clears the spinner',
+    );
+    expect(s.busy, isFalse);
+    expect(
+      s.history.any((l) => l.contains('exceeded')),
+      isTrue,
+      reason: 'the timeout is reported honestly',
+    );
+  });
+
+  test('cancel() stops a running command and drops the shell', () async {
+    final s = StudioShellSession(tabId: 'u-cancel');
+    addTearDown(s.dispose);
+
+    s.begin('sleep 30');
+    expect(
+      await s.runPersistent('sleep 30', sid: 'sess-cancel', spawner: _spawnShell),
+      isTrue,
+    );
+    expect(s.busy, isTrue);
+
+    s.cancel();
+    expect(s.busy, isFalse);
+    expect(s.shell, isNull);
+  });
 }

@@ -115,11 +115,103 @@ class SandboxService {
   // Legacy accessors kept so older call sites compile (MCP checks them).
   Directory? get root => _prefix;
   Directory? get rootfs => _prefix;
-  String? get prootPath => bashPath;
+
+  /// Path to the real proot binary, when the Ubuntu userland is provisioned.
+  /// (Previously this was an alias of [bashPath] — a lie that named bash as
+  /// proot. The actual binary lives inside the sandbox prefix.)
+  String? get prootBinaryPath =>
+      _prefix != null ? '${_prefix!.path}/bin/proot' : null;
+
+  /// Directory of the provisioned proot-Ubuntu rootfs, if any.
+  String? get ubuntuRootfsPath =>
+      _prefix != null ? '${_prefix!.path}/ubuntu' : null;
 
   // ── Lazy proot fallback state (on-demand only) ─────────────────────
   final List<Map<String, String>> _fallbackLog = [];
   List<Map<String, String>> get fallbackLog => List.unmodifiable(_fallbackLog);
+
+  // ── Lazy-ensure validation + test seams ────────────────────────────
+  // Each `_xEnsured` flag is a fast-path cache. It is only trusted while its
+  // artifact still exists on disk: a quota sweep, data clear, or uninstall can
+  // remove the artifact behind our back, and a stale `true` would then skip
+  // provisioning forever (the "installed ✓ but nothing works" class).
+
+  bool _filePresent(String relative) {
+    final p = _prefix;
+    if (p == null) return false;
+    try {
+      return File('${p.path}/$relative').existsSync();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// True when the proot Ubuntu userland (binary + rootfs) is really on disk.
+  bool _prootArtifactsPresent() =>
+      _filePresent('ubuntu/etc/os-release') && _filePresent('bin/proot');
+
+  /// Record a glibc/ABI fallback trigger (health/diagnostics surface it).
+  @visibleForTesting
+  void recordFallbackForTest(String cmd) {
+    _fallbackLog.add({
+      'cmd': cmd,
+      'error': 'glibc/abi',
+      'ts': DateTime.now().toIso8601String(),
+    });
+  }
+
+  @visibleForTesting
+  void setLazyFlagsForTest({
+    bool? proot,
+    bool? flutter,
+    bool? jdk,
+    bool? kotlin,
+    bool? compiler,
+    bool? runtimeNode,
+  }) {
+    if (proot != null) _prootEnsured = proot;
+    if (flutter != null) _flutterEnsured = flutter;
+    if (jdk != null) _jdkEnsured = jdk;
+    if (kotlin != null) _kotlinEnsured = kotlin;
+    if (compiler != null) _compilerEnsured = compiler;
+    if (runtimeNode != null) _runtimeEnsured['node'] = runtimeNode;
+  }
+
+  @visibleForTesting
+  Map<String, bool> get lazyFlagsForTest => {
+    'proot': _prootEnsured,
+    'flutter': _flutterEnsured,
+    'jdk': _jdkEnsured,
+    'kotlin': _kotlinEnsured,
+    'compiler': _compilerEnsured,
+    'runtimeNode': _runtimeEnsured['node'] ?? false,
+  };
+
+  /// Test seam: replace the proot provisioning step (no network/device).
+  @visibleForTesting
+  static Future<bool> Function(void Function(String line)? onLine)?
+  prootProvisionOverrideForTest;
+
+  /// Pure: the guest exit code decides whether Flutter is installed. The old
+  /// check read a string the probe never returns, so it always reported
+  /// success.
+  @visibleForTesting
+  static bool flutterPresentProbe(int exitCode) => exitCode == 0;
+
+  /// Minimal environment for the HOST `proot` process itself. It is a Termux
+  /// binary so it needs the sandbox lib path, but Termux-only vars (the
+  /// LD_PRELOAD path shim, PREFIX/TERMUX__PREFIX, APT_CONFIG, the git
+  /// credential helper) must NOT leak into it.
+  @visibleForTesting
+  Map<String, String> prootHostEnvForTest() {
+    final p = _prefix?.path;
+    return {
+      'PATH': '/system/bin:/system/xbin',
+      'LANG': 'C.UTF-8',
+      if (p != null) 'LD_LIBRARY_PATH': '$p/lib',
+      if (p != null) 'TMPDIR': '$p/tmp',
+    };
+  }
 
   static const _nativeChannel = MethodChannel('ovid/native');
 
@@ -2073,6 +2165,7 @@ audit=false
     List<String> arguments, {
     String? workingDirectory,
     Map<String, String>? environment,
+    void Function(String line)? onLine,
   }) async {
     final proc = await Process.start(
       executable,
@@ -2086,6 +2179,37 @@ audit=false
       _runProcesses.putIfAbsent(runKey, () => []).add(proc);
     }
     try {
+      // Streaming path: a long install must show progress line by line, not
+      // buffer everything until exit. A stream is single-subscription, so
+      // this is a separate branch from the byte-accumulating one below.
+      if (onLine != null) {
+        final outBuf = StringBuffer();
+        final errBuf = StringBuffer();
+        final outF = proc.stdout
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())
+            .listen((l) {
+              outBuf.writeln(l);
+              onLine(l);
+            })
+            .asFuture<void>();
+        final errF = proc.stderr
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())
+            .listen((l) {
+              errBuf.writeln(l);
+              onLine(l);
+            })
+            .asFuture<void>();
+        final code = await proc.exitCode;
+        await outF;
+        await errF;
+        return (
+          exitCode: code,
+          stdout: outBuf.toString(),
+          stderr: errBuf.toString(),
+        );
+      }
       final outF = proc.stdout
           .fold<List<int>>(
             <int>[],
@@ -2383,7 +2507,11 @@ audit=false
     void Function(String line)? onLine,
   }) async {
     final bin = kind == 'node' ? 'node' : 'python';
-    if (_runtimeEnsured[kind] == true) return true;
+    if (_runtimeEnsured[kind] == true &&
+        _filePresent(kind == 'node' ? 'bin/node' : 'bin/python')) {
+      return true;
+    }
+    _runtimeEnsured[kind] = false;
     // Fast path: check if already present (exit-code based —
     // `command -v` prints nothing and exits 1 when missing).
     try {
@@ -2459,7 +2587,8 @@ audit=false
   bool _compilerEnsured = false;
 
   Future<bool> ensureCompiler({void Function(String line)? onLine}) async {
-    if (_compilerEnsured) return true;
+    if (_compilerEnsured && _filePresent('bin/clang')) return true;
+    _compilerEnsured = false;
     try {
       final (code, _) = await execChecked([
         'bash',
@@ -2563,7 +2692,8 @@ audit=false
   /// java/javac/kotlin/gradle/maven invocation, or an explicit request.
   /// Same idempotent shape as [ensureRuntime] — cheap to call repeatedly.
   Future<bool> ensureJdk({void Function(String line)? onLine}) async {
-    if (_jdkEnsured) return true;
+    if (_jdkEnsured && _filePresent('bin/java')) return true;
+    _jdkEnsured = false;
     try {
       final (code, _) = await execChecked([
         'bash',
@@ -2611,7 +2741,8 @@ audit=false
   /// by pinned SHA-256 + size + expected layout before install, then small
   /// `kotlinc`/`kotlin` wrappers land in `$PREFIX/bin`.
   Future<bool> ensureKotlin({void Function(String line)? onLine}) async {
-    if (_kotlinEnsured) return true;
+    if (_kotlinEnsured && _filePresent('opt/kotlinc/bin/kotlinc')) return true;
+    _kotlinEnsured = false;
     try {
       final (code, _) = await execChecked([
         'bash',
@@ -2691,7 +2822,8 @@ echo INSTALLED
   /// Triggered by a real glibc/ABI failure or an explicit request (flutter
   /// and other glibc-only tooling need it).
   Future<bool> ensureProotUbuntu({void Function(String line)? onLine}) async {
-    if (_prootEnsured) return true;
+    if (_prootEnsured && _prootArtifactsPresent()) return true;
+    _prootEnsured = false;
     try {
       final (code, _) = await execChecked([
         'bash',
@@ -2714,15 +2846,19 @@ echo INSTALLED
     }
   }
 
-  Future<bool> _installProotUbuntu(
-    void Function(String line)? onLine,
-  ) async {
-    // One script does the whole provision so no state is lost between
-    // steps: proot binary → rootfs download → hash verify → unpack →
-    // resolv.conf → smoke probe. The pinned 24.04.5 hashes are embedded;
-    // when that point release disappears the script reads the live
-    // SHA256SUMS and verifies against the newest entry instead.
-    final script = '''
+  /// The whole proot provision as one script so no state is lost between
+  /// steps: proot binary → rootfs download → hash verify → unpack →
+  /// resolv.conf → smoke probe. The arch is passed in from Dart (single
+  /// source of truth); the pinned 24.04.5 hashes are embedded, and when that
+  /// point release disappears the script reads the live SHA256SUMS and
+  /// verifies against the newest entry instead.
+  @visibleForTesting
+  static String prootProvisionScriptForTest(String ubuntuArch) =>
+      _prootProvisionScript(ubuntuArch);
+
+  static String _prootProvisionScript(String ubuntuArch) {
+    final pin = _ubuntuRootfsHashes[ubuntuArch] ?? '';
+    return '''
 set -u
 command -v proot >/dev/null || {
   echo "[proot] installing proot…"
@@ -2730,18 +2866,9 @@ command -v proot >/dev/null || {
   apt install -y proot 2>&1 | tail -2 || exit 20
 }
 command -v proot >/dev/null || { echo "no proot"; exit 20; }
-UARCH="\$(uname -m)"
-case "\$UARCH" in
-  aarch64) UARCH=arm64 ;;
-  armv7*|armv8l) UARCH=armhf ;;
-  x86_64) UARCH=amd64 ;;
-esac
-case "\$UARCH" in
-  amd64) PIN="${_ubuntuRootfsHashes['amd64']}" ;;
-  arm64) PIN="${_ubuntuRootfsHashes['arm64']}" ;;
-  armhf) PIN="${_ubuntuRootfsHashes['armhf']}" ;;
-  *) echo "unsupported arch \$UARCH"; exit 20 ;;
-esac
+UARCH="$ubuntuArch"
+PIN="$pin"
+[ -n "\$PIN" ] || { echo "unsupported arch \$UARCH"; exit 20; }
 FILE="ubuntu-base-$ubuntuRelease-base-\$UARCH.tar.gz"
 URL="$ubuntuBaseUrl/\$FILE"
 DEST="\$PREFIX/var/cache/\$FILE"
@@ -2767,6 +2894,14 @@ proot -R "\$PREFIX/ubuntu" true || exit 24
 rm -f "\$DEST"
 echo PROVISIONED
 ''';
+  }
+
+  Future<bool> _installProotUbuntu(
+    void Function(String line)? onLine,
+  ) async {
+    final override = prootProvisionOverrideForTest;
+    if (override != null) return override(onLine);
+    final script = _prootProvisionScript(ubuntuArchFor(_deviceArch));
     final (code, out) = await execChecked(
       ['bash', '-c', script],
     ).timeout(const Duration(minutes: 20));
@@ -2790,7 +2925,33 @@ echo PROVISIONED
     Directory? hostWorkDir,
     Map<String, String>? env,
     Duration timeout = const Duration(minutes: 10),
+    void Function(String line)? onLine,
   }) async {
+    final checked = await execProotChecked(
+      args,
+      cwd: cwd,
+      hostWorkDir: hostWorkDir,
+      env: env,
+      timeout: timeout,
+      onLine: onLine,
+    );
+    return checked.output;
+  }
+
+  /// Exit-code-checked proot exec — the shape probes need (a probe must read
+  /// the guest exit code, not guess from output text). Returns the denial as
+  /// output with a non-zero code when the policy gate refuses.
+  Future<({int exitCode, String output})> execProotChecked(
+    List<String> args, {
+    String? cwd,
+    Directory? hostWorkDir,
+    Map<String, String>? env,
+    Duration timeout = const Duration(minutes: 10),
+    void Function(String line)? onLine,
+  }) async {
+    // Same policy gate as exec/spawn/execHost: proot is NOT a bypass.
+    final denial = checkPolicy(args, cwd: cwd, hostWorkDir: hostWorkDir);
+    if (denial != null) return (exitCode: 126, output: denial);
     final ok = await ensureProotUbuntu();
     if (!ok) {
       throw Exception(
@@ -2823,9 +2984,14 @@ echo PROVISIONED
         ...args,
       ],
       workingDirectory: work,
-      environment: _sandboxEnv(),
+      // Minimal host env: Termux-only vars must not leak into proot itself.
+      environment: prootHostEnvForTest(),
+      onLine: onLine,
     ).timeout(timeout);
-    return '${result.stdout}${result.stderr}';
+    return (
+      exitCode: result.exitCode,
+      output: '${result.stdout}${result.stderr}',
+    );
   }
 
   bool _flutterEnsured = false;
@@ -2836,13 +3002,18 @@ echo PROVISIONED
   /// Google publishes no checksum sidecar, so verification is TLS + size
   /// sanity + post-extract structure + `flutter --version`.
   Future<bool> ensureFlutter({void Function(String line)? onLine}) async {
-    if (_flutterEnsured) return true;
+    if (_flutterEnsured && _filePresent('ubuntu/opt/flutter/bin/flutter')) {
+      return true;
+    }
+    _flutterEnsured = false;
     try {
-      final probe = await execProot(
+      final probe = await execProotChecked(
         ['test', '-x', '/opt/flutter/bin/flutter'],
         timeout: const Duration(seconds: 60),
       ).timeout(const Duration(minutes: 2));
-      if (!probe.contains('not available')) {
+      // The guest exit code is the truth; the old check read a string the
+      // probe never returns and so always reported "installed".
+      if (flutterPresentProbe(probe.exitCode)) {
         _flutterEnsured = true;
         return true;
       }
@@ -2867,11 +3038,16 @@ echo PROVISIONED
     // Storage gate first: the tarball plus the extracted tree plus the
     // engine precache need real room. Fail fast with an honest number.
     try {
-      final df = await execProot(
+      final df = await execProotChecked(
         ['sh', '-c', 'df -P -k /opt | awk \'NR==2{print \$4}\''],
         timeout: const Duration(seconds: 60),
       ).timeout(const Duration(minutes: 2));
-      final freeKb = int.tryParse(df.trim().split('\n').last.trim()) ?? 0;
+      if (df.exitCode != 0) {
+        onLine?.call('[flutter] storage check failed (exit ${df.exitCode}).');
+        return false;
+      }
+      final freeKb =
+          int.tryParse(df.output.trim().split('\n').last.trim()) ?? 0;
       if (freeKb < 5000000) {
         onLine?.call(
           '[flutter] needs ~5 GB free; only ${(freeKb / 1048576).toStringAsFixed(1)} GB available.',
@@ -3066,23 +3242,26 @@ echo INSTALLED
     return proc;
   }
 
-  Future<Process> shell({Directory? hostWorkDir}) async {
-    if (_prefix == null) {
-      final ok = await checkExisting();
-      if (!ok) {
-        throw Exception(
-          'sandbox not installed — open Studio once to install it, then retry.',
-        );
-      }
+  /// Proot-Ubuntu status for the Health screen and diagnostics.
+  /// `provisioned` is a REAL disk check (not the cached flag), and
+  /// `fallbackTriggers` counts glibc/ABI commands that had to run under
+  /// proot — the signal that a workflow depends on the Ubuntu userland.
+  Future<({bool provisioned, bool prootBinary, int fallbackTriggers})>
+  prootStatus() async {
+    final prefix = _prefix;
+    var provisioned = false;
+    var prootBinary = false;
+    if (prefix != null) {
+      try {
+        provisioned =
+            File('${prefix.path}/ubuntu/etc/os-release').existsSync();
+        prootBinary = File('${prefix.path}/bin/proot').existsSync();
+      } catch (_) {}
     }
-    return Process.start(
-      '${_prefix!.path}/bin/bash',
-      ['-l'],
-      workingDirectory: hostWorkDir != null
-          ? hostWorkDir.path
-          : '${_prefix!.path}/home',
-      environment: _sandboxEnv(),
-      mode: ProcessStartMode.normal,
+    return (
+      provisioned: provisioned,
+      prootBinary: prootBinary,
+      fallbackTriggers: _fallbackLog.length,
     );
   }
 
@@ -3113,5 +3292,22 @@ echo INSTALLED
     _prefix = null;
     _installed = false;
     _checked = false;
+    // Reset every lazy-ensure cache: a stale `true` after the prefix is gone
+    // would skip provisioning on the next install (broken reinstall).
+    _resetLazyState();
+  }
+
+  /// Clear all lazy-ensure caches + diagnostics that describe the prefix.
+  void _resetLazyState() {
+    _runtimeEnsured.clear();
+    _compilerEnsured = false;
+    _jdkEnsured = false;
+    _kotlinEnsured = false;
+    _prootEnsured = false;
+    _flutterEnsured = false;
+    _fallbackLog.clear();
+    _pythonSitePackages = null;
+    _payloadAbi = null;
+    _payloadReadError = null;
   }
 }
