@@ -230,6 +230,114 @@ Recommended follow-ups:
 3. Report an honest, specific error for browser MCPs instead of a generic
    connect failure.
 
+## Defect #2 — `${CLAUDE_PLUGIN_ROOT}` is never expanded (breaks ALL [CC]/Codex hooks)
+
+Ovid parses the [CC] plugin format correctly, but it does **not** expand the path
+variables the [CC] plugin spec defines. The canonical hook in `obra/superpowers`
+is:
+
+```json
+"command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" session-start"
+```
+
+Ovid stores that string verbatim as the hook `payload` and executes it with
+`bash -c`, with no `CLAUDE_PLUGIN_ROOT` in the environment. Bash expands the
+unset variable to the empty string, so the command becomes
+`"/hooks/run-hook.cmd" session-start` and dies.
+
+From this session's own ledger (`session-ledgers/<id>.jsonl`):
+
+```json
+{ "kind": "hook/result", "plugin": "jesse-vincent/superpowers",
+  "event": "session_start", "ok": false, "exit": 127,
+  "warning": "hook failed (fail-open) — output ignored",
+  "stdout": "bash: line 1: /hooks/run-hook.cmd: No such file or directory" }
+```
+
+Because hooks are **fail-open**, the failure is silent: the plugin looks
+installed, its skills are listed, and nothing ever actually runs. This affects
+every [CC]/Codex plugin that uses a hook — which is the normal case.
+
+Proof it is the env var and nothing else — same command, same cwd:
+
+| invocation | result |
+| --- | --- |
+| exactly as Ovid ran it (no `CLAUDE_PLUGIN_ROOT`) | `/hooks/run-hook.cmd: No such file or directory`, exit 127 |
+| with `CLAUDE_PLUGIN_ROOT` set | valid `hookSpecificOutput` JSON, exit 0 |
+
+`tools/normalize_cc_plugins.py` resolves `${CLAUDE_PLUGIN_ROOT}`,
+`${CLAUDE_PLUGIN_DATA}` and `${CLAUDE_PROJECT_DIR}` in place across every
+installed plugin's surfaces (`ovid-plugin.json`, `ovid-activation.json`,
+`hooks/*.json`, `.mcp.json`, `commands/`, `agents/`, `skills/`), makes hook
+scripts executable, and never touches binaries. Idempotent.
+
+```bash
+python3 tools/test_normalize_cc_plugins.py   # 21/21 green
+python3 tools/normalize_cc_plugins.py        # apply to all installed plugins
+```
+
+### The correct fix belongs in the app, not in the files
+
+Rewriting the files works, but it **mutates the plugin content** and therefore
+its `manifestDigest`. The spec-compliant fix is to export the variables into the
+**child environment** when Ovid spawns the hook / MCP server / command:
+
+```
+CLAUDE_PLUGIN_ROOT = <plugin content dir>
+CLAUDE_PLUGIN_DATA = <plugin persistent data dir>
+CLAUDE_PROJECT_DIR = <session workspace>
+```
+
+That needs no file mutation and cannot invalidate a digest. The normalizer is a
+workaround for an already-installed plugin; the env-var export is the real fix.
+
+## Open defect #3 — skill invocation is gated on a manifest digest
+
+`skill` is advertised in the system prompt and listed in `AVAILABLE SKILLS`, but
+invoking one fails:
+
+```
+Plugin contribution "plugin:jesse-vincent/superpowers/skill:systematic-debugging"
+is not active in the current manifest for this session. Nothing was executed.
+```
+
+Observed state (all from this session):
+
+| key | value |
+| --- | --- |
+| `plugin_activation_v1` | `state: "sessionActive"`, `immediateSessionId: 1789933966388911` (= this session), `installedBootEpoch: 7`, `promoteOnNextBoot: true` |
+| `plugin_boot_epoch_v1` | **empty** |
+| `plugin_rows_v2` | `activation: "sessionActive"`, `promoteOnNextBoot: true`, `manifestDigest: sha256:30fa7420…` |
+| `plugin_grants_v1` | same `manifestDigest`, `approvedAt: 2026-09-20T20:07:28` |
+| `plugin_runtime_status_v1` | `state: "ready"` |
+| session bootstrap | contains **no** manifest field at all; `systemPromptSnapshot` *does* contain `superpowers` and `AVAILABLE SKILLS` |
+
+So the activation record claims the plugin is active for this session, the
+system prompt lists its skills, and the skill tool still refuses. Two candidate
+gates remain, both inside the app runtime:
+
+1. **Digest mismatch.** The grant records a `manifestDigest` approved at
+   `20:07:28`, but the plugin content was re-extracted at `01:31–01:33`. If the
+   digest is recomputed from content and compared to the granted value, the
+   re-extraction invalidated the grant.
+2. **Stuck promotion.** `promoteOnNextBoot: true` with `installedBootEpoch: 7`
+   while `plugin_boot_epoch_v1` is **empty** — the boot-epoch counter is not
+   persisting, so promotion to globally-active never completes.
+
+I could not reverse-engineer the digest (25 candidate inputs tried — raw file
+bytes, JSON re-serializations, per-file listings, manifest variants — none
+matched), so this is reported rather than fixed. **The gate lives in the app's
+plugin runtime, which is not present in this repository snapshot**, so it cannot
+be patched here. Recommended runtime changes:
+
+1. Expand the `CLAUDE_PLUGIN_*` variables in the child environment (above).
+2. Recompute **and re-grant** the manifest digest whenever plugin content is
+   re-extracted, or scope the digest to the parsed manifest instead of raw bytes.
+3. Persist `plugin_boot_epoch_v1` and make `promoteOnNextBoot` idempotent, so an
+   install mid-session actually becomes active.
+4. Make a hook that exits non-zero **visible** instead of silently fail-open —
+   defect #2 was invisible for exactly this reason.
+
 ## Note on repo scope
 
 This repository snapshot does **not** contain `lib/core/mcp_service.dart`,
