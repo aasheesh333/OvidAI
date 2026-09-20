@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/device_control_service.dart';
@@ -165,5 +167,90 @@ void main() {
 
     final result = await DeviceControlService.I.tap(x: 1, y: 2);
     expect(result, DeviceControlService.cancelledSupersededMessage);
+  });
+
+  test('reconnectService surfaces the native post-nudge state', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'deviceServiceReconnect') return 'connecting';
+      return true;
+    });
+    expect(await DeviceControlService.I.reconnectService(), 'connecting');
+  });
+
+  test('reconnectService never throws to callers', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      throw PlatformException(code: 'RECONNECT_FAILED');
+    });
+    expect(await DeviceControlService.I.reconnectService(), 'connecting');
+  });
+
+  test('refreshServiceBinding nudges once, then waits for the bind',
+      () async {
+    final calls = <String>[];
+    var polls = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      calls.add(call.method);
+      if (call.method == 'deviceServiceState') {
+        polls++;
+        // First read: still connecting; after the nudge the bind lands.
+        return polls <= 2 ? 'connecting' : 'bound';
+      }
+      if (call.method == 'deviceServiceReconnect') return 'connecting';
+      return true;
+    });
+
+    await DeviceControlService.I.refreshServiceBinding();
+    expect(
+      calls.where((c) => c == 'deviceServiceReconnect').length,
+      1,
+      reason: 'exactly one programmatic nudge per refresh',
+    );
+    expect(polls, greaterThan(1));
+  });
+
+  test('refreshServiceBinding never nudges an already-bound service',
+      () async {
+    var reconnects = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'deviceServiceState') return 'bound';
+      if (call.method == 'deviceServiceReconnect') reconnects++;
+      return true;
+    });
+
+    await DeviceControlService.I.refreshServiceBinding();
+    expect(reconnects, 0);
+  });
+
+  test('native reconnect route forces a rebind without touching Settings',
+      () {
+    final kt = File(
+      'android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt',
+    ).readAsStringSync();
+    expect(kt.contains('"deviceServiceReconnect"'), isTrue);
+    // Programmatic off/on of OUR OWN component = the manual toggle's
+    // binding effect, without killing our process mid-call.
+    expect(kt.contains('setComponentEnabledSetting'), isTrue);
+    expect(kt.contains('DONT_KILL_APP'), isTrue);
+    // A genuinely disabled service is reported, never force-enabled.
+    final idx = kt.indexOf('"deviceServiceReconnect"');
+    final body = kt.substring(idx, idx + 2500);
+    expect(body.contains('"disabled"'), isTrue);
+  });
+
+  test('service publishes its instance on rebind as well as connect', () {
+    final kt = File(
+      'android/app/src/main/kotlin/com/dhanuk/ovidai/OvidAccessibilityService.kt',
+    ).readAsStringSync();
+    expect(kt.contains('override fun onRebind'), isTrue);
+    final idx = kt.indexOf('override fun onRebind');
+    expect(
+      kt.substring(idx, idx + 400).contains('instance = this'),
+      isTrue,
+      reason: 'a rebind without instance publish would wedge "connecting" forever',
+    );
   });
 }

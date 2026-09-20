@@ -2495,6 +2495,427 @@ audit=false
     }
   }
 
+  // TOOLCHAINS — JVM/Kotlin run natively on bionic; everything that needs
+  // glibc (flutter, …) runs under the on-demand proot-Ubuntu below.
+  // ═════════════════════════════════════════════════════════════════
+
+  /// Pinned Kotlin compiler (pure JVM — runs on the sandbox JDK, no proot).
+  /// Hash measured 2026-09-20 from the official GitHub release asset
+  /// (89,729,132 bytes; single top-level `kotlinc/` dir holding
+  /// `bin/kotlinc`, `bin/kotlin` and `lib/kotlin-compiler.jar`).
+  static const kotlinVersion = '2.4.20';
+  static const kotlinZipUrl =
+      'https://github.com/JetBrains/kotlin/releases/download/'
+      'v2.4.20/kotlin-compiler-2.4.20.zip';
+  static const kotlinZipSha256 =
+      '59e9ca74c7904ef2c122b12114937673ccce68de820a663f0ed66ccf8799e0b7';
+  static const kotlinZipBytes = 89729132;
+
+  /// Ubuntu base for the proot fallback. Hashes are the official cdimage
+  /// SHA256SUMS values for 24.04.5; when that point release disappears the
+  /// installer falls back to the newest entry in the live SHA256SUMS file
+  /// (still hash-verified, never unchecked).
+  static const ubuntuBaseUrl =
+      'https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release';
+  static const ubuntuRelease = '24.04.5';
+
+  static String ubuntuArchFor(String deviceArch) {
+    switch (deviceArch) {
+      case 'arm64':
+        return 'arm64';
+      case 'arm':
+        return 'armhf';
+      case 'x86_64':
+        return 'amd64';
+      default:
+        return 'arm64';
+    }
+  }
+
+  static String ubuntuRootfsFile(String ubuntuArch) =>
+      'ubuntu-base-$ubuntuRelease-base-$ubuntuArch.tar.gz';
+
+  static const _ubuntuRootfsHashes = {
+    'amd64':
+        'e77b6f10c2590cef872b33ee9f635a0e3fd1f57fb074c0e52b5c7f56147a0c86',
+    'arm64':
+        'a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2',
+    'armhf':
+        '4fcee4d278f1c5232e085a021a85e4c6cef3853557a88d98ff380b5e5d5841bb',
+  };
+
+  static String? ubuntuRootfsSha256(String ubuntuArch) =>
+      _ubuntuRootfsHashes[ubuntuArch];
+
+  /// Pinned Flutter stable (needs glibc → proot Ubuntu only). Google
+  /// publishes no checksum sidecar for this archive, so verification is
+  /// TLS + size sanity + post-extract structure + `flutter --version`.
+  static const flutterVersion = '3.47.5';
+  static const flutterSdkUrl =
+      'https://storage.googleapis.com/flutter_infra_release/releases/'
+      'stable/linux/flutter_linux_3.47.5-stable.tar.xz';
+  static const flutterTarBytes = 1576266884;
+
+  bool _jdkEnsured = false;
+
+  /// Lazy JDK install — `openjdk-17` from Termux is large, so it does not
+  /// ride the eager install. Installs on first genuine need: any
+  /// java/javac/kotlin/gradle/maven invocation, or an explicit request.
+  /// Same idempotent shape as [ensureRuntime] — cheap to call repeatedly.
+  Future<bool> ensureJdk({void Function(String line)? onLine}) async {
+    if (_jdkEnsured) return true;
+    try {
+      final (code, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v java',
+      ]).timeout(const Duration(seconds: 10));
+      if (code == 0) {
+        _jdkEnsured = true;
+        return true;
+      }
+    } catch (_) {}
+    onLine?.call('[jdk] installing openjdk-17 (one-time, large)…');
+    try {
+      await _aptChecked('update 2>&1', timeout: const Duration(minutes: 3));
+      final (code, out) = await _aptChecked(
+        'install -y openjdk-17 2>&1',
+        timeout: const Duration(minutes: 15),
+      );
+      final verify = await execChecked([
+        'bash',
+        '-c',
+        'command -v java && java -version 2>&1 | head -1',
+      ]).timeout(const Duration(seconds: 30));
+      final ok = code == 0 && verify.$1 == 0;
+      if (ok) {
+        _jdkEnsured = true;
+        onLine?.call('[jdk] java installed ✓');
+      } else {
+        final tail = out.trim().split('\n').where((l) => l.isNotEmpty);
+        onLine?.call(
+          '[jdk] install FAILED: ${tail.isEmpty ? "no output" : tail.last}',
+        );
+      }
+      return ok;
+    } catch (e) {
+      onLine?.call('[jdk] install failed: $e');
+      return false;
+    }
+  }
+
+  bool _kotlinEnsured = false;
+
+  /// Lazy Kotlin compiler — the official `kotlin-compiler` zip is pure JVM,
+  /// so it runs on the sandbox JDK with no proot. The download is verified
+  /// by pinned SHA-256 + size + expected layout before install, then small
+  /// `kotlinc`/`kotlin` wrappers land in `$PREFIX/bin`.
+  Future<bool> ensureKotlin({void Function(String line)? onLine}) async {
+    if (_kotlinEnsured) return true;
+    try {
+      final (code, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v kotlinc',
+      ]).timeout(const Duration(seconds: 10));
+      if (code == 0) {
+        _kotlinEnsured = true;
+        return true;
+      }
+    } catch (_) {}
+    if (!await ensureJdk(onLine: onLine)) {
+      onLine?.call('[kotlin] needs a JDK first — JDK install failed.');
+      return false;
+    }
+    onLine?.call('[kotlin] installing kotlin-compiler $kotlinVersion (~90 MB, one-time)…');
+    try {
+      final ok = await _installKotlinCompiler(onLine);
+      if (ok) _kotlinEnsured = true;
+      return ok;
+    } catch (e) {
+      onLine?.call('[kotlin] install failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _installKotlinCompiler(
+    void Function(String line)? onLine,
+  ) async {
+    final script =
+        '''
+set -u
+DL="\$PREFIX/var/cache/kotlin-compiler.zip"
+mkdir -p "\$PREFIX/var/cache" "\$PREFIX/opt"
+curl -fsSL --retry 3 --connect-timeout 25 "$kotlinZipUrl" -o "\$DL" || exit 10
+SIZE=\$(wc -c < "\$DL" | tr -d ' ')
+[ "\$SIZE" = "$kotlinZipBytes" ] || { echo "size mismatch: \$SIZE"; exit 11; }
+SUM=\$(sha256sum "\$DL" | cut -d' ' -f1)
+[ "\$SUM" = "$kotlinZipSha256" ] || { echo "SHA256 mismatch"; exit 12; }
+unzip -l "\$DL" | grep -q "kotlinc/bin/kotlinc" || { echo "bad layout"; exit 13; }
+unzip -l "\$DL" | grep -q "kotlinc/lib/kotlin-compiler.jar" || { echo "bad layout"; exit 13; }
+rm -rf "\$PREFIX/opt/kotlinc"
+unzip -q -o "\$DL" -d "\$PREFIX/opt" || exit 14
+cat > "\$PREFIX/bin/kotlinc" <<'EOF'
+#!/bin/sh
+D="\$(dirname "\$0")"
+exec "\$D/../opt/kotlinc/bin/kotlinc" "\$@"
+EOF
+cat > "\$PREFIX/bin/kotlin" <<'EOF'
+#!/bin/sh
+D="\$(dirname "\$0")"
+exec "\$D/../opt/kotlinc/bin/kotlin" "\$@"
+EOF
+chmod +x "\$PREFIX/bin/kotlinc" "\$PREFIX/bin/kotlin"
+command -v kotlinc >/dev/null || exit 15
+rm -f "\$DL"
+echo INSTALLED
+''';
+    final (code, out) = await execChecked(
+      ['bash', '-c', script],
+    ).timeout(const Duration(minutes: 15));
+    final tail = out.trim().split('\n').where((l) => l.isNotEmpty);
+    if (code == 0 && out.contains('INSTALLED')) {
+      onLine?.call('[kotlin] kotlinc installed ✓');
+      return true;
+    }
+    onLine?.call(
+      '[kotlin] install FAILED: ${tail.isEmpty ? "exit $code" : tail.last}',
+    );
+    return false;
+  }
+
+  bool _prootEnsured = false;
+
+  /// Lazy proot-Ubuntu fallback — provisioned ON DEMAND (proot from Termux
+  /// + a minimal Ubuntu 24.04 base rootfs, hash-verified), never bundled.
+  /// Triggered by a real glibc/ABI failure or an explicit request (flutter
+  /// and other glibc-only tooling need it).
+  Future<bool> ensureProotUbuntu({void Function(String line)? onLine}) async {
+    if (_prootEnsured) return true;
+    try {
+      final (code, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v proot >/dev/null && test -f "\$PREFIX/ubuntu/etc/os-release"',
+      ]).timeout(const Duration(seconds: 10));
+      if (code == 0) {
+        _prootEnsured = true;
+        return true;
+      }
+    } catch (_) {}
+    onLine?.call('[proot] provisioning Ubuntu userland (one-time)…');
+    try {
+      final ok = await _installProotUbuntu(onLine);
+      if (ok) _prootEnsured = true;
+      return ok;
+    } catch (e) {
+      onLine?.call('[proot] provisioning failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _installProotUbuntu(
+    void Function(String line)? onLine,
+  ) async {
+    // One script does the whole provision so no state is lost between
+    // steps: proot binary → rootfs download → hash verify → unpack →
+    // resolv.conf → smoke probe. The pinned 24.04.5 hashes are embedded;
+    // when that point release disappears the script reads the live
+    // SHA256SUMS and verifies against the newest entry instead.
+    final script = '''
+set -u
+command -v proot >/dev/null || {
+  echo "[proot] installing proot…"
+  apt update 2>&1 | tail -1
+  apt install -y proot 2>&1 | tail -2 || exit 20
+}
+command -v proot >/dev/null || { echo "no proot"; exit 20; }
+UARCH="\$(uname -m)"
+case "\$UARCH" in
+  aarch64) UARCH=arm64 ;;
+  armv7*|armv8l) UARCH=armhf ;;
+  x86_64) UARCH=amd64 ;;
+esac
+case "\$UARCH" in
+  amd64) PIN="${_ubuntuRootfsHashes['amd64']}" ;;
+  arm64) PIN="${_ubuntuRootfsHashes['arm64']}" ;;
+  armhf) PIN="${_ubuntuRootfsHashes['armhf']}" ;;
+  *) echo "unsupported arch \$UARCH"; exit 20 ;;
+esac
+FILE="ubuntu-base-$ubuntuRelease-base-\$UARCH.tar.gz"
+URL="$ubuntuBaseUrl/\$FILE"
+DEST="\$PREFIX/var/cache/\$FILE"
+mkdir -p "\$PREFIX/var/cache"
+EXPECT="\$PIN  \$FILE"
+if ! curl -fsSL --retry 2 --connect-timeout 25 "\$URL" -o "\$DEST"; then
+  echo "[proot] pinned rootfs gone — reading live SHA256SUMS…"
+  SUMS="\$(curl -fsSL --retry 2 --connect-timeout 25 "$ubuntuBaseUrl/SHA256SUMS")" || exit 21
+  LINE="\$(printf "%s" "\$SUMS" | grep -E "base-\$UARCH\\.tar\\.gz\$" | sort | tail -1)"
+  [ -n "\$LINE" ] || { echo "no rootfs for \$UARCH"; exit 21; }
+  FILE="\$(printf "%s" "\$LINE" | awk '{print \$2}')"
+  URL="$ubuntuBaseUrl/\$FILE"
+  DEST="\$PREFIX/var/cache/\$FILE"
+  curl -fsSL --retry 2 --connect-timeout 25 "\$URL" -o "\$DEST" || exit 21
+  EXPECT="\$LINE"
+fi
+echo "\$EXPECT" | (cd "\$PREFIX/var/cache" && sha256sum -c -) || { echo "SHA256 mismatch"; exit 22; }
+rm -rf "\$PREFIX/ubuntu"
+mkdir -p "\$PREFIX/ubuntu"
+tar xzf "\$DEST" -C "\$PREFIX/ubuntu" || exit 23
+printf "nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n" > "\$PREFIX/ubuntu/etc/resolv.conf"
+proot -R "\$PREFIX/ubuntu" true || exit 24
+rm -f "\$DEST"
+echo PROVISIONED
+''';
+    final (code, out) = await execChecked(
+      ['bash', '-c', script],
+    ).timeout(const Duration(minutes: 20));
+    final tail = out.trim().split('\n').where((l) => l.isNotEmpty);
+    if (code == 0 && out.contains('PROVISIONED')) {
+      onLine?.call('[proot] Ubuntu userland ready ✓');
+      return true;
+    }
+    onLine?.call(
+      '[proot] provisioning FAILED: ${tail.isEmpty ? "exit $code" : tail.last}',
+    );
+    return false;
+  }
+
+  /// Run [args] inside the provisioned proot Ubuntu. The calling session
+  /// workspace is bound at `/work` (and used as cwd); [env] extends a
+  /// minimal guest environment. Throws when proot is unavailable.
+  Future<String> execProot(
+    List<String> args, {
+    String? cwd,
+    Directory? hostWorkDir,
+    Map<String, String>? env,
+    Duration timeout = const Duration(minutes: 10),
+  }) async {
+    final ok = await ensureProotUbuntu();
+    if (!ok) {
+      throw Exception(
+        'proot Ubuntu is not available — provisioning failed (need network '
+        'once, ~30 MB). Retry with connectivity.',
+      );
+    }
+    final p = _prefix!.path;
+    final work = hostWorkDir?.path ?? cwd ?? '$p/home';
+    final guestEnv = <String, String>{
+      'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      'HOME': '/root',
+      'LANG': 'C.UTF-8',
+      'TERM': 'xterm-256color',
+      ...?env,
+    };
+    final result = await _trackedRun(
+      '$p/bin/proot',
+      [
+        '-0',
+        '-R',
+        '$p/ubuntu',
+        '-b',
+        '$work:/work',
+        '-w',
+        '/work',
+        'env',
+        for (final e in guestEnv.entries) '${e.key}=${e.value}',
+        '--',
+        ...args,
+      ],
+      workingDirectory: work,
+      environment: _sandboxEnv(),
+    ).timeout(timeout);
+    return '${result.stdout}${result.stderr}';
+  }
+
+  bool _flutterEnsured = false;
+
+  /// Lazy Flutter SDK — glibc-only, so it installs INSIDE proot Ubuntu
+  /// (never natively). ~1.5 GB download, ~4 GB installed: storage-gated and
+  /// strictly on demand (an explicit flutter/dart command or request).
+  /// Google publishes no checksum sidecar, so verification is TLS + size
+  /// sanity + post-extract structure + `flutter --version`.
+  Future<bool> ensureFlutter({void Function(String line)? onLine}) async {
+    if (_flutterEnsured) return true;
+    try {
+      final probe = await execProot(
+        ['test', '-x', '/opt/flutter/bin/flutter'],
+        timeout: const Duration(seconds: 60),
+      ).timeout(const Duration(minutes: 2));
+      if (!probe.contains('not available')) {
+        _flutterEnsured = true;
+        return true;
+      }
+    } catch (_) {}
+    onLine?.call(
+      '[flutter] installing Flutter $flutterVersion inside proot Ubuntu '
+      '(~1.5 GB download, ~4 GB installed, one-time)…',
+    );
+    try {
+      final ok = await _installFlutter(onLine);
+      if (ok) _flutterEnsured = true;
+      return ok;
+    } catch (e) {
+      onLine?.call('[flutter] install failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _installFlutter(
+    void Function(String line)? onLine,
+  ) async {
+    // Storage gate first: the tarball plus the extracted tree plus the
+    // engine precache need real room. Fail fast with an honest number.
+    try {
+      final df = await execProot(
+        ['sh', '-c', 'df -P -k /opt | awk \'NR==2{print \$4}\''],
+        timeout: const Duration(seconds: 60),
+      ).timeout(const Duration(minutes: 2));
+      final freeKb = int.tryParse(df.trim().split('\n').last.trim()) ?? 0;
+      if (freeKb < 5000000) {
+        onLine?.call(
+          '[flutter] needs ~5 GB free; only ${(freeKb / 1048576).toStringAsFixed(1)} GB available.',
+        );
+        return false;
+      }
+    } catch (e) {
+      onLine?.call('[flutter] storage check failed: $e');
+      return false;
+    }
+    final script = '''
+set -u
+export DEBIAN_FRONTEND=noninteractive
+apt-get update 2>&1 | tail -1
+apt-get install -y curl ca-certificates xz-utils git unzip 2>&1 | tail -2 || exit 30
+cd /opt
+curl -fsSL --retry 3 --connect-timeout 25 "$flutterSdkUrl" -o flutter.tar.xz || exit 31
+SIZE=\$(wc -c < flutter.tar.xz | tr -d ' ')
+[ "\$SIZE" = "$flutterTarBytes" ] || { echo "size mismatch: \$SIZE"; exit 32; }
+rm -rf /opt/flutter
+tar xf flutter.tar.xz -C /opt || exit 33
+rm -f flutter.tar.xz
+[ -x /opt/flutter/bin/flutter ] || { echo "bad layout"; exit 34; }
+[ -d /opt/flutter/bin/cache/dart-sdk ] || { echo "no dart-sdk"; exit 34; }
+export CI=true
+/opt/flutter/bin/flutter config --no-analytics >/dev/null 2>&1
+/opt/flutter/bin/flutter --version 2>&1 | head -3 || exit 35
+echo INSTALLED
+''';
+    final out = await execProot(
+      ['bash', '-c', script],
+      timeout: const Duration(minutes: 45),
+    ).timeout(const Duration(minutes: 50));
+    final tail = out.trim().split('\n').where((l) => l.isNotEmpty);
+    if (out.contains('INSTALLED')) {
+      onLine?.call('[flutter] Flutter $flutterVersion installed ✓');
+      return true;
+    }
+    onLine?.call(
+      '[flutter] install FAILED: ${tail.isEmpty ? "no output" : tail.last}',
+    );
+    return false;
+  }
+
   // ═════════════════════════════════════════════════════════════════
   // HEALTH / RUNTIME REPAIR (Health screen + first-launch gate)
   // ═════════════════════════════════════════════════════════════════
@@ -2576,15 +2997,25 @@ audit=false
     if (_fallbackLog.length > 200) {
       _fallbackLog.removeRange(0, _fallbackLog.length - 200);
     }
-    // Provisioning the fallback downloads proot + a minimal Ubuntu rootfs
-    // on FIRST failure only (~40 MB).  Not implemented inline here — the
-    // legacy proot installer is retained separately and wired in the next
-    // commit; for now report the miss clearly so the model can adapt.
+    // Provision the fallback (proot + minimal Ubuntu rootfs, one-time) and
+    // retry the exact command inside it. Never returns null without trying.
     onLine?.call(
-      '[fallback] command needs a glibc environment — logged for '
-      'native packaging; skipping proot (on-demand fallback pending).',
+      '[fallback] command needs a glibc environment — provisioning proot '
+      'Ubuntu and retrying there…',
     );
-    return null;
+    try {
+      final out = await execProot(
+        args,
+        cwd: cwd,
+        hostWorkDir: hostWorkDir,
+        env: env,
+      );
+      onLine?.call('[fallback] ran under proot Ubuntu ✓');
+      return out;
+    } catch (e) {
+      onLine?.call('[fallback] proot retry failed: $e');
+      return null;
+    }
   }
 
   // ═════════════════════════════════════════════════════════════════

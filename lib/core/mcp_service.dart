@@ -882,6 +882,45 @@ class McpService {
     return sawMap ? tools : null;
   }
 
+  /// `tools/list` over stdio, following a non-empty `nextCursor` exactly
+  /// like [_listToolsHttp] so paginating servers never lose pages. Throws
+  /// on timeout/error so the handshake keeps its existing error surfacing.
+  Future<List<McpToolDef>> _listToolsStdio(
+    _RunningServer rs, {
+    Duration? timeout,
+  }) async {
+    final tools = <McpToolDef>[];
+    String? cursor;
+    for (var page = 0; page < _maxToolListPages; page++) {
+      final res = await _rpc(
+        rs,
+        'tools/list',
+        {'cursor': ?cursor},
+        timeout: timeout,
+      );
+      if (res.isTimeout) {
+        throw TimeoutException('tools/list timed out', timeout);
+      }
+      if (res.isError) {
+        throw Exception('tools/list failed: ${res.error}');
+      }
+      final payload = res.value;
+      if (payload is! Map<String, dynamic>) break;
+      final pageTools = payload['tools'];
+      if (pageTools is List) {
+        tools.addAll(
+          pageTools
+              .whereType<Map>()
+              .map((t) => McpToolDef.fromJson(t.cast<String, dynamic>())),
+        );
+      }
+      final next = payload['nextCursor'];
+      if (next is! String || next.isEmpty) break;
+      cursor = next;
+    }
+    return tools;
+  }
+
   Future<String> _connectStdio(
     McpServer server,
     _RunningServer rs, {
@@ -902,6 +941,15 @@ class McpService {
     try {
       if (deadline != null && !_now().isBefore(deadline)) {
         throw TimeoutException('MCP handshake timed out', Duration.zero);
+      }
+      // A stdio entry without a declared command is malformed (MCP
+      // requires `command`). Fail loudly here instead of spawning an
+      // unrelated default binary.
+      if (server.command.trim().isEmpty) {
+        throw Exception(
+          'MCP server "${server.name}" declares no command — add "command" '
+          '(e.g. "npx", "uvx" or "python") to its config.',
+        );
       }
       // Spawn inside the native sandbox — servers are trusted code the
       // user explicitly connected, same trust level as MCP defaults.
@@ -995,28 +1043,9 @@ class McpService {
       _recordConnectPhase('notifications/initialized', timeoutFor());
       _sendNotification(rs, 'notifications/initialized', {});
 
-      // ── Tool discovery ─────────────────────────────────────────────
-      final toolsResult = await _rpc(
-        rs,
-        'tools/list',
-        {},
-        timeout: phaseTimeout('tools/list'),
-      );
-      if (toolsResult.isTimeout) {
-        throw TimeoutException('tools/list timed out', timeoutFor());
-      }
-      if (toolsResult.isError) {
-        throw Exception('tools/list failed: ${toolsResult.error}');
-      }
-      final payload = toolsResult.value;
-      if (payload is Map<String, dynamic>) {
-        rs.tools =
-            (payload['tools'] as List?)
-                ?.whereType<Map>()
-                .map((t) => McpToolDef.fromJson(t.cast<String, dynamic>()))
-                .toList() ??
-            <McpToolDef>[];
-      }
+      // ── Tool discovery (paginated like the HTTP path: a stdio server
+      // returning `nextCursor` must not silently lose pages) ──────────────
+      rs.tools = await _listToolsStdio(rs, timeout: phaseTimeout('tools/list'));
       if (aborted()) return 'connect aborted';
       rs.handshakeDone = true;
       _reconnectAttempts.remove(key);

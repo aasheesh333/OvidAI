@@ -269,7 +269,10 @@ class PluginItem {
   final String name;
   final String author;
   final String description;
-  final String version;
+  /// Synced from the installed manifest on every successful install (the
+  /// content dir is keyed by manifest version, so a stale row version
+  /// would misreport what is actually on disk).
+  String version;
   final String category; // Agent, MCP, Tool, Runtime
   bool installed;
   bool enabled;
@@ -1960,6 +1963,9 @@ class AppState extends ChangeNotifier {
       plugin.installed = true;
       plugin.enabled = true;
       plugin.runtimeId = result.manifest!.id;
+      // The content dir is keyed by manifest version — sync the row so it
+      // never reports the transient placeholder (or a stale version).
+      plugin.version = result.manifest!.version;
       plugin.activation = result.record!.state;
       plugin.immediateSessionId = result.record!.immediateSessionId;
       plugin.promoteOnNextBoot = result.record!.promoteOnNextBoot;

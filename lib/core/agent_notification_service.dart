@@ -26,8 +26,38 @@ class AgentNotificationService {
   bool _supported = true; // desktop/test → channel MissingPluginException
   bool _active = false;
   bool _permAsked = false;
-  int _failCount = 0; // 3 native failures → feature off for the session
+  int _failCount = 0; // 3 native failures → feature off until the cooldown
+  DateTime? _disabledAt;
   int _lastEventHash = 0;
+
+  /// Cooldown before a failure-disabled notifier re-arms itself. A permanent
+  /// session-long disable meant one bad burst (e.g. transient native errors)
+  /// silently killed background keep-alive for the rest of the session.
+  @visibleForTesting
+  static Duration supportCooldownForTest = const Duration(minutes: 5);
+
+  void _disableSupport() {
+    _supported = false;
+    _disabledAt = DateTime.now();
+  }
+
+  /// Re-arm after the cooldown so keep-alive can never die silently for a
+  /// whole session. Returns whether the notifier may proceed.
+  bool _maybeRearmSupport() {
+    if (_supported) return true;
+    final disabledAt = _disabledAt;
+    if (disabledAt == null) {
+      _supported = true;
+      return true;
+    }
+    if (DateTime.now().difference(disabledAt) >= supportCooldownForTest) {
+      _supported = true;
+      _failCount = 0;
+      _disabledAt = null;
+      return true;
+    }
+    return false;
+  }
   Timer? _debounce;
   String? _displayedStopTargetSessionId;
   int _issuedGeneration = 0;
@@ -80,6 +110,8 @@ class AgentNotificationService {
     _debounce?.cancel();
     _active = false;
     _supported = true;
+    _disabledAt = null;
+    supportCooldownForTest = const Duration(minutes: 5);
     _failCount = 0;
     _lastEventHash = 0;
     _displayedStopTargetSessionId = null;
@@ -164,7 +196,8 @@ class AgentNotificationService {
   /// are swallowed and after 3 consecutive native failures the feature
   /// disables itself for the session.
   Future<void> agentWorking(String text, {String? sessionId}) async {
-    if (!_supported || !AppState.I.notificationsEnabled) return;
+    if (!AppState.I.notificationsEnabled) return;
+    if (!_maybeRearmSupport()) return;
     unawaited(_ensurePermission());
     final clean = _clean(text);
     final h = Object.hash(clean, sessionId);
@@ -192,7 +225,7 @@ class AgentNotificationService {
   /// Run finished / idle → notification either updates to Ready & Listening
   /// (if keep-alive enabled) or stops the foreground service.
   void agentIdle({String? sessionId}) {
-    if (!_supported) return;
+    if (!_maybeRearmSupport()) return;
     if (_isAnyRunActive()) {
       if (_active &&
           sessionId != null &&
@@ -305,13 +338,13 @@ class AgentNotificationService {
       if (!isBgDenied) {
         _failCount++;
         if (_failCount >= 3 || e.code.contains('SECURITY')) {
-          _supported = false; // feature off for this app session
+          _disableSupport(); // re-arms after the cooldown (never silent forever)
         }
       }
       return false;
     } catch (_) {
       _failCount++;
-      if (_failCount >= 3) _supported = false;
+      if (_failCount >= 3) _disableSupport();
       return false;
     }
   }

@@ -82,6 +82,41 @@ void main() {
     await app.setNotificationsEnabled(true);
   });
 
+  test('keep-alive re-arms after the failure cooldown instead of dying silent',
+      () async {
+    final app = AppState.createForTest();
+    controlSession(app, 'control-1');
+    setAnyRunActiveForTest(true);
+    AgentNotificationService.supportCooldownForTest = Duration.zero;
+
+    var calls = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      calls++;
+      throw PlatformException(code: 'START_FAIL');
+    });
+
+    // Three failures disable the notifier…
+    await AgentNotificationService.I.agentWorking('one');
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+    await AgentNotificationService.I.agentWorking('two');
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+    await AgentNotificationService.I.agentWorking('three');
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+    expect(AgentNotificationService.I.supportedForTest, isFalse);
+
+    // …but the next run re-arms instead of staying dead for the session.
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      calls++;
+      return true;
+    });
+    await AgentNotificationService.I.agentWorking('four');
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+    expect(AgentNotificationService.I.supportedForTest, isTrue);
+    expect(calls, greaterThan(3));
+  });
+
   test('presence lock lifts when control mode turns off', () async {
     final app = AppState.createForTest();
     final s = controlSession(app, 'control-1');

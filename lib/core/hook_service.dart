@@ -370,11 +370,13 @@ class HookService extends ChangeNotifier {
   /// with (legacy hooks keep their legacy name in `OVID_HOOK_EVENT`).
   List<(String pluginId, PluginHook hook, String declaredEvent)> _resolveHooks(
     String eventRaw,
-    String sessionId,
-  ) {
+    String sessionId, {
+    String? onlyPluginId,
+  }) {
     final canonical = canonicalHookEvent(eventRaw) ?? eventRaw;
     final out = <(String, PluginHook, String)>[];
     for (final pid in PluginContributionRegistry.I.registeredPluginIds) {
+      if (onlyPluginId != null && pid != onlyPluginId) continue;
       final m = PluginContributionRegistry.I.manifestFor(pid);
       if (m == null) continue;
       if (!PluginContributionRegistry.I.isPluginActiveForSession(
@@ -553,6 +555,47 @@ class HookService extends ChangeNotifier {
     return m?.rootPath ?? '';
   }
 
+  /// Rewrite a Windows-style hook entrypoint to its runnable sibling.
+  ///
+  /// Real [CC] plugins ship e.g. `hooks/run-hook.cmd` (a Windows batch /
+  /// polyglot wrapper) which cannot exec on Android. When the payload's
+  /// first `.cmd` reference has an extensionless sibling that exists, use
+  /// the sibling; otherwise leave the payload untouched (fail-open
+  /// downstream). Known root variables are expanded against this plugin's
+  /// installed root for the existence check only.
+  @visibleForTesting
+  String resolveHookPayload(PluginHook hook) {
+    final payload = hook.payload;
+    final match = RegExp(
+      r'"([^"]+\.cmd)"|' r"'([^']+\.cmd)'" r'|(\S+\.cmd)\b',
+      caseSensitive: false,
+    ).firstMatch(payload);
+    if (match == null) return payload;
+    final token = match.group(1) ?? match.group(2) ?? match.group(3) ?? '';
+    if (token.isEmpty) return payload;
+    final root = _rootPathFor(hook.pluginId, hook);
+    if (root.isEmpty) return payload;
+    var expanded = token;
+    for (final v in const [
+      r'${CLAUDE_PLUGIN_ROOT}',
+      r'$CLAUDE_PLUGIN_ROOT',
+      r'${PLUGIN_ROOT}',
+      r'$PLUGIN_ROOT',
+      r'${OVID_PLUGIN_ROOT}',
+      r'$OVID_PLUGIN_ROOT',
+    ]) {
+      expanded = expanded.replaceAll(v, root);
+    }
+    if (expanded.contains(r'$')) return payload;
+    final sibling = expanded.substring(0, expanded.length - 4);
+    try {
+      if (!File(sibling).existsSync()) return payload;
+    } catch (_) {
+      return payload;
+    }
+    return payload.replaceRange(match.start, match.end, '"$sibling"');
+  }
+
   /// Execute one hook. Returns (exitCode, stdout) — throws on
   /// exec error/timeout. Failures bubble to the caller's fail-open
   /// handling. [gate] selects the test seam matching the calling context
@@ -569,19 +612,22 @@ class HookService extends ChangeNotifier {
           ? defaultTimeoutS
           : (hook.timeoutS > maxTimeoutS ? maxTimeoutS : hook.timeoutS),
     );
+    // Windows-style entrypoints never reach a shell verbatim: prefer the
+    // runnable sibling when one exists (fail-open keeps the old string).
+    final command = resolveHookPayload(hook);
     if (gate) {
       final g = gateExecutorForTest;
-      if (g != null) return g(hook.payload, env);
+      if (g != null) return g(command, env);
     }
     final custom = executorForTest;
-    if (custom != null) return (0, await custom(hook.payload, env));
+    if (custom != null) return (0, await custom(command, env));
     final t = execTimeoutForTest;
     if (t != null) return (0, await t(timeout.inSeconds));
     if (!SandboxService.I.isInstalled) {
       throw StateError('sandbox not installed');
     }
     final (code, out) = await SandboxService.I
-        .execChecked(['bash', '-c', hook.payload], hostWorkDir: cwd)
+        .execChecked(['bash', '-c', command], hostWorkDir: cwd)
         .timeout(timeout);
     return (code, out);
   }
@@ -601,6 +647,7 @@ class HookService extends ChangeNotifier {
     String sessionId, {
     Map<String, dynamic> payload = const {},
     String? model,
+    String? onlyPluginId,
   }) async {
     if (!enabled) return '';
     final canonical = canonicalHookEvent(event) ?? event;
@@ -611,7 +658,7 @@ class HookService extends ChangeNotifier {
     if (_firingEvents.contains(guardKey)) return '';
     final chainDepth = _chainDepth();
     if (chainDepth >= maxDepth) return '';
-    final hooks = _resolveHooks(event, sessionId);
+    final hooks = _resolveHooks(event, sessionId, onlyPluginId: onlyPluginId);
     if (hooks.isEmpty) return '';
 
     _firingEvents.add(guardKey);

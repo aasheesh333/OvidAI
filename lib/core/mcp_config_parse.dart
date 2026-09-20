@@ -199,10 +199,11 @@ ImportedMcp importedMcpFromJson(
   final rawCwd = (v['cwd'] as String?)?.trim();
   return ImportedMcp(
     name: name,
+    // No silent default: a stdio entry without `command`/`cmd` keeps an
+    // empty command so connect fails loudly naming the missing field
+    // instead of spawning an unrelated binary.
     command:
-        (v['command'] as String?) ??
-        (v['cmd'] as String?) ??
-        (type == 'stdio' ? 'npx' : ''),
+        (v['command'] as String?) ?? (v['cmd'] as String?) ?? '',
     args: [for (final a in args) interpolateMcpValue(a, resolvedEnv)],
     env: mcpStringMap(v['env'], env: resolvedEnv),
     url: url != null && url.isNotEmpty ? url : null,
@@ -231,9 +232,11 @@ Map<String, String> mcpStringMap(
 }
 
 /// Mutable accumulator for one TOML `[mcp_servers.<name>]` block.
+/// `command` stays null until declared — a missing command must fail loudly
+/// at connect time, never silently spawn a default binary.
 class _TomlServerAgg {
   final String name;
-  String command = 'npx';
+  String? command;
   List<String> args = const [];
   String? url;
   String? cwd;
@@ -363,7 +366,7 @@ ImportedMcp _importedFromToml(_TomlServerAgg a, Map<String, String> env) {
       : (url != null && url.isNotEmpty ? 'http' : 'stdio');
   return ImportedMcp(
     name: a.name,
-    command: resolvedType == 'stdio' ? a.command : '',
+    command: resolvedType == 'stdio' ? (a.command ?? '') : '',
     args: [for (final arg in a.args) interpolateMcpValue(arg, env)],
     env: {
       for (final e in a.env.entries)

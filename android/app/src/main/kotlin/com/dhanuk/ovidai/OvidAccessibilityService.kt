@@ -745,17 +745,35 @@ class OvidAccessibilityService : AccessibilityService() {
     }
 
     override fun onServiceConnected() {
-        super.onServiceConnected()
+        // Bind first: even if the service-info update below throws, the
+        // instance must be visible so device calls stop reporting
+        // "connecting" instead of wedging until a manual toggle.
         instance = this
-        treeCache.markDirty()
-        val info = serviceInfo ?: AccessibilityServiceInfo()
-        info.flags = info.flags or
-            AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
-            AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-        info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
-        info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-        info.notificationTimeout = 50
-        serviceInfo = info
+        super.onServiceConnected()
+        try {
+            treeCache.markDirty()
+            val info = serviceInfo ?: AccessibilityServiceInfo()
+            info.flags = info.flags or
+                AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+            info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+            info.notificationTimeout = 50
+            serviceInfo = info
+        } catch (_: Throwable) {
+            // A bad service-info update must never kill the bind: the
+            // service stays usable with manifest defaults.
+        }
+    }
+
+    override fun onRebind(intent: Intent?) {
+        // A rebind (no fresh onServiceConnected) must also publish the
+        // instance, or every device call would report "connecting" forever.
+        instance = this
+        try {
+            treeCache.markDirty()
+        } catch (_: Throwable) {}
+        super.onRebind(intent)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {

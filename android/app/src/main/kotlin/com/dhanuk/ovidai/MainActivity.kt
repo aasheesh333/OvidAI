@@ -507,6 +507,53 @@ class MainActivity : FlutterActivity() {
                     "deviceServiceState" -> {
                         result.success(deviceServiceState())
                     }
+                    "deviceServiceReconnect" -> {
+                        // Enabled in Settings but the OS has not rebound our
+                        // process yet after an app restart — the state users
+                        // previously fixed with a manual off/on toggle.
+                        // Toggling OUR OWN component state programmatically
+                        // forces AccessibilityManagerService to re-evaluate
+                        // and rebind, with no user action and no extra
+                        // permission (own package). A genuinely disabled
+                        // service is left alone and reported as such.
+                        try {
+                            if (OvidAccessibilityService.instance != null) {
+                                result.success("bound")
+                            } else if (!isAccessibilityServiceEnabled(this)) {
+                                result.success("disabled")
+                            } else {
+                                try {
+                                    val cn = ComponentName(
+                                        this,
+                                        OvidAccessibilityService::class.java,
+                                    )
+                                    packageManager.setComponentEnabledSetting(
+                                        cn,
+                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                                        android.content.pm.PackageManager.DONT_KILL_APP,
+                                    )
+                                    packageManager.setComponentEnabledSetting(
+                                        cn,
+                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                                        android.content.pm.PackageManager.DONT_KILL_APP,
+                                    )
+                                } catch (_: Exception) {}
+                                result.success(
+                                    if (OvidAccessibilityService.instance != null) {
+                                        "bound"
+                                    } else {
+                                        "connecting"
+                                    },
+                                )
+                            }
+                        } catch (e: Exception) {
+                            result.error(
+                                "RECONNECT_FAILED",
+                                e.message ?: "Reconnect failed.",
+                                null,
+                            )
+                        }
+                    }
                     "getSecurityStatus" -> {
                         result.success(SecurityCheck.getDeviceSecuritySummary(this))
                     }

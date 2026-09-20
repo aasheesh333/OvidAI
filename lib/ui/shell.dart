@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../core/agent_notification_service.dart';
 import '../core/agent_service.dart';
+import '../core/device_control_service.dart';
 import '../core/firebase_service.dart';
 import '../core/mcp_service.dart';
 import '../core/startup_coordinator.dart';
@@ -66,6 +67,10 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.resumed:
         unawaited(AppState.I.reconnectServicesAfterResume());
+        // If Ovid's accessibility service is enabled in Settings but the
+        // OS has not rebound it (app restart), nudge the rebind now so
+        // control mode works without a manual off/on toggle.
+        unawaited(DeviceControlService.I.refreshServiceBinding());
         // Control overlay is visible only while backgrounded.
         unawaited(AgentService.I.setAppForegrounded(true));
         // PR32: a run that survived the background must keep its

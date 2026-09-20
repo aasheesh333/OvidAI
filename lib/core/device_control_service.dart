@@ -205,12 +205,33 @@ class DeviceControlService {
     return 'disabled';
   }
 
+  /// Asks the native side to force an accessibility rebind when the service
+  /// is enabled in Settings but the OS has not rebound it after an app
+  /// restart — the state users previously fixed with a manual off/on toggle.
+  /// Returns the state after the nudge: `bound`, `connecting`, or
+  /// `disabled`. Never throws; a genuinely disabled service is reported as
+  /// such so callers show the Settings guidance instead of retrying.
+  Future<String> reconnectService() async {
+    try {
+      final state = await _channel.invokeMethod<String>(
+        'deviceServiceReconnect',
+      );
+      if (state == 'bound' || state == 'connecting' || state == 'disabled') {
+        return state!;
+      }
+    } catch (_) {}
+    return 'connecting';
+  }
+
   /// Absorbs an in-progress accessibility rebind. Intended for app-resume
-  /// callers: when the state is `connecting`, waits with the same capped
-  /// backoff until bound or the budget is exhausted. Non-throwing.
+  /// callers: when the state is `connecting`, first nudges the OS to rebind
+  /// (the programmatic equivalent of the manual toggle), then waits with
+  /// the same capped backoff until bound or the budget is exhausted.
+  /// Non-throwing.
   Future<void> refreshServiceBinding() async {
     try {
       if (await serviceState() != 'connecting') return;
+      await reconnectService();
       final generation = _deviceGeneration;
       var attempt = 0;
       var waited = Duration.zero;

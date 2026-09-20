@@ -6904,6 +6904,10 @@ Future<void> _enableControlMode(BuildContext context) async {
     app.controlDisclosureAccepted = true;
   }
   AgentService.I.setMode(AgentMode.control);
+  // If the accessibility service is enabled but unbound after an app
+  // restart, nudge the OS to rebind now — control mode must not need a
+  // manual off/on toggle to start working.
+  unawaited(DeviceControlService.I.refreshServiceBinding());
   // Battery exemption once: control mode means permanent presence, which
   // Doze/OEM killers will end without the exemption. Asked only on first
   // enable, and only when not already exempt — never a nag.
@@ -6917,6 +6921,36 @@ Future<void> _enableControlMode(BuildContext context) async {
       try {
         await AgentService.I.requestBatteryExemption();
       } catch (_) {}
+    }
+  }
+  // Control mode survives the background only through the persistent
+  // notification (Android mandates it for a foreground service). If the
+  // user turned notifications off, say so once with a one-tap fix instead
+  // of letting control runs die silently in the background.
+  if (!app.notificationsEnabled && context.mounted) {
+    final enable = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('Keep Ovid alive in the background?'),
+        content: const Text(
+          'Control mode drives your device while the app is backgrounded. '
+          'Android only allows that with a persistent notification. Turn '
+          'notifications on so runs survive the background.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(d, true),
+            child: const Text('Turn on'),
+          ),
+        ],
+      ),
+    );
+    if (enable == true) {
+      await app.setNotificationsEnabled(true);
     }
   }
   // Only deep-link to Settings when the accessibility service is not yet

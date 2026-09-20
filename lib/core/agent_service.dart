@@ -3565,8 +3565,41 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         'optional dependencies unavailable: '
             '${runtimeResult.degradedNames.join(', ')}',
     ];
+    final installedId = row.runtimeId;
+    if (sid.isNotEmpty && installedId != null) {
+      await _fireInstalledPluginSessionStart(sid, installedId);
+    }
     return 'Plugin "${row.name}" ${parts.join(' · ')} '
         '(id ${row.runtimeId}).';
+  }
+
+  /// Fire a freshly installed plugin's `session_start` hooks in the
+  /// installing session so its bootstrap context exists immediately.
+  ///
+  /// The generic `session_start` is exactly-once per boot and already ran
+  /// for this session, so a plain re-fire would either no-op or duplicate
+  /// every other plugin's context. Scoping to the new plugin id gives the
+  /// installing session exactly what a fresh session would have received
+  /// from this plugin — and nothing else.
+  Future<void> _fireInstalledPluginSessionStart(
+    String sessionId,
+    String pluginId,
+  ) async {
+    if (sessionId.isEmpty) return;
+    try {
+      await HookService.I.fire(
+        'session_start',
+        sessionId,
+        payload: const {
+          'reason': 'created',
+          'pluginInstalled': true,
+          'isSubagent': false,
+        },
+        model: _runSession?.model,
+        onlyPluginId: pluginId,
+      );
+      await refreshSkills(sessionId: sessionId);
+    } catch (_) {}
   }
 
   /// Names of the skill/command contributions a legacy plugin row actually
@@ -7383,7 +7416,10 @@ Execution tiers: run_shell picks the best tier automatically.
 • Whenever the native sandbox is installed (one-time setup) → bash, python3,
   node/npm, git, apt/curl/wget all available, in any access mode, in the
   session workspace. Never report these as "not found" without running
-  them first — they work.
+  them first — they work. java/kotlin provision on first use (JDK +
+  compiler install automatically); flutter runs inside an on-demand
+  proot-Ubuntu userland (large one-time download, needs free space) —
+  ask the user before that download only if storage looks tight.
 • Only when the sandbox is NOT installed: instant phone terminal
   (Android device shell + toybox: ls/cat/grep/cp/mv/ps/uname...). If a
   command is "not found", tell the user to run the one-time native
@@ -9499,6 +9535,26 @@ ${await _agentsMdBlock()}
                 onLine: (l) => _emit('shellOut', l),
               );
             }
+            // JVM toolchains provision lazily like the compiler above: java
+            // needs the JDK, kotlin needs JDK + compiler (pure JVM, runs
+            // natively), flutter needs proot Ubuntu (glibc-only, large —
+            // storage-gated inside ensureFlutter). Best-effort: a failed
+            // provision doesn't block the command itself.
+            if (_looksLikeJvmCommand(cmd)) {
+              await SandboxService.I.ensureJdk(
+                onLine: (l) => _emit('shellOut', l),
+              );
+              if (_looksLikeKotlinCommand(cmd)) {
+                await SandboxService.I.ensureKotlin(
+                  onLine: (l) => _emit('shellOut', l),
+                );
+              }
+            }
+            if (_looksLikeFlutterCommand(cmd)) {
+              await SandboxService.I.ensureFlutter(
+                onLine: (l) => _emit('shellOut', l),
+              );
+            }
             // Native bionic sandbox (bash/python/node/apt) — full tooling.
             // 10-minute cap: builds/installs/test-suites need real time
             // (60s used to kill them mid-run). Longer work → the model
@@ -10237,7 +10293,17 @@ ${await _agentsMdBlock()}
                 'optional dependencies unavailable: '
                     '${runtimeResult.degradedNames.join(', ')}',
             ];
-            return 'Plugin "$pluginName" ${parts.join(' · ')} '
+            // The installing session gets this plugin's session-start
+            // bootstrap now — otherwise its skills mount but its context
+            // stays empty until a brand-new session.
+            final installedId = target.runtimeId;
+            if (!pendingOnly && installedId != null) {
+              await _fireInstalledPluginSessionStart(sid, installedId);
+            }
+            final displayName = pluginName.isNotEmpty
+                ? pluginName
+                : repoArg;
+            return 'Plugin "$displayName" ${parts.join(' · ')} '
                 '(id ${target.runtimeId}).';
           }
 
@@ -14133,6 +14199,50 @@ ${await _agentsMdBlock()}
   );
   bool _looksLikeNativeBuildCommand(String cmd) =>
       _nativeBuildCommandRe.hasMatch(cmd);
+
+  /// JVM + Flutter command detection for lazy toolchain provisioning. Only
+  /// the leading tool of each shell segment counts, so `echo java` or
+  /// `myjavascript` never trigger a JDK download.
+  static const _jvmTools = {
+    'java',
+    'javac',
+    'kotlin',
+    'kotlinc',
+    'gradle',
+    'gradlew',
+    'mvn',
+  };
+  static const _kotlinTools = {'kotlin', 'kotlinc'};
+  static const _flutterTools = {'flutter', 'dart'};
+
+  static String? _firstCommandToken(String segment) {
+    var t = segment.trim();
+    if (t.startsWith('./')) t = t.substring(2);
+    if (t.startsWith('sudo ')) t = t.substring(5).trimLeft();
+    final parts = t.split(RegExp(r'\s+'));
+    if (parts.isEmpty || parts.first.isEmpty) return null;
+    return parts.first;
+  }
+
+  static bool _commandUsesTools(String cmd, Set<String> tools) {
+    for (final seg in cmd.split(RegExp(r'&&|\|\||;|\n|\|'))) {
+      final first = _firstCommandToken(seg);
+      if (first != null && tools.contains(first)) return true;
+    }
+    return false;
+  }
+
+  bool _looksLikeJvmCommand(String cmd) => _commandUsesTools(cmd, _jvmTools);
+
+  bool _looksLikeKotlinCommand(String cmd) =>
+      _commandUsesTools(cmd, _kotlinTools);
+
+  bool _looksLikeFlutterCommand(String cmd) =>
+      _commandUsesTools(cmd, _flutterTools);
+
+  @visibleForTesting
+  static bool looksLikeJvmCommandForTest(String cmd) =>
+      _commandUsesTools(cmd, _jvmTools);
 
   /// PR47/K5: is [cmd] a bare echo/printf placeholder (fake work)? True only
   /// when EVERY shell segment is an echo/printf (or a `true`/`:` no-op) with
