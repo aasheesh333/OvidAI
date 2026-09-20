@@ -1,0 +1,82 @@
+name: Build Ovid APK + AAB
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Analyze (fail on errors)
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Build debug APK
+        run: flutter build apk --debug
+
+      - name: Rename debug APK
+        run: |
+          cp build/app/outputs/flutter-apk/app-debug.apk \
+             build/app/outputs/flutter-apk/Ovid-debug.apk
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Rename release APK
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             build/app/outputs/flutter-apk/Ovid-release.apk
+
+      # The release build type is signed with the debug keystore (see
+      # android/app/build.gradle.kts), so the bundle builds with no extra
+      # secrets. Swap in a real signing config before store upload.
+      - name: Build release AAB
+        run: flutter build appbundle --release
+
+      - name: Rename AAB
+        run: |
+          cp build/app/outputs/bundle/release/app-release.aab \
+             build/app/outputs/bundle/release/Ovid-release.aab
+
+      - name: Show artifact sizes
+        run: |
+          ls -lh build/app/outputs/flutter-apk/*.apk || true
+          ls -lh build/app/outputs/bundle/release/*.aab || true
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ovid-APK-debug
+          path: build/app/outputs/flutter-apk/Ovid-debug.apk
+          retention-days: 30
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ovid-APK-release
+          path: build/app/outputs/flutter-apk/Ovid-release.apk
+          retention-days: 30
+
+      - name: Upload release AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ovid-AAB-release
+          path: build/app/outputs/bundle/release/Ovid-release.aab
+          retention-days: 30
