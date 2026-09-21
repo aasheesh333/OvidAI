@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+
 import '../core/theme.dart';
 import '../core/state.dart';
 
@@ -68,6 +70,21 @@ class _ProvidersScreenState extends State<ProvidersScreen> {
               ),
               for (final p in filtered)
                 ProviderCard(key: ValueKey(p.id), provider: p),
+              // A search that matches nothing should say so instead of
+              // leaving an empty list under the search box.
+              if (filtered.isEmpty && _query.trim().isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 28, 24, 12),
+                  child: Text(
+                    'No providers match "${_query.trim()}".',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      height: 1.6,
+                      color: Aether.textMuted,
+                    ),
+                  ),
+                ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
                 child: OutlinedButton.icon(
@@ -166,9 +183,8 @@ void addProviderSheet(BuildContext context) {
                 );
                 if (!ctx.mounted) return;
                 if (error != null) {
-                  ScaffoldMessenger.of(
-                    ctx,
-                  ).showSnackBar(SnackBar(content: Text(error)));
+                  ScaffoldMessenger.of(ctx)
+                      .showSnackBar(SnackBar(content: Text(error)));
                   return;
                 }
                 Navigator.pop(ctx);
@@ -261,17 +277,17 @@ class _ProviderCardState extends State<ProviderCard> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, controller.text),
-            child: const Text(
-              'Save',
-              style: TextStyle(color: Aether.accent),
-            ),
+            child: const Text('Save', style: TextStyle(color: Aether.accent)),
           ),
         ],
       ),
     );
     controller.dispose();
     if (value == null || !mounted) return;
-    final error = await AppState.I.updateProviderBaseUrlChecked(provider, value);
+    final error = await AppState.I.updateProviderBaseUrlChecked(
+      provider,
+      value,
+    );
     if (!mounted) return;
     if (error != null) {
       messenger.showSnackBar(SnackBar(content: Text(error)));
@@ -293,12 +309,15 @@ class _ProviderCardState extends State<ProviderCard> {
   void _updateApiKey(String value) {
     final target = provider;
     // Strip newlines/control chars on save — a pasted multi-line blob
-    // (e.g. an error message) must never reach the HTTP header layer.
-    target.apiKey = value.replaceAll(RegExp(r'[\s\x00-\x1f\x7f]'), '');
+    // (e.g. an error message) must never reach the HTTP header layer. The
+    // SANITIZED value is what gets persisted; persisting the raw input
+    // would quietly store a broken key in secure storage.
+    final sanitized = value.replaceAll(RegExp(r'[\s\x00-\x1f\x7f]'), '');
+    target.apiKey = sanitized;
     AppState.I.refresh();
     _keyPersistTimer?.cancel();
     _keyPersistTimer = Timer(const Duration(milliseconds: 400), () {
-      AppState.I.updateProviderApiKey(target, value).catchError((_) {
+      AppState.I.updateProviderApiKey(target, sanitized).catchError((_) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -337,9 +356,8 @@ class _ProviderCardState extends State<ProviderCard> {
     if (!mounted) return;
     if (error != null) {
       _deleting = false;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(error)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error)));
     }
   }
 
@@ -371,7 +389,11 @@ class _ProviderCardState extends State<ProviderCard> {
               ),
               child: Center(
                 child: Text(
-                  provider.name.substring(0, 1).toUpperCase(),
+                  // Empty provider names (deleted/renamed) would throw on
+                  // substring — fall back to a neutral glyph.
+                  provider.name.isEmpty
+                      ? '?'
+                      : provider.name.substring(0, 1).toUpperCase(),
                   style: TextStyle(
                     fontSize: 15,
                     fontWeight: FontWeight.w700,

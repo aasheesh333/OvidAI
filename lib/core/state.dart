@@ -3,10 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
+
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import 'agent_notification_service.dart';
 import 'agent_service.dart' show AgentService;
 import 'firebase_service.dart';
@@ -131,8 +133,7 @@ class ProviderConfig {
     }
   }
 
-  Map<String, bool> get visionOverrides =>
-      Map.unmodifiable(_visionOverrides);
+  Map<String, bool> get visionOverrides => Map.unmodifiable(_visionOverrides);
 
   /// Merge a persisted provider row (used by [AppState.loadProviderState]).
   void applyPersistedJson(Map<String, dynamic> entry) {
@@ -174,9 +175,9 @@ class ProviderConfig {
   /// native Messages API even for legacy rows persisted before [apiFormat].
   ApiFormat get effectiveApiFormat =>
       apiFormat == ApiFormat.anthropic ||
-              baseUrl.toLowerCase().contains('anthropic.com')
-          ? ApiFormat.anthropic
-          : ApiFormat.openai;
+          baseUrl.toLowerCase().contains('anthropic.com')
+      ? ApiFormat.anthropic
+      : ApiFormat.openai;
 
   /// Returns the API key with all whitespace and control characters
   /// removed.  This is the value that should be used in HTTP headers —
@@ -269,6 +270,7 @@ class PluginItem {
   final String name;
   final String author;
   final String description;
+
   /// Synced from the installed manifest on every successful install (the
   /// content dir is keyed by manifest version, so a stale row version
   /// would misreport what is actually on disk).
@@ -921,9 +923,8 @@ class SessionAnalytics {
   int get averageTtftMs => ttftSamples == 0 ? 0 : ttftMs ~/ ttftSamples;
   double get decodeTokensPerSecond =>
       llmMs <= 0 ? 0 : decodeTokens / (llmMs / 1000);
-  double get contextFraction => contextLimit <= 0
-      ? 0
-      : (contextTokens / contextLimit).clamp(0.0, 1.0);
+  double get contextFraction =>
+      contextLimit <= 0 ? 0 : (contextTokens / contextLimit).clamp(0.0, 1.0);
 
   void add({
     int inputTokens = 0,
@@ -959,7 +960,9 @@ class SessionAnalytics {
     if (contextLimit > 0) this.contextLimit = contextLimit;
     if (contextSystemTokens > 0) this.contextSystemTokens = contextSystemTokens;
     if (contextToolTokens > 0) this.contextToolTokens = contextToolTokens;
-    if (contextMessageTokens > 0) this.contextMessageTokens = contextMessageTokens;
+    if (contextMessageTokens > 0) {
+      this.contextMessageTokens = contextMessageTokens;
+    }
     this.estimatedCostUsd += estimatedCostUsd;
   }
 
@@ -1561,6 +1564,10 @@ void registerAllNativePlugins() {
   registerAiMedia();
 }
 
+/// Lifecycle of the deferred first-launch runtime install
+/// (node/python toolchain). `idle` also covers "banner dismissed".
+enum RuntimeInstallState { idle, running, done, failed }
+
 class AppState extends ChangeNotifier {
   /// Singleton — everything is user-side / on-device.
   static AppState? _testInstance;
@@ -1659,8 +1666,7 @@ class AppState extends ChangeNotifier {
 
   /// Durable, secret-scrubbed startup status per canonical plugin/MCP id
   /// (Task 7, spec §5.8). Shared process-wide store.
-  PluginRuntimeStatusStore get runtimeStatusStore =>
-      PluginRuntimeStatusStore.I;
+  PluginRuntimeStatusStore get runtimeStatusStore => PluginRuntimeStatusStore.I;
 
   /// The persisted terminal status for [canonicalId], or null.
   PluginRuntimeStatus? statusFor(String canonicalId) =>
@@ -1731,9 +1737,7 @@ class AppState extends ChangeNotifier {
     String pluginId, {
     bool revive = false,
   }) async {
-    final row = plugins
-        .where((p) => p.runtimeId == pluginId)
-        .firstOrNull;
+    final row = plugins.where((p) => p.runtimeId == pluginId).firstOrNull;
     if (row == null) return;
     final health = await pluginHealthFor(row);
     if (!health.state.isTerminal) return;
@@ -1797,8 +1801,7 @@ class AppState extends ChangeNotifier {
     // fast instead of failing again; a ready outcome clears the memo.
     // Manual Retry clears it too (coordinator onBeforeRetry), so a tap
     // always runs for real.
-    if (status.id == 'marketplace.refresh' ||
-        status.id == 'sandbox.selfHeal') {
+    if (status.id == 'marketplace.refresh' || status.id == 'sandbox.selfHeal') {
       if (status.state == StartupItemState.failed ||
           status.state == StartupItemState.degraded) {
         unawaited(_writeStartupFailureMemo(status.id, DateTime.now()));
@@ -1812,9 +1815,7 @@ class AppState extends ChangeNotifier {
   /// capability surface (roster tools, registered hooks, owned MCP); legacy
   /// rows fall back to the roster probe. Hooks are never executed.
   Future<StartupItemStatus> pluginHealthFor(PluginItem row) async {
-    final label = row.name.isNotEmpty
-        ? row.name
-        : (row.runtimeId ?? 'Plugin');
+    final label = row.name.isNotEmpty ? row.name : (row.runtimeId ?? 'Plugin');
     if (row.migrationRequired) {
       return StartupItemStatus.migrationRequired(
         row.runtimeId ?? label,
@@ -2106,7 +2107,7 @@ class AppState extends ChangeNotifier {
     refresh();
   }
 
-    /// Install an inbuilt (source-less) plugin/MCP row directly: mark it
+  /// Install an inbuilt (source-less) plugin/MCP row directly: mark it
   /// installed+enabled and persist. Inbuilt rows ship with the app and have
   /// no remote source to fetch, so the add-marketplace sheet must never open
   /// for them.
@@ -2427,6 +2428,7 @@ class AppState extends ChangeNotifier {
         startMaintenance: () =>
             _runStartupStage('sandbox.selfHeal', _startSandboxMaintenance),
         runtimesVerified: SandboxService.I.runtimesVerified,
+        runtimesRequested: () => SandboxService.I.runtimesRequested,
         installCoreRuntimes: () =>
             SandboxService.I.installCoreRuntimes((_, _, _) {}),
         enforceQuota: _enforceSandboxQuota,
@@ -2821,9 +2823,7 @@ class AppState extends ChangeNotifier {
       // is NOT truthful until the plugin is actually registered/activated.
       // The post-activation capability probe records the durable `ready` (C1).
       if (status.state == StartupItemState.ready) continue;
-      unawaited(
-        recordStartupStatus(status, ownerId: status.id),
-      );
+      unawaited(recordStartupStatus(status, ownerId: status.id));
     }
     _pluginSafetyReconciled = true;
   }
@@ -2981,15 +2981,13 @@ class AppState extends ChangeNotifier {
       browserDesktopMode = prefs.getBool(_kBrowserDesktopMode) ?? false;
       autoRunSafeCommands = prefs.getBool(_kAutoRunSafe) ?? true;
       sendWhileBusy = prefs.getString(_kSendWhileBusy) ?? 'queue';
-      conversationDisplay =
-          prefs.getString(_kConversationDisplay) ?? 'compact';
+      conversationDisplay = prefs.getString(_kConversationDisplay) ?? 'compact';
       sandboxSkipped = prefs.getBool(_kSandboxSkipped) ?? false;
       localePref = prefs.getString(_kLocale) ?? 'system';
       seenWelcomeVersion = prefs.getString(_kWelcome) ?? '';
       _keepAliveEnabled = prefs.getBool(_kKeepAlivePref) ?? true;
       _notificationsEnabled = prefs.getBool(_kNotificationsPref) ?? true;
-      _controlDisclosureAccepted =
-          prefs.getBool(_kControlDisclosure) ?? false;
+      _controlDisclosureAccepted = prefs.getBool(_kControlDisclosure) ?? false;
       controlBatteryPromptShown =
           prefs.getBool(_kControlBatteryPrompt) ?? false;
       chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0).clamp(
@@ -3051,7 +3049,9 @@ class AppState extends ChangeNotifier {
       }
       if (lastSelectedModel.isNotEmpty &&
           lastSelectedModel != 'Select a provider') {
-        final pId = (lastSelectedProviderId != null && lastSelectedProviderId!.isNotEmpty)
+        final pId =
+            (lastSelectedProviderId != null &&
+                lastSelectedProviderId!.isNotEmpty)
             ? lastSelectedProviderId
             : _inferProviderId(lastSelectedModel);
         if (pId != null &&
@@ -4983,7 +4983,10 @@ class AppState extends ChangeNotifier {
   // string or null so the tool layer can surface a real reason.
 
   /// Update a provider's display name (id is stable, never renamed).
-  Future<String?> updateProviderName(ProviderConfig provider, String value) async {
+  Future<String?> updateProviderName(
+    ProviderConfig provider,
+    String value,
+  ) async {
     final v = value.trim();
     if (v.isEmpty) return 'Provider name cannot be empty.';
     provider.name = v;
@@ -5031,7 +5034,10 @@ class AppState extends ChangeNotifier {
   }
 
   /// Add a model id to a provider (dedup). Empty ids are rejected.
-  Future<String?> addProviderModel(ProviderConfig provider, String modelId) async {
+  Future<String?> addProviderModel(
+    ProviderConfig provider,
+    String modelId,
+  ) async {
     final m = modelId.trim();
     if (m.isEmpty) return 'Model id cannot be empty.';
     if (provider.models.contains(m)) {
@@ -5221,6 +5227,103 @@ class AppState extends ChangeNotifier {
       unawaited(setSandboxSkipped(false));
     }
     refresh();
+  }
+
+  // ── Deferred first-launch runtime install (node/python/…) ──────────
+  //
+  // The first-launch gate installs only the native sandbox core (fast) so
+  // the app is interactive in under a minute. The network-bound runtime
+  // phase (apt update + install) runs here, in the background, exactly
+  // once per install: the shell kicks it off after first frame and a
+  // banner shows live progress. Idempotent and cheap when there is
+  // nothing to do (pure disk probe, no processes spawned).
+
+  /// Lifecycle of the deferred background runtime install.
+  RuntimeInstallState runtimeInstallState = RuntimeInstallState.idle;
+
+  /// Most recent progress line from the background installer (for the banner).
+  String runtimeInstallLine = '';
+
+  /// 0..1 progress of the background installer, -1 when indeterminate.
+  double runtimeInstallProgress = -1;
+
+  bool _bgRuntimeInstallStarted = false;
+
+  /// Starts the deferred runtime install unless it already ran. Safe to
+  /// call on every shell open: when the runtimes are present it returns
+  /// after a cheap disk check. Never throws.
+  Future<void> maybeStartBackgroundRuntimeInstall() async {
+    if (_bgRuntimeInstallStarted) return;
+    _bgRuntimeInstallStarted = true;
+    if (!sandboxInstalled) return;
+    // Cheap path first: pure disk probe, no process spawns.
+    if (SandboxService.I.runtimesPresentOnDisk()) {
+      runtimeInstallState = RuntimeInstallState.done;
+      refresh();
+      return;
+    }
+    // Confirm with the real probe before burning network on an install.
+    if (await SandboxService.I.runtimesVerified()) {
+      runtimeInstallState = RuntimeInstallState.done;
+      refresh();
+      return;
+    }
+    runtimeInstallState = RuntimeInstallState.running;
+    runtimeInstallLine = 'Installing Node.js + Python in the background…';
+    runtimeInstallProgress = -1;
+    refresh();
+    try {
+      await SandboxService.I.installCoreRuntimes((phase, progress, line) {
+        runtimeInstallLine = line;
+        // Phase 7 reports 0.05 (apt update) / 0.4 (apt install) weights;
+        // surface them directly as the banner's determinate progress.
+        runtimeInstallProgress = progress.clamp(0.0, 1.0);
+        refresh();
+      });
+      runtimeInstallState = await SandboxService.I.runtimesVerified()
+          ? RuntimeInstallState.done
+          : RuntimeInstallState.failed;
+      if (runtimeInstallState == RuntimeInstallState.failed) {
+        runtimeInstallLine =
+            'Runtime install did not complete — tap Retry. '
+            'Node/Python tools will install on demand instead.';
+      }
+    } catch (e) {
+      runtimeInstallState = RuntimeInstallState.failed;
+      runtimeInstallLine = 'Runtime install failed: $e';
+    }
+    refresh();
+  }
+
+  /// Retry entry point for the banner's Retry button.
+  Future<void> retryBackgroundRuntimeInstall() {
+    _bgRuntimeInstallStarted = false;
+    _runtimeInstallBannerDismissed = false;
+    return maybeStartBackgroundRuntimeInstall();
+  }
+
+  /// Dismisses the banner. The install keeps running when it is active;
+  /// a failed install stays failed until Retry.
+  void dismissRuntimeInstallBanner() {
+    if (runtimeInstallState == RuntimeInstallState.running) {
+      // Keep the state machine; the banner just hides itself via this flag.
+      _runtimeInstallBannerDismissed = true;
+    } else {
+      runtimeInstallState = RuntimeInstallState.idle;
+    }
+    refresh();
+  }
+
+  bool _runtimeInstallBannerDismissed = false;
+
+  /// Whether the background-install banner should be visible right now.
+  bool get showRuntimeInstallBanner {
+    if (_runtimeInstallBannerDismissed &&
+        runtimeInstallState == RuntimeInstallState.running) {
+      return false;
+    }
+    return runtimeInstallState == RuntimeInstallState.running ||
+        runtimeInstallState == RuntimeInstallState.failed;
   }
 
   static const _kMarketplaces = 'ovid_marketplaces_v1';
@@ -5413,9 +5516,7 @@ class AppState extends ChangeNotifier {
 
   @visibleForTesting
   static List<String> purgedMarketplacesForTest(Iterable<String> repos) =>
-      repos
-          .where((r) => !deadMarketplaceRepos.contains(r.trim()))
-          .toList();
+      repos.where((r) => !deadMarketplaceRepos.contains(r.trim())).toList();
 
   Future<void> _loadMarketplaces() async {
     try {
@@ -6047,31 +6148,54 @@ class AppState extends ChangeNotifier {
   static String? _githubPluginSource(dynamic raw, {String? marketplaceRepo}) {
     if (raw == null) return null;
     // Claude-Code / Codex object form: `{source:"url", url}`,
-    // `{source:"github", repo, ref}`, `{source:"local", path}`. Normalize to
+    // `{source:"github", repo, ref}`, `{source:"local", path}`, or the
+    // NESTED object form some marketplaces ship
+    // (`{"source": {"source": "url", "url": "./"}}`, as in
+    // obra/superpowers' `.agents/plugins/marketplace.json`). Normalize to
     // the string forms below instead of throwing a cast error (which the
     // fetch loop used to swallow as a false "not found").
     if (raw is Map) {
-      final kind = (raw['source'] as String?)?.toLowerCase();
+      final sourceValue = raw['source'];
+      if (sourceValue is Map) {
+        return _githubPluginSource(
+          sourceValue,
+          marketplaceRepo: marketplaceRepo,
+        );
+      }
+      final kind = sourceValue is String ? sourceValue.toLowerCase() : null;
       switch (kind) {
         case 'url':
+          final urlValue = raw['url'];
+          // A relative url ("./") addresses the marketplace repo itself —
+          // resolve it like the bare string form, not as a git remote.
+          if (urlValue is String) {
+            final trimmed = urlValue.trim();
+            if (trimmed.startsWith('.') || trimmed.startsWith('/')) {
+              return _githubPluginSource(
+                urlValue,
+                marketplaceRepo: marketplaceRepo,
+              );
+            }
+          }
           return _githubPluginSource(
-            _repoFromUrl(raw['url'] as String?),
+            _repoFromUrl(urlValue is String ? urlValue : null),
             marketplaceRepo: marketplaceRepo,
           );
         case 'github':
           return _githubPluginSource(
-            raw['repo'] as String?,
+            raw['repo'] is String ? raw['repo'] as String : null,
             marketplaceRepo: marketplaceRepo,
           );
         case 'local':
           return _githubPluginSource(
-            raw['path'] as String?,
+            raw['path'] is String ? raw['path'] as String : null,
             marketplaceRepo: marketplaceRepo,
           );
       }
       // Unknown object shape — try the common keys before giving up.
+      final fallback = raw['repo'] ?? raw['url'] ?? raw['path'];
       return _githubPluginSource(
-        raw['repo'] ?? raw['url'] ?? raw['path'],
+        fallback is String || fallback is Map ? fallback : null,
         marketplaceRepo: marketplaceRepo,
       );
     }
@@ -6088,6 +6212,9 @@ class AppState extends ChangeNotifier {
       // away (rejecting any walk that escapes the marketplace root).
       final resolved = _resolveRelativePath(cleanPath);
       if (resolved == null) return null;
+      // A bare "./" (or ".") addresses the marketplace repo root itself —
+      // e.g. obra/superpowers' own marketplace entry `"source": "./"`.
+      if (resolved.isEmpty) return cleanMarketplace;
       return '$cleanMarketplace/raw/branch/$resolved';
     }
     final normalized = normalizeMarketplace(s);
@@ -6111,6 +6238,8 @@ class AppState extends ChangeNotifier {
   /// Normalize a relative path, dropping `.` segments and resolving `..`
   /// against prior segments. Returns null when a `..` escapes the root (so a
   /// marketplace entry can't craft a raw URL that walks outside its repo).
+  /// A bare `./` (or `.`) normalizes to the empty string, which the caller
+  /// treats as the marketplace repo root itself.
   static String? _resolveRelativePath(String raw) {
     final out = <String>[];
     for (final seg in raw.split('/')) {
@@ -6122,8 +6251,7 @@ class AppState extends ChangeNotifier {
         out.add(seg);
       }
     }
-    final joined = out.join('/');
-    return joined.isEmpty ? null : joined;
+    return out.join('/');
   }
 
   @visibleForTesting
@@ -6333,10 +6461,7 @@ class AppState extends ChangeNotifier {
         if (!enableAll && enabled.isNotEmpty && !enabled.contains(name)) {
           continue;
         }
-        final parsed = importedMcpFromJson(
-          name,
-          value.cast<String, dynamic>(),
-        );
+        final parsed = importedMcpFromJson(name, value.cast<String, dynamic>());
         if (parsed.type == 'sse') continue;
         final server = _addImportedMcpRow(
           name: name,
@@ -6400,13 +6525,12 @@ class AppState extends ChangeNotifier {
     label: s.name,
   );
 
-  Future<void> _recordMcpFailed(McpServer s, String detail) =>
-      _recordMcpStatus(
-        s.canonicalId,
-        StartupItemState.failed,
-        redactStartupError(detail),
-        label: s.name,
-      );
+  Future<void> _recordMcpFailed(McpServer s, String detail) => _recordMcpStatus(
+    s.canonicalId,
+    StartupItemState.failed,
+    redactStartupError(detail),
+    label: s.name,
+  );
 
   Future<void> _recordMcpNeedsSetup(McpServer s, List<String> missing) =>
       _recordMcpStatus(
@@ -6615,8 +6739,7 @@ class AppState extends ChangeNotifier {
   String _serviceDetailForHealth(PluginItem row, StartupItemStatus health) {
     final reason = health.reason;
     return switch (health.state) {
-      StartupItemState.ready =>
-        'probe ok · ${_healthCapabilityDetail(row)}',
+      StartupItemState.ready => 'probe ok · ${_healthCapabilityDetail(row)}',
       StartupItemState.needsSetup =>
         'Needs setup: ${reason ?? 'configuration required'}',
       StartupItemState.unsupported =>
@@ -6791,12 +6914,16 @@ class AppState extends ChangeNotifier {
       final list = prefs.getStringList(_kRemovedBuiltinSeeds);
       if (list == null || list.isEmpty) return;
       final set = list.toSet();
-      mcpServers.removeWhere((s) => !s.custom && (set.contains(s.canonicalId) || set.contains(s.name)));
+      mcpServers.removeWhere(
+        (s) =>
+            !s.custom && (set.contains(s.canonicalId) || set.contains(s.name)),
+      );
     } catch (_) {}
   }
 
   @visibleForTesting
-  Future<void> reloadRemovedBuiltinSeedsForTest() => _applyRemovedBuiltinSeeds();
+  Future<void> reloadRemovedBuiltinSeedsForTest() =>
+      _applyRemovedBuiltinSeeds();
 
   /// Test seam: re-run the persisted-custom-MCP-servers load (simulates a
   /// restart without tearing down the whole AppState singleton).
@@ -7044,9 +7171,7 @@ class AppState extends ChangeNotifier {
       // navigation. Idempotent; runs on every hydrate.
       var healed = false;
       for (final p in plugins) {
-        if (p.runtimeId != null ||
-            p.source != null ||
-            p.marketplace != null) {
+        if (p.runtimeId != null || p.source != null || p.marketplace != null) {
           continue;
         }
         if (!(p.installed || p.enabled)) continue;

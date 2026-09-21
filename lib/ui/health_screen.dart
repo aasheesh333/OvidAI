@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import '../core/health_service.dart';
 import '../core/sandbox_service.dart';
 import '../core/state.dart';
@@ -49,7 +50,7 @@ class _HealthScreenState extends State<HealthScreen> {
       await HealthService.I.runChecks();
     } catch (e) {
       _repairLog.add('ovid: reset failed: $e');
-      setState(() {});
+      if (mounted) setState(() {});
     } finally {
       if (mounted) setState(() => _resetting = false);
     }
@@ -232,7 +233,8 @@ class _HealthScreenState extends State<HealthScreen> {
                           padding: const EdgeInsets.symmetric(vertical: 4),
                           child: Row(
                             children: [
-                              if (entry.value.health == ServiceHealth.connecting)
+                              if (entry.value.health ==
+                                  ServiceHealth.connecting)
                                 const SizedBox(
                                   width: 14,
                                   height: 14,
@@ -241,7 +243,8 @@ class _HealthScreenState extends State<HealthScreen> {
                                     color: Aether.accent,
                                   ),
                                 )
-                              else if (entry.value.health == ServiceHealth.working)
+                              else if (entry.value.health ==
+                                  ServiceHealth.working)
                                 Icon(
                                   Icons.check_circle_outline,
                                   size: 16,
@@ -283,11 +286,14 @@ class _HealthScreenState extends State<HealthScreen> {
                                   fontSize: 10.5,
                                   fontFamily: Aether.mono,
                                   fontWeight: FontWeight.w600,
-                                  color: entry.value.health == ServiceHealth.working
+                                  color:
+                                      entry.value.health ==
+                                          ServiceHealth.working
                                       ? Aether.successLight
-                                      : entry.value.health == ServiceHealth.connecting
-                                          ? Aether.accent
-                                          : Aether.dangerC,
+                                      : entry.value.health ==
+                                            ServiceHealth.connecting
+                                      ? Aether.accent
+                                      : Aether.dangerC,
                                 ),
                               ),
                             ],
@@ -316,10 +322,22 @@ class _HealthScreenState extends State<HealthScreen> {
                             _repairing = true;
                             _repairLog.clear();
                           });
-                          await HealthService.I.repair(
-                            (l) => setState(() => _repairLog.add(l)),
-                          );
-                          if (mounted) setState(() => _repairing = false);
+                          try {
+                            await HealthService.I.repair((l) {
+                              if (!mounted) return;
+                              setState(() => _repairLog.add(l));
+                            });
+                          } catch (e) {
+                            if (mounted) {
+                              setState(
+                                () => _repairLog.add('repair failed: $e'),
+                              );
+                            }
+                          } finally {
+                            if (mounted) {
+                              setState(() => _repairing = false);
+                            }
+                          }
                         },
                   icon: Icon(
                     _repairing

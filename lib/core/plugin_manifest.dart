@@ -18,6 +18,11 @@ library;
 /// The source format a manifest was adapted from (spec §4.3).
 enum PluginFormat { claudeCode, codex, genericMcp }
 
+/// Interpreters the sandbox guarantees for plugin hook execution. A
+/// manifest `shell` key naming anything else falls back to bash, with an
+/// optional compatibility note recorded at adapter time.
+const Set<String> kKnownHookShells = {'bash', 'sh'};
+
 /// Fixed capability vocabulary (spec §5.1). The spec's
 /// `environment.read:<name>` form is represented by
 /// [PluginCapability.environmentRead]; the specific variable names travel

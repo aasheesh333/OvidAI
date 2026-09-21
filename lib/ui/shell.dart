@@ -42,6 +42,13 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     // First-run welcome notice (the onboarding flow welcomeNoticeVersion):
     // one dialog per version, after the consent dialog settles.
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeWelcome());
+    // Deferred first-launch runtime install: the setup gate installs only
+    // the native sandbox core (fast); Node.js/Python finish here in the
+    // background with a progress banner. Idempotent — a cheap disk probe
+    // no-ops when the runtimes are already present.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => unawaited(AppState.I.maybeStartBackgroundRuntimeInstall()),
+    );
   }
 
   void _onFirebaseReady() {
@@ -152,7 +159,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
       body: wide
           ? Row(
               children: [
-                const SessionsSidebar(),
+                const SessionsSidebar(isDrawer: false),
                 const VerticalDivider(width: 1),
                 Expanded(child: chat),
               ],

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import '../core/connection_service.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
@@ -9,7 +10,12 @@ import 'trajectory_screen.dart';
 /// Sessions sidebar — DeepSeek-style harness: auto-named sessions,
 /// search, new session, swipe to delete, long-press rename.
 class SessionsSidebar extends StatefulWidget {
-  const SessionsSidebar({super.key});
+  /// True when hosted inside a [Drawer] (narrow screens). In wide mode the
+  /// sidebar is embedded directly in a Row — there popping the route would
+  /// exit the app, so navigation taps must not call `maybePop`.
+  final bool isDrawer;
+
+  const SessionsSidebar({super.key, this.isDrawer = true});
 
   @override
   State<SessionsSidebar> createState() => _SessionsSidebarState();
@@ -60,12 +66,15 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                   // brand/connection parity — live connection chip.
                   const _ConnectionChip(),
                   const Spacer(),
-                  IconButton(
-                    tooltip: 'Close',
-                    visualDensity: VisualDensity.compact,
-                    icon: const Icon(Icons.close, size: 18),
-                    onPressed: () => Navigator.maybePop(context),
-                  ),
+                  // No close button in wide mode: the sidebar is embedded,
+                  // not a route — popping here would exit the app.
+                  if (widget.isDrawer)
+                    IconButton(
+                      tooltip: 'Close',
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.close, size: 18),
+                      onPressed: () => Navigator.maybePop(context),
+                    ),
                 ],
               ),
             ),
@@ -77,7 +86,9 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                 borderRadius: BorderRadius.circular(12),
                 onTap: () {
                   app.newSession();
-                  Navigator.maybePop(context);
+                  // Only the drawer is a route; in wide mode maybePop
+                  // would pop the app itself.
+                  if (widget.isDrawer) Navigator.maybePop(context);
                 },
                 child: Container(
                   padding: const EdgeInsets.symmetric(vertical: 12),
@@ -214,6 +225,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                             _SessionTile(
                               session: s,
                               active: s.id == app.activeSessionId,
+                              isDrawer: widget.isDrawer,
                             ),
                         ],
                       );
@@ -225,50 +237,65 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
 
             const Divider(),
             // PR27/B2: trajectory moved here from the chat header (the
-            // header keeps only jobs + studio + browser).
-            InkWell(
-              onTap: () {
-                final sid = app.activeSessionId ?? '';
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => TrajectoryScreen(sessionId: sid),
+            // header keeps only jobs + studio + browser). Disabled when
+            // there is no active session — pushing with an empty id lands
+            // on a confusing empty ledger.
+            Builder(
+              builder: (context) {
+                final hasSession = app.activeSessionId != null;
+                return InkWell(
+                  onTap: hasSession
+                      ? () {
+                          final sid = app.activeSessionId ?? '';
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => TrajectoryScreen(sessionId: sid),
+                            ),
+                          );
+                        }
+                      : null,
+                  child: Opacity(
+                    opacity: hasSession ? 1.0 : 0.45,
+                    child: Container(
+                      margin: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 11,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 13,
+                            backgroundColor: Aether.surfaceRaised,
+                            child: Icon(
+                              Icons.timeline_outlined,
+                              size: 15,
+                              color: Aether.textMuted,
+                            ),
+                          ),
+                          SizedBox(width: 12),
+                          Text(
+                            'Trajectory — event ledger',
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: Aether.textMuted,
+                            ),
+                          ),
+                          Spacer(),
+                          Icon(
+                            Icons.chevron_right,
+                            size: 16,
+                            color: Aether.textFaint,
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                 );
               },
-              child: Container(
-                margin: const EdgeInsets.fromLTRB(8, 4, 8, 0),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 11,
-                ),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 13,
-                      backgroundColor: Aether.surfaceRaised,
-                      child: Icon(
-                        Icons.timeline_outlined,
-                        size: 15,
-                        color: Aether.textMuted,
-                      ),
-                    ),
-                    SizedBox(width: 12),
-                    Text(
-                      'Trajectory — event ledger',
-                      style: TextStyle(fontSize: 13, color: Aether.textMuted),
-                    ),
-                    Spacer(),
-                    Icon(
-                      Icons.chevron_right,
-                      size: 16,
-                      color: Aether.textFaint,
-                    ),
-                  ],
-                ),
-              ),
             ),
             // Settings at the very bottom — DeepSeek style.
             InkWell(
@@ -320,7 +347,12 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
 class _SessionTile extends StatelessWidget {
   final ChatSession session;
   final bool active;
-  const _SessionTile({required this.session, required this.active});
+  final bool isDrawer;
+  const _SessionTile({
+    required this.session,
+    required this.active,
+    required this.isDrawer,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -359,7 +391,9 @@ class _SessionTile extends StatelessWidget {
                     borderRadius: BorderRadius.circular(10),
                     onTap: () {
                       app.selectSession(session.id);
-                      Navigator.maybePop(context);
+                      // Only the drawer is a route; in wide mode maybePop
+                      // would pop the app itself.
+                      if (isDrawer) Navigator.maybePop(context);
                     },
                     onLongPress: () => _showActions(context),
                     child: Padding(

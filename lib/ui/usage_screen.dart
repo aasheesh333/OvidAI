@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import '../core/format.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
@@ -115,7 +116,10 @@ class UsageScreen extends StatelessWidget {
         () => ProviderUsage(
           providerId: e.providerId,
           providerName: e.providerName,
-          tier: 'BYOK',
+          // Built-in free providers (Groq/Gemini/…) are not BYOK.
+          tier: (app.providerById(e.providerId)?.isFree ?? false)
+              ? 'FREE'
+              : 'BYOK',
           icon: _iconFor(e.providerName),
           color: _colorFor(e.providerName),
           requests: 0,
@@ -173,18 +177,6 @@ class UsageScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = AppState.I;
-    final providers = _aggregate(app);
-    final reqs = providers.fold<int>(0, (s, p) => s + p.requests);
-    final tokensIn = providers.fold<int>(0, (s, p) => s + p.tokensIn);
-    final tokensOut = providers.fold<int>(0, (s, p) => s + p.tokensOut);
-    final costUsd = providers.fold<double>(0, (s, p) => s + p.costUsd);
-    final anyPriced = providers.any((p) => p.hasPricedModel);
-    final todayEntries = app.usageLog.where((e) {
-      final d = e.time;
-      final now = DateTime.now();
-      return d.year == now.year && d.month == now.month && d.day == now.day;
-    }).toList();
-    final todayTokens = todayEntries.fold<int>(0, (s, e) => s + e.totalTokens);
 
     return Scaffold(
       backgroundColor: Aether.bg,
@@ -192,6 +184,25 @@ class UsageScreen extends StatelessWidget {
       body: AnimatedBuilder(
         animation: app,
         builder: (_, _) {
+          // Aggregate INSIDE the builder: the outer build runs once, so
+          // capturing here would freeze token/cost stats at first open.
+          final providers = _aggregate(app);
+          final reqs = providers.fold<int>(0, (s, p) => s + p.requests);
+          final tokensIn = providers.fold<int>(0, (s, p) => s + p.tokensIn);
+          final tokensOut = providers.fold<int>(0, (s, p) => s + p.tokensOut);
+          final costUsd = providers.fold<double>(0, (s, p) => s + p.costUsd);
+          final anyPriced = providers.any((p) => p.hasPricedModel);
+          final todayEntries = app.usageLog.where((e) {
+            final d = e.time;
+            final now = DateTime.now();
+            return d.year == now.year &&
+                d.month == now.month &&
+                d.day == now.day;
+          }).toList();
+          final todayTokens = todayEntries.fold<int>(
+            0,
+            (s, e) => s + e.totalTokens,
+          );
           return ListView(
             padding: const EdgeInsets.only(bottom: 40),
             children: [

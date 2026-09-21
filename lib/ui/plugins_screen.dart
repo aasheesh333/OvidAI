@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+
 import '../core/agent_service.dart';
 import '../core/github_service.dart';
 import '../core/hook_service.dart';
@@ -81,8 +82,8 @@ enum McpCredentialAsk { connectDirectly, askCredentials }
 @visibleForTesting
 McpCredentialAsk mcpCredentialAskForTest({required List<String> missing}) =>
     missing.isEmpty
-        ? McpCredentialAsk.connectDirectly
-        : McpCredentialAsk.askCredentials;
+    ? McpCredentialAsk.connectDirectly
+    : McpCredentialAsk.askCredentials;
 
 /// Whether the credential sheet should offer the GitHub login as the
 /// first-class path: the GitHub server itself, or any server whose declared
@@ -167,14 +168,18 @@ enum PluginInstallKind {
   builtinDirect,
   mcpServer,
   nativeCapability,
-  unsupported
+  unsupported,
 }
 
 @visibleForTesting
 ({PluginInstallKind kind, GithubPluginSource? github, McpServer? server})
 pluginInstallRouteForTest(PluginItem plugin) {
   if (NativePluginRegistry.I.has(plugin.name)) {
-    return (kind: PluginInstallKind.nativeCapability, github: null, server: null);
+    return (
+      kind: PluginInstallKind.nativeCapability,
+      github: null,
+      server: null,
+    );
   }
   final source = plugin.source;
   if (source != null) {
@@ -203,11 +208,7 @@ pluginInstallRouteForTest(PluginItem plugin) {
   if (plugin.category == 'MCP') {
     final server = AgentService.mcpServerForPlugin(plugin);
     if (server != null) {
-      return (
-        kind: PluginInstallKind.mcpServer,
-        github: null,
-        server: server,
-      );
+      return (kind: PluginInstallKind.mcpServer, github: null, server: server);
     }
     return (kind: PluginInstallKind.unsupported, github: null, server: null);
   }
@@ -224,11 +225,7 @@ pluginInstallRouteForTest(PluginItem plugin) {
     return (kind: PluginInstallKind.unsupported, github: null, server: null);
   }
   if (plugin.author == 'you') {
-    return (
-      kind: PluginInstallKind.builtinDirect,
-      github: null,
-      server: null,
-    );
+    return (kind: PluginInstallKind.builtinDirect, github: null, server: null);
   }
   return (kind: PluginInstallKind.unsupported, github: null, server: null);
 }
@@ -263,20 +260,13 @@ Widget durableStatusIcon(PluginRuntimeStatus status) {
       return const SizedBox(
         width: 14,
         height: 14,
-        child: CircularProgressIndicator(
-          strokeWidth: 2,
-          color: Aether.accent,
-        ),
+        child: CircularProgressIndicator(strokeWidth: 2, color: Aether.accent),
       );
     case StartupItemState.failed:
     case StartupItemState.unsupported:
       return Tooltip(
         message: tooltip,
-        child: Icon(
-          Icons.error_outline,
-          size: 18,
-          color: Aether.dangerC,
-        ),
+        child: Icon(Icons.error_outline, size: 18, color: Aether.dangerC),
       );
     case StartupItemState.degraded:
     case StartupItemState.skipped:
@@ -284,18 +274,10 @@ Widget durableStatusIcon(PluginRuntimeStatus status) {
     case StartupItemState.migrationRequired:
       return Tooltip(
         message: tooltip,
-        child: const Icon(
-          Icons.warning_amber,
-          size: 18,
-          color: Aether.accent,
-        ),
+        child: const Icon(Icons.warning_amber, size: 18, color: Aether.accent),
       );
     case StartupItemState.disabled:
-      return Icon(
-        Icons.power_settings_new,
-        size: 18,
-        color: Aether.textFaint,
-      );
+      return Icon(Icons.power_settings_new, size: 18, color: Aether.textFaint);
   }
 }
 
@@ -534,10 +516,7 @@ Future<void> showPluginAddSheet(BuildContext context) {
               TextField(
                 controller: repoC,
                 autofocus: true,
-                style: const TextStyle(
-                  fontSize: 13.5,
-                  fontFamily: Aether.mono,
-                ),
+                style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
                 decoration: const InputDecoration(
                   hintText: 'owner/repo or https://github.com/owner/repo',
                 ),
@@ -548,7 +527,9 @@ Future<void> showPluginAddSheet(BuildContext context) {
                 child: OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Aether.accent,
-                    side: BorderSide(color: Aether.accent.withValues(alpha: .4)),
+                    side: BorderSide(
+                      color: Aether.accent.withValues(alpha: .4),
+                    ),
                     padding: const EdgeInsets.symmetric(vertical: 11),
                   ),
                   icon: const Icon(Icons.code, size: 16),
@@ -681,9 +662,7 @@ Future<void> showPluginAddSheet(BuildContext context) {
 /// input names no usable repo.
 GithubPluginSource? _githubSourceFromInput(String input) {
   var txt = input.trim();
-  final m = RegExp(
-    r'^https?://github\.com/([^/]+)/([^/#?]+)',
-  ).firstMatch(txt);
+  final m = RegExp(r'^https?://github\.com/([^/]+)/([^/#?]+)').firstMatch(txt);
   if (m != null) {
     return GithubPluginSource(owner: m.group(1)!, repo: m.group(2)!);
   }
@@ -707,18 +686,21 @@ Future<void> _runSourceInstall(
     ),
   );
   _pluginInstallSheetContext = context;
-  final result = await startPluginInstallForTest(AppState.I, row,
-      source: source);
+  final result = await startPluginInstallForTest(
+    AppState.I,
+    row,
+    source: source,
+  );
   _pluginInstallSheetContext = null;
   final msg = result == null
       ? 'Install cancelled — nothing was changed.'
       : switch (result.status) {
           PluginInstallStatus.ok =>
             'Installed ✓ — restart Ovid to enable it everywhere '
-            '(this session: contributions pending restart).',
+                '(this session: contributions pending restart).',
           PluginInstallStatus.degraded =>
             'Installed with degraded dependencies: '
-            '${result.degradedNames.join(', ')} — restart to enable.',
+                '${result.degradedNames.join(', ')} — restart to enable.',
           PluginInstallStatus.failed =>
             'Install failed: ${result.error ?? 'unknown error'}',
         };
@@ -798,10 +780,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
     );
   }
 
-  void _revealFocus(
-    List<PluginItem> items,
-    Map<PluginItem, String> focusIds,
-  ) {
+  void _revealFocus(List<PluginItem> items, Map<PluginItem, String> focusIds) {
     if (!mounted || _focusRevealed) return;
     final focus = widget.focusCanonicalId;
     if (focus == null) return;
@@ -864,8 +843,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
         focusIds[p] = legacyPluginFocusId(p, legacyOrdinal++);
       }
     }
-    final migrationOnly =
-        widget.focusCanonicalId == kMigrationRequiredFocusId;
+    final migrationOnly = widget.focusCanonicalId == kMigrationRequiredFocusId;
     final items = app.plugins
         .where(
           (p) =>
@@ -921,124 +899,125 @@ class _PluginsScreenState extends State<PluginsScreen> {
           return CustomScrollView(
             controller: _scroll,
             slivers: [
-            // ── Search bar ON TOP ──
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
-                child: TextField(
-                  onChanged: (v) => setState(() => _query = v),
-                  style: const TextStyle(fontSize: 13),
-                  decoration: InputDecoration(
-                    hintText: 'Search 4,800+ community plugins…',
-                    prefixIcon: Icon(
-                      Icons.search,
-                      size: 16,
-                      color: Aether.textFaint,
-                    ),
-                    isDense: true,
-                  ),
-                ),
-              ),
-            ),
-            SliverToBoxAdapter(
-              child: SizedBox(
-                height: 36,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  children: [
-                    for (final c in cats)
-                      Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: ChoiceChip(
-                          label: Text(c, style: const TextStyle(fontSize: 12)),
-                          selected: _cat == c,
-                          onSelected: (_) => setState(() => _cat = c),
-                          showCheckmark: false,
-                          selectedColor: Aether.accentSoft,
-                          backgroundColor: Aether.surfaceAlt,
-                          side: BorderSide(
-                            color: _cat == c ? Aether.accent : Aether.hairline,
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(9),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            // ── MCP section ──
-            if (!migrationOnly)
-              SliverToBoxAdapter(
-                child: _McpSection(
-                  app: app,
-                  focusCanonicalId: widget.focusCanonicalId,
-                  cardKeys: _mcpCardKeys,
-                ),
-              ),
-            if (migrationOnly)
+              // ── Search bar ON TOP ──
               SliverToBoxAdapter(
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 2),
-                  child: Text(
-                    'Plugins needing re-approval show the exact reason '
-                    'below.',
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: Aether.textMuted,
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+                  child: TextField(
+                    onChanged: (v) => setState(() => _query = v),
+                    style: const TextStyle(fontSize: 13),
+                    decoration: InputDecoration(
+                      hintText: 'Search 4,800+ community plugins…',
+                      prefixIcon: Icon(
+                        Icons.search,
+                        size: 16,
+                        color: Aether.textFaint,
+                      ),
+                      isDense: true,
                     ),
                   ),
                 ),
               ),
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(20, 12, 20, 2),
-                child: Text(
-                  migrationOnly ? 'NEEDS RE-APPROVAL' : 'ALL PLUGINS',
-                  style: TextStyle(
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.4,
-                    color: Aether.textFaint,
+              SliverToBoxAdapter(
+                child: SizedBox(
+                  height: 36,
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    children: [
+                      for (final c in cats)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: ChoiceChip(
+                            label: Text(
+                              c,
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            selected: _cat == c,
+                            onSelected: (_) => setState(() => _cat = c),
+                            showCheckmark: false,
+                            selectedColor: Aether.accentSoft,
+                            backgroundColor: Aether.surfaceAlt,
+                            side: BorderSide(
+                              color: _cat == c
+                                  ? Aether.accent
+                                  : Aether.hairline,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(9),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
               ),
-            ),
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-              sliver: SliverList.separated(
-                itemCount: items.length,
-                separatorBuilder: (_, _) => const SizedBox(height: 10),
-                itemBuilder: (_, i) {
-                  final p = items[i];
-                  final focusId = focusIds[p];
-                  return PluginCard(
-                    key: focusId == null
-                        ? null
-                        : _pluginCardKeys.putIfAbsent(
-                            focusId,
-                            () => GlobalKey(),
-                          ),
-                    plugin: p,
-                    focusId: focusId,
-                    highlighted: migrationOnly
-                        ? durablePluginStatus(p)?.state ==
-                              StartupItemState.migrationRequired
-                        : focusId != null &&
-                              focusId == widget.focusCanonicalId,
-                  );
-                },
+              // ── MCP section ──
+              if (!migrationOnly)
+                SliverToBoxAdapter(
+                  child: _McpSection(
+                    app: app,
+                    focusCanonicalId: widget.focusCanonicalId,
+                    cardKeys: _mcpCardKeys,
+                  ),
+                ),
+              if (migrationOnly)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 12, 20, 2),
+                    child: Text(
+                      'Plugins needing re-approval show the exact reason '
+                      'below.',
+                      style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
+                    ),
+                  ),
+                ),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(20, 12, 20, 2),
+                  child: Text(
+                    migrationOnly ? 'NEEDS RE-APPROVAL' : 'ALL PLUGINS',
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.4,
+                      color: Aether.textFaint,
+                    ),
+                  ),
+                ),
               ),
-            ),
-          ],
-        );
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                sliver: SliverList.separated(
+                  itemCount: items.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 10),
+                  itemBuilder: (_, i) {
+                    final p = items[i];
+                    final focusId = focusIds[p];
+                    return PluginCard(
+                      key: focusId == null
+                          ? null
+                          : _pluginCardKeys.putIfAbsent(
+                              focusId,
+                              () => GlobalKey(),
+                            ),
+                      plugin: p,
+                      focusId: focusId,
+                      highlighted: migrationOnly
+                          ? durablePluginStatus(p)?.state ==
+                                StartupItemState.migrationRequired
+                          : focusId != null &&
+                                focusId == widget.focusCanonicalId,
+                    );
+                  },
+                ),
+              ),
+            ],
+          );
         },
       ),
     );
   }
-
 }
 
 class PluginCard extends StatelessWidget {
@@ -1108,9 +1087,7 @@ class PluginCard extends StatelessWidget {
         MaterialPageRoute(builder: (_) => PluginDetailScreen(plugin: plugin)),
       ),
       child: Container(
-        key: _keyId == null
-            ? null
-            : ValueKey('plugin-card-$_keyId'),
+        key: _keyId == null ? null : ValueKey('plugin-card-$_keyId'),
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: highlighted ? Aether.accentSoft : Aether.surface,
@@ -1172,10 +1149,7 @@ class PluginCard extends StatelessWidget {
                       Tag(plugin.category.toUpperCase(), filled: true),
                       // Task 11 (spec §11): source/format badge —
                       // Claude Code / Codex / MCP / Ovid built-in.
-                      Tag(
-                        PluginCard.sourceFormatLabel(plugin),
-                        filled: false,
-                      ),
+                      Tag(PluginCard.sourceFormatLabel(plugin), filled: false),
                       // Task 11 (spec §11): activation badge beside the
                       // category tag (This session / Restart to enable
                       // everywhere / Global / Degraded / Failed).
@@ -1247,19 +1221,23 @@ class PluginCard extends StatelessWidget {
                           key: ValueKey('plugin-switch-${plugin.name}'),
                           value: plugin.enabled,
                           activeTrackColor: Aether.accent,
-                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          materialTapTargetSize:
+                              MaterialTapTargetSize.shrinkWrap,
                           onChanged: (val) async {
                             PluginRuntimeCallRecorderForTest.record?.call(
                               val ? 'enable' : 'disable',
                             );
                             if (val) {
                               await app.enablePlugin(plugin);
-                              final tools = AgentService.I.pluginToolNames(plugin);
+                              final tools = AgentService.I.pluginToolNames(
+                                plugin,
+                              );
                               if (tools.isNotEmpty) {
                                 app.updateServiceStatus(
                                   'plugin:${plugin.name}',
                                   ServiceHealth.working,
-                                  detail: 'probe ok · tools: ${tools.join(', ')}',
+                                  detail:
+                                      'probe ok · tools: ${tools.join(', ')}',
                                 );
                               } else {
                                 app.updateServiceStatus(
@@ -1283,9 +1261,16 @@ class PluginCard extends StatelessWidget {
                     ],
                     IconButton(
                       key: ValueKey('plugin-delete-${plugin.name}'),
-                      icon: const Icon(Icons.delete_outline, size: 18, color: Aether.danger),
+                      icon: const Icon(
+                        Icons.delete_outline,
+                        size: 18,
+                        color: Aether.danger,
+                      ),
                       padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                      constraints: const BoxConstraints(
+                        minWidth: 28,
+                        minHeight: 28,
+                      ),
                       tooltip: 'Delete plugin',
                       onPressed: () async {
                         final ok = await showDeleteConfirmationDialog(
@@ -1293,7 +1278,9 @@ class PluginCard extends StatelessWidget {
                           title: 'Delete ${plugin.name}?',
                         );
                         if (!ok) return;
-                        PluginRuntimeCallRecorderForTest.record?.call('uninstall');
+                        PluginRuntimeCallRecorderForTest.record?.call(
+                          'uninstall',
+                        );
                         await app.uninstallPlugin(plugin);
                         app.plugins.remove(plugin);
                         await app.persistPluginState();
@@ -1303,61 +1290,67 @@ class PluginCard extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 6),
-                Builder(builder: (_) {
-                  if (!plugin.installed) {
-                    return Icon(
-                      Icons.download_outlined,
-                      size: 18,
-                      color: Aether.textFaint,
-                    );
-                  }
-                  final durable = durablePluginStatus(plugin);
-                  if (durable != null) {
-                    return durableStatusIcon(durable);
-                  }
-                  final status = app.serviceStatus['plugin:${plugin.name}'];
-                  if (status != null) {
-                    if (status.health == ServiceHealth.connecting) {
-                      return const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Aether.accent,
-                        ),
-                      );
-                    } else if (status.health == ServiceHealth.working) {
+                Builder(
+                  builder: (_) {
+                    if (!plugin.installed) {
                       return Icon(
-                        Icons.check_circle_outline,
+                        Icons.download_outlined,
                         size: 18,
-                        color: Aether.successLight,
-                      );
-                    } else if (status.health == ServiceHealth.failed) {
-                      return Tooltip(
-                        message: status.detail,
-                        child: Icon(
-                          Icons.error_outline,
-                          size: 18,
-                          color: Aether.dangerC,
-                        ),
+                        color: Aether.textFaint,
                       );
                     }
-                  }
-                  // Runtime rows without a durable record are honestly unknown —
-                  // never a green check derived from installed/enabled flags.
-                  if (plugin.runtimeId != null) {
+                    final durable = durablePluginStatus(plugin);
+                    if (durable != null) {
+                      return durableStatusIcon(durable);
+                    }
+                    final status = app.serviceStatus['plugin:${plugin.name}'];
+                    if (status != null) {
+                      if (status.health == ServiceHealth.connecting) {
+                        return const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Aether.accent,
+                          ),
+                        );
+                      } else if (status.health == ServiceHealth.working) {
+                        return Icon(
+                          Icons.check_circle_outline,
+                          size: 18,
+                          color: Aether.successLight,
+                        );
+                      } else if (status.health == ServiceHealth.failed) {
+                        return Tooltip(
+                          message: status.detail,
+                          child: Icon(
+                            Icons.error_outline,
+                            size: 18,
+                            color: Aether.dangerC,
+                          ),
+                        );
+                      }
+                    }
+                    // Runtime rows without a durable record are honestly unknown —
+                    // never a green check derived from installed/enabled flags.
+                    if (plugin.runtimeId != null) {
+                      return Icon(
+                        Icons.help_outline,
+                        size: 18,
+                        color: Aether.textFaint,
+                      );
+                    }
                     return Icon(
-                      Icons.help_outline,
+                      plugin.enabled
+                          ? Icons.check_circle
+                          : Icons.check_circle_outline,
                       size: 18,
-                      color: Aether.textFaint,
+                      color: plugin.enabled
+                          ? Aether.successLight
+                          : Aether.textFaint,
                     );
-                  }
-                  return Icon(
-                    plugin.enabled ? Icons.check_circle : Icons.check_circle_outline,
-                    size: 18,
-                    color: plugin.enabled ? Aether.successLight : Aether.textFaint,
-                  );
-                }),
+                  },
+                ),
               ],
             ),
           ],
@@ -1486,10 +1479,7 @@ class PluginDetailScreen extends StatelessWidget {
                     // uninstalled rows read "Available".
                     Text(
                       PluginCard.availabilityLabel(plugin),
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        color: Aether.textFaint,
-                      ),
+                      style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
                     ),
                     const SizedBox(height: 6),
                     Row(
@@ -1780,7 +1770,9 @@ class PluginDetailScreen extends StatelessWidget {
                       // Task 11: uninstall routes through the runtime
                       // manager (registry + content + deps + record +
                       // grant + secrets) via AppState.uninstallPlugin.
-                      PluginRuntimeCallRecorderForTest.record?.call('uninstall');
+                      PluginRuntimeCallRecorderForTest.record?.call(
+                        'uninstall',
+                      );
                       await app.uninstallPlugin(plugin);
                     },
                   ),
@@ -1914,8 +1906,7 @@ class _PluginDiagnostics extends StatelessWidget {
         if (tools.isEmpty)
           const _DiagRow('This plugin contributes no roster tools.')
         else
-          for (final c in tools)
-            _DiagRow('${c.canonicalId} (${c.kindLabel})'),
+          for (final c in tools) _DiagRow('${c.canonicalId} (${c.kindLabel})'),
         const SectionHeader('Aliases'),
         ...aliases,
         if (conflicts.isNotEmpty) ...[
@@ -1966,7 +1957,9 @@ class _PluginDiagnostics extends StatelessWidget {
               ),
         if (manifest != null)
           for (final d in manifest.mcpServers)
-            if (!owned.any((s) => s.canonicalId == '${manifest.id}/${d.name}') &&
+            if (!owned.any(
+                  (s) => s.canonicalId == '${manifest.id}/${d.name}',
+                ) &&
                 (d.envNames.isNotEmpty || d.headerNames.isNotEmpty))
               _DiagRow(
                 'Needs setup: '
@@ -2290,31 +2283,33 @@ List<ImportedMcp> _parseMcpConfig(String raw) => parseMcpConfig(raw);
 /// dialog. Returns a record list (public shape) so the parser's own value
 /// type never leaks into this screen's public API.
 @visibleForTesting
-List<({
-  String name,
-  String command,
-  List<String> args,
-  Map<String, String> env,
-  String? url,
-  Map<String, String> headers,
-  String type,
-  String? cwd,
-  List<String> ignoredKeys,
-})>
+List<
+  ({
+    String name,
+    String command,
+    List<String> args,
+    Map<String, String> env,
+    String? url,
+    Map<String, String> headers,
+    String type,
+    String? cwd,
+    List<String> ignoredKeys,
+  })
+>
 parseMcpConfigForTest(String raw) => [
-      for (final e in _parseMcpConfig(raw))
-        (
-          name: e.name,
-          command: e.command,
-          args: e.args,
-          env: e.env,
-          url: e.url,
-          headers: e.headers,
-          type: e.type,
-          cwd: e.cwd,
-          ignoredKeys: e.ignoredKeys,
-        ),
-    ];
+  for (final e in _parseMcpConfig(raw))
+    (
+      name: e.name,
+      command: e.command,
+      args: e.args,
+      env: e.env,
+      url: e.url,
+      headers: e.headers,
+      type: e.type,
+      cwd: e.cwd,
+      ignoredKeys: e.ignoredKeys,
+    ),
+];
 
 /// Test seam: overrides the sandbox gate in [connectMcpServer] so widget
 /// tests can exercise the credential/runtime sheets without a sandbox.
@@ -2338,8 +2333,9 @@ Future<void> connectMcpServer(BuildContext context, McpServer server) async {
   // connect without it burns the handshake budget and records a timeout.
   // A set test seam fully replaces the gate (including with null).
   final gate = mcpSupportGateForTest;
-  final unsupported =
-      gate != null ? gate(server) : mcpUnsupportedReason(server);
+  final unsupported = gate != null
+      ? gate(server)
+      : mcpUnsupportedReason(server);
   if (unsupported != null) {
     if (!context.mounted) return;
     final go = await showDialog<bool>(
@@ -2442,9 +2438,7 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
   @override
   void initState() {
     super.initState();
-    _controllers = {
-      for (final k in widget.missing) k: TextEditingController(),
-    };
+    _controllers = {for (final k in widget.missing) k: TextEditingController()};
   }
 
   @override
@@ -2469,7 +2463,19 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
       _saving = true;
       _error = null;
     });
-    await AppState.I.setMcpEnv(widget.server.canonicalId, values);
+    try {
+      await AppState.I.setMcpEnv(widget.server.canonicalId, values);
+    } catch (e) {
+      // Reset the spinner and surface the failure instead of stranding
+      // the sheet on a disabled Save button.
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _error = 'Could not save credentials: $e';
+        });
+      }
+      return;
+    }
     if (!mounted) return;
     Navigator.pop(context, 'connected');
   }
@@ -2549,9 +2555,7 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
               ),
             FilledButton.icon(
               style: FilledButton.styleFrom(
-                backgroundColor: _saving
-                    ? Aether.surfaceRaised
-                    : Aether.accent,
+                backgroundColor: _saving ? Aether.surfaceRaised : Aether.accent,
                 padding: const EdgeInsets.symmetric(vertical: 12),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
@@ -2651,10 +2655,7 @@ class _McpRuntimeInstallSheetState extends State<_McpRuntimeInstallSheet> {
                 ),
                 child: Text(
                   _log.join('\n'),
-                  style: const TextStyle(
-                    fontSize: 11,
-                    fontFamily: Aether.mono,
-                  ),
+                  style: const TextStyle(fontSize: 11, fontFamily: Aether.mono),
                 ),
               ),
             ],
@@ -2686,18 +2687,13 @@ class _McpRuntimeInstallSheetState extends State<_McpRuntimeInstallSheet> {
             else
               FilledButton.icon(
                 style: FilledButton.styleFrom(
-                  backgroundColor: _ok
-                      ? Aether.accent
-                      : Aether.surfaceRaised,
+                  backgroundColor: _ok ? Aether.accent : Aether.surfaceRaised,
                   padding: const EdgeInsets.symmetric(vertical: 12),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
                 ),
-                icon: Icon(
-                  _ok ? Icons.check : Icons.close,
-                  size: 16,
-                ),
+                icon: Icon(_ok ? Icons.check : Icons.close, size: 16),
                 label: Text(
                   _ok ? 'Connect server' : 'Close',
                   style: const TextStyle(fontSize: 13.5),
@@ -2795,9 +2791,16 @@ class McpCard extends StatelessWidget {
                 const SizedBox(width: 4),
                 IconButton(
                   key: ValueKey('mcp-delete-${server.canonicalId}'),
-                  icon: const Icon(Icons.delete_outline, size: 16, color: Aether.danger),
+                  icon: const Icon(
+                    Icons.delete_outline,
+                    size: 16,
+                    color: Aether.danger,
+                  ),
                   padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                  constraints: const BoxConstraints(
+                    minWidth: 24,
+                    minHeight: 24,
+                  ),
                   tooltip: 'Delete server',
                   onPressed: () async {
                     final ok = await showDeleteConfirmationDialog(
@@ -2825,47 +2828,53 @@ class McpCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 4),
-                Builder(builder: (_) {
-                  final durable = durableMcpStatus(server);
-                  if (durable != null) return durableStatusIcon(durable);
-                  // No record: neutral, never inferred from serviceStatus
-                  // or connected (spec §5.3, Task 3).
-                  return Icon(
-                    Icons.help_outline,
-                    size: 14,
-                    color: Aether.textFaint,
-                  );
-                }),
+                Builder(
+                  builder: (_) {
+                    final durable = durableMcpStatus(server);
+                    if (durable != null) return durableStatusIcon(durable);
+                    // No record: neutral, never inferred from serviceStatus
+                    // or connected (spec §5.3, Task 3).
+                    return Icon(
+                      Icons.help_outline,
+                      size: 14,
+                      color: Aether.textFaint,
+                    );
+                  },
+                ),
               ],
             ),
             const SizedBox(height: 2),
-            Builder(builder: (_) {
-              final durable = durableMcpStatus(server);
-              if (durable != null) {
-                final label = startupItemStateLabel(durable.state);
-                final reason = durable.reason;
+            Builder(
+              builder: (_) {
+                final durable = durableMcpStatus(server);
+                if (durable != null) {
+                  final label = startupItemStateLabel(durable.state);
+                  final reason = durable.reason;
+                  return Text(
+                    reason == null || reason.isEmpty
+                        ? label
+                        : '$label · $reason',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      color: durable.state == StartupItemState.ready
+                          ? Aether.successLight
+                          : Aether.textMuted,
+                    ),
+                  );
+                }
+                // No record: neutral "Not started", never inferred from
+                // serviceStatus, connected, or structural guards — those stay
+                // on the detail screen banners (spec §5.3, Task 3).
                 return Text(
-                  reason == null || reason.isEmpty ? label : '$label · $reason',
-                  maxLines: 2,
+                  'Not started',
+                  maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 10.5,
-                    color: durable.state == StartupItemState.ready
-                        ? Aether.successLight
-                        : Aether.textMuted,
-                  ),
+                  style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
                 );
-              }
-              // No record: neutral "Not started", never inferred from
-              // serviceStatus, connected, or structural guards — those stay
-              // on the detail screen banners (spec §5.3, Task 3).
-              return Text(
-                'Not started',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-              );
-            }),
+              },
+            ),
           ],
         ),
       ),
@@ -2988,31 +2997,33 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                     // never serviceStatus or connected. The live
                     // Connect/Disconnect toggle below stays as-is.
                     const SizedBox(height: 3),
-                    Builder(builder: (_) {
-                      final durable = durableMcpStatus(s);
-                      if (durable == null) {
+                    Builder(
+                      builder: (_) {
+                        final durable = durableMcpStatus(s);
+                        if (durable == null) {
+                          return Text(
+                            'Not started',
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: Aether.textFaint,
+                            ),
+                          );
+                        }
+                        final label = startupItemStateLabel(durable.state);
+                        final reason = durable.reason;
                         return Text(
-                          'Not started',
+                          reason == null || reason.isEmpty
+                              ? label
+                              : '$label · $reason',
                           style: TextStyle(
                             fontSize: 11.5,
-                            color: Aether.textFaint,
+                            color: durable.state == StartupItemState.ready
+                                ? Aether.successLight
+                                : Aether.textMuted,
                           ),
                         );
-                      }
-                      final label = startupItemStateLabel(durable.state);
-                      final reason = durable.reason;
-                      return Text(
-                        reason == null || reason.isEmpty
-                            ? label
-                            : '$label · $reason',
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          color: durable.state == StartupItemState.ready
-                              ? Aether.successLight
-                              : Aether.textMuted,
-                        ),
-                      );
-                    }),
+                      },
+                    ),
                   ],
                 ),
               ),
@@ -3058,15 +3069,13 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               decoration: BoxDecoration(
                 color: Aether.surfaceAlt,
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Aether.dangerC.withValues(alpha: 0.35)),
+                border: Border.all(
+                  color: Aether.dangerC.withValues(alpha: 0.35),
+                ),
               ),
               child: Row(
                 children: [
-                  Icon(
-                    Icons.block_outlined,
-                    size: 15,
-                    color: Aether.dangerC,
-                  ),
+                  Icon(Icons.block_outlined, size: 15, color: Aether.dangerC),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
@@ -3087,7 +3096,9 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               decoration: BoxDecoration(
                 color: Aether.surfaceAlt,
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Aether.warnLight.withValues(alpha: 0.35)),
+                border: Border.all(
+                  color: Aether.warnLight.withValues(alpha: 0.35),
+                ),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -3316,7 +3327,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               );
               // Env values (API keys) → secure storage, passed to the
               // server process at connect time.
-               unawaited(app.setMcpEnv(s.canonicalId, env));
+              unawaited(app.setMcpEnv(s.canonicalId, env));
               Navigator.pop(ctx);
               ScaffoldMessenger.of(
                 context,
@@ -3336,9 +3347,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
         ? ',\n      "env": { "${s.envHint!}": "••••••••" }'
         : '';
     final isHttp = s.transport == 'http';
-    final urlJson = s.url != null
-        ? ',\n      "url": "${s.url}"'
-        : '';
+    final urlJson = s.url != null ? ',\n      "url": "${s.url}"' : '';
     final cwdJson = s.cwd != null ? ',\n      "cwd": "${s.cwd}"' : '';
     final transportJson = ',\n      "transport": "${s.transport}"';
     return '{\n'
@@ -3397,9 +3406,7 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
     Map<String, String> headers,
     String? cwd,
   })?
-  _parse(
-    String raw,
-  ) {
+  _parse(String raw) {
     try {
       final j = jsonDecode(raw) as Map<String, dynamic>;
       final servers = j['mcpServers'] as Map<String, dynamic>?;
@@ -3407,10 +3414,9 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
       final entry = servers.values.first as Map<String, dynamic>;
       final command = entry['command'] as String?;
       final url = (entry['url'] as String?)?.trim();
-      final transport = (entry['transport'] as String?) ??
-          (entry['type'] as String?);
-      final isHttp =
-          (url != null && url.isNotEmpty) || transport == 'http';
+      final transport =
+          (entry['transport'] as String?) ?? (entry['type'] as String?);
+      final isHttp = (url != null && url.isNotEmpty) || transport == 'http';
       if ((command == null || command.trim().isEmpty) && !isHttp) {
         return null;
       }

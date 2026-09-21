@@ -751,9 +751,15 @@ class SkillService {
     return _resolveSkillAlias(visible, alias);
   }
 
+  /// Parse a single SKILL.md file through the real frontmatter parser
+  /// without registering a root. Production API used by the plugin
+  /// adapters during inspection.
+  Future<Skill?> parseContributionFile(File file) => _parse(file, file.path);
+
   /// Test seam: parse a single SKILL.md file through the real frontmatter
   /// parser without registering a root.
-  Future<Skill?> parseForTest(File file, String path) => _parse(file, path);
+  Future<Skill?> parseForTest(File file, String path) =>
+      parseContributionFile(file);
 
   /// Resolves [relativePath] against [skill]'s own directory and returns the
   /// file's UTF-8 content, or null when the path is unsafe (traversal,

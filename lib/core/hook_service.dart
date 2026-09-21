@@ -295,8 +295,7 @@ class HookService extends ChangeNotifier {
     String canonicalEvent,
     Map<String, dynamic> payload,
   ) {
-    if (canonicalEvent == 'session_start' ||
-        canonicalEvent == 'session_end') {
+    if (canonicalEvent == 'session_start' || canonicalEvent == 'session_end') {
       final reason = payload['reason']?.toString() ?? '';
       return _ccSessionSource(reason);
     }
@@ -567,7 +566,9 @@ class HookService extends ChangeNotifier {
   String resolveHookPayload(PluginHook hook) {
     final payload = hook.payload;
     final match = RegExp(
-      r'"([^"]+\.cmd)"|' r"'([^']+\.cmd)'" r'|(\S+\.cmd)\b',
+      r'"([^"]+\.cmd)"|'
+      r"'([^']+\.cmd)'"
+      r'|(\S+\.cmd)\b',
       caseSensitive: false,
     ).firstMatch(payload);
     if (match == null) return payload;
@@ -591,6 +592,22 @@ class HookService extends ChangeNotifier {
   /// handling. [gate] selects the test seam matching the calling context
   /// (gate vs observe) so a test executor for one never intercepts the
   /// other.
+  /// Whether the hook declaration asked for fire-and-forget execution
+  /// (`"async": true`, stashed in `unknownFields` by the adapters).
+  static bool _hookDeclaresAsync(PluginHook hook) =>
+      hook.unknownFields['async'] == true;
+
+  /// Interpreters the sandbox guarantees for hook execution. A manifest
+  /// `shell` naming anything else falls back to bash with an optional
+  /// compatibility note at adapter time ([kKnownHookShells]).
+  static String _hookShell(PluginHook hook) {
+    final declared = hook.unknownFields['shell'];
+    if (declared is String && kKnownHookShells.contains(declared.trim())) {
+      return declared.trim();
+    }
+    return 'bash';
+  }
+
   Future<(int, String)> _exec(
     PluginHook hook,
     Map<String, String> env,
@@ -629,7 +646,11 @@ class HookService extends ChangeNotifier {
     // with exit 127 -- for EVERY plugin, not just one. `execChecked` merges
     // this over the sandbox env, so pass it through.
     final (code, out) = await SandboxService.I
-        .execChecked(['bash', '-c', command], hostWorkDir: cwd, env: env)
+        .execChecked(
+          [_hookShell(hook), '-c', command],
+          hostWorkDir: cwd,
+          env: env,
+        )
         .timeout(timeout);
     return (code, out);
   }
@@ -742,9 +763,45 @@ class HookService extends ChangeNotifier {
         await _ledger(
           sessionId,
           'hook/invoked',
-          Map<String, dynamic>.from(record),
+          _hookDeclaresAsync(hook)
+              ? {...Map<String, dynamic>.from(record), 'async': true}
+              : Map<String, dynamic>.from(record),
         );
       } catch (_) {}
+      // `async: true` hooks are fire-and-forget per the Claude Code
+      // contract: launch without awaiting so they never block the session.
+      // Their output is NOT collected into session context (it may arrive
+      // after the turn), and failures only touch the health ledger.
+      if (_hookDeclaresAsync(hook)) {
+        // `_exec` resolves normally on nonzero exit — check the code the
+        // same way the sync path does, instead of recording every
+        // completed process as a success.
+        unawaited(
+          _exec(hook, env, cwd)
+              .then((result) async {
+                final (code, out) = result;
+                if (code == 0) {
+                  _recordSuccess(pluginId, sessionId);
+                  return;
+                }
+                _recordFailure(pluginId, sessionId);
+                try {
+                  await _ledger(sessionId, 'hook/result', {
+                    ...record,
+                    'ok': false,
+                    'exit': code,
+                    'async': true,
+                    'warning': 'async hook failed (fail-open) — output ignored',
+                    'stdout': cleanHookJson(out),
+                  });
+                } catch (_) {}
+              })
+              .catchError((Object _) {
+                _recordFailure(pluginId, sessionId);
+              }),
+        );
+        continue;
+      }
       try {
         final (code, out) = await _exec(hook, env, cwd);
         if (code != 0) {
@@ -788,9 +845,7 @@ class HookService extends ChangeNotifier {
     final joined = collected.join('\n');
     // session_start output becomes standing session context, so it gets the
     // larger context cap; other events are short injections (≤2 KB).
-    final cap = canonical == 'session_start'
-        ? maxSessionContextChars
-        : 2048;
+    final cap = canonical == 'session_start' ? maxSessionContextChars : 2048;
     if (joined.length > cap) {
       return '${joined.substring(0, cap)}\n[hook output truncated]';
     }

@@ -1,5 +1,7 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
+
 import '../core/theme.dart';
 import '../core/state.dart';
 import '../core/sandbox_service.dart';
@@ -15,13 +17,11 @@ void openStudio(BuildContext context) {
     AppState.I.sandboxInstalled = installed;
     if (!context.mounted) return;
     if (installed) {
-      Navigator.of(
-        context,
-      ).push(MaterialPageRoute(builder: (_) => const StudioScreen()));
+      Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => const StudioScreen()));
     } else {
-      Navigator.of(
-        context,
-      ).push(MaterialPageRoute(builder: (_) => const SandboxSetupScreen()));
+      Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => const SandboxSetupScreen()));
     }
   });
 }
@@ -44,17 +44,31 @@ class SandboxSetupScreen extends StatefulWidget {
 }
 
 class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
-  static const _phaseNames = [
-    'Checking device',
-    'Locating bundled bootstrap',
-    'Extracting sandbox payload',
-    'Setting exec bits',
-    'Linking tool aliases',
-    'Configuring prefix',
-    'Verifying native exec',
-    'Installing Node.js runtime',
-    'Installing Python runtime',
-  ];
+  /// Gate mode (first launch) installs only the NATIVE CORE (phases 0–6)
+  /// so the app opens in under a minute; the network-bound Node.js/Python
+  /// runtimes install in the background afterwards. The manual setup flow
+  /// (Studio) still does the full install including runtimes.
+  List<String> get _phaseNames => widget.gateMode
+      ? const [
+          'Checking device',
+          'Locating bundled bootstrap',
+          'Extracting sandbox payload',
+          'Setting exec bits',
+          'Linking tool aliases',
+          'Configuring prefix',
+          'Verifying native exec',
+        ]
+      : const [
+          'Checking device',
+          'Locating bundled bootstrap',
+          'Extracting sandbox payload',
+          'Setting exec bits',
+          'Linking tool aliases',
+          'Configuring prefix',
+          'Verifying native exec',
+          'Installing Node.js runtime',
+          'Installing Python runtime',
+        ];
 
   final _log = <String>[];
   final _scroll = ScrollController();
@@ -63,6 +77,9 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   bool _done = false;
   String? _error;
   bool _unsupported = false;
+  // Guards the gate-mode hand-off: the auto-advance timer and the manual
+  // "Start chatting" button must not push the shell twice.
+  bool _navigated = false;
   DateTime? _start;
   Timer? _ticker;
 
@@ -99,6 +116,9 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   Future<void> _runInstall() async {
     try {
       await SandboxService.I.install(
+        // First-launch gate: core only (fast) — runtimes continue in the
+        // background after the shell opens. Manual setup: full install.
+        includeRuntimes: !widget.gateMode,
         onPhase: (phase, p, line) {
           if (!mounted || _done) return;
           _phase = phase;
@@ -111,6 +131,20 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
         _done = true;
       });
       AppState.I.sandboxReady();
+      if (widget.gateMode) {
+        // Auto-advance: the gate is a first-launch blocker, not a
+        // destination. Give the user a beat to see the success state,
+        // then replace the whole stack with the chat shell (the button
+        // below stays as a manual fallback).
+        Future.delayed(const Duration(milliseconds: 1200), () {
+          if (!mounted || !widget.gateMode || _navigated) return;
+          _navigated = true;
+          Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+            MaterialPageRoute(builder: (_) => const OvidShell()),
+            (_) => false,
+          );
+        });
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -243,7 +277,9 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
           Expanded(child: _terminal()),
           const SizedBox(height: 12),
           Text(
-            'Keep the app open — this happens only once.',
+            widget.gateMode
+                ? 'Core sandbox installs now (under a minute) — Node.js + Python continue in the background after the app opens.'
+                : 'Keep the app open — this happens only once.',
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
           ),
@@ -323,7 +359,9 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
           const Icon(Icons.error_outline, size: 40, color: Aether.danger),
           const SizedBox(height: 12),
           Text(
-            _unsupported ? 'This device can\'t run the sandbox' : 'Install interrupted',
+            _unsupported
+                ? 'This device can\'t run the sandbox'
+                : 'Install interrupted',
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 8),
@@ -428,13 +466,16 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             ),
           ],
           const SizedBox(height: 8),
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(
-              'Close',
-              style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
+          // In gate mode PopScope(canPop: false) blocks every pop, so a
+          // Close button here would silently do nothing — hide it.
+          if (!widget.gateMode)
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(
+                'Close',
+                style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
+              ),
             ),
-          ),
         ],
       ),
     );
@@ -520,6 +561,8 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                 ),
                 onPressed: () {
                   if (widget.gateMode) {
+                    if (_navigated) return;
+                    _navigated = true;
                     // Replace the whole nav stack with the chat shell.
                     Navigator.of(
                       context,

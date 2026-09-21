@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import '../core/plugin_manifest.dart';
 import '../core/plugin_permissions.dart';
 import '../core/theme.dart';
@@ -42,25 +43,40 @@ class _PluginPermissionSheet extends StatefulWidget {
 
 class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
   bool _saving = false;
+  String? _error;
 
   Future<void> _accept() async {
     if (_saving) return;
-    setState(() => _saving = true);
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
     // One consolidated grant per manifest digest (spec §5.1): the full
     // inferred capability set + environment-read names, non-secret data
     // only — secret VALUES stay in secure storage, never here.
-    await PluginPermissionStore().save(
-      PluginPermissionGrant(
-        pluginId: widget.manifest.id,
-        manifestDigest: pluginManifestDigest(widget.manifest),
-        capabilities: inferRequestedCapabilities(widget.manifest),
-        environmentReadNames: {
-          ...widget.manifest.environmentReadNames,
-          for (final s in widget.manifest.mcpServers) ...s.envNames,
-        },
-        approvedAt: DateTime.now(),
-      ),
-    );
+    try {
+      await PluginPermissionStore().save(
+        PluginPermissionGrant(
+          pluginId: widget.manifest.id,
+          manifestDigest: pluginManifestDigest(widget.manifest),
+          capabilities: inferRequestedCapabilities(widget.manifest),
+          environmentReadNames: {
+            ...widget.manifest.environmentReadNames,
+            for (final s in widget.manifest.mcpServers) ...s.envNames,
+          },
+          approvedAt: DateTime.now(),
+        ),
+      );
+    } catch (e) {
+      // Surface the failure in-sheet instead of stranding the spinner.
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _error = 'Could not save the grant: $e';
+        });
+      }
+      return;
+    }
     if (mounted) Navigator.pop(context, true);
   }
 
@@ -213,10 +229,7 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
                         'Approve once for this exact plugin version. Secrets '
                         'stay in secure storage; you can revoke anytime from '
                         'plugin settings.',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Aether.textFaint,
-                        ),
+                        style: TextStyle(fontSize: 11, color: Aether.textFaint),
                       ),
                     ],
                   ),
@@ -257,9 +270,7 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
                           ? const SizedBox(
                               width: 18,
                               height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                              ),
+                              child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Text(
                               'Accept',
@@ -269,6 +280,17 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
                   ),
                 ],
               ),
+              if (_error != null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  _error!,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: Aether.danger,
+                    height: 1.4,
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -297,11 +319,7 @@ class _CapabilityRow extends StatelessWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(
-              _iconFor(e.capability),
-              size: 16,
-              color: Aether.accent,
-            ),
+            Icon(_iconFor(e.capability), size: 16, color: Aether.accent),
             const SizedBox(width: 10),
             Expanded(
               child: Column(
@@ -317,20 +335,14 @@ class _CapabilityRow extends StatelessWidget {
                   const SizedBox(height: 2),
                   Text(
                     e.reason,
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: Aether.textMuted,
-                    ),
+                    style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
                   ),
                   if (e.environmentNames.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 2),
                       child: Text(
                         'variables: ${e.environmentNames.join(', ')}',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Aether.textMuted,
-                        ),
+                        style: TextStyle(fontSize: 11, color: Aether.textMuted),
                       ),
                     ),
                   if (e.sourcePath.isNotEmpty)

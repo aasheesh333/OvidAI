@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+
 import 'core/security_service.dart';
 import 'core/state.dart';
 import 'core/theme.dart';
@@ -70,9 +71,11 @@ class _OvidAppState extends State<OvidApp> {
 }
 
 /// Full-screen gate shown ONLY on first launch when the sandbox is not
-/// yet installed.  Runs the real SandboxService.install (payload extract
-/// → chmod → symlinks → config → bash sanity → Node.js → Python) and
-/// then replaces itself with the chat shell.  Non-dismissible — the
+/// yet installed. Runs the NATIVE CORE of SandboxService.install
+/// (payload extract → chmod → symlinks → config → bash sanity) — the
+/// network-bound Node.js/Python runtimes are deferred to a background
+/// install after the shell opens, so first launch stays under a minute.
+/// Then replaces itself with the chat shell. Non-dismissible — the core
 /// sandbox is required for all agent features (MCP, code execution, etc.).
 class _FirstLaunchSetupGate extends StatelessWidget {
   const _FirstLaunchSetupGate();

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+
 import '../core/theme.dart';
 import '../core/state.dart';
 import '../core/github_service.dart';
@@ -309,7 +310,8 @@ class _StudioScreenState extends State<StudioScreen> {
   Future<void> _pickAndPinFolder({required String dialogTitle}) async {
     String? path;
     try {
-      path = studioFolderPickOverrideForTest ??
+      path =
+          studioFolderPickOverrideForTest ??
           await FilePicker.platform.getDirectoryPath(dialogTitle: dialogTitle);
     } catch (_) {
       path = null;
@@ -419,9 +421,8 @@ class _StudioScreenState extends State<StudioScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Repo list failed: $e')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Repo list failed: $e')));
       }
     }
   }
@@ -657,10 +658,7 @@ class _RepoBar extends StatelessWidget {
               ),
               onPressed: onPickBranch,
               icon: const Icon(Icons.call_split, size: 13),
-              label: Text(
-                branch,
-                style: const TextStyle(fontSize: 12),
-              ),
+              label: Text(branch, style: const TextStyle(fontSize: 12)),
             ),
           ],
           if (syncing) ...[
@@ -832,7 +830,9 @@ class _FileTree extends StatelessWidget {
                           ? Icons.cloud_done_outlined
                           : Icons.cloud_off_outlined,
                       size: 13,
-                      color: cache.isReady ? Aether.successLight : Aether.textFaint,
+                      color: cache.isReady
+                          ? Aether.successLight
+                          : Aether.textFaint,
                     ),
                     const SizedBox(width: 7),
                     Expanded(
@@ -1261,9 +1261,7 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
                                   style: TextStyle(
                                     fontFamily: Aether.mono,
                                     fontSize: 10,
-                                    color: sel
-                                        ? Aether.text
-                                        : Aether.textFaint,
+                                    color: sel ? Aether.text : Aether.textFaint,
                                   ),
                                 ),
                                 const SizedBox(width: 5),
@@ -1359,9 +1357,13 @@ class _TerminalPaneState extends State<_TerminalPane> {
 
   void _scrollToBottom(_TerminalSession t) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (t.scroll.hasClients) {
-        t.scroll.jumpTo(t.scroll.position.maxScrollExtent);
-      }
+      if (!t.scroll.hasClients) return;
+      final pos = t.scroll.position;
+      // Follow-mode: only auto-scroll when the user is already near the
+      // bottom — scrolling up to read earlier output must not be yanked
+      // back down by every new line of command output.
+      if (pos.maxScrollExtent - pos.pixels > 48) return;
+      t.scroll.jumpTo(pos.maxScrollExtent);
     });
   }
 

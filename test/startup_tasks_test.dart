@@ -847,6 +847,31 @@ void main() {
       expect(status.state, StartupItemState.degraded);
     });
 
+    test('runtimes nobody requested are skipped, not degraded', () async {
+      // First-launch installs the native core WITHOUT runtimes; the boot
+      // task must not burn its budget (or scare the user) installing
+      // node/python nobody asked for yet.
+      var installAttempted = false;
+      final calls = <String>[];
+      final status = await SandboxMaintenanceTask(
+        id: 'sandbox.selfHeal',
+        label: 'Maintain local sandbox',
+        timeout: const Duration(seconds: 30),
+        isInstalled: () => true,
+        startMaintenance: () async => calls.add('maintain'),
+        runtimesVerified: () async => false,
+        runtimesRequested: () => false,
+        installCoreRuntimes: () async {
+          installAttempted = true;
+          return true;
+        },
+        enforceQuota: () async => calls.add('quota'),
+      ).run();
+      expect(status.state, StartupItemState.ready);
+      expect(installAttempted, isFalse);
+      expect(calls, ['maintain', 'quota']);
+    });
+
     test('a healthy sandbox is ready and runs quota after runtimes', () async {
       final calls = <String>[];
       final status = await task(

@@ -187,9 +187,8 @@ class MarketplaceRefreshTask implements StartupTask {
       final slice = Duration(
         microseconds: remaining.inMicroseconds ~/ reposLeft,
       );
-      final outcome = await guarded(
-        repos[i],
-      ).timeout(slice, onTimeout: () => MarketplaceSyncOutcome.failed);
+      final outcome = await guarded(repos[i])
+          .timeout(slice, onTimeout: () => MarketplaceSyncOutcome.failed);
       if (outcome.index > worst.index) worst = outcome;
     }
     return switch (worst) {
@@ -364,7 +363,9 @@ class SandboxMaintenanceTask implements StartupTask {
     this.lastFailedAt,
     this.cooldown = const Duration(hours: 12),
     DateTime Function()? now,
-  }) : now = now ?? DateTime.now;
+    bool Function()? runtimesRequested,
+  }) : now = now ?? DateTime.now,
+       runtimesRequested = runtimesRequested ?? (() => true);
 
   @override
   final String id;
@@ -377,6 +378,14 @@ class SandboxMaintenanceTask implements StartupTask {
   final Future<bool> Function() runtimesVerified;
   final Future<bool> Function() installCoreRuntimes;
   final Future<void> Function() enforceQuota;
+
+  /// Whether any code path has asked for the dev runtimes (node/python)
+  /// this process lifetime. First-launch installs the native core WITHOUT
+  /// runtimes; when they were never requested, missing runtimes are
+  /// "not needed yet" (ready), not "broken" (degraded). Defaults to
+  /// `() => true` to preserve the historical eager-install behavior for
+  /// callers that don't opt into deferred runtimes.
+  final bool Function() runtimesRequested;
 
   /// Same cooldown contract as [MarketplaceRefreshTask]: a recent failure
   /// skips instead of timing out again every launch; manual Retry bypasses
@@ -413,6 +422,15 @@ class SandboxMaintenanceTask implements StartupTask {
     try {
       await startMaintenance();
       if (!await runtimesVerified()) {
+        if (!runtimesRequested()) {
+          // Runtimes are intentionally deferred (first-launch core
+          // install skips them; they arrive in the background or on
+          // first real use). Missing-but-unrequested is not a failure —
+          // run quota and report ready instead of burning the boot
+          // budget on an apt install nobody asked for.
+          await enforceQuota();
+          return StartupItemStatus.ready(id, kind, label);
+        }
         final installed = await installCoreRuntimes();
         if (!installed) {
           return StartupItemStatus.degraded(

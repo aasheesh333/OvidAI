@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -9,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
+
 import '../core/theme.dart';
 import '../core/format.dart';
 import '../core/voice_input_service.dart';
@@ -98,9 +100,9 @@ class ChatTranscript extends StatelessWidget {
           },
         );
         return MediaQuery(
-          data: MediaQuery.of(context).copyWith(
-            textScaler: TextScaler.linear(AppState.I.chatFontScale),
-          ),
+          data: MediaQuery.of(
+            context,
+          ).copyWith(textScaler: TextScaler.linear(AppState.I.chatFontScale)),
           child: Center(
             child: ConstrainedBox(
               constraints: BoxConstraints(maxWidth: layout.contentWidth),
@@ -333,79 +335,76 @@ class _StatsLine extends StatelessWidget {
         return GestureDetector(
           onTap: () => _showSessionAnalytics(context, s),
           child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.fromLTRB(16, 3, 16, 3),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Flexible(
-                child: Text(
-                  [
-                    '${analytics.turns} turn${analytics.turns == 1 ? '' : 's'}',
-                    if (analytics.llmMs > 0)
-                      'LLM ${formatCompactDuration(Duration(milliseconds: analytics.llmMs))}',
-                    'Input ${_fmtTok(analytics.inputTokens)} tok · Output ${_fmtTok(analytics.outputTokens)} tok',
-                    if (analytics.decodeTokensPerSecond > 0)
-                      '${analytics.decodeTokensPerSecond.toStringAsFixed(1)} tok/s',
-                    if (analytics.cacheReadTokens > 0)
-                      'cache ${_fmtTok(analytics.cacheReadTokens)} tok',
-                    if (analytics.averageTtftMs > 0)
-                      'ttft ~${analytics.averageTtftMs} ms',
-                    if (analytics.estimatedCostUsd > 0)
-                      '≈ ${_fmtCost(analytics.estimatedCostUsd)}',
-                    if (s.compactedSummary != null) 'compacted',
-                  ].join('  |  '),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-                ),
-              ),
-              const SizedBox(width: 8),
-              // Context ring — 12px arc + % label (the context indicator "% of context used").
-              // Tap → full context meter sheet (segmented breakdown).
-              Tooltip(
-                message:
-                    '${pct.toStringAsFixed(0)}% of ${_fmtTok(window)} context used · '
-                    'session input ${_fmtTok(analytics.inputTokens)} · '
-                    'session output ${_fmtTok(analytics.outputTokens)} · '
-                    'tap for details',
-                child: GestureDetector(
-                  onTap: () => _showContextMeter(
-                    context,
-                    window: window,
-                    used: used,
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(
-                          value: frac,
-                          strokeWidth: 2,
-                          backgroundColor: Aether.hairline,
-                          valueColor: AlwaysStoppedAnimation(ringColor),
-                          strokeCap: StrokeCap.round,
-                        ),
-                      ),
-                      const SizedBox(width: 5),
-                      Text(
-                        '${pct.toStringAsFixed(0)}%',
-                        style: TextStyle(
-                          fontSize: 10.5,
-                          fontFamily: Aether.mono,
-                          color: ringColor,
-                        ),
-                      ),
-                    ],
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(16, 3, 16, 3),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Flexible(
+                  child: Text(
+                    [
+                      '${analytics.turns} turn${analytics.turns == 1 ? '' : 's'}',
+                      if (analytics.llmMs > 0)
+                        'LLM ${formatCompactDuration(Duration(milliseconds: analytics.llmMs))}',
+                      'Input ${_fmtTok(analytics.inputTokens)} tok · Output ${_fmtTok(analytics.outputTokens)} tok',
+                      if (analytics.decodeTokensPerSecond > 0)
+                        '${analytics.decodeTokensPerSecond.toStringAsFixed(1)} tok/s',
+                      if (analytics.cacheReadTokens > 0)
+                        'cache ${_fmtTok(analytics.cacheReadTokens)} tok',
+                      if (analytics.averageTtftMs > 0)
+                        'ttft ~${analytics.averageTtftMs} ms',
+                      if (analytics.estimatedCostUsd > 0)
+                        '≈ ${_fmtCost(analytics.estimatedCostUsd)}',
+                      if (s.compactedSummary != null) 'compacted',
+                    ].join('  |  '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
                   ),
                 ),
-              ),
-            ],
+                const SizedBox(width: 8),
+                // Context ring — 12px arc + % label (the context indicator "% of context used").
+                // Tap → full context meter sheet (segmented breakdown).
+                Tooltip(
+                  message:
+                      '${pct.toStringAsFixed(0)}% of ${_fmtTok(window)} context used · '
+                      'session input ${_fmtTok(analytics.inputTokens)} · '
+                      'session output ${_fmtTok(analytics.outputTokens)} · '
+                      'tap for details',
+                  child: GestureDetector(
+                    onTap: () =>
+                        _showContextMeter(context, window: window, used: used),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(
+                            value: frac,
+                            strokeWidth: 2,
+                            backgroundColor: Aether.hairline,
+                            valueColor: AlwaysStoppedAnimation(ringColor),
+                            strokeCap: StrokeCap.round,
+                          ),
+                        ),
+                        const SizedBox(width: 5),
+                        Text(
+                          '${pct.toStringAsFixed(0)}%',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            fontFamily: Aether.mono,
+                            color: ringColor,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
         );
       },
     );
@@ -448,12 +447,31 @@ class _StatsLine extends StatelessWidget {
                 children: [
                   _analyticsMetric('Input', '${_fmtTok(a.inputTokens)} tok'),
                   _analyticsMetric('Output', '${_fmtTok(a.outputTokens)} tok'),
-                  _analyticsMetric('Context', '${_fmtTok(a.contextTokens)} / ${_fmtTok(a.contextLimit)}'),
+                  _analyticsMetric(
+                    'Context',
+                    '${_fmtTok(a.contextTokens)} / ${_fmtTok(a.contextLimit)}',
+                  ),
                   _analyticsMetric('Turns', '${a.turns}'),
-                  _analyticsMetric('Tools', '${a.toolCalls} · ${formatCompactDuration(Duration(milliseconds: a.toolMs))}'),
-                  _analyticsMetric('TTFT', a.averageTtftMs == 0 ? '—' : '${a.averageTtftMs} ms'),
-                  _analyticsMetric('Decode', a.decodeTokensPerSecond == 0 ? '—' : '${a.decodeTokensPerSecond.toStringAsFixed(1)} tok/s'),
-                  _analyticsMetric('Est. cost', a.estimatedCostUsd == 0 ? '—' : _fmtCost(a.estimatedCostUsd)),
+                  _analyticsMetric(
+                    'Tools',
+                    '${a.toolCalls} · ${formatCompactDuration(Duration(milliseconds: a.toolMs))}',
+                  ),
+                  _analyticsMetric(
+                    'TTFT',
+                    a.averageTtftMs == 0 ? '—' : '${a.averageTtftMs} ms',
+                  ),
+                  _analyticsMetric(
+                    'Decode',
+                    a.decodeTokensPerSecond == 0
+                        ? '—'
+                        : '${a.decodeTokensPerSecond.toStringAsFixed(1)} tok/s',
+                  ),
+                  _analyticsMetric(
+                    'Est. cost',
+                    a.estimatedCostUsd == 0
+                        ? '—'
+                        : _fmtCost(a.estimatedCostUsd),
+                  ),
                 ],
               ),
               const SizedBox(height: 12),
@@ -480,7 +498,14 @@ class _StatsLine extends StatelessWidget {
       children: [
         Text(label, style: TextStyle(color: Aether.textFaint, fontSize: 10)),
         const SizedBox(height: 2),
-        Text(value, style: TextStyle(color: Aether.text, fontSize: 12, fontWeight: FontWeight.w600)),
+        Text(
+          value,
+          style: TextStyle(
+            color: Aether.text,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
       ],
     ),
   );
@@ -1144,11 +1169,20 @@ class _ChatScreenState extends State<ChatScreen>
                 animation: AgentService.I,
                 builder: (_, _) {
                   final jobs = s == null
-                      ? const <({int id, String name, String state, int elapsedSec, int outChars})>[]
+                      ? const <
+                          ({
+                            int id,
+                            String name,
+                            String state,
+                            int elapsedSec,
+                            int outChars,
+                          })
+                        >[]
                       : AgentService.I.jobsFor(s.id);
                   if (jobs.isEmpty) return const SizedBox.shrink();
-                  final running =
-                      jobs.where((j) => j.state == 'running').length;
+                  final running = jobs
+                      .where((j) => j.state == 'running')
+                      .length;
                   return Stack(
                     alignment: Alignment.center,
                     children: [
@@ -1199,7 +1233,9 @@ class _ChatScreenState extends State<ChatScreen>
                   final a = AgentService.I;
                   final dotColor = a.browserBusy
                       ? Aether.accent
-                      : (a.browserReady ? Aether.successLight : Aether.textFaint);
+                      : (a.browserReady
+                            ? Aether.successLight
+                            : Aether.textFaint);
                   return Stack(
                     alignment: Alignment.center,
                     children: [
@@ -1249,10 +1285,7 @@ class _ChatScreenState extends State<ChatScreen>
                 // Reserve most of a short viewport for the composer/docks so
                 // an expanded dashboard can never crowd them off-screen at
                 // large text scales. The panel still scrolls internally.
-                final panelCap = math.min(
-                  240.0,
-                  constraints.maxHeight * 0.35,
-                );
+                final panelCap = math.min(240.0, constraints.maxHeight * 0.35);
                 // Docks share the same centered content column as the
                 // transcript so the whole chat reads as one axis.
                 final dockColumn = Column(
@@ -1288,372 +1321,399 @@ class _ChatScreenState extends State<ChatScreen>
                         ),
                       ),
                     ),
+                    // Deferred first-launch runtime install (Node.js/Python
+                    // in the background). Own AnimatedBuilder on AppState so
+                    // installer progress never rebuilds the transcript.
+                    const _RuntimeInstallBanner(),
                     Expanded(
-                  child: s == null || s.messages.isEmpty
-                      ? const _EmptyState()
-                      : Stack(
-                          children: [
-                            // Pinch-to-zoom: scales message text only.
-                            GestureDetector(
-                              behavior: HitTestBehavior.translucent,
-                              onScaleStart: (d) {
-                                _pinchStartScale = app.chatFontScale;
-                              },
-                              onScaleUpdate: (d) {
-                                // Only react to genuine 2-finger pinch
-                                // (pointerCount >= 2), not 1-finger scroll.
-                                if (d.pointerCount < 2) return;
-                                app.setChatFontScale(
-                                  _pinchStartScale * d.scale,
-                                );
-                              },
-                              child: MediaQuery(
-                                // Apply the font scale to the message list
-                                // subtree ONLY. The AppBar (header) and the
-                                // _InputBar (composer chatbox) are outside
-                                // this MediaQuery, so they stay fixed.
-                                data: MediaQuery.of(context).copyWith(
-                                  textScaler: TextScaler.linear(
-                                    app.chatFontScale,
-                                  ),
-                                ),
-                                child: AnimatedBuilder(
-                                  animation: AgentService.I,
-                                  builder: (_, _) {
-                                    final typing = AgentService.I.busyFor(s.id);
-                                    // Bounded, cached fold (Task 4): the
-                                    // folded window is reused across streaming
-                                    // tokens; only the message count / last
-                                    // message identity / showReasoning / pager
-                                    // window can invalidate it.
-                                    final window = _transcriptWindow(s);
-                                    _hasEarlier = window.hasEarlier;
-                                    final hiddenMessages = window.hiddenMessages;
-                                    final items = window.visible;
-                                    // "Produced" card — files written by
-                                    // this run surface as a card under the
-                                    // final answer (tap → Studio).
-                                    final produced =
-                                        AgentService.I.producedFiles;
-                                    final showProduced =
-                                        !typing && produced.isNotEmpty;
-                                    // System-prompt disclosure (context
-                                    // visibility): only at the top of the
-                                    // loaded window so it never shifts the
-                                    // paging row.
-                                    final sysPrompt = hiddenMessages == 0
-                                        ? s.systemPromptSnapshot
-                                        : null;
-                                    final showSysPrompt =
-                                        sysPrompt != null &&
-                                        sysPrompt.trim().isNotEmpty;
-                                    final count =
-                                        (showSysPrompt ? 1 : 0) +
-                                        (hiddenMessages > 0 ? 1 : 0) +
-                                        items.length +
-                                        (typing ? 1 : 0) +
-                                        (showProduced ? 1 : 0);
-                                    // Keyed anchor (Task 7): keep the row-key
-                                    // map current for capture/restore, then
-                                    // follow the tip only when it changed.
-                                    _rowKeys = _computeRowKeys(
-                                      window,
-                                      typing,
-                                      showProduced,
+                      child: s == null || s.messages.isEmpty
+                          ? const _EmptyState()
+                          : Stack(
+                              children: [
+                                // Pinch-to-zoom: scales message text only.
+                                GestureDetector(
+                                  behavior: HitTestBehavior.translucent,
+                                  onScaleStart: (d) {
+                                    _pinchStartScale = app.chatFontScale;
+                                  },
+                                  onScaleUpdate: (d) {
+                                    // Only react to genuine 2-finger pinch
+                                    // (pointerCount >= 2), not 1-finger scroll.
+                                    if (d.pointerCount < 2) return;
+                                    app.setChatFontScale(
+                                      _pinchStartScale * d.scale,
                                     );
-                                    _maybeFollowTip();
-                                    final list = ListView.builder(
-                                      key: const ValueKey(
-                                        'chat-transcript-list',
+                                  },
+                                  child: MediaQuery(
+                                    // Apply the font scale to the message list
+                                    // subtree ONLY. The AppBar (header) and the
+                                    // _InputBar (composer chatbox) are outside
+                                    // this MediaQuery, so they stay fixed.
+                                    data: MediaQuery.of(context).copyWith(
+                                      textScaler: TextScaler.linear(
+                                        app.chatFontScale,
                                       ),
-                                      controller: _scroll,
-                                      padding: const EdgeInsets.fromLTRB(
-                                        16,
-                                        8,
-                                        16,
-                                        16,
-                                      ),
-                                      itemCount: count,
-                                      itemBuilder: (_, i) {
-                                        var idx = i;
-                                        // Row 0 (no paging): the system-prompt
-                                        // disclosure for the latest turn.
-                                        if (showSysPrompt && idx == 0) {
-                                          return _RowIn(
-                                            child: _SystemPromptRow(
-                                              text: sysPrompt,
-                                            ),
-                                          );
-                                        }
-                                        if (showSysPrompt) idx -= 1;
-                                        // Next row: paging affordance. The
-                                        // spinner shows only while a page is
-                                        // actually loading — it used to spin
-                                        // forever in any long thread.
-                                        if (hiddenMessages > 0 && idx == 0) {
-                                          return Center(
-                                            child: Padding(
-                                              padding: const EdgeInsets.all(8),
-                                              child: Row(
-                                                mainAxisSize: MainAxisSize.min,
-                                                children: [
-                                                  if (_paging) ...[
-                                                    SizedBox(
-                                                      width: 12,
-                                                      height: 12,
-                                                      child:
-                                                          CircularProgressIndicator(
-                                                            strokeWidth: 1.5,
-                                                            color: Aether
-                                                                .textFaint,
-                                                          ),
-                                                    ),
-                                                    const SizedBox(width: 6),
-                                                  ] else ...[
-                                                    Icon(
-                                                      Icons
-                                                          .keyboard_arrow_up_rounded,
-                                                      size: 14,
-                                                      color: Aether.textFaint,
-                                                    ),
-                                                    const SizedBox(width: 4),
-                                                  ],
-                                                  Text(
-                                                    _paging
-                                                        ? 'Loading earlier…'
-                                                        : '$hiddenMessages earlier '
-                                                              'message${hiddenMessages == 1 ? '' : 's'} '
-                                                              '· scroll up',
-                                                    style: TextStyle(
-                                                      fontSize: 11,
-                                                      color: Aether.textFaint,
-                                                    ),
+                                    ),
+                                    child: AnimatedBuilder(
+                                      animation: AgentService.I,
+                                      builder: (_, _) {
+                                        final typing = AgentService.I.busyFor(
+                                          s.id,
+                                        );
+                                        // Bounded, cached fold (Task 4): the
+                                        // folded window is reused across streaming
+                                        // tokens; only the message count / last
+                                        // message identity / showReasoning / pager
+                                        // window can invalidate it.
+                                        final window = _transcriptWindow(s);
+                                        _hasEarlier = window.hasEarlier;
+                                        final hiddenMessages =
+                                            window.hiddenMessages;
+                                        final items = window.visible;
+                                        // "Produced" card — files written by
+                                        // this run surface as a card under the
+                                        // final answer (tap → Studio).
+                                        final produced =
+                                            AgentService.I.producedFiles;
+                                        final showProduced =
+                                            !typing && produced.isNotEmpty;
+                                        // System-prompt disclosure (context
+                                        // visibility): only at the top of the
+                                        // loaded window so it never shifts the
+                                        // paging row.
+                                        final sysPrompt = hiddenMessages == 0
+                                            ? s.systemPromptSnapshot
+                                            : null;
+                                        final showSysPrompt =
+                                            sysPrompt != null &&
+                                            sysPrompt.trim().isNotEmpty;
+                                        final count =
+                                            (showSysPrompt ? 1 : 0) +
+                                            (hiddenMessages > 0 ? 1 : 0) +
+                                            items.length +
+                                            (typing ? 1 : 0) +
+                                            (showProduced ? 1 : 0);
+                                        // Keyed anchor (Task 7): keep the row-key
+                                        // map current for capture/restore, then
+                                        // follow the tip only when it changed.
+                                        _rowKeys = _computeRowKeys(
+                                          window,
+                                          typing,
+                                          showProduced,
+                                        );
+                                        _maybeFollowTip();
+                                        final list = ListView.builder(
+                                          key: const ValueKey(
+                                            'chat-transcript-list',
+                                          ),
+                                          controller: _scroll,
+                                          padding: const EdgeInsets.fromLTRB(
+                                            16,
+                                            8,
+                                            16,
+                                            16,
+                                          ),
+                                          itemCount: count,
+                                          itemBuilder: (_, i) {
+                                            var idx = i;
+                                            // Row 0 (no paging): the system-prompt
+                                            // disclosure for the latest turn.
+                                            if (showSysPrompt && idx == 0) {
+                                              return _RowIn(
+                                                child: _SystemPromptRow(
+                                                  text: sysPrompt,
+                                                ),
+                                              );
+                                            }
+                                            if (showSysPrompt) idx -= 1;
+                                            // Next row: paging affordance. The
+                                            // spinner shows only while a page is
+                                            // actually loading — it used to spin
+                                            // forever in any long thread.
+                                            if (hiddenMessages > 0 &&
+                                                idx == 0) {
+                                              return Center(
+                                                child: Padding(
+                                                  padding: const EdgeInsets.all(
+                                                    8,
                                                   ),
-                                                ],
-                                              ),
-                                            ),
-                                          );
-                                        }
-                                        final li = hiddenMessages > 0
-                                            ? idx - 1
-                                            : idx;
-                                        if (li == items.length) {
-                                          return typing
-                                              ? const _TypingBubble()
-                                              : _RowIn(
-                                                  child: _ProducedFilesCard(
-                                                    files: produced,
+                                                  child: Row(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
+                                                    children: [
+                                                      if (_paging) ...[
+                                                        SizedBox(
+                                                          width: 12,
+                                                          height: 12,
+                                                          child:
+                                                              CircularProgressIndicator(
+                                                                strokeWidth:
+                                                                    1.5,
+                                                                color: Aether
+                                                                    .textFaint,
+                                                              ),
+                                                        ),
+                                                        const SizedBox(
+                                                          width: 6,
+                                                        ),
+                                                      ] else ...[
+                                                        Icon(
+                                                          Icons
+                                                              .keyboard_arrow_up_rounded,
+                                                          size: 14,
+                                                          color:
+                                                              Aether.textFaint,
+                                                        ),
+                                                        const SizedBox(
+                                                          width: 4,
+                                                        ),
+                                                      ],
+                                                      Text(
+                                                        _paging
+                                                            ? 'Loading earlier…'
+                                                            : '$hiddenMessages earlier '
+                                                                  'message${hiddenMessages == 1 ? '' : 's'} '
+                                                                  '· scroll up',
+                                                        style: TextStyle(
+                                                          fontSize: 11,
+                                                          color:
+                                                              Aether.textFaint,
+                                                        ),
+                                                      ),
+                                                    ],
                                                   ),
-                                                );
-                                        }
-                                        final item = items[li];
-                                        // The live tail bubble subscribes to
-                                        // AppState so streaming tokens repaint
-                                        // only this row — the rest of the list
-                                        // stays cached.
-                                        if (typing && li == items.length - 1) {
-                                          return AnimatedBuilder(
-                                            animation: AppState.I,
-                                            builder: (_, _) => _buildItem(
+                                                ),
+                                              );
+                                            }
+                                            final li = hiddenMessages > 0
+                                                ? idx - 1
+                                                : idx;
+                                            if (li == items.length) {
+                                              return typing
+                                                  ? const _TypingBubble()
+                                                  : _RowIn(
+                                                      child: _ProducedFilesCard(
+                                                        files: produced,
+                                                      ),
+                                                    );
+                                            }
+                                            final item = items[li];
+                                            // The live tail bubble subscribes to
+                                            // AppState so streaming tokens repaint
+                                            // only this row — the rest of the list
+                                            // stays cached.
+                                            if (typing &&
+                                                li == items.length - 1) {
+                                              return AnimatedBuilder(
+                                                animation: AppState.I,
+                                                builder: (_, _) => _buildItem(
+                                                  item,
+                                                  s,
+                                                  onAction: () =>
+                                                      setState(() {}),
+                                                  input: _input,
+                                                  layout: layout,
+                                                ),
+                                              );
+                                            }
+                                            return _buildItem(
                                               item,
                                               s,
                                               onAction: () => setState(() {}),
                                               input: _input,
                                               layout: layout,
+                                            );
+                                          },
+                                        );
+                                        return Center(
+                                          child: ConstrainedBox(
+                                            key: const ValueKey(
+                                              'chat-transcript-column',
                                             ),
-                                          );
-                                        }
-                                        return _buildItem(
-                                          item,
-                                          s,
-                                          onAction: () => setState(() {}),
-                                          input: _input,
-                                          layout: layout,
+                                            constraints: BoxConstraints(
+                                              maxWidth: layout.contentWidth,
+                                            ),
+                                            child: list,
+                                          ),
                                         );
                                       },
-                                    );
-                                    return Center(
-                                      child: ConstrainedBox(
-                                        key: const ValueKey(
-                                          'chat-transcript-column',
-                                        ),
-                                        constraints: BoxConstraints(
-                                          maxWidth: layout.contentWidth,
-                                        ),
-                                        child: list,
-                                      ),
-                                    );
-                                  },
+                                    ),
+                                  ),
                                 ),
-                              ),
-                            ),
-                            // web-IDE "jump to latest" pill — only when the
-                            // user scrolled up while content keeps streaming.
-                            if (_showJumpFab)
-                              Positioned(
-                                bottom: 12,
-                                right: 12,
-                                child: Semantics(
-                                  button: true,
-                                  label: 'Jump to latest',
-                                  child: Material(
-                                    color: Aether.surface,
-                                    elevation: 2,
-                                    borderRadius: BorderRadius.circular(20),
-                                    child: InkWell(
-                                      borderRadius: BorderRadius.circular(20),
-                                      onTap: () {
-                                        _scroll.jumpTo(
-                                          _scroll.position.maxScrollExtent,
-                                        );
-                                      },
-                                      child: const Padding(
-                                        padding: EdgeInsets.symmetric(
-                                          horizontal: 10,
-                                          vertical: 6,
-                                        ),
-                                        child: Icon(
-                                          Icons.arrow_downward,
-                                          size: 16,
-                                          color: Aether.accent,
+                                // web-IDE "jump to latest" pill — only when the
+                                // user scrolled up while content keeps streaming.
+                                if (_showJumpFab)
+                                  Positioned(
+                                    bottom: 12,
+                                    right: 12,
+                                    child: Semantics(
+                                      button: true,
+                                      label: 'Jump to latest',
+                                      child: Material(
+                                        color: Aether.surface,
+                                        elevation: 2,
+                                        borderRadius: BorderRadius.circular(20),
+                                        child: InkWell(
+                                          borderRadius: BorderRadius.circular(
+                                            20,
+                                          ),
+                                          onTap: () {
+                                            _scroll.jumpTo(
+                                              _scroll.position.maxScrollExtent,
+                                            );
+                                          },
+                                          child: const Padding(
+                                            padding: EdgeInsets.symmetric(
+                                              horizontal: 10,
+                                              vertical: 6,
+                                            ),
+                                            child: Icon(
+                                              Icons.arrow_downward,
+                                              size: 16,
+                                              color: Aether.accent,
+                                            ),
+                                          ),
                                         ),
                                       ),
                                     ),
                                   ),
-                                ),
-                              ),
-                          ],
-                        ),
-                ),
-                Center(
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(maxWidth: layout.contentWidth),
-                    child: dockColumn,
-                  ),
-                ),
-                _InputBar(
-                  layout: layout,
-                  controller: _input,
-                  sessionId: s?.id,
-                  coordinator: widget.startupCoordinator,
-                  running: s == null ? false : AgentService.I.busyFor(s.id),
-                  // approval takeover parity: a pending approval LOCKS
-                  // the composer — the user answers the card, not the box.
-                  locked: AgentService.I.pendingApproval != null,
-                  onSend: () async {
-                    final t = _input.text.trim();
-                    if (t.isEmpty) return;
-
-                    // ── Composer command system ───────────────────────
-                    if (t.startsWith('/')) {
-                      final result = await CommandService.I.execute(t);
-                      if (result != null) {
-                        _input.clear();
-                        // popupSelect (the command picker parity): open the overlay picker.
-                        if (!context.mounted) return;
-                        if (result.popup == 'model') {
-                          _modelPicker(context);
-                          return;
-                        }
-                        if (result.popup == 'permission') {
-                          _showModeSheetFromCommand(context);
-                          return;
-                        }
-                        if (result.popup == 'controlDisclosure') {
-                          await _enableControlMode(context);
-                          return;
-                        }
-                        if (result.popup == 'preset') {
-                          _showPresetSheetFromCommand(context);
-                          return;
-                        }
-                        if (result.feedback != null &&
-                            result.feedback!.isNotEmpty &&
-                            context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(result.feedback!),
-                              behavior: SnackBarBehavior.floating,
+                              ],
                             ),
-                          );
-                        }
-                        final prompt = result.prompt;
-                        if (prompt != null && prompt.isNotEmpty && context.mounted) {
-                          _sendPrompt(context, s, prompt);
-                        }
-                        return;
-                      }
-                      // Skill direct invocation: /skill-name [args].
-                      final parsed = parseSkillInvocation(t);
-                      if (parsed != null && s != null) {
-                        final resolved = SkillService.I.resolveForSession(
-                          s.id,
-                          parsed.token,
-                        );
-                        if (resolved.isAmbiguous) {
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  'Ambiguous skill. Choose exactly one: '
-                                  '${resolved.options.join(', ')}',
+                    ),
+                    Center(
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth: layout.contentWidth,
+                        ),
+                        child: dockColumn,
+                      ),
+                    ),
+                    _InputBar(
+                      layout: layout,
+                      controller: _input,
+                      sessionId: s?.id,
+                      coordinator: widget.startupCoordinator,
+                      running: s == null ? false : AgentService.I.busyFor(s.id),
+                      // approval takeover parity: a pending approval LOCKS
+                      // the composer — the user answers the card, not the box.
+                      locked: AgentService.I.pendingApproval != null,
+                      onSend: () async {
+                        final t = _input.text.trim();
+                        if (t.isEmpty) return;
+
+                        // ── Composer command system ───────────────────────
+                        if (t.startsWith('/')) {
+                          final result = await CommandService.I.execute(t);
+                          if (result != null) {
+                            _input.clear();
+                            // popupSelect (the command picker parity): open the overlay picker.
+                            if (!context.mounted) return;
+                            if (result.popup == 'model') {
+                              _modelPicker(context);
+                              return;
+                            }
+                            if (result.popup == 'permission') {
+                              _showModeSheetFromCommand(context);
+                              return;
+                            }
+                            if (result.popup == 'controlDisclosure') {
+                              await _enableControlMode(context);
+                              return;
+                            }
+                            if (result.popup == 'preset') {
+                              _showPresetSheetFromCommand(context);
+                              return;
+                            }
+                            if (result.feedback != null &&
+                                result.feedback!.isNotEmpty &&
+                                context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(result.feedback!),
+                                  behavior: SnackBarBehavior.floating,
                                 ),
-                                behavior: SnackBarBehavior.floating,
-                              ),
-                            );
-                          }
-                          return;
-                        }
-                        final skill = resolved.unique;
-                        if (skill != null && skill.userInvocable) {
-                          if (!AgentService.I.isSkillAvailableForSession(
-                            skill,
-                            s.id,
-                          )) {
+                              );
+                            }
+                            final prompt = result.prompt;
+                            if (prompt != null &&
+                                prompt.isNotEmpty &&
+                                context.mounted) {
+                              _sendPrompt(context, s, prompt);
+                            }
                             return;
                           }
-                          _input.clear();
-                          final content = AgentService
-                              .substituteCommandArguments(
-                                skill.content,
-                                parsed.args,
-                              );
-                          final argsText = AgentService.commandArgumentTrailer(
-                            skill.content,
-                            parsed.args,
-                            'User instruction',
-                          );
-                          if (context.mounted) {
-                            _sendPrompt(
-                              context,
-                              s,
-                              '<skill_content>\n$content\n</skill_content>'
-                              '$argsText',
+                          // Skill direct invocation: /skill-name [args].
+                          final parsed = parseSkillInvocation(t);
+                          if (parsed != null && s != null) {
+                            final resolved = SkillService.I.resolveForSession(
+                              s.id,
+                              parsed.token,
                             );
+                            if (resolved.isAmbiguous) {
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      'Ambiguous skill. Choose exactly one: '
+                                      '${resolved.options.join(', ')}',
+                                    ),
+                                    behavior: SnackBarBehavior.floating,
+                                  ),
+                                );
+                              }
+                              return;
+                            }
+                            final skill = resolved.unique;
+                            if (skill != null && skill.userInvocable) {
+                              if (!AgentService.I.isSkillAvailableForSession(
+                                skill,
+                                s.id,
+                              )) {
+                                return;
+                              }
+                              _input.clear();
+                              final content =
+                                  AgentService.substituteCommandArguments(
+                                    skill.content,
+                                    parsed.args,
+                                  );
+                              final argsText =
+                                  AgentService.commandArgumentTrailer(
+                                    skill.content,
+                                    parsed.args,
+                                    'User instruction',
+                                  );
+                              if (context.mounted) {
+                                _sendPrompt(
+                                  context,
+                                  s,
+                                  '<skill_content>\n$content\n</skill_content>'
+                                  '$argsText',
+                                );
+                              }
+                              return;
+                            }
                           }
-                          return;
+                          // Unknown /command falls through to the agent.
                         }
-                      }
-                      // Unknown /command falls through to the agent.
-                    }
 
-                    // ── web-IDE busy behavior: typing while running either
-                    // queues the message (default) or interrupts the current
-                    // run and sends immediately, per the user's setting. ──
-                    if (s != null && AgentService.I.busyFor(s.id)) {
-                      if (AppState.I.sendWhileBusyInterrupt) {
-                        AgentService.I.stopRequested(sessionId: s.id);
-                        // fall through to send
-                      } else {
-                        AgentService.I.enqueueMessage(t);
-                        _input.clear();
-                        return;
-                      }
-                    }
+                        // ── web-IDE busy behavior: typing while running either
+                        // queues the message (default) or interrupts the current
+                        // run and sends immediately, per the user's setting. ──
+                        if (s != null && AgentService.I.busyFor(s.id)) {
+                          if (AppState.I.sendWhileBusyInterrupt) {
+                            AgentService.I.stopRequested(sessionId: s.id);
+                            // fall through to send
+                          } else {
+                            AgentService.I.enqueueMessage(t);
+                            _input.clear();
+                            return;
+                          }
+                        }
 
-                    if (context.mounted) _sendPrompt(context, s, t);
-                  },
-                ),
+                        if (context.mounted) _sendPrompt(context, s, t);
+                      },
+                    ),
                   ],
                 );
               },
@@ -1745,8 +1805,9 @@ class _ChatScreenState extends State<ChatScreen>
                       : null,
                   onTap: () async {
                     Navigator.pop(context);
-                    final result =
-                        await CommandService.I.execute('/preset ${p.id}');
+                    final result = await CommandService.I.execute(
+                      '/preset ${p.id}',
+                    );
                     if (!context.mounted) return;
                     final fb = result?.feedback;
                     if (fb != null && fb.isNotEmpty) {
@@ -1767,7 +1828,8 @@ class _ChatScreenState extends State<ChatScreen>
     );
   }
 
-  void _sendPrompt(BuildContext context, ChatSession? s, String t) {    final app = AppState.I;
+  void _sendPrompt(BuildContext context, ChatSession? s, String t) {
+    final app = AppState.I;
     final session = app.activeSession;
     final provider = app.providerForSession(session);
     if (provider == null ||
@@ -1775,9 +1837,7 @@ class _ChatScreenState extends State<ChatScreen>
         session.model == 'Select a provider') {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: const Text(
-            'Select a provider and model before sending.',
-          ),
+          content: const Text('Select a provider and model before sending.'),
           action: SnackBarAction(
             label: 'Select',
             onPressed: () => _modelPicker(context),
@@ -1788,9 +1848,7 @@ class _ChatScreenState extends State<ChatScreen>
     }
     if (!provider.isConfigured) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Add an API key for ${provider.name} first.'),
-        ),
+        SnackBar(content: Text('Add an API key for ${provider.name} first.')),
       );
       return;
     }
@@ -1841,8 +1899,11 @@ class _ChatScreenState extends State<ChatScreen>
                 children: [
                   Row(
                     children: [
-                      const Icon(Icons.terminal_outlined,
-                          size: 16, color: Aether.accent),
+                      const Icon(
+                        Icons.terminal_outlined,
+                        size: 16,
+                        color: Aether.accent,
+                      ),
                       const SizedBox(width: 8),
                       const Text(
                         'Background jobs',
@@ -1854,8 +1915,11 @@ class _ChatScreenState extends State<ChatScreen>
                       const Spacer(),
                       IconButton(
                         visualDensity: VisualDensity.compact,
-                        icon: Icon(Icons.close,
-                            size: 17, color: Aether.textFaint),
+                        icon: Icon(
+                          Icons.close,
+                          size: 17,
+                          color: Aether.textFaint,
+                        ),
                         onPressed: () => Navigator.pop(ctx),
                       ),
                     ],
@@ -1908,24 +1972,27 @@ class _ChatScreenState extends State<ChatScreen>
                                             fontWeight: FontWeight.w600,
                                           ),
                                         ),
-                                      Text(
-                                        '${j.state} · ${formatCompactDuration(Duration(seconds: j.elapsedSec))} · '
-                                        '${j.outChars} chars',
-                                        style: TextStyle(
-                                          fontSize: 11,
-                                          color: Aether.textMuted,
+                                        Text(
+                                          '${j.state} · ${formatCompactDuration(Duration(seconds: j.elapsedSec))} · '
+                                          '${j.outChars} chars',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: Aether.textMuted,
+                                          ),
                                         ),
-                                      ),
-                                    ],
-                                  ),
+                                      ],
+                                    ),
                                   ),
                                   if (j.state == 'running' ||
                                       j.state == 'stopping')
                                     IconButton(
                                       tooltip: 'Kill job',
                                       visualDensity: VisualDensity.compact,
-                                      icon: Icon(Icons.stop_circle_outlined,
-                                          size: 18, color: Aether.danger),
+                                      icon: Icon(
+                                        Icons.stop_circle_outlined,
+                                        size: 18,
+                                        color: Aether.danger,
+                                      ),
                                       onPressed: () => AgentService.I
                                           .killJobFor(sessionId, j.id),
                                     ),
@@ -2081,6 +2148,30 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                     ),
                   );
                 }
+                // A search that matches nothing should say so — otherwise
+                // the sheet shows only the hint row and looks broken.
+                if (q.isNotEmpty &&
+                    configured.isEmpty &&
+                    unconfigured.every(
+                      (p) =>
+                          !p.name.toLowerCase().contains(q) &&
+                          !p.models.any((m) => m.toLowerCase().contains(q)),
+                    )) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(
+                        'No matches for "$_query".\nTry a different search.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          height: 1.6,
+                          color: Aether.textMuted,
+                        ),
+                      ),
+                    ),
+                  );
+                }
                 // Recent models: current selected model + all past selected models.
                 final allRecents = <({String providerId, String model})>[];
                 final session = app.activeSession;
@@ -2089,10 +2180,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                     session.model != 'Select a provider') {
                   final pId = session.providerId;
                   if (pId != null && pId.isNotEmpty) {
-                    allRecents.add((
-                      providerId: pId,
-                      model: session.model,
-                    ));
+                    allRecents.add((providerId: pId, model: session.model));
                   }
                 }
                 for (final r in app.recentModels) {
@@ -2108,8 +2196,11 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                   final p = app.providerById(r.providerId);
                   if (p == null) return false;
                   if (q.isEmpty) return true;
-                  final baseModel =
-                      r.model.split('·').first.trim().toLowerCase();
+                  final baseModel = r.model
+                      .split('·')
+                      .first
+                      .trim()
+                      .toLowerCase();
                   return baseModel.contains(q) ||
                       r.model.toLowerCase().contains(q) ||
                       p.name.toLowerCase().contains(q);
@@ -2352,11 +2443,14 @@ class _ModelTile extends StatelessWidget {
                 ),
               )
             : (effortVariant != null
-                ? Text(
-                    effortVariant,
-                    style: const TextStyle(fontSize: 11, color: Aether.accent),
-                  )
-                : null),
+                  ? Text(
+                      effortVariant,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Aether.accent,
+                      ),
+                    )
+                  : null),
         trailing: selected
             ? Row(
                 mainAxisSize: MainAxisSize.min,
@@ -2382,9 +2476,7 @@ class _ModelTile extends StatelessWidget {
                   onSelected: (_) {
                     app.setModel(
                       providerId,
-                      v == 'Medium'
-                          ? '$baseModel · Medium'
-                          : '$baseModel · $v',
+                      v == 'Medium' ? '$baseModel · Medium' : '$baseModel · $v',
                     );
                     Navigator.pop(context);
                   },
@@ -2595,16 +2687,15 @@ class _ReasoningCardState extends State<_ReasoningCard> {
           Container(
             decoration: BoxDecoration(
               border: Border(
-                bottom: BorderSide(
-                  color: Aether.hairlineStrong,
-                  width: 0.5,
-                ),
+                bottom: BorderSide(color: Aether.hairlineStrong, width: 0.5),
               ),
             ),
             child: InkWell(
               key: const ValueKey('chat-reasoning-summary'),
               borderRadius: BorderRadius.circular(6),
-              onTap: hasBody ? () => setState(() => _override = !expanded) : null,
+              onTap: hasBody
+                  ? () => setState(() => _override = !expanded)
+                  : null,
               child: SizedBox(
                 height: 33,
                 child: Row(
@@ -3059,7 +3150,12 @@ class _DetailBodyState extends State<_DetailBody> {
     );
   }
 
-  Widget _buildRichDetail(Message m, bool isDiff, List<String> shown, String detail) {
+  Widget _buildRichDetail(
+    Message m,
+    bool isDiff,
+    List<String> shown,
+    String detail,
+  ) {
     // 1. Model Compare result format: sections starting with "## <model_name>"
     if ((m.toolName ?? '').contains('compare') && detail.contains('## ')) {
       return _ModelCompareView(content: detail);
@@ -3081,9 +3177,7 @@ class _DetailBodyState extends State<_DetailBody> {
         fontFamily: Aether.mono,
         fontSize: 11.5,
         height: 1.45,
-        color: m.toolState == 'error'
-            ? Aether.dangerC
-            : Aether.text,
+        color: m.toolState == 'error' ? Aether.dangerC : Aether.text,
       ),
     );
   }
@@ -3115,7 +3209,10 @@ class _ModelCompareViewState extends State<_ModelCompareView> {
     }
 
     if (sections.isEmpty) {
-      return Text(widget.content, style: TextStyle(fontFamily: Aether.mono, fontSize: 11.5));
+      return Text(
+        widget.content,
+        style: TextStyle(fontFamily: Aether.mono, fontSize: 11.5),
+      );
     }
 
     final activeIdx = _selectedTab.clamp(0, sections.length - 1);
@@ -3134,7 +3231,9 @@ class _ModelCompareViewState extends State<_ModelCompareView> {
                     sections[i].model,
                     style: TextStyle(
                       fontSize: 11,
-                      fontWeight: i == activeIdx ? FontWeight.w700 : FontWeight.w500,
+                      fontWeight: i == activeIdx
+                          ? FontWeight.w700
+                          : FontWeight.w500,
                     ),
                   ),
                   selected: i == activeIdx,
@@ -3142,7 +3241,9 @@ class _ModelCompareViewState extends State<_ModelCompareView> {
                   selectedColor: Aether.accentSoft,
                   backgroundColor: Aether.surfaceAlt,
                   showCheckmark: false,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
                 ),
                 const SizedBox(width: 6),
               ],
@@ -3160,11 +3261,7 @@ class _ModelCompareViewState extends State<_ModelCompareView> {
           ),
           child: SelectableText(
             active.output,
-            style: TextStyle(
-              fontSize: 12,
-              height: 1.5,
-              color: Aether.text,
-            ),
+            style: TextStyle(fontSize: 12, height: 1.5, color: Aether.text),
           ),
         ),
       ],
@@ -3178,27 +3275,41 @@ class _ColorPaletteView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hexMatches = RegExp(r'#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b').allMatches(content).map((m) => m.group(0)!).toSet().toList();
+    final hexMatches = RegExp(r'#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b')
+        .allMatches(content)
+        .map((m) => m.group(0)!)
+        .toSet()
+        .toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (hexMatches.isNotEmpty) ...[
-          Text('Palette Swatches', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Aether.textMuted)),
+          Text(
+            'Palette Swatches',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: Aether.textMuted,
+            ),
+          ),
           const SizedBox(height: 6),
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: [
-              for (final hex in hexMatches)
-                _buildSwatch(context, hex),
+              for (final hex in hexMatches) _buildSwatch(context, hex),
             ],
           ),
           const SizedBox(height: 10),
         ],
         SelectableText(
           content,
-          style: TextStyle(fontFamily: Aether.mono, fontSize: 11.5, height: 1.45),
+          style: TextStyle(
+            fontFamily: Aether.mono,
+            fontSize: 11.5,
+            height: 1.45,
+          ),
         ),
       ],
     );
@@ -3232,7 +3343,10 @@ class _ColorPaletteView extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 6),
-          Text(hex, style: const TextStyle(fontFamily: Aether.mono, fontSize: 11)),
+          Text(
+            hex,
+            style: const TextStyle(fontFamily: Aether.mono, fontSize: 11),
+          ),
         ],
       ),
     );
@@ -3423,8 +3537,7 @@ class _ProducedFilesCard extends StatelessWidget {
       ? '${(b / 1024).toStringAsFixed(1)} KB'
       : '$b B';
 
-  String _base(String path) =>
-      path.contains('/') ? path.split('/').last : path;
+  String _base(String path) => path.contains('/') ? path.split('/').last : path;
 
   Future<void> _open(BuildContext context, String path) async {
     final messenger = ScaffoldMessenger.of(context);
@@ -3558,10 +3671,7 @@ class _ProducedFilesCard extends StatelessWidget {
                 label,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 11.5,
-                  fontFamily: Aether.mono,
-                ),
+                style: const TextStyle(fontSize: 11.5, fontFamily: Aether.mono),
               ),
             ),
             if (trailing != null) ...[
@@ -3721,8 +3831,7 @@ class _MessageView extends StatelessWidget {
                   _ => _text(isUser),
                 },
                 // Attachment chips under the user bubble (in-chat display).
-                if (isUser && m.attachments.isNotEmpty)
-                  _attachmentChips(),
+                if (isUser && m.attachments.isNotEmpty) _attachmentChips(),
               ],
             ),
           ),
@@ -3912,7 +4021,10 @@ class _MessageView extends StatelessWidget {
       ),
       builder: (ctx) => Padding(
         padding: EdgeInsets.fromLTRB(
-          16, 16, 16, MediaQuery.of(ctx).viewInsets.bottom + 16,
+          16,
+          16,
+          16,
+          MediaQuery.of(ctx).viewInsets.bottom + 16,
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -3920,7 +4032,10 @@ class _MessageView extends StatelessWidget {
           children: [
             Text(
               'What was wrong with this answer?',
-              style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700),
+              style: const TextStyle(
+                fontSize: 14.5,
+                fontWeight: FontWeight.w700,
+              ),
             ),
             const SizedBox(height: 4),
             Text(
@@ -4000,11 +4115,7 @@ class _MessageView extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
-                  _attachIcon(a.name),
-                  size: 13,
-                  color: Aether.accent,
-                ),
+                Icon(_attachIcon(a.name), size: 13, color: Aether.accent),
                 const SizedBox(width: 5),
                 Text(
                   a.name,
@@ -4034,8 +4145,19 @@ class _MessageView extends StatelessWidget {
       'mp3' || 'wav' || 'ogg' || 'm4a' || 'flac' => Icons.audio_file,
       'pdf' => Icons.picture_as_pdf,
       'zip' || 'tar' || 'gz' || 'rar' || '7z' => Icons.folder_zip,
-      'dart' || 'py' || 'js' || 'ts' || 'json' || 'yaml' || 'yml' ||
-      'md' || 'txt' || 'csv' || 'html' || 'css' || 'sh' => Icons.code,
+      'dart' ||
+      'py' ||
+      'js' ||
+      'ts' ||
+      'json' ||
+      'yaml' ||
+      'yml' ||
+      'md' ||
+      'txt' ||
+      'csv' ||
+      'html' ||
+      'css' ||
+      'sh' => Icons.code,
       _ => Icons.insert_drive_file,
     };
   }
@@ -4072,8 +4194,11 @@ class _MessageView extends StatelessWidget {
             child: AspectRatio(
               aspectRatio: 1,
               child: exists
-                  ? Image.file(file, fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => _imageGenFallback())
+                  ? Image.file(
+                      file,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, _, _) => _imageGenFallback(),
+                    )
                   : _imageGenFallback(),
             ),
           ),
@@ -4110,18 +4235,12 @@ class _MessageView extends StatelessWidget {
                       const SizedBox(width: 14),
                       Text(
                         '${(file.lengthSync() / 1024).toStringAsFixed(0)} KB',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Aether.textFaint,
-                        ),
+                        style: TextStyle(fontSize: 11, color: Aether.textFaint),
                       ),
                     ] else
                       Text(
                         'image file not in workspace',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Aether.textFaint,
-                        ),
+                        style: TextStyle(fontSize: 11, color: Aether.textFaint),
                       ),
                   ],
                 ),
@@ -4148,10 +4267,7 @@ class _MessageView extends StatelessWidget {
           children: [
             Icon(icon, size: 15, color: Aether.accent),
             const SizedBox(width: 4),
-            Text(
-              label,
-              style: TextStyle(fontSize: 11, color: Aether.accent),
-            ),
+            Text(label, style: TextStyle(fontSize: 11, color: Aether.accent)),
           ],
         ),
       );
@@ -4416,6 +4532,7 @@ class _MicButtonState extends State<_MicButton> {
 class _InputBar extends StatefulWidget {
   final TextEditingController controller;
   final String? sessionId;
+
   /// Startup coordinator observed so runtime plugin skills mounted by the
   /// `skill.mount` item refresh the slash suggestions without rebuilding the
   /// transcript. Defaults to the process singleton.
@@ -4687,8 +4804,7 @@ class _InputBarState extends State<_InputBar> {
       var dir = ws;
       var lastSeg = query;
       if (query.contains('/')) {
-        final parts = query.split('/')
-          ..removeWhere((p) => p.isEmpty);
+        final parts = query.split('/')..removeWhere((p) => p.isEmpty);
         // Walk the leading segments as directories (depth cap 3).
         for (var i = 0; i < parts.length - 1 && i < 3; i++) {
           final next = Directory('${dir.path}/${parts[i]}');
@@ -4716,7 +4832,9 @@ class _InputBarState extends State<_InputBar> {
                 ? Icons.folder_outlined
                 : Icons.insert_drive_file_outlined,
             name: rel,
-            description: isDir ? 'directory — @$rel/ to descend' : 'workspace file',
+            description: isDir
+                ? 'directory — @$rel/ to descend'
+                : 'workspace file',
             hint: '',
             insert: '@$rel${isDir ? '/' : ' '}',
             group: 'Files',
@@ -4735,7 +4853,8 @@ class _InputBarState extends State<_InputBar> {
         s: _SlashSuggestion(
           icon: Icons.info_outline,
           name: 'no files yet',
-          description: 'The agent creates workspace files as it works — '
+          description:
+              'The agent creates workspace files as it works — '
               'try @session:<id> to cite another chat',
           hint: '',
           insert: '@',
@@ -4795,8 +4914,7 @@ class _InputBarState extends State<_InputBar> {
         // Boundary: @ at start, after whitespace, or after a common
         // enclosing char ( `( [ , >` — chat/prose contexts; `x@` emails
         // still never trigger). PR23/M7.
-        final boundaryOk = at == 0 ||
-            ' \n\t([,>'.contains(head[at - 1]);
+        final boundaryOk = at == 0 || ' \n\t([,>'.contains(head[at - 1]);
         if (boundaryOk && !token.contains(RegExp(r'\s'))) {
           mention = true;
           mentionQuery = token.toLowerCase();
@@ -4957,7 +5075,9 @@ class _InputBarState extends State<_InputBar> {
     if (ok == 0) {
       _toast(errors.isEmpty ? 'No files attached.' : errors.first);
     } else if (errors.isEmpty) {
-      _toast('Attached $ok file${ok == 1 ? '' : 's'} — sent with your next message.');
+      _toast(
+        'Attached $ok file${ok == 1 ? '' : 's'} — sent with your next message.',
+      );
     } else {
       _toast('Attached $ok · ${errors.length} skipped (${errors.first})');
     }
@@ -5054,7 +5174,8 @@ class _InputBarState extends State<_InputBar> {
           top: 4,
           bottom: 10,
           left: (widget.layout.viewportWidth - widget.layout.composerWidth) / 2,
-          right: (widget.layout.viewportWidth - widget.layout.composerWidth) / 2,
+          right:
+              (widget.layout.viewportWidth - widget.layout.composerWidth) / 2,
         ),
         child: Container(
           key: const ValueKey('chat-composer-card'),
@@ -5184,9 +5305,7 @@ class _InputBarState extends State<_InputBar> {
                 // composer: 16px input, 24px line-height.
                 style: const TextStyle(fontSize: 16, height: 24 / 16),
                 decoration: InputDecoration(
-                  hintText: locked
-                      ? 'Answer the approval card above first…'
-                      : 'Describe what you want to build…  / commands  @ agents',
+                  hintText: locked ? 'Answer the approval card above first…' : 'Describe what you want to build…  / commands  @ agents',
                   hintStyle: TextStyle(
                     fontSize: 16,
                     height: 24 / 16,
@@ -5249,11 +5368,13 @@ class _InputBarState extends State<_InputBar> {
                       // Per-session run state (never leaked from other
                       // sessions — the multi-session blink fix).
                       final sessionId = widget.sessionId;
-                      final runningNow = sessionId != null &&
+                      final runningNow =
+                          sessionId != null &&
                           AgentService.I.busyFor(sessionId);
                       final hasDraft = controller.text.trim().isNotEmpty;
                       final IconData icon;
-                      final hasQueued = sessionId != null &&
+                      final hasQueued =
+                          sessionId != null &&
                           AgentService.I
                               .queuedMessagesFor(sessionId)
                               .isNotEmpty;
@@ -5427,10 +5548,7 @@ class _GoalBar extends StatelessWidget {
               ),
               const SizedBox(width: 8),
               Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 6,
-                  vertical: 1,
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                 decoration: BoxDecoration(
                   color: color.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(6),
@@ -5498,7 +5616,10 @@ class _GoalBar extends StatelessWidget {
       ),
       builder: (ctx) => Padding(
         padding: EdgeInsets.fromLTRB(
-          16, 16, 16, MediaQuery.of(ctx).viewInsets.bottom + 16,
+          16,
+          16,
+          16,
+          MediaQuery.of(ctx).viewInsets.bottom + 16,
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -5784,9 +5905,7 @@ class _QueueDock extends StatelessWidget {
                 // a delete/steer/edit never rebinds another row's State.
                 for (var i = 0; i < queue.length; i++)
                   _QueueRow(
-                    key: ValueKey(
-                      ids.length == queue.length ? ids[i] : 'q-$i',
-                    ),
+                    key: ValueKey(ids.length == queue.length ? ids[i] : 'q-$i'),
                     id: ids.length == queue.length ? ids[i] : null,
                     index: i,
                     text: queue[i],
@@ -6445,10 +6564,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
         isDense: true,
         hintText: 'Or type your own answer…',
         hintStyle: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 10,
-          vertical: 7,
-        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
           borderSide: BorderSide(color: Aether.hairline),
@@ -6524,7 +6640,8 @@ class _StudioFolderChip extends StatelessWidget {
       animation: Listenable.merge([AppState.I, AgentService.I]),
       builder: (_, _) {
         final s = AppState.I.activeSession;
-        final isStudio = AgentService.I.mode == AgentMode.studio ||
+        final isStudio =
+            AgentService.I.mode == AgentMode.studio ||
             (s?.mode == AgentMode.studio.name);
         if (!isStudio) return const SizedBox.shrink();
 
@@ -6565,8 +6682,8 @@ class _StudioFolderChip extends StatelessWidget {
                     hasRepo
                         ? Icons.bookmark_border
                         : (hasFolder
-                            ? Icons.folder_special_outlined
-                            : Icons.folder_outlined),
+                              ? Icons.folder_special_outlined
+                              : Icons.folder_outlined),
                     size: 14,
                     color: isConfigured ? Aether.accent : Aether.textMuted,
                   ),
@@ -6759,7 +6876,9 @@ class _PlanChip extends StatelessWidget {
             decoration: BoxDecoration(
               color: Aether.warnLight.withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Aether.warnLight.withValues(alpha: 0.45)),
+              border: Border.all(
+                color: Aether.warnLight.withValues(alpha: 0.45),
+              ),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -6835,40 +6954,40 @@ class _ModeChip extends StatelessWidget {
       builder: (_) => SafeArea(
         child: SingleChildScrollView(
           child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 12),
-            const Text(
-              'Agent access mode',
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 6),
-            for (final m in modeOptionsForPicker())
-              ListTile(
-                dense: true,
-                leading: Icon(m.icon, size: 18, color: m.color),
-                title: Text(m.label, style: const TextStyle(fontSize: 13.5)),
-                subtitle: Text(
-                  m.hint,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Aether.textFaint,
-                    height: 1.4,
-                  ),
-                ),
-                trailing: AgentService.I.mode == m
-                    ? const Icon(Icons.check, size: 18, color: Aether.accent)
-                    : null,
-                onTap: () async {
-                  Navigator.pop(context);
-                  if (m == AgentMode.control) {
-                    await _enableControlMode(context);
-                  } else {
-                    AgentService.I.setMode(m);
-                  }
-                },
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 12),
+              const Text(
+                'Agent access mode',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
               ),
-            const SizedBox(height: 8),
+              const SizedBox(height: 6),
+              for (final m in modeOptionsForPicker())
+                ListTile(
+                  dense: true,
+                  leading: Icon(m.icon, size: 18, color: m.color),
+                  title: Text(m.label, style: const TextStyle(fontSize: 13.5)),
+                  subtitle: Text(
+                    m.hint,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Aether.textFaint,
+                      height: 1.4,
+                    ),
+                  ),
+                  trailing: AgentService.I.mode == m
+                      ? const Icon(Icons.check, size: 18, color: Aether.accent)
+                      : null,
+                  onTap: () async {
+                    Navigator.pop(context);
+                    if (m == AgentMode.control) {
+                      await _enableControlMode(context);
+                    } else {
+                      AgentService.I.setMode(m);
+                    }
+                  },
+                ),
+              const SizedBox(height: 8),
             ],
           ),
         ),
@@ -6887,7 +7006,9 @@ Future<void> _enableControlMode(BuildContext context) async {
       barrierDismissible: false,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Enable Control mode'),
-        content: const SingleChildScrollView(child: Text(kControlModeDisclosure)),
+        content: const SingleChildScrollView(
+          child: Text(kControlModeDisclosure),
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
@@ -6966,7 +7087,9 @@ Future<void> _enableControlMode(BuildContext context) async {
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Could not open Accessibility Settings. Use the inline retry.'),
+          content: Text(
+            'Could not open Accessibility Settings. Use the inline retry.',
+          ),
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -7006,7 +7129,8 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && AgentService.I.mode == AgentMode.control) {
+    if (state == AppLifecycleState.resumed &&
+        AgentService.I.mode == AgentMode.control) {
       _refresh(isResume: true);
     }
   }
@@ -7014,14 +7138,18 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
   Future<void> _refresh({bool isResume = false}) async {
     if (AgentService.I.mode != AgentMode.control) return;
     _retryTimer?.cancel();
-    final enabled = await DeviceControlService.I.isEnabled().catchError((_) => false);
+    final enabled = await DeviceControlService.I.isEnabled().catchError(
+      (_) => false,
+    );
     if (!mounted) return;
     if (mounted) setState(() => _enabled = enabled);
     if (isResume && !enabled && _enabled != true) {
       // Retry once after 600ms on resume in case the OS is still binding the service
       _retryTimer = Timer(const Duration(milliseconds: 600), () async {
         if (!mounted || AgentService.I.mode != AgentMode.control) return;
-        final retryEnabled = await DeviceControlService.I.isEnabled().catchError((_) => false);
+        final retryEnabled = await DeviceControlService.I
+            .isEnabled()
+            .catchError((_) => false);
         if (mounted) setState(() => _enabled = retryEnabled);
       });
     }
@@ -7057,10 +7185,10 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: AgentService.I,
     builder: (_, _) {
-    if (_enabled == null) {
-      _refresh();
-    }
-    if (AgentService.I.mode != AgentMode.control) {
+      if (_enabled == null) {
+        _refresh();
+      }
+      if (AgentService.I.mode != AgentMode.control) {
         return const SizedBox.shrink();
       }
       final showOffWarning = _enabled == false;
@@ -7079,9 +7207,18 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
           if (showOffWarning)
             Row(
               children: [
-                Icon(Icons.warning_amber_rounded, size: 15, color: Aether.warnLight),
+                Icon(
+                  Icons.warning_amber_rounded,
+                  size: 15,
+                  color: Aether.warnLight,
+                ),
                 const SizedBox(width: 5),
-                Expanded(child: Text('Control service is off', style: TextStyle(fontSize: 11, color: Aether.warnLight))),
+                Expanded(
+                  child: Text(
+                    'Control service is off',
+                    style: TextStyle(fontSize: 11, color: Aether.warnLight),
+                  ),
+                ),
                 TextButton(
                   onPressed: _retry,
                   child: const Text('Open Accessibility Settings'),
@@ -7091,7 +7228,11 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
           if (showHealthGuidance)
             Row(
               children: [
-                Icon(Icons.battery_alert_outlined, size: 15, color: Aether.warnLight),
+                Icon(
+                  Icons.battery_alert_outlined,
+                  size: 15,
+                  color: Aether.warnLight,
+                ),
                 const SizedBox(width: 5),
                 Expanded(
                   child: Text(
@@ -7113,7 +7254,10 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
           if (_error != null)
             Padding(
               padding: const EdgeInsets.only(left: 20),
-              child: Text(_error!, style: TextStyle(fontSize: 11, color: Aether.danger)),
+              child: Text(
+                _error!,
+                style: TextStyle(fontSize: 11, color: Aether.danger),
+              ),
             ),
         ],
       );
@@ -7304,11 +7448,7 @@ class _OvidMarkdown extends StatelessWidget {
           fontWeight: FontWeight.w700,
           color: body,
         ),
-        tableBody: TextStyle(
-          fontSize: fontSize - 1,
-          height: 1.4,
-          color: body,
-        ),
+        tableBody: TextStyle(fontSize: fontSize - 1, height: 1.4, color: body),
         a: const TextStyle(
           color: Aether.accent,
           decoration: TextDecoration.underline,
@@ -7333,9 +7473,8 @@ Future<void> _openLink(
     // Bare-domain text ("example.com", "www.x.dev/y") — open it too.
     final t = text.trim();
     if (t.isEmpty) return;
-    final domainLike = RegExp(
-      r'^(www\.)?[\w-]+(\.[\w-]+)+(/.*)?$',
-    ).firstMatch(t);
+    final domainLike = RegExp(r'^(www\.)?[\w-]+(\.[\w-]+)+(/.*)?$')
+        .firstMatch(t);
     if (domainLike == null) return;
     raw = t.startsWith('www.') ? 'https://$t' : 'https://$t';
   }
@@ -7514,6 +7653,134 @@ class _OvidInlineCodeBuilder extends MarkdownElementBuilder {
           color: Aether.text,
         ),
       ),
+    );
+  }
+}
+
+/// Background runtime-install banner (first launch only).
+///
+/// The setup gate installs just the native sandbox core so the app opens
+/// fast; Node.js/Python finish here in the background. The banner shows
+/// live installer output, is dismissible while running (the install
+/// continues), and offers Retry on failure. It observes [AppState] through
+/// its own AnimatedBuilder so installer progress never rebuilds the chat
+/// transcript or the composer.
+class _RuntimeInstallBanner extends StatelessWidget {
+  const _RuntimeInstallBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AppState.I,
+      builder: (context, _) {
+        final app = AppState.I;
+        if (!app.showRuntimeInstallBanner) return const SizedBox.shrink();
+        final failed = app.runtimeInstallState == RuntimeInstallState.failed;
+        final progress = app.runtimeInstallProgress;
+        return Container(
+          margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+          padding: const EdgeInsets.fromLTRB(12, 9, 8, 9),
+          decoration: BoxDecoration(
+            color: Aether.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: failed ? Aether.danger : Aether.accent,
+              width: 1,
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  if (!failed)
+                    const SizedBox(
+                      width: 15,
+                      height: 15,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  else
+                    const Icon(
+                      Icons.warning_amber_rounded,
+                      size: 17,
+                      color: Aether.danger,
+                    ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      failed
+                          ? 'Background setup needs attention'
+                          : 'Setting up Node.js + Python…',
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  if (failed)
+                    TextButton(
+                      onPressed: () =>
+                          unawaited(app.retryBackgroundRuntimeInstall()),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        minimumSize: const Size(0, 30),
+                      ),
+                      child: const Text(
+                        'Retry',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ),
+                  IconButton(
+                    onPressed: app.dismissRuntimeInstallBanner,
+                    icon: const Icon(Icons.close, size: 16),
+                    color: Aether.textFaint,
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.all(4),
+                    constraints: const BoxConstraints(),
+                    tooltip: failed ? 'Dismiss' : 'Hide (keeps installing)',
+                  ),
+                ],
+              ),
+              if (progress >= 0 && !failed) ...[
+                const SizedBox(height: 7),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: progress.clamp(0.0, 1.0),
+                    minHeight: 4,
+                    backgroundColor: Aether.surfaceAlt,
+                    valueColor: const AlwaysStoppedAnimation(Aether.accent),
+                  ),
+                ),
+              ],
+              if (app.runtimeInstallLine.isNotEmpty) ...[
+                const SizedBox(height: 5),
+                Text(
+                  app.runtimeInstallLine,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontFamily: Aether.mono,
+                    fontSize: 10.5,
+                    height: 1.5,
+                    color: Aether.textFaint,
+                  ),
+                ),
+              ],
+              if (!failed)
+                Padding(
+                  padding: const EdgeInsets.only(top: 3),
+                  child: Text(
+                    'Chat works meanwhile — agent tools that need Node/Python will install them on demand.',
+                    style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

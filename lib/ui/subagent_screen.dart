@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import '../core/format.dart';
 
 import '../core/agent_service.dart';
@@ -35,6 +36,7 @@ class _SubagentScreenState extends State<SubagentScreen> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
   bool _sending = false;
+  bool _firstJumpDone = false;
 
   @override
   void dispose() {
@@ -45,8 +47,19 @@ class _SubagentScreenState extends State<SubagentScreen> {
 
   void _jumpToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scroll.hasClients) return;
-      _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      if (!mounted || !_scroll.hasClients) return;
+      final pos = _scroll.position;
+      if (!_firstJumpDone) {
+        // First layout: start at the latest output like before.
+        _firstJumpDone = true;
+        _scroll.jumpTo(pos.maxScrollExtent);
+        return;
+      }
+      // Follow-mode: only yank to the bottom when the user is already
+      // near it — never steal the scroll position while they're reading
+      // earlier output (mirrors the chat screen's _atBottom follow logic).
+      if (pos.maxScrollExtent - pos.pixels > 48) return;
+      _scroll.jumpTo(pos.maxScrollExtent);
     });
   }
 
@@ -307,7 +320,11 @@ class _StatusStrip extends StatelessWidget {
           if (session.agentAllowedTools.isNotEmpty)
             Tooltip(
               message: 'Tools: ${session.agentAllowedTools.join(', ')}',
-              child: Icon(Icons.lock_outline, size: 13, color: Aether.textFaint),
+              child: Icon(
+                Icons.lock_outline,
+                size: 13,
+                color: Aether.textFaint,
+              ),
             ),
         ],
       ),
@@ -397,10 +414,7 @@ class _Composer extends StatelessWidget {
                     hintText: running
                         ? 'Queue a follow-up for this agent…'
                         : 'Send this agent more work…',
-                    hintStyle: TextStyle(
-                      fontSize: 14,
-                      color: Aether.textFaint,
-                    ),
+                    hintStyle: TextStyle(fontSize: 14, color: Aether.textFaint),
                   ),
                   onSubmitted: (_) => onSend(),
                 ),
@@ -447,10 +461,7 @@ class _Composer extends StatelessWidget {
 
 /// Bottom sheet listing the subagents dispatched by [sessionId] — state,
 /// elapsed time, transcript size, and a tap to open each child.
-Future<void> showSubagentCatalog(
-  BuildContext context,
-  String sessionId,
-) async {
+Future<void> showSubagentCatalog(BuildContext context, String sessionId) async {
   await showModalBottomSheet<void>(
     context: context,
     backgroundColor: Aether.surface,

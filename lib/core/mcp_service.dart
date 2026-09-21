@@ -94,8 +94,13 @@ class McpService {
         .replaceAll(RegExp(r'[^a-z0-9_-]+'), '_')
         .replaceAll(RegExp(r'^_+|_+$'), '');
     final prefix = (readable.isEmpty ? 'id' : readable);
-    final boundedPrefix = prefix.length <= 27 ? prefix : prefix.substring(0, 27);
-    final digest = sha256.convert(utf8.encode(value)).toString().substring(0, 32);
+    final boundedPrefix = prefix.length <= 27
+        ? prefix
+        : prefix.substring(0, 27);
+    final digest = sha256
+        .convert(utf8.encode(value))
+        .toString()
+        .substring(0, 32);
     return '${boundedPrefix}_$digest';
   }
 
@@ -262,6 +267,19 @@ class McpService {
   static void _recordConnectPhase(String phase, Duration timeout) =>
       connectPhaseTimeoutRecorderForTest?.call(phase, timeout);
 
+  /// Test seam: when set, [_connectStdio] spawns the server through this
+  /// instead of [SandboxService.spawn] and skips the sandbox-installed
+  /// gate plus the lazy runtime ensure. Lets a test drive a REAL
+  /// subprocess MCP server on the host (no Android sandbox present).
+  /// Null in production — the sandbox path is untouched.
+  @visibleForTesting
+  static Future<Process> Function(
+    List<String> argv, {
+    Map<String, String>? env,
+    Directory? hostWorkDir,
+  })?
+  spawnProcessForTest;
+
   /// Spawn/dial the server and perform the MCP handshake
   /// (initialize → initialized → tools/list).
   ///
@@ -352,15 +370,13 @@ class McpService {
       }
       final missing = await missingCredentialsFor(server);
       if (missing.isNotEmpty) {
-        final reason = (server.transport == 'native' &&
+        final reason =
+            (server.transport == 'native' &&
                 (server.name.toLowerCase() == 'github' ||
                     server.canonicalId.toLowerCase() == 'github'))
             ? 'Please log in to GitHub or set GITHUB_TOKEN'
             : 'Needs configuration (${missing.join(', ')})';
-        return McpConnectOutcome(
-          McpConnectOutcomeKind.needsSetup,
-          reason,
-        );
+        return McpConnectOutcome(McpConnectOutcomeKind.needsSetup, reason);
       }
       if (server.ownerPluginId != null) {
         server.headers = await AppState.I.getMcpHeaders(server.canonicalId);
@@ -392,8 +408,8 @@ class McpService {
       final message = server.transport == 'http'
           ? await _connectHttp(server, rs, deadline: deadline)
           : server.transport == 'native'
-              ? await _connectNative(server, rs, deadline: deadline)
-              : await _connectStdio(server, rs, deadline: deadline);
+          ? await _connectNative(server, rs, deadline: deadline)
+          : await _connectStdio(server, rs, deadline: deadline);
       if (isConnected(server.canonicalId)) {
         return const McpConnectOutcome(McpConnectOutcomeKind.ready);
       }
@@ -569,7 +585,9 @@ class McpService {
   /// nothing here.
   static List<String>? _envHintNames(McpServer server) {
     final hint = server.envHint;
-    if (hint == null || hint.trim().isEmpty || hint.trimLeft().startsWith('{')) {
+    if (hint == null ||
+        hint.trim().isEmpty ||
+        hint.trimLeft().startsWith('{')) {
       return null;
     }
     final names = hint
@@ -605,7 +623,8 @@ class McpService {
   }
 
   Future<NativeMcpHandler> _createNativeHandler(McpServer server) async {
-    final customFactory = _nativeHandlerFactories[server.canonicalId.toLowerCase()] ??
+    final customFactory =
+        _nativeHandlerFactories[server.canonicalId.toLowerCase()] ??
         _nativeHandlerFactories[server.name.toLowerCase()];
     if (customFactory != null) {
       return customFactory(server);
@@ -678,13 +697,17 @@ class McpService {
       final handler = await _createNativeHandler(server);
       rs.nativeHandler = handler;
 
-      await handler.initialize({
-        'protocolVersion': '2024-11-05',
-        'capabilities': {},
-        'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
-      }).timeout(phaseTimeout('initialize'));
+      await handler
+          .initialize({
+            'protocolVersion': '2024-11-05',
+            'capabilities': {},
+            'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
+          })
+          .timeout(phaseTimeout('initialize'));
 
-      final tools = await handler.listTools().timeout(phaseTimeout('tools/list'));
+      final tools = await handler.listTools().timeout(
+        phaseTimeout('tools/list'),
+      );
       rs.tools = tools;
 
       if (!identical(_running[key], rs) || rs.userDisconnected) {
@@ -738,9 +761,7 @@ class McpService {
     }
     final effectiveTimeout = _effectiveToolTimeout(rs.server, timeout);
     try {
-      return await handler
-          .callTool(toolName, args)
-          .timeout(effectiveTimeout);
+      return await handler.callTool(toolName, args).timeout(effectiveTimeout);
     } on TimeoutException {
       return const McpRpcResult.timeout();
     } catch (e) {
@@ -757,11 +778,13 @@ class McpService {
       final tools = await handler.listTools();
       return McpRpcResult.ok({
         'tools': tools
-            .map((t) => {
-                  'name': t.name,
-                  if (t.description != null) 'description': t.description,
-                  if (t.inputSchema != null) 'inputSchema': t.inputSchema,
-                })
+            .map(
+              (t) => {
+                'name': t.name,
+                if (t.description != null) 'description': t.description,
+                if (t.inputSchema != null) 'inputSchema': t.inputSchema,
+              },
+            )
             .toList(),
       });
     } catch (e) {
@@ -817,10 +840,8 @@ class McpService {
         {},
         timeout: phaseTimeout('notifications/initialized'),
       );
-      rs.tools = await _listToolsHttp(
-            rs,
-            timeout: phaseTimeout('tools/list'),
-          ) ??
+      rs.tools =
+          await _listToolsHttp(rs, timeout: phaseTimeout('tools/list')) ??
           <McpToolDef>[];
       // A budget abort may have detached this attempt — never mark it ready.
       if (!identical(_running[key], rs) || rs.userDisconnected) {
@@ -869,12 +890,9 @@ class McpService {
     var sawMap = false;
     String? cursor;
     for (var page = 0; page < _maxToolListPages; page++) {
-      final res = await _rpcHttp(
-        rs,
-        'tools/list',
-        {'cursor': ?cursor},
-        timeout: timeout,
-      );
+      final res = await _rpcHttp(rs, 'tools/list', {
+        'cursor': ?cursor,
+      }, timeout: timeout);
       if (res.isTimeout) {
         throw TimeoutException('tools/list timed out', timeout);
       }
@@ -887,9 +905,9 @@ class McpService {
       final pageTools = payload['tools'];
       if (pageTools is List) {
         tools.addAll(
-          pageTools
-              .whereType<Map>()
-              .map((t) => McpToolDef.fromJson(t.cast<String, dynamic>())),
+          pageTools.whereType<Map>().map(
+            (t) => McpToolDef.fromJson(t.cast<String, dynamic>()),
+          ),
         );
       }
       final next = payload['nextCursor'];
@@ -909,12 +927,9 @@ class McpService {
     final tools = <McpToolDef>[];
     String? cursor;
     for (var page = 0; page < _maxToolListPages; page++) {
-      final res = await _rpc(
-        rs,
-        'tools/list',
-        {'cursor': ?cursor},
-        timeout: timeout,
-      );
+      final res = await _rpc(rs, 'tools/list', {
+        'cursor': ?cursor,
+      }, timeout: timeout);
       if (res.isTimeout) {
         throw TimeoutException('tools/list timed out', timeout);
       }
@@ -926,9 +941,9 @@ class McpService {
       final pageTools = payload['tools'];
       if (pageTools is List) {
         tools.addAll(
-          pageTools
-              .whereType<Map>()
-              .map((t) => McpToolDef.fromJson(t.cast<String, dynamic>())),
+          pageTools.whereType<Map>().map(
+            (t) => McpToolDef.fromJson(t.cast<String, dynamic>()),
+          ),
         );
       }
       final next = payload['nextCursor'];
@@ -952,6 +967,7 @@ class McpService {
       _recordConnectPhase(phase, timeout);
       return timeout;
     }
+
     bool aborted() =>
         deadline != null &&
         (!identical(_running[key], rs) || rs.userDisconnected);
@@ -970,24 +986,31 @@ class McpService {
       }
       // Spawn inside the native sandbox — servers are trusted code the
       // user explicitly connected, same trust level as MCP defaults.
+      // A test spawn override bypasses the sandbox entirely (host CI has
+      // no Android sandbox); production always takes the sandbox path.
       final sandbox = SandboxService.I;
-      if (!sandbox.isInstalled || sandbox.prefixPath == null) {
-        throw Exception(
-          'MCP servers need the sandbox. Open Studio once to initialize it '
-          '(fast native setup), then retry. If the sandbox is already '
-          'initialized, this is a bug — report it.',
-        );
+      final testSpawn = spawnProcessForTest;
+      if (testSpawn == null) {
+        if (!sandbox.isInstalled || sandbox.prefixPath == null) {
+          throw Exception(
+            'MCP servers need the sandbox. Open Studio once to initialize it '
+            '(fast native setup), then retry. If the sandbox is already '
+            'initialized, this is a bug — report it.',
+          );
+        }
       }
       // Lazy runtime ensure: if the eager Node.js/Python install during
       // sandbox setup was skipped (offline) or failed, install on demand
-      // now — the server command needs npx / uvx to exist.
+      // now — the server command needs npx / uvx to exist. Skipped for a
+      // test spawn override: the host running the test provides the
+      // runtime directly.
       final cmd = server.command;
       final kind = (cmd == 'npx' || cmd == 'node')
           ? 'node'
           : (cmd == 'uvx' || cmd == 'uv' || cmd == 'python' || cmd == 'python3')
           ? 'python'
           : null;
-      if (kind != null) {
+      if (kind != null && testSpawn == null) {
         final ok = await sandbox.ensureRuntime(kind);
         if (!ok) {
           throw Exception(
@@ -1011,11 +1034,18 @@ class McpService {
       final cwdDir = _resolveWorkingDirectory(server, sandbox.prefixPath);
       // Native exec — the server command runs through the sandbox env
       // (PATH/LD_LIBRARY_PATH/LD_PRELOAD set by SandboxService.spawn).
-      final proc = await sandbox.spawn(
-        [server.command, ...server.args],
-        env: env.isEmpty ? null : env,
-        hostWorkDir: cwdDir,
-      );
+      // A test spawn override runs the command directly on the host.
+      final proc = testSpawn != null
+          ? await testSpawn(
+              [server.command, ...server.args],
+              env: env.isEmpty ? null : env,
+              hostWorkDir: cwdDir,
+            )
+          : await sandbox.spawn(
+              [server.command, ...server.args],
+              env: env.isEmpty ? null : env,
+              hostWorkDir: cwdDir,
+            );
       rs.process = proc;
 
       // Route stdout lines into the broadcast stream; drain stderr so it
@@ -1059,6 +1089,7 @@ class McpService {
       if (initResult.isError) {
         throw Exception('initialize failed: ${initResult.error}');
       }
+      _rememberInitializeResult(rs, initResult.value);
       _recordConnectPhase('notifications/initialized', timeoutFor());
       _sendNotification(rs, 'notifications/initialized', {});
 
@@ -1078,11 +1109,7 @@ class McpService {
     }
   }
 
-  void _attachStdioStreams(
-    _RunningServer rs,
-    String key,
-    Process process,
-  ) {
+  void _attachStdioStreams(_RunningServer rs, String key, Process process) {
     process.stdout
         .transform(utf8.decoder)
         .transform(const LineSplitter())
@@ -1122,7 +1149,8 @@ class McpService {
     final root = Directory(runtimeRoot).resolveSymbolicLinksSync();
     final requested = Directory(cwd.startsWith('/') ? cwd : '$root/$cwd');
     final resolved = requested.resolveSymbolicLinksSync();
-    if (resolved != root && !resolved.startsWith('$root${Platform.pathSeparator}')) {
+    if (resolved != root &&
+        !resolved.startsWith('$root${Platform.pathSeparator}')) {
       throw StateError('owned MCP cwd escapes plugin runtime root');
     }
     return Directory(resolved);
@@ -1290,26 +1318,16 @@ class McpService {
         ? await _rpcHttp(
             rs,
             'tools/call',
-            {
-              'name': toolName,
-              'arguments': args,
-            },
+            {'name': toolName, 'arguments': args},
             timeout: effectiveTimeout,
             cancelOnTimeout: true,
           )
         : rs.server.transport == 'native'
-            ? await _callNativeTool(
-                rs,
-                toolName,
-                args,
-                timeout: effectiveTimeout,
-              )
-            : await _rpc(
-                rs,
-                'tools/call',
-                {'name': toolName, 'arguments': args},
-                timeout: effectiveTimeout,
-              );
+        ? await _callNativeTool(rs, toolName, args, timeout: effectiveTimeout)
+        : await _rpc(rs, 'tools/call', {
+            'name': toolName,
+            'arguments': args,
+          }, timeout: effectiveTimeout);
     if (res.isTimeout) {
       return 'MCP error: "$toolName" on "$serverName" timed out after '
           '${effectiveTimeout.inSeconds} s (server may be busy or dead).';

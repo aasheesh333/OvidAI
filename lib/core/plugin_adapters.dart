@@ -157,6 +157,10 @@ class _Build {
   final unknown = <String, dynamic>{};
   final envNames = <String>{};
 
+  /// Per-event hook ordinals — [PluginHook.ordinal] is the manifest-order
+  /// index WITHIN its event, not a global counter across all events.
+  final hookOrdinals = <String, int>{};
+
   _Build(this.pluginId, this.root);
 }
 
@@ -167,7 +171,7 @@ Future<void> _addMarkdown(
   required bool asAgent,
 }) async {
   for (final file in _filesUnder(dir, (f) => f.path.endsWith('.md'))) {
-    final skill = await SkillService.forTest().parseForTest(file, file.path);
+    final skill = await SkillService.I.parseContributionFile(file);
     if (skill == null) continue;
     final rel = _relative(b.root, file.path);
     final name = _slug(skill.name);
@@ -201,7 +205,7 @@ Future<void> _addMarkdown(
 /// Parse `<dir>/**/SKILL.md` bundles plus their supporting files.
 Future<void> _addSkills(_Build b, Directory dir) async {
   for (final file in _filesUnder(dir, (f) => f.path.endsWith('/SKILL.md'))) {
-    final skill = await SkillService.forTest().parseForTest(file, file.path);
+    final skill = await SkillService.I.parseContributionFile(file);
     if (skill == null) continue;
     final name = _slug(skill.name);
     if (name.isEmpty) continue;
@@ -239,11 +243,31 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
     Map<String, dynamic> unknownFields = const {},
     Map<String, dynamic> frontmatter = const {},
   }) {
+    // Manifest-order index WITHIN the event (per the PluginHook.ordinal
+    // contract), not a global counter across events.
+    final ordinal = b.hookOrdinals[event] ?? 0;
+    b.hookOrdinals[event] = ordinal + 1;
+    // A `shell` naming an interpreter the sandbox doesn't guarantee
+    // degrades to bash with a visible note (honored in HookService._exec).
+    final shellDecl = unknownFields['shell'];
+    if (shellDecl is String &&
+        shellDecl.trim().isNotEmpty &&
+        !kKnownHookShells.contains(shellDecl.trim())) {
+      b.issues.add(
+        CompatibilityIssue(
+          severity: CompatibilitySeverity.optional,
+          message:
+              'Hook shell "${shellDecl.trim()}" is not supported by the '
+              'sandbox; the hook runs under bash instead.',
+          fields: ['hooks.$event'],
+        ),
+      );
+    }
     b.hooks.add(
       PluginHook(
         pluginId: b.pluginId,
         event: event,
-        ordinal: b.hooks.length,
+        ordinal: ordinal,
         type: type,
         payload: payload,
         matcher: matcher,
@@ -275,8 +299,24 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
       add(event: event, type: 'command', payload: value);
       continue;
     }
-    if (value is! List) continue;
-    for (final group in value) {
+    // A single matcher-object (non-array) is wrapped rather than dropped.
+    final List<dynamic> groups;
+    if (value is Map) {
+      groups = [value];
+    } else if (value is! List) {
+      b.issues.add(
+        CompatibilityIssue(
+          severity: CompatibilitySeverity.optional,
+          message:
+              'Hook event "$rawEvent" has an unsupported shape and was skipped.',
+          fields: ['hooks.$rawEvent'],
+        ),
+      );
+      continue;
+    } else {
+      groups = value;
+    }
+    for (final group in groups) {
       if (group is! Map) continue;
       final matcher = (group['matcher'] as String?)?.trim();
       final inner = group['hooks'];
@@ -377,7 +417,10 @@ Object? _tomlScalar(String value) {
 }
 
 /// Map parsed MCP entries into scrubbed [PluginMcpServer] records, adding a
-/// required-severity issue for unsupported SSE definitions.
+/// required-severity issue for unsupported SSE definitions (spec §4.3):
+/// SSE is not a supported transport — Streamable HTTP replaces it — so
+/// SSE-only servers are rejected (not installed) with an actionable
+/// message instead of failing silently.
 void _addMcp(
   _Build b,
   List<ImportedMcp> parsed,
@@ -492,7 +535,8 @@ void _requirePublisherIdentity(_Build b, String idField) {
   b.issues.add(
     CompatibilityIssue(
       severity: CompatibilitySeverity.required,
-      message: 'Invalid plugin identity: $idField declares no publisher, so '
+      message:
+          'Invalid plugin identity: $idField declares no publisher, so '
           'the canonical id "publisher/name" has an empty publisher segment.',
       fields: [idField],
     ),
@@ -573,9 +617,11 @@ class ClaudePluginAdapter {
     final j = _readJsonMap(manifestFile);
     final name = (j['name'] as String?)?.trim() ?? '';
     final author = j['author'];
+    // Author may be a string or a {name, email, …} map; anything else
+    // (list, number) yields an empty publisher instead of a cast throw.
     final publisher = author is Map
-        ? (author['name'] as String?) ?? ''
-        : (author as String?) ?? '';
+        ? ((author['name'] as String?) ?? '')
+        : (author is String ? author : '');
 
     final b = _Build(
       NormalizedPluginManifest.canonicalId(publisher, name),
@@ -602,7 +648,9 @@ class ClaudePluginAdapter {
       for (final e in raw.entries) {
         if (!const {'mcpServers', 'mcp_servers', 'servers'}.contains(e.key)) {
           b.unknown['mcp.${e.key}'] = scrubMcpSecrets(
-            e.value is Map ? e.value.cast<String, dynamic>() : <String, dynamic>{'value': e.value},
+            e.value is Map
+                ? e.value.cast<String, dynamic>()
+                : <String, dynamic>{'value': e.value},
           ).scrubbed;
         }
       }
@@ -630,9 +678,7 @@ class CodexPluginAdapter {
 
   Future<NormalizedPluginManifest> inspect(Directory root) async {
     final configFile = File('${root.path}/config.toml');
-    final config = configFile.existsSync()
-        ? configFile.readAsStringSync()
-        : '';
+    final config = configFile.existsSync() ? configFile.readAsStringSync() : '';
     // Only the root TOML table may name the plugin: a `name`/`publisher`
     // nested inside an `[mcp_servers.*]` (or any other) table must not
     // spoof the manifest identity.
@@ -645,21 +691,62 @@ class CodexPluginAdapter {
       return m == null ? '' : unquoteToml(m.group(1)!.trim());
     }
 
+    // `.codex-plugin/plugin.json` (Codex plugin manifest, e.g.
+    // obra/superpowers): declares name/version/author, a `skills`
+    // directory pointer, and a `hooks` map. Read it BEFORE building the
+    // identity so a manifest-declared name/publisher wins over the
+    // config.toml fallback when config.toml names nothing.
+    final codexManifestFile = File('${root.path}/.codex-plugin/plugin.json');
+    final codexManifest = codexManifestFile.existsSync()
+        ? _readJsonMap(codexManifestFile)
+        : const <String, dynamic>{};
+    final manifestName = (codexManifest['name'] as String?)?.trim() ?? '';
+    final manifestAuthor = codexManifest['author'];
+    // Author may be a string or a {name, email, …} map; anything else
+    // (list, number) yields an empty publisher instead of a cast throw.
+    final manifestPublisher = manifestAuthor is Map
+        ? ((manifestAuthor['name'] as String?)?.trim() ?? '')
+        : (manifestAuthor is String ? manifestAuthor.trim() : '');
+
     // Stock Codex configs declare no `name`/`publisher`; derive a stable,
     // slug-safe identity from the source id instead of failing.
     final sourceId = _slug(_basename(root.path));
     final fallbackName = sourceId.isEmpty ? 'plugin' : sourceId;
     final explicitName = scalar('name');
     final explicitPublisher = scalar('publisher');
-    final name = explicitName.isNotEmpty ? explicitName : fallbackName;
+    final name = explicitName.isNotEmpty
+        ? explicitName
+        : (manifestName.isNotEmpty ? manifestName : fallbackName);
+    final publisher = explicitPublisher.isNotEmpty
+        ? explicitPublisher
+        : (manifestPublisher.isNotEmpty ? manifestPublisher : 'codex');
     final b = _Build(
-      NormalizedPluginManifest.canonicalId(
-        explicitPublisher.isNotEmpty ? explicitPublisher : 'codex',
-        name,
-      ),
+      NormalizedPluginManifest.canonicalId(publisher, name),
       root,
     );
-    _requirePublisherIdentity(b, 'config.toml:publisher');
+    // Preserve unrecognized manifest metadata (interface block, homepage,
+    // keywords, …) verbatim so newer manifests never lose information.
+    for (final e in codexManifest.entries) {
+      if (const {
+        'name',
+        'version',
+        'description',
+        'author',
+        'skills',
+        'hooks',
+      }.contains(e.key)) {
+        continue;
+      }
+      b.unknown['manifest.${e.key}'] = e.value;
+    }
+    _requirePublisherIdentity(
+      b,
+      explicitPublisher.isNotEmpty
+          ? 'config.toml:publisher'
+          : (manifestPublisher.isNotEmpty
+                ? '.codex-plugin/plugin.json:author'
+                : 'config.toml:publisher'),
+    );
 
     // Root + nested AGENTS.md instruction files.
     final instructions = [
@@ -685,12 +772,37 @@ class CodexPluginAdapter {
       asAgent: true,
     );
 
+    // The manifest's `skills` pointer (e.g. `"skills": "./skills/"`) —
+    // honor it in addition to the legacy `.agents/skills` scan above.
+    // `..` segments are rejected: a manifest must not point outside the
+    // plugin tree.
+    final skillsPointer = codexManifest['skills'];
+    if (skillsPointer is String && skillsPointer.trim().isNotEmpty) {
+      final cleaned = skillsPointer
+          .trim()
+          .replaceAll(RegExp(r'^\.?/'), '')
+          .replaceAll(RegExp(r'/+$'), '');
+      final segments = cleaned.split('/');
+      if (!segments.contains('..') && cleaned.isNotEmpty) {
+        final skillsDir = Directory('${root.path}/$cleaned');
+        final legacyDir = Directory('${root.path}/.agents/skills');
+        if (skillsDir.path != legacyDir.path) {
+          await _addSkills(b, skillsDir);
+        }
+      }
+    }
+
     // Codex lifecycle hooks: plugin-bundled `hooks/hooks.json` plus inline
     // `[[hooks.<Event>]]` tables, normalized through the shared [_addHooks].
     _addHooks(b, _parseCodexInlineHooks(config), 'config.toml');
     final codexHooksFile = File('${root.path}/hooks/hooks.json');
     if (codexHooksFile.existsSync()) {
       _addHooks(b, _readJsonMap(codexHooksFile), 'hooks/hooks.json');
+    }
+    // …plus the manifest-declared `hooks` map, when present.
+    final manifestHooks = codexManifest['hooks'];
+    if (manifestHooks is Map && manifestHooks.isNotEmpty) {
+      _addHooks(b, {'hooks': manifestHooks}, '.codex-plugin/plugin.json');
     }
 
     if (config.isNotEmpty) {
@@ -712,10 +824,16 @@ class CodexPluginAdapter {
     }
 
     _addDependencies(b);
+    final version = scalar('version');
+    final manifestVersion = codexManifest['version'];
     return _finish(
       b,
       name: name,
-      version: scalar('version'),
+      version: version.isNotEmpty
+          ? version
+          : (manifestVersion is String
+                ? manifestVersion
+                : (manifestVersion is num ? '$manifestVersion' : '')),
       format: PluginFormat.codex,
     );
   }
@@ -807,6 +925,7 @@ class PluginAdapterRegistry {
     }
     if (File('${root.path}/AGENTS.md').existsSync() ||
         File('${root.path}/config.toml').existsSync() ||
+        File('${root.path}/.codex-plugin/plugin.json').existsSync() ||
         Directory('${root.path}/.agents').existsSync()) {
       return const CodexPluginAdapter().inspect(root);
     }

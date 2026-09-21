@@ -11321,6 +11321,56 @@ url = "https://api.example.com/mcp"
     });
 
     test(
+      '_githubPluginSource resolves bare "./" to the marketplace repo root',
+      () {
+        // obra/superpowers' own marketplace declares `"source": "./"`.
+        expect(
+          AppState.githubPluginSourceForTest(
+            './',
+            marketplaceRepo: 'obra/superpowers',
+          ),
+          'obra/superpowers',
+        );
+        expect(
+          AppState.githubPluginSourceForTest(
+            '.',
+            marketplaceRepo: 'obra/superpowers',
+          ),
+          'obra/superpowers',
+        );
+      },
+    );
+
+    test(
+      '_githubPluginSource unwraps the nested source-object marketplace form',
+      () {
+        // obra/superpowers' `.agents/plugins/marketplace.json` shape:
+        // {"source": {"source": "url", "url": "./"}}
+        expect(
+          AppState.githubPluginSourceForTest({
+            'source': {'source': 'url', 'url': './'},
+          }, marketplaceRepo: 'obra/superpowers'),
+          'obra/superpowers',
+        );
+        // Absolute git urls still parse through the url branch.
+        expect(
+          AppState.githubPluginSourceForTest({
+            'source': 'url',
+            'url': 'https://github.com/someone/else.git',
+          }, marketplaceRepo: 'obra/superpowers'),
+          'someone/else',
+        );
+        // A non-string, non-map `source` value must not throw.
+        expect(
+          AppState.githubPluginSourceForTest({
+            'source': 42,
+          }, marketplaceRepo: 'obra/superpowers'),
+          isNull,
+        );
+      },
+    );
+
+    test(
       'plugin_* tool returns honest no-op when no skill/command matches',
       () async {
         final app = AppState.I;

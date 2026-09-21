@@ -3,12 +3,16 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive.dart';
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+
 import 'sandbox_pkg.dart';
 
-typedef SandboxPolicy = ({List<String> allowedRoots, List<String> deniedCommands});
+typedef SandboxPolicy = ({
+  List<String> allowedRoots,
+  List<String> deniedCommands,
+});
 
 /// ═══════════════════════════════════════════════════════════════════
 /// NATIVE BIONIC SANDBOX — Termux-style architecture, NO proot.
@@ -37,6 +41,24 @@ typedef SandboxPolicy = ({List<String> allowedRoots, List<String> deniedCommands
 /// Termux.  On API 23 (Android 6) the phone-terminal tier (toybox) is
 /// used — it needs no install.  A lazy proot-Ubuntu fallback exists ONLY
 /// for glibc-only commands that fail natively (logged, on-demand).
+
+/// Worker-isolate entry for the payload extract step of [SandboxService.install].
+///
+/// Decodes the ~32 MB bootstrap zip, parses SYMLINKS.txt and writes every
+/// file into [stagingPath]. Top-level (not a closure) so [compute] can spawn
+/// it; everything it touches is pure/static — no service instance state.
+/// Returns the extracted file count plus the parsed symlink list.
+/// Public so tests can exercise the real isolate round-trip.
+({int count, List<({String target, String linkPath})> symlinks})
+decodeAndExtractPayload(({Uint8List bytes, String stagingPath}) args) {
+  final archive = ZipDecoder().decodeBytes(args.bytes, verify: false);
+  final symlinks = SandboxService.parseSymlinks(archive);
+  final count = SandboxService.extractArchive(
+    archive,
+    Directory(args.stagingPath),
+  );
+  return (count: count, symlinks: symlinks);
+}
 
 /// Thrown when the DEVICE cannot run the native sandbox (Android < 7,
 /// exec-blocked ROM, no payload for the process ABI). Permanent — retrying
@@ -429,9 +451,20 @@ class SandboxService {
 
   // ═════════════════════════════════════════════════════════════════
   // INSTALL — extract the bundled libovid_bootstrap.so payload.
+  //
+  // First-launch budget: the app must be interactive in UNDER ONE MINUTE.
+  // The multi-minute network step (phase 7: apt update + install of the
+  // node/python/git toolchain) is therefore DEFERRABLE — pass
+  // [includeRuntimes]=false in the first-launch gate so the shell opens
+  // as soon as the native core (phases 0–6) is live, and let
+  // AppState.maybeStartBackgroundRuntimeInstall() finish phase 7 in the
+  // background with a progress banner. MCP/plugin paths already lazily
+  // ensure node/python on first use (ensureRuntime), so nothing breaks
+  // while the background install is still running.
   // ═════════════════════════════════════════════════════════════════
   Future<void> install({
     required void Function(int phase, double progress, String line) onPhase,
+    bool includeRuntimes = true,
   }) async {
     final files = await _ensureFilesRoot();
     final prefix = Directory('${files.path}/sandbox');
@@ -486,12 +519,19 @@ class SandboxService {
     );
 
     // ── Extract zip into staging ──
+    // Decode + write runs in a worker isolate: ZipDecoder on a ~32 MB
+    // payload is the heaviest CPU stretch of the core install, and doing
+    // it on the UI thread would freeze the setup progress screen (ANR
+    // risk) on slower devices.
     onPhase(2, 0.0, 'extracting sandbox payload');
     if (staging.existsSync()) staging.deleteSync(recursive: true);
     staging.createSync(recursive: true);
-    final archive = ZipDecoder().decodeBytes(payload.bytes, verify: false);
-    final symlinks = parseSymlinks(archive);
-    final count = extractArchive(archive, staging);
+    final extracted = await compute(decodeAndExtractPayload, (
+      bytes: payload.bytes,
+      stagingPath: staging.path,
+    ));
+    final symlinks = extracted.symlinks;
+    final count = extracted.count;
     onPhase(2, 1.0, 'extracted ......... $count files ✓');
 
     // ── chmod executables (TermuxInstaller rule) ──
@@ -586,10 +626,8 @@ class SandboxService {
     // a false ✓ while every subsequent shell command failed.
     onPhase(6, 0.0, r'$ bash --version (native exec sanity)');
     try {
-      final (code, out) = await execChecked([
-        'bash',
-        '--version',
-      ]).timeout(const Duration(seconds: 15));
+      final (code, out) = await execChecked(['bash', '--version'])
+          .timeout(const Duration(seconds: 15));
       if (code != 0) {
         throw Exception(
           'bash --version exited $code: '
@@ -620,12 +658,24 @@ class SandboxService {
     }
 
     // ── Phase 7: Runtimes — node/npm/npx/pnpm + python/pip/uv ─────────
-    // These are REQUIRED for MCP servers (npx/uvx) and for the agent's
-    // node/python tooling, so we install them eagerly at first launch and
-    // VERIFY each binary actually runs. apt update+install is retried —
-    // a single flaky mirror/timeout must not leave the sandbox runtimeless.
-    onPhase(7, 0.0, r'$ apt update && apt install runtimes');
-    await _installRuntimesWithRetry(onPhase);
+    // REQUIRED for MCP servers (npx/uvx) and the agent's node/python
+    // tooling, but NETWORK-BOUND (apt update + install, minutes). On the
+    // first-launch gate this phase is SKIPPED (includeRuntimes=false) so
+    // the app opens in under a minute; it then runs in the background
+    // (see AppState.maybeStartBackgroundRuntimeInstall) and every
+    // consumer also has the lazy ensureRuntime() fallback, so the app
+    // works offline and nothing blocks on it.
+    if (includeRuntimes) {
+      onPhase(7, 0.0, r'$ apt update && apt install runtimes');
+      await _installRuntimesWithRetry(onPhase);
+    } else {
+      onPhase(
+        7,
+        1.0,
+        'runtimes deferred — node/python install continues in the '
+        'background after the app opens',
+      );
+    }
   }
 
   /// Install + verify node/npm/npx/pnpm and python/pip/uv, retrying the
@@ -637,11 +687,8 @@ class SandboxService {
   ) async {
     Future<bool> binRuns(String bin, [String args = '--version']) async {
       try {
-        final (code, _) = await execChecked([
-          'bash',
-          '-c',
-          '$bin $args 2>&1',
-        ]).timeout(const Duration(seconds: 15));
+        final (code, _) = await execChecked(['bash', '-c', '$bin $args 2>&1'])
+            .timeout(const Duration(seconds: 15));
         return code == 0;
       } catch (_) {
         return false;
@@ -850,12 +897,20 @@ class SandboxService {
       final (_, ver) = await execChecked(['bash', '-c', 'git --version 2>&1'])
           .timeout(const Duration(seconds: 30));
       if (!ver.contains('git version')) {
-        onPhase(8, 1.0, 'git ...............  ⚠ unexpected version output: '
-            '${ver.trim().split('\n').last}');
+        onPhase(
+          8,
+          1.0,
+          'git ...............  ⚠ unexpected version output: '
+          '${ver.trim().split('\n').last}',
+        );
       }
     } catch (e) {
-      onPhase(8, 1.0, 'git ...............  ⚠ exec failed: '
-          '${e.toString().split('\n').first}');
+      onPhase(
+        8,
+        1.0,
+        'git ...............  ⚠ exec failed: '
+        '${e.toString().split('\n').first}',
+      );
     }
     String? execPath;
     try {
@@ -874,7 +929,7 @@ class SandboxService {
         8,
         1.0,
         'git exec-path .....  ⚠ points at $execPath — env override active '
-            '(GIT_EXEC_PATH=$prefixPath/libexec/git-core)',
+        '(GIT_EXEC_PATH=$prefixPath/libexec/git-core)',
       );
     } else {
       onPhase(8, 1.0, 'git exec-path .....  ✓ $execPath');
@@ -1096,7 +1151,8 @@ export PIP_CACHE_DIR="\$HOME/.cache/pip"
   /// Pure apt-config body so tests can pin the HTTPS transport settings
   /// without a real prefix.
   @visibleForTesting
-  static String aptConfigText(String p) => '''
+  static String aptConfigText(String p) =>
+      '''
 // Ovid sandbox apt config — override the compiled-in Termux prefix.
 Dir "$p";
 Dir::State "$p/var/lib/apt";
@@ -1570,7 +1626,8 @@ audit=false
     // expression (host-verified): /files/usr/ → $p/ first (the payload
     // root IS the usr), then any bare /files/ prefix (legacy scripts).
     // Order matters — the bare form would mangle the usr form's tail.
-    final sedExpr = 's|/data/data/com.termux/files/usr/|$p/|g; '
+    final sedExpr =
+        's|/data/data/com.termux/files/usr/|$p/|g; '
         's|/data/data/com.termux/files|$p|g';
     await execChecked([
       'bash',
@@ -1600,13 +1657,15 @@ audit=false
     // (configs, docs) and must not trip this. A residual shebang means
     // the patcher failed — report loudly so Health surfaces it (the
     // next self-heal boot re-runs this whole pass).
-    final (_, verifyOut) = await execChecked(
-      ['bash', '-c', 'cd "\$PREFIX" && '
+    final (_, verifyOut) = await execChecked([
+      'bash',
+      '-c',
+      'cd "\$PREFIX" && '
           'for f in bin/* lib/node_modules/npm/bin/*; do '
           '[ -f "\$f" ] || continue; '
           'head -1 "\$f" 2>/dev/null | grep -q '
-          '"data/data/com.termux" && echo "SHEBANG_STALE: \$f"; done | head -5'],
-    ).timeout(const Duration(seconds: 30));
+          '"data/data/com.termux" && echo "SHEBANG_STALE: \$f"; done | head -5',
+    ]).timeout(const Duration(seconds: 30));
     if (verifyOut.contains('SHEBANG_STALE')) {
       // ignore: avoid_print
       print(
@@ -1665,9 +1724,8 @@ audit=false
     try {
       final dir = Directory('${prefix.path}/etc/apt')
         ..createSync(recursive: true);
-      File(
-        '${dir.path}/sources.list.d/termux.list',
-      ).createSync(recursive: true);
+      File('${dir.path}/sources.list.d/termux.list')
+          .createSync(recursive: true);
       File('${dir.path}/sources.list').writeAsStringSync(
         '# Ovid sandbox apt mirror (auto-managed)\n'
         'deb $mirror stable main\n',
@@ -1695,7 +1753,8 @@ audit=false
 
   bool _rotateMirror(String aptOut) {
     final l = aptOut.toLowerCase();
-    final dead = l.contains('unable to locate package') ||
+    final dead =
+        l.contains('unable to locate package') ||
         l.contains('failed to fetch') ||
         l.contains('does not have a release file') ||
         l.contains('no release file') ||
@@ -1753,12 +1812,34 @@ audit=false
     for (final sub in subdirs) {
       final dir = Directory('${root.path}/$sub');
       if (!dir.existsSync()) continue;
+      // One recursive chmod per subtree. The previous implementation
+      // spawned a NEW OS process per file (hundreds of spawns — tens of
+      // seconds on device); a single `chmod -R` does the same work in
+      // well under a second.
+      if (await _chmodRecursive(dir.path)) continue;
+      // Fallback: per-file (previous behavior) when no chmod binary works.
       await for (final entity in dir.list(recursive: true)) {
         if (entity is File) {
           await _chmod(entity.path, 0x1ED); // 0755
         }
       }
     }
+  }
+
+  /// `chmod -R 755 <path>` via the first usable chmod binary. Returns false
+  /// when neither /system/bin/chmod nor toybox is available.
+  Future<bool> _chmodRecursive(String path) async {
+    const attempts = [
+      ('/system/bin/chmod', ['-R', '755']),
+      ('toybox', ['chmod', '-R', '755']),
+    ];
+    for (final (bin, baseArgs) in attempts) {
+      try {
+        final result = await Process.run(bin, [...baseArgs, path]);
+        if (result.exitCode == 0) return true;
+      } catch (_) {}
+    }
+    return false;
   }
 
   Future<void> _chmod(String path, int mode) async {
@@ -1789,7 +1870,8 @@ audit=false
   /// Falls back to the extracted file for dev/test environments.
   /// Process-truth device facts for the preflight gate. Channel misses
   /// (host tests) fall back to safe defaults so no gate ever fires there.
-  Future<({String abi, int sdkInt, bool dataExecAllowed})> _deviceFacts() async {
+  Future<({String abi, int sdkInt, bool dataExecAllowed})>
+  _deviceFacts() async {
     var abi = _deviceArch;
     var sdkInt = -1;
     var dataExecAllowed = true;
@@ -2006,10 +2088,8 @@ audit=false
   Future<void> selfHealNow({void Function(String line)? onLine}) async {
     Directory prefix;
     try {
-      prefix = _prefix ??
-          Directory(
-            '${(await _ensureFilesRoot()).path}/sandbox',
-          );
+      prefix =
+          _prefix ?? Directory('${(await _ensureFilesRoot()).path}/sandbox');
     } catch (_) {
       return;
     }
@@ -2210,16 +2290,14 @@ audit=false
           stderr: errBuf.toString(),
         );
       }
-      final outF = proc.stdout
-          .fold<List<int>>(
-            <int>[],
-            (acc, chunk) => acc..addAll(chunk),
-          );
-      final errF = proc.stderr
-          .fold<List<int>>(
-            <int>[],
-            (acc, chunk) => acc..addAll(chunk),
-          );
+      final outF = proc.stdout.fold<List<int>>(
+        <int>[],
+        (acc, chunk) => acc..addAll(chunk),
+      );
+      final errF = proc.stderr.fold<List<int>>(
+        <int>[],
+        (acc, chunk) => acc..addAll(chunk),
+      );
       final code = await proc.exitCode;
       final out = await outF;
       final err = await errF;
@@ -2441,10 +2519,7 @@ audit=false
       // `_prefix!` and would null-crash in a unit test. A real prefix still
       // contributes its env, merged under the caller-supplied map, so the
       // override observes exactly what the production spawn would receive.
-      return override(args, {
-        if (_prefix != null) ..._sandboxEnv(),
-        ...?env,
-      });
+      return override(args, {if (_prefix != null) ..._sandboxEnv(), ...?env});
     }
     if (_prefix == null) {
       final ok = await checkExisting();
@@ -2511,11 +2586,8 @@ audit=false
       rotated = true;
     }
     if (rotated) {
-      final (uCode, uOut) = await execChecked([
-        'bash',
-        '-c',
-        'apt update 2>&1',
-      ]).timeout(const Duration(minutes: 3));
+      final (uCode, uOut) = await execChecked(['bash', '-c', 'apt update 2>&1'])
+          .timeout(const Duration(minutes: 3));
       if (sub.startsWith('update')) {
         (code, out) = (uCode, uOut);
       } else if (uCode != 0) {
@@ -2550,14 +2622,14 @@ audit=false
       return true;
     }
     _runtimeEnsured[kind] = false;
+    // A genuine request — the boot maintenance task uses this to tell
+    // "runtimes not needed yet" apart from "runtimes needed but broken".
+    _runtimesRequested = true;
     // Fast path: check if already present (exit-code based —
     // `command -v` prints nothing and exits 1 when missing).
     try {
-      final (code, _) = await execChecked([
-        'bash',
-        '-c',
-        'command -v $bin',
-      ]).timeout(const Duration(seconds: 10));
+      final (code, _) = await execChecked(['bash', '-c', 'command -v $bin'])
+          .timeout(const Duration(seconds: 10));
       if (code == 0) {
         _runtimeEnsured[kind] = true;
         return true;
@@ -2583,11 +2655,8 @@ audit=false
           ]).timeout(const Duration(minutes: 2));
         } catch (_) {}
       }
-      final (vCode, _) = await execChecked([
-        'bash',
-        '-c',
-        'command -v $bin',
-      ]).timeout(const Duration(seconds: 10));
+      final (vCode, _) = await execChecked(['bash', '-c', 'command -v $bin'])
+          .timeout(const Duration(seconds: 10));
       final ok = vCode == 0;
       if (ok) _runtimeEnsured[kind] = true;
       onLine?.call(
@@ -2604,11 +2673,8 @@ audit=false
   /// Whether a runtime binary exists right now (no install attempted).
   Future<bool> hasRuntime(String bin) async {
     try {
-      final (code, _) = await execChecked([
-        'bash',
-        '-c',
-        'command -v $bin',
-      ]).timeout(const Duration(seconds: 10));
+      final (code, _) = await execChecked(['bash', '-c', 'command -v $bin'])
+          .timeout(const Duration(seconds: 10));
       return code == 0;
     } catch (_) {
       return false;
@@ -2628,11 +2694,8 @@ audit=false
     if (_compilerEnsured && _filePresent('bin/clang')) return true;
     _compilerEnsured = false;
     try {
-      final (code, _) = await execChecked([
-        'bash',
-        '-c',
-        'command -v clang',
-      ]).timeout(const Duration(seconds: 10));
+      final (code, _) = await execChecked(['bash', '-c', 'command -v clang'])
+          .timeout(const Duration(seconds: 10));
       if (code == 0) {
         _compilerEnsured = true;
         return true;
@@ -2703,12 +2766,9 @@ audit=false
       'ubuntu-base-$ubuntuRelease-base-$ubuntuArch.tar.gz';
 
   static const _ubuntuRootfsHashes = {
-    'amd64':
-        'e77b6f10c2590cef872b33ee9f635a0e3fd1f57fb074c0e52b5c7f56147a0c86',
-    'arm64':
-        'a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2',
-    'armhf':
-        '4fcee4d278f1c5232e085a021a85e4c6cef3853557a88d98ff380b5e5d5841bb',
+    'amd64': 'e77b6f10c2590cef872b33ee9f635a0e3fd1f57fb074c0e52b5c7f56147a0c86',
+    'arm64': 'a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2',
+    'armhf': '4fcee4d278f1c5232e085a021a85e4c6cef3853557a88d98ff380b5e5d5841bb',
   };
 
   static String? ubuntuRootfsSha256(String ubuntuArch) =>
@@ -2733,11 +2793,8 @@ audit=false
     if (_jdkEnsured && _filePresent('bin/java')) return true;
     _jdkEnsured = false;
     try {
-      final (code, _) = await execChecked([
-        'bash',
-        '-c',
-        'command -v java',
-      ]).timeout(const Duration(seconds: 10));
+      final (code, _) = await execChecked(['bash', '-c', 'command -v java'])
+          .timeout(const Duration(seconds: 10));
       if (code == 0) {
         _jdkEnsured = true;
         return true;
@@ -2782,11 +2839,8 @@ audit=false
     if (_kotlinEnsured && _filePresent('opt/kotlinc/bin/kotlinc')) return true;
     _kotlinEnsured = false;
     try {
-      final (code, _) = await execChecked([
-        'bash',
-        '-c',
-        'command -v kotlinc',
-      ]).timeout(const Duration(seconds: 10));
+      final (code, _) = await execChecked(['bash', '-c', 'command -v kotlinc'])
+          .timeout(const Duration(seconds: 10));
       if (code == 0) {
         _kotlinEnsured = true;
         return true;
@@ -2796,7 +2850,9 @@ audit=false
       onLine?.call('[kotlin] needs a JDK first — JDK install failed.');
       return false;
     }
-    onLine?.call('[kotlin] installing kotlin-compiler $kotlinVersion (~90 MB, one-time)…');
+    onLine?.call(
+      '[kotlin] installing kotlin-compiler $kotlinVersion (~90 MB, one-time)…',
+    );
     try {
       final ok = await _installKotlinCompiler(onLine);
       if (ok) _kotlinEnsured = true;
@@ -2839,9 +2895,8 @@ command -v kotlinc >/dev/null || exit 15
 rm -f "\$DL"
 echo INSTALLED
 ''';
-    final (code, out) = await execChecked(
-      ['bash', '-c', script],
-    ).timeout(const Duration(minutes: 15));
+    final (code, out) = await execChecked(['bash', '-c', script])
+        .timeout(const Duration(minutes: 15));
     final tail = out.trim().split('\n').where((l) => l.isNotEmpty);
     if (code == 0 && out.contains('INSTALLED')) {
       onLine?.call('[kotlin] kotlinc installed ✓');
@@ -2934,15 +2989,12 @@ echo PROVISIONED
 ''';
   }
 
-  Future<bool> _installProotUbuntu(
-    void Function(String line)? onLine,
-  ) async {
+  Future<bool> _installProotUbuntu(void Function(String line)? onLine) async {
     final override = prootProvisionOverrideForTest;
     if (override != null) return override(onLine);
     final script = _prootProvisionScript(ubuntuArchFor(_deviceArch));
-    final (code, out) = await execChecked(
-      ['bash', '-c', script],
-    ).timeout(const Duration(minutes: 20));
+    final (code, out) = await execChecked(['bash', '-c', script])
+        .timeout(const Duration(minutes: 20));
     final tail = out.trim().split('\n').where((l) => l.isNotEmpty);
     if (code == 0 && out.contains('PROVISIONED')) {
       onLine?.call('[proot] Ubuntu userland ready ✓');
@@ -3070,9 +3122,7 @@ echo PROVISIONED
     }
   }
 
-  Future<bool> _installFlutter(
-    void Function(String line)? onLine,
-  ) async {
+  Future<bool> _installFlutter(void Function(String line)? onLine) async {
     // Storage gate first: the tarball plus the extracted tree plus the
     // engine precache need real room. Fail fast with an honest number.
     try {
@@ -3096,7 +3146,8 @@ echo PROVISIONED
       onLine?.call('[flutter] storage check failed: $e');
       return false;
     }
-    final script = '''
+    final script =
+        '''
 set -u
 export DEBIAN_FRONTEND=noninteractive
 apt-get update 2>&1 | tail -1
@@ -3133,6 +3184,44 @@ echo INSTALLED
   // ═════════════════════════════════════════════════════════════════
   // HEALTH / RUNTIME REPAIR (Health screen + first-launch gate)
   // ═════════════════════════════════════════════════════════════════
+
+  /// Whether any code path has actually asked for the dev runtimes
+  /// (node/python) since process start. First-launch installs the native
+  /// core WITHOUT runtimes (they finish in the background, or install on
+  /// first real use via [ensureRuntime]); the boot maintenance task must
+  /// not burn its budget reinstalling runtimes nobody asked for yet —
+  /// [runtimesRequested] lets it tell "not needed yet" (skip) apart from
+  /// "needed but broken" (degraded).
+  bool _runtimesRequested = false;
+
+  /// True once any caller has requested the core dev runtimes.
+  bool get runtimesRequested => _runtimesRequested;
+
+  /// Mark the runtimes as requested without installing them — used by the
+  /// deferred first-launch background installer in [AppState], which
+  /// drives the install itself rather than going through [ensureRuntime].
+  void markRuntimesRequested() => _runtimesRequested = true;
+
+  /// Cheap synchronous disk probe: are the phase-7 runtime binaries
+  /// present? Used by the deferred background runtime install to skip
+  /// without spawning any processes — [runtimesVerified] costs a bash
+  /// spawn with a 15 s timeout, too heavy to run on every shell open.
+  /// Same REQUIRED set as [runtimesVerified] (node+npm+python+curl+git).
+  bool runtimesPresentOnDisk() {
+    final prefix = _prefix;
+    if (prefix == null || !_installed) return false;
+    const required = [
+      'bin/node',
+      'bin/npm',
+      'bin/python',
+      'bin/git',
+      'bin/curl',
+    ];
+    for (final rel in required) {
+      if (!File('${prefix.path}/$rel').existsSync()) return false;
+    }
+    return true;
+  }
 
   /// Fast check: every runtime the app treats as REQUIRED is present.
   /// (bash + node + npm + python + git + curl — the full Linux toolchain
@@ -3187,9 +3276,26 @@ echo INSTALLED
     void Function(int phase, double progress, String line) onPhase,
   ) async {
     if (!_installed) return false;
-    await _installRuntimesWithRetry(onPhase);
-    return await runtimesVerified();
+    _runtimesRequested = true;
+    if (_coreRuntimesRunning) {
+      // A runtime install is already in flight (e.g. the deferred
+      // first-launch background job racing the readiness self-heal) —
+      // wait for it instead of running apt twice against the dpkg lock.
+      while (_coreRuntimesRunning) {
+        await Future.delayed(const Duration(seconds: 2));
+      }
+      return runtimesVerified();
+    }
+    _coreRuntimesRunning = true;
+    try {
+      await _installRuntimesWithRetry(onPhase);
+      return await runtimesVerified();
+    } finally {
+      _coreRuntimesRunning = false;
+    }
   }
+
+  bool _coreRuntimesRunning = false;
 
   // ═════════════════════════════════════════════════════════════════
   // LAZY PROOT-UBUNTU FALLBACK — provisioned ON DEMAND, never bundled.
@@ -3291,8 +3397,7 @@ echo INSTALLED
     var prootBinary = false;
     if (prefix != null) {
       try {
-        provisioned =
-            File('${prefix.path}/ubuntu/etc/os-release').existsSync();
+        provisioned = File('${prefix.path}/ubuntu/etc/os-release').existsSync();
         prootBinary = File('${prefix.path}/bin/proot').existsSync();
       } catch (_) {}
     }
@@ -3310,11 +3415,10 @@ echo INSTALLED
     final denial = checkPolicy(['sh', '-c', cmd], hostWorkDir: hostWorkDir);
     if (denial != null) return denial;
     // PR32: tracked (Stop can kill it instantly).
-    final result = await _trackedRun(
-      '/system/bin/sh',
-      ['-c', cmd],
-      workingDirectory: hostWorkDir?.path,
-    );
+    final result = await _trackedRun('/system/bin/sh', [
+      '-c',
+      cmd,
+    ], workingDirectory: hostWorkDir?.path);
     return '${result.stdout}${result.stderr}';
   }
 
@@ -3338,6 +3442,7 @@ echo INSTALLED
   /// Clear all lazy-ensure caches + diagnostics that describe the prefix.
   void _resetLazyState() {
     _runtimeEnsured.clear();
+    _runtimesRequested = false;
     _compilerEnsured = false;
     _jdkEnsured = false;
     _kotlinEnsured = false;

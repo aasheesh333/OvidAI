@@ -1,10 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+
 import '../core/agent_service.dart';
+import '../core/app_info.dart';
 import '../core/firebase_service.dart';
 import '../core/hook_service.dart';
 import '../core/presets.dart';
@@ -152,7 +155,8 @@ class SettingsScreen extends StatelessWidget {
             setter: _setShowReasoning,
           ),
 
-          const SectionHeader('Agents & Sandbox'),          _navTile(
+          const SectionHeader('Agents & Sandbox'),
+          _navTile(
             context,
             Icons.monitor_heart_outlined,
             'Device health',
@@ -221,10 +225,7 @@ class SettingsScreen extends StatelessWidget {
             title: 'Send behavior while busy',
             subtitle: 'What sending does while the agent is still running',
             getter: _getSendWhileBusy,
-            options: [
-              ('queue', 'Queue'),
-              ('interrupt', 'Interrupt'),
-            ],
+            options: [('queue', 'Queue'), ('interrupt', 'Interrupt')],
             onChanged: _setSendWhileBusy,
           ),
           const _ChoiceTile(
@@ -232,10 +233,7 @@ class SettingsScreen extends StatelessWidget {
             title: 'Conversation display',
             subtitle: 'Controls process content in completed turns',
             getter: _getConversationDisplay,
-            options: [
-              ('compact', 'Compact'),
-              ('full', 'Full'),
-            ],
+            options: [('compact', 'Compact'), ('full', 'Full')],
             onChanged: _setConversationDisplay,
           ),
           const SectionHeader('Data controls'),
@@ -280,7 +278,7 @@ class SettingsScreen extends StatelessWidget {
             setter: _setSecureScreen,
           ),
           const _DeviceIntegrityTile(),
-          _settingTile(Icons.info_outline, 'About', 'Ovid AI 0.1.0-demo'),
+          _settingTile(Icons.info_outline, 'About', 'Ovid AI $kAppVersion'),
         ],
       ),
     );
@@ -445,6 +443,7 @@ class _TelemetryTile extends StatelessWidget {
     );
   }
 }
+
 /// Real persisted setting toggle — reads/writes AppState (survives app
 /// restarts, gates actual features). Replaces the old fake local-state
 /// `_SwitchTile` that reset to a hardcoded literal on every reopen.
@@ -484,9 +483,7 @@ class _SettingsSwitchTile extends StatelessWidget {
             child: Switch(
               value: v,
               activeTrackColor: Aether.accent,
-              onChanged: setter == null
-                  ? null
-                  : (x) => setter!(x),
+              onChanged: setter == null ? null : (x) => setter!(x),
             ),
           ),
           onTap: setter == null ? null : () => setter!(!getter()),
@@ -531,10 +528,7 @@ class _DeviceIntegrityTile extends StatelessWidget {
             size: 19,
             color: compromised ? Aether.warnLight : Aether.successLight,
           ),
-          title: const Text(
-            'Device integrity',
-            style: TextStyle(fontSize: 14),
-          ),
+          title: const Text('Device integrity', style: TextStyle(fontSize: 14)),
           subtitle: Text(
             detail,
             style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
@@ -566,8 +560,7 @@ bool _getHooksEnabled() => HookService.I.enabled;
 Future<void> _setHooksEnabled(bool v) => HookService.I.setEnabled(v);
 
 bool _getBrowserDesktop() => AppState.I.browserDesktopMode;
-Future<void> _setBrowserDesktop(bool v) =>
-    AppState.I.setBrowserDesktopMode(v);
+Future<void> _setBrowserDesktop(bool v) => AppState.I.setBrowserDesktopMode(v);
 
 String _getSendWhileBusy() => AppState.I.sendWhileBusy;
 Future<void> _setSendWhileBusy(String v) => AppState.I.setSendWhileBusy(v);
@@ -637,9 +630,9 @@ class _StorageTile extends StatelessWidget {
         style: TextStyle(fontSize: 12, color: Aether.textFaint),
       ),
       trailing: const Icon(Icons.chevron_right, size: 18),
-      onTap: () => Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => const _StorageScreen()),
-      ),
+      onTap: () => Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const _StorageScreen())),
     );
   }
 }
@@ -754,10 +747,7 @@ class _StorageScreenState extends State<_StorageScreen> {
     final total = _docs + _cache + _support;
     return Scaffold(
       backgroundColor: Aether.bg,
-      appBar: AppBar(
-        leading: const BackButton(),
-        title: const Text('Storage'),
-      ),
+      appBar: AppBar(leading: const BackButton(), title: const Text('Storage')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -1285,9 +1275,9 @@ class _ExportChatsScreenState extends State<_ExportChatsScreen> {
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Export failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Export failed: $e')));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1304,7 +1294,11 @@ class _ExportChatsScreenState extends State<_ExportChatsScreen> {
             'Exports every session (messages, todos, goals, schedules, '
             'attachments metadata) as a single JSON file saved to the app '
             'documents directory.',
-            style: TextStyle(fontSize: 13.5, height: 1.6, color: Aether.textMuted),
+            style: TextStyle(
+              fontSize: 13.5,
+              height: 1.6,
+              color: Aether.textMuted,
+            ),
           ),
           const SizedBox(height: 20),
           FilledButton.icon(
@@ -1359,9 +1353,9 @@ class _DeleteAllDataScreenState extends State<_DeleteAllDataScreen> {
     if (confirmed != true) return;
     await AppState.I.deleteAllData();
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('All data deleted.')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('All data deleted.')));
   }
 
   @override
@@ -1374,7 +1368,11 @@ class _DeleteAllDataScreenState extends State<_DeleteAllDataScreen> {
           Text(
             'Deletes every session, all API keys, providers, plugin state, '
             'and app preferences. Sandbox workspaces are removed too.',
-            style: TextStyle(fontSize: 13.5, height: 1.6, color: Aether.textMuted),
+            style: TextStyle(
+              fontSize: 13.5,
+              height: 1.6,
+              color: Aether.textMuted,
+            ),
           ),
           const SizedBox(height: 20),
           FilledButton.icon(
@@ -1450,7 +1448,9 @@ class _SkillsScreenState extends State<SkillsScreen> {
         final srcFile = File(src);
         final size = await srcFile.length();
         if (size > 512 * 1024) {
-          errors.add('$name — too large (${(size / 1024).toStringAsFixed(0)} KB, max 512 KB)');
+          errors.add(
+            '$name — too large (${(size / 1024).toStringAsFixed(0)} KB, max 512 KB)',
+          );
           continue;
         }
         // Collision-safe: suffix if a skill with this name already exists.
@@ -1486,7 +1486,10 @@ class _SkillsScreenState extends State<SkillsScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('Delete "${s.name}"?', style: const TextStyle(fontSize: 15)),
+        title: Text(
+          'Delete "${s.name}"?',
+          style: const TextStyle(fontSize: 15),
+        ),
         content: const Text('The agent will no longer see this skill in chat.'),
         actions: [
           TextButton(
@@ -1518,7 +1521,11 @@ class _SkillsScreenState extends State<SkillsScreen> {
           child: SingleChildScrollView(
             child: Text(
               s.content,
-              style: TextStyle(fontSize: 12.5, height: 1.5, color: Aether.textMuted),
+              style: TextStyle(
+                fontSize: 12.5,
+                height: 1.5,
+                color: Aether.textMuted,
+              ),
             ),
           ),
         ),
@@ -1558,7 +1565,10 @@ class _SkillsScreenState extends State<SkillsScreen> {
               itemBuilder: (_, i) {
                 final s = _skills[i];
                 return Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
                   decoration: BoxDecoration(
                     color: Aether.surface,
                     borderRadius: BorderRadius.circular(12),
@@ -1601,12 +1611,20 @@ class _SkillsScreenState extends State<SkillsScreen> {
                       IconButton(
                         tooltip: 'Preview',
                         onPressed: () => _preview(s),
-                        icon: Icon(Icons.visibility_outlined, size: 17, color: Aether.textMuted),
+                        icon: Icon(
+                          Icons.visibility_outlined,
+                          size: 17,
+                          color: Aether.textMuted,
+                        ),
                       ),
                       IconButton(
                         tooltip: 'Delete',
                         onPressed: () => _delete(s),
-                        icon: Icon(Icons.delete_outline, size: 17, color: Aether.danger),
+                        icon: Icon(
+                          Icons.delete_outline,
+                          size: 17,
+                          color: Aether.danger,
+                        ),
                       ),
                     ],
                   ),
@@ -1657,14 +1675,20 @@ class _PresetsScreen extends StatelessWidget {
   const _PresetsScreen();
 
   void _duplicate(BuildContext context, AgentPreset preset) async {
-    final nameController = TextEditingController(text: '${preset.label} (Custom)');
+    final nameController = TextEditingController(
+      text: '${preset.label} (Custom)',
+    );
     final idController = TextEditingController(
-      text: '${preset.id}_custom_${DateTime.now().millisecondsSinceEpoch % 1000}',
+      text:
+          '${preset.id}_custom_${DateTime.now().millisecondsSinceEpoch % 1000}',
     );
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Duplicate as custom preset', style: TextStyle(fontSize: 16)),
+        title: const Text(
+          'Duplicate as custom preset',
+          style: TextStyle(fontSize: 16),
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1717,7 +1741,9 @@ class _PresetsScreen extends StatelessWidget {
       body: AnimatedBuilder(
         animation: AppState.I,
         builder: (context, _) {
-          final customIds = PresetRegistry.customPresets.map((e) => e.id).toSet();
+          final customIds = PresetRegistry.customPresets
+              .map((e) => e.id)
+              .toSet();
           final allPresets = PresetRegistry.all;
           return ListView(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 40),
@@ -1810,13 +1836,21 @@ class _PresetTileState extends State<_PresetTile> {
               children: [
                 Text(
                   p.label,
-                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
                 const SizedBox(width: 8),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 2,
+                  ),
                   decoration: BoxDecoration(
-                    color: isCustom ? Aether.accent.withValues(alpha: 0.15) : Aether.surfaceRaised,
+                    color: isCustom
+                        ? Aether.accent.withValues(alpha: 0.15)
+                        : Aether.surfaceRaised,
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
@@ -1859,12 +1893,18 @@ class _PresetTileState extends State<_PresetTile> {
                 if (isCustom && widget.onDelete != null)
                   IconButton(
                     tooltip: 'Delete custom preset',
-                    icon: Icon(Icons.delete_outline, size: 18, color: Aether.danger),
+                    icon: Icon(
+                      Icons.delete_outline,
+                      size: 18,
+                      color: Aether.danger,
+                    ),
                     onPressed: widget.onDelete,
                   ),
                 if (isCustom)
                   IconButton(
-                    tooltip: _expanded ? 'Hide tools' : 'Configure denied tools',
+                    tooltip: _expanded
+                        ? 'Hide tools'
+                        : 'Configure denied tools',
                     icon: Icon(
                       _expanded ? Icons.expand_less : Icons.tune,
                       size: 18,
@@ -1903,7 +1943,9 @@ class _PresetTileState extends State<_PresetTile> {
                       onSelected: (selected) {
                         final currentDenied = List<String>.from(p.deniedTools);
                         if (selected) {
-                          if (!currentDenied.contains(tool)) currentDenied.add(tool);
+                          if (!currentDenied.contains(tool)) {
+                            currentDenied.add(tool);
+                          }
                         } else {
                           currentDenied.remove(tool);
                         }

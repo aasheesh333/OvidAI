@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+
 import '../core/theme.dart';
 import '../core/agent_service.dart';
 
@@ -19,9 +20,8 @@ class BrowserScreen extends StatefulWidget {
 
   /// Push the browser, optionally navigating the active tab to [url].
   static Future<void> open(BuildContext context, {String? url}) async {
-    await Navigator.of(
-      context,
-    ).push(MaterialPageRoute(builder: (_) => BrowserScreen(openUrl: url)));
+    await Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => BrowserScreen(openUrl: url)));
   }
 
   @override
@@ -376,7 +376,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   for (final t in agent.browserTabs)
                     browserWebViewBuilderForTest?.call(t) ??
                         WebViewWidget(
-                          key: ValueKey('${t.url}_${t.desktopMode}'),
+                          // Key on the tab's STABLE id, not its URL:
+                          // in-page navigation (t.url changes constantly)
+                          // must not tear down and recreate the platform
+                          // view. desktopMode stays in the key because the
+                          // controller is intentionally recreated on toggle.
+                          key: ValueKey('tab_${t.id}_${t.desktopMode}'),
                           controller: agent.controllerForTab(t),
                         ),
                 ],
@@ -418,7 +423,10 @@ class _AgentDot extends StatelessWidget {
     return Container(
       width: 10,
       height: 10,
-      decoration: BoxDecoration(color: Aether.successLight, shape: BoxShape.circle),
+      decoration: BoxDecoration(
+        color: Aether.successLight,
+        shape: BoxShape.circle,
+      ),
     );
   }
 }
