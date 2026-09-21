@@ -2413,6 +2413,16 @@ audit=false
   )?
   execCheckedOverrideForTest;
 
+  /// True when [execChecked] can actually run: either a provisioned sandbox
+  /// prefix exists, or [execCheckedOverrideForTest] stands in for one.
+  ///
+  /// Production callers that want to fail early (with the historical
+  /// `sandbox not installed` message) gate on this instead of reading the
+  /// override directly -- reading a `@visibleForTesting` member from another
+  /// library is what `invalid_use_of_visible_for_testing_member` flags.
+  static bool get sandboxReady =>
+      execCheckedOverrideForTest != null || I.isInstalled;
+
   /// Exit-code-checked exec — returns (exitCode, combinedOutput).
   /// Unlike [exec], this NEVER swallows failures: the caller can see
   /// exitCode != 0 even when the command printed something on stderr

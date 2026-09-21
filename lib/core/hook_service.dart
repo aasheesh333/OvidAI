@@ -618,8 +618,7 @@ class HookService extends ChangeNotifier {
     // message. A test override stands in for the installed sandbox, so it
     // must not be pre-empted here -- that boundary is exactly where the hook
     // env bug slipped through.
-    if (SandboxService.execCheckedOverrideForTest == null &&
-        !SandboxService.I.isInstalled) {
+    if (!SandboxService.sandboxReady) {
       throw StateError('sandbox not installed');
     }
     // The env map is the hook's ENTIRE runtime contract: [CC]/Codex plugins
