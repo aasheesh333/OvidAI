@@ -943,3 +943,39 @@ List<String> _mergedNames(Iterable<Iterable<String>> groups) {
   }
   return List<String>.unmodifiable(out);
 }
+
+/// Root-variable names a plugin bundle may interpolate into its hook
+/// commands and MCP server declarations.
+///
+/// `CLAUDE_PLUGIN_ROOT` is what [CC] plugins ship (`obra/superpowers` runs
+/// `"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd"`, and dozens of bundles
+/// declare `"args": ["${CLAUDE_PLUGIN_ROOT}/server.js"]`). Codex bundles and
+/// Ovid-native manifests use the Ovid/neutral spellings. Every alias is
+/// expanded from the SAME installed root, so a bundle authored for any of
+/// the three ecosystems resolves against where it was actually installed.
+const List<String> kPluginRootVariables = [
+  r'${CLAUDE_PLUGIN_ROOT}',
+  r'$CLAUDE_PLUGIN_ROOT',
+  r'${OVID_PLUGIN_ROOT}',
+  r'$OVID_PLUGIN_ROOT',
+  r'${PLUGIN_ROOT}',
+  r'$PLUGIN_ROOT',
+];
+
+/// Expand every known plugin-root variable in [value] against [root].
+///
+/// MCP `command`/`args`/`cwd` are spawned as a raw argv list with NO shell,
+/// so a literal `${CLAUDE_PLUGIN_ROOT}` is passed to the executable as-is
+/// and the server never starts — the expansion has to happen here, in Dart.
+/// Hook commands run through `bash -c`, where the exported
+/// `CLAUDE_PLUGIN_ROOT`/`PLUGIN_ROOT`/`OVID_PLUGIN_ROOT` env vars resolve
+/// them; expanding there too is harmless and makes the behaviour identical
+/// whether or not the shell is involved.
+String expandPluginRoot(String value, String root) {
+  if (root.isEmpty || !value.contains(r'$')) return value;
+  var out = value;
+  for (final v in kPluginRootVariables) {
+    out = out.replaceAll(v, root);
+  }
+  return out;
+}

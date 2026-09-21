@@ -15099,8 +15099,33 @@ ${await _agentsMdBlock()}
       SkillContributionKind.agent => PluginContributionKind.agent,
     };
     if (contribution.kind != expectedKind) return false;
-    return File(skill.path).absolute.path ==
-        File('${contribution.rootPath}/${contribution.path}').absolute.path;
+    // Compare CANONICAL paths, not `File.absolute.path`.
+    //
+    // `skill.path` was produced by `resolveSymbolicLinksSync()` during the
+    // catalog scan (see SkillService._containedRegularFile), but
+    // `contribution.rootPath` is taken verbatim from the manifest. On
+    // Android `/data/user/0` is a symlink to `/data/data`, so the two
+    // spellings of the SAME file never compare equal through
+    // `File.absolute.path` (which does not resolve links). That mismatch
+    // rejected every plugin contribution with "not active in the current
+    // manifest for this session" even though the plugin was mounted and
+    // active. Resolve both sides before comparing.
+    return canonicalFilePath(skill.path) ==
+        canonicalFilePath('${contribution.rootPath}/${contribution.path}');
+  }
+
+  /// Symlink-resolved absolute path, falling back to the plain absolute path
+  /// when resolution fails (missing file, permission error). Needed because
+  /// Android exposes the app data dir under two equivalent spellings
+  /// (`/data/user/0/...` and `/data/data/...`); `File.absolute.path` keeps
+  /// whichever spelling it was handed and never resolves the link.
+  @visibleForTesting
+  static String canonicalFilePath(String path) {
+    try {
+      return File(path).resolveSymbolicLinksSync();
+    } catch (_) {
+      return File(path).absolute.path;
+    }
   }
 
   /// Executes ONE canonical plugin contribution (spec §4.4): the declared

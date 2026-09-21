@@ -575,17 +575,7 @@ class HookService extends ChangeNotifier {
     if (token.isEmpty) return payload;
     final root = _rootPathFor(hook.pluginId, hook);
     if (root.isEmpty) return payload;
-    var expanded = token;
-    for (final v in const [
-      r'${CLAUDE_PLUGIN_ROOT}',
-      r'$CLAUDE_PLUGIN_ROOT',
-      r'${PLUGIN_ROOT}',
-      r'$PLUGIN_ROOT',
-      r'${OVID_PLUGIN_ROOT}',
-      r'$OVID_PLUGIN_ROOT',
-    ]) {
-      expanded = expanded.replaceAll(v, root);
-    }
+    final expanded = expandPluginRoot(token, root);
     if (expanded.contains(r'$')) return payload;
     final sibling = expanded.substring(0, expanded.length - 4);
     try {
@@ -623,11 +613,24 @@ class HookService extends ChangeNotifier {
     if (custom != null) return (0, await custom(command, env));
     final t = execTimeoutForTest;
     if (t != null) return (0, await t(timeout.inSeconds));
-    if (!SandboxService.I.isInstalled) {
+    // `execChecked` throws its own (more helpful) error when no sandbox is
+    // installed; this guard exists only to fail early with the historical
+    // message. A test override stands in for the installed sandbox, so it
+    // must not be pre-empted here -- that boundary is exactly where the hook
+    // env bug slipped through.
+    if (SandboxService.execCheckedOverrideForTest == null &&
+        !SandboxService.I.isInstalled) {
       throw StateError('sandbox not installed');
     }
+    // The env map is the hook's ENTIRE runtime contract: [CC]/Codex plugins
+    // interpolate `${CLAUDE_PLUGIN_ROOT}` (and read `PLUGIN_PAYLOAD`,
+    // `PLUGIN_SESSION`, `PLUGIN_MODEL`, ...) inside their commands. Dropping
+    // it here left every variable unset, so `"${CLAUDE_PLUGIN_ROOT}/hooks/
+    // run-hook.cmd" session-start` expanded to `/hooks/run-hook.cmd` and died
+    // with exit 127 -- for EVERY plugin, not just one. `execChecked` merges
+    // this over the sandbox env, so pass it through.
     final (code, out) = await SandboxService.I
-        .execChecked(['bash', '-c', command], hostWorkDir: cwd)
+        .execChecked(['bash', '-c', command], hostWorkDir: cwd, env: env)
         .timeout(timeout);
     return (code, out);
   }

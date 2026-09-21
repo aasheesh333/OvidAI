@@ -5716,14 +5716,31 @@ class AppState extends ChangeNotifier {
       var server = mcpServers
           .where((s) => s.canonicalId == canonicalId)
           .firstOrNull;
+      // [CC]/Codex bundles interpolate `${CLAUDE_PLUGIN_ROOT}` into their MCP
+      // `command`/`args`/`cwd` (e.g. `"args": ["${CLAUDE_PLUGIN_ROOT}/server.js"]`).
+      // A stdio server is spawned as a raw argv list with NO shell, so an
+      // unexpanded literal reaches the executable verbatim and the server can
+      // never start. Expand against the installed root here — for EVERY
+      // plugin, whatever format it was authored in.
+      final pluginRoot = manifest.rootPath;
+      final declaredCommand = expandPluginRoot(declared.command, pluginRoot);
+      final declaredArgs = [
+        for (final a in declared.args) expandPluginRoot(a, pluginRoot),
+      ];
       String? cwd;
-      final declaredCwd = declared.cwd;
-      if (declaredCwd == null || declaredCwd.isEmpty) {
-        cwd = manifest.rootPath;
-      } else if (isLexicallySafeRelPath(declaredCwd)) {
-        cwd = '${manifest.rootPath}/$declaredCwd';
+      final rawCwd = expandPluginRoot(declared.cwd ?? '', pluginRoot);
+      if (rawCwd.isEmpty) {
+        cwd = pluginRoot;
+      } else if (rawCwd.startsWith('/')) {
+        // Absolute — honored only inside the plugin's own installed root, so
+        // a bundle cannot aim the server at an unrelated directory.
+        cwd = (rawCwd == pluginRoot || rawCwd.startsWith('$pluginRoot/'))
+            ? rawCwd
+            : null;
+      } else if (isLexicallySafeRelPath(rawCwd)) {
+        cwd = '$pluginRoot/$rawCwd';
       }
-      final contentDir = Directory(manifest.rootPath);
+      final contentDir = Directory(pluginRoot);
       if (server == null) {
         server = McpServer(
           name: declared.name,
@@ -5731,8 +5748,8 @@ class AppState extends ChangeNotifier {
           author: manifest.id.split('/').first,
           description: 'declared by plugin ${manifest.id}',
           category: 'Plugin',
-          command: declared.command,
-          args: declared.args,
+          command: declaredCommand,
+          args: declaredArgs,
           source: 'plugin:${manifest.id}',
           custom: true,
           transport: declared.transport,
@@ -5747,8 +5764,8 @@ class AppState extends ChangeNotifier {
         mounted++;
       } else {
         await McpService.I.disconnect(server.canonicalId);
-        server.command = declared.command;
-        server.args = declared.args;
+        server.command = declaredCommand;
+        server.args = declaredArgs;
         server.transport = declared.transport;
         server.url = declared.url;
         server.cwd = cwd;

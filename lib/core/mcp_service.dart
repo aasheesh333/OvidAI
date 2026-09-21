@@ -102,6 +102,23 @@ class McpService {
   static String providerServerToolName(McpServer server) =>
       'mcp_${_providerEncode(server.canonicalId)}';
 
+  /// Root-variable env for a plugin-owned server's process.
+  ///
+  /// Mirrors the hook runtime's contract: a bundle's MCP server may read
+  /// `CLAUDE_PLUGIN_ROOT`/`PLUGIN_ROOT` itself, or shell out to a sibling
+  /// script inside its own content dir. Without these the variable is unset
+  /// and the server misbehaves — for every [CC]/Codex bundle that relies on it.
+  static Map<String, String> _pluginRootEnv(String ownerPluginId) {
+    final manifest = PluginContributionRegistry.I.manifestFor(ownerPluginId);
+    final root = manifest?.rootPath ?? '';
+    if (root.isEmpty) return const {};
+    return {
+      'CLAUDE_PLUGIN_ROOT': root,
+      'OVID_PLUGIN_ROOT': root,
+      'PLUGIN_ROOT': root,
+    };
+  }
+
   static String? _runtimeRoot(McpServer server) {
     final owner = server.ownerPluginId;
     if (owner == null) return null;
@@ -985,6 +1002,8 @@ class McpService {
       final env = {
         if (runtimeRoot != null)
           ...SandboxService.pluginRuntimeEnv(runtimeRoot),
+        if (server.ownerPluginId != null)
+          ..._pluginRootEnv(server.ownerPluginId!),
         ...secretEnv,
       };
       // Optional working directory for the spawned server (best-effort:

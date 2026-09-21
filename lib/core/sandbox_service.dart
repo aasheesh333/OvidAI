@@ -2397,6 +2397,22 @@ audit=false
         l.contains('exec format error');
   }
 
+  /// Test seam: intercept [execChecked] to observe the EXACT argv and
+  /// environment a caller launches a process with.
+  ///
+  /// Deliberately sits at this boundary rather than reusing the hook
+  /// runtime's `executorForTest`, which is invoked ABOVE the sandbox call:
+  /// that higher seam could not see that the hook env map (the plugin
+  /// runtime contract — `CLAUDE_PLUGIN_ROOT`, `PLUGIN_PAYLOAD`, ...) was
+  /// being built and then silently dropped, so every [CC]/Codex hook ran
+  /// with no plugin variables at all.
+  @visibleForTesting
+  static Future<(int, String)> Function(
+    List<String> args,
+    Map<String, String> env,
+  )?
+  execCheckedOverrideForTest;
+
   /// Exit-code-checked exec — returns (exitCode, combinedOutput).
   /// Unlike [exec], this NEVER swallows failures: the caller can see
   /// exitCode != 0 even when the command printed something on stderr
@@ -2408,6 +2424,18 @@ audit=false
     Directory? hostWorkDir,
     Map<String, String>? env,
   }) async {
+    final override = execCheckedOverrideForTest;
+    if (override != null) {
+      // The override stands in for the WHOLE sandbox (prefix + provisioning),
+      // so it must not depend on a provisioned prefix: `_sandboxEnv()` does
+      // `_prefix!` and would null-crash in a unit test. A real prefix still
+      // contributes its env, merged under the caller-supplied map, so the
+      // override observes exactly what the production spawn would receive.
+      return override(args, {
+        if (_prefix != null) ..._sandboxEnv(),
+        ...?env,
+      });
+    }
     if (_prefix == null) {
       final ok = await checkExisting();
       if (!ok) {
