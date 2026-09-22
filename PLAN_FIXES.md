@@ -483,3 +483,4 @@ upgrades webview_flutter or a platform channel is added.
   setCookie), added a pending-delete retry queue, per-session visit records and
   session-delete cleanup. New test/session_browser_profiles_test.dart (logic +
   source contracts); plan docs updated. Branch hoplite/gortyn-77773150.
+  Landing commit: 5678efa (isolation + restart sharing + native hardening).
