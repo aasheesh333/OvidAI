@@ -5367,14 +5367,19 @@ class _InputBarState extends State<_InputBar> {
                     builder: (_, _) {
                       // Per-session run state (never leaked from other
                       // sessions — the multi-session blink fix).
-                      final sessionId = widget.sessionId;
+                      // `widget.sessionId` is read directly for the null
+                      // check: a field access is never type-promoted, so the
+                      // analyzer can see the check is real. The empty-string
+                      // fallback only feeds lookups that are already guarded
+                      // by [hasSession].
+                      final sessionId = widget.sessionId ?? '';
+                      final hasSession = widget.sessionId != null;
                       final runningNow =
-                          sessionId != null &&
-                          AgentService.I.busyFor(sessionId);
+                          hasSession && AgentService.I.busyFor(sessionId);
                       final hasDraft = controller.text.trim().isNotEmpty;
                       final IconData icon;
                       final hasQueued =
-                          sessionId != null &&
+                          hasSession &&
                           AgentService.I
                               .queuedMessagesFor(sessionId)
                               .isNotEmpty;
@@ -5410,7 +5415,7 @@ class _InputBarState extends State<_InputBar> {
                           icon: Icon(icon, size: 18, color: Colors.white),
                           onPressed: () {
                             if (runningNow && !hasDraft) {
-                              if (sessionId != null) {
+                              if (hasSession) {
                                 AgentService.I.stopRequested(sessionId: sessionId);
                               } else {
                                 AgentService.I.hardStopAll();

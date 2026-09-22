@@ -1564,7 +1564,8 @@ class AgentService extends ChangeNotifier {
     if (text.trim().isEmpty) return;
     final run = sessionId != null ? _runFor(sessionId) : _runResolved;
     _queueAdd(run, text);
-    _emit('think', 'queued message ${run.queue.length}', sessionId: sessionId);
+    _emitToRun(run, 'think', 'queued message ${run.queue.length}',
+        sessionId: sessionId);
     notifyListeners();
   }
 
