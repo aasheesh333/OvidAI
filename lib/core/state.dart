@@ -723,9 +723,14 @@ enum MsgKind {
   text,
   reasoning,
   tool,
-  turnTail, // reserved: turn-tail lane rows (not constructed today)
+  turnTail, // passive turn-tail lane rows: settlement notices, dropped-queue notes
   compact,
   imageGen,
+  // Live streaming bubble: the in-progress assistant message. Born as
+  // `streaming` (never `reasoning`) so the answer is never hidden behind
+  // a collapsed thinking card; finalized to `text` (or `reasoning` when
+  // only thinking tokens arrived) when the stream ends.
+  streaming,
 }
 
 /// Attachment metadata rendered as a chip under a user message.
@@ -1963,7 +1968,12 @@ class AppState extends ChangeNotifier {
     }
     if (result.status != PluginInstallStatus.failed) {
       plugin.installed = true;
-      plugin.enabled = true;
+      // WS2 default-enable gate: the row mirrors the manifest's
+      // default-enable choice instead of hard-enabling — a default-off
+      // plugin installs disabled until the user explicitly enables it.
+      // Already-disabled entries are never auto-enabled at boot (see
+      // PluginRuntimeManager._runBootActivation).
+      plugin.enabled = result.manifest!.enabledByDefault;
       plugin.runtimeId = result.manifest!.id;
       // The content dir is keyed by manifest version — sync the row so it
       // never reports the transient placeholder (or a stale version).
@@ -2330,6 +2340,7 @@ class AppState extends ChangeNotifier {
     await _loadSessionsForFirstFrame();
     await _loadLastSelection();
     await _loadShellPreferences();
+    await loadStudioFirstOpenFlag();
     sandboxInstalled = await SandboxService.I.checkExisting();
   }
 
@@ -2437,8 +2448,7 @@ class AppState extends ChangeNotifier {
             _runStartupStage('sandbox.selfHeal', _startSandboxMaintenance),
         runtimesVerified: SandboxService.I.runtimesVerified,
         runtimesRequested: () => SandboxService.I.runtimesRequested,
-        installCoreRuntimes: () =>
-            SandboxService.I.installCoreRuntimes((_, _, _) {}),
+        installCoreRuntimes: verifyRuntimesForStartupSelfHeal,
         enforceQuota: _enforceSandboxQuota,
         lastFailedAt: sandboxMemo,
       ),
@@ -2720,6 +2730,23 @@ class AppState extends ChangeNotifier {
     unawaited(AgentService.I.prewarmBrowser());
   }
 
+  /// Startup self-heal runtime step. The Studio first-open install owns the
+  /// apt path (see [studioFirstOpenDone]), so the boot self-heal NEVER
+  /// installs: it waits out a Studio install in flight instead of racing
+  /// it on the dpkg lock, then reports the verified truth. Missing
+  /// runtimes after the first-open flag is set are genuinely degraded;
+  /// before the flag is set they are "not installed yet" — the
+  /// [SandboxMaintenanceTask] runtimesRequested gate already reports those
+  /// as ready without burning the boot budget.
+  Future<bool> verifyRuntimesForStartupSelfHeal() async {
+    if (SandboxService.I.installInFlight) {
+      while (SandboxService.I.installInFlight) {
+        await Future.delayed(const Duration(seconds: 2));
+      }
+    }
+    return SandboxService.I.runtimesVerified();
+  }
+
   Future<void> _enforceSandboxQuota() => SandboxService.I.enforceWorkspaceQuota(
     activeSandboxIds: sessions
         .map((session) => session.sandboxId)
@@ -2860,6 +2887,10 @@ class AppState extends ChangeNotifier {
     // error would otherwise be unhandled (the timeout future detached).
     unawaited(attempt.catchError((Object _) {}));
     await attempt.timeout(_activationBudget, onTimeout: () {});
+    // WS2: entries are final and owned MCP servers are mounted — seed
+    // the persisted MCP connected-intent on first boot and prune it of
+    // disabled/stale plugin servers every boot.
+    await _reconcileMcpIntentForBoot();
   }
 
   Duration get _activationBudget =>
@@ -4037,6 +4068,32 @@ class AppState extends ChangeNotifier {
   /// automatically when an install later succeeds.
   bool sandboxSkipped = false;
   static const _kSandboxSkipped = 'ovid_sandbox_skipped';
+
+  /// The Studio first-open mandatory install has run (full install: core
+  /// phases 0–6 + runtimes). Until this is set, opening Studio routes to
+  /// the mandatory install screen instead of Studio itself — first launch
+  /// goes straight to the chat shell, so the Studio flow owns the apt
+  /// path now (the old first-launch gate is gone).
+  bool studioFirstOpenDone = false;
+  static const _kStudioFirstOpenDone = 'studio_first_open_done';
+
+  Future<void> setStudioFirstOpenDone(bool v) async {
+    studioFirstOpenDone = v;
+    refresh();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kStudioFirstOpenDone, v);
+    } catch (_) {}
+  }
+
+  /// Loads the persisted first-open flag. Called during first-frame init;
+  /// tests call it directly after [resetTestInstance].
+  Future<void> loadStudioFirstOpenFlag() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      studioFirstOpenDone = prefs.getBool(_kStudioFirstOpenDone) ?? false;
+    } catch (_) {}
+  }
 
   Future<void> setSandboxSkipped(bool v) async {
     sandboxSkipped = v;
@@ -5283,14 +5340,17 @@ class AppState extends ChangeNotifier {
     refresh();
   }
 
-  // ── Deferred first-launch runtime install (node/python/…) ──────────
+  // ── Studio first-open runtime install ─────────────────────────────
   //
-  // The first-launch gate installs only the native sandbox core (fast) so
-  // the app is interactive in under a minute. The network-bound runtime
-  // phase (apt update + install) runs here, in the background, exactly
-  // once per install: the shell kicks it off after first frame and a
-  // banner shows live progress. Idempotent and cheap when there is
-  // nothing to do (pure disk probe, no processes spawned).
+  // Install ownership moved to Studio first-open: the mandatory full
+  // install (core phases 0–6 + runtimes) runs from openStudio(), and the
+  // apt path NEVER runs from a startup/background trigger anymore. The
+  // shell still kicks off this job after first frame, but it is now
+  // verify-only unless the user explicitly retries: cheap disk probes
+  // mark it done, a Studio install in flight is left alone, and missing
+  // runtimes surface as a failed banner whose Retry is the explicit
+  // user-initiated apt path. Idempotent and cheap when there is nothing
+  // to do (pure disk probe, no processes spawned).
 
   /// Lifecycle of the deferred background runtime install.
   RuntimeInstallState runtimeInstallState = RuntimeInstallState.idle;
@@ -5305,20 +5365,41 @@ class AppState extends ChangeNotifier {
 
   /// Starts the deferred runtime install unless it already ran. Safe to
   /// call on every shell open: when the runtimes are present it returns
-  /// after a cheap disk check. Never throws.
-  Future<void> maybeStartBackgroundRuntimeInstall() async {
+  /// after a cheap disk check. The apt path only runs when [userInitiated]
+  /// (the banner's Retry) — a startup/background call never apt-updates;
+  /// it verifies cheaply and reports. Never throws.
+  Future<void> maybeStartBackgroundRuntimeInstall({
+    bool userInitiated = false,
+  }) async {
     if (_bgRuntimeInstallStarted) return;
     _bgRuntimeInstallStarted = true;
     if (!sandboxInstalled) return;
+    // Never race the Studio first-open full install: it owns phases 0–7
+    // including the dpkg lock, and sets the first-open flag + sandboxReady
+    // on success — there is nothing for the background job to do.
+    if (SandboxService.I.installInFlight) return;
     // Cheap path first: pure disk probe, no process spawns.
-    if (SandboxService.I.runtimesPresentOnDisk()) {
+    if (SandboxService.I.runtimesPresentOnDisk() ||
+        await SandboxService.I.runtimesVerified()) {
       runtimeInstallState = RuntimeInstallState.done;
       refresh();
       return;
     }
-    // Confirm with the real probe before burning network on an install.
-    if (await SandboxService.I.runtimesVerified()) {
-      runtimeInstallState = RuntimeInstallState.done;
+    // Runtimes are missing. The background job must not apt-update at
+    // startup — that belongs to the Studio first-open install. Only an
+    // explicit user retry runs the apt path below.
+    if (!userInitiated) {
+      if (studioFirstOpenDone) {
+        // The full install completed before, so missing runtimes are a
+        // real regression — surface it; the banner's Retry is the explicit
+        // user action that runs the apt path.
+        runtimeInstallState = RuntimeInstallState.failed;
+        runtimeInstallLine =
+            'Node/Python runtimes are missing — tap Retry to reinstall, '
+            'or open Studio to run the full setup again.';
+      }
+      // First-open hasn't run yet: stay quiet (idle). Opening Studio runs
+      // the mandatory full install, which is the retry path.
       refresh();
       return;
     }
@@ -5349,11 +5430,13 @@ class AppState extends ChangeNotifier {
     refresh();
   }
 
-  /// Retry entry point for the banner's Retry button.
+  /// Retry entry point for the banner's Retry button. This is the explicit
+  /// user-initiated apt path — the only background trigger allowed to run
+  /// installCoreRuntimes.
   Future<void> retryBackgroundRuntimeInstall() {
     _bgRuntimeInstallStarted = false;
     _runtimeInstallBannerDismissed = false;
-    return maybeStartBackgroundRuntimeInstall();
+    return maybeStartBackgroundRuntimeInstall(userInitiated: true);
   }
 
   /// Dismisses the banner. The install keeps running when it is active;
@@ -6717,6 +6800,63 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(_kMcpConnectedIntent, merged.toList());
+    } catch (_) {}
+  }
+
+  /// WS2: seed/prune the persisted MCP connected-intent against the
+  /// default-enabled set. Runs once per boot after plugin activation
+  /// (owned servers are mounted and entry states are final).
+  ///
+  /// * Seed (first boot only — no intent persisted yet): every MCP
+  ///   server owned by a default-enabled, active plugin joins the
+  ///   intent, so a failed first-boot connect is retried on later
+  ///   boots until the user explicitly disconnects it. Ownerless
+  ///   (bundled/custom) servers stay opt-in and are never seeded.
+  /// * Prune (every boot): drop ids whose server is gone (stale) or
+  ///   whose owning plugin is no longer active (disabled, failed, or
+  ///   uninstalled) — a disabled plugin's servers must never be
+  ///   auto-reconnected at boot. Ownerless entries are the user's
+  ///   explicit choice and are never pruned here.
+  ///
+  /// Never throws: a damaged intent must not break the boot.
+  Future<void> _reconcileMcpIntentForBoot() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final persisted = prefs.getStringList(_kMcpConnectedIntent);
+      final entries = await PluginRuntimeManager.I.installedEntries();
+
+      bool pluginActive(String pluginId) {
+        final e = entries[pluginId];
+        if (e == null || e.disabled) return false;
+        return switch (e.activation.state) {
+          PluginActivation.globalActive ||
+          PluginActivation.degraded ||
+          PluginActivation.sessionActive => true,
+          PluginActivation.pendingGlobal ||
+          PluginActivation.failed ||
+          PluginActivation.disabled => false,
+        };
+      }
+
+      final intent = <String>{...?persisted};
+      if (persisted == null) {
+        for (final s in mcpServers) {
+          final owner = s.ownerPluginId;
+          if (owner == null) continue;
+          final e = entries[owner];
+          if (e != null && e.manifest.enabledByDefault && pluginActive(owner)) {
+            intent.add(s.canonicalId);
+          }
+        }
+      }
+      intent.removeWhere((id) {
+        final server = _mcpServerByCanonicalId(id);
+        if (server == null) return true;
+        final owner = server.ownerPluginId;
+        if (owner == null) return false;
+        return !pluginActive(owner);
+      });
+      await prefs.setStringList(_kMcpConnectedIntent, intent.toList());
     } catch (_) {}
   }
 

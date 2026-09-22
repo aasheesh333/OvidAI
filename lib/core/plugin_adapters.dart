@@ -157,6 +157,13 @@ class _Build {
   final unknown = <String, dynamic>{};
   final envNames = <String>{};
 
+  /// Default-enable choice, derived during inspection (see [_finish]):
+  /// true unless the source manifest explicitly opts out with
+  /// `enabledByDefault: false`. An explicitly installed plugin is on by
+  /// default — the flag only lets a manifest author ship "installed but
+  /// off until the user enables it".
+  bool enabledByDefault = true;
+
   /// Per-event hook ordinals — [PluginHook.ordinal] is the manifest-order
   /// index WITHIN its event, not a global counter across all events.
   final hookOrdinals = <String, int>{};
@@ -588,6 +595,11 @@ NormalizedPluginManifest _finish(
       dependencies: PluginDependencies(
         packages: List.unmodifiable(b.dependencies),
       ),
+      // WS2 default-enable rule (documented on [_Build.enabledByDefault]):
+      // manifest-declared opt-out only; every format without one stays
+      // default-on. Round-tripped through JSON so the flag freezes with
+      // the rest of the normalized model.
+      enabledByDefault: b.enabledByDefault,
       requestedCapabilities: Set.unmodifiable(_inferCapabilities(b)),
       environmentReadNames: Set.unmodifiable(b.envNames),
       unknownFields: Map.unmodifiable(b.unknown),
@@ -606,7 +618,17 @@ const _knownClaudeManifestKeys = {
   'homepage',
   'license',
   'keywords',
+  'enabledByDefault',
 };
+
+/// Reads a manifest-declared default-enable opt-out: only an explicit
+/// boolean `false` flips the default; any other type (string, number,
+/// …) is ignored so a malformed declaration can never silently disable
+/// a plugin the user chose to install.
+bool _readEnabledByDefault(Map<String, dynamic> manifestJson) {
+  final v = manifestJson['enabledByDefault'];
+  return v is bool ? v : true;
+}
 
 /// Adapts a [CC]-shaped plugin tree (spec §4.3).
 class ClaudePluginAdapter {
@@ -631,6 +653,8 @@ class ClaudePluginAdapter {
       if (!_knownClaudeManifestKeys.contains(e.key)) b.unknown[e.key] = e.value;
     }
     _requirePublisherIdentity(b, '.claude-plugin/plugin.json:author');
+    // Manifest-declared default-enable opt-out (see [_readEnabledByDefault]).
+    b.enabledByDefault = _readEnabledByDefault(j);
 
     await _addMarkdown(b, Directory('${root.path}/commands'), asAgent: false);
     await _addSkills(b, Directory('${root.path}/skills'));
@@ -822,6 +846,16 @@ class CodexPluginAdapter {
         }
       }
     }
+
+    // Default-enable: manifest-declared opt-out
+    // (`enabledByDefault: false` in `.codex-plugin/plugin.json`) or the
+    // root TOML table's `enabled_by_default = false` — an explicit false
+    // in either wins; anything else keeps the default-on rule.
+    final tomlEnabledDefault = scalar(
+      'enabled_by_default',
+    ).trim().toLowerCase();
+    b.enabledByDefault =
+        _readEnabledByDefault(codexManifest) && tomlEnabledDefault != 'false';
 
     _addDependencies(b);
     final version = scalar('version');

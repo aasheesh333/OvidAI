@@ -42,10 +42,11 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     // First-run welcome notice (the onboarding flow welcomeNoticeVersion):
     // one dialog per version, after the consent dialog settles.
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeWelcome());
-    // Deferred first-launch runtime install: the setup gate installs only
-    // the native sandbox core (fast); Node.js/Python finish here in the
-    // background with a progress banner. Idempotent — a cheap disk probe
-    // no-ops when the runtimes are already present.
+    // Studio first-open owns the sandbox install now (mandatory full
+    // install incl. Node.js/Python via openStudio). The shell still kicks
+    // the background job below, but it is verify-only unless the user
+    // explicitly retries — it never apt-updates at startup anymore.
+    // Idempotent — cheap disk probes no-op when the runtimes are present.
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => unawaited(AppState.I.maybeStartBackgroundRuntimeInstall()),
     );

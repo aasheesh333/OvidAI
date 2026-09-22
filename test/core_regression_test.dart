@@ -5633,7 +5633,8 @@ block</pre>
       },
     );
 
-    test('settlement notice reaches an idle parent as a new turn', () async {
+    test('settlement notice reaches an idle parent as a passive row, never a new turn',
+        () async {
       final parent = newParent('sg-p3');
       parent.messages.add(
         Message(role: 'user', content: 'kick off the parent transcript'),
@@ -5646,21 +5647,26 @@ block</pre>
         'run_in_background': true,
       });
 
-      // The parent transcript now holds the settlement notice AFTER the
-      // child settled (fail-fast in tests, so the notice is already there).
+      // The parent transcript now holds a PASSIVE settlement notice — a
+      // settling child must never start a brand-new run on an idle parent
+      // after the response looked done.
       final notices = parent.messages
-          .where((m) => m.content.contains('Background subagent'))
+          .where((m) => m.content.contains('Background agent'))
           .toList();
       expect(
         notices,
         isNotEmpty,
-        reason: 'background settlement delivers a parent notice',
+        reason: 'background settlement delivers a passive parent notice',
       );
-      final n = notices.first.content;
-      expect(n, contains('and will do no further work'));
+      expect(notices.first.content, contains('⛁'));
+      // The old "new turn" form must NOT appear — no run was started.
+      final newTurnNotices = parent.messages
+          .where((m) => m.content.contains('Background subagent'))
+          .length;
       expect(
-        n,
-        anyOf(contains('closing message'), contains('no closing message')),
+        newTurnNotices,
+        0,
+        reason: 'idle parent must not get a new-turn settlement notice',
       );
       // Foreground children must NOT deliver a notice — their result IS
       // the tool result (double-delivery check).
@@ -5670,7 +5676,7 @@ block</pre>
       });
       final fgNotices = parent.messages
           .skip(fgBefore)
-          .where((m) => m.content.contains('Background subagent'))
+          .where((m) => m.content.contains('Background agent'))
           .length;
       expect(
         fgNotices,
@@ -12461,6 +12467,53 @@ You are an expert security auditor reviewing code for vulnerabilities.
     );
 
     test(
+      'WS2: enabledByDefault round-trips through manifest JSON and defaults to true',
+      () {
+        NormalizedPluginManifest manifest({
+          required bool enabledByDefault,
+        }) =>
+            NormalizedPluginManifest(
+              id: 'acme-inc/reviewer-pro',
+              name: 'Reviewer Pro',
+              version: '1.2.0',
+              format: PluginFormat.claudeCode,
+              rootPath: '/plugins/acme',
+              commands: const [],
+              skills: const [],
+              agents: const [],
+              hooks: const [],
+              mcpServers: const [],
+              dependencies: const PluginDependencies(),
+              requestedCapabilities: const {},
+              unknownFields: const {},
+              compatibility: const [],
+              enabledByDefault: enabledByDefault,
+            );
+
+        // Explicit opt-out survives a JSON round-trip.
+        final off = manifest(enabledByDefault: false);
+        expect(
+          NormalizedPluginManifest.fromJson(off.toJson()).enabledByDefault,
+          isFalse,
+        );
+        // Default is on.
+        final on = manifest(enabledByDefault: true);
+        expect(
+          NormalizedPluginManifest.fromJson(on.toJson()).enabledByDefault,
+          isTrue,
+        );
+        // Old persisted manifests without the field decode as enabled.
+        final legacy = Map<String, dynamic>.from(off.toJson())
+          ..remove('enabledByDefault');
+        expect(
+          NormalizedPluginManifest.fromJson(legacy).enabledByDefault,
+          isTrue,
+          reason: 'pre-WS2 persisted manifests stay enabled',
+        );
+      },
+    );
+
+    test(
       'PLUGIN1b: contributions carry canonical IDs, frontmatter, and unknown fields through manifest round-trip',
       () {
         const pluginId = 'acme-inc/reviewer-pro';
@@ -13407,6 +13460,52 @@ cwd = 'tools'
       expect(core.cwd, ui.cwd);
       expect(core.type, ui.type);
     });
+
+    test(
+      'WS2: adapters honor an explicit enabledByDefault opt-out and default to on',
+      () async {
+        Future<NormalizedPluginManifest> inspectClaude(
+          Map<String, dynamic> pluginJson,
+        ) async {
+          final root = Directory.systemTemp.createTempSync(
+            'ovid-plugin2-enabled',
+          );
+          addTearDown(() => root.deleteSync(recursive: true));
+          final file = File('${root.path}/.claude-plugin/plugin.json');
+          file.parent.createSync(recursive: true);
+          file.writeAsStringSync(jsonEncode(pluginJson));
+          return ClaudePluginAdapter().inspect(root);
+        }
+
+        // Explicit false opts out …
+        final off = await inspectClaude({
+          'name': 'Quiet Helper',
+          'author': 'Acme Labs',
+          'version': '1.0.0',
+          'enabledByDefault': false,
+        });
+        expect(off.enabledByDefault, isFalse);
+        // … and the flag is a known key, not leaked into unknownFields.
+        expect(off.unknownFields.containsKey('enabledByDefault'), isFalse);
+
+        // Absent flag defaults on …
+        final on = await inspectClaude({
+          'name': 'Loud Helper',
+          'author': 'Acme Labs',
+          'version': '1.0.0',
+        });
+        expect(on.enabledByDefault, isTrue);
+
+        // … as does a malformed (non-boolean) value.
+        final malformed = await inspectClaude({
+          'name': 'Weird Helper',
+          'author': 'Acme Labs',
+          'version': '1.0.0',
+          'enabledByDefault': 'nope',
+        });
+        expect(malformed.enabledByDefault, isTrue);
+      },
+    );
   });
 
   group('PluginCompat Task 3: secure source resolver', () {
@@ -16242,6 +16341,9 @@ cwd = 'tools'
           ],
         );
 
+        // Binary probe (pure `command -v`, no install) precedes the
+        // package-manager calls.
+        runner.queue((0, 'OK node'));
         runner.queue((0, 'added 2 packages'));
         // Version-capture pass (npm ls) — the resolved versions come
         // from the manager, never fabricated.
@@ -16335,6 +16437,9 @@ cwd = 'tools'
           deps: [const PluginDependency(name: 'node-gyp-ish')],
         );
 
+        // Binary probe (pure `command -v`, no install) precedes the
+        // package-manager calls.
+        runner.queue((0, 'OK node'));
         runner.queue((0, 'added 1 package'));
         runner.queue((
           0,
@@ -16383,6 +16488,9 @@ cwd = 'tools'
           ],
         );
 
+        // Binary probe (pure `command -v`, no install) precedes the
+        // package-manager calls.
+        runner.queue((0, 'OK python'));
         runner.queue((0, 'Successfully installed requests-2.31.0'));
         final result = await svc.install(manifest, null);
         expect(result.status, PluginDependencyStatus.ok);
@@ -16436,7 +16544,10 @@ cwd = 'tools'
         );
 
         // ovid-pkg install ripgrep succeeds; the desktop-only package
-        // is not in the index (exit 1 + "not found").
+        // is not in the index (exit 1 + "not found"). A binary probe
+        // (pure `command -v`, no install) precedes the package-manager
+        // calls.
+        runner.queue((0, 'OK ovid-pkg'));
         runner.queue((0, '[ovid-pkg] installing ripgrep'));
         runner.queue((1, '[ovid-pkg] not found: unsupported-desktop-bin'));
         final result = await svc.install(manifest, null);
@@ -16488,6 +16599,9 @@ cwd = 'tools'
         );
 
         // npm batch fails (both in one command) → required dep failed.
+        // A binary probe (pure `command -v`, no install) precedes the
+        // package-manager calls.
+        runner.queue((0, 'OK node'));
         runner.queue((1, 'npm ERR! network unreachable'));
         final result = await svc.install(manifest, null);
         expect(result.status, PluginDependencyStatus.failed);
@@ -16522,7 +16636,9 @@ cwd = 'tools'
           ],
         );
         // Optional pip packages install one-per-command (so an optional
-        // failure is attributable to exactly that package).
+        // failure is attributable to exactly that package). A binary
+        // probe (pure `command -v`, no install) precedes them.
+        runner2.queue((0, 'OK python'));
         runner2.queue((0, 'Successfully installed core-lib-1.0.0'));
         runner2.queue((1, 'ERROR: Could not find fancy-extra'));
         final result2 = await svc2.install(manifest2, null);
@@ -16554,6 +16670,9 @@ cwd = 'tools'
         final manifest = p6Manifest(
           deps: [const PluginDependency(name: 'left-pad')],
         );
+        // Binary probe (pure `command -v`, no install) precedes the
+        // package-manager calls; it also runs inside the runtime root.
+        runner.queue((0, 'OK node'));
         runner.queue((0, 'added 1 package'));
         await svc.install(manifest, null);
 
@@ -16647,6 +16766,9 @@ cwd = 'tools'
             version: v,
             deps: [const PluginDependency(name: 'left-pad')],
           );
+          // Binary probe (pure `command -v`, no install) precedes the
+          // package-manager calls.
+          runner.queue((0, 'OK node'));
           runner.queue((0, 'added 1 package'));
           final result = await svc.install(manifest, null);
 
@@ -16725,6 +16847,9 @@ cwd = 'tools'
             const PluginDependency(name: 'opt-thing'),
           ],
         );
+        // Binary probe (pure `command -v`, no install) precedes the
+        // package-manager calls.
+        runner.queue((0, 'OK node'));
         runner.queue((0, 'added 2 packages'));
         runner.queue((
           0,
@@ -16736,7 +16861,8 @@ cwd = 'tools'
         expect(result.status, PluginDependencyStatus.ok);
 
         // Exactly one extra npm command after the batch install: the
-        // `npm ls` version-capture pass.
+        // `npm ls` version-capture pass. (The probe is a bash call, not
+        // npm, so it is excluded by the filter below.)
         final npmCmds = runner.cmds
             .where((c) => c.args.isNotEmpty && c.args[0] == 'npm')
             .toList();
@@ -16769,6 +16895,9 @@ cwd = 'tools'
           runner: runner2.call,
           ensureRuntime: (_) async => true,
         );
+        // A binary probe (pure `command -v`, no install) precedes the
+        // package-manager calls.
+        runner2.queue((0, 'OK node'));
         runner2.queue((0, 'added 2 packages'));
         runner2.queue((1, 'npm ERR! missing: nothing installed'));
         final result2 = await svc2.install(manifest, null);
@@ -16811,6 +16940,9 @@ cwd = 'tools'
         const outerKey = 'outer-run-42';
         SandboxService.I.tagRun(outerKey);
         addTearDown(() => SandboxService.I.tagRun(null));
+        // Binary probe (pure `command -v`, no install) precedes the
+        // package-manager calls.
+        runner.queue((0, 'OK node'));
         runner.queue((0, 'added 1 package'));
         await svc.install(manifest, null);
 
@@ -16818,6 +16950,95 @@ cwd = 'tools'
         // clobbered to null — so the outer run's later processes stay
         // tagged and stoppable.
         expect(SandboxService.I.activeRunKeyForTest, outerKey);
+      },
+    );
+
+    test(
+      'WS2: missing runtime binary fails with an actionable error and never installs a runtime',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('p6-noruntime-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final runner = RecordingRunner();
+        var ensureCalls = 0;
+        final svc = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: runner.call,
+          ensureRuntime: (_) async {
+            ensureCalls++;
+            return true;
+          },
+        );
+        final manifest = p6Manifest(
+          deps: [const PluginDependency(name: 'left-pad')],
+        );
+
+        // Probe finds no node/npm at all (empty output).
+        runner.queue((0, ''));
+        final lines = <String>[];
+        final result = await svc.install(manifest, null, onProgress: lines.add);
+
+        expect(result.status, PluginDependencyStatus.failed);
+        final entry = result.entries.singleWhere(
+          (e) => e.name == 'left-pad',
+        );
+        expect(entry.status, PluginDependencyStatus.failed);
+        expect(entry.error, contains('node is not installed'));
+        expect(entry.error, contains('install it, then retry'));
+        // No silent runtime install was attempted …
+        expect(
+          ensureCalls,
+          0,
+          reason: 'a missing node must never trigger a runtime install',
+        );
+        // … and no package-manager command ever ran.
+        expect(
+          runner.cmds.where(
+            (c) => c.args.isNotEmpty && c.args.first == 'npm',
+          ),
+          isEmpty,
+        );
+        // The actionable error reached the progress stream for the UI.
+        expect(
+          lines.any((l) => l.contains('node is not installed')),
+          isTrue,
+        );
+      },
+    );
+
+    test(
+      'WS2: dependency installer streams tagged lines to onProgress',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('p6-progress-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final runner = RecordingRunner();
+        final svc = PluginDependencyService(
+          runtimeRootOverride: dir,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final manifest = p6Manifest(
+          deps: [const PluginDependency(name: 'left-pad')],
+        );
+
+        runner.queue((0, 'OK node'));
+        runner.queue((0, 'added 1 package'));
+        runner.queue((
+          0,
+          '{"dependencies":{"left-pad":{"version":"1.3.11"}}}',
+        ));
+        final lines = <String>[];
+        final result = await svc.install(manifest, null, onProgress: lines.add);
+
+        expect(result.status, PluginDependencyStatus.ok);
+        // Tagged `[kind]` lines stream to the UI callback — the live
+        // progress sheet renders them without polling.
+        expect(
+          lines.any(
+            (l) => l.startsWith('[npm]') && l.contains('left-pad'),
+          ),
+          isTrue,
+          reason: 'npm stage lines must reach onProgress, got: $lines',
+        );
       },
     );
   });
@@ -17088,6 +17309,9 @@ cwd = 'tools'
           deps: {'broken-required': '^1.0.0'},
         );
         final runner = RecordingRunner()
+          // Binary probe (pure `command -v`, no install) precedes the
+          // package-manager calls.
+          ..queue((0, 'OK node'))
           ..queue((1, 'EPUBLISHCONFLICT broken-required'));
         PluginRuntimeManager.depsForTest = PluginDependencyService(
           runtimeRootOverride: p7Runtime,
@@ -17168,6 +17392,9 @@ cwd = 'tools'
           deps: {'left-pad': '^1.0.0'},
         );
         final runner = RecordingRunner()
+          // Binary probe (pure `command -v`, no install) precedes the
+          // package-manager calls.
+          ..queue((0, 'OK node'))
           ..queue((0, 'added 1 package'))
           ..queue((0, '{"dependencies":{"left-pad":{"version":"1.3.11"}}}'));
         PluginRuntimeManager.depsForTest = PluginDependencyService(
@@ -17191,6 +17418,9 @@ cwd = 'tools'
           version: '2.0.0',
           deps: {'also-broken': '^2.0.0'},
         );
+        // The binary probe (pure `command -v`, no install) precedes
+        // the failing call.
+        runner.queue((0, 'OK node'));
         runner.queue((1, 'EPUBLISHCONFLICT also-broken'));
         await p7Approve(v2);
         final bad = await app.installPlugin(
@@ -17468,6 +17698,117 @@ cwd = 'tools'
         final rec = await PluginRuntimeManager.I.recordFor('p7org/runtime-kit');
         expect(rec!.state, PluginActivation.pendingGlobal);
         expect(rec.promoteOnNextBoot, isTrue);
+      },
+    );
+
+    test(
+      'WS2: default-off manifest installs disabled and stays disabled across boot activation',
+      () async {
+        final app = await p7Boot();
+        // Manifest opts out of default-enable.
+        final src = p7PluginDir(name: 'Runtime Kit', version: '1.0.0');
+        final pluginJson = File('${src.path}/.claude-plugin/plugin.json');
+        final raw =
+            jsonDecode(pluginJson.readAsStringSync()) as Map<String, dynamic>;
+        raw['enabledByDefault'] = false;
+        pluginJson.writeAsStringSync(jsonEncode(raw));
+
+        // The adapter honored the opt-out.
+        final inspected = await const PluginAdapterRegistry().inspect(src);
+        expect(inspected.enabledByDefault, isFalse);
+
+        final runner = RecordingRunner();
+        PluginRuntimeManager.depsForTest = PluginDependencyService(
+          runtimeRootOverride: p7Runtime,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final row = p7Row('P7 Runtime Kit');
+        app.plugins.add(row);
+        await p7Approve(src);
+        final ok = await app.installPlugin(
+          row,
+          source: LocalFolderPluginSource(src.path),
+          origin: PluginInstallOrigin.pluginsScreen,
+        );
+        expect(ok!.status, PluginInstallStatus.ok);
+        // Install gate: a default-off manifest never enables the row.
+        expect(row.enabled, isFalse);
+
+        // Simulate the next boot in a fresh registry (a real reboot
+        // starts with an empty in-memory registry; only persisted
+        // entries survive).
+        PluginContributionRegistry.I.unregisterPlugin('p7org/runtime-kit');
+        await PluginRuntimeManager.I.activateForBoot(connectMcp: false);
+
+        // The pending entry promoted into the disabled set — never
+        // active — and persists as disabled so later boots skip it.
+        final rec = await PluginRuntimeManager.I.recordFor(
+          'p7org/runtime-kit',
+        );
+        expect(rec!.state, PluginActivation.disabled);
+        expect(rec.promoteOnNextBoot, isFalse);
+        final entries = await PluginRuntimeManager.I.installedEntries();
+        expect(entries['p7org/runtime-kit']!.disabled, isTrue);
+        expect(
+          PluginContributionRegistry.I.isRegistered('p7org/runtime-kit'),
+          isFalse,
+          reason: 'a default-off plugin must not mount contributions on boot',
+        );
+      },
+    );
+
+    test(
+      'WS2: startPluginInstallForTest streams fetch + dependency lines to onProgress',
+      () async {
+        final app = await p7Boot();
+        final src = p7PluginDir(
+          name: 'Progress Kit',
+          version: '1.0.0',
+          deps: {'left-pad': '^1.0.0'},
+        );
+        addTearDown(
+          () => PluginContributionRegistry.I.unregisterPlugin(
+            'p7org/progress-kit',
+          ),
+        );
+        final runner = RecordingRunner()
+          ..queue((0, 'OK node'))
+          ..queue((0, 'added 1 package'))
+          ..queue((0, '{"dependencies":{"left-pad":{"version":"1.3.11"}}}'));
+        PluginRuntimeManager.depsForTest = PluginDependencyService(
+          runtimeRootOverride: p7Runtime,
+          runner: runner.call,
+          ensureRuntime: (_) async => true,
+        );
+        final row = p7Row('P7 Progress Kit');
+        app.plugins.add(row);
+        await p7Approve(src);
+
+        final lines = <String>[];
+        final result = await startPluginInstallForTest(
+          app,
+          row,
+          source: LocalFolderPluginSource(src.path),
+          onProgress: lines.add,
+        );
+
+        expect(result!.status, PluginInstallStatus.ok);
+        // The resolver's byte counts were wrapped into one readable
+        // fetch summary line …
+        expect(
+          lines.any(
+            (l) => l.startsWith('Fetched ') && l.contains('files staged'),
+          ),
+          isTrue,
+          reason: 'fetch summary must reach onProgress, got: $lines',
+        );
+        // … and the dependency installer's tagged lines streamed through.
+        expect(
+          lines.any((l) => l.startsWith('[npm]')),
+          isTrue,
+          reason: 'npm stage lines must reach onProgress, got: $lines',
+        );
       },
     );
   });
@@ -20615,7 +20956,14 @@ cwd = 'tools'
         // sandbox in tests) and succeeds.
         PluginRuntimeManager.depsForTest = PluginDependencyService(
           runtimeRootOverride: p11Runtime,
-          runner: (args, {cwd, env}) async => (0, 'ok'),
+          runner: (args, {cwd, env}) async {
+            // Binary probe (pure `command -v`, no install): report all
+            // runtimes present so the dependency stage succeeds.
+            if (args.isNotEmpty && args.first == 'bash') {
+              return (0, 'OK node\nOK npm\nOK python\nOK pip\nOK ovid-pkg');
+            }
+            return (0, 'ok');
+          },
           ensureRuntime: (_) async => true,
         );
 
@@ -20715,7 +21063,14 @@ cwd = 'tools'
 
         PluginRuntimeManager.depsForTest = PluginDependencyService(
           runtimeRootOverride: p11Runtime,
-          runner: (args, {cwd, env}) async => (0, 'ok'),
+          runner: (args, {cwd, env}) async {
+            // Binary probe (pure `command -v`, no install): report all
+            // runtimes present so the dependency stage succeeds.
+            if (args.isNotEmpty && args.first == 'bash') {
+              return (0, 'OK node\nOK npm\nOK python\nOK pip\nOK ovid-pkg');
+            }
+            return (0, 'ok');
+          },
           ensureRuntime: (_) async => true,
         );
 
@@ -20793,7 +21148,14 @@ cwd = 'tools'
         // would attempt real sandbox provisioning under the widget clock.
         PluginRuntimeManager.depsForTest = PluginDependencyService(
           runtimeRootOverride: p11Runtime,
-          runner: (args, {cwd, env}) async => (0, 'ok'),
+          runner: (args, {cwd, env}) async {
+            // Binary probe (pure `command -v`, no install): report all
+            // runtimes present so the dependency stage succeeds.
+            if (args.isNotEmpty && args.first == 'bash') {
+              return (0, 'OK node\nOK npm\nOK python\nOK pip\nOK ovid-pkg');
+            }
+            return (0, 'ok');
+          },
           ensureRuntime: (_) async => true,
         );
 

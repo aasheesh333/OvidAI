@@ -498,7 +498,15 @@ class _RunCtx {
   final AgentRun run;
   final ChatSession session;
   final ProviderConfig provider;
-  const _RunCtx(this.run, this.session, this.provider);
+
+  /// The run generation this chain belongs to (see [AgentRun.runEpoch]):
+  /// Stop and newer runs bump the bucket's epoch, so a stale chain can be
+  /// told apart from the live one and its late events/tokens dropped.
+  /// Mutable: [runTask] seeds it with the bucket's current epoch and
+  /// [_runTaskBody] bumps it once the run is admitted (after the
+  /// re-entry guard, so a refused re-entry never invalidates the live run).
+  int epoch;
+  _RunCtx(this.run, this.session, this.provider, this.epoch);
 }
 
 class AgentRun {
@@ -506,6 +514,19 @@ class AgentRun {
   final List<AgentEvent> runEvents = [];
   String? activeRunId;
   bool cancelRequested = false;
+
+  /// Run generation counter (stop/output rendering): bumped on every
+  /// [runTask] start and on every stop ([_cancelBucket]). Each run chain
+  /// captures the epoch in its [_RunCtx]; events and streaming tokens
+  /// from a superseded generation are dropped so NOTHING renders after
+  /// Stop or after a newer run took over the bucket.
+  int runEpoch = 0;
+
+  /// Set by [_cancelBucket] on every stop path; cleared when a new
+  /// [runTask] starts. Lets settlement delivery tell "parent was stopped"
+  /// apart from "parent idle after normal completion".
+  bool stoppedByUser = false;
+
   HttpClientRequest? activeRequest;
   HttpClient? activeClient;
   final List<String> queue = [];
@@ -776,7 +797,10 @@ class AgentService extends ChangeNotifier {
   static const _runCtxKey = #ovidAgentRunCtx;
 
   /// The per-run execution context active in the current async Zone.
-  _RunCtx? get _runCtx => Zone.current[_runCtxKey] as _RunCtx?;
+  /// Tests may pin one via [setRunCtxForTest] (no Zone needed).
+  _RunCtx? _testRunCtxOverride;
+  _RunCtx? get _runCtx =>
+      _testRunCtxOverride ?? Zone.current[_runCtxKey] as _RunCtx?;
 
   /// The run bound to the session a RUNNING agent action belongs to,
   /// else the active session's bucket. Mid-run tool calls MUST route
@@ -856,6 +880,17 @@ class AgentService extends ChangeNotifier {
   bool get cancelRequested => _runResolved.cancelRequested;
   bool get _cancelRequested => _runResolved.cancelRequested;
   set _cancelRequested(bool v) => _runResolved.cancelRequested = v;
+
+  /// True when the current run chain is stale: Stop (or a newer run)
+  /// invalidated this generation. Streaming tokens, tool output and tool
+  /// results from a stale chain must be dropped — nothing renders after
+  /// Stop. Zone-less callers (UI thread, the stop path itself) are never
+  /// stale.
+  bool get _runChainStale {
+    final z = _runCtx;
+    if (z == null) return false;
+    return z.epoch != z.run.runEpoch || z.run.cancelRequested;
+  }
   set _activeRequest(HttpClientRequest? v) => _runResolved.activeRequest = v;
   List<String> get _queue => _runResolved.queue;
 
@@ -1005,10 +1040,40 @@ class AgentService extends ChangeNotifier {
     final wasActive = r.activeRunId != null;
     final queuePreserved = r.queue.isNotEmpty;
     _cancelBucket(r);
+    // Stop interrupts the whole run TREE: live child/grandchild
+    // dispatch_agent runs stop too (mirrors hardStopAll's loop).
+    _interruptSubagentTree(sessionId);
     // Stop with queued work: start the next message immediately rather than
     // waiting for the cancelled run to finish unwinding.
     if (wasActive && queuePreserved) _scheduleQueuedContinuation(sessionId);
     return queuePreserved;
+  }
+
+  /// Mark every live descendant subagent of [sessionId] (children,
+  /// grandchildren, …) interrupted so their dispatch_agent loops settle as
+  /// stopped instead of waiting for reports that will never come — the
+  /// per-session mirror of [hardStopAll]'s global subagent-interrupt loop.
+  /// Each child's own run bucket is cancelled too, so in-flight child work
+  /// (SSE streams, tool calls) stops promptly instead of draining first.
+  void _interruptSubagentTree(String sessionId) {
+    final roots = <String>{sessionId};
+    var grew = true;
+    while (grew) {
+      grew = false;
+      for (final sub in _subagents.values) {
+        if (!sub.finished &&
+            !sub.interrupted &&
+            roots.contains(sub.parentSessionId)) {
+          sub.interrupted = true;
+          try {
+            AppState.I.setAgentState(sub.sessionId, 'stopped');
+          } catch (_) {}
+          final childRun = _runs[sub.sessionId];
+          if (childRun != null) _cancelBucket(childRun);
+          if (roots.add(sub.sessionId)) grew = true;
+        }
+      }
+    }
   }
 
   /// Hard force-stop EVERYWHERE the agent runs (composer Stop, overlay X,
@@ -1478,6 +1543,12 @@ class AgentService extends ChangeNotifier {
       unawaited(checkpointRunEnd(r.runKey!));
     }
     r.cancelRequested = true;
+    // Run-epoch (stop/output): invalidate this generation so stale
+    // in-flight continuations drop their events/tokens instead of
+    // rendering after Stop. Also marks the bucket stopped-by-user so
+    // settlement delivery can tell a stopped parent from an idle one.
+    r.runEpoch++;
+    r.stoppedByUser = true;
     r.activeRunId = null;
     // Abort the in-flight request and forcefully close the active HTTP client
     // immediately — kills the socket instantly without waiting for chunk/idle timeouts.
@@ -1591,10 +1662,24 @@ class AgentService extends ChangeNotifier {
     try {
       var target = AppState.I.sessionById(sessionId);
       if (target == null) {
-        // Session deleted — fall back to the active session so the message
-        // is never lost.
-        AppState.I.sendMessage(text);
-        target = AppState.I.activeSession;
+        // Session deleted — NEVER fire the queued message into whatever
+        // session happens to be active now (spurious output in a different
+        // chat). Drop it with a visible notice instead.
+        final active = AppState.I.activeSession;
+        if (active != null) {
+          active.messages.add(
+            Message(
+              role: 'assistant',
+              kind: MsgKind.turnTail,
+              content:
+                  '⚠ Dropped queued message — its session was deleted: '
+                  '"${cleanTruncate(text, 90)}"',
+            ),
+          );
+          AppState.I.refresh();
+          AppState.I.persistSessions();
+        }
+        return;
       } else {
         target.messages.add(Message(role: 'user', content: text));
         if (target.title == 'New chat' || target.title.isEmpty) {
@@ -1603,8 +1688,7 @@ class AgentService extends ChangeNotifier {
         AppState.I.refresh();
         AppState.I.persistSessions();
       }
-      final targetId = target?.id;
-      if (targetId == null) return;
+      final targetId = target.id;
 
       final starter = queuedRunStarterForTest;
       final delays = queuedContinuationRetryDelaysForTest;
@@ -1723,6 +1807,27 @@ class AgentService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Quick-send the queued message with stable [id]: pull it to the front
+  /// of the queue, then stop the current run so the message starts
+  /// immediately (Stop promotes the queue head). [sessionId] defaults to
+  /// the resolved run's session key. Graceful no-op (never a crash) when
+  /// the queue is empty, the id is unknown, or no session key is available.
+  void quickSendQueuedMessage(int id, {String? sessionId}) {
+    final run = _runResolved;
+    _syncQueueIds(run);
+    if (run.queue.isEmpty) return;
+    var index = run.queueIds.indexOf(id);
+    if (index < 0 && run.runKey != null) {
+      index = _queueIndexOfId(run.runKey!, id);
+    }
+    if (index < 0 || index >= run.queue.length) return;
+    steerQueuedMessageById(id);
+    final sid = sessionId ?? run.runKey;
+    if (sid != null && sid.isNotEmpty) {
+      stopRequested(sessionId: sid);
+    }
+  }
+
   /// Test seam: enqueue without a live run.
   @visibleForTesting
   void queueMessageForTest(String text) => _queueAdd(_runResolved, text);
@@ -1761,6 +1866,53 @@ class AgentService extends ChangeNotifier {
   @visibleForTesting
   // ignore: avoid_returning_this
   AgentRun runBucketForTest(String sessionId) => _runFor(sessionId);
+
+  /// Stop/output test seams.
+  @visibleForTesting
+  SubagentInfo? subagentForTest(String id) => _subagents[id];
+
+  @visibleForTesting
+  void clearSubagentsForTest() => _subagents.clear();
+
+  /// Pin a run context (run + session + epoch) without a Zone, so
+  /// epoch-gated paths (_emitToRun, streaming) can be tested directly.
+  @visibleForTesting
+  void setRunCtxForTest(AgentRun run, ChatSession session, int epoch) {
+    _testRunCtxOverride = _RunCtx(
+      run,
+      session,
+      ProviderConfig(
+        name: 'test',
+        description: 'test',
+        baseUrl: 'https://test.invalid',
+      ),
+      epoch,
+    );
+  }
+
+  @visibleForTesting
+  void clearRunCtxForTest() => _testRunCtxOverride = null;
+
+  @visibleForTesting
+  void emitToRunForTest(AgentRun run, String kind, String text) =>
+      _emitToRun(run, kind, text);
+
+  @visibleForTesting
+  void ensureLiveMsgForTest(ChatSession s) => _ensureLiveMsg(s);
+
+  @visibleForTesting
+  void streamReasoningForTest(ChatSession s, String tok) =>
+      _streamReasoning(s, tok);
+
+  @visibleForTesting
+  void finalizeLiveForTest() => _finalizeLive();
+
+  @visibleForTesting
+  void finalizeLiveStoppedForTest() => _finalizeLiveStopped();
+
+  @visibleForTesting
+  void deliverSettlementNoticeForTest(SubagentInfo sub) =>
+      _deliverSettlementNotice(sub);
 
   /// Browser live state
   String? browserUrl;
@@ -3555,6 +3707,14 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       _emitToRun(_runResolved, kind, text, sessionId: _pinnedRunId);
 
   void _emitToRun(AgentRun run, String kind, String text, {String? sessionId}) {
+    // Run-epoch gate (stop/output rendering): events from a superseded run
+    // generation — invalidated by Stop or replaced by a newer run — are
+    // dropped so NOTHING renders after Stop. Zone-less callers (the stop
+    // path itself, UI handlers) always pass through.
+    final z = _runCtx;
+    if (z != null && identical(z.run, run) && z.epoch != run.runEpoch) {
+      return;
+    }
     final eventSessionId = sessionId ?? run.runKey;
     run.runEvents.add(AgentEvent(kind, text));
     if (run.runEvents.length > 120) {
@@ -7285,6 +7445,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // async continuation — SSE stream handlers, tool dispatch, subagent
     // loops — inherits it, so two runs never see each other's state.
     final bucket = _runFor(s.id);
+    // The Zone context seeds the run generation; _runTaskBody bumps the
+    // bucket epoch once the run is admitted (after the re-entry guard).
     // Device overlay (spec §5.5): every new run opens a fresh device
     // generation so in-flight device_* calls from a superseded run/Stop
     // report `cancelled: superseded by a newer run/stop` instead of stale
@@ -7310,7 +7472,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // started, and Android froze the Dart isolate mid-run (the reported
     // "agent stops if I mistakenly open the app again").
     AgentNotificationService.I.agentWorking('starting task…', sessionId: s.id);
-    final ctx = _RunCtx(bucket, s, p);
+    final ctx = _RunCtx(bucket, s, p, bucket.runEpoch);
     return runZoned(
       () => _runTaskBody(prompt, ctx, freshTurn: freshTurn),
       zoneValues: {_runCtxKey: ctx, #ovidRunKey: s.id},
@@ -7459,6 +7621,12 @@ can drive there yourself with the device_* tools):
       _emit('think', 'run already active for this session — refusing re-entry');
       return;
     }
+    // This generation is live now: bump the run epoch (stale chains from a
+    // previous generation drop their events/tokens instead of rendering
+    // late) and clear the stopped-by-user marker — a new run is fresh user
+    // intent, so later settlement notices treat the parent as alive again.
+    ctx.run.stoppedByUser = false;
+    ctx.epoch = ++ctx.run.runEpoch;
     // This run's bucket state — resolve nothing through the active session.
     activeRunId = runId;
     ctx.run.runKey = s.id;
@@ -7586,6 +7754,13 @@ For emphasis you may color key words with <font color="red|green|blue|orange|pur
 NEVER fake work: do not emit placeholder echo commands (e.g. `echo "Command N executed"`)
 and claim tasks ran. If a sandbox command fails, show its ACTUAL error + fix it
 (or report it to the user honestly) instead of simulating the work.
+RESULT FORMAT CONTRACT (main chat): your final message is what the user SEES —
+it must stand alone. Lead with the answer or result in the FIRST line. Present
+results as a visible markdown block (short bullets, code fences, or a small
+table). Never bury the result inside reasoning or tool narration: thinking stays
+in the thinking lane, and the final message must make sense without it. After
+running tools, end with the concrete outcome (what changed, where it lives, the
+key numbers) — not a play-by-play of the steps.
 SHELL COMMAND HYGIENE:
 • Always use valid bash syntax. If executing multiple commands, ALWAYS separate them with `;` or `&&` (never concatenate without a delimiter, e.g. never `2>&1 ls`).
 • When using pipelines with `head` or `tail` (e.g. `| head -5`), do NOT append trailing command names directly without a semicolon.
@@ -8026,6 +8201,9 @@ ${await _agentsMdBlock()}
         });
 
         for (final tc in toolCalls) {
+          // Stop/output: never dispatch another tool after Stop — drop the
+          // remaining calls instead of letting their results render late.
+          if (_runChainStale) break;
           final fn = tc['function'];
           final name = fn['name'];
           // B2: never let a malformed/truncated tool-arg fragment abort the
@@ -8080,6 +8258,15 @@ ${await _agentsMdBlock()}
           } catch (e) {
             result = 'tool error: $e';
             if (toolMsg != null) _toolFinish(state: 'error', detail: result);
+          }
+          // Stop/output: Stop raced this tool — mark its card stopped and
+          // drop the result: it must not render late or feed the next
+          // model request.
+          if (_runChainStale) {
+            if (toolMsg != null) {
+              _toolFinish(state: 'stopped', detail: 'stopped by user');
+            }
+            break;
           }
           // Repeat-tool reminder (PR18 baseline; PR45/F2 parity): the
           // same tool with IDENTICAL args called 3+/5+/8+ times in a row is
@@ -8307,11 +8494,15 @@ ${await _agentsMdBlock()}
       m.thinking = false;
       m.content = '${_liveContent.toString()}\n\n*⏹ stopped by user*';
     } else if (_liveReasoning.isNotEmpty) {
+      // Reasoning-only stop: keep the reasoning row but settle it —
+      // never leave thinking=true shimmering after Stop.
       m.kind = MsgKind.reasoning;
-      m.thinking = true;
+      m.thinking = false;
       m.content =
           '${cleanReasoningText(_liveReasoning.toString())}\n\n*⏹ stopped by user*';
     } else {
+      m.kind = MsgKind.text;
+      m.thinking = false;
       m.content = '*⏹ stopped by user*';
     }
     _liveContent.clear();
@@ -9031,9 +9222,12 @@ ${await _agentsMdBlock()}
         s.messages.contains(_liveMsg)) {
       return; // reuse
     }
+    // The bubble is BORN as a streaming message — never `reasoning`: the
+    // answer must stay visible as markdown while it arrives, not hidden
+    // behind a collapsed thinking card.
     _liveMsg = Message(
       role: 'assistant',
-      kind: MsgKind.reasoning,
+      kind: MsgKind.streaming,
       thinking: true,
       content: '',
     );
@@ -9042,6 +9236,9 @@ ${await _agentsMdBlock()}
   }
 
   void _streamToBubble(ChatSession s, String tok) {
+    // Stop/output: drop tokens from a stale/cancelled chain — nothing
+    // renders after Stop.
+    if (_runChainStale) return;
     _ensureLiveMsg(s);
     _liveContent.write(tok);
     _liveMsg!.content = _liveContent.toString();
@@ -9050,6 +9247,9 @@ ${await _agentsMdBlock()}
   }
 
   void _streamReasoning(ChatSession s, String tok) {
+    // Stop/output: drop tokens from a stale/cancelled chain — nothing
+    // renders after Stop.
+    if (_runChainStale) return;
     // Reasoning display toggle (Settings) — OFF hides thinking chips live;
     // tokens still accumulate in reasoningBuf for the final message.
     if (!AppState.I.showReasoning) {
@@ -9073,8 +9273,11 @@ ${await _agentsMdBlock()}
       m.thinking = false;
       m.content = _liveContent.toString();
     } else if (_liveReasoning.isNotEmpty) {
+      // Reasoning-only turn: keep it a reasoning row, but NEVER leave
+      // thinking=true — a stuck "Thinking…" shimmer hides the content.
+      // thinking=false renders the visible "Thoughts" card instead.
       m.kind = MsgKind.reasoning;
-      m.thinking = true;
+      m.thinking = false;
       m.content = cleanReasoningText(_liveReasoning.toString());
     }
     _liveContent.clear();
@@ -12634,6 +12837,11 @@ ${await _agentsMdBlock()}
   }
 
   void _toolStreamFor(AgentRun run, String chunk) {
+    // Stop/output: drop output from a stale/cancelled chain — nothing
+    // renders after Stop.
+    if (run.cancelRequested) return;
+    final z = _runCtx;
+    if (z != null && identical(z.run, run) && z.epoch != run.runEpoch) return;
     final m = run.activeToolMsg;
     if (m == null) return;
     m.toolDetail = '${m.toolDetail ?? ''}$chunk';
@@ -16198,6 +16406,9 @@ ${await _agentsMdBlock()}
     if (!sub.background) return;
     final parent = AppState.I.sessionById(sub.parentSessionId);
     if (parent == null || parent.messages.isEmpty) return;
+    // Stop/output: if the parent was stopped, a settling child must not
+    // reopen it — no notice, no new run.
+    if (_runs[sub.parentSessionId]?.stoppedByUser ?? false) return;
     final outcome = sub.interrupted
         ? 'was stopped'
         : sub.state == 'failed'
@@ -16218,11 +16429,22 @@ ${await _agentsMdBlock()}
       if (noticeRun != null) _queueAdd(noticeRun, notice);
       _emit('think', 'queued settlement notice for ${sub.id} → parent');
     } else {
-      // Idle — one ordinary later turn.
-      parent.messages.add(Message(role: 'user', content: notice));
+      // Idle — render a PASSIVE notice row. NEVER call runTask on an idle
+      // parent: a settled child must not start a brand-new run after the
+      // response looked done.
+      final shortClosing = closing.isEmpty || closing == '(no answer)'
+          ? ''
+          : ' — ${cleanTruncate(closing, 100)}';
+      parent.messages.add(
+        Message(
+          role: 'assistant',
+          kind: MsgKind.turnTail,
+          content:
+              '⛁ Background agent ${sub.label} (${sub.id}) $outcome$shortClosing',
+        ),
+      );
       AppState.I.refresh();
       AppState.I.persistSessions();
-      unawaited(runTask(notice, sessionId: parent.id, freshTurn: false));
     }
   }
 

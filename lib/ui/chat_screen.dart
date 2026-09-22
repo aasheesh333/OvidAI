@@ -779,6 +779,11 @@ class _ChatScreenState extends State<ChatScreen>
   final _input = TextEditingController();
   final _scroll = ScrollController();
 
+  /// Focus node for the composer text field: the queue dock's "Edit in
+  /// composer" action moves a queued message into the composer and hands
+  /// it focus so the user can edit and resend immediately.
+  final _inputFocus = FocusNode();
+
   /// web-IDE auto-scroll: when the user is at the bottom, we follow the
   /// stream; as soon as they scroll up we stop moving; when they return to
   /// the bottom we resume following.
@@ -891,6 +896,7 @@ class _ChatScreenState extends State<ChatScreen>
   void dispose() {
     _scroll.dispose();
     _input.dispose();
+    _inputFocus.dispose();
     super.dispose();
   }
 
@@ -1298,6 +1304,17 @@ class _ChatScreenState extends State<ChatScreen>
                     _QueueDock(
                       sessionId: AppState.I.activeSessionId,
                       onEdited: () => setState(() {}),
+                      onEditToComposer: (text) {
+                        setState(() {
+                          _input.value = TextEditingValue(
+                            text: text,
+                            selection: TextSelection.collapsed(
+                              offset: text.length,
+                            ),
+                          );
+                        });
+                        _inputFocus.requestFocus();
+                      },
                     ),
                     const _ApprovalDock(),
                   ],
@@ -1591,6 +1608,7 @@ class _ChatScreenState extends State<ChatScreen>
                     _InputBar(
                       layout: layout,
                       controller: _input,
+                      focusNode: _inputFocus,
                       sessionId: s?.id,
                       coordinator: widget.startupCoordinator,
                       running: s == null ? false : AgentService.I.busyFor(s.id),
@@ -2661,19 +2679,25 @@ class _SystemPromptRowState extends State<_SystemPromptRow> {
 /// "Thinking…" shimmer is preserved in the summary while streaming.
 class _ReasoningCard extends StatefulWidget {
   final Message m;
-  const _ReasoningCard(this.m);
+
+  /// When true the card starts expanded (used for the LIVE streaming
+  /// message while it thinks). Finalized rows still default to collapsed;
+  /// a user tap always wins via [_ReasoningCardState._override].
+  final bool expandedByDefault;
+  const _ReasoningCard(this.m, {this.expandedByDefault = false});
   @override
   State<_ReasoningCard> createState() => _ReasoningCardState();
 }
 
 class _ReasoningCardState extends State<_ReasoningCard> {
-  /// null = collapsed by default. Once the user taps, we lock to their choice.
+  /// null = default (collapsed, unless [expandedByDefault]). Once the user
+  /// taps, we lock to their choice.
   bool? _override;
 
   @override
   Widget build(BuildContext context) {
     final isStreaming = widget.m.thinking;
-    final expanded = _override ?? false;
+    final expanded = _override ?? widget.expandedByDefault;
     final hasBody = widget.m.content.trim().isNotEmpty;
     return Container(
       key: const ValueKey('chat-reasoning-disclosure'),
@@ -3772,9 +3796,11 @@ class _TurnTailRow extends StatelessWidget {
         children: [
           Icon(Icons.schedule, size: 11, color: Aether.textFaint),
           const SizedBox(width: 4),
-          Text(
-            m.content,
-            style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+          Expanded(
+            child: Text(
+              m.content,
+              style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+            ),
           ),
         ],
       ),
@@ -3825,6 +3851,7 @@ class _MessageView extends StatelessWidget {
                 switch (m.kind) {
                   MsgKind.imageGen => _imageGen(context),
                   MsgKind.reasoning => _reasoning(),
+                  MsgKind.streaming => _streaming(),
                   MsgKind.tool => _toolCard(),
                   MsgKind.turnTail => _turnTail(),
                   MsgKind.compact => _CompactionRow(m),
@@ -4095,6 +4122,23 @@ class _MessageView extends StatelessWidget {
   );
 
   Widget _reasoning() => _ReasoningCard(m);
+
+  /// Live streaming bubble (MsgKind.streaming): answer text renders as
+  /// markdown the moment it arrives (never hidden behind a thinking card);
+  /// while the model is still thinking, the reasoning card shows expanded
+  /// by default so the live thought stream stays visible.
+  Widget _streaming() {
+    final hasBody = m.content.trim().isNotEmpty;
+    final isUser = m.role == 'user';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (hasBody && !m.thinking) _text(isUser),
+        if (m.thinking) _ReasoningCard(m, expandedByDefault: true),
+      ],
+    );
+  }
 
   /// Attachment chips under a user message (paperclip + name + size).
   Widget _attachmentChips() => Padding(
@@ -4533,6 +4577,11 @@ class _InputBar extends StatefulWidget {
   final TextEditingController controller;
   final String? sessionId;
 
+  /// Focus node for the composer text field, owned by the parent screen.
+  /// Lets external actions (e.g. the queue dock's "Edit in composer")
+  /// hand focus to the composer after moving text into it.
+  final FocusNode? focusNode;
+
   /// Startup coordinator observed so runtime plugin skills mounted by the
   /// `skill.mount` item refresh the slash suggestions without rebuilding the
   /// transcript. Defaults to the process singleton.
@@ -4549,6 +4598,7 @@ class _InputBar extends StatefulWidget {
   final VoidCallback onSend;
   const _InputBar({
     required this.controller,
+    this.focusNode,
     required this.sessionId,
     required this.running,
     required this.layout,
@@ -5298,6 +5348,7 @@ class _InputBarState extends State<_InputBar> {
               TextField(
                 key: const ValueKey('chat-composer'),
                 controller: controller,
+                focusNode: widget.focusNode,
                 minLines: 1,
                 maxLines: 5,
                 // Approval takeover: locked while a card awaits an answer.
@@ -5837,7 +5888,15 @@ class _TodoDockState extends State<_TodoDock> {
 class _QueueDock extends StatelessWidget {
   final String? sessionId;
   final VoidCallback onEdited;
-  const _QueueDock({this.sessionId, required this.onEdited});
+
+  /// Moves a queued message's text into the composer for editing. Wired
+  /// from the screen that owns the composer's TextEditingController.
+  final ValueChanged<String> onEditToComposer;
+  const _QueueDock({
+    this.sessionId,
+    required this.onEdited,
+    required this.onEditToComposer,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -5919,6 +5978,7 @@ class _QueueDock extends StatelessWidget {
                     index: i,
                     text: queue[i],
                     onEdited: onEdited,
+                    onEditToComposer: onEditToComposer,
                   ),
               ],
             ),
@@ -5934,12 +5994,17 @@ class _QueueRow extends StatefulWidget {
   final int index;
   final String text;
   final VoidCallback onEdited;
+
+  /// Moves this row's text into the composer for editing (the row itself
+  /// is removed from the queue first).
+  final ValueChanged<String> onEditToComposer;
   const _QueueRow({
     super.key,
     this.id,
     required this.index,
     required this.text,
     required this.onEdited,
+    required this.onEditToComposer,
   });
 
   @override
@@ -5986,6 +6051,38 @@ class _QueueRowState extends State<_QueueRow> {
     } else {
       agent.steerQueuedMessage(widget.index);
     }
+    widget.onEdited();
+  }
+
+  /// Quick send: pull this row to the front of the queue and stop the
+  /// current run so the message starts immediately.
+  void _quickSend() {
+    final agent = AgentService.I;
+    final id = widget.id;
+    if (id != null) {
+      agent.quickSendQueuedMessage(id);
+    } else {
+      // No stable id (index-based row): steer to front, then stop the
+      // active session so the head starts now.
+      agent.steerQueuedMessage(widget.index);
+      final sid = AppState.I.activeSessionId;
+      if (sid != null) agent.stopRequested(sessionId: sid);
+    }
+    widget.onEdited();
+  }
+
+  /// Edit in composer: remove this row from the queue and hand its text
+  /// to the composer's TextEditingController (via the dock callback) so
+  /// the user can edit and resend.
+  void _editToComposer() {
+    final text = widget.text;
+    final id = widget.id;
+    if (id != null) {
+      AgentService.I.removeQueuedMessageById(id);
+    } else {
+      AgentService.I.removeQueuedMessage(widget.index);
+    }
+    widget.onEditToComposer(text);
     widget.onEdited();
   }
 
@@ -6051,6 +6148,15 @@ class _QueueRowState extends State<_QueueRow> {
               style: TextStyle(fontSize: 12.5, color: Aether.text),
             ),
           ),
+          // Quick send (the WS4 action): stop the current run and send this
+          // queued message right now — it is steered to the front and the
+          // stop promotes the queue head immediately.
+          _QueueAction(
+            icon: Icons.bolt,
+            color: Aether.warn,
+            tooltip: 'Quick send: stop current run and send this now',
+            onTap: _quickSend,
+          ),
           // Strict-steer (the queue steering parity): pull this row to the
           // front so the running turn injects it on the very next request.
           _QueueAction(
@@ -6067,6 +6173,14 @@ class _QueueRowState extends State<_QueueRow> {
               _ctrl.text = widget.text;
               setState(() => _editing = true);
             },
+          ),
+          // Move this row's text into the composer for a fuller edit; the
+          // row leaves the queue so a resend doesn't duplicate it.
+          _QueueAction(
+            icon: Icons.open_in_new_outlined,
+            color: Aether.textMuted,
+            tooltip: 'Edit in composer',
+            onTap: _editToComposer,
           ),
           _QueueAction(
             icon: Icons.delete_outline,

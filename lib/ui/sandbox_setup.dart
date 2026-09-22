@@ -8,11 +8,23 @@ import '../core/sandbox_service.dart';
 import 'studio_screen.dart';
 import 'shell.dart';
 
-/// Opens Studio.  The sandbox is now installed on FIRST LAUNCH (blocking
-/// gate in main.dart) — Studio just opens.  (Defense-in-depth: if the
-/// sandbox somehow got wiped, open the setup screen instead.)
+/// Opens Studio. The sandbox installs on STUDIO FIRST-OPEN (a mandatory
+/// full install: core phases 0–6 + runtimes) — first launch goes straight
+/// to the chat shell, so the first-open flag is the source of truth here:
+/// until the mandatory install has run, Studio always routes to the full
+/// install screen (non-dismissible, live log). Once the flag is set, the
+/// real disk check decides: Studio when installed, the manual setup screen
+/// as defense-in-depth when the sandbox was somehow wiped.
 void openStudio(BuildContext context) {
-  // The gate is decided by a REAL disk check, not a stale in-memory flag.
+  if (!AppState.I.studioFirstOpenDone) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => const SandboxSetupScreen(studioFirstOpen: true),
+      ),
+    );
+    return;
+  }
+  // The flag is set — the disk check decides Studio vs manual setup.
   SandboxService.I.checkExisting().then((installed) {
     AppState.I.sandboxInstalled = installed;
     if (!context.mounted) return;
@@ -37,17 +49,30 @@ class SandboxSetupScreen extends StatefulWidget {
   /// and on success navigates to the chat shell (not Studio).  When false
   /// (default, opened from Studio), it allows back navigation and goes to
   /// Studio on success.
+  ///
+  /// Health-screen hard reset uses gateMode for a core-only reinstall.
   final bool gateMode;
-  const SandboxSetupScreen({super.key, this.gateMode = false});
+
+  /// Studio first-open mandatory install: non-dismissible, runs the FULL
+  /// install (core phases 0–6 AND runtimes — includeRuntimes:true), and on
+  /// success sets the studio-first-open flag and replaces itself with
+  /// Studio (which then prompts the GitHub login once). Mutually exclusive
+  /// with [gateMode].
+  final bool studioFirstOpen;
+  const SandboxSetupScreen({
+    super.key,
+    this.gateMode = false,
+    this.studioFirstOpen = false,
+  });
   @override
   State<SandboxSetupScreen> createState() => _SandboxSetupScreenState();
 }
 
 class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
-  /// Gate mode (first launch) installs only the NATIVE CORE (phases 0–6)
-  /// so the app opens in under a minute; the network-bound Node.js/Python
-  /// runtimes install in the background afterwards. The manual setup flow
-  /// (Studio) still does the full install including runtimes.
+  /// Gate mode (Health-screen hard reset) installs only the NATIVE CORE
+  /// (phases 0–6) so the reset stays fast. The Studio first-open flow and
+  /// the manual setup flow do the full install including the network-bound
+  /// Node.js/Python runtimes.
   List<String> get _phaseNames => widget.gateMode
       ? const [
           'Checking device',
@@ -116,8 +141,11 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   Future<void> _runInstall() async {
     try {
       await SandboxService.I.install(
-        // First-launch gate: core only (fast) — runtimes continue in the
-        // background after the shell opens. Manual setup: full install.
+        // Studio first-open: the FULL install (core + runtimes) — the old
+        // first-launch gate no longer guarantees even the core, so the
+        // first-open flow must not skip anything. Health-reset gate mode:
+        // core only (fast); runtimes arrive via the Studio first-open flow
+        // or an explicit retry. Manual setup: full install.
         includeRuntimes: !widget.gateMode,
         onPhase: (phase, p, line) {
           if (!mounted || _done) return;
@@ -144,6 +172,13 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             (_) => false,
           );
         });
+      } else if (widget.studioFirstOpen) {
+        // Same beat, then complete the first-open flow: flag set, replace
+        // this screen with Studio (button below stays as manual fallback).
+        Future.delayed(const Duration(milliseconds: 1200), () {
+          if (!mounted || !widget.studioFirstOpen) return;
+          unawaited(_completeFirstOpen());
+        });
       }
     } catch (e) {
       if (!mounted) return;
@@ -154,6 +189,41 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
         _unsupported = e is SandboxUnsupportedException;
       });
     }
+  }
+
+  /// Studio first-open completion: persist the flag (so this mandatory
+  /// screen shows exactly once), then replace this screen with Studio.
+  /// Studio fires the one-time GitHub login prompt itself
+  /// ([StudioScreen.postInstallGithubPrompt]), so the sheet can't pop
+  /// twice. Guarded by [_navigated]: the auto-advance timer and the manual
+  /// button must not push Studio twice.
+  Future<void> _completeFirstOpen() async {
+    if (_navigated) return;
+    _navigated = true;
+    AppState.I.sandboxReady();
+    await AppState.I.setStudioFirstOpenDone(true);
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => const StudioScreen(postInstallGithubPrompt: true),
+      ),
+    );
+  }
+
+  /// Studio first-open escape hatch for devices that can never run the
+  /// sandbox: persist the flag (never trap the user in the mandatory
+  /// screen) and the skip choice, then open Studio without the install.
+  Future<void> _continueFirstOpenWithoutSandbox() async {
+    if (_navigated) return;
+    _navigated = true;
+    await AppState.I.setSandboxSkipped(true);
+    await AppState.I.setStudioFirstOpenDone(true);
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => const StudioScreen(postInstallGithubPrompt: true),
+      ),
+    );
   }
 
   double get _overall {
@@ -180,15 +250,18 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Gate mode: never dismissible (sandbox is required, not optional).
-    final canPop = !widget.gateMode && (_done || _error != null);
+    // Gate mode and Studio first-open are never dismissible (the sandbox
+    // install is required, not optional).
+    final canPop =
+        !widget.gateMode && !widget.studioFirstOpen && (_done || _error != null);
+    final hideClose = widget.gateMode || widget.studioFirstOpen;
     return PopScope(
       canPop: canPop,
       child: Scaffold(
         backgroundColor: Aether.bg,
         appBar: AppBar(
-          leading: widget.gateMode
-              ? null // no close button in gate mode
+          leading: hideClose
+              ? null // no close button in gate / first-open mode
               : IconButton(
                   icon: const Icon(Icons.close, size: 20),
                   onPressed: () {
@@ -196,9 +269,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                   },
                 ),
           title: Text(
-            widget.gateMode
-                ? 'Setting up Ovid — one time'
-                : 'Setting up sandbox',
+            hideClose ? 'Setting up Ovid — one time' : 'Setting up sandbox',
           ),
         ),
         body: SafeArea(
@@ -277,7 +348,9 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
           Expanded(child: _terminal()),
           const SizedBox(height: 12),
           Text(
-            widget.gateMode
+            widget.studioFirstOpen
+                ? 'One-time full setup — sandbox core plus Node.js and Python. Keep the app open.'
+                : widget.gateMode
                 ? 'Core sandbox installs now (under a minute) — Node.js + Python continue in the background after the app opens.'
                 : 'Keep the app open — this happens only once.',
             textAlign: TextAlign.center,
@@ -404,6 +477,13 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                   style: TextStyle(fontSize: 14),
                 ),
                 onPressed: () async {
+                  if (widget.studioFirstOpen) {
+                    // Device can never run the sandbox: persist the flag so
+                    // the mandatory screen never traps this user again, then
+                    // open Studio without the install.
+                    await _continueFirstOpenWithoutSandbox();
+                    return;
+                  }
                   await AppState.I.setSandboxSkipped(true);
                   if (!mounted) return;
                   if (widget.gateMode) {
@@ -466,9 +546,9 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             ),
           ],
           const SizedBox(height: 8),
-          // In gate mode PopScope(canPop: false) blocks every pop, so a
-          // Close button here would silently do nothing — hide it.
-          if (!widget.gateMode)
+          // Gate / first-open mode: PopScope(canPop: false) blocks every
+          // pop, so a Close button here would silently do nothing — hide it.
+          if (!widget.gateMode && !widget.studioFirstOpen)
             TextButton(
               onPressed: () => Navigator.pop(context),
               child: Text(
@@ -571,6 +651,8 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                       MaterialPageRoute(builder: (_) => const OvidShell()),
                       (_) => false,
                     );
+                  } else if (widget.studioFirstOpen) {
+                    unawaited(_completeFirstOpen());
                   } else {
                     Navigator.of(context).pushReplacement(
                       MaterialPageRoute(builder: (_) => const StudioScreen()),
@@ -579,7 +661,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                 },
               ),
             ),
-            if (!widget.gateMode) ...[
+            if (!widget.gateMode && !widget.studioFirstOpen) ...[
               const SizedBox(height: 6),
               TextButton(
                 onPressed: () => Navigator.pop(context),

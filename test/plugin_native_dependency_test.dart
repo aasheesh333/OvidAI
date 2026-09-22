@@ -25,9 +25,26 @@ void main() {
   Future<PluginDependencyResult> installWith(
     Future<(int, String)> Function(List<String>, {String? cwd, Map<String, String>? env}) runner,
   ) {
+    // WS2: the dependency installer probes binaries first (pure
+    // `command -v`, never installs) — answer the probe with all
+    // runtimes present so these tests exercise the package-manager
+    // failure paths below it.
+    Future<(int, String)> probeAware(
+      List<String> args, {
+      String? cwd,
+      Map<String, String>? env,
+    }) {
+      if (args.isNotEmpty && args.first == 'bash') {
+        return Future.value(
+          (0, 'OK node\nOK npm\nOK python\nOK pip\nOK ovid-pkg'),
+        );
+      }
+      return runner(args, cwd: cwd, env: env);
+    }
+
     final svc = PluginDependencyService(
       runtimeRootOverride: runtimeRoot,
-      runner: runner,
+      runner: probeAware,
       ensureRuntime: (_) async => true,
     );
     final manifest = NormalizedPluginManifest(

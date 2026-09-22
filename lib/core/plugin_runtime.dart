@@ -783,6 +783,12 @@ class PluginRuntimeManager extends ChangeNotifier {
     }
   }
 
+  /// WS2: read-only snapshot of the persisted install entries, for
+  /// boot-time reconciliation owned by [AppState] (MCP intent
+  /// seed/prune). Never throws — corrupt storage yields an empty map.
+  Future<Map<String, PluginInstallEntry>> installedEntries() =>
+      _loadEntries();
+
   Future<void> _saveEntries(
     Map<String, PluginInstallEntry> entries, {
     bool reportFailure = false,
@@ -1988,11 +1994,19 @@ class PluginRuntimeManager extends ChangeNotifier {
         var rec = entry.activation;
         var dirty = false;
         if (rec.promoteOnNextBoot && rec.installedBootEpoch < epoch) {
+          // WS2 default-enable gate: a manifest that opts out of
+          // default-enable promotes into the disabled set instead of
+          // going active — only an explicit user enable turns it on.
+          // Entries the user already disabled are skipped at the top of
+          // the loop and are never auto-enabled here.
+          final defaultOn = entry.manifest.enabledByDefault;
           rec = PluginActivationRecord(
             pluginId: id,
-            state: entry.isDegraded
-                ? PluginActivation.degraded
-                : PluginActivation.globalActive,
+            state: defaultOn
+                ? (entry.isDegraded
+                      ? PluginActivation.degraded
+                      : PluginActivation.globalActive)
+                : PluginActivation.disabled,
             immediateSessionId: null,
             installedBootEpoch: rec.installedBootEpoch,
             promoteOnNextBoot: false,
@@ -2034,7 +2048,11 @@ class PluginRuntimeManager extends ChangeNotifier {
             version: entry.version,
             degradedNames: entry.degradedNames,
             probeFailures: entry.probeFailures,
-            disabled: entry.disabled,
+            // A default-off manifest promotes into the disabled set
+            // (above): persist it as a disabled entry so later boots
+            // skip it at the top of the loop and can never auto-enable
+            // it — an explicit user enable still restores it.
+            disabled: entry.disabled || !entry.manifest.enabledByDefault,
           );
           entriesChanged = true;
         }

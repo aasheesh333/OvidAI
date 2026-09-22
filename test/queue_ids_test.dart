@@ -23,6 +23,7 @@ void main() {
 
   tearDown(() {
     agent.clearQueueForTest();
+    agent.queuedRunStarterForTest = null;
     agent.dropSessionRun('qid-a');
     app.sessions.clear();
     app.activeSessionId = null;
@@ -100,5 +101,82 @@ void main() {
     // The head is promoted; the remaining id is untouched.
     expect(agent.queuedMessageIdsFor(s.id), [ids[1]]);
     expect(agent.queuedMessages, ['second']);
+  });
+
+  test('quick send steers the row to front and promotes it on stop', () async {
+    final s = session('qid-a');
+    AgentService.setRunSessionForTest(s.id);
+    agent.enqueueMessage('one');
+    agent.enqueueMessage('two');
+    agent.enqueueMessage('three');
+    final ids = agent.queuedMessageIdsFor(s.id);
+
+    // Stop only promotes a RUNNING session's queue.
+    agent.runBucketForTest(s.id).activeRunId = 'run-a';
+    String? startedText;
+    agent.queuedRunStarterForTest = (_, text) async {
+      startedText = text;
+    };
+
+    // No sessionId passed: defaults to the resolved run's session key.
+    agent.quickSendQueuedMessage(ids[2]);
+    await Future<void>.delayed(Duration.zero);
+
+    // 'three' was steered to the front and the stop promoted it
+    // immediately; the remaining rows keep their ids and order.
+    expect(startedText, 'three');
+    expect(agent.queuedMessages, ['one', 'two']);
+    expect(agent.queuedMessageIdsFor(s.id), [ids[0], ids[1]]);
+  });
+
+  test('quick send is a no-op for unknown id or empty queue', () {
+    final s = session('qid-a');
+    AgentService.setRunSessionForTest(s.id);
+    agent.enqueueMessage('one');
+
+    // Unknown id: queue untouched, no stop triggered, no crash.
+    agent.quickSendQueuedMessage(999999);
+    expect(agent.queuedMessages, ['one']);
+
+    // Empty queue: same guarantees.
+    agent.clearQueueForTest();
+    agent.quickSendQueuedMessage(999999);
+    expect(agent.queuedMessages, isEmpty);
+  });
+
+  test('quick send on an idle session steers but keeps the queue', () {
+    final s = session('qid-a');
+    AgentService.setRunSessionForTest(s.id);
+    agent.enqueueMessage('one');
+    agent.enqueueMessage('two');
+    final ids = agent.queuedMessageIdsFor(s.id);
+
+    // No active run: Stop must NOT promote (idle sessions keep their
+    // queue — the same contract as the stop button).
+    agent.quickSendQueuedMessage(ids[1], sessionId: s.id);
+
+    expect(agent.queuedMessages, ['two', 'one']);
+    expect(agent.queuedMessageIdsFor(s.id), [ids[1], ids[0]]);
+  });
+
+  test('edit-to-composer contract: row removed, text handed to composer', () {
+    final s = session('qid-a');
+    AgentService.setRunSessionForTest(s.id);
+    agent.enqueueMessage('one');
+    agent.enqueueMessage('two');
+    final ids = agent.queuedMessageIdsFor(s.id);
+
+    // Mirrors _QueueRowState._editToComposer: the row leaves the queue
+    // first, then its text is handed to the dock's onEditToComposer
+    // callback (which loads the composer's TextEditingController and
+    // focuses the input field).
+    String? composerText;
+    void onEditToComposer(String text) => composerText = text;
+    agent.removeQueuedMessageById(ids[0]);
+    onEditToComposer('one');
+
+    expect(agent.queuedMessages, ['two']);
+    expect(agent.queuedMessageIdsFor(s.id), [ids[1]]);
+    expect(composerText, 'one');
   });
 }

@@ -606,6 +606,16 @@ class NormalizedPluginManifest {
   final List<PluginMcpServer> mcpServers;
   final PluginDependencies dependencies;
 
+  /// Whether the plugin becomes active without an explicit user enable:
+  /// a fresh install (and the boot promotion that follows it) turns the
+  /// plugin on when true; when false the install lands disabled and only
+  /// an explicit enable activates it. Adapters derive this from a
+  /// manifest-declared opt-out (`enabledByDefault: false`); formats with
+  /// no such declaration default to true (an explicitly installed plugin
+  /// is on unless its author opts out). The boot path never auto-enables
+  /// an already-disabled entry regardless of this flag.
+  final bool enabledByDefault;
+
   /// Minimum requested capability set derived by inspection (spec §5.1).
   final Set<PluginCapability> requestedCapabilities;
 
@@ -633,6 +643,7 @@ class NormalizedPluginManifest {
     this.hooks = const [],
     this.mcpServers = const [],
     this.dependencies = const PluginDependencies(),
+    this.enabledByDefault = true,
     this.requestedCapabilities = const {},
     this.environmentReadNames = const {},
     this.unknownFields = const {},
@@ -667,6 +678,7 @@ class NormalizedPluginManifest {
     'hooks': hooks.map((h) => h.toJson()).toList(),
     'mcpServers': mcpServers.map((s) => s.toJson()).toList(),
     'dependencies': dependencies.toJson(),
+    'enabledByDefault': enabledByDefault,
     'requestedCapabilities': requestedCapabilities.map((c) => c.name).toList(),
     'environmentReadNames': environmentReadNames.toList(),
     'unknownFields': unknownFields,
@@ -700,6 +712,9 @@ class NormalizedPluginManifest {
           _asMapList(j['mcpServers']).map(PluginMcpServer.fromJson),
         ),
         dependencies: PluginDependencies.fromJson(_asMap(j['dependencies'])),
+        // Absent (pre-flag persisted manifests) means default-enabled —
+        // matches the constructor default so old installs keep working.
+        enabledByDefault: j['enabledByDefault'] as bool? ?? true,
         requestedCapabilities: pluginCapabilitiesFromNames(
           j['requestedCapabilities'],
         ),

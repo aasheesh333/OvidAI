@@ -18,6 +18,7 @@ import '../core/startup_coordinator.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import 'github_login_sheet.dart';
+import 'plugin_install_progress.dart';
 import 'plugin_permission_sheet.dart';
 import 'sandbox_setup.dart';
 import 'startup_progress_panel.dart';
@@ -315,19 +316,36 @@ class PluginRuntimeCallRecorderForTest {
 /// install a source the catalog has no row for (the row is created).
 /// Returns the transaction result, or null when the user cancelled /
 /// no approval (nothing changed — cancel leaves NO state).
+///
+/// [onProgress] receives line-based install output (dependency
+/// installer lines, fetch summaries) for live UI streaming; it is
+/// threaded through [AppState.installPlugin] → the runtime → the
+/// dependency installer. [sourceProgress] receives the resolver's raw
+/// byte progress for the fetch stage (a UI typically wraps it into
+/// readable labels with [fetchProgressLabel]).
 Future<PluginInstallResult?> startPluginInstallForTest(
   AppState app,
   PluginItem? plugin, {
   required PluginSource source,
+  void Function(String line)? onProgress,
+  PluginSourceProgress? sourceProgress,
 }) async {
   PluginInspection inspection;
   try {
-    inspection = await PluginRuntimeManager.I.inspect(source);
+    inspection = await PluginRuntimeManager.I.inspect(
+      source,
+      onProgress: sourceProgress,
+    );
   } catch (e) {
     return PluginInstallResult.failed(error: 'source resolution failed: $e');
   }
   PluginInspectRecorderForTest.record?.call(source, inspection.manifest);
   inspectResultsForTest.add(inspection.manifest);
+  // Wrap the resolver's byte counts into one readable fetch summary
+  // line for the live log.
+  onProgress?.call(
+    'Fetched ${source.sourceId}: ${inspection.source.fileCount} files staged',
+  );
 
   // One consolidated capability + dependency approval (Task 5 sheet).
   // An unchanged-digest grant reuses silently; anything else prompts.
@@ -373,6 +391,7 @@ Future<PluginInstallResult?> startPluginInstallForTest(
     row,
     inspection: inspection,
     origin: PluginInstallOrigin.pluginsScreen,
+    onProgress: onProgress,
   );
   if (result == null) {
     // No row to sync — remember the runtime install anyway.
@@ -671,28 +690,78 @@ GithubPluginSource? _githubSourceFromInput(String input) {
   return GithubPluginSource(owner: parts[0], repo: parts[1]);
 }
 
-/// Runs one source install to completion with progress + honest result
-/// reporting (never a silent failure).
+/// Runs one source install to completion with live progress + honest
+/// result reporting (never a silent failure).
+///
+/// A progress sheet streams the resolver's byte progress (wrapped into
+/// readable labels) and the dependency installer's line-based output
+/// into one terminal-style log with follow-mode auto-scroll. The
+/// outcome is also reported via SnackBar, so dismissing the sheet
+/// mid-install loses nothing — the install keeps running.
 Future<void> _runSourceInstall(
   BuildContext context,
   PluginSource source,
   PluginItem? row,
 ) async {
   final messenger = ScaffoldMessenger.of(context);
-  messenger.showSnackBar(
-    const SnackBar(
-      content: Text('Inspecting plugin source…'),
-      behavior: SnackBarBehavior.floating,
+  _pluginInstallSheetContext = context;
+
+  // WS2 live progress: created before the install starts so no line is
+  // lost; the sheet reads the controller's current state on build.
+  final progress = PluginInstallProgress();
+  progress.setPhase('Fetching plugin source…');
+  progress.line('Fetching ${source.sourceId}…');
+  unawaited(
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => PluginInstallProgressSheet(
+        progress: progress,
+        title: 'Installing ${row?.name ?? source.sourceId}',
+        subtitle: 'Plugin install — live log',
+      ),
     ),
   );
-  _pluginInstallSheetContext = context;
-  final result = await startPluginInstallForTest(
-    AppState.I,
-    row,
-    source: source,
-  );
+
+  PluginInstallResult? result;
+  String? crash;
+  var depsStarted = false;
+  try {
+    result = await startPluginInstallForTest(
+      AppState.I,
+      row,
+      source: source,
+      sourceProgress: (received, total) {
+        final value = total == null || total <= 0
+            ? null
+            : (received / total).clamp(0.0, 1.0);
+        progress.setPhase(
+          fetchProgressLabel(source.sourceId, received, total),
+          value,
+        );
+      },
+      onProgress: (line) {
+        // The dependency installer tags its lines `[npm]` / `[python]` /
+        // `[native]` — the first such line marks the end of the fetch
+        // stage and the start of dependency installation.
+        if (!depsStarted && line.startsWith('[')) {
+          depsStarted = true;
+          progress.setPhase('Installing dependencies…');
+        }
+        progress.line(line);
+      },
+    );
+  } catch (e) {
+    crash = '$e';
+  }
   _pluginInstallSheetContext = null;
-  final msg = result == null
+  final msg = crash != null
+      ? 'Install crashed: $crash'
+      : result == null
       ? 'Install cancelled — nothing was changed.'
       : switch (result.status) {
           PluginInstallStatus.ok =>
@@ -704,6 +773,10 @@ Future<void> _runSourceInstall(
           PluginInstallStatus.failed =>
             'Install failed: ${result.error ?? 'unknown error'}',
         };
+  progress.finish(
+    ok: crash == null && result?.status == PluginInstallStatus.ok,
+    summary: msg,
+  );
   messenger.showSnackBar(
     SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
   );
@@ -2607,13 +2680,14 @@ class _McpRuntimeInstallSheetState extends State<_McpRuntimeInstallSheet> {
     setState(() {
       _installing = true;
     });
+    // Explicit user-tapped runtime install (not a silent one): streams
+    // the installer's lines into the follow-mode log below.
     final ok = await SandboxService.I.ensureRuntime(
       widget.kind,
       onLine: (line) {
         if (!mounted) return;
         setState(() {
           _log.add(line);
-          if (_log.length > 30) _log.removeAt(0);
         });
       },
     );
@@ -2647,17 +2721,11 @@ class _McpRuntimeInstallSheetState extends State<_McpRuntimeInstallSheet> {
             ),
             if (_log.isNotEmpty) ...[
               const SizedBox(height: 10),
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Aether.surfaceAlt,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  _log.join('\n'),
-                  style: const TextStyle(fontSize: 11, fontFamily: Aether.mono),
-                ),
-              ),
+              // WS2: follow-mode auto-scroll (ScrollController +
+              // jump-to-bottom when near the bottom) replaces the old
+              // static 30-line Text — the user always sees the latest
+              // installer output and real errors.
+              ProgressLogView(lines: _log, height: 180),
             ],
             const SizedBox(height: 12),
             if (!_done)

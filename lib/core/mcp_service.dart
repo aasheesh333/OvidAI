@@ -488,8 +488,9 @@ class McpService {
   missingRuntimeOverrideForTest;
 
   /// Language runtime (`node`/`python`) a stdio command needs, or null
-  /// when the command needs none. Mirrors the mapping in [_connectStdio]
-  /// so the two can never drift apart.
+  /// when the command needs none. Used by [_connectStdio] itself (single
+  /// source of truth — the inline duplicate was removed) and by
+  /// [missingRuntimeFor]'s eager gate.
   static String? runtimeKindForCommand(String command) {
     if (command == 'npx' || command == 'node') return 'node';
     if (command == 'uvx' ||
@@ -498,6 +499,10 @@ class McpService {
         command == 'python3') {
       return 'python';
     }
+    // WS2: git-backed MCP servers need the git binary — without this
+    // case a missing git failed opaquely at spawn; now
+    // [missingRuntimeFor] reports "needs runtime (git)" up front.
+    if (command == 'git') return 'git';
     return null;
   }
 
@@ -999,23 +1004,21 @@ class McpService {
           );
         }
       }
-      // Lazy runtime ensure: if the eager Node.js/Python install during
-      // sandbox setup was skipped (offline) or failed, install on demand
-      // now — the server command needs npx / uvx to exist. Skipped for a
-      // test spawn override: the host running the test provides the
-      // runtime directly.
+      // WS2: no silent runtime installs on the MCP path — the eager
+      // `missingRuntimeFor` gate in `connect`/`connectOutcome` already
+      // reports "needs runtime (<kind>) — install runtimes, then
+      // reconnect" before spawning. This probe is the fail-closed
+      // backstop for callers that reach _connectStdio without the gate:
+      // a pure `command -v` probe (never installs) that throws the same
+      // actionable message. Skipped for a test spawn override: the host
+      // running the test provides the runtime directly.
       final cmd = server.command;
-      final kind = (cmd == 'npx' || cmd == 'node')
-          ? 'node'
-          : (cmd == 'uvx' || cmd == 'uv' || cmd == 'python' || cmd == 'python3')
-          ? 'python'
-          : null;
+      final kind = runtimeKindForCommand(cmd);
       if (kind != null && testSpawn == null) {
-        final ok = await sandbox.ensureRuntime(kind);
-        if (!ok) {
+        if (!await sandbox.hasRuntime(cmd)) {
           throw Exception(
-            'runtime "$cmd" unavailable — install ${kind == 'node' ? 'nodejs+npm' : 'python+uv'} '
-            'failed (offline?). Reconnect once you have internet.',
+            '"${server.name}" needs runtime ($kind) — install runtimes, '
+            'then reconnect',
           );
         }
       }

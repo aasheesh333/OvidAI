@@ -391,10 +391,18 @@ class SandboxService {
   // ═════════════════════════════════════════════════════════════════
   // CHECK EXISTING — sandbox prefix already installed?
   // ═════════════════════════════════════════════════════════════════
+  /// Test seam: forget the memoized [checkExisting] result so the next call
+  /// re-probes disk. Lets tests fake an installed (or missing) sandbox.
+  @visibleForTesting
+  void resetCheckExistingForTest() {
+    _checked = false;
+    _installed = false;
+    _prefix = null;
+  }
+
   Future<bool> checkExisting() async {
     if (_checked) return _installed;
-    _checked = true;
-    try {
+    _checked = true;    try {
       final files = await _ensureFilesRoot();
       final prefix = Directory('${files.path}/sandbox');
       final bash = File('${prefix.path}/bin/bash');
@@ -452,17 +460,49 @@ class SandboxService {
   // ═════════════════════════════════════════════════════════════════
   // INSTALL — extract the bundled libovid_bootstrap.so payload.
   //
-  // First-launch budget: the app must be interactive in UNDER ONE MINUTE.
-  // The multi-minute network step (phase 7: apt update + install of the
-  // node/python/git toolchain) is therefore DEFERRABLE — pass
-  // [includeRuntimes]=false in the first-launch gate so the shell opens
-  // as soon as the native core (phases 0–6) is live, and let
-  // AppState.maybeStartBackgroundRuntimeInstall() finish phase 7 in the
-  // background with a progress banner. MCP/plugin paths already lazily
-  // ensure node/python on first use (ensureRuntime), so nothing breaks
-  // while the background install is still running.
+  // Install ownership: the sandbox installs on STUDIO FIRST-OPEN (the
+  // mandatory full install: core phases 0–6 + runtimes, owned by
+  // openStudio()), never at app launch. The multi-minute network step
+  // (phase 7: apt update + install of the node/python/git toolchain) is
+  // therefore part of that Studio flow — pass [includeRuntimes]=false
+  // only for flows that intentionally install the native core alone
+  // (Health-screen hard reset; the runtimes then arrive via the Studio
+  // first-open full install or an explicit user retry). MCP/plugin paths
+  // lazily ensure node/python on first use (ensureRuntime), so nothing
+  // breaks while no install has run yet.
   // ═════════════════════════════════════════════════════════════════
+
+  /// Serializes full installs: the Studio first-open flow, the
+  /// Health-screen hard reset, and any retry can never run against each
+  /// other (or against [installCoreRuntimes]'s dpkg lock). A second caller
+  /// waits for the first to finish, mirroring the [_coreRuntimesRunning]
+  /// discipline below. [installInFlight] lets the background jobs observe
+  /// the wait without joining it.
   Future<void> install({
+    required void Function(int phase, double progress, String line) onPhase,
+    bool includeRuntimes = true,
+  }) async {
+    while (_installInFlight) {
+      await Future.delayed(const Duration(seconds: 2));
+    }
+    _installInFlight = true;
+    try {
+      await _installImpl(onPhase: onPhase, includeRuntimes: includeRuntimes);
+    } finally {
+      _installInFlight = false;
+    }
+  }
+
+  /// True while a full [install] (phases 0–7) is running. The deferred
+  /// background runtime job and the boot self-heal check this so they never
+  /// apt against a Studio first-open install in flight.
+  bool get installInFlight => _installInFlight;
+  bool _installInFlight = false;
+
+  @visibleForTesting
+  void setInstallInFlightForTest(bool v) => _installInFlight = v;
+
+  Future<void> _installImpl({
     required void Function(int phase, double progress, String line) onPhase,
     bool includeRuntimes = true,
   }) async {
@@ -659,12 +699,12 @@ class SandboxService {
 
     // ── Phase 7: Runtimes — node/npm/npx/pnpm + python/pip/uv ─────────
     // REQUIRED for MCP servers (npx/uvx) and the agent's node/python
-    // tooling, but NETWORK-BOUND (apt update + install, minutes). On the
-    // first-launch gate this phase is SKIPPED (includeRuntimes=false) so
-    // the app opens in under a minute; it then runs in the background
-    // (see AppState.maybeStartBackgroundRuntimeInstall) and every
-    // consumer also has the lazy ensureRuntime() fallback, so the app
-    // works offline and nothing blocks on it.
+    // tooling, and NETWORK-BOUND (apt update + install, minutes). It runs
+    // as part of the Studio first-open full install (or an explicit user
+    // retry) — never from a startup/background trigger. Flows that pass
+    // includeRuntimes=false (Health-screen hard reset) install the native
+    // core alone; every consumer also has the lazy ensureRuntime()
+    // fallback, so the app works offline and nothing blocks on it.
     if (includeRuntimes) {
       onPhase(7, 0.0, r'$ apt update && apt install runtimes');
       await _installRuntimesWithRetry(onPhase);
@@ -3277,11 +3317,11 @@ echo INSTALLED
   ) async {
     if (!_installed) return false;
     _runtimesRequested = true;
-    if (_coreRuntimesRunning) {
-      // A runtime install is already in flight (e.g. the deferred
-      // first-launch background job racing the readiness self-heal) —
+    if (_coreRuntimesRunning || _installInFlight) {
+      // A runtime install is already in flight (e.g. the Studio first-open
+      // full install racing the banner retry or the boot self-heal) —
       // wait for it instead of running apt twice against the dpkg lock.
-      while (_coreRuntimesRunning) {
+      while (_coreRuntimesRunning || _installInFlight) {
         await Future.delayed(const Duration(seconds: 2));
       }
       return runtimesVerified();

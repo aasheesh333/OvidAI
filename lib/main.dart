@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'core/security_service.dart';
 import 'core/state.dart';
 import 'core/theme.dart';
-import 'ui/sandbox_setup.dart';
 import 'ui/shell.dart';
 
 Future<void> main() async {
@@ -20,11 +19,11 @@ Future<void> main() async {
   if (AppState.I.secureScreen) {
     unawaited(SecurityService.I.setSecureScreen(true));
   }
-  runApp(
-    OvidApp(
-      sandboxReady: AppState.I.sandboxInstalled || AppState.I.sandboxSkipped,
-    ),
-  );
+  // First launch goes straight to the chat shell — there is no setup gate
+  // anymore. The sandbox (core + runtimes) installs on Studio first-open
+  // via openStudio(); the sandboxInstalled detection above stays available
+  // for guards elsewhere.
+  runApp(const OvidApp());
   WidgetsBinding.instance.addPostFrameCallback((_) {
     unawaited(_startReadiness());
   });
@@ -33,8 +32,7 @@ Future<void> main() async {
 Future<void> _startReadiness() => AppState.I.initializeReadiness();
 
 class OvidApp extends StatefulWidget {
-  const OvidApp({super.key, this.sandboxReady = true});
-  final bool sandboxReady;
+  const OvidApp({super.key});
   @override
   State<OvidApp> createState() => _OvidAppState();
 }
@@ -63,24 +61,7 @@ class _OvidAppState extends State<OvidApp> {
       title: 'Ovid',
       debugShowCheckedModeBanner: false,
       theme: Aether.theme(),
-      home: widget.sandboxReady
-          ? const OvidShell()
-          : const _FirstLaunchSetupGate(),
+      home: const OvidShell(),
     );
-  }
-}
-
-/// Full-screen gate shown ONLY on first launch when the sandbox is not
-/// yet installed. Runs the NATIVE CORE of SandboxService.install
-/// (payload extract → chmod → symlinks → config → bash sanity) — the
-/// network-bound Node.js/Python runtimes are deferred to a background
-/// install after the shell opens, so first launch stays under a minute.
-/// Then replaces itself with the chat shell. Non-dismissible — the core
-/// sandbox is required for all agent features (MCP, code execution, etc.).
-class _FirstLaunchSetupGate extends StatelessWidget {
-  const _FirstLaunchSetupGate();
-  @override
-  Widget build(BuildContext context) {
-    return const SandboxSetupScreen(gateMode: true);
   }
 }

@@ -80,4 +80,26 @@ void main() {
     expect(outcome.kind, McpConnectOutcomeKind.needsRuntime);
     expect(outcome.reason, contains('ode'));
   });
+
+  test('WS2: git-based servers map to the git runtime, not an opaque spawn failure',
+      () async {
+    final missing = await McpService.I.missingRuntimeFor(
+      stdio('git'),
+      hasRuntime: (_) async => false,
+      sandboxInstalled: true,
+    );
+    expect(
+      missing,
+      'git',
+      reason: 'a missing git must surface as needs-runtime(git)',
+    );
+    expect(
+      await McpService.I.missingRuntimeFor(
+        stdio('git'),
+        hasRuntime: (_) async => true,
+        sandboxInstalled: true,
+      ),
+      isNull,
+    );
+  });
 }

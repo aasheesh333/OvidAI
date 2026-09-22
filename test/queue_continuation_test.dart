@@ -103,8 +103,9 @@ void main() {
     );
   });
 
-  test('a continuation for a deleted session falls back to the active one',
-      () async {
+  test(
+      'a continuation for a deleted session is dropped with a notice, never '
+      'fired into another session', () async {
     final s = session('q-a');
     agent.runBucketForTest(s.id)
       ..activeRunId = 'run-a'
@@ -122,7 +123,19 @@ void main() {
     agent.stopRequested(sessionId: s.id);
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
-    expect(started, ['q-b:orphan']);
-    expect(fallback.messages.map((m) => m.content), contains('orphan'));
+    // The orphaned message must NEVER start a run in whatever session
+    // happens to be active now — that would be spurious output in a
+    // different chat after the response looked done.
+    expect(
+      started,
+      isEmpty,
+      reason: 'a queued message must never start in a different session',
+    );
+    // Instead the user sees a visible drop notice on the active session.
+    expect(
+      fallback.messages.map((m) => m.content),
+      contains(contains('Dropped queued message')),
+      reason: 'the user must see a visible drop notice',
+    );
   });
 }

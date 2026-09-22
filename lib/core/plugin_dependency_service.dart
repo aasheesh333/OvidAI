@@ -136,6 +136,13 @@ class PluginDependencyService {
 
   /// Runtime-ensure seam — defaults to the sandbox's lazy runtime
   /// installer (node/npm, python/pip/uv).
+  ///
+  /// WS2: retained for source compatibility, but the plugin dependency
+  /// install path NEVER calls it anymore — [_install] probes the
+  /// binaries first (pure `command -v` via [probe]) and fails missing
+  /// tools with a user-actionable message instead of silently
+  /// installing runtimes. The sandbox's own `ensureRuntime` is still
+  /// the right tool for boot maintenance and hooks.
   final Future<bool> Function(String kind) ensureRuntime;
 
   /// Install log cap (mirrors the sandbox fallback-log cap).
@@ -236,6 +243,14 @@ class PluginDependencyService {
       onProgress?.call(l);
     }
 
+    // WS2: no silent runtime installs on the plugin path — probe the
+    // dependency binaries FIRST (pure `command -v`, never installs) and
+    // fail the entries with a user-actionable message when a tool is
+    // missing. The injected `ensureRuntime` (the sandbox's silent
+    // apt-install shape, still used by boot maintenance and hooks) is
+    // deliberately NEVER called from this path.
+    final availability = await probe(cwd: rt.path);
+
     final env = SandboxService.pluginRuntimeEnv(rt.path);
     final entries = <PluginDependencyResultEntry>[];
     var anyFailed = false;
@@ -274,7 +289,11 @@ class PluginDependencyService {
     // ── npm: one batched install into the plugin-local prefix ──
     final npmDeps = manifest.dependencies.npm.toList();
     if (npmDeps.isNotEmpty) {
-      if (!await ensureRuntime('node')) {
+      if (availability['node'] != true) {
+        // WS2: node is missing — fail the entries with a user-actionable
+        // message (surfaced in the install progress log) instead of
+        // silently apt-installing a runtime.
+        log('[npm] node is not installed — install it, then retry');
         for (final d in npmDeps) {
           entries.add(PluginDependencyResultEntry(
             name: d.name,
@@ -283,7 +302,7 @@ class PluginDependencyService {
             command: '(node runtime unavailable)',
             exitCode: -1,
             status: PluginDependencyStatus.failed,
-            error: 'node runtime unavailable in sandbox',
+            error: 'node is not installed — install it, then retry',
           ));
           if (d.required) requiredFailed = true;
           anyFailed = true;
@@ -348,7 +367,10 @@ class PluginDependencyService {
     // ── Python: isolated --target per package ──
     final pyDeps = manifest.dependencies.python.toList();
     if (pyDeps.isNotEmpty) {
-      if (!await ensureRuntime('python')) {
+      if (availability['python'] != true) {
+        // WS2: python is missing — fail the entries with a
+        // user-actionable message instead of silently apt-installing.
+        log('[python] python is not installed — install it, then retry');
         for (final d in pyDeps) {
           entries.add(PluginDependencyResultEntry(
             name: d.name,
@@ -357,7 +379,7 @@ class PluginDependencyService {
             command: '(python runtime unavailable)',
             exitCode: -1,
             status: PluginDependencyStatus.failed,
-            error: 'python runtime unavailable in sandbox',
+            error: 'python is not installed — install it, then retry',
           ));
           if (d.required) requiredFailed = true;
           anyFailed = true;
@@ -383,10 +405,31 @@ class PluginDependencyService {
     }
 
     // ── Native: sandbox package manager + ABI gate ──
-    for (final d in manifest.dependencies.native) {
-      entries.add(
-        await runOne('native', d, ['ovid-pkg', 'install', d.name]),
-      );
+    // WS2: probe `ovid-pkg` first — a missing package manager fails the
+    // entries with a user-actionable message instead of an opaque spawn
+    // failure.
+    final nativeDeps = manifest.dependencies.native.toList();
+    if (nativeDeps.isNotEmpty && availability['ovid-pkg'] != true) {
+      log('[native] ovid-pkg is not installed — install it, then retry');
+      for (final d in nativeDeps) {
+        entries.add(PluginDependencyResultEntry(
+          name: d.name,
+          kind: 'native',
+          required: d.required,
+          command: '(ovid-pkg unavailable)',
+          exitCode: -1,
+          status: PluginDependencyStatus.failed,
+          error: 'ovid-pkg is not installed — install it, then retry',
+        ));
+        if (d.required) requiredFailed = true;
+        anyFailed = true;
+      }
+    } else {
+      for (final d in nativeDeps) {
+        entries.add(
+          await runOne('native', d, ['ovid-pkg', 'install', d.name]),
+        );
+      }
     }
 
     final status = requiredFailed
@@ -406,16 +449,19 @@ class PluginDependencyService {
   /// attempted): `node`, `npm`, `python`, `pip`, `ovid-pkg`. Uses the
   /// same one-shot `command -v` probe shape as the sandbox's
   /// `probeRuntimes`, via the injected runner so tests stay inert.
-  Future<Map<String, bool>> probe() async {
+  Future<Map<String, bool>> probe({String? cwd}) async {
     const bins = ['node', 'npm', 'python', 'pip', 'ovid-pkg'];
     final result = {for (final b in bins) b: false};
     try {
-      final (code, out) = await runner([
-        'bash',
-        '-c',
-        'for b in ${bins.join(' ')}; do command -v \$b >/dev/null && '
-            'echo "OK \$b" || echo "MISS \$b"; done',
-      ]);
+      final (code, out) = await runner(
+        [
+          'bash',
+          '-c',
+          'for b in ${bins.join(' ')}; do command -v \$b >/dev/null && '
+              'echo "OK \$b" || echo "MISS \$b"; done',
+        ],
+        cwd: cwd,
+      );
       if (code == 0 || out.isNotEmpty) {
         for (final l in out.split('\n')) {
           final t = l.trim();

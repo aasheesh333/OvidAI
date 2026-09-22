@@ -12,6 +12,11 @@ import '../core/repo_cache.dart';
 import '../core/studio_terminal.dart';
 import '../core/sandbox_service.dart';
 import 'github_login_sheet.dart';
+// Note: sandbox_setup.dart imports this file (for StudioScreen) — the
+// reverse import here is intentional so the not-installed banner routes
+// through the canonical openStudio() entry point. Dart resolves the
+// cycle; both files only reference each other's classes inside methods.
+import 'sandbox_setup.dart';
 
 /// Test seam: overrides the device directory picker for the Studio
 /// working-folder affordance so host widget tests can drive "change folder"
@@ -56,7 +61,13 @@ String branchForPickedRepo(Map<String, dynamic>? repo) {
 /// buffers, agent-visible tabs, and a live Ubuntu sandbox terminal. The
 /// user never sees OS/infra details — only "Sandbox ● ready".
 class StudioScreen extends StatefulWidget {
-  const StudioScreen({super.key});
+  /// Set when Studio is opened by the Studio first-open install flow
+  /// (openStudio → SandboxSetupScreen(studioFirstOpen: true) → here).
+  /// [_handleInitialAuth] then fires the one-time GitHub login prompt from
+  /// its own branch instead of the regular path, so the sheet can never
+  /// pop twice.
+  final bool postInstallGithubPrompt;
+  const StudioScreen({super.key, this.postInstallGithubPrompt = false});
   @override
   State<StudioScreen> createState() => _StudioScreenState();
 }
@@ -85,6 +96,19 @@ class _StudioScreenState extends State<StudioScreen> {
   void _handleInitialAuth() {
     final github = GitHubService.I;
     if (!mounted || _handledInitialAuth) return;
+    if (widget.postInstallGithubPrompt) {
+      // Opened by the Studio first-open install flow: the install screen
+      // replaced itself with Studio, so the GitHub prompt fires here
+      // (once) instead of the regular path below — no double popup.
+      // Don't consume the one-shot while the restore is still settling;
+      // the GitHubService listener re-fires after initialize() finishes.
+      if (github.isInitializing) return;
+      _handledInitialAuth = true;
+      if (!github.isLoggedIn) {
+        (studioLoginPromptOverrideForTest ?? showGithubLoginSheet)(context);
+      }
+      return;
+    }
     if (github.isLoggedIn) {
       // The token is assigned before the profile fetch, so during a restore
       // that will 401 `isLoggedIn` is momentarily true. Only settle once
@@ -560,6 +584,22 @@ class _StudioScreenState extends State<StudioScreen> {
       body: SafeArea(
         child: Column(
           children: [
+            // Graceful degradation: the sandbox may be missing here when the
+            // user skipped the first-open install or the prefix was wiped
+            // afterwards. Terminal commands already fail with a friendly
+            // "open Studio" error; this banner makes the fix one tap.
+            AnimatedBuilder(
+              animation: AppState.I,
+              builder: (context, _) {
+                if (AppState.I.sandboxInstalled ||
+                    AppState.I.sandboxSkipped) {
+                  return const SizedBox.shrink();
+                }
+                return _SandboxMissingBanner(
+                  onInstall: () => openStudio(context),
+                );
+              },
+            ),
             _RepoBar(
               repo: _repo ?? 'Connect a repo',
               branch: AgentService.I.sessionBranch,
@@ -602,6 +642,40 @@ class _StudioScreenState extends State<StudioScreen> {
             SizedBox(height: 240, child: const StudioTerminalTabs()),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _SandboxMissingBanner extends StatelessWidget {
+  final VoidCallback onInstall;
+  const _SandboxMissingBanner({required this.onInstall});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      color: Aether.warnLight.withValues(alpha: 0.10),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Row(
+        children: [
+          Icon(Icons.terminal_outlined, size: 15, color: Aether.warnLight),
+          const SizedBox(width: 8),
+          const Expanded(
+            child: Text(
+              'Sandbox not installed — the terminal needs the one-time setup.',
+              style: TextStyle(fontSize: 12),
+            ),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+            ),
+            onPressed: onInstall,
+            child: const Text('Install', style: TextStyle(fontSize: 12.5)),
+          ),
+        ],
       ),
     );
   }

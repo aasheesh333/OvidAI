@@ -72,6 +72,14 @@ class AgentPreset {
 /// Central registry. IDs are stable (persisted on sessions as
 /// `presetId`); unknown ids fall back to standard.
 class PresetRegistry {
+  /// Shared result-format guidance appended to every built-in persona: the
+  /// final message is what the user SEES — lead with the answer, keep
+  /// results as a visible markdown block, never bury them in reasoning.
+  static const resultFormatGuidance =
+      ' Lead with the answer. Present results as a visible markdown block '
+      '(short bullets or code), never buried inside reasoning or tool '
+      'narration.';
+
   static const standard = AgentPreset(
     id: 'standard',
     label: 'Standard',
@@ -97,8 +105,9 @@ class PresetRegistry {
       'browser_close', 'browser_tabs',
       'generate_image', 'image_gen', 'workflow', 'ralph',
     ],
-    persona: 'You are a lean agent: prefer direct answers and small file '
-        'edits. Do not open browsers or spawn subagents.',
+    persona:
+        'You are a lean agent: prefer direct answers and small file '
+        'edits. Do not open browsers or spawn subagents.$resultFormatGuidance',
   );
 
   /// Studio authoring preset: generation-heavy, wide access, persona
@@ -109,9 +118,10 @@ class PresetRegistry {
     description: 'Authoring preset — images, web research, files, with a '
         'deliverables-first persona.',
     allowedTools: [],
-    persona: 'You are a studio author. Always end a turn by writing the '
+    persona:
+        'You are a studio author. Always end a turn by writing the '
         'deliverable (report/image/code) into the shared workspace, then '
-        'summarize what changed and where it lives.',
+        'summarize what changed and where it lives.$resultFormatGuidance',
   );
 
   /// Code preset: repo work only — shell, files, git; no browser or
@@ -130,9 +140,10 @@ class PresetRegistry {
       'browser_close', 'browser_tabs',
       'generate_image', 'image_gen',
     ],
-    persona: 'You are a coding agent inside the user\'s repository. '
+    persona:
+        'You are a coding agent inside the user\'s repository. '
         'Read before editing, keep changes minimal, and never touch '
-        'files outside the workspace.',
+        'files outside the workspace.$resultFormatGuidance',
   );
 
   /// Plan preset: the read-only planning policy. Selecting it turns on
@@ -144,9 +155,10 @@ class PresetRegistry {
     description: 'Read-only planning — explore and propose before executing.',
     allowedTools: [],
     deniedTools: [],
-    persona: 'You are in plan mode. Explore the workspace read-only, then '
+    persona:
+        'You are in plan mode. Explore the workspace read-only, then '
         'present a concrete plan and call exit_plan_mode for approval '
-        'before making any change.',
+        'before making any change.$resultFormatGuidance',
   );
 
   static final List<AgentPreset> _custom = [];
