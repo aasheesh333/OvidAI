@@ -23,6 +23,7 @@ import 'repo_cache.dart';
 import 'mcp_service.dart';
 import 'session_ledger.dart';
 import 'session_search.dart';
+import 'session_browser_profiles.dart';
 import 'session_lifecycle_service.dart';
 import 'presets.dart';
 import 'hook_service.dart';
@@ -53,6 +54,22 @@ class BrowserTab {
   WebViewController? controller;
   Future<void>? fileSelectorRegistration;
   bool loadedOnce = false;
+
+  /// Owning session id — the key of the per-session browser bucket this tab
+  /// lives in. Drives the tab's WebView profile (its own cookie jar) so
+  /// session A's logins are invisible from session B.
+  String sessionId;
+
+  /// WebView profile (cookie jar + web storage) this tab browses in. Derived
+  /// from the owning session id, so each session keeps its own logins while
+  /// the app runs. Null until the tab is bound (non-Android / unsupported
+  /// WebView providers keep the process-wide jar).
+  String? profileName;
+
+  /// Whether the native `setProfile` call already ran for this WebView. The
+  /// platform forbids calling it twice or after navigation, so this gate is
+  /// what makes [AgentService.ensureTabProfile] idempotent.
+  bool profileBound = false;
 
   /// Logical viewport factor (B10, browser-resize parity): drives the
   /// media-query width ([logicalWidth]/[logicalHeight]) only. It is NOT the
@@ -104,7 +121,7 @@ class BrowserTab {
 
   bool desktopMode;
 
-  BrowserTab({required this.url, bool? desktopMode})
+  BrowserTab({required this.url, bool? desktopMode, this.sessionId = ''})
     : desktopMode = desktopMode ?? AppState.I.browserDesktopMode;
 }
 
@@ -650,6 +667,17 @@ class AgentService extends ChangeNotifier {
     AppState.I.onSessionDeleted = (sessionId) {
       dropSessionRun(sessionId);
       SkillService.I.dropSession(sessionId);
+      // Drop the session's browser bucket AND its native profile (cookie jar +
+      // web storage). Without this, deleting a chat would leave a logged-in
+      // cookie jar behind on disk that a later session id could reuse.
+      _sessionBrowsers.remove(sessionId);
+      _sessionActiveTab.remove(sessionId);
+      unawaited(_dropSessionBrowserPrefs(sessionId));
+      unawaited(
+        SessionBrowserProfiles.I.deleteProfile(
+          BrowserProfileId.forSession(sessionId),
+        ),
+      );
       if (HookService.I.hasHookListeners('session_end', sessionId: sessionId)) {
         unawaited(
           HookService.I.fire(
@@ -1740,10 +1768,17 @@ class AgentService extends ChangeNotifier {
 
   // ── PER-SESSION BROWSER (each session owns its tabs + active index) ──
   // The WebView controllers live here — OUTLIVES any BrowserScreen route.
-  // Cookies/logins are SHARED across all sessions (WebView CookieManager
-  // is app-global): a login done in session A works in sessions B…Z too.
-  // Tabs themselves are per-session: switching sessions switches tab sets;
-  // old sessions keep their tabs and pages alive as-is.
+  // Sessions are isolated in BOTH dimensions:
+  //   * tabs — each session owns its own tab list (switching sessions switches
+  //     tab sets; old sessions keep their tabs and pages alive as-is), and
+  //   * cookies/logins — each session's WebViews are bound to their own native
+  //     WebView profile (its own cookie jar), so a Google login in session A is
+  //     NOT visible from session B.
+  // Once per launch, `SessionDataSharing` may merge the accumulated logins
+  // across sessions ("Share browser logins on restart", default ON); after that
+  // merge the sessions diverge again. When the WebView provider has no
+  // multi-profile support every profile call degrades to a no-op and all tabs
+  // fall back to the process-wide CookieManager.
   static const _kBrowserTabs = 'ovid_browser_tabs';
   static const _kBrowserTabsV2 = 'ovid_browser_tabs_v2';
   static const _kBrowserActiveTab = 'ovid_browser_active_tab';
@@ -1806,8 +1841,9 @@ class AgentService extends ChangeNotifier {
   }
 
   BrowserTab _newTabInternal(String url) {
-    final tabs = browserTabs;
-    final tab = BrowserTab(url: url);
+    final key = _browserKey();
+    final tabs = _browserBucketFor(key);
+    final tab = BrowserTab(url: url, sessionId: key);
     tabs.add(tab);
     activeTabIndex = tabs.length - 1;
     return tab;
@@ -1893,8 +1929,9 @@ class AgentService extends ChangeNotifier {
   /// fall back to the global default mode and a 1.0 zoom; out-of-range zoom is
   /// clamped by the [BrowserTab.userZoom] setter.
   ({List<BrowserTab> tabs, int activeIndex})? _decodeBrowserTabsEnvelope(
-    String? raw,
-  ) {
+    String? raw, {
+    String sessionId = '',
+  }) {
     if (raw == null || raw.isEmpty) return null;
     try {
       final data = jsonDecode(raw);
@@ -1906,7 +1943,7 @@ class AgentService extends ChangeNotifier {
         if (item is! Map) continue;
         final url = item['url'];
         if (url is! String || url.isEmpty) continue;
-        final tab = BrowserTab(url: _homeUrl(url));
+        final tab = BrowserTab(url: _homeUrl(url), sessionId: sessionId);
         final mode = item['desktopMode'];
         if (mode is bool) tab.desktopMode = mode;
         final z = item['userZoom'];
@@ -1930,6 +1967,7 @@ class AgentService extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       final decoded = _decodeBrowserTabsEnvelope(
         prefs.getString('$_kBrowserSessionV2Prefix$sessionId'),
+        sessionId: sessionId,
       );
       if (decoded != null) {
         tabs.addAll(decoded.tabs);
@@ -1941,7 +1979,7 @@ class AgentService extends ChangeNotifier {
         final urls = prefs.getStringList('$_kBrowserSessionPrefix$sessionId');
         if (urls != null && urls.isNotEmpty) {
           for (final u in urls) {
-            tabs.add(BrowserTab(url: _homeUrl(u)));
+            tabs.add(BrowserTab(url: _homeUrl(u), sessionId: sessionId));
           }
           _sessionActiveTab[sessionId] =
               (prefs.getInt('$_kBrowserActiveTab$sessionId') ?? 0).clamp(
@@ -1953,9 +1991,9 @@ class AgentService extends ChangeNotifier {
     } catch (_) {}
     if (tabs.isEmpty) {
       // A brand-new session starts with a FRESH home-page tab (google.com),
-      // never a blank page — browser data (cookies/logins) is shared
-      // app-wide, but tabs are never inherited from another session.
-      tabs.add(BrowserTab(url: _defaultBrowserUrl));
+      // never a blank page — its own cookie jar (profile), so logins from
+      // other sessions never leak in, and its tabs are never inherited.
+      tabs.add(BrowserTab(url: _defaultBrowserUrl, sessionId: sessionId));
     }
   }
 
@@ -1972,6 +2010,7 @@ class AgentService extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       final decoded = _decodeBrowserTabsEnvelope(
         prefs.getString(_kBrowserTabsV2),
+        sessionId: _browserKey(),
       );
       if (decoded != null) {
         browserTabs.addAll(decoded.tabs);
@@ -1982,7 +2021,9 @@ class AgentService extends ChangeNotifier {
       final urls = prefs.getStringList(_kBrowserTabs);
       if (urls == null || urls.isEmpty) return false;
       for (final u in urls) {
-        browserTabs.add(BrowserTab(url: _homeUrl(u)));
+        browserTabs.add(
+          BrowserTab(url: _homeUrl(u), sessionId: _browserKey()),
+        );
       }
       activeTabIndex = prefs.getInt(_kBrowserActiveTab) ?? 0;
       if (activeTabIndex >= browserTabs.length) activeTabIndex = 0;
@@ -2008,8 +2049,11 @@ class AgentService extends ChangeNotifier {
       await prefs.setString(_kBrowserTabsV2, envelope);
       await prefs.setStringList(_kBrowserTabs, urls);
       await prefs.setInt(_kBrowserActiveTab, activeTabIndex);
-      // …and the per-session copy keyed by this session's id.
-      final key = _currentRunKey();
+      // …and the per-session copy keyed by the session that OWNS these tabs.
+      // `_browserKey()` (not `_currentRunKey()`): inside a background run the
+      // tabs belong to the RUN's session, and writing them under the UI-active
+      // session's key would hand one chat's tabs to another.
+      final key = _browserKey();
       if (key.isNotEmpty) {
         await prefs.setString('$_kBrowserSessionV2Prefix$key', envelope);
         await prefs.setStringList('$_kBrowserSessionPrefix$key', urls);
@@ -2040,6 +2084,23 @@ class AgentService extends ChangeNotifier {
     _sessionActiveTab.clear();
   }
 
+  /// Forget a deleted session's persisted browser state: its own tab list
+  /// (per-session keys) and its visit record.
+  ///
+  /// Tab keys are per session, so a deleted chat's pages can never be restored
+  /// into another one; removing them keeps that true even if a future session
+  /// were to reuse the id.
+  Future<void> _dropSessionBrowserPrefs(String sessionId) async {
+    if (sessionId.isEmpty) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('$_kBrowserSessionV2Prefix$sessionId');
+      await prefs.remove('$_kBrowserSessionPrefix$sessionId');
+      await prefs.remove('$_kBrowserActiveTab$sessionId');
+    } catch (_) {}
+    await SessionBrowserProfiles.I.forgetOrigins(sessionId: sessionId);
+  }
+
   /// User-facing: open a new tab.
   void newBrowserTab([String url = _defaultBrowserUrl]) {
     _newTabInternal(url);
@@ -2048,9 +2109,41 @@ class AgentService extends ChangeNotifier {
   }
 
   Future<void> _loadTabUrl(BrowserTab tab, String url) {
-    final c = tab.controller;
-    if (c == null) return Future.value();
-    return c.loadRequest(Uri.parse(url));
+    return navigateTab(tab, url);
+  }
+
+  /// Navigate [tab] to [url], binding its session profile first.
+  ///
+  /// EVERY navigation must go through here (or await [ensureTabProfile]): the
+  /// native `setProfile` call is only legal before the WebView's first
+  /// navigation, so a load racing ahead of it would pin the tab to the shared
+  /// app-wide cookie jar for its whole lifetime — i.e. another session's
+  /// logins would be visible in this one.
+  Future<void> navigateTab(BrowserTab tab, String url) async {
+    if (url.startsWith('http')) {
+      // Navigating a live-preview tab to the web turns it into a normal tab;
+      // otherwise the deferred first load would re-render the preview file
+      // while `tab.url` claims the site.
+      tab.localPreviewPath = null;
+    }
+    if (tab.controller == null) {
+      // No controller yet: hand the target to controllerForTab, whose deferred
+      // first load waits for the profile binding and then loads `url` — one
+      // load, correct jar, no race.
+      tab.url = url;
+      controllerForTab(tab);
+      return;
+    }
+    final controller = tab.controller!;
+    await ensureTabProfile(tab);
+    if (tab.controller != controller) return; // recreated meanwhile
+    tab.url = url;
+    // Visit record stays inside THIS session's bucket — other sessions can
+    // never read it (only the restart login merge unions the buckets).
+    unawaited(
+      SessionBrowserProfiles.I.rememberOrigin(url, sessionId: tab.sessionId),
+    );
+    await controller.loadRequest(Uri.parse(url));
   }
 
   /// Agent-facing: open (or reuse) the session's LIVE PREVIEW tab — a
@@ -2341,18 +2434,22 @@ class AgentService extends ChangeNotifier {
     BrowserTab tab, {
     bool reload = true,
   }) async {
-    // Clear old controller so WebView / WebSettings initialize fresh.
+    // Clear old controller so WebView / WebSettings initialize fresh. The
+    // fresh WebView is a NEW native view, so the profile must be bound again
+    // (setProfile cannot be re-applied to the same WebView, but a brand-new
+    // one has no profile yet).
     tab.controller = null;
     tab.loadedOnce = false;
+    tab.profileBound = false;
     notifyListeners();
     if (reload) {
       if (tab.localPreviewPath != null) {
-        final c = controllerForTab(tab);
-        c.loadFile(tab.localPreviewPath!);
-      } else if (tab.url.isNotEmpty && !tab.url.startsWith('ovid://')) {
+        // controllerForTab's deferred first load already renders the preview
+        // in this session's profile — no extra loadFile needed.
         controllerForTab(tab);
-        // Note: if tab.url starts with http, controllerForTab(tab) already invokes
-        // loadRequest(Uri.parse(tab.url)) when tab.loadedOnce was reset to false.
+      } else if (tab.url.isNotEmpty && !tab.url.startsWith('ovid://')) {
+        // The deferred first load binds the profile and then loads tab.url.
+        controllerForTab(tab);
       }
     }
   }
@@ -2451,6 +2548,16 @@ class AgentService extends ChangeNotifier {
               ..url = url
               ..loading = false;
             browserUrl = url;
+            // Remember this origin so a restart can find THIS session's
+            // cookies again: a cookie jar cannot be enumerated, so the merge
+            // pass replays the sites that session visited. Scoped to the tab's
+            // own session — never a shared visit log.
+            unawaited(
+              SessionBrowserProfiles.I.rememberOrigin(
+                url,
+                sessionId: tab.sessionId,
+              ),
+            );
             final title = (await tab.controller?.getTitle())?.trim();
             if (tab.url == url) {
               tab.title = title == null || title.isEmpty ? null : title;
@@ -2624,38 +2731,89 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     }
     if (!tab.loadedOnce) {
       tab.loadedOnce = true;
-      // Apply desktop viewport and user agent to tabs in desktopMode:
-      // desktop = desktop UA + wide viewport; visual scale stays userZoom.
-      // mobile (default) = device viewport with a clean mobile UA (no `wv`)
-      // so OAuth providers like Google don't reject the embedded browser.
-      if (tab.desktopMode) {
-        tab.controller!.setUserAgent(BrowserTab.desktopUserAgent);
-      } else {
-        tab.controller!.setUserAgent(BrowserTab.mobileUserAgent);
-      }
-      // Platform wide viewport setting before initial load (desktop or mobile
-      // reset). Target only this tab's fresh WebView — no cross-tab leak.
-      // Desktop tabs also force the 1280px layout width here; every later
-      // navigation re-applies it (page start AND finish) so a fresh document
-      // never lays out at device width.
-      unawaited(
-        applyDesktopViewport(
-          tab.desktopMode,
-          tabId: tab.id,
-          webViewIdentifier: webViewIdentifierFor(tab),
-          logicalWidth: viewportWidthForTest(tab),
-          userAgent: userAgentForTest(tab),
-        ),
-      );
-      final previewPath = tab.localPreviewPath;
-      if (previewPath != null) {
-        tab.controller!.loadFile(previewPath);
-      } else if (tab.url.startsWith('http')) {
-        tab.controller!.loadRequest(Uri.parse(tab.url));
-      }
+      // Everything that must happen before the first navigation — the profile
+      // bind, the user agent, the layout viewport and the load itself — is
+      // sequenced inside _bindProfileThenLoad. It cannot be done inline here:
+      // the viewport helper evaluates JavaScript on mobile, and
+      // `WebViewCompat.setProfile` is rejected once a WebView has evaluated
+      // JavaScript. Ordering is therefore load-bearing, not cosmetic.
+      unawaited(_bindProfileThenLoad(tab));
       // Non-http non-preview (ovid:// markers) — nothing to load.
     }
     return tab.controller!;
+  }
+
+  /// Bind [tab]'s session profile, then apply its pre-navigation settings and
+  /// perform its first load.
+  ///
+  /// Strict ordering is the whole point:
+  ///   1. `setProfile` — legal ONLY before the WebView navigates or evaluates
+  ///      JavaScript, and it is what gives this session its own cookie jar. A
+  ///      load (or viewport script) racing ahead of it would silently pin the
+  ///      tab to the shared app-wide jar for its whole lifetime, i.e. another
+  ///      session's logins would show up in this one.
+  ///   2. user agent — desktop = desktop UA, mobile = clean mobile UA (no `wv`)
+  ///      so OAuth providers like Google don't reject the embedded browser.
+  ///   3. layout viewport — the platform wide-viewport setting plus, on desktop
+  ///      tabs, the forced 1280px layout width so `window.innerWidth` reports a
+  ///      large screen. Targeted at THIS tab's fresh WebView only.
+  ///   4. the load itself.
+  Future<void> _bindProfileThenLoad(BrowserTab tab) async {
+    await ensureTabProfile(tab);
+    final controller = tab.controller;
+    if (controller == null || tab.controller != controller) return;
+    if (tab.desktopMode) {
+      await controller.setUserAgent(BrowserTab.desktopUserAgent);
+    } else {
+      await controller.setUserAgent(BrowserTab.mobileUserAgent);
+    }
+    if (tab.controller != controller) return;
+    await applyDesktopViewport(
+      tab.desktopMode,
+      tabId: tab.id,
+      webViewIdentifier: webViewIdentifierFor(tab),
+      logicalWidth: viewportWidthForTest(tab),
+      userAgent: userAgentForTest(tab),
+    );
+    if (tab.controller != controller) return;
+    final previewPath = tab.localPreviewPath;
+    if (previewPath != null) {
+      await controller.loadFile(previewPath);
+    } else if (tab.url.startsWith('http')) {
+      await controller.loadRequest(Uri.parse(tab.url));
+    }
+  }
+
+  /// Ensure [tab]'s native WebView is bound to its session's browser profile.
+  ///
+  /// Idempotent and safe to await from every navigation entry point: the
+  /// platform throws when `setProfile` runs after a navigation, so the first
+  /// caller wins and the flag stops any repeat. Falls back silently to the
+  /// shared default jar when the WebView provider has no profile support.
+  Future<void> ensureTabProfile(BrowserTab tab) async {
+    if (tab.profileBound) return;
+    // No native WebView yet (controller still lazy, or a non-Android
+    // platform): do NOT mark the tab bound, so a later call can still bind it.
+    final identifier = webViewIdentifierFor(tab);
+    if (identifier == null) return;
+    tab.profileBound = true;
+    final profile = tab.profileName ??= BrowserProfileId.forSession(
+      tab.sessionId.isEmpty ? _currentRunKey() : tab.sessionId,
+    );
+    final applied = await SessionBrowserProfiles.I.bind(
+      profileName: profile,
+      webViewIdentifier: identifier,
+    );
+    // Record the browsed origin so a restart can find this session's cookies
+    // again (a jar cannot be enumerated).
+    if (applied) {
+      unawaited(
+        SessionBrowserProfiles.I.rememberOrigin(
+          tab.url,
+          sessionId: tab.sessionId,
+        ),
+      );
+    }
   }
 
   /// Back-compat for existing agent tools (browser_open etc.).
@@ -2740,6 +2898,36 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
 
   /// Open-file tab list — scoped to the ACTIVE session.
   List<String> get studioOpenFiles => _studio.openFiles;
+
+  /// Re-bind the repo cache to the ACTIVE session's Studio repo/branch.
+  ///
+  /// Studio state is per session, so switching chats (or a restart-time
+  /// repo/branch backfill) must re-point the cache; otherwise Studio keeps
+  /// showing the previous session's files — the visible half of the
+  /// "sessions bleed into each other" bug.
+  Future<void> refreshStudioBindingForActiveSession() async {
+    final sessionId = _currentRunKey();
+    final repo = sessionRepoFull;
+    if (sessionId.isEmpty || repo == null || repo.isEmpty) return;
+    if (RepoCache.I.isReady &&
+        RepoCache.I.repoFull == repo &&
+        RepoCache.I.boundSessionId == sessionId) {
+      return;
+    }
+    final token = GitHubService.I.token;
+    if (token == null || token.isEmpty) return;
+    try {
+      RepoCache.I.bind(
+        repo,
+        token,
+        branch: sessionBranch,
+        sessionId: sessionId,
+      );
+      notifyListeners();
+    } catch (error) {
+      debugPrint('refreshStudioBindingForActiveSession failed: $error');
+    }
+  }
 
   void openStudioFile(String path, String content) {
     final st = _studio;
@@ -7378,6 +7566,11 @@ touch anything outside it.'''}
 Session isolation: this chat has its OWN sandbox workspace (id: ${s.sandboxId ?? s.id}).
 Other chats' files are NOT visible to you — don't ask about them, they're
 inaccessible here. ${AppState.I.shareSessionMemory ? 'The user enabled "Share session memory" — you may search across all chats via memory_search.' : ''}
+Browser isolation: the Browser panel is per session too — this chat has its own
+tabs AND its own cookie jar / logins (WebView profile), so a site the user
+signed into in ANOTHER chat is NOT logged in here, and vice versa. Never claim
+a login exists here because it exists elsewhere. ${AppState.I.shareBrowserOnRestart ? 'The user enabled "Share browser logins on restart": only the LOGINS (cookies) are merged across sessions, once, at app restart — never during this launch, and never tabs or visit history.' : 'Cross-session login sharing is OFF.'}
+Studio isolation: the repo, branch and open Studio files are per session as well.
 
 RESPONSE STYLE (default): Be concise and lightweight, like a fast coding assistant.
 Lead with the answer or result. Skip long preambles, restating the question, and
@@ -9659,10 +9852,11 @@ ${await _agentsMdBlock()}
         notifyListeners();
         try {
           // Drive the persistent browser tab (creates one if needed).
+          // navigateTab binds the session's browser profile BEFORE the load,
+          // so the page opens in THIS session's cookie jar (no cross-session
+          // login bleed).
           final tab = _activeTab;
-          tab.controller ??= controllerForTab(tab);
-          tab.controller!.loadRequest(Uri.parse(url));
-          tab.url = url;
+          await navigateTab(tab, url);
           browserUrl = url;
           notifyListeners();
           _emit('page', 'loading $url');
@@ -9718,9 +9912,7 @@ ${await _agentsMdBlock()}
           return 'local file not found: $url';
         }
         final tab = _activeTab;
-        tab.controller ??= controllerForTab(tab);
-        tab.controller!.loadRequest(Uri.parse(url));
-        tab.url = url;
+        await navigateTab(tab, url);
         browserUrl = url;
         _emit('nav', url);
         await Future.delayed(const Duration(seconds: 2));
@@ -11246,6 +11438,9 @@ ${await _agentsMdBlock()}
       case 'browser_cookies':
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
+        // Bind the session profile first: `setProfile` is illegal once a page
+        // has evaluated JavaScript, and this handler runs JS immediately.
+        await ensureTabProfile(tab);
         final set = args['set'] as String?;
         if (set != null && set.trim().isNotEmpty) {
           final js =
@@ -11271,8 +11466,21 @@ ${await _agentsMdBlock()}
         }
         if (args['clear'] == true) {
           try {
+            // Sessions each own a cookie jar, so "clear all" must clear every
+            // profile too — otherwise the other chats stay logged in.
+            final origins = await SessionBrowserProfiles.I
+                .allRememberedOrigins();
+            final profiles = AppState.I.sessions
+                .map((s) => BrowserProfileId.forSession(s.id))
+                .toList();
+            final perProfile = await SessionBrowserProfiles.I.clearCookies(
+              profiles: profiles,
+              urls: origins,
+            );
             await WebViewCookieManager().clearCookies();
-            return 'cookies cleared';
+            await SessionBrowserProfiles.I.forgetOrigins();
+            return 'cookies cleared (${profiles.length} session profiles, '
+                '$perProfile writes)';
           } catch (e) {
             return 'cookies failed: $e';
           }

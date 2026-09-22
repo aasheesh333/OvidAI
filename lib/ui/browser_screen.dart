@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -45,7 +47,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       if (active == null) {
         agent.newBrowserTab(widget.openUrl!);
       } else if (_sameHost(active.url, widget.openUrl!)) {
-        active.controller?.loadRequest(Uri.parse(widget.openUrl!));
+        unawaited(agent.navigateTab(active, widget.openUrl!));
       } else {
         agent.newBrowserTab(widget.openUrl!);
       }
@@ -117,7 +119,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (!u.startsWith('http://') && !u.startsWith('https://')) {
       u = 'https://www.google.com/search?q=${Uri.encodeComponent(u)}';
     }
-    _activeTab?.controller?.loadRequest(Uri.parse(u));
+    final tab = _activeTab;
+    if (tab == null) return;
+    unawaited(_agent.navigateTab(tab, u));
   }
 
   @override

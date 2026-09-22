@@ -7,6 +7,9 @@
 # Agent working scratch (briefs, reports, ledgers) — local only, never tracked.
 # Tracked design records live under docs/superpowers/ instead.
 .superpowers/
+# Large tool-output dumps and throwaway analysis scripts.
+.spill/
+.scratch/
 .atom/
 .build/
 .buildlog/

@@ -333,6 +333,28 @@ upgrades webview_flutter or a platform channel is added.
 
 ## Progress log
 
+- 2026-09-22 **Session isolation + restart sharing** (user report: "sessions
+  should be isolated but after restart all sessions data will be shared once"):
+  - Each session now owns a **WebView profile** (its own cookie jar) via
+    AndroidX WebKit `WebViewCompat.setProfile`, bound BEFORE the first
+    navigation; per-session browser buckets (`_sessionBrowsers`,
+    `_sessionActiveTab`) replaced the shared tab list.
+  - `BrowserProfileId` (deterministic provider-safe name per session id),
+    `CookieMerge` (pure cookie-header arithmetic, unit-tested),
+    `SessionBrowserProfiles` + `SessionDataSharing` services, native
+    `OvidBrowserProfiles` + six `ovid/webview` channel methods.
+  - Restart merge (once per launch): Settings → "Share browser logins on
+    restart" / "Share Studio repo & branch on restart" (both default ON) +
+    "Share session data now"; `session.shareOnRestart` startup task.
+  - Studio: `refreshStudioBindingForActiveSession` re-points `RepoCache` at the
+    active session's repo/branch on session switch; deleting a chat now also
+    drops its native profile and browser bucket.
+  - Stop is per session (`stopRequested(sessionId:)`) — the composer red button
+    no longer force-stops every other session.
+  - Design + risk register:
+    `docs/superpowers/plans/2026-09-22-session-isolation-and-queue.md`.
+    Tests: `test/session_browser_profiles_test.dart`.
+
 - 2026-09-03 **PR32** (user report: "app dubara open karte hi black
   screen… agent stop… background mein kaam karna chahiye… red button
   instant stop"): THREE root-cause fixes —
@@ -450,3 +472,14 @@ upgrades webview_flutter or a platform channel is added.
   covered by PR25's identical green build). PR26 (f42bd1d) Device Test
   green, Build cancelled by PR27 push (same coverage). Final state:
   197 tests, analyze 0 issues, head = 6539cd2.
+- 2026-09-22 PR29 DONE (code+tests+docs): Session isolation + once-per-launch
+  sharing. Per-session WebView cookie profiles (AndroidX WebKit multi-profile,
+  pinned 1.12.0), per-session browser tabs, per-session Studio binding,
+  session-scoped Stop, `@session:` mentions, Settings switches + manual sync.
+  Clarified contract from the user: at restart only browser/Studio DATA is
+  shared (logins + repo/branch) — never tabs, never visit history. Hardening
+  pass on the native layer fixed four real bugs (bindProfile Map-vs-bool reply,
+  deleteProfile vs a loaded profile, no-op clearCookies, merged-header
+  setCookie), added a pending-delete retry queue, per-session visit records and
+  session-delete cleanup. New test/session_browser_profiles_test.dart (logic +
+  source contracts); plan docs updated. Branch hoplite/gortyn-77773150.

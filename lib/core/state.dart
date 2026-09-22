@@ -26,6 +26,7 @@ import 'secure_store.dart';
 import 'security_service.dart';
 import 'theme.dart';
 import 'sandbox_service.dart';
+import 'session_data_sharing.dart';
 import 'session_lifecycle_service.dart';
 import 'presets.dart';
 import 'startup_coordinator.dart';
@@ -2407,6 +2408,13 @@ class AppState extends ChangeNotifier {
         timeout: const Duration(seconds: 20),
         body: GitHubService.I.initialize,
       ),
+      _startupTask(
+        id: 'session.shareOnRestart',
+        kind: StartupItemKind.sessionHook,
+        label: 'Share session data across restarts',
+        timeout: const Duration(seconds: 15),
+        body: SessionDataSharing.I.runOnStartup,
+      ),
       ...mcpTasks,
       FirebaseStartupTask(
         id: 'firebase.initialize',
@@ -2972,6 +2980,8 @@ class AppState extends ChangeNotifier {
       contextWindowOverride = prefs.getInt(_kContextWindowOverride) ?? 0;
       maxOutputTokens = prefs.getInt(_kMaxOutputTokens) ?? 0;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
+      shareStudioOnRestart = prefs.getBool(_kShareStudioOnRestart) ?? true;
+      shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? true;
       lightTheme = prefs.getBool(_kTheme) ?? false;
       secureScreen = prefs.getBool(_kSecureScreen) ?? false;
       memoryEnabled = prefs.getBool(_kMemoryEnabled) ?? true;
@@ -4004,6 +4014,8 @@ class AppState extends ChangeNotifier {
       browserDesktopMode = false;
       autoRunSafeCommands = true;
       shareSessionMemory = false;
+      shareStudioOnRestart = true;
+      shareBrowserOnRestart = true;
       lastSelectedModel = '';
       lastSelectedProviderId = null;
       try {
@@ -4053,6 +4065,48 @@ class AppState extends ChangeNotifier {
   static const _kCustomPresets = 'ovid_custom_presets';
   static const _kMcpEnvPrefix = 'ovid_mcp_env_';
   bool shareSessionMemory = false;
+
+  /// Share Studio repo/branch selections across sessions ON RESTART
+  /// (persisted, default ON).
+  ///
+  /// Sessions stay isolated while the app runs: switching to another chat
+  /// keeps that chat's own repo, branch, open files and buffers. On the next
+  /// launch every session starts from the union of what was selected before,
+  /// so a repo connected in one chat is offered in all of them. Turn this OFF
+  /// to keep repo/branch strictly per session, even across restarts.
+  static const _kShareStudioOnRestart = 'ovid_share_studio_on_restart';
+  bool shareStudioOnRestart = true;
+
+  /// Share browser logins (cookies) across sessions ON RESTART
+  /// (persisted, default ON).
+  ///
+  /// Each session browses in its own WebView profile, so a Google login in
+  /// one chat is invisible from another while the app runs. On the next
+  /// launch the accumulated logins are copied into every session, so the user
+  /// is signed in everywhere, then the sessions diverge again. Turn this OFF
+  /// for strict per-session cookies.
+  static const _kShareBrowserOnRestart = 'ovid_share_browser_on_restart';
+  bool shareBrowserOnRestart = true;
+
+  Future<void> setShareStudioOnRestart(bool v) async {
+    shareStudioOnRestart = v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kShareStudioOnRestart, v);
+    } catch (_) {}
+    if (v) unawaited(SessionDataSharing.I.shareStudioOnRestart());
+  }
+
+  Future<void> setShareBrowserOnRestart(bool v) async {
+    shareBrowserOnRestart = v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kShareBrowserOnRestart, v);
+    } catch (_) {}
+    if (v) unawaited(SessionDataSharing.I.shareBrowserOnRestart());
+  }
 
   // ── Light/dark theme (the theme controller light/dark preference parity) ──
   static const _kTheme = 'ovid_light_theme';

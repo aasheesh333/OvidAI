@@ -254,7 +254,10 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 
 ### Phase C — Browser / session / subagents / usage / auth
 12. **B10** Browser viewport-resize tool.
-13. **B9** Per-session cookie isolation (research WebView profile limits; document or accept).
+13. **B9** DONE — per-session cookie isolation via AndroidX WebKit
+    multi-profile (`setProfile` before the first navigation), with a documented
+    degradation path when the provider has no profile support. See
+    `docs/superpowers/plans/2026-09-22-session-isolation-and-queue.md`.
 14. **B8** Subagents screen over `_BgSubagent`.
 15. **B14** Live token counter + charts in Usage; per-session (not global) stats line.
 16. **B7** Google sign-in (`google_sign_in` + `FirebaseAuth.signInWithCredential`).
@@ -532,4 +535,8 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 2. FTS5 search needs `sqlite3_flutter_libs` (~2 MB APK). Acceptable?
 3. Trajectory ledger implies event-sourced session history — a full rewrite is risky. Ship an inspector-only view over the existing message list first?
 4. Presets / persona and Ralph — worth it on mobile, or intentionally skip?
-5. Per-session browser cookie isolation may be impossible with a single WebView profile. Accept the limitation and document it?
+5. ~~Per-session browser cookie isolation may be impossible with a single
+   WebView profile.~~ **Resolved**: `WebViewCompat.setProfile` (AndroidX WebKit
+   1.12+, WebView 125+) gives each session its own cookie jar. Below that the
+   bind is a logged no-op and sessions share the process-wide `CookieManager`
+   (isolation degrades; the app keeps working).

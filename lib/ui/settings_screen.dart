@@ -12,6 +12,8 @@ import '../core/firebase_service.dart';
 import '../core/hook_service.dart';
 import '../core/presets.dart';
 import '../core/skills.dart';
+import '../core/session_browser_profiles.dart';
+import '../core/session_data_sharing.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'auth_screen.dart';
@@ -185,6 +187,7 @@ class SettingsScreen extends StatelessWidget {
             const _PresetsScreen(),
           ),
           const _ShareMemoryTile(),
+          const _SessionDataSharingTile(),
           const _SettingsSwitchTile(
             icon: Icons.folder_shared_outlined,
             title: 'GitHub sync',
@@ -719,12 +722,27 @@ class _StorageScreenState extends State<_StorageScreen> {
   Future<void> _clearCookies() async {
     setState(() => _clearing = true);
     try {
+      // Per-session profiles hold their own jars, so clearing only the default
+      // one would leave every session still logged in.
+      // Every session's visit record is needed to find their cookies (a jar
+      // cannot be enumerated), then all of it is wiped.
+      final origins = await SessionBrowserProfiles.I.allRememberedOrigins();
+      final profiles = AppState.I.sessions
+          .map((s) => BrowserProfileId.forSession(s.id))
+          .toList();
+      final perProfile = await SessionBrowserProfiles.I.clearCookies(
+        profiles: profiles,
+        urls: origins,
+      );
       final cleared = await WebViewCookieManager().clearCookies();
+      await SessionBrowserProfiles.I.forgetOrigins();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            cleared ? 'Browser cookies cleared.' : 'No browser cookies found.',
+            (cleared || perProfile > 0)
+                ? 'Browser cookies cleared (all sessions).'
+                : 'No browser cookies found.',
           ),
           behavior: SnackBarBehavior.floating,
         ),
@@ -907,6 +925,129 @@ class _ShareMemoryTile extends StatelessWidget {
         ),
         onTap: () => app.setShareSessionMemory(!app.shareSessionMemory),
       ),
+    );
+  }
+}
+
+/// Per-session data sharing ON RESTART (Studio repo/branch + browser logins).
+///
+/// While the app runs, sessions are fully isolated: each one has its own
+/// Studio repo/branch/open files and its own browser tabs AND its own WebView
+/// cookie jar, so a login in one chat is invisible from another.
+///
+/// These two switches decide what happens at the NEXT launch — and ONLY for
+/// *data*, never for *state*: the logins (cookies) and the Studio repo/branch
+/// are merged once, so the user is signed in and connected everywhere; tabs,
+/// open pages, open files/buffers and visit history are NEVER carried into
+/// another session. Each chat still restores exactly its own tabs.
+class _SessionDataSharingTile extends StatelessWidget {
+  const _SessionDataSharingTile();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    final sharing = SessionDataSharing.I;
+    return AnimatedBuilder(
+      animation: Listenable.merge([app, sharing]),
+      builder: (_, _) {
+        final report = sharing.lastBrowserReport;
+        return Column(
+          children: [
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.badge_outlined,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              title: const Text(
+                'Share browser logins on restart',
+                style: TextStyle(fontSize: 14),
+              ),
+              subtitle: Text(
+                app.shareBrowserOnRestart
+                    ? 'ON — each session browses in its OWN profile (separate '
+                          'cookies); at restart the logins are merged once '
+                          'into every session. Tabs and visit history are '
+                          'never shared.'
+                    : 'OFF — cookies stay strictly per session, even across '
+                          'restarts.',
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+              trailing: SizedBox(
+                height: 26,
+                child: Switch(
+                  value: app.shareBrowserOnRestart,
+                  activeTrackColor: Aether.accent,
+                  onChanged: (v) => app.setShareBrowserOnRestart(v),
+                ),
+              ),
+              onTap: () =>
+                  app.setShareBrowserOnRestart(!app.shareBrowserOnRestart),
+            ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.account_tree_outlined,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              title: const Text(
+                'Share Studio repo on restart',
+                style: TextStyle(fontSize: 14),
+              ),
+              subtitle: Text(
+                app.shareStudioOnRestart
+                    ? 'ON — each session keeps its own repo/branch/open files; '
+                          'at restart the last connected repo is offered to '
+                          'every session.'
+                    : 'OFF — repo/branch stay strictly per session.',
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+              trailing: SizedBox(
+                height: 26,
+                child: Switch(
+                  value: app.shareStudioOnRestart,
+                  activeTrackColor: Aether.accent,
+                  onChanged: (v) => app.setShareStudioOnRestart(v),
+                ),
+              ),
+              onTap: () => app.setShareStudioOnRestart(!app.shareStudioOnRestart),
+            ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.sync_outlined,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              title: const Text('Share session data now', style: TextStyle(fontSize: 14)),
+              subtitle: Text(
+                report == null
+                    ? 'Runs the same merge the next app restart performs — '
+                          'useful right after logging in somewhere.'
+                    : report.message,
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+              trailing: const Icon(Icons.chevron_right, size: 18),
+              onTap: () async {
+                final messenger = ScaffoldMessenger.of(context);
+                await sharing.shareBrowserOnRestart(force: true);
+                final filled = await sharing.shareStudioOnRestart(force: true);
+                final msg = sharing.lastBrowserReport?.message ?? '';
+                messenger.showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      '$msg Studio repo filled for $filled session'
+                      '${filled == 1 ? '' : 's'}.',
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        );
+      },
     );
   }
 }

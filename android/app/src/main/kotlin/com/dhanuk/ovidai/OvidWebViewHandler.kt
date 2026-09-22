@@ -116,8 +116,74 @@ class OvidWebViewHandler(
                     )
                 }
             }
+            // ── Per-session browser profiles ────────────────────────────────
+            // Each chat session owns its own cookie jar / web storage so a
+            // login in one session is invisible from another. See
+            // OvidBrowserProfiles for the restart-sharing details.
+            "profilesSupported" -> result.success(OvidBrowserProfiles.supported())
+
+            "bindProfile" -> {
+                val identifier = call.argument<Number>("webViewIdentifier")?.toLong()
+                val profileName = call.argument<String>("profileName").orEmpty()
+                val webView = resolveWebView(identifier)
+                if (webView == null || profileName.isBlank()) {
+                    result.success(
+                        mapOf("applied" to false, "profile" to profileName)
+                    )
+                    return
+                }
+                onUi {
+                    // Plain Boolean: the Dart caller reads `invokeMethod<bool>`.
+                    result.success(OvidBrowserProfiles.bind(webView, profileName))
+                }
+            }
+
+            // Profile/WebView APIs are @UiThread; every branch below hops to it
+            // (onUi runs inline when no activity is attached, so the channel
+            // still replies exactly once in tests).
+            "listProfiles" -> onUi {
+                result.success(OvidBrowserProfiles.profileNames())
+            }
+
+            "deleteProfile" -> {
+                val name = call.argument<String>("profileName").orEmpty()
+                onUi { result.success(OvidBrowserProfiles.delete(name)) }
+            }
+
+            "shareProfileCookies" -> {
+                val profiles = call.argument<List<String>>("profiles").orEmpty()
+                val urls = call.argument<List<String>>("urls").orEmpty()
+                onUi {
+                    result.success(
+                        mapOf(
+                            "copied" to OvidBrowserProfiles.shareCookies(profiles, urls),
+                            "profiles" to profiles.size,
+                            "urls" to urls.size
+                        )
+                    )
+                }
+            }
+
+            "clearProfileCookies" -> {
+                val profiles = call.argument<List<String>>("profiles").orEmpty()
+                val urls = call.argument<List<String>>("urls").orEmpty()
+                onUi {
+                    result.success(OvidBrowserProfiles.clearCookies(profiles, urls))
+                }
+            }
+
             else -> result.notImplemented()
         }
+    }
+
+    /**
+     * Run [block] on the UI thread. WebView/Profile calls must happen there;
+     * with no activity attached (unit tests, headless engine) the block runs
+     * inline so the channel still replies exactly once.
+     */
+    private fun onUi(block: () -> Unit) {
+        val act = activity
+        if (act == null) block() else act.runOnUiThread(block)
     }
 
     /**

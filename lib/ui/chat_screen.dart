@@ -5381,14 +5381,14 @@ class _InputBarState extends State<_InputBar> {
                       final Color bg;
                       final String tip;
                       if (runningNow && !hasDraft) {
-                        // Running + empty → STOP (red). Hard force-stop:
-                        // every session stops right where it is; queued
+                        // Running + empty → STOP (red). Stop only the current
+                        // session so other sessions remain isolated; queued
                         // messages still send next.
                         icon = Icons.stop_rounded;
                         bg = Colors.redAccent;
                         tip = hasQueued
-                            ? 'Stop everything (next queued will run)'
-                            : 'Stop everything now';
+                            ? 'Stop session (next queued will run)'
+                            : 'Stop session';
                       } else if (runningNow && hasDraft) {
                         // Running + draft → SEND-TO-QUEUE (teal).
                         icon = Icons.arrow_upward;
@@ -5410,7 +5410,11 @@ class _InputBarState extends State<_InputBar> {
                           icon: Icon(icon, size: 18, color: Colors.white),
                           onPressed: () {
                             if (runningNow && !hasDraft) {
-                              AgentService.I.hardStopAll();
+                              if (sessionId != null) {
+                                AgentService.I.stopRequested(sessionId: sessionId);
+                              } else {
+                                AgentService.I.hardStopAll();
+                              }
                             } else {
                               onSend();
                             }
