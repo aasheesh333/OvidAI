@@ -621,7 +621,11 @@ class HookService extends ChangeNotifier {
     );
     // Windows-style entrypoints never reach a shell verbatim: prefer the
     // runnable sibling when one exists (fail-open keeps the old string).
-    final command = resolveHookPayload(hook);
+    var command = resolveHookPayload(hook);
+    final root = _rootPathFor(hook.pluginId, hook);
+    if (root.isNotEmpty) {
+      command = expandPluginRoot(command, root);
+    }
     if (gate) {
       final g = gateExecutorForTest;
       if (g != null) return g(command, env);

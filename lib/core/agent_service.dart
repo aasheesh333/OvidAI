@@ -1532,10 +1532,11 @@ class AgentService extends ChangeNotifier {
   }
 
   /// Enqueue a message to run after the current turn completes.
-  void enqueueMessage(String text) {
+  void enqueueMessage(String text, {String? sessionId}) {
     if (text.trim().isEmpty) return;
-    _queueAdd(_runResolved, text);
-    _emit('think', 'queued message ${_queue.length}');
+    final run = sessionId != null ? _runFor(sessionId) : _runResolved;
+    _queueAdd(run, text);
+    _emit('think', 'queued message ${run.queue.length}', sessionId: sessionId);
     notifyListeners();
   }
 
@@ -1620,10 +1621,13 @@ class AgentService extends ChangeNotifier {
   /// current run injects it on the very next request — an implicit-AND
   /// steering affordance per row.
   void steerQueuedMessage(int index) {
-    if (index < 0 || index >= _queue.length) return;
-    final msg = _queue.removeAt(index);
-    _queue.insert(0, msg);
-    _syncQueueIds(_runResolved);
+    final run = _runResolved;
+    if (index < 0 || index >= run.queue.length) return;
+    _syncQueueIds(run);
+    final msg = run.queue.removeAt(index);
+    final msgId = run.queueIds.removeAt(index);
+    run.queue.insert(0, msg);
+    run.queueIds.insert(0, msgId);
     notifyListeners();
   }
 

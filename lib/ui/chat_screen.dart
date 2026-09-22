@@ -1705,7 +1705,7 @@ class _ChatScreenState extends State<ChatScreen>
                             AgentService.I.stopRequested(sessionId: s.id);
                             // fall through to send
                           } else {
-                            AgentService.I.enqueueMessage(t);
+                            AgentService.I.enqueueMessage(t, sessionId: s.id);
                             _input.clear();
                             return;
                           }
