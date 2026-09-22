@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'sandbox_pkg.dart';
+import 'global_repo_registry.dart';
 
 typedef SandboxPolicy = ({
   List<String> allowedRoots,
@@ -276,10 +277,26 @@ class SandboxService {
   String workDirNameFor(String sessionSandboxId) => 'ws_$sessionSandboxId';
 
   Future<Directory> workDirFor(String sessionSandboxId) async {
+    // A Studio repo binding wins: the session works inside the shared
+    // clone-once working copy instead of an isolated ws_<id> folder.
+    final bound = await _boundWorkspaceFor(sessionSandboxId);
+    if (bound != null) return bound;
     final root = await _ensureFilesRoot();
     final d = Directory('${root.path}/workspaces/ws_$sessionSandboxId');
     if (!d.existsSync()) d.createSync(recursive: true);
     return d;
+  }
+
+  /// Registry-backed workspace override (null when the session has no
+  /// binding or its folder vanished). Never throws — callers fall back to
+  /// the default per-session workspace.
+  Future<Directory?> _boundWorkspaceFor(String sessionSandboxId) async {
+    try {
+      final reg = await GlobalRepoRegistry.instance();
+      final path = reg.boundWorkspaceFor(sessionSandboxId);
+      if (path != null) return Directory(path);
+    } catch (_) {}
+    return null;
   }
 
   /// Sync view of a session workspace (for @file pickers that cannot
@@ -287,6 +304,12 @@ class SandboxService {
   /// best-guess Directory that may not exist yet (the picker filters by
   /// existsSync, so this is safe).
   Directory workDirForSync(String sessionSandboxId) {
+    // Honor an already-initialized repo binding without blocking; when
+    // the registry hasn't warmed yet this is null → default behavior.
+    final bound = GlobalRepoRegistry.maybeInstance?.boundWorkspaceFor(
+      sessionSandboxId,
+    );
+    if (bound != null) return Directory(bound);
     if (_syncRoot != null) {
       return Directory('${_syncRoot!.path}/workspaces/ws_$sessionSandboxId');
     }
@@ -298,10 +321,22 @@ class SandboxService {
   /// Warm the sync root (call once at app start; safe to repeat).
   Future<void> warmSyncRoot() async {
     _syncRoot ??= await _ensureFilesRoot();
+    // Warm the repo registry alongside so the sync read path above can
+    // honor session→repo bindings without awaiting.
+    try {
+      await GlobalRepoRegistry.instance();
+    } catch (_) {}
   }
 
   /// Delete a session's workspace (session deleted → files go too).
   Future<void> deleteWorkspace(String sessionSandboxId) async {
+    // Drop the session's repo binding too (the shared clone itself is
+    // kept — other sessions may still use it).
+    try {
+      await (await GlobalRepoRegistry.instance()).unbindSession(
+        sessionSandboxId,
+      );
+    } catch (_) {}
     try {
       final root = await _ensureFilesRoot();
       final d = Directory('${root.path}/workspaces/ws_$sessionSandboxId');
@@ -2540,6 +2575,13 @@ audit=false
   /// library is what `invalid_use_of_visible_for_testing_member` flags.
   static bool get sandboxReady =>
       execCheckedOverrideForTest != null || I.isInstalled;
+
+  /// Whether a test override currently stands in for the sandbox at the
+  /// [execChecked] boundary. Unlike [execCheckedOverrideForTest] this is
+  /// NOT `@visibleForTesting`, so production libraries (e.g. the hook
+  /// runtime) may read it: the hook env contract is asserted at exactly
+  /// this boundary, and the stdin-capable spawn path must not bypass it.
+  static bool get hasExecOverride => execCheckedOverrideForTest != null;
 
   /// Exit-code-checked exec — returns (exitCode, combinedOutput).
   /// Unlike [exec], this NEVER swallows failures: the caller can see

@@ -8634,7 +8634,17 @@ block</pre>
       // Source contract: a missed approval dock must not park the run
       // for the tool's full budget. Questions/plan reviews are exempt.
       final src = File('lib/core/agent_service.dart').readAsStringSync();
-      expect(src, contains("Timer(const Duration(seconds: 120)"));
+      // Production grace is still 120 s when the approval UI is mounted…
+      expect(
+        src,
+        contains('approvalUiReady\n        ? const Duration(seconds: 120)'),
+      );
+      // …but fail-closed when nobody can answer (unit tests, background
+      // isolates, user on another screen): a short grace instead of the
+      // full 2-minute wedge.
+      expect(src, contains('const Duration(seconds: 5)'));
+      expect(src, contains('static bool approvalUiReady = false;'));
+      expect(src, contains('approval unanswered with no approval UI'));
       expect(src, contains("req.questions == null && t != 'exit_plan_mode'"));
       expect(src, contains('approval unanswered for 120s'));
       // The timeout never double-completes against a user tap or Stop.
@@ -11832,9 +11842,16 @@ You are an expert security auditor reviewing code for vulnerabilities.
       },
     );
 
-    test('sse transport rejected with clear Streamable HTTP error', () async {
+    test('sse transport is accepted (no Streamable-HTTP rejection)', () async {
+      // SSE is a supported legacy transport (Claude Code parity). The
+      // transport gate must NOT reject it — a bad endpoint fails
+      // truthfully at dial time instead.
+      McpService.I.httpClientForTest = MockClient((request) async {
+        return http.Response('not an sse stream', 500);
+      });
+      addTearDown(() => McpService.I.httpClientForTest = null);
       final server = McpServer(
-        name: 'sse-reject',
+        name: 'sse-accept',
         author: 't',
         description: '',
         category: 'Custom',
@@ -11843,7 +11860,7 @@ You are an expert security auditor reviewing code for vulnerabilities.
         url: 'https://sse.example.com/mcp',
       );
       final status = await McpService.I.connect(server);
-      expect(status.toLowerCase(), contains('sse transport not supported'));
+      expect(status.toLowerCase(), isNot(contains('not supported')));
     });
 
     test('stdio tolerates string ids in responses', () async {
@@ -13021,9 +13038,24 @@ Find security defects.''');
         expect(manifest.mcpServers.map((server) => server.name), [
           'local-fs',
           'remote',
+          // SSE is a supported transport now (Claude Code parity): the
+          // fixture's legacy-events SSE server imports instead of being
+          // filtered out.
+          'legacy-events',
         ]);
         expect(manifest.mcpServers.first.envNames, ['ACME_TOKEN']);
-        expect(manifest.mcpServers.last.headerNames, ['Authorization']);
+        expect(
+          manifest.mcpServers
+              .firstWhere((s) => s.name == 'remote')
+              .headerNames,
+          ['Authorization'],
+        );
+        expect(
+          manifest.mcpServers
+              .firstWhere((s) => s.name == 'legacy-events')
+              .transport,
+          'sse',
+        );
         expect(jsonEncode(manifest.toJson()), isNot(contains('super-secret')));
         expect(jsonEncode(manifest.toJson()), isNot(contains('Bearer secret')));
         expect(manifest.mcpServers.first.frontmatter['futureServerField'], 7);
@@ -13061,13 +13093,16 @@ Find security defects.''');
           isNot(contains('wrapper-secret')),
         );
         expect(manifest.unknownFields['hooks.futureHooksTopLevel'], 'retained');
+        // SSE is supported now (Claude Code parity): no required-severity
+        // "Streamable HTTP" rejection issue is raised for the fixture's
+        // legacy-events SSE server anymore.
         expect(
           manifest.compatibility.any(
             (issue) =>
                 issue.severity == CompatibilitySeverity.required &&
                 issue.message.contains('Streamable HTTP'),
           ),
-          isTrue,
+          isFalse,
         );
         expect(
           manifest.compatibility.any(
@@ -13174,7 +13209,7 @@ WORKSPACE_PROFILE = "secret-profile"
     );
 
     test(
-      'PLUGIN2: generic MCP supports aliases and direct definitions and rejects SSE as required',
+      'PLUGIN2: generic MCP supports aliases and direct definitions and accepts SSE',
       () {
         final adapter = GenericMcpAdapter();
         final mapped = adapter.inspectConfig(
@@ -13240,9 +13275,12 @@ WORKSPACE_PROFILE = "secret-profile"
         ]);
         expect(rawUrl.mcpServers.single.transport, 'http');
         expect(rawUrl.mcpServers.single.url, 'https://example.test/raw-mcp');
-        expect(sse.mcpServers, isEmpty);
-        expect(sse.hasRequiredIssues, isTrue);
-        expect(sse.compatibility.single.message, contains('Streamable HTTP'));
+        // SSE is a supported legacy transport (Claude Code parity): the
+        // adapter imports it with transport/url preserved and raises no
+        // required-severity compatibility issue.
+        expect(sse.mcpServers.single.transport, 'sse');
+        expect(sse.mcpServers.single.url, 'https://example.test/sse');
+        expect(sse.hasRequiredIssues, isFalse);
       },
     );
 
@@ -18008,7 +18046,7 @@ cwd = 'tools'
       expect(env['OVID_HOOK_SESSION'], 'p8-sess-env');
     });
 
-    test('per-hook timeoutS is honored and capped at 120 s', () async {
+    test('per-hook timeoutS is honored and capped at 300 s', () async {
       p8Register('p8/timeout', [
         p8Hook('notification', 't-default', ordinal: 0),
         p8Hook('notification', 't-600', ordinal: 1, timeoutS: 600),
@@ -18022,11 +18060,13 @@ cwd = 'tools'
       };
       addTearDown(() => svc.execTimeoutForTest = null);
       await svc.fire('notification', 'p8-sess-timeout');
+      // Cap raised 120 → 300 (Claude Code parity: compilers/test suites may
+      // legitimately need the full five minutes — see maxTimeoutS).
       expect(secs, [
         30,
-        120,
+        300,
         5,
-      ], reason: 'default 30, declared 600 clamped to 120, declared 5 kept');
+      ], reason: 'default 30, declared 600 clamped to 300, declared 5 kept');
     });
 
     test(

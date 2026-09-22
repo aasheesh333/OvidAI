@@ -889,11 +889,16 @@ class _ChatScreenState extends State<ChatScreen>
   @override
   void initState() {
     super.initState();
+    // An approval UI is now mounted: tool approval cards are answerable.
+    // (AgentService.approvalUiReady gates the fail-closed grace in _askUser.)
+    AgentService.approvalUiReady = true;
     _scroll.addListener(_onScroll);
   }
 
   @override
   void dispose() {
+    // No approval UI can answer anymore: fail approvals closed.
+    AgentService.approvalUiReady = false;
     _scroll.dispose();
     _input.dispose();
     _inputFocus.dispose();
@@ -6011,27 +6016,39 @@ class _QueueRow extends StatefulWidget {
   State<_QueueRow> createState() => _QueueRowState();
 }
 
+/// Action spec for [_QueueRow]'s icon buttons, in left-to-right order.
+/// Exposed so tests can assert the row's action order, icons and tooltips
+/// without spinning up the whole chat UI.
+@visibleForTesting
+class QueueRowAction {
+  final IconData icon;
+  final String tooltip;
+
+  /// Stable id: 'quickSend', 'editInComposer', 'delete'.
+  final String action;
+  const QueueRowAction(this.icon, this.tooltip, this.action);
+}
+
+@visibleForTesting
+const queueRowActions = <QueueRowAction>[
+  QueueRowAction(
+    Icons.fast_forward_outlined,
+    'Quick send: stop current run and send this now',
+    'quickSend',
+  ),
+  QueueRowAction(
+    Icons.edit_outlined,
+    'Edit in composer',
+    'editInComposer',
+  ),
+  QueueRowAction(
+    Icons.delete_outline,
+    'Delete',
+    'delete',
+  ),
+];
+
 class _QueueRowState extends State<_QueueRow> {
-  bool _editing = false;
-  late final TextEditingController _ctrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = TextEditingController(text: widget.text);
-  }
-
-  @override
-  void didUpdateWidget(_QueueRow old) {
-    super.didUpdateWidget(old);
-    // The row is keyed by id, so this State belongs to the same message.
-    // Only resync the buffer when not actively editing, so a reorder while
-    // editing never clobbers what the user typed.
-    if (!_editing && old.text != widget.text) {
-      _ctrl.text = widget.text;
-    }
-  }
-
   void _delete() {
     final agent = AgentService.I;
     final id = widget.id;
@@ -6039,17 +6056,6 @@ class _QueueRowState extends State<_QueueRow> {
       agent.removeQueuedMessageById(id);
     } else {
       agent.removeQueuedMessage(widget.index);
-    }
-    widget.onEdited();
-  }
-
-  void _steer() {
-    final agent = AgentService.I;
-    final id = widget.id;
-    if (id != null) {
-      agent.steerQueuedMessageById(id);
-    } else {
-      agent.steerQueuedMessage(widget.index);
     }
     widget.onEdited();
   }
@@ -6087,55 +6093,7 @@ class _QueueRowState extends State<_QueueRow> {
   }
 
   @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final agent = AgentService.I;
-    if (_editing) {
-      return Padding(
-        padding: const EdgeInsets.only(top: 4),
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _ctrl,
-                autofocus: true,
-                style: const TextStyle(fontSize: 12.5),
-                decoration: InputDecoration(
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 7,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: BorderSide(color: Aether.hairline),
-                  ),
-                ),
-                onSubmitted: (v) {
-                  final id = widget.id;
-                  if (id != null) {
-                    agent.editQueuedMessageById(id, v);
-                  } else {
-                    agent.editQueuedMessage(widget.index, v);
-                  }
-                  setState(() => _editing = false);
-                  widget.onEdited();
-                },
-              ),
-            ),
-            IconButton(
-              icon: const Icon(Icons.close, size: 15),
-              onPressed: () => setState(() => _editing = false),
-            ),
-          ],
-        ),
-      );
-    }
     return Padding(
       padding: const EdgeInsets.only(top: 4),
       child: Row(
@@ -6148,44 +6106,27 @@ class _QueueRowState extends State<_QueueRow> {
               style: TextStyle(fontSize: 12.5, color: Aether.text),
             ),
           ),
-          // Quick send (the WS4 action): stop the current run and send this
-          // queued message right now — it is steered to the front and the
-          // stop promotes the queue head immediately.
+          // Quick send FIRST: stop the current run and send this queued
+          // message right now — it is steered to the front and the stop
+          // promotes the queue head immediately.
           _QueueAction(
-            icon: Icons.bolt,
+            icon: queueRowActions[0].icon,
             color: Aether.warn,
-            tooltip: 'Quick send: stop current run and send this now',
+            tooltip: queueRowActions[0].tooltip,
             onTap: _quickSend,
-          ),
-          // Strict-steer (the queue steering parity): pull this row to the
-          // front so the running turn injects it on the very next request.
-          _QueueAction(
-            icon: Icons.fast_forward_outlined,
-            color: Aether.accent,
-            tooltip: 'Send next',
-            onTap: _steer,
-          ),
-          _QueueAction(
-            icon: Icons.edit_outlined,
-            color: Aether.textMuted,
-            tooltip: 'Edit',
-            onTap: () {
-              _ctrl.text = widget.text;
-              setState(() => _editing = true);
-            },
           ),
           // Move this row's text into the composer for a fuller edit; the
           // row leaves the queue so a resend doesn't duplicate it.
           _QueueAction(
-            icon: Icons.open_in_new_outlined,
+            icon: queueRowActions[1].icon,
             color: Aether.textMuted,
-            tooltip: 'Edit in composer',
+            tooltip: queueRowActions[1].tooltip,
             onTap: _editToComposer,
           ),
           _QueueAction(
-            icon: Icons.delete_outline,
+            icon: queueRowActions[2].icon,
             color: Aether.textMuted,
-            tooltip: 'Delete',
+            tooltip: queueRowActions[2].tooltip,
             onTap: _delete,
           ),
         ],

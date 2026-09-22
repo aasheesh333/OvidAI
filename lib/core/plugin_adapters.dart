@@ -22,8 +22,10 @@ import 'state.dart' show shellSplitArgs;
 /// [PluginMcpServer.scrubbedRaw], so env/header VALUES are stripped and
 /// only their NAMES survive into persisted metadata.
 
-/// Actionable message for SSE-only MCP definitions (spec §4.3). SSE is not
-/// a supported transport; Streamable HTTP replaces it.
+/// Legacy note (kept for API stability): SSE-only MCP definitions used to
+/// be rejected with this message before the legacy SSE transport was
+/// implemented in [McpService]. No longer emitted.
+@Deprecated('SSE transport is now supported; this message is not emitted.')
 const String kSseUnsupportedMessage =
     'SSE transport is not supported. Use Streamable HTTP instead: replace '
     '"type": "sse" with "type": "http" and point "url" at the server\'s '
@@ -423,11 +425,10 @@ Object? _tomlScalar(String value) {
   return int.tryParse(v) ?? unquoteToml(v);
 }
 
-/// Map parsed MCP entries into scrubbed [PluginMcpServer] records, adding a
-/// required-severity issue for unsupported SSE definitions (spec §4.3):
-/// SSE is not a supported transport — Streamable HTTP replaces it — so
-/// SSE-only servers are rejected (not installed) with an actionable
-/// message instead of failing silently.
+/// Map parsed MCP entries into scrubbed [PluginMcpServer] records. Legacy
+/// SSE (`"type": "sse"`) is accepted — [McpService] speaks the legacy
+/// GET /sse + POST /message protocol — though Streamable HTTP remains the
+/// recommended transport for new servers.
 void _addMcp(
   _Build b,
   List<ImportedMcp> parsed,
@@ -435,16 +436,6 @@ void _addMcp(
   Map<String, dynamic> rawByName = const {},
 }) {
   for (final s in parsed) {
-    if (s.type == 'sse') {
-      b.issues.add(
-        CompatibilityIssue(
-          severity: CompatibilitySeverity.required,
-          message: kSseUnsupportedMessage,
-          fields: ['$sourcePath:${s.name}'],
-        ),
-      );
-      continue;
-    }
     final raw = rawByName[s.name] ?? s.ignoredFields;
     b.mcpServers.add(
       PluginMcpServer.scrubbedRaw(
@@ -609,7 +600,10 @@ NormalizedPluginManifest _finish(
 }
 
 /// Fields `.claude-plugin/plugin.json` contributes to the normalized model —
-/// everything else is preserved as `unknownFields`.
+/// everything else is preserved as `unknownFields`. The inline/component
+/// keys (`hooks`, `mcpServers`, `commands`, `skills`, `agents`) are handled
+/// by [_addClaudeInlineComponents], so they are "known" and never duplicated
+/// into `unknownFields`.
 const _knownClaudeManifestKeys = {
   'name',
   'version',
@@ -619,6 +613,11 @@ const _knownClaudeManifestKeys = {
   'license',
   'keywords',
   'enabledByDefault',
+  'hooks',
+  'mcpServers',
+  'commands',
+  'skills',
+  'agents',
 };
 
 /// Reads a manifest-declared default-enable opt-out: only an explicit
@@ -686,6 +685,11 @@ class ClaudePluginAdapter {
       );
     }
 
+    // Inline manifest declarations (spec §4.3 parity): plugin.json may
+    // declare hooks inline, bundle MCP servers, and point the component
+    // directories at custom locations.
+    await _addClaudeInlineComponents(b, j);
+
     _addDependencies(b);
     return _finish(
       b,
@@ -693,6 +697,121 @@ class ClaudePluginAdapter {
       version: (j['version'] as String?) ?? '',
       format: PluginFormat.claudeCode,
     );
+  }
+}
+
+/// Inline `plugin.json` component declarations for the Claude adapter:
+/// - `hooks`: an inline hooks event map (same shape as `hooks/hooks.json`),
+///   or a string pointing at a directory containing `hooks.json`.
+/// - `mcpServers`: an inline MCP server map, parsed exactly like
+///   `.mcp.json` entries.
+/// - `commands` / `skills` / `agents`: string pointers at custom component
+///   directories, scanned ADDITIVELY alongside the default scans.
+///
+/// Directory pointers are sanitized: `..` segments (escaping the plugin
+/// tree) and absolute paths are rejected; a missing directory is skipped
+/// silently. A pointer that resolves to the already-scanned default
+/// directory is not scanned twice.
+Future<void> _addClaudeInlineComponents(
+  _Build b,
+  Map<String, dynamic> j,
+) async {
+  final root = b.root;
+
+  Directory? safeComponentDir(String pointer, Directory defaultDir) {
+    final cleaned = pointer
+        .trim()
+        .replaceAll(RegExp(r'^\.?/'), '')
+        .replaceAll(RegExp(r'/+$'), '');
+    if (cleaned.isEmpty) return null;
+    final segments = cleaned.split('/');
+    if (segments.contains('..')) return null;
+    final dir = Directory('${root.path}/$cleaned');
+    if (!dir.existsSync()) return null;
+    // Don't scan the default directory twice.
+    if (dir.absolute.path == defaultDir.absolute.path) return null;
+    return dir;
+  }
+
+  // Inline hooks: {"hooks": {"PreToolUse": [...]}} — the same event-map
+  // shape `_addHooks` expects from hooks.json. `_addHooks` preserves
+  // hook-level unknown fields such as `"if"` predicates.
+  final hooksDecl = j['hooks'];
+  if (hooksDecl is Map) {
+    _addHooks(
+      b,
+      {'hooks': hooksDecl},
+      '.claude-plugin/plugin.json#hooks',
+    );
+  } else if (hooksDecl is String && hooksDecl.trim().isNotEmpty) {
+    final dir = safeComponentDir(
+      hooksDecl,
+      Directory('${root.path}/hooks'),
+    );
+    final f = dir == null ? null : File('${dir.path}/hooks.json');
+    if (f != null && f.existsSync()) {
+      _addHooks(
+        b,
+        _readJsonMap(f),
+        '.claude-plugin/plugin.json#hooks',
+      );
+    }
+  }
+
+  // Inline MCP servers: {"mcpServers": {"name": {...}}} — parsed exactly
+  // like `.mcp.json` entries, including `oauth` and wrapperless shapes.
+  final mcpDecl = j['mcpServers'];
+  if (mcpDecl is Map && mcpDecl.isNotEmpty) {
+    final parsed = <ImportedMcp>[];
+    for (final e in mcpDecl.entries) {
+      final v = e.value;
+      if (v is! Map) continue;
+      try {
+        parsed.add(
+          importedMcpFromJson(
+            e.key.toString(),
+            v.cast<String, dynamic>(),
+          ),
+        );
+      } catch (_) {
+        // A malformed inline entry must not fail the whole plugin —
+        // `parseMcpConfig` already surfaced structured issues for
+        // `.mcp.json`; here we simply skip.
+      }
+    }
+    _addMcp(
+      b,
+      parsed,
+      '.claude-plugin/plugin.json#mcpServers',
+      rawByName: mcpDecl.cast<String, dynamic>(),
+    );
+  }
+
+  // Custom component directories (additive with the default scans in
+  // [ClaudePluginAdapter.inspect]).
+  final commandsDecl = j['commands'];
+  if (commandsDecl is String && commandsDecl.trim().isNotEmpty) {
+    final dir = safeComponentDir(
+      commandsDecl,
+      Directory('${root.path}/commands'),
+    );
+    if (dir != null) await _addMarkdown(b, dir, asAgent: false);
+  }
+  final skillsDecl = j['skills'];
+  if (skillsDecl is String && skillsDecl.trim().isNotEmpty) {
+    final dir = safeComponentDir(
+      skillsDecl,
+      Directory('${root.path}/skills'),
+    );
+    if (dir != null) await _addSkills(b, dir);
+  }
+  final agentsDecl = j['agents'];
+  if (agentsDecl is String && agentsDecl.trim().isNotEmpty) {
+    final dir = safeComponentDir(
+      agentsDecl,
+      Directory('${root.path}/agents'),
+    );
+    if (dir != null) await _addMarkdown(b, dir, asAgent: true);
   }
 }
 

@@ -13,6 +13,7 @@ import 'agent_notification_service.dart';
 import 'agent_service.dart' show AgentService;
 import 'firebase_service.dart';
 import 'github_service.dart';
+import 'grant_store.dart';
 import 'hook_service.dart';
 import 'mcp_config_parse.dart';
 import 'mcp_service.dart';
@@ -1097,6 +1098,13 @@ class ChatSession {
   /// When set, the child may only call these tools (parent-imposed filter).
   List<String> agentAllowedTools;
 
+  /// Session-scoped "always allow" permission grants (the strict permission
+  /// model: General/Studio). Recorded when the user picks "Always allow" on
+  /// an out-of-workspace path or off-allowlist host prompt. Hierarchical —
+  /// a folder grant covers its children. Persisted in the session JSON
+  /// (`grants` key); missing key on old sessions means no grants.
+  List<PermissionGrant> grants;
+
   bool get isSubagent => parentId != null;
 
   /// Session todo/task list — written by todo_write tool, rendered as a
@@ -1176,6 +1184,7 @@ class ChatSession {
     this.agentPersona,
     this.agentOutputHint,
     List<String>? agentAllowedTools,
+    List<PermissionGrant>? grants,
     List<Message>? messages,
     List<Map<String, String>>? todos,
     List<Map<String, dynamic>>? schedules,
@@ -1183,6 +1192,7 @@ class ChatSession {
     SessionAnalytics? analytics,
     this.titleGenerated = false,
   }) : agentAllowedTools = agentAllowedTools ?? [],
+       grants = grants ?? [],
        messages = messages ?? [],
        todos = todos ?? [],
        schedules = schedules ?? [],
@@ -1219,6 +1229,9 @@ class ChatSession {
     agentAllowedTools:
         (j['agentAllowedTools'] as List?)?.whereType<String>().toList() ??
         const [],
+    // Backward compatible: sessions persisted before grants existed have
+    // no 'grants' key — they simply start with no grants.
+    grants: PermissionGrant.listFromJson(j['grants'] as List?),
     goal: j['goal'] == null
         ? null
         : Map<String, dynamic>.from(j['goal'] as Map),
@@ -1277,6 +1290,7 @@ class ChatSession {
     if (agentOutputHint != null && agentOutputHint!.isNotEmpty)
       'agentOutputHint': agentOutputHint,
     if (agentAllowedTools.isNotEmpty) 'agentAllowedTools': agentAllowedTools,
+    if (grants.isNotEmpty) 'grants': grants.map((g) => g.toJson()).toList(),
     if (goal != null) 'goal': goal,
     if (planMode) 'planMode': planMode,
     if (planPreMode != null) 'planPreMode': planPreMode,
@@ -3021,6 +3035,14 @@ class AppState extends ChangeNotifier {
       workflowEnabled = prefs.getBool(_kWorkflowEnabled) ?? true;
       browserDesktopMode = prefs.getBool(_kBrowserDesktopMode) ?? false;
       autoRunSafeCommands = prefs.getBool(_kAutoRunSafe) ?? true;
+      try {
+        final rawGrants = prefs.getString(_kPermissionGrants);
+        globalPermissionGrants = rawGrants == null
+            ? []
+            : PermissionGrant.listFromJson(jsonDecode(rawGrants) as List?);
+      } catch (_) {
+        globalPermissionGrants = [];
+      }
       sendWhileBusy = prefs.getString(_kSendWhileBusy) ?? 'queue';
       conversationDisplay = prefs.getString(_kConversationDisplay) ?? 'compact';
       sandboxSkipped = prefs.getBool(_kSandboxSkipped) ?? false;
@@ -4227,6 +4249,12 @@ class AppState extends ChangeNotifier {
   static const _kAutoRunSafe = 'ovid_auto_run_safe';
   bool autoRunSafeCommands = true;
 
+  /// Global "always allow" permission grants (the strict permission model:
+  /// General/Studio). Applies to every session; the user can revoke entries
+  /// from Settings. Session-scoped grants live on the ChatSession instead.
+  static const _kPermissionGrants = 'ovid_permission_grants_v1';
+  List<PermissionGrant> globalPermissionGrants = [];
+
   /// Send behavior while the agent is running: `queue` (default) appends the
   /// text to the active run; `interrupt` stops the current run first, then
   /// sends. Mirrors the reference's send-while-busy selector.
@@ -4481,6 +4509,50 @@ class AppState extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kAutoRunSafe, v);
     } catch (_) {}
+  }
+
+  Future<void> _persistGlobalPermissionGrants() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _kPermissionGrants,
+        jsonEncode(globalPermissionGrants.map((g) => g.toJson()).toList()),
+      );
+    } catch (_) {}
+  }
+
+  /// Adds a global "always allow" grant (applies to every session).
+  Future<void> addGlobalPermissionGrant(PermissionGrant grant) async {
+    if (grant.value.isEmpty) return;
+    final exists = globalPermissionGrants.any(
+      (g) => g.kind == grant.kind && g.value == grant.value,
+    );
+    if (!exists) {
+      globalPermissionGrants.add(
+        PermissionGrant(
+          kind: grant.kind,
+          value: grant.value,
+          scope: PermissionGrant.scopeGlobal,
+          grantedAt: grant.grantedAt,
+        ),
+      );
+      notifyListeners();
+      await _persistGlobalPermissionGrants();
+    }
+  }
+
+  /// Revokes a global grant; returns true when one was removed.
+  Future<bool> revokeGlobalPermissionGrant(String kind, String value) async {
+    final before = globalPermissionGrants.length;
+    globalPermissionGrants.removeWhere(
+      (g) => g.kind == kind && g.value == value,
+    );
+    if (globalPermissionGrants.length < before) {
+      notifyListeners();
+      await _persistGlobalPermissionGrants();
+      return true;
+    }
+    return false;
   }
 
   /// AI response timeout (seconds, user-configurable in Settings).
@@ -6415,6 +6487,7 @@ class AppState extends ChangeNotifier {
     String? cwd,
     int startupTimeoutS = 30,
     int toolTimeoutS = 60,
+    McpOAuthConfig? oauth,
   }) {
     if (name.isEmpty) return null;
     if (mcpServers.any((e) => e.name == name)) return null;
@@ -6437,6 +6510,13 @@ class AppState extends ChangeNotifier {
     );
     mcpServers.add(server);
     if (headers.isNotEmpty) unawaited(setMcpHeaders(name, headers));
+    // OAuth config rides in McpService's sidecar (McpServer carries no
+    // oauth field): register it at materialization so the browser-based
+    // authorization flow can pick it up. The OAuth browser-capture UI is
+    // out of scope — config + token storage + buildMcpAuthorizeUrl exist.
+    if (oauth != null) {
+      unawaited(McpService.I.setMcpOAuthConfig(server.canonicalId, oauth));
+    }
     return server;
   }
 
@@ -6529,6 +6609,7 @@ class AppState extends ChangeNotifier {
         cwd: m['cwd'] as String?,
         startupTimeoutS: (m['startupTimeoutS'] as num?)?.toInt() ?? 30,
         toolTimeoutS: (m['toolTimeoutS'] as num?)?.toInt() ?? 60,
+        oauth: parseMcpOAuthConfig(m['oauth']),
       );
       if (server != null) importedMcps++;
     }
@@ -6570,7 +6651,7 @@ class AppState extends ChangeNotifier {
   /// `enableAllProjectMcpServers`, `enabledMcpjsonServers`, and
   /// `disabledMcpjsonServers` (disabled always wins; an allowlist only
   /// applies when non-empty and `enableAllProjectMcpServers` is not set).
-  /// Unsupported SSE entries are skipped rather than mounted dead.
+  /// SSE entries mount too (transport implemented in mcp_service.dart).
   /// Returns the number of servers mounted. Never throws.
   Future<int> importMcpFromSettings(
     String json, {
@@ -6599,7 +6680,6 @@ class AppState extends ChangeNotifier {
           continue;
         }
         final parsed = importedMcpFromJson(name, value.cast<String, dynamic>());
-        if (parsed.type == 'sse') continue;
         final server = _addImportedMcpRow(
           name: name,
           author: 'settings',
@@ -6614,6 +6694,7 @@ class AppState extends ChangeNotifier {
           headers: parsed.headers,
           cwd: parsed.cwd,
           startupTimeoutS: parsed.startupTimeoutS ?? 30,
+          oauth: parsed.oauth,
         );
         if (server != null) mounted++;
       }

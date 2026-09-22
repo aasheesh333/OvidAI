@@ -13,9 +13,188 @@ import 'sandbox_service.dart';
 import 'session_ledger.dart';
 import 'state.dart';
 
-/// Production plugin hook lifecycle (spec §8) — the runtime that fires
+/// Evaluates a prompt-type hook with the agent's model. The AgentService
+/// worker wires this: `HookService.I.promptHookEvaluator = (prompt, ctx) =>
+/// AgentService.I.completeQuietly(prompt, ...)` (or equivalent). The
+/// returned string is parsed by [HookService.parsePromptHookDecision]
+/// (JSON `{"decision":"block"|"approve","reason":"…"}` or plain-text
+/// "block"/"approve" heuristics). Null/empty or a throw fails OPEN.
+typedef PromptHookEvaluator =
+    Future<String?> Function(String prompt, Map<String, dynamic> context);
+
+/// Gate outcome of [HookService.fireGate].
+enum HookDecision {
+  /// The action proceeds.
+  allow,
+
+  /// The action is denied outright (exit 2 / JSON `block`).
+  deny,
+
+  /// The hook defers to the user: route into the permission prompt
+  /// (`hookSpecificOutput.permissionDecision: "ask"`).
+  ask,
+}
+
+/// Outcome of [HookService.fireGate] — pre_tool/permission_request gates
+/// (and [HookService.fireStop]) produce deny/ask; observe events never do.
+class HookGateResult {
+  final HookDecision decision;
+
+  /// Plugin that produced the deny/ask (display name, no `legacy:` prefix).
+  final String? decidedByPlugin;
+
+  final String? reason;
+
+  /// Rewritten tool args from `hookSpecificOutput.updatedInput` — the
+  /// caller applies these pre-execution (pre_tool only). Present on allow
+  /// results too: a hook may rewrite args without blocking.
+  final Map<String, dynamic>? updatedInput;
+
+  /// Backward-compat: true only for [HookDecision.allow].
+  bool get allowed => decision == HookDecision.allow;
+
+  /// Backward-compat: the plugin behind a deny (or ask).
+  String? get deniedByPlugin =>
+      decision == HookDecision.allow ? null : decidedByPlugin;
+
+  const HookGateResult.allow({this.updatedInput})
+    : decision = HookDecision.allow,
+      decidedByPlugin = null,
+      reason = null;
+
+  const HookGateResult.deny(this.decidedByPlugin, this.reason, {this.updatedInput})
+    : decision = HookDecision.deny;
+
+  const HookGateResult.ask(this.decidedByPlugin, this.reason, {this.updatedInput})
+    : decision = HookDecision.ask;
+}
+
+/// Outcome of [HookService.fireStop] — a Stop hook may veto the stop
+/// (JSON `{"decision":"block"}` or exit code 2), in which case the model
+/// loop continues. A USER-initiated stop always wins ([userInitiated]).
+class HookStopResult {
+  /// True = the stop proceeds; false = vetoed, the model loop continues.
+  final bool stopAllowed;
+
+  /// True when a user-initiated stop bypassed the hooks entirely.
+  final bool userInitiated;
+
+  final String? vetoedByPlugin;
+  final String? vetoReason;
+
+  const HookStopResult.allow({this.userInitiated = false})
+    : stopAllowed = true,
+      vetoedByPlugin = null,
+      vetoReason = null;
+
+  const HookStopResult.veto(this.vetoedByPlugin, this.vetoReason)
+    : stopAllowed = false,
+      userInitiated = false;
+}
+
+/// Detailed outcome of [HookService.fireDetailed] — [HookService.fire]
+/// returns just [output].
+class HookFireResult {
+  /// Combined hook stdout after the output contract was applied
+  /// (`suppressOutput` entries removed, `continue:false` honored).
+  final String output;
+
+  /// `systemMessage` values surfaced by hooks, in firing order.
+  final List<String> systemMessages;
+
+  /// True when a hook returned `continue:false` and later hooks were skipped.
+  final bool halted;
+
+  /// Reason when an evaluated prompt-type hook returned "block" on an
+  /// observe event (null when no prompt hook blocked). The AgentService
+  /// worker decides what a prompt-block means for the run.
+  final String? promptBlockReason;
+
+  const HookFireResult({
+    required this.output,
+    this.systemMessages = const [],
+    this.halted = false,
+    this.promptBlockReason,
+  });
+}
+
+/// The JSON output contract a hook's stdout may carry (Claude Code shape).
+/// Top level: `continue`, `suppressOutput`, `systemMessage`, `decision`,
+/// `reason`. Nested `hookSpecificOutput`: `additionalContext`,
+/// `permissionDecision` (`allow`|`ask`|`deny`), `permissionDecisionReason`,
+/// `updatedInput`, `envFileAppend`/`env` (session_start only).
+class HookOutputContract {
+  final bool continueHooks;
+  final bool suppressOutput;
+  final String? systemMessage;
+  final String? decision;
+  final String? reason;
+  final String? additionalContext;
+  final String? permissionDecision;
+  final String? permissionDecisionReason;
+  final Map<String, dynamic>? updatedInput;
+
+  const HookOutputContract({
+    this.continueHooks = true,
+    this.suppressOutput = false,
+    this.systemMessage,
+    this.decision,
+    this.reason,
+    this.additionalContext,
+    this.permissionDecision,
+    this.permissionDecisionReason,
+    this.updatedInput,
+  });
+
+  static const empty = HookOutputContract();
+
+  /// Parse a hook's stdout for the contract. Non-JSON output yields
+  /// [empty] (plain text is context, never a decision).
+  static HookOutputContract parse(String stdout) {
+    final t = stdout.trim();
+    if (t.isEmpty || !t.startsWith('{') || !t.endsWith('}')) return empty;
+    dynamic j;
+    try {
+      j = jsonDecode(t);
+    } catch (_) {
+      return empty;
+    }
+    if (j is! Map) return empty;
+    final m = j.cast<String, dynamic>();
+    Map<String, dynamic>? hso;
+    final rawHso = m['hookSpecificOutput'];
+    if (rawHso is Map) hso = rawHso.cast<String, dynamic>();
+    String? str(Object? v) =>
+        v is String && v.trim().isNotEmpty ? v.trim() : null;
+    Map<String, dynamic>? updated;
+    final rawUpdated = hso?['updatedInput'];
+    if (rawUpdated is Map) updated = rawUpdated.cast<String, dynamic>();
+    return HookOutputContract(
+      continueHooks: m['continue'] is bool ? m['continue'] as bool : true,
+      suppressOutput: m['suppressOutput'] == true,
+      systemMessage: str(m['systemMessage']),
+      decision: str(m['decision'])?.toLowerCase(),
+      reason: str(m['reason']),
+      additionalContext: str(hso?['additionalContext']),
+      permissionDecision: str(hso?['permissionDecision'])?.toLowerCase(),
+      permissionDecisionReason: str(hso?['permissionDecisionReason']),
+      updatedInput: updated,
+    );
+  }
+}
+
+/// Parsed verdict of a prompt-type hook evaluation.
+class PromptHookVerdict {
+  /// 'block' or 'approve'.
+  final String decision;
+  final String? reason;
+
+  const PromptHookVerdict(this.decision, [this.reason]);
+}
 /// normalized [PluginHook]s at the 14 canonical agent-lifecycle points.
 ///
+/// Production plugin hook lifecycle (spec §8) — the runtime that fires
+/// normalized [PluginHook]s at the 14 canonical agent-lifecycle points.
 /// Event sources, in precedence order:
 ///   1. Registered normalized manifests (the contribution registry) —
 ///      ordered [PluginHook] lists, session-scoped by activation (§7).
@@ -24,19 +203,26 @@ import 'state.dart';
 ///
 /// Ordering (§8.2): install/registration order, then manifest order.
 ///
-/// Blocking (§8.2): only `pre_tool` and `permission_request` may deny,
-/// and only via exit code 2 or a valid JSON
-/// `{"decision":"block","reason":"…"}`. Every other event is
-/// fire-and-forget observe. Crash, timeout, missing interpreter,
+/// Blocking (§8.2): `pre_tool`, `permission_request` (via [fireGate])
+/// and `stop` (via [fireStop]) may deny, and only via exit code 2 or a
+/// valid JSON `{"decision":"block","reason":"…"}`. A USER-initiated stop
+/// ([userStopChecker]) always wins over Stop-hook vetoes. Every other
+/// event is fire-and-forget observe. Crash, timeout, missing interpreter,
 /// malformed output, or any other nonzero exit is a visible fail-open
 /// warning + ledger event — a broken hook script can never wedge the
 /// agent run.
 ///
+/// Hook child processes receive the FULL JSON payload on stdin (Claude
+/// Code contract — real hooks do `json.load(sys.stdin)`), in addition to
+/// the env vars below.
+///
 /// Environment per invocation: `PLUGIN_ROOT` (plugin content root),
 /// `PLUGIN_STORAGE` (per-plugin private storage dir), `PLUGIN_WORKSPACE`
 /// (session workspace), `PLUGIN_SESSION`, `PLUGIN_MODEL`, `PLUGIN_EVENT`
-/// (canonical name), `PLUGIN_PAYLOAD` (capped JSON), plus the legacy
-/// `OVID_HOOK_*` names for backward compatibility.
+/// (canonical name), `PLUGIN_PAYLOAD` (capped JSON), `CLAUDE_PROJECT_DIR`,
+/// `CLAUDE_ENV_FILE` (per-session env file a SessionStart hook can append
+/// to via `hookSpecificOutput.envFileAppend`), `CLAUDE_CODE_REMOTE`,
+/// plus the legacy `OVID_HOOK_*` names for backward compatibility.
 ///
 /// Recursion prevention (§8.2): a hook cannot re-fire its own event
 /// while that event is executing, and nesting depth is capped.
@@ -50,6 +236,23 @@ class HookService extends ChangeNotifier {
   /// Master kill-switch (Settings toggle, default ON).
   bool enabled = true;
 
+  /// Wiring point for prompt-type hooks (item 3). The AgentService worker
+  /// sets this to route prompt-hook evaluation through the agent's model:
+  ///   HookService.I.promptHookEvaluator = (prompt, ctx) =>
+  ///       AgentService.I.evaluatePromptHook(prompt, context: ctx);
+  /// Null (default) = prompt hooks are skipped fail-open with a ledger note.
+  PromptHookEvaluator? promptHookEvaluator;
+
+  /// Wiring point for user-initiated stops (item 4). The AgentService worker
+  /// sets this to report whether the stop for [sessionId] was USER-initiated
+  /// (Stop button / cancel), e.g.:
+  ///   HookService.I.userStopChecker = (sid) =>
+  ///       AgentService.I.userStopRequestedFor(sid);
+  /// A user stop ALWAYS wins over Stop-hook vetoes: [fireStop] returns
+  /// allow without running any hook. Null (default) = no user signal, hooks
+  /// may veto.
+  bool Function(String sessionId)? userStopChecker;
+
   /// Invocations this boot (diagnostics surface).
   int fired = 0;
   int failed = 0;
@@ -57,8 +260,10 @@ class HookService extends ChangeNotifier {
   /// Default per-hook timeout when the hook declares none (§8.1).
   static const int defaultTimeoutS = 30;
 
-  /// Hard cap on a declared per-hook timeout (§8.1).
-  static const int maxTimeoutS = 120;
+  /// Hard cap on a declared per-hook timeout (§8.1). Best-effort parity:
+  /// long-running hooks (compilers, test suites) may legitimately need
+  /// the full five minutes.
+  static const int maxTimeoutS = 300;
 
   /// Consecutive failures that trip the per-plugin per-session breaker.
   static const int breakerThreshold = 3;
@@ -119,7 +324,10 @@ class HookService extends ChangeNotifier {
     _sessionContexts.clear();
     executorForTest = null;
     gateExecutorForTest = null;
+    stdinExecutorForTest = null;
     execTimeoutForTest = null;
+    promptHookEvaluator = null;
+    userStopChecker = null;
     _consecutiveFails.clear();
     _tripped.clear();
     _firingEvents.clear();
@@ -154,6 +362,18 @@ class HookService extends ChangeNotifier {
   @visibleForTesting
   Future<(int, String)> Function(String cmd, Map<String, String> env)?
   gateExecutorForTest;
+
+  /// Test seam: stdin-aware executor (no sandbox in unit tests).
+  /// Signature: (command, env, stdinJson) → (exitCode, combinedOutput).
+  /// Consulted BEFORE [executorForTest] so tests can assert the exact JSON
+  /// payload the hook child receives on stdin (item 1).
+  @visibleForTesting
+  Future<(int, String)> Function(
+    String cmd,
+    Map<String, String> env,
+    String stdinJson,
+  )?
+  stdinExecutorForTest;
 
   /// Test seam: capture the resolved per-hook timeout (seconds) without
   /// executing anything. Signature: (seconds) → stdout.
@@ -507,7 +727,98 @@ class HookService extends ChangeNotifier {
     }
   }
 
-  Map<String, String> _envFor({
+  /// Directory holding per-session hook env files (item 8).
+  Future<Directory?> _hookEnvDir() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final d = Directory('${docs.path}/hook-env');
+      if (!d.existsSync()) d.createSync(recursive: true);
+      return d;
+    } catch (_) {
+      try {
+        final d = Directory('${Directory.systemTemp.path}/hook-env');
+        if (!d.existsSync()) d.createSync(recursive: true);
+        return d;
+      } catch (_) {
+        return null;
+      }
+    }
+  }
+
+  /// Path of the per-session env file exposed as `CLAUDE_ENV_FILE`. A
+  /// SessionStart hook appends `KEY=VALUE` lines to it (via
+  /// `hookSpecificOutput.envFileAppend`); subsequent hooks in the same
+  /// session inherit those vars. Empty when no dir is available.
+  Future<String> _sessionEnvFilePath(String sessionId) async {
+    if (sessionId.isEmpty) return '';
+    final dir = await _hookEnvDir();
+    if (dir == null) return '';
+    final safe = sessionId.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
+    return '${dir.path}/$safe.env';
+  }
+
+  /// Load the session env file into a map (item 8). Malformed lines are
+  /// skipped; the file is capped at 64 KB so a hostile hook cannot blow up
+  /// every subsequent invocation's environment.
+  Map<String, String> _loadSessionEnv(String path) {
+    if (path.isEmpty) return const {};
+    try {
+      final f = File(path);
+      if (!f.existsSync()) return const {};
+      final text = f.readAsStringSync();
+      final capped = text.length > 65536
+          ? text.substring(0, 65536)
+          : text;
+      final out = <String, String>{};
+      for (final rawLine in capped.split('\n')) {
+        final line = rawLine.trim();
+        if (line.isEmpty || line.startsWith('#')) continue;
+        final eq = line.indexOf('=');
+        if (eq <= 0) continue;
+        final name = line.substring(0, eq).trim();
+        if (!RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(name)) continue;
+        out[name] = line.substring(eq + 1);
+      }
+      return out;
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  /// Append validated `KEY=VALUE` lines to the session env file (called
+  /// for SessionStart hook output). Best-effort — never throws.
+  Future<void> _appendSessionEnv(String sessionId, List<String> lines) async {
+    if (lines.isEmpty) return;
+    try {
+      final path = await _sessionEnvFilePath(sessionId);
+      if (path.isEmpty) return;
+      final f = File(path);
+      if (f.existsSync() && f.lengthSync() > 65536) return;
+      final sink = f.openWrite(mode: FileMode.append);
+      try {
+        for (final line in lines) {
+          sink.writeln(line);
+        }
+        await sink.close();
+      } catch (_) {
+        try {
+          await sink.close();
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  /// Delete the session env file (session_end cleanup).
+  Future<void> _deleteSessionEnv(String sessionId) async {
+    try {
+      final path = await _sessionEnvFilePath(sessionId);
+      if (path.isEmpty) return;
+      final f = File(path);
+      if (f.existsSync()) f.deleteSync();
+    } catch (_) {}
+  }
+
+  Future<Map<String, String>> _envFor({
     required String pluginId,
     required PluginHook hook,
     required String canonical,
@@ -517,10 +828,16 @@ class HookService extends ChangeNotifier {
     required String workspace,
     required String storage,
     String? model,
-  }) {
+  }) async {
     final pluginName = _displayName(pluginId);
     final root = _rootPathFor(pluginId, hook);
+    // Per-session env vars a SessionStart hook persisted via
+    // `hookSpecificOutput.envFileAppend` (item 8). Spread FIRST so the
+    // built-in contract below always wins on collision.
+    final envFilePath = await _sessionEnvFilePath(sessionId);
+    final sessionEnv = _loadSessionEnv(envFilePath);
     return {
+      ...sessionEnv,
       // Legacy env contract: the DECLARED name (a hook that registered
       // on_turn_start sees "on_turn_start"), never the internal prefix.
       'OVID_HOOK_EVENT': declaredEvent,
@@ -543,6 +860,12 @@ class HookService extends ChangeNotifier {
       // the CC name also steers polyglot hooks to their CC output shape.
       'CLAUDE_PLUGIN_ROOT': root,
       'OVID_PLUGIN_ROOT': root,
+      // Missing-env parity (item 8): real [CC] hooks read these.
+      'CLAUDE_PROJECT_DIR': workspace,
+      'CLAUDE_ENV_FILE': envFilePath,
+      // We run hooks locally, not on a remote host — the empty value
+      // steers polyglot hooks to their local code path.
+      'CLAUDE_CODE_REMOTE': '',
     };
   }
 
@@ -591,7 +914,9 @@ class HookService extends ChangeNotifier {
   /// exec error/timeout. Failures bubble to the caller's fail-open
   /// handling. [gate] selects the test seam matching the calling context
   /// (gate vs observe) so a test executor for one never intercepts the
-  /// other.
+  /// other. [stdinPayload] is the full JSON payload written to the child's
+  /// stdin (item 1 — the Claude Code contract: real hooks do
+  /// `json.load(sys.stdin)`; without it they read EOF and die).
   /// Whether the hook declaration asked for fire-and-forget execution
   /// (`"async": true`, stashed in `unknownFields` by the adapters).
   static bool _hookDeclaresAsync(PluginHook hook) =>
@@ -613,6 +938,7 @@ class HookService extends ChangeNotifier {
     Map<String, String> env,
     Directory? cwd, {
     bool gate = false,
+    String stdinPayload = '',
   }) async {
     final timeout = Duration(
       seconds: hook.timeoutS <= 0
@@ -630,10 +956,30 @@ class HookService extends ChangeNotifier {
       final g = gateExecutorForTest;
       if (g != null) return g(command, env);
     }
+    // Stdin-aware test seam (item 1) — consulted before the legacy seams.
+    final se = stdinExecutorForTest;
+    if (se != null) return se(command, env, stdinPayload);
     final custom = executorForTest;
     if (custom != null) return (0, await custom(command, env));
     final t = execTimeoutForTest;
     if (t != null) return (0, await t(timeout.inSeconds));
+    // The sandbox exec boundary — the hook env contract (CLAUDE_PLUGIN_ROOT,
+    // PLUGIN_ROOT, PLUGIN_SESSION, ...). When a test override stands in for
+    // the installed sandbox, route through `execChecked`, which consults it:
+    // the override observes the FULL env map exactly as the production spawn
+    // would receive it. Stdin delivery is additive — the stdin-aware seam
+    // above already serves stdin-capable tests, and production keeps the
+    // spawn path below. Without this, the spawn path bypassed the boundary
+    // the contract tests pin, so hooks never reached it.
+    if (SandboxService.hasExecOverride) {
+      return SandboxService.I
+          .execChecked(
+            [_hookShell(hook), '-c', command],
+            hostWorkDir: cwd,
+            env: env,
+          )
+          .timeout(timeout);
+    }
     // `execChecked` throws its own (more helpful) error when no sandbox is
     // installed; this guard exists only to fail early with the historical
     // message. A test override stands in for the installed sandbox, so it
@@ -642,21 +988,55 @@ class HookService extends ChangeNotifier {
     if (!SandboxService.sandboxReady) {
       throw StateError('sandbox not installed');
     }
+    // Spawn (not execChecked): the hook child MUST receive the full JSON
+    // payload on stdin — `SandboxService.spawn` (Process.start) is the only
+    // sandbox API exposing the stdin pipe. The UTF-8 bytes are written and
+    // the pipe closed before we wait for exit, exactly like Claude Code.
     // The env map is the hook's ENTIRE runtime contract: [CC]/Codex plugins
     // interpolate `${CLAUDE_PLUGIN_ROOT}` (and read `PLUGIN_PAYLOAD`,
     // `PLUGIN_SESSION`, `PLUGIN_MODEL`, ...) inside their commands. Dropping
     // it here left every variable unset, so `"${CLAUDE_PLUGIN_ROOT}/hooks/
     // run-hook.cmd" session-start` expanded to `/hooks/run-hook.cmd` and died
-    // with exit 127 -- for EVERY plugin, not just one. `execChecked` merges
+    // with exit 127 -- for EVERY plugin, not just one. `spawn` merges
     // this over the sandbox env, so pass it through.
-    final (code, out) = await SandboxService.I
-        .execChecked(
-          [_hookShell(hook), '-c', command],
-          hostWorkDir: cwd,
-          env: env,
-        )
-        .timeout(timeout);
-    return (code, out);
+    //
+    // Note: `spawn` (unlike the old `execChecked` path) enforces the
+    // sandbox policy (destructive-command denylist) — a denied hook fails
+    // open through the callers' normal error handling, same as any exec
+    // failure.
+    final proc = await SandboxService.I.spawn(
+      [_hookShell(hook), '-c', command],
+      hostWorkDir: cwd,
+      env: env,
+    );
+    // Subscribe to stdout/stderr BEFORE touching stdin so a chatty hook
+    // can never deadlock on a full pipe while we write.
+    final stdoutFuture = proc.stdout.transform(utf8.decoder).join();
+    final stderrFuture = proc.stderr.transform(utf8.decoder).join();
+    try {
+      if (stdinPayload.isNotEmpty) {
+        proc.stdin.add(utf8.encode(stdinPayload));
+      }
+      await proc.stdin.close();
+    } catch (_) {
+      // A hook that exits before reading stdin (closed pipe) must not fail
+      // the invocation — its exit code/output still decide.
+    }
+    int code;
+    try {
+      code = await proc.exitCode.timeout(timeout);
+    } on TimeoutException {
+      // The old execChecked path leaked the timed-out process; kill it so
+      // a hung hook cannot outlive its timeout (Stop can also reach it via
+      // the sandbox's live-process registry — spawn registers it).
+      try {
+        proc.kill(ProcessSignal.sigkill);
+      } catch (_) {}
+      rethrow;
+    }
+    final out = await stdoutFuture;
+    final err = await stderrFuture;
+    return (code, '$out$err');
   }
 
   Future<void> _ledger(String sessionId, String kind, Map<String, dynamic> d) {
@@ -668,25 +1048,47 @@ class HookService extends ChangeNotifier {
   /// Fire [event] for [sessionId]. Returns the combined stdout of all
   /// listener commands (≤2 KB — `pre_request` context injection) — empty
   /// when no listener or hooks are disabled. Observe events NEVER block
-  /// the run: failures are ledgered and skipped.
+  /// the run: failures are ledgered and skipped. See [fireDetailed] for
+  /// the output contract (`continue:false`, `suppressOutput`,
+  /// `systemMessage`) and prompt-hook verdicts.
   Future<String> fire(
     String event,
     String sessionId, {
     Map<String, dynamic> payload = const {},
     String? model,
     String? onlyPluginId,
+  }) async => (await fireDetailed(
+    event,
+    sessionId,
+    payload: payload,
+    model: model,
+    onlyPluginId: onlyPluginId,
+  )).output;
+
+  /// [fire] with the full output contract: `continue:false` halting,
+  /// `suppressOutput` filtering, surfaced `systemMessage`s, and
+  /// prompt-hook block verdicts. Blocking stop semantics live in
+  /// [fireStop] — call exactly one of the two for the `stop` event.
+  Future<HookFireResult> fireDetailed(
+    String event,
+    String sessionId, {
+    Map<String, dynamic> payload = const {},
+    String? model,
+    String? onlyPluginId,
   }) async {
-    if (!enabled) return '';
+    if (!enabled) return const HookFireResult(output: '');
     final canonical = canonicalHookEvent(event) ?? event;
     // Recursion prevention: never re-fire the SAME event for the SAME session
     // while it is executing. Concurrent DISTINCT sessions are independent and
     // must both run (workflow child fan-out).
     final guardKey = '$sessionId|$canonical';
-    if (_firingEvents.contains(guardKey)) return '';
+    if (_firingEvents.contains(guardKey)) {
+      return const HookFireResult(output: '');
+    }
     final chainDepth = _chainDepth();
-    if (chainDepth >= maxDepth) return '';
+    if (chainDepth >= maxDepth) return const HookFireResult(output: '');
     final hooks = _resolveHooks(event, sessionId, onlyPluginId: onlyPluginId);
-    if (hooks.isEmpty) return '';
+    if (hooks.isEmpty) return const HookFireResult(output: '');
 
     _firingEvents.add(guardKey);
     try {
@@ -703,9 +1105,16 @@ class HookService extends ChangeNotifier {
       // A SessionStart hook's output is the session's standing context
       // (real [CC] plugins inject a skill here). Extract it once and hold it
       // for the run loop, which prepends it to the request.
-      if (canonical == 'session_start' && result.isNotEmpty) {
-        final ctx = extractHookContext(result);
+      if (canonical == 'session_start' && result.output.isNotEmpty) {
+        final ctx = extractHookContext(result.output);
         if (ctx.isNotEmpty) _sessionContexts[sessionId] = ctx;
+      }
+      if (canonical == 'session_end') {
+        // The per-session env file dies with the session (item 8), and so
+        // does the cached session_start context — a new session re-fires
+        // session_start and rebuilds it.
+        _sessionContexts.remove(sessionId);
+        await _deleteSessionEnv(sessionId);
       }
       return result;
     } finally {
@@ -713,7 +1122,127 @@ class HookService extends ChangeNotifier {
     }
   }
 
-  Future<String> _runHooks({
+  /// Evaluate one prompt-type hook through the wired [promptHookEvaluator]
+  /// (item 3). Returns the parsed verdict, or null when the hook was
+  /// skipped (no evaluator wired / evaluation failed / unparseable
+  /// response) — every skip is fail-open with a ledger note.
+  Future<PromptHookVerdict?> _evalPromptHook({
+    required String pluginId,
+    required PluginHook hook,
+    required String canonical,
+    required String sessionId,
+    required Map<String, dynamic> payload,
+    required String? model,
+    required String stdinJson,
+  }) async {
+    final record = {
+      'plugin': pluginId,
+      'event': canonical,
+      'type': 'prompt',
+    };
+    final eval = promptHookEvaluator;
+    if (eval == null) {
+      fired++;
+      try {
+        await _ledger(sessionId, 'hook/result', {
+          ...record,
+          'ok': false,
+          'reason':
+              'prompt-type hook skipped: no PromptHookEvaluator wired '
+              '(fail-open)',
+        });
+      } catch (_) {}
+      return null;
+    }
+    fired++;
+    try {
+      await _ledger(sessionId, 'hook/invoked', {
+        ...Map<String, dynamic>.from(record),
+        'promptChars': hook.payload.length,
+      });
+    } catch (_) {}
+    final prompt = _buildPromptHookPrompt(
+      hook: hook,
+      canonical: canonical,
+      sessionId: sessionId,
+      stdinJson: stdinJson,
+    );
+    String? response;
+    try {
+      response = await eval(prompt, {
+        'event': canonical,
+        'session': sessionId,
+        'plugin': _displayName(pluginId),
+        'hook': hook.canonicalId,
+        'model': ?model,
+      }).timeout(const Duration(seconds: 120));
+    } catch (e) {
+      failed++;
+      _recordFailure(pluginId, sessionId);
+      try {
+        await _ledger(sessionId, 'hook/result', {
+          ...record,
+          'ok': false,
+          'error': e.toString(),
+          'warning': 'prompt-hook evaluation failed (fail-open)',
+        });
+      } catch (_) {}
+      return null;
+    }
+    final verdict = parsePromptHookDecision(response ?? '');
+    if (verdict == null) {
+      _recordSuccess(pluginId, sessionId);
+      try {
+        await _ledger(sessionId, 'hook/result', {
+          ...record,
+          'ok': true,
+          'decision': 'unparseable — fail-open',
+        });
+      } catch (_) {}
+      return null;
+    }
+    _recordSuccess(pluginId, sessionId);
+    try {
+      await _ledger(sessionId, 'hook/result', {
+        ...record,
+        'ok': true,
+        'decision': verdict.decision,
+        if (verdict.reason != null) 'reason': verdict.reason,
+      });
+    } catch (_) {}
+    return verdict;
+  }
+
+  /// Build the evaluation prompt for a prompt-type hook: the hook's rule
+  /// text plus the same event context a command hook would see on stdin.
+  static String _buildPromptHookPrompt({
+    required PluginHook hook,
+    required String canonical,
+    required String sessionId,
+    required String stdinJson,
+  }) {
+    final eventName = ccHookEventNames[canonical] ?? canonical;
+    return 'You are evaluating a plugin hook rule for the "$eventName" '
+        'event (session "$sessionId"). The plugin registered this rule:\n\n'
+        '${hook.payload}\n\n'
+        'The current event context (JSON):\n$stdinJson\n\n'
+        'Decide whether this event violates the rule. Reply with exactly '
+        'one word — "block" or "approve" — or with JSON '
+        '{"decision": "block"|"approve", "reason": "..."}. '
+        '"block" stops the event; "approve" lets it proceed.';
+  }
+
+  /// The `"if"` predicate declared on [hook] (`unknownFields` first, then
+  /// `frontmatter`), or null when the hook declares none.
+  static String? _hookIfPredicate(PluginHook hook) {
+    final u = hook.unknownFields['if'];
+    if (u is String && u.trim().isNotEmpty) return u;
+    final f = hook.frontmatter['if'];
+    if (f is String && f.trim().isNotEmpty) return f;
+    return null;
+  }
+
+  Future<HookFireResult> _runHooks({
     required String sessionId,
     required String canonical,
     required List<(String, PluginHook, String)> hooks,
@@ -726,13 +1255,46 @@ class HookService extends ChangeNotifier {
       ...redactHookPayload(payload),
     });
     final cwd = await _sessionWorkDir(sessionId);
+    // The FULL JSON payload every hook child receives on stdin (item 1).
+    final stdinJson = buildHookStdinJson(
+      canonicalEvent: canonical,
+      sessionId: sessionId,
+      payload: payload,
+      cwd: cwd?.path ?? '',
+      transcriptPath: _transcriptPathFrom(payload),
+    );
     final collected = <String>[];
+    final systemMessages = <String>[];
+    var halted = false;
+    String? promptBlockReason;
     for (final (pluginId, hook, declaredEvent) in hooks) {
       if (!_matcherApplies(canonical, hook.matcher, payload)) continue;
       if (_tripped.contains('$pluginId|$sessionId')) continue;
-      if (hook.type != 'command') {
-        // Prompt hooks have no shell runtime ("where implementable",
-        // §8.1) — skipped with a visible ledger note, never executed.
+      // `"if"` predicate (item 7): a non-matching hook is skipped — it is
+      // a filter, not a failure, so no breaker/ledger noise.
+      final ifPredicate = _hookIfPredicate(hook);
+      if (ifPredicate != null && !ifPredicateMatches(ifPredicate, payload)) {
+        continue;
+      }
+      if (hook.type == 'prompt') {
+        // Prompt-type hooks are LLM-evaluated where the event supports it
+        // (item 3); elsewhere they keep the historical skip-with-note.
+        if (promptHookEvents.contains(canonical)) {
+          final verdict = await _evalPromptHook(
+            pluginId: pluginId,
+            hook: hook,
+            canonical: canonical,
+            sessionId: sessionId,
+            payload: payload,
+            model: model,
+            stdinJson: stdinJson,
+          );
+          if (verdict != null && verdict.decision == 'block') {
+            promptBlockReason ??=
+                verdict.reason ?? 'blocked by prompt hook ($pluginId)';
+          }
+          continue;
+        }
         fired++;
         try {
           await _ledger(sessionId, 'hook/result', {
@@ -745,8 +1307,9 @@ class HookService extends ChangeNotifier {
         } catch (_) {}
         continue;
       }
+      if (hook.type != 'command') continue;
       final storage = await _pluginStorageDir(pluginId);
-      final env = _envFor(
+      final env = await _envFor(
         pluginId: pluginId,
         hook: hook,
         canonical: canonical,
@@ -781,7 +1344,7 @@ class HookService extends ChangeNotifier {
         // same way the sync path does, instead of recording every
         // completed process as a success.
         unawaited(
-          _exec(hook, env, cwd)
+          _exec(hook, env, cwd, stdinPayload: stdinJson)
               .then((result) async {
                 final (code, out) = result;
                 if (code == 0) {
@@ -807,7 +1370,7 @@ class HookService extends ChangeNotifier {
         continue;
       }
       try {
-        final (code, out) = await _exec(hook, env, cwd);
+        final (code, out) = await _exec(hook, env, cwd, stdinPayload: stdinJson);
         if (code != 0) {
           failed++;
           _recordFailure(pluginId, sessionId);
@@ -823,15 +1386,37 @@ class HookService extends ChangeNotifier {
           continue;
         }
         _recordSuccess(pluginId, sessionId);
-        if (out.trim().isNotEmpty) {
-          collected.add(out.trim());
-          try {
-            await _ledger(sessionId, 'hook/result', {
-              ...record,
-              'ok': true,
-              'stdout': cleanHookJson(out),
-            });
-          } catch (_) {}
+        // A SessionStart hook may persist vars for the session via
+        // `hookSpecificOutput.envFileAppend` (item 8).
+        if (canonical == 'session_start') {
+          final appends = extractEnvFileAppend(out);
+          if (appends.isNotEmpty) {
+            await _appendSessionEnv(sessionId, appends);
+          }
+        }
+        final contract = HookOutputContract.parse(out);
+        final trimmed = out.trim();
+        if (trimmed.isNotEmpty && !contract.suppressOutput) {
+          collected.add(trimmed);
+        }
+        if (contract.systemMessage != null) {
+          systemMessages.add(contract.systemMessage!);
+        }
+        try {
+          await _ledger(sessionId, 'hook/result', {
+            ...record,
+            'ok': true,
+            if (trimmed.isNotEmpty) 'stdout': cleanHookJson(out),
+            if (!contract.continueHooks) 'halted': true,
+            if (contract.suppressOutput) 'suppressOutput': true,
+            if (contract.systemMessage != null)
+              'systemMessage': contract.systemMessage,
+          });
+        } catch (_) {}
+        // `continue:false` halts further hooks for this event (item 9).
+        if (!contract.continueHooks) {
+          halted = true;
+          break;
         }
       } catch (e) {
         failed++;
@@ -850,10 +1435,15 @@ class HookService extends ChangeNotifier {
     // session_start output becomes standing session context, so it gets the
     // larger context cap; other events are short injections (≤2 KB).
     final cap = canonical == 'session_start' ? maxSessionContextChars : 2048;
-    if (joined.length > cap) {
-      return '${joined.substring(0, cap)}\n[hook output truncated]';
-    }
-    return joined;
+    final output = joined.length > cap
+        ? '${joined.substring(0, cap)}\n[hook output truncated]'
+        : joined;
+    return HookFireResult(
+      output: output,
+      systemMessages: systemMessages,
+      halted: halted,
+      promptBlockReason: promptBlockReason,
+    );
   }
 
   /// Compact + strip newlines so env vars stay one-line.
@@ -885,14 +1475,244 @@ class HookService extends ChangeNotifier {
         : null;
   }
 
+  /// Claude Code event name for a canonical event (the `hook_event_name`
+  /// real hooks switch on). Events with no CC equivalent keep the
+  /// canonical name.
+  static const Map<String, String> ccHookEventNames = {
+    'session_start': 'SessionStart',
+    'session_end': 'SessionEnd',
+    'user_prompt_submit': 'UserPromptSubmit',
+    'pre_tool': 'PreToolUse',
+    'post_tool': 'PostToolUse',
+    'notification': 'Notification',
+    'pre_compact': 'PreCompact',
+    'post_compact': 'PostCompact',
+    'stop': 'Stop',
+    'subagent_start': 'SubagentStart',
+    'subagent_end': 'SubagentStop',
+    'permission_request': 'PermissionRequest',
+  };
+
+  /// Transcript path for hook stdin: the caller (AgentService) may
+  /// supply `transcript_path` in the event payload; HookService has no
+  /// other source for it. Empty when absent.
+  static String _transcriptPathFrom(Map<String, dynamic> payload) {
+    final v = payload['transcript_path'] ?? payload['transcriptPath'];
+    return v is String ? v : '';
+  }
+
+  /// Build the FULL JSON payload a hook child receives on stdin (item 1 —
+  /// the Claude Code contract: real hooks do `json.load(sys.stdin)`).
+  /// Keys: `session_id`, `transcript_path`, `cwd`, `permission_mode`,
+  /// `hook_event_name`, plus `tool_name`/`tool_input`/`tool_response`
+  /// (tool events), `prompt` (user-prompt events), `reason` and
+  /// event-specific extras when the caller supplied them. Values are
+  /// redacted exactly like the env payload ([redactHookPayload]).
+  @visibleForTesting
+  static String buildHookStdinJson({
+    required String canonicalEvent,
+    required String sessionId,
+    required Map<String, dynamic> payload,
+    required String cwd,
+    String transcriptPath = '',
+  }) {
+    final redacted = redactHookPayload(payload);
+    final m = <String, dynamic>{
+      'session_id': sessionId,
+      // Explicit parameter wins; otherwise the caller may carry it in the
+      // event payload (the two internal fire paths do this via
+      // `_transcriptPathFrom`).
+      'transcript_path': transcriptPath.isNotEmpty
+          ? transcriptPath
+          : _transcriptPathFrom(redacted),
+      'cwd': cwd,
+      'permission_mode': redacted['permission_mode']?.toString() ?? '',
+      'hook_event_name': ccHookEventNames[canonicalEvent] ?? canonicalEvent,
+    };
+    final tool = redacted['tool'] ?? redacted['tool_name'];
+    if (tool != null) m['tool_name'] = tool.toString();
+    final toolInput =
+        redacted['tool_input'] ?? redacted['args'] ?? redacted['input'];
+    if (toolInput != null) m['tool_input'] = toolInput;
+    final toolResult =
+        redacted['tool_result'] ??
+        redacted['tool_response'] ??
+        redacted['result'];
+    if (toolResult != null) m['tool_response'] = toolResult;
+    final prompt = redacted['prompt'] ?? redacted['user_prompt'];
+    if (prompt != null) m['prompt'] = prompt;
+    final reason = redacted['reason'];
+    if (reason != null) m['reason'] = reason.toString();
+    // Event-specific extras real hooks read.
+    if (canonicalEvent == 'notification' && redacted['message'] != null) {
+      m['message'] = redacted['message'];
+    }
+    if (canonicalEvent == 'pre_compact' || canonicalEvent == 'post_compact') {
+      if (redacted['trigger'] != null) m['trigger'] = redacted['trigger'];
+    }
+    return jsonEncode(m);
+  }
+
+  /// Evaluate a hook `"if"` predicate (item 7): `ToolName(arg-pattern)`,
+  /// `ToolName(*)` or bare `ToolName`. The arg pattern wildcard-matches
+  /// (`*` → `.*`, unanchored) against the JSON-encoded tool input; `:`
+  /// matches a colon or whitespace so `Bash(git commit:*)` matches
+  /// `{"command": "git commit -m …"}`. A malformed predicate never matches
+  /// (the hook is skipped — fail-closed for the hook, fail-open for the
+  /// run). `*` as the tool part matches any tool.
+  @visibleForTesting
+  static bool ifPredicateMatches(
+    String predicate,
+    Map<String, dynamic> payload,
+  ) {
+    final p = predicate.trim();
+    if (p.isEmpty) return true;
+    String toolPart;
+    String? argPattern;
+    final paren = p.indexOf('(');
+    if (paren < 0) {
+      toolPart = p;
+    } else {
+      if (!p.endsWith(')')) return false;
+      toolPart = p.substring(0, paren).trim();
+      argPattern = p.substring(paren + 1, p.length - 1).trim();
+    }
+    if (toolPart.isEmpty) return false;
+    final tool = (payload['tool'] ?? payload['tool_name'])?.toString() ?? '';
+    if (toolPart != '*' && toolPart != tool) return false;
+    if (argPattern == null || argPattern.isEmpty || argPattern == '*') {
+      return true;
+    }
+    final input = payload['tool_input'] ?? payload['args'] ?? payload['input'];
+    final subject = input is String ? input : jsonEncode(input);
+    // `*` → `.*`; `:` is a soft separator (colon or whitespace); everything
+    // else is literal. Unanchored: the pattern may match anywhere in the
+    // JSON-encoded input.
+    final buf = StringBuffer();
+    for (final ch in argPattern.split('')) {
+      if (ch == '*') {
+        buf.write('.*');
+      } else if (ch == ':') {
+        buf.write('[:\\s]');
+      } else {
+        buf.write(RegExp.escape(ch));
+      }
+    }
+    try {
+      return RegExp(buf.toString(), dotAll: true).hasMatch(subject);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Parse an LLM's verdict on a prompt-type hook (item 3). Accepts JSON
+  /// `{"decision":"block"|"approve","reason":"…"}` or plain text:
+  /// leading "block"/"approve" wins, else the first whole-word occurrence
+  /// (a negated "do not block" does NOT count as block). Anything else
+  /// yields null → the caller fails open.
+  @visibleForTesting
+  static PromptHookVerdict? parsePromptHookDecision(String response) {
+    final t = response.trim();
+    if (t.isEmpty) return null;
+    if (t.startsWith('{') && t.endsWith('}')) {
+      try {
+        final j = jsonDecode(t);
+        if (j is Map) {
+          final d = j['decision']?.toString().toLowerCase().trim();
+          if (d == 'block' || d == 'approve') {
+            final r = j['reason'];
+            return PromptHookVerdict(
+              d!,
+              r is String && r.trim().isNotEmpty ? r.trim() : null,
+            );
+          }
+        }
+      } catch (_) {
+        // Fall through to the text heuristics.
+      }
+    }
+    final lower = t.toLowerCase();
+    final capped = t.length > 500 ? '${t.substring(0, 500)}…' : t;
+    if (lower.startsWith('block')) return PromptHookVerdict('block', capped);
+    if (lower.startsWith('approve')) {
+      return PromptHookVerdict('approve', capped);
+    }
+    final negatedBlock = RegExp(
+      r"\b(do not|don't|dont|never|no)\s+block\b",
+    ).hasMatch(lower);
+    if (!negatedBlock && RegExp(r'\bblock\b').hasMatch(lower)) {
+      return PromptHookVerdict('block', capped);
+    }
+    if (RegExp(r'\bapprove\b').hasMatch(lower)) {
+      return PromptHookVerdict('approve', capped);
+    }
+    return null;
+  }
+
+  /// Events on which prompt-type hooks are evaluated (item 3). Other
+  /// events skip prompt hooks with a ledger note (no shell runtime).
+  static const Set<String> promptHookEvents = {
+    'stop',
+    'subagent_end',
+    'user_prompt_submit',
+    'pre_tool',
+    'permission_request',
+  };
+
+  /// Extract `KEY=VALUE` lines a SessionStart hook appends to the
+  /// per-session env file (item 8): `hookSpecificOutput.envFileAppend`
+  /// (list of strings or map) or `hookSpecificOutput.env` (map). Only
+  /// well-formed `NAME=value` lines survive; anything else is dropped.
+  @visibleForTesting
+  static List<String> extractEnvFileAppend(String stdout) {
+    final t = stdout.trim();
+    if (t.isEmpty || !t.startsWith('{') || !t.endsWith('}')) {
+      return const [];
+    }
+    dynamic j;
+    try {
+      j = jsonDecode(t);
+    } catch (_) {
+      return const [];
+    }
+    if (j is! Map) return const [];
+    final hso = j['hookSpecificOutput'];
+    if (hso is! Map) return const [];
+    final hm = hso.cast<String, dynamic>();
+    final append = hm['envFileAppend'] ?? hm['env_file_append'];
+    List<String> raw;
+    if (append is List) {
+      raw = [for (final e in append) e.toString()];
+    } else if (append is Map) {
+      raw = [
+        for (final e in append.entries) '${e.key}=${e.value}',
+      ];
+    } else {
+      final envMap = hm['env'];
+      if (envMap is! Map) return const [];
+      raw = [
+        for (final e in envMap.entries) '${e.key}=${e.value}',
+      ];
+    }
+    final nameRe = RegExp(r'^[A-Za-z_][A-Za-z0-9_]*=');
+    return [
+      for (final line in raw)
+        if (nameRe.hasMatch(line.trim())) line.trim(),
+    ];
+  }
+
   // ── fireGate: blocking events (pre_tool, permission_request) ────────
 
-  /// Fire the GATING event [event] for [sessionId] and return whether the
-  /// action is allowed. Only `pre_tool` and `permission_request` are
-  /// blocking (§8.2); a block requires exit code 2 or a valid JSON block
-  /// decision. Everything else — crash, timeout, missing interpreter,
-  /// malformed output, any other nonzero exit — fails OPEN with a ledger
-  /// warning (a broken hook must never brick the run).
+  /// Fire the GATING event [event] for [sessionId] and return the gate
+  /// outcome. Only `pre_tool` and `permission_request` are blocking
+  /// (§8.2); a block requires exit code 2 or a valid JSON block decision.
+  /// `hookSpecificOutput.updatedInput` rewrites the tool args (returned on
+  /// [HookGateResult.updatedInput] even when allowed) and
+  /// `hookSpecificOutput.permissionDecision: "ask"` surfaces as
+  /// [HookDecision.ask] for routing into the permission prompt. Everything
+  /// else — crash, timeout, missing interpreter, malformed output, any
+  /// other nonzero exit — fails OPEN with a ledger warning (a broken hook
+  /// must never brick the run).
   Future<HookGateResult> fireGate(
     String event,
     String sessionId, {
@@ -917,7 +1737,7 @@ class HookService extends ChangeNotifier {
 
     _firingEvents.add(guardKey);
     try {
-      final denied = await runZoned(
+      return await runZoned(
         () => _runGateHooks(
           sessionId: sessionId,
           canonical: canonical,
@@ -927,15 +1747,92 @@ class HookService extends ChangeNotifier {
         ),
         zoneValues: {_depthKey: chainDepth + 1},
       );
-      return denied ?? const HookGateResult.allow();
     } finally {
       _firingEvents.remove(guardKey);
     }
   }
 
-  /// Runs the resolved gating hooks; returns a deny result or null when the
-  /// action is allowed. Callers own the recursion guard/zone wrapping.
-  Future<HookGateResult?> _runGateHooks({
+  // ── fireStop: the stop event as a blocking gate (item 4) ────────────
+
+  /// Fire the `stop` hooks as a BLOCKING gate and return whether the stop
+  /// may proceed. A Stop hook vetoes the stop (model loop continues) via
+  /// exit code 2 or a JSON `{"decision":"block","reason":"…"}` — command
+  /// or prompt-type hooks alike.
+  ///
+  /// A USER-initiated stop ALWAYS wins over hooks: pass
+  /// [userStopRequested]: true (or wire [userStopChecker]) and the result
+  /// is allow without running any hook. Call exactly one of [fireStop] /
+  /// [fire] for the `stop` event — never both (each executes the hooks).
+  ///
+  /// AGENTSERVICE WIRING (for the AgentService worker): at the natural
+  /// stop point, replace the fire-and-forget `fire('stop', …)` with:
+  /// ```dart
+  /// final stopRes = await HookService.I.fireStop(
+  ///   sessionId,
+  ///   payload: {...},
+  ///   model: model,
+  ///   userStopRequested: true, // when the user hit Stop/cancel
+  /// );
+  /// if (!stopRes.stopAllowed) {
+  ///   // vetoed — continue the model loop instead of stopping
+  /// }
+  /// ```
+  /// and set `HookService.I.userStopChecker = (sid) =>`
+  /// `[passive per-session "user asked to stop" flag]` once at startup so
+  /// [fireStop] can honor user stops without a per-call argument. The
+  /// passive signal must NOT be `stopRequested()` itself (that method
+  /// performs the stop); use the run's cancel flag.
+  Future<HookStopResult> fireStop(
+    String sessionId, {
+    Map<String, dynamic> payload = const {},
+    String? model,
+    bool? userStopRequested,
+  }) async {
+    final userStop =
+        userStopRequested ?? userStopChecker?.call(sessionId) ?? false;
+    if (userStop) {
+      return const HookStopResult.allow(userInitiated: true);
+    }
+    if (!enabled) return const HookStopResult.allow();
+    const canonical = 'stop';
+    final guardKey = '$sessionId|$canonical';
+    if (_firingEvents.contains(guardKey)) {
+      return const HookStopResult.allow();
+    }
+    final chainDepth = _chainDepth();
+    if (chainDepth >= maxDepth) return const HookStopResult.allow();
+    final hooks = _resolveHooks(canonical, sessionId);
+    if (hooks.isEmpty) return const HookStopResult.allow();
+
+    _firingEvents.add(guardKey);
+    try {
+      final gate = await runZoned(
+        () => _runGateHooks(
+          sessionId: sessionId,
+          canonical: canonical,
+          hooks: hooks,
+          payload: payload,
+          model: model,
+        ),
+        zoneValues: {_depthKey: chainDepth + 1},
+      );
+      if (gate.decision == HookDecision.deny) {
+        return HookStopResult.veto(
+          gate.decidedByPlugin,
+          gate.reason ?? 'stopped by hook',
+        );
+      }
+      // "ask" is meaningless at stop time — fail open (allow).
+      return const HookStopResult.allow();
+    } finally {
+      _firingEvents.remove(guardKey);
+    }
+  }
+
+  /// Runs the resolved gating hooks; always returns a [HookGateResult]
+  /// (allow carrying any [HookGateResult.updatedInput] collected along the
+  /// way). Callers own the recursion guard/zone wrapping.
+  Future<HookGateResult> _runGateHooks({
     required String sessionId,
     required String canonical,
     required List<(String, PluginHook, String)> hooks,
@@ -948,12 +1845,60 @@ class HookService extends ChangeNotifier {
       ...redactHookPayload(payload),
     });
     final cwd = await _sessionWorkDir(sessionId);
+    final stdinJson = buildHookStdinJson(
+      canonicalEvent: canonical,
+      sessionId: sessionId,
+      payload: payload,
+      cwd: cwd?.path ?? '',
+      transcriptPath: _transcriptPathFrom(payload),
+    );
+    Map<String, dynamic>? updatedInput;
     for (final (pluginId, hook, declaredEvent) in hooks) {
       if (!_matcherApplies(canonical, hook.matcher, payload)) continue;
       if (_tripped.contains('$pluginId|$sessionId')) continue;
+      final ifPredicate = _hookIfPredicate(hook);
+      if (ifPredicate != null && !ifPredicateMatches(ifPredicate, payload)) {
+        continue;
+      }
+      final displayName = _displayName(pluginId);
+      if (hook.type == 'prompt') {
+        // Prompt-type hooks on gate events are LLM-evaluated (item 3); a
+        // "block" verdict denies like exit code 2.
+        if (!promptHookEvents.contains(canonical)) continue;
+        final verdict = await _evalPromptHook(
+          pluginId: pluginId,
+          hook: hook,
+          canonical: canonical,
+          sessionId: sessionId,
+          payload: payload,
+          model: model,
+          stdinJson: stdinJson,
+        );
+        if (verdict != null && verdict.decision == 'block') {
+          failed++;
+          final reason =
+              verdict.reason ?? '$displayName denied this action';
+          try {
+            await _ledger(sessionId, 'hook/result', {
+              'plugin': pluginId,
+              'event': canonical,
+              'type': 'prompt',
+              'ok': false,
+              'decision': 'deny',
+              'reason': reason,
+            });
+          } catch (_) {}
+          return HookGateResult.deny(
+            displayName,
+            reason,
+            updatedInput: updatedInput,
+          );
+        }
+        continue;
+      }
       if (hook.type != 'command') continue;
       final storage = await _pluginStorageDir(pluginId);
-      final env = _envFor(
+      final env = await _envFor(
         pluginId: pluginId,
         hook: hook,
         canonical: canonical,
@@ -978,13 +1923,36 @@ class HookService extends ChangeNotifier {
         );
       } catch (_) {}
       try {
-        final (code, out) = await _exec(hook, env, cwd, gate: true);
+        final (code, out) = await _exec(
+          hook,
+          env,
+          cwd,
+          gate: true,
+          stdinPayload: stdinJson,
+        );
+        final contract = HookOutputContract.parse(out);
+        // Rewritten tool args (item 5) — collected even from hooks that
+        // allow, so the caller can apply them pre-execution.
+        if (contract.updatedInput != null) {
+          updatedInput = contract.updatedInput;
+        }
         final blockReason = jsonBlockReason(out);
-        if (code == 2 || blockReason != null) {
+        final decision = contract.decision;
+        final permDecision = contract.permissionDecision;
+        final denies =
+            code == 2 ||
+            blockReason != null ||
+            decision == 'block' ||
+            decision == 'deny' ||
+            permDecision == 'deny';
+        final asks = !denies &&
+            (decision == 'ask' || permDecision == 'ask');
+        if (denies || asks) {
           failed++;
-          final displayName = _displayName(pluginId);
           final reason =
               blockReason ??
+              contract.reason ??
+              contract.permissionDecisionReason ??
               (out.trim().isEmpty
                   ? '$displayName denied this action'
                   : cleanHookJson(out.trim()));
@@ -993,12 +1961,24 @@ class HookService extends ChangeNotifier {
               ...record,
               'ok': false,
               'exit': code,
-              'decision': 'deny',
+              'decision': asks ? 'ask' : 'deny',
               'blockReason': ?blockReason,
               'reason': reason,
+              if (contract.updatedInput != null)
+                'updatedInput': contract.updatedInput,
             });
           } catch (_) {}
-          return HookGateResult.deny(displayName, reason);
+          return asks
+              ? HookGateResult.ask(
+                  displayName,
+                  reason,
+                  updatedInput: updatedInput,
+                )
+              : HookGateResult.deny(
+                  displayName,
+                  reason,
+                  updatedInput: updatedInput,
+                );
         }
         _recordSuccess(pluginId, sessionId);
         try {
@@ -1007,8 +1987,12 @@ class HookService extends ChangeNotifier {
             'ok': true,
             'decision': 'allow',
             if (out.trim().isNotEmpty) 'stdout': cleanHookJson(out),
+            if (contract.updatedInput != null)
+              'updatedInput': contract.updatedInput,
+            if (!contract.continueHooks) 'halted': true,
           });
         } catch (_) {}
+        if (!contract.continueHooks) break;
       } catch (e) {
         // Exec error/timeout/missing sandbox — fail-open, but count
         // toward the breaker and record the visible warning.
@@ -1024,22 +2008,6 @@ class HookService extends ChangeNotifier {
         } catch (_) {}
       }
     }
-    return null;
+    return HookGateResult.allow(updatedInput: updatedInput);
   }
-}
-
-/// Outcome of [HookService.fireGate] — only pre_tool/permission_request
-/// gates produce a deny.
-@immutable
-class HookGateResult {
-  final bool allowed;
-  final String? deniedByPlugin;
-  final String? reason;
-
-  const HookGateResult.allow()
-    : allowed = true,
-      deniedByPlugin = null,
-      reason = null;
-
-  const HookGateResult.deny(this.deniedByPlugin, this.reason) : allowed = false;
 }

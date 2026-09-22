@@ -17,6 +17,8 @@ import 'format.dart';
 import 'voice_input_service.dart';
 import 'agent_notification_service.dart';
 import 'state.dart';
+import 'grant_store.dart';
+import 'global_repo_registry.dart';
 import 'sandbox_service.dart';
 import 'github_service.dart';
 import 'repo_cache.dart';
@@ -381,6 +383,7 @@ class ApprovalRequest {
   /// Free-text note the user attached when refusing (e.g. "Chat about it"),
   /// handed back to the model so it can revise instead of guessing.
   String? note;
+
   /// When true the approval card offers a third "Always allow" action that
   /// remembers the tool for the rest of the session. Only plain tool
   /// approvals set this — destructive commands, plugin installs, device
@@ -506,6 +509,14 @@ class _RunCtx {
   /// [_runTaskBody] bumps it once the run is admitted (after the
   /// re-entry guard, so a refused re-entry never invalidates the live run).
   int epoch;
+
+  /// The runId this chain admitted itself under (set in [_runTaskBody]
+  /// right after the re-entry guard). The run-end finally only clears
+  /// [AgentRun.activeRunId]/`cancelRequested` when the bucket still carries
+  /// THIS id — an old run unwinding late (e.g. after a Stop+queue
+  /// promotion) must never wipe the promoted run's id, or the Stop button
+  /// hides mid-stream and a second concurrent run can slip in.
+  String? ownedRunId;
   _RunCtx(this.run, this.session, this.provider, this.epoch);
 }
 
@@ -704,7 +715,10 @@ class AgentService extends ChangeNotifier {
           HookService.I.fire(
             'session_end',
             sessionId,
-            payload: {'deleted': true},
+            payload: {
+              'deleted': true,
+              'transcript_path': _transcriptPathFor(sessionId),
+            },
           ),
         );
       }
@@ -722,6 +736,23 @@ class AgentService extends ChangeNotifier {
     CommandService.I.registerBuiltins();
     // Warm the sync workspace root for the @file picker.
     unawaited(SandboxService.I.warmSyncRoot());
+    // Plugin/MCP parity wiring (once at init):
+    // 1. Prompt-type hooks are evaluated through the agent's own model —
+    //    a quiet, non-streaming completion (never touches the transcript).
+    //    Null/throw fails open (HookService treats it as "no verdict").
+    HookService.I.promptHookEvaluator =
+        (String prompt, Map<String, dynamic> context) async {
+          try {
+            return await _evaluatePromptHookQuietly(prompt, context);
+          } catch (_) {
+            return null; // fail open
+          }
+        };
+    // 2. User-initiated stops always win over Stop-hook vetoes. This is the
+    //    run bucket's passive cancel flag — never stopRequested() itself
+    //    (that method PERFORMS the stop).
+    HookService.I.userStopChecker = (sid) =>
+        _runs[sid]?.cancelRequested ?? false;
   }
 
   @override
@@ -835,6 +866,16 @@ class AgentService extends ChangeNotifier {
   ApprovalRequest? get pendingApproval => _runResolved.pendingApproval;
   set pendingApproval(ApprovalRequest? v) => _runResolved.pendingApproval = v;
 
+  /// Whether an interactive approval UI is currently mounted and able to
+  /// present approval cards to the user. The chat screen sets this in its
+  /// [State.initState] and clears it in [State.dispose]; it is false in
+  /// unit tests, background isolates, and whenever the user is on another
+  /// screen. [_askUser] consults it: with nobody able to answer, tool
+  /// approvals fail closed after a short grace period instead of wedging
+  /// the run on a completer nobody will complete (the full 120 s window
+  /// only applies when the UI is actually there to answer).
+  static bool approvalUiReady = false;
+
   /// Plan mode, PERSISTED per session (the plan mode coordinator parity): the run bucket reads
   /// through to the session's `planMode` field, so `/plan` survives
   /// restarts and session switches, and the composer chip reads it.
@@ -891,6 +932,7 @@ class AgentService extends ChangeNotifier {
     if (z == null) return false;
     return z.epoch != z.run.runEpoch || z.run.cancelRequested;
   }
+
   set _activeRequest(HttpClientRequest? v) => _runResolved.activeRequest = v;
   List<String> get _queue => _runResolved.queue;
 
@@ -1162,7 +1204,8 @@ class AgentService extends ChangeNotifier {
   static const String deviceOverlayStopMethod = 'deviceOverlayStop';
   static const String deviceOverlayMicMethod = 'deviceOverlayMic';
   static const String deviceOverlaySetTextMethod = 'deviceOverlaySetText';
-  static const String deviceOverlayMicListeningMethod = 'deviceOverlayMicListening';
+  static const String deviceOverlayMicListeningMethod =
+      'deviceOverlayMicListening';
   static const String deviceOverlaySetPromptMethod = 'deviceOverlaySetPrompt';
   static const String deviceOverlayLiveMethod = 'deviceOverlayLive';
 
@@ -1187,8 +1230,7 @@ class AgentService extends ChangeNotifier {
   /// Test seam: replaces the actual run start for a queued continuation.
   /// Signature: (sessionId, text). Null in production.
   @visibleForTesting
-  Future<void> Function(String sessionId, String text)?
-  queuedRunStarterForTest;
+  Future<void> Function(String sessionId, String text)? queuedRunStarterForTest;
 
   /// Retry delays when a queued continuation cannot start yet (the previous
   /// run is still unwinding and `runTask` would refuse re-entry). The message
@@ -1238,10 +1280,9 @@ class AgentService extends ChangeNotifier {
   Future<void> setOverlayLive(bool live) async {
     _overlayLive = live;
     try {
-      await _overlayChannel.invokeMethod(
-        deviceOverlayLiveMethod,
-        {'live': live},
-      );
+      await _overlayChannel.invokeMethod(deviceOverlayLiveMethod, {
+        'live': live,
+      });
     } catch (_) {}
   }
 
@@ -1343,10 +1384,9 @@ class AgentService extends ChangeNotifier {
     if (voice.isListening) {
       await voice.stop();
       try {
-        await _overlayChannel.invokeMethod(
-          deviceOverlayMicListeningMethod,
-          {'listening': false},
-        );
+        await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
+          'listening': false,
+        });
       } catch (_) {}
       return;
     }
@@ -1375,25 +1415,22 @@ class AgentService extends ChangeNotifier {
         // overlay-typed text and clear the field.
         await voice.stop();
         try {
-          await _overlayChannel.invokeMethod(
-            deviceOverlayMicListeningMethod,
-            {'listening': false},
-          );
+          await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
+            'listening': false,
+          });
         } catch (_) {}
         await handleDeviceOverlayText(t);
         try {
-          await _overlayChannel.invokeMethod(
-            deviceOverlaySetTextMethod,
-            {'text': ''},
-          );
+          await _overlayChannel.invokeMethod(deviceOverlaySetTextMethod, {
+            'text': '',
+          });
         } catch (_) {}
         return;
       }
       try {
-        await _overlayChannel.invokeMethod(
-          deviceOverlaySetTextMethod,
-          {'text': text},
-        );
+        await _overlayChannel.invokeMethod(deviceOverlaySetTextMethod, {
+          'text': text,
+        });
       } catch (_) {}
     });
     if (!started) {
@@ -1401,10 +1438,9 @@ class AgentService extends ChangeNotifier {
       return;
     }
     try {
-      await _overlayChannel.invokeMethod(
-        deviceOverlayMicListeningMethod,
-        {'listening': started},
-      );
+      await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
+        'listening': started,
+      });
     } catch (_) {}
   }
 
@@ -1413,16 +1449,14 @@ class AgentService extends ChangeNotifier {
   /// button with no idea what is wrong.
   Future<void> _overlayMicError(String message) async {
     try {
-      await _overlayChannel.invokeMethod(
-        deviceOverlayMicListeningMethod,
-        {'listening': false},
-      );
+      await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
+        'listening': false,
+      });
     } catch (_) {}
     try {
-      await _overlayChannel.invokeMethod(
-        deviceOverlaySetTextMethod,
-        {'text': message},
-      );
+      await _overlayChannel.invokeMethod(deviceOverlaySetTextMethod, {
+        'text': message,
+      });
     } catch (_) {}
   }
 
@@ -1635,8 +1669,12 @@ class AgentService extends ChangeNotifier {
     if (text.trim().isEmpty) return;
     final run = sessionId != null ? _runFor(sessionId) : _runResolved;
     _queueAdd(run, text);
-    _emitToRun(run, 'think', 'queued message ${run.queue.length}',
-        sessionId: sessionId);
+    _emitToRun(
+      run,
+      'think',
+      'queued message ${run.queue.length}',
+      sessionId: sessionId,
+    );
     notifyListeners();
   }
 
@@ -1655,10 +1693,7 @@ class AgentService extends ChangeNotifier {
     unawaited(_startQueuedContinuation(sessionId, text));
   }
 
-  Future<void> _startQueuedContinuation(
-    String sessionId,
-    String text,
-  ) async {
+  Future<void> _startQueuedContinuation(String sessionId, String text) async {
     try {
       var target = AppState.I.sessionById(sessionId);
       if (target == null) {
@@ -2174,9 +2209,7 @@ class AgentService extends ChangeNotifier {
       final urls = prefs.getStringList(_kBrowserTabs);
       if (urls == null || urls.isEmpty) return false;
       for (final u in urls) {
-        browserTabs.add(
-          BrowserTab(url: _homeUrl(u), sessionId: _browserKey()),
-        );
+        browserTabs.add(BrowserTab(url: _homeUrl(u), sessionId: _browserKey()));
       }
       activeTabIndex = prefs.getInt(_kBrowserActiveTab) ?? 0;
       if (activeTabIndex >= browserTabs.length) activeTabIndex = 0;
@@ -2799,7 +2832,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
               _emit(
                 'shell',
                 'Google sign-in opened in the system browser — complete it '
-                'there, then return to Ovid.',
+                    'there, then return to Ovid.',
               );
               return NavigationDecision.prevent;
             }
@@ -3106,7 +3139,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       return true;
     }
     try {
-      final host = await _resolveFsPath(path) ?? await _resolveFsPath(cleanPath);
+      final host =
+          await _resolveFsPath(path) ?? await _resolveFsPath(cleanPath);
       if (host != null && host.startsWith('repo:')) {
         final rel = host.substring('repo:'.length);
         final content = RepoCache.I.read(rel);
@@ -3784,8 +3818,38 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     pendingApproval = null;
     if (req == null) return;
     if (req.allowAlways) {
-      final sid = _runSession?.id ?? AppState.I.activeSession?.id ?? '';
-      _alwaysAllowedTools.putIfAbsent(sid, () => <String>{}).add(req.tool);
+      // Grant prompts ("Always allow" on an out-of-workspace path or
+      // off-allowlist host) record a hierarchical GrantStore grant on the
+      // session — NOT a tool-name entry. Plain tool prompts keep the
+      // existing per-session _alwaysAllowedTools behavior. The two systems
+      // are complementary: tool names vs paths/hosts.
+      final s = _runSession ?? AppState.I.activeSession;
+      if (req.tool.startsWith('grant:path:') && s != null) {
+        final p = req.tool.substring('grant:path:'.length);
+        if (p.isNotEmpty &&
+            !s.grants.any(
+              (g) =>
+                  g.kind == PermissionGrant.kindPath &&
+                  pathCoveredBy(g.value, p),
+            )) {
+          s.grants.add(PermissionGrant.path(p, sessionId: s.id));
+          AppState.I.persistSessions();
+        }
+      } else if (req.tool.startsWith('grant:host:') && s != null) {
+        final h = req.tool.substring('grant:host:'.length);
+        if (h.isNotEmpty &&
+            !s.grants.any(
+              (g) =>
+                  g.kind == PermissionGrant.kindHost &&
+                  hostCoveredBy(g.value, h),
+            )) {
+          s.grants.add(PermissionGrant.host(h, sessionId: s.id));
+          AppState.I.persistSessions();
+        }
+      } else {
+        final sid = s?.id ?? '';
+        _alwaysAllowedTools.putIfAbsent(sid, () => <String>{}).add(req.tool);
+      }
     }
     if (!req.completer.isCompleted) req.completer.complete(true);
     notifyListeners();
@@ -3943,10 +4007,11 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       await HookService.I.fire(
         'session_start',
         sessionId,
-        payload: const {
+        payload: {
           'reason': 'created',
           'pluginInstalled': true,
           'isSubagent': false,
+          'transcript_path': _transcriptPathFor(sessionId),
         },
         model: _runSession?.model,
         onlyPluginId: pluginId,
@@ -3978,8 +4043,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     final runtimeId = p.runtimeId;
     if (runtimeId != null &&
         PluginContributionRegistry.I.isRegistered(runtimeId)) {
-      for (final c in PluginContributionRegistry.I
-          .toolContributionsForPlugin(runtimeId)) {
+      for (final c in PluginContributionRegistry.I.toolContributionsForPlugin(
+        runtimeId,
+      )) {
         names.add(c.name);
       }
     }
@@ -4021,9 +4087,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       final capability = NativePluginRegistry.I.capabilityFor(p.name);
       if (capability == null) return const [];
       final slug = NativePluginRegistry.slugify(p.name);
-      return capability.tools
-          .map((t) => 'plugin__${slug}__${t.name}')
-          .toList();
+      return capability.tools.map((t) => 'plugin__${slug}__${t.name}').toList();
     }
     if (p.category == 'MCP') {
       // Task 10: honest parity with the roster gate — the proxy tool only
@@ -4136,8 +4200,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // P6: device_* tools are hard-denied outside Control mode, so they are
     // omitted from the roster entirely when the running session is not in
     // Control — a smaller, more honest per-request payload.
-    final runningMode =
-        _runSession?.mode ?? AppState.I.activeSession?.mode;
+    final runningMode = _runSession?.mode ?? AppState.I.activeSession?.mode;
     final controlMode = runningMode == AgentMode.control.name;
     for (final t in _coreTools) {
       final fn = t['function'];
@@ -4635,14 +4698,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             'node': {'type': 'integer'},
             'direction': {
               'type': 'string',
-              'enum': [
-                'forward',
-                'backward',
-                'up',
-                'down',
-                'left',
-                'right',
-              ],
+              'enum': ['forward', 'backward', 'up', 'down', 'left', 'right'],
             },
           },
           'required': ['node', 'direction'],
@@ -6053,6 +6109,38 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     {
       'type': 'function',
       'function': {
+        'name': 'git_clone',
+        'description':
+            'Clone a git repository into the session workspace. Pass '
+            '`branch` to check out a specific branch or tag on clone '
+            '(`git clone -b <branch>`); omit it to clone the default branch.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'url': {
+              'type': 'string',
+              'description': 'Repository URL to clone.',
+            },
+            'path': {
+              'type': 'string',
+              'description':
+                  'Destination directory name inside the session workspace. '
+                  'Defaults to the repository name.',
+            },
+            'branch': {
+              'type': 'string',
+              'description':
+                  'Branch or tag to check out on clone '
+                  '(`git clone -b <branch>`). Omit for the default branch.',
+            },
+          },
+          'required': ['url'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
         'name': 'agent_install_plugin',
         'description':
             'Install a plugin by catalog name, or from a GitHub repo with '
@@ -7030,6 +7118,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         ],
         s,
         includeTools: false,
+        // Invisible helper call — must never stream into the transcript.
+        streamToTranscript: false,
       );
       if (summary == null || summary['content'] == null) continue;
       final text = summary['content'] as String;
@@ -7065,7 +7155,12 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         HookService.I.fire(
           'pre_compact',
           s.id,
-          payload: {'from': from, 'cutoff': cutoff, 'forced': forced},
+          payload: {
+            'from': from,
+            'cutoff': cutoff,
+            'forced': forced,
+            'transcript_path': _transcriptPathFor(s.id),
+          },
           model: s.model,
         ),
       );
@@ -7107,6 +7202,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             'cutoff': cutoff,
             'folded': shadowed,
             'forced': forced,
+            'transcript_path': _transcriptPathFor(s.id),
           },
           model: s.model,
         ),
@@ -7434,7 +7530,10 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         HookService.I.fire(
           'user_prompt_submit',
           s.id,
-          payload: {'prompt': cleanTruncate(originalPrompt, 400)},
+          payload: {
+            'prompt': cleanTruncate(originalPrompt, 400),
+            'transcript_path': _transcriptPathFor(s.id),
+          },
           model: s.model,
         ),
       );
@@ -7625,13 +7724,24 @@ can drive there yourself with the device_* tools):
     // previous generation drop their events/tokens instead of rendering
     // late) and clear the stopped-by-user marker — a new run is fresh user
     // intent, so later settlement notices treat the parent as alive again.
+    // The cancel flag is likewise owned by the live generation: a Stop
+    // that aborted the OLD run must not keep killing the newly admitted
+    // one (the old run's finally only clears the flag when it still owns
+    // the bucket).
     ctx.run.stoppedByUser = false;
+    ctx.run.cancelRequested = false;
     ctx.epoch = ++ctx.run.runEpoch;
     // This run's bucket state — resolve nothing through the active session.
     activeRunId = runId;
+    // Own this runId (see [_RunCtx.ownedRunId]): the run-end finally only
+    // clears the bucket while it still carries this id.
+    ctx.ownedRunId = runId;
     ctx.run.runKey = s.id;
     unawaited(checkpointRunStart(s.id, runId));
     SandboxService.I.tagRun(s.id);
+    // Warm the hook transcript path (session ledger JSONL) so
+    // `transcript_path` is present in hook payloads fired during the run.
+    _warmTranscriptPath(s.id);
     // Plan mode is persisted on the session — seed the run bucket from it
     // so gate checks inside the run see the user's last /plan state.
     ctx.run.planMode = s.planMode;
@@ -7887,23 +7997,41 @@ ${await _agentsMdBlock()}
               payload: {
                 'turn': turn,
                 'prompt': cleanTruncate(originalPrompt, 400),
+                'transcript_path': _transcriptPathFor(s.id),
               },
               model: s.model,
             ),
           );
         }
         if (HookService.I.hasHookListeners('pre_request', sessionId: s.id)) {
-          final hookCtx = await HookService.I.fire(
+          final hookRes = await HookService.I.fireDetailed(
             'pre_request',
             s.id,
-            payload: {'turn': turn},
+            payload: {
+              'turn': turn,
+              'transcript_path': _transcriptPathFor(s.id),
+            },
             model: s.model,
           );
-          if (hookCtx.isNotEmpty) {
+          // Surface hook systemMessages as system notes on this request.
+          for (final sm in hookRes.systemMessages) {
+            msgs.insert(0, {'role': 'system', 'content': '[plugin hook]\n$sm'});
+          }
+          if (hookRes.output.isNotEmpty) {
             msgs.insert(0, {
               'role': 'system',
-              'content': '[plugin hook context — on_pre_request]\n$hookCtx',
+              'content':
+                  '[plugin hook context — on_pre_request]\n${hookRes.output}',
             });
+          }
+          // A prompt-hook "block" on an observe event cannot halt the run —
+          // run policy: surface it as a visible note and continue.
+          if (hookRes.promptBlockReason != null) {
+            _emit(
+              'think',
+              'a plugin hook flagged this request: '
+                  '${hookRes.promptBlockReason} — continuing (observe-only)',
+            );
           }
         }
         // SessionStart context (real [CC] plugins inject a skill here, e.g.
@@ -7912,10 +8040,7 @@ ${await _agentsMdBlock()}
         // front of every request, before per-request hook notes.
         final sessionCtx = HookService.I.sessionContextFor(s.id);
         if (sessionCtx.isNotEmpty) {
-          msgs.insert(0, {
-            'role': 'system',
-            'content': sessionCtx,
-          });
+          msgs.insert(0, {'role': 'system', 'content': sessionCtx});
         }
         var msg = await _callLlm(p, msgs, s);
         // Task 8 (spec §8.1): post_request — observe-only hook after every
@@ -7929,6 +8054,7 @@ ${await _agentsMdBlock()}
               payload: {
                 'turn': turn,
                 'reply': cleanTruncate((msg['content'] as String?) ?? '', 400),
+                'transcript_path': _transcriptPathFor(s.id),
               },
               model: s.model,
             ),
@@ -8051,17 +8177,13 @@ ${await _agentsMdBlock()}
               duration: Duration.zero,
             ),
           );
-          final toolDelta = _runResolved.toolMs -
-              _runResolved.analyticsToolMsRecorded;
-          final llmDelta = _runResolved.llmMs -
-              _runResolved.analyticsLlmMsRecorded;
-          final stepDelta = _runResolved.steps -
-              _runResolved.analyticsStepsRecorded;
-          final cost = estimatedCostForModel(
-            _baseModelOf(s.model),
-            pt,
-            ct,
-          );
+          final toolDelta =
+              _runResolved.toolMs - _runResolved.analyticsToolMsRecorded;
+          final llmDelta =
+              _runResolved.llmMs - _runResolved.analyticsLlmMsRecorded;
+          final stepDelta =
+              _runResolved.steps - _runResolved.analyticsStepsRecorded;
+          final cost = estimatedCostForModel(_baseModelOf(s.model), pt, ct);
           s.recordAnalytics(
             inputTokens: pt,
             outputTokens: ct,
@@ -8110,7 +8232,7 @@ ${await _agentsMdBlock()}
             _emit(
               'think',
               'provider hiccup ($err) — retrying in ${wait.inSeconds}s… '
-              '(~${_fmtK(measuredContextTokens(s))} tokens in context)',
+                  '(~${_fmtK(measuredContextTokens(s))} tokens in context)',
             );
             // Drop the failed attempt's partial bubble before the run-level
             // retry, so it can never sit beside the retry's fresh answer.
@@ -8187,6 +8309,43 @@ ${await _agentsMdBlock()}
             continue;
           }
           _finalizeLive();
+          // Blocking Stop gate (plugin/MCP parity): Stop hooks may veto
+          // the stop, in which case the model loop CONTINUES instead of
+          // settling. A user-initiated stop always wins — fireStop
+          // short-circuits to allow without running any hook when the
+          // run's cancel flag is set.
+          final stopResult = await HookService.I.fireStop(
+            s.id,
+            payload: {
+              'turn': turn,
+              'steps': ctx.run.steps,
+              'transcript_path': _transcriptPathFor(s.id),
+            },
+            model: s.model,
+            userStopRequested: ctx.run.cancelRequested,
+          );
+          if (!stopResult.stopAllowed) {
+            // Vetoed — re-enter the model loop. The final answer is already
+            // in the transcript; keep it in the request too so the next
+            // turn sees the full conversation instead of a gap.
+            msgs.add({'role': 'assistant', 'content': msg['content'] ?? ''});
+            final vetoBy = stopResult.vetoedByPlugin;
+            _emit(
+              'think',
+              'stop vetoed by ${vetoBy ?? 'plugin'}'
+                  '${stopResult.vetoReason != null ? ': ${stopResult.vetoReason}' : ''}'
+                  ' — continuing the run',
+            );
+            msgs.add({
+              'role': 'user',
+              'content':
+                  '[system] A plugin hook vetoed the end of this run'
+                  '${stopResult.vetoReason != null ? ' (reason: ${stopResult.vetoReason})' : ''}. '
+                  'Continue working on the task; do not repeat your last '
+                  'message verbatim.',
+            });
+            continue;
+          }
           _emit('done', 'completed');
           break;
         }
@@ -8233,17 +8392,17 @@ ${await _agentsMdBlock()}
                   '($argError). Re-issue the call with a complete, valid JSON '
                   'object.';
             } else {
-            // Per-tool cooperative timeout budget (PR18, reference
-            // tool-call-timeout-policy): each tool gets a deadline; slow
-            // tools surface a structured timeout error the model can read.
-            final budget = _toolTimeoutFor(name);
-            result = await _dispatch(name, args).timeout(
-              budget,
-              onTimeout: () =>
-                  'Error: tool "$name" timed out after ${budget.inSeconds}s '
-                  '— narrow the request (smaller path/pattern/range) and '
-                  'retry, or continue without it.',
-            );
+              // Per-tool cooperative timeout budget (PR18, reference
+              // tool-call-timeout-policy): each tool gets a deadline; slow
+              // tools surface a structured timeout error the model can read.
+              final budget = _toolTimeoutFor(name);
+              result = await _dispatch(name, args).timeout(
+                budget,
+                onTimeout: () =>
+                    'Error: tool "$name" timed out after ${budget.inSeconds}s '
+                    '— narrow the request (smaller path/pattern/range) and '
+                    'retry, or continue without it.',
+              );
             }
             if (toolMsg != null) {
               _toolFinish(
@@ -8357,7 +8516,15 @@ ${await _agentsMdBlock()}
       _emit('err', '$e');
       _appendAssistant('Agent error: $e', session: s);
     } finally {
-      activeRunId = null;
+      // Stop/output ownership: only the run that still OWNS the bucket may
+      // clear it. An old run unwinding after a Stop+queue promotion (the
+      // promoted run already admitted and streaming) must NOT null out
+      // activeRunId — that hid the Stop button mid-stream and let the user
+      // Send a second concurrent run (ghost/duplicate responses). Likewise
+      // only the owning run clears the cancel flag: a stale run's blanket
+      // clear could erase a fresh stop request on the promoted run.
+      final ownsRun = ctx.ownedRunId != null && activeRunId == ctx.ownedRunId;
+      if (ownsRun) activeRunId = null;
       // Capture BEFORE the reset below: a user-cancelled run must not yank
       // the user back to Ovid (they stopped to take over themselves).
       final userStopped = ctx.run.cancelRequested;
@@ -8365,7 +8532,7 @@ ${await _agentsMdBlock()}
       unawaited(setOverlayLive(false));
       unawaited(checkpointRunEnd(s.id));
       SandboxService.I.tagRun(null);
-      _cancelRequested = false;
+      if (ownsRun) _cancelRequested = false;
       // The Zone exits with this function — there is nothing to pop.
       // The queue auto-continue continues on THIS run's session, captured
       // from the zone (never the currently-active one in the UI).
@@ -8381,18 +8548,10 @@ ${await _agentsMdBlock()}
           'llmMs': pinned.llmMs,
         }),
       );
-      // PR24: on_turn_end fire-and-forget — post-run bookkeeping plugins
-      // (indexers, notifiers, cleanup) never block the UI.
-      if (HookService.I.hasHookListeners('stop', sessionId: pinnedSessionId)) {
-        unawaited(
-          HookService.I.fire(
-            'stop',
-            pinnedSessionId,
-            payload: {'steps': pinned.steps, 'turns': pinned.turns},
-            model: ctx.session.model,
-          ),
-        );
-      }
+      // PR24: on_turn_end — the blocking Stop gate now lives at the natural
+      // stop point inside the turn loop (a veto re-enters the model loop),
+      // so the run-end finally no longer fires 'stop'. Call exactly one of
+      // fireStop/fire per HookService contract.
       // LLM session title (the title generator parity): one cheap background call after
       // the first real exchange — fire-and-forget, heuristic stays on fail.
       unawaited(maybeGenerateSessionTitle(ctx.session));
@@ -8418,7 +8577,7 @@ ${await _agentsMdBlock()}
           _emit(
             'think',
             'could not switch to the task session: '
-            '${e.toString().split('\n').first}',
+                '${e.toString().split('\n').first}',
           );
         }
         try {
@@ -8437,7 +8596,7 @@ ${await _agentsMdBlock()}
             msg = detail.isNotEmpty
                 ? '$detail Tap the Ovid notification to return to the task session.'
                 : 'Ovid could not come to the foreground. Tap the Ovid '
-                    'notification to return to the task session.';
+                      'notification to return to the task session.';
           }
           _emit('think', msg);
         }
@@ -8552,6 +8711,74 @@ ${await _agentsMdBlock()}
   )?
   promptLlmForTest;
 
+  /// Quiet model completion for prompt-type plugin hooks (wired as
+  /// [HookService.promptHookEvaluator] once at init). The hook's rule text
+  /// plus event context goes in as a single user message; the returned
+  /// string is parsed by [HookService.parsePromptHookDecision]. Always
+  /// invisible: `streamToTranscript: false`, no tools, no transcript
+  /// writes. Null (or a throw) fails open — the hook is skipped.
+  ///
+  /// Runs outside any run zone: [_callLlm] → `_callLlmOnce` touches no
+  /// run-zone state, so a hook evaluated mid-run cannot disturb the live
+  /// generation. HookService's own recursion guard prevents a hook from
+  /// re-firing its own event while evaluating.
+  Future<String?> _evaluatePromptHookQuietly(
+    String prompt,
+    Map<String, dynamic> context,
+  ) async {
+    try {
+      final sessionId = context['session'] as String?;
+      final session = sessionId != null
+          ? AppState.I.sessionById(sessionId)
+          : null;
+      final s = session ?? AppState.I.activeSession;
+      if (s == null) return null;
+      final p = AppState.I.providerForSession(s);
+      if (p == null) return null;
+      final r = await _callLlm(
+        p,
+        [
+          {'role': 'user', 'content': prompt},
+        ],
+        s,
+        includeTools: false,
+        // Invisible helper call — must never stream into the transcript.
+        streamToTranscript: false,
+      ).timeout(const Duration(seconds: 120));
+      final text = (r?['content'] as String?)?.trim();
+      return (text == null || text.isEmpty) ? null : text;
+    } catch (_) {
+      return null; // fail open
+    }
+  }
+
+  /// Warmed per-session transcript paths for hook payloads.
+  ///
+  /// `transcript_path` in the hook stdin JSON points at the session's
+  /// ledger JSONL — the on-disk event transcript. The path convention
+  /// (documents dir + `session-ledgers/<safe-id>.jsonl`) mirrors
+  /// SessionLedger's private layout; if that ever changes, this degrades
+  /// to '' (HookService treats empty as absent) rather than breaking.
+  final Map<String, String> _transcriptPathCache = {};
+
+  /// Synchronous best-effort lookup for hook payloads; '' when unknown.
+  String _transcriptPathFor(String sessionId) =>
+      _transcriptPathCache[sessionId] ?? '';
+
+  /// Warm [_transcriptPathFor] for [sessionId] (fire-and-forget at run
+  /// start — hook payloads are built synchronously).
+  void _warmTranscriptPath(String sessionId) {
+    if (_transcriptPathCache.containsKey(sessionId)) return;
+    unawaited(() async {
+      try {
+        final base =
+            '${(await getApplicationDocumentsDirectory()).path}/session-ledgers';
+        final safe = sessionId.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
+        _transcriptPathCache[sessionId] = '$base/$safe.jsonl';
+      } catch (_) {}
+    }());
+  }
+
   /// Execute a prompt-backed capability tool through a live model (NP5).
   ///
   /// Mirrors the title-generation `_callLlm(..., includeTools: false)`
@@ -8583,14 +8810,19 @@ ${await _agentsMdBlock()}
     final override = promptLlmForTest;
     final r = override != null
         ? await override(p, msgs, session)
-        : await _callLlm(p, msgs, session, includeTools: false);
+        : await _callLlm(
+            p,
+            msgs,
+            session,
+            includeTools: false,
+            // Invisible helper call — must never stream into the transcript.
+            streamToTranscript: false,
+          );
     if (r == null) {
       return 'Model call failed: ${lastError ?? 'unknown'}.';
     }
     final choices = (r['choices'] as List?)?.whereType<Map>().toList() ?? [];
-    final raw = choices.isEmpty
-        ? null
-        : choices.first['message']?['content'];
+    final raw = choices.isEmpty ? null : choices.first['message']?['content'];
     final text = (raw as String? ?? '').trim();
     if (text.isEmpty) return 'The model returned no text.';
     return text;
@@ -8677,18 +8909,23 @@ ${await _agentsMdBlock()}
       try {
         r = override != null
             ? await override(target, subMsgs, session)
-            : await _callLlm(target, subMsgs, session, includeTools: false);
+            : await _callLlm(
+                target,
+                subMsgs,
+                session,
+                includeTools: false,
+                // Invisible helper call — must never stream into the
+                // transcript.
+                streamToTranscript: false,
+              );
       } catch (e) {
         return '## $label\nModel call failed: $e.';
       }
       if (r == null) {
         return '## $label\nModel call failed: ${lastError ?? 'unknown'}.';
       }
-      final choices =
-          (r['choices'] as List?)?.whereType<Map>().toList() ?? [];
-      final raw = choices.isEmpty
-          ? null
-          : choices.first['message']?['content'];
+      final choices = (r['choices'] as List?)?.whereType<Map>().toList() ?? [];
+      final raw = choices.isEmpty ? null : choices.first['message']?['content'];
       final text = (raw as String? ?? '').trim();
       if (text.isEmpty) return '## $label\nThe model returned no text.';
       return '## $label\n$text';
@@ -8720,7 +8957,20 @@ ${await _agentsMdBlock()}
     if (_isUserTitle(s)) return; // user renamed it — never touch a human title
     if (_titledSessions.contains(s.id)) return;
     _titledSessions.add(s.id);
+    // Epoch-aware: capture the run bucket's epoch NOW (at this run's end).
+    // A queued continuation that starts while the title LLM is in flight
+    // bumps the epoch at its own admission — a late title from the dead
+    // generation must not overwrite anything, and the new generation's
+    // own run-end title pass owns naming from here on.
+    final epochAtCall = _runs[s.id]?.runEpoch;
     final title = await _generateTitleFor(s);
+    if (epochAtCall != null && _runs[s.id]?.runEpoch != epochAtCall) {
+      // A newer run/continuation started meanwhile — discard the stale
+      // title and release the in-flight guard so the new generation's
+      // run-end pass can try naming the session itself.
+      _titledSessions.remove(s.id);
+      return;
+    }
     if (title != null) {
       s.title = title;
       s.titleGenerated = true;
@@ -8778,8 +9028,24 @@ ${await _agentsMdBlock()}
       final override = titleLlmForTest;
       final r = override != null
           ? await override(p, titleMsgs, s)
-          : await _callLlm(p, titleMsgs, s, includeTools: false);
+          : await _callLlm(
+              p,
+              titleMsgs,
+              s,
+              includeTools: false,
+              // Invisible helper call — must never stream into the
+              // transcript.
+              streamToTranscript: false,
+            );
       final choices = (r?['choices'] as List?)?.whereType<Map>().toList() ?? [];
+      // The title call goes through the streaming transport, which returns
+      // `{content, ...}` (no `choices` wrapper); also accept the legacy
+      // non-streaming `{choices: [{message: {content}}]}` shape so test
+      // overrides keep working.
+      final streamed = r?['content'];
+      if (streamed is String && streamed.isNotEmpty) {
+        return cleanSessionTitle(streamed);
+      }
       if (choices.isEmpty) return null;
       return cleanSessionTitle(choices.first['message']?['content'] as String?);
     } catch (_) {
@@ -8872,6 +9138,12 @@ ${await _agentsMdBlock()}
     List<Map<String, dynamic>> msgs,
     ChatSession session, {
     bool includeTools = true,
+    // Invisible helper calls (title generation, compaction summarizer,
+    // prompt tools, multi-model fan-out) pass false: the response text is
+    // returned but NEVER streamed into the visible transcript — no live
+    // bubble is created, so a helper call can never leave a stray bubble
+    // under the real answer.
+    bool streamToTranscript = true,
   }) async {
     var lastErr = 'unknown';
     for (var attempt = 0; attempt <= 4; attempt++) {
@@ -8885,6 +9157,7 @@ ${await _agentsMdBlock()}
         msgs,
         session,
         includeTools: includeTools,
+        streamToTranscript: streamToTranscript,
       );
       if (r != null) {
         // Surface recovery so a slow turn reads as "retried and recovered"
@@ -8893,7 +9166,7 @@ ${await _agentsMdBlock()}
           _emit(
             'think',
             'recovered after ${attempt + 1} attempts '
-            '(last error: ${cleanTruncate(lastErr, 160)})',
+                '(last error: ${cleanTruncate(lastErr, 160)})',
           );
         }
         return r;
@@ -8912,7 +9185,7 @@ ${await _agentsMdBlock()}
         _emit(
           'think',
           'retrying ${p.name} in ${wait.inSeconds}s '
-          '(attempt ${attempt + 2}/5, ~${kb}KB request)…',
+              '(attempt ${attempt + 2}/5, ~${kb}KB request)…',
         );
         await Future.delayed(wait);
       }
@@ -8926,6 +9199,7 @@ ${await _agentsMdBlock()}
     List<Map<String, dynamic>> msgs,
     ChatSession session, {
     bool includeTools = true,
+    bool streamToTranscript = true,
   }) async {
     final onceOverride = llmOnceForTest;
     if (onceOverride != null) {
@@ -8935,7 +9209,13 @@ ${await _agentsMdBlock()}
     // auth header, body shape, SSE events, tool schema). Route it to its
     // own builder so the OpenAI path stays untouched.
     if (p.effectiveApiFormat == ApiFormat.anthropic) {
-      return _callAnthropicOnce(p, msgs, session, includeTools: includeTools);
+      return _callAnthropicOnce(
+        p,
+        msgs,
+        session,
+        includeTools: includeTools,
+        streamToTranscript: streamToTranscript,
+      );
     }
     HttpClient? client;
     final ttftWatch = Stopwatch()..start();
@@ -9129,14 +9409,14 @@ ${await _agentsMdBlock()}
         if (c is String && c.isNotEmpty) {
           ttftMs ??= ttftWatch.elapsedMilliseconds;
           contentBuf.write(c);
-          _streamToBubble(session, c);
+          if (streamToTranscript) _streamToBubble(session, c);
         }
         // Reasoning tokens — DeepSeek `reasoning_content` / OpenRouter `reasoning`
         final r = delta['reasoning_content'] ?? delta['reasoning'];
         if (r is String && r.isNotEmpty) {
           ttftMs ??= ttftWatch.elapsedMilliseconds;
           reasoningBuf.write(r);
-          _streamReasoning(session, r);
+          if (streamToTranscript) _streamReasoning(session, r);
         }
         // Tool-call argument fragments — accumulate by index
         final tcs = delta['tool_calls'] as List?;
@@ -9316,11 +9596,11 @@ ${await _agentsMdBlock()}
   /// assistant turn with tool_calls becomes `tool_use` blocks.
   @visibleForTesting
   ({String system, List<Map<String, dynamic>> messages})
-      anthropicRequestMessagesForTest(List<Map<String, dynamic>> msgs) =>
-          _anthropicRequestMessages(msgs);
+  anthropicRequestMessagesForTest(List<Map<String, dynamic>> msgs) =>
+      _anthropicRequestMessages(msgs);
 
   ({String system, List<Map<String, dynamic>> messages})
-      _anthropicRequestMessages(List<Map<String, dynamic>> msgs) {
+  _anthropicRequestMessages(List<Map<String, dynamic>> msgs) {
     final system = StringBuffer();
     final out = <Map<String, dynamic>>[];
     for (final m in msgs) {
@@ -9391,9 +9671,7 @@ ${await _agentsMdBlock()}
       final content = m['content'];
       out.add({
         'role': 'user',
-        'content': content is String
-            ? content
-            : (content ?? '').toString(),
+        'content': content is String ? content : (content ?? '').toString(),
       });
     }
     // Anthropic rejects `_toolResults` helper keys — strip them now.
@@ -9409,9 +9687,7 @@ ${await _agentsMdBlock()}
     List<Map<String, dynamic>> tools,
   ) => _anthropicTools(tools);
 
-  List<Map<String, dynamic>> _anthropicTools(
-    List<Map<String, dynamic>> tools,
-  ) {
+  List<Map<String, dynamic>> _anthropicTools(List<Map<String, dynamic>> tools) {
     final out = <Map<String, dynamic>>[];
     for (final t in tools) {
       final fn = t['function'];
@@ -9419,7 +9695,8 @@ ${await _agentsMdBlock()}
       out.add({
         'name': fn['name'],
         'description': fn['description'] ?? '',
-        'input_schema': fn['parameters'] ?? {'type': 'object', 'properties': {}},
+        'input_schema':
+            fn['parameters'] ?? {'type': 'object', 'properties': {}},
       });
     }
     return out;
@@ -9430,6 +9707,8 @@ ${await _agentsMdBlock()}
     List<Map<String, dynamic>> msgs,
     ChatSession session, {
     bool includeTools = true,
+    // See [_callLlm]: false keeps helper calls out of the transcript.
+    bool streamToTranscript = true,
   }) async {
     HttpClient? client;
     final ttftWatch = Stopwatch()..start();
@@ -9478,7 +9757,9 @@ ${await _agentsMdBlock()}
         if (converted.system.isNotEmpty) 'system': converted.system,
         'messages': converted.messages,
       };
-      final toolList = includeTools ? _anthropicTools(_tools) : const <Map<String, dynamic>>[];
+      final toolList = includeTools
+          ? _anthropicTools(_tools)
+          : const <Map<String, dynamic>>[];
       if (toolList.isNotEmpty) body['tools'] = toolList;
       if (effort == 'high') {
         body['thinking'] = {'type': 'enabled', 'budget_tokens': 4096};
@@ -9572,10 +9853,7 @@ ${await _agentsMdBlock()}
               toolBlocks[idx] = {
                 'id': block['id'] ?? 'call_$idx',
                 'type': 'function',
-                'function': {
-                  'name': block['name'] ?? '',
-                  'arguments': '',
-                },
+                'function': {'name': block['name'] ?? '', 'arguments': ''},
               };
             }
           case 'content_block_delta':
@@ -9588,14 +9866,14 @@ ${await _agentsMdBlock()}
               if (t is String && t.isNotEmpty) {
                 ttftMs ??= ttftWatch.elapsedMilliseconds;
                 contentBuf.write(t);
-                _streamToBubble(session, t);
+                if (streamToTranscript) _streamToBubble(session, t);
               }
             } else if (dType == 'thinking_delta') {
               final t = delta['thinking'];
               if (t is String && t.isNotEmpty) {
                 ttftMs ??= ttftWatch.elapsedMilliseconds;
                 reasoningBuf.write(t);
-                _streamReasoning(session, t);
+                if (streamToTranscript) _streamReasoning(session, t);
               }
             } else if (dType == 'input_json_delta') {
               final partial = delta['partial_json'];
@@ -9639,7 +9917,8 @@ ${await _agentsMdBlock()}
       _activeRequest = null;
 
       if (contentBuf.isEmpty && reasoningBuf.isEmpty && toolBlocks.isEmpty) {
-        lastError ??= 'empty response from ${modelId.isEmpty ? 'model' : modelId}';
+        lastError ??=
+            'empty response from ${modelId.isEmpty ? 'model' : modelId}';
         _emit('err', lastError!);
         return null;
       }
@@ -9671,9 +9950,7 @@ ${await _agentsMdBlock()}
   /// Anthropic reports `input_tokens`/`output_tokens`; the rest of the app
   /// meters on `prompt_tokens`/`completion_tokens`. Normalize so Usage and
   /// the context ring stay correct for Claude runs.
-  Map<String, dynamic>? _normalizeAnthropicUsage(
-    Map<String, dynamic>? usage,
-  ) {
+  Map<String, dynamic>? _normalizeAnthropicUsage(Map<String, dynamic>? usage) {
     if (usage == null) return null;
     final input = (usage['input_tokens'] as num?)?.toInt() ?? 0;
     final output = (usage['output_tokens'] as num?)?.toInt() ?? 0;
@@ -9721,10 +9998,19 @@ ${await _agentsMdBlock()}
       final gate = await HookService.I.fireGate(
         'pre_tool',
         ledgerSid ?? '',
-        payload: {'tool': name, 'args': args},
+        payload: {
+          'tool': name,
+          'args': args,
+          'transcript_path': _transcriptPathFor(ledgerSid ?? ''),
+        },
         model: _runSession?.model,
       );
-      if (!gate.allowed) {
+      // A hook may rewrite the tool args without blocking — apply the
+      // rewrite BEFORE dispatch (pre_tool only).
+      if (gate.updatedInput != null) {
+        args = <String, dynamic>{...args, ...gate.updatedInput!};
+      }
+      if (gate.decision == HookDecision.deny) {
         // Reuses the existing "DENIED" prefix contract (same UI 'stopped'
         // state + ledger 'ok: false' as a user-declined approval) — a
         // hook deny and a user deny are the same shape of outcome to the
@@ -9743,6 +10029,31 @@ ${await _agentsMdBlock()}
           );
         }
         return msg;
+      }
+      if (gate.decision == HookDecision.ask) {
+        // The hook defers to the user — route through the normal
+        // permission prompt (the WS5 approval UI). A "no" becomes the
+        // standard user-denial shape.
+        final ok = await _maybeApprove(
+          name,
+          'Hook "${gate.decidedByPlugin ?? 'plugin'}" asked for a decision',
+          gate.reason ??
+              'A plugin hook asked you to decide whether this tool call '
+                  'may run.',
+        );
+        if (!ok) {
+          if (ledgerSid != null) {
+            unawaited(
+              SessionLedger.I.append(ledgerSid, 'tool_end', {
+                'tool': name,
+                'ms': sw.elapsedMilliseconds,
+                'ok': false,
+                'deniedBy': 'user',
+              }),
+            );
+          }
+          return 'DENIED by user';
+        }
       }
     }
     try {
@@ -9771,6 +10082,7 @@ ${await _agentsMdBlock()}
               'ms': sw.elapsedMilliseconds,
               'ok': !res.startsWith('DENIED'),
               'result': cleanTruncate(res, 400),
+              'transcript_path': _transcriptPathFor(ledgerSid ?? ''),
             },
             model: _runSession?.model,
           ),
@@ -10206,12 +10518,15 @@ ${await _agentsMdBlock()}
         final fname = (args['filename'] as String? ?? '').trim();
         if (fname.isEmpty) return 'filename is required';
         _emit('shell', 'reading: $fname');
-        // Real check — file must exist in the session workspace.
+        // Real check — file must exist in the session workspace, or be
+        // covered by a grant / approval (strict permission model).
         try {
-          final work = await _sessionWorkDir();
-          final safe = containedPath(work, fname);
+          final safe = await _resolveGrantedPath(
+            fname,
+            tool: 'read_attachment',
+          );
           if (safe == null) {
-            return 'path escapes the session workspace: $fname — use a path inside the workspace.';
+            return 'path escapes the session workspace: $fname — access denied.';
           }
           final f = File(safe);
           if (!f.existsSync()) {
@@ -10231,8 +10546,15 @@ ${await _agentsMdBlock()}
         final u = args['url'] as String;
         _emit('nav', 'fetching: $u');
         try {
+          final uri = Uri.parse(u);
+          // Strict permission model: a host outside the allowlist prompts
+          // Allow / Deny / Always allow in General/Studio instead of a
+          // silent fetch.
+          if (!await _checkHostGrant(uri.host, tool: 'fetch_url')) {
+            return 'DENIED by user';
+          }
           final r = await HttpShim.get(
-            Uri.parse(u),
+            uri,
             headers: {'User-Agent': 'OvidAgent/1.0'},
           );
           final body = utf8.decode(r.bytes, allowMalformed: true);
@@ -10346,7 +10668,8 @@ ${await _agentsMdBlock()}
         }
         _emit('shell', 'MCP: ${resolved.server.name} → ${resolved.tool.name}');
         final cleanArgs = Map<String, dynamic>.from(args);
-        final rawTimeout = cleanArgs.remove('_timeout_seconds') ??
+        final rawTimeout =
+            cleanArgs.remove('_timeout_seconds') ??
             cleanArgs.remove('_timeout') ??
             cleanArgs.remove('timeout_seconds');
         Duration? callTimeout;
@@ -10386,7 +10709,8 @@ ${await _agentsMdBlock()}
             'MCP: ${resolved.server.name} → ${resolved.tool.name}',
           );
           final cleanArgs = Map<String, dynamic>.from(args);
-          final rawTimeout = cleanArgs.remove('_timeout_seconds') ??
+          final rawTimeout =
+              cleanArgs.remove('_timeout_seconds') ??
               cleanArgs.remove('_timeout') ??
               cleanArgs.remove('timeout_seconds');
           Duration? callTimeout;
@@ -10421,7 +10745,8 @@ ${await _agentsMdBlock()}
           if (!res.contains('connected')) return res;
         }
         final cleanMcpArgs = Map<String, dynamic>.from(mcpArgs);
-        final rawTimeout = cleanMcpArgs.remove('_timeout_seconds') ??
+        final rawTimeout =
+            cleanMcpArgs.remove('_timeout_seconds') ??
             cleanMcpArgs.remove('_timeout') ??
             cleanMcpArgs.remove('timeout_seconds');
         Duration? callTimeout;
@@ -10454,8 +10779,7 @@ ${await _agentsMdBlock()}
           return 'Plugin tool "$name" is malformed: expected '
               'plugin__<plugin_slug>__<tool_name>.';
         }
-        final capability =
-            NativePluginRegistry.I.capabilityForSlug(slug);
+        final capability = NativePluginRegistry.I.capabilityForSlug(slug);
         if (capability == null) {
           return 'Plugin tool "$name" not found or plugin is disabled.';
         }
@@ -10700,9 +11024,7 @@ ${await _agentsMdBlock()}
             if (!pendingOnly && installedId != null) {
               await _fireInstalledPluginSessionStart(sid, installedId);
             }
-            final displayName = pluginName.isNotEmpty
-                ? pluginName
-                : repoArg;
+            final displayName = pluginName.isNotEmpty ? pluginName : repoArg;
             return 'Plugin "$displayName" ${parts.join(' · ')} '
                 '(id ${target.runtimeId}).';
           }
@@ -11137,10 +11459,10 @@ ${await _agentsMdBlock()}
         }
         final targetCapability =
             NativePluginRegistry.I.capabilityFor(pluginArg) ??
-                NativePluginRegistry.I.capabilityForSlug(pluginArg) ??
-                NativePluginRegistry.I.capabilityForSlug(
-                  NativePluginRegistry.slugify(pluginArg),
-                );
+            NativePluginRegistry.I.capabilityForSlug(pluginArg) ??
+            NativePluginRegistry.I.capabilityForSlug(
+              NativePluginRegistry.slugify(pluginArg),
+            );
         if (targetCapability == null) {
           return 'Plugin "$pluginArg" has no native capability to configure.';
         }
@@ -11274,8 +11596,7 @@ ${await _agentsMdBlock()}
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
         await setTabDesktopMode(tab, isDesktop);
-        var zoomFrag =
-            'userZoom=${tab.userZoom.toStringAsFixed(2)}';
+        var zoomFrag = 'userZoom=${tab.userZoom.toStringAsFixed(2)}';
         if (newZoom != null) {
           zoomFrag = await applyBrowserZoomForTest(tab, newZoom);
         }
@@ -11964,6 +12285,64 @@ ${await _agentsMdBlock()}
           return 'commit failed: $e';
         }
 
+      case 'git_clone':
+        final url = (args['url'] as String? ?? '').trim();
+        if (url.isEmpty) return 'git_clone needs a repository "url".';
+        final dest = (args['path'] as String? ?? '').trim();
+        final branch = (args['branch'] as String? ?? '').trim();
+        // Refuse suspicious branch names early — a clean error beats a
+        // confusing git failure (the argv form below already prevents any
+        // shell injection).
+        if (branch.contains(RegExp(r'\s')) || branch.contains('..')) {
+          return 'git_clone: refusing suspicious branch name "$branch".';
+        }
+        // Strict permission model: a clone source outside the host
+        // allowlist prompts Allow / Deny / Always allow in General/Studio.
+        final cloneHost = () {
+          final scp = RegExp(r'^[\w.+-]+@([^:/]+):').firstMatch(url);
+          if (scp != null) return scp.group(1)!;
+          return Uri.tryParse(url)?.host ?? '';
+        }();
+        if (!await _checkHostGrant(cloneHost, tool: 'git_clone')) {
+          return 'DENIED by user';
+        }
+        final okClone = await _maybeApprove(
+          'git_clone',
+          url,
+          'Clone repository into the session workspace:\n'
+              '$url'
+              '${branch.isEmpty ? '' : '\nBranch/tag: $branch'}'
+              '${dest.isEmpty ? '' : '\nDestination: $dest'}',
+        );
+        if (!okClone) return 'DENIED by user';
+        _emit('shell', 'git clone${branch.isEmpty ? '' : ' -b $branch'} $url');
+        try {
+          final work = await _sessionWorkDir();
+          // argv form — no shell, so branch/URL can never inject commands.
+          final cmd = <String>['git', 'clone'];
+          if (branch.isNotEmpty) cmd.addAll(['-b', branch]);
+          cmd.add(url);
+          if (dest.isNotEmpty) cmd.add(dest);
+          final useSandbox =
+              SandboxService.I.isInstalled ||
+              await SandboxService.I.checkExisting();
+          if (!useSandbox) {
+            return 'sandbox not installed yet. Tell the user: "Open Studio '
+                'and install the sandbox (one-time, ~320 MB), then the '
+                'clone will work."';
+          }
+          final out = await SandboxService.I
+              .exec(cmd, hostWorkDir: work)
+              .timeout(const Duration(minutes: 10));
+          for (final l in const LineSplitter().convert(out.trim())) {
+            _emit('shellOut', l);
+          }
+          unawaited(syncOpenFilesFromDisk());
+          return out.isEmpty ? 'cloned $url ✓' : out;
+        } catch (e) {
+          return 'git clone failed: $e';
+        }
+
       case 'preview':
         _emit('think', 'rendering preview…');
         try {
@@ -12189,6 +12568,102 @@ ${await _agentsMdBlock()}
     return true;
   }
 
+  // ── Strict permission-model grant gates (General/Studio) ─────────────
+  // General (auto) confines the agent to the session workspace; Studio
+  // confines it to the bound repo folder (boundWorkspaceFor — null for now,
+  // so Studio currently uses the session workspace too). Paths outside the
+  // root, or network hosts outside the allowlist, trigger an Allow / Deny /
+  // Always-allow prompt instead of a hard refusal. Full Access (drive) and
+  // Control never prompt. This sits alongside _alwaysAllowedTools (which
+  // remembers TOOL names per session); grants remember PATHS and HOSTS.
+
+  /// Live GrantStore view for [sessionId]: session grants + global grants.
+  GrantStore _grantStoreFor(String? sessionId) {
+    final s = sessionId == null ? null : AppState.I.sessionById(sessionId);
+    return GrantStore(
+      sessionGrants: {
+        if (s != null) s.id: List<PermissionGrant>.from(s.grants),
+      },
+      globalGrants: List<PermissionGrant>.from(
+        AppState.I.globalPermissionGrants,
+      ),
+    );
+  }
+
+  /// Resolves [rel] against the permission-model workspace root. Returns the
+  /// absolute path when access is allowed, null when denied:
+  /// * inside the root → allowed, no prompt;
+  /// * drive/control → allowed, no prompt (full access);
+  /// * outside the root in auto/studio → granted paths pass, otherwise the
+  ///   user is prompted (Allow / Deny / Always allow).
+  /// Safe (read-only) keeps the old hard-refusal behavior.
+  Future<String?> _resolveGrantedPath(
+    String rel, {
+    required String tool,
+  }) async {
+    final rs = _runSession;
+    final sid = rs?.id ?? AppState.I.activeSession?.id;
+    final m = mode;
+    final workDir = await _sessionWorkDir();
+    // Studio bound workspace: the real session→repo binding from
+    // GlobalRepoRegistry (the workspaces worker's registry). Null when
+    // unbound — falls back to the session workspace, the same confinement
+    // General mode uses.
+    var root = workDir.path;
+    if (m == AgentMode.studio) {
+      try {
+        final registry = await GlobalRepoRegistry.instance();
+        root =
+            registry.boundWorkspaceFor(rs?.sandboxId ?? rs?.id ?? '') ??
+            workDir.path;
+      } catch (_) {
+        root = workDir.path;
+      }
+    }
+    final inside = containedPath(Directory(root), rel);
+    if (inside != null) return inside;
+    if (m == AgentMode.drive || m == AgentMode.control) {
+      // Full access: no prompts, no confinement.
+      return normalizeGrantPath(rel, base: workDir.path);
+    }
+    if (m == AgentMode.safe) return null;
+    final abs = normalizeGrantPath(rel, base: workDir.path);
+    if (_grantStoreFor(sid).isPathGranted(sid, abs)) return abs;
+    final ok = await _askUser(
+      'grant:path:$abs',
+      'Access outside the workspace',
+      'The agent ($tool) wants to touch a path outside the session workspace:\n'
+          '$abs\n\n'
+          'Allow once, Deny, or "Always allow" to grant this path (and everything '
+          'under it) for this session.',
+      allowAlways: true,
+    );
+    return ok ? abs : null;
+  }
+
+  /// Network gate for General/Studio: allowlisted hosts and granted hosts
+  /// pass; everything else prompts (Allow / Deny / Always allow).
+  /// drive/control never prompt; safe keeps existing behavior.
+  Future<bool> _checkHostGrant(String rawHost, {required String tool}) async {
+    final host = normalizeGrantHost(rawHost);
+    if (host.isEmpty) return false;
+    if (defaultAllowedHosts.contains(host)) return true;
+    final m = mode;
+    if (m == AgentMode.drive || m == AgentMode.control) return true;
+    if (m == AgentMode.safe) return true;
+    final sid = _runSession?.id ?? AppState.I.activeSession?.id;
+    if (_grantStoreFor(sid).isHostGranted(sid, host)) return true;
+    return _askUser(
+      'grant:host:$host',
+      'Network access: $host',
+      'The agent ($tool) wants to reach a network host outside the allowlist:\n'
+          '$host\n\n'
+          'Allow once, Deny, or "Always allow" to grant this host (and its '
+          'subdomains) for this session.',
+      allowAlways: true,
+    );
+  }
+
   Future<bool> _maybeApprove(String tool, String summary, String detail) async {
     final running = _runSession;
     final sessionId = running?.id ?? AppState.I.activeSession?.id;
@@ -12204,10 +12679,17 @@ ${await _agentsMdBlock()}
       final gate = await HookService.I.fireGate(
         'permission_request',
         sessionId ?? '',
-        payload: {'tool': tool, 'summary': summary, 'detail': detail},
+        payload: {
+          'tool': tool,
+          'summary': summary,
+          'detail': detail,
+          'transcript_path': _transcriptPathFor(sessionId ?? ''),
+        },
         model: running?.model,
       );
-      if (!gate.allowed) {
+      // Deny short-circuits before the user is ever asked. `ask` falls
+      // through to the normal approval prompt below — it IS the ask.
+      if (gate.decision == HookDecision.deny) {
         if (sessionId != null) {
           await SessionLedger.I.append(sessionId, 'approval', {
             'tool': tool,
@@ -12523,6 +13005,7 @@ ${await _agentsMdBlock()}
             'kind': 'approval',
             'tool': t,
             'summary': cleanTruncate(s, 200),
+            'transcript_path': _transcriptPathFor(_runSession?.id ?? ''),
           },
           model: _runSession?.model,
         ),
@@ -12539,16 +13022,30 @@ ${await _agentsMdBlock()}
       'think',
       'approval needed: $s — the Approve/Deny card is above the input',
     );
+    // Fail-closed: when no approval UI is mounted ([approvalUiReady] is
+    // false — unit tests, background isolates, or the user on another
+    // screen), nobody can answer the card, so the grace period shrinks to
+    // a few seconds instead of wedging the run for the full 2 minutes.
+    // The denial is recorded exactly the same way; the model sees DENIED
+    // and continues.
+    final grace = approvalUiReady
+        ? const Duration(seconds: 120)
+        : const Duration(seconds: 5);
     final isToolApproval = req.questions == null && t != 'exit_plan_mode';
     if (isToolApproval) {
-      Timer(const Duration(seconds: 120), () {
+      Timer(grace, () {
         if (req.completer.isCompleted) return;
         req.completer.complete(false);
         if (identical(pendingApproval, req)) {
           pendingApproval = null;
           notifyListeners();
         }
-        _emit('think', 'approval unanswered for 120s — auto-denied');
+        _emit(
+          'think',
+          approvalUiReady
+              ? 'approval unanswered for 120s — auto-denied'
+              : 'approval unanswered with no approval UI — auto-denied',
+        );
       });
     }
     return req.completer.future;
@@ -13390,11 +13887,12 @@ ${await _agentsMdBlock()}
         if (RepoCache.I.files.containsKey(path)) {
           return 'file already exists: $path — use str_replace to edit it';
         }
-        final work = await _sessionWorkDir();
-        final safe = containedPath(work, path);
+        // Strict permission model: a path outside the workspace root
+        // prompts Allow / Deny / Always allow in General/Studio instead of
+        // a hard refusal; an existing grant lets the create proceed.
+        final safe = await _resolveGrantedPath(path, tool: 'fs_edit');
         if (safe == null) {
-          return 'path escapes the session workspace: $path — use a path '
-              'inside the workspace.';
+          return 'path escapes the session workspace: $path — access denied.';
         }
         if (File(safe).existsSync()) {
           return 'file already exists: $path — use str_replace to edit it';
@@ -13689,8 +14187,9 @@ ${await _agentsMdBlock()}
     // Common vision families the exact set does not enumerate. Kept narrow
     // (a real `-vl`/`-vision`/`llava` token) so a text model is never
     // mistaken for a vision model.
-    if (RegExp(r'(?:^|[-_/])(?:vl|vision|llava|pixtral|moondream)\d*(?:$|[-_.])')
-        .hasMatch(id)) {
+    if (RegExp(
+      r'(?:^|[-_/])(?:vl|vision|llava|pixtral|moondream)\d*(?:$|[-_.])',
+    ).hasMatch(id)) {
       return true;
     }
     return RegExp(r'^gpt-4o(?:-mini)?-\d{4}-\d{2}-\d{2}$').hasMatch(id) ||
@@ -13965,8 +14464,8 @@ ${await _agentsMdBlock()}
           if (pressNode == null && (pressX == null || pressY == null)) {
             return 'device_long_press requires node or both x and y.';
           }
-          final duration =
-              ((args['duration_ms'] as num?)?.toInt() ?? 600).clamp(200, 3000);
+          final duration = ((args['duration_ms'] as num?)?.toInt() ?? 600)
+              .clamp(200, 3000);
           final pressResult = await device.longPress(
             node: pressNode,
             x: pressX,
@@ -14516,10 +15015,9 @@ ${await _agentsMdBlock()}
         ? questions.first.question
         : '${questions.length} questions — ${questions.first.question}';
     try {
-      await _overlayChannel.invokeMethod(
-        deviceOverlaySetPromptMethod,
-        {'prompt': prompt},
-      );
+      await _overlayChannel.invokeMethod(deviceOverlaySetPromptMethod, {
+        'prompt': prompt,
+      });
     } catch (_) {}
   }
 
@@ -15878,6 +16376,15 @@ ${await _agentsMdBlock()}
     parent.messages.add(Message(role: 'user', content: report));
     AppState.I.refresh();
     AppState.I.persistSessions();
+    // Stop/output: a parent stopped by the user must not be woken by a
+    // settling child's report — mirrors the settlement-notice guard
+    // (`stoppedByUser` → no notice, no new run). The report stays in the
+    // transcript as a user row; the parent reads it on its next turn.
+    if (_runs[parent.id]?.stoppedByUser ?? false) {
+      _emit('think', 'report from ${sub.id} held — parent stopped by user');
+      return 'reported — the parent was stopped by the user, so it was '
+          'not woken.';
+    }
     unawaited(runTask(report, sessionId: parent.id, freshTurn: false));
     _emit('think', 'woke parent with report from ${sub.id}');
     return 'reported — the parent was woken with your message.';
@@ -15971,6 +16478,7 @@ ${await _agentsMdBlock()}
         'parentSessionId': parent.id,
         'label': sub.label,
         'background': background,
+        'transcript_path': _transcriptPathFor(child.id),
       },
       model: child.model,
     );
@@ -16375,6 +16883,7 @@ ${await _agentsMdBlock()}
               'state': sub.state,
               'interrupted': sub.interrupted,
               'result': cleanTruncate(sub.result, 400),
+              'transcript_path': _transcriptPathFor(child.id),
             },
             model: child.model,
           ),

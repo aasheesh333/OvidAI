@@ -595,7 +595,7 @@ void main() {
       expect(requests, 0, reason: 'credential probe must not dial');
     });
 
-    test('unsupported transport reports Unsupported', () async {
+    test('sse transport is supported; unknown transports report Unsupported', () async {
       final manifest = runtimeManifest(
         'acme/sse',
         name: 'SSE Only',
@@ -619,7 +619,36 @@ void main() {
 
       final health = await app.pluginHealthFor(row);
 
-      expect(health.state, StartupItemState.unsupported);
+      // SSE is a supported transport now: the gate must not report
+      // Unsupported. The server is simply not connected yet → degraded.
+      expect(health.state, isNot(StartupItemState.unsupported));
+      expect(health.state, StartupItemState.degraded);
+
+      // A genuinely unknown transport still reports Unsupported.
+      final bogusManifest = runtimeManifest(
+        'acme/bogus',
+        name: 'Bogus Only',
+        mcpServers: [
+          PluginMcpServer(
+            pluginId: 'acme/bogus',
+            name: 'server',
+            transport: 'bogus',
+          ),
+        ],
+      );
+      await seedRuntime(bogusManifest);
+      PluginContributionRegistry.I.register(
+        bogusManifest,
+        activation: PluginActivation.globalActive,
+      );
+      final bogusRow = runtimeRow(bogusManifest);
+      app.mcpServers.add(
+        ownedServer('acme/bogus', 'server', transport: 'bogus'),
+      );
+
+      final bogusHealth = await app.pluginHealthFor(bogusRow);
+
+      expect(bogusHealth.state, StartupItemState.unsupported);
     });
 
     test('mixed hook + MCP is Ready only after every required probe', () async {
@@ -932,7 +961,7 @@ void main() {
 
   group('service health truthfulness', () {
     test(
-      'hook-only ready, MCP needsSetup, and unsupported map to accurate detail',
+      'hook-only ready, MCP needsSetup, and transport states map to accurate detail',
       () async {
         final hookManifest = runtimeManifest(
           'acme/svc-hook',
@@ -1000,6 +1029,27 @@ void main() {
           ownedServer('acme/svc-sse', 'server', transport: 'sse'),
         );
 
+        final bogusManifest = runtimeManifest(
+          'acme/svc-bogus',
+          name: 'Svc Bogus',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: 'acme/svc-bogus',
+              name: 'server',
+              transport: 'bogus',
+            ),
+          ],
+        );
+        await seedRuntime(bogusManifest);
+        PluginContributionRegistry.I.register(
+          bogusManifest,
+          activation: PluginActivation.globalActive,
+        );
+        app.plugins.add(runtimeRow(bogusManifest));
+        app.mcpServers.add(
+          ownedServer('acme/svc-bogus', 'server', transport: 'bogus'),
+        );
+
         await app.reconnectServices();
 
         final hookStatus = app.serviceStatus['plugin:Svc Hook']!;
@@ -1010,9 +1060,17 @@ void main() {
         expect(needsStatus.detail, isNot(contains('no agent tools')));
         expect(needsStatus.detail, contains('Needs setup'));
 
+        // SSE is a supported transport: not Unsupported — the unconnected
+        // server reports Degraded instead.
         final sseStatus = app.serviceStatus['plugin:Svc SSE']!;
         expect(sseStatus.detail, isNot(contains('no agent tools')));
-        expect(sseStatus.detail, contains('Unsupported'));
+        expect(sseStatus.detail, isNot(contains('Unsupported')));
+        expect(sseStatus.detail, contains('Degraded'));
+
+        // A genuinely unknown transport still reports Unsupported.
+        final bogusStatus = app.serviceStatus['plugin:Svc Bogus']!;
+        expect(bogusStatus.detail, isNot(contains('no agent tools')));
+        expect(bogusStatus.detail, contains('Unsupported'));
       },
     );
   });

@@ -11,6 +11,94 @@ import 'state.dart' show shellSplitArgs;
 /// The UI keeps a thin delegate seam (`parseMcpConfigForTest`) over these
 /// same functions, so behavior is shared rather than duplicated.
 
+/// OAuth configuration for an MCP server that requires browser-based
+/// authorization (item 6). Parsed from the `oauth` key of a server entry:
+/// ```json
+/// {"url": "https://mcp.example.com/mcp",
+///  "oauth": {"authorization_url": "https://example.com/oauth/authorize",
+///            "token_url": "https://example.com/oauth/token",
+///            "client_id": "…", "scopes": ["…"], "redirect_uri": "…"},
+///  "type": "http"}
+/// ```
+/// Values may use `${VAR}` interpolation like every other config value.
+/// The issued token is stored per-server in secure storage by
+/// [McpService] (never in the config file); see
+/// `McpService.buildMcpAuthorizeUrl` / `exchangeMcpOAuthCode`.
+class McpOAuthConfig {
+  final String? authorizationUrl;
+  final String? tokenUrl;
+  final String? clientId;
+  final List<String> scopes;
+  final String? redirectUri;
+
+  const McpOAuthConfig({
+    this.authorizationUrl,
+    this.tokenUrl,
+    this.clientId,
+    this.scopes = const [],
+    this.redirectUri,
+  });
+
+  bool get isUsable =>
+      (authorizationUrl ?? '').isNotEmpty && (clientId ?? '').isNotEmpty;
+
+  Map<String, dynamic> toJson() => {
+    'authorization_url': authorizationUrl,
+    'token_url': tokenUrl,
+    'client_id': clientId,
+    'scopes': scopes,
+    'redirect_uri': redirectUri,
+  };
+
+  factory McpOAuthConfig.fromJson(Map<String, dynamic> j) => McpOAuthConfig(
+    authorizationUrl: j['authorization_url'] as String?,
+    tokenUrl: j['token_url'] as String?,
+    clientId: j['client_id'] as String?,
+    scopes: [
+      for (final s in (j['scopes'] as List? ?? const [])) s.toString(),
+    ],
+    redirectUri: j['redirect_uri'] as String?,
+  );
+}
+
+/// Parse the `oauth` block of an MCP server entry. Returns null when the
+/// entry declares none.
+McpOAuthConfig? parseMcpOAuthConfig(
+  dynamic raw, {
+  Map<String, String> env = const {},
+}) {
+  if (raw is! Map) return null;
+  final m = raw.cast<String, dynamic>();
+  String? str(String key) {
+    final v = m[key];
+    if (v is! String || v.trim().isEmpty) return null;
+    return interpolateMcpValue(v.trim(), env);
+  }
+
+  final scopesRaw = m['scopes'];
+  final scopes = <String>[];
+  if (scopesRaw is List) {
+    scopes.addAll(scopesRaw.map((s) => s.toString()));
+  } else if (scopesRaw is String && scopesRaw.trim().isNotEmpty) {
+    scopes.addAll(scopesRaw.split(RegExp(r'[\s,]+')).where((s) => s.isNotEmpty));
+  }
+  final cfg = McpOAuthConfig(
+    authorizationUrl: str('authorization_url') ?? str('authorize_url'),
+    tokenUrl: str('token_url'),
+    clientId: str('client_id'),
+    scopes: scopes,
+    redirectUri: str('redirect_uri'),
+  );
+  // An empty `oauth: {}` declares nothing.
+  if (!cfg.isUsable &&
+      cfg.tokenUrl == null &&
+      cfg.scopes.isEmpty &&
+      cfg.redirectUri == null) {
+    return null;
+  }
+  return cfg;
+}
+
 /// One MCP server entry parsed out of a config blob.
 class ImportedMcp {
   final String name;
@@ -26,6 +114,10 @@ class ImportedMcp {
   final String type;
   final String? cwd;
   final int? startupTimeoutS;
+
+  /// OAuth configuration for browser-based authorization (item 6), or null
+  /// when the server declares none.
+  final McpOAuthConfig? oauth;
 
   /// Keys present in the source config that Ovid doesn't understand —
   /// surfaced to the user instead of silently dropped.
@@ -45,6 +137,7 @@ class ImportedMcp {
     this.type = 'stdio',
     this.cwd,
     this.startupTimeoutS,
+    this.oauth,
     this.ignoredKeys = const [],
     this.ignoredFields = const {},
   });
@@ -146,9 +239,40 @@ List<ImportedMcp> _parseMcpJson(String raw, Map<String, String> env) {
         }
       }
     }
+  } else {
+    // Top-level shape: `{"server-name": {...}}` with no wrapper key
+    // (item 2). Each top-level Map value is a server entry named by its
+    // key; non-Map values (e.g. an `inputs` list) are ignored. Known
+    // non-server keys are skipped so metadata never becomes a server.
+    for (final e in j.entries) {
+      if (_topLevelNonServerKeys.contains(e.key)) continue;
+      final v = e.value;
+      if (v is Map) {
+        final name = e.key.toString().trim();
+        if (name.isNotEmpty) {
+          out.add(
+            importedMcpFromJson(
+              name,
+              v.cast<String, dynamic>(),
+              env: env,
+            ),
+          );
+        }
+      }
+    }
   }
   return out;
 }
+
+/// Top-level `.mcp.json` keys that are never server entries when the
+/// wrapper-less shape is used (item 2).
+const _topLevelNonServerKeys = {
+  'inputs',
+  'mcpServers',
+  'mcp_servers',
+  'servers',
+  r'$schema',
+};
 
 /// Keys we understand in a JSON MCP server entry — anything else is an
 /// *ignored key* surfaced to the user rather than silently dropped.
@@ -169,6 +293,7 @@ const _knownMcpJsonKeys = {
   'timeout',
   'startupTimeoutS',
   'startup_timeout_s',
+  'oauth',
 };
 
 /// Map one JSON server entry into an [ImportedMcp]. [env] supplies
@@ -213,6 +338,7 @@ ImportedMcp importedMcpFromJson(
     startupTimeoutS:
         (v['timeout'] as num?)?.toInt() ??
         (v['startupTimeoutS'] as num?)?.toInt(),
+    oauth: parseMcpOAuthConfig(v['oauth'], env: resolvedEnv),
     ignoredKeys: v.keys.where((k) => !_knownMcpJsonKeys.contains(k)).toList(),
     ignoredFields: {
       for (final e in v.entries)

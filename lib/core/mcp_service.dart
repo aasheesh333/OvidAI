@@ -8,11 +8,306 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
 import 'github_service.dart';
+import 'mcp_config_parse.dart';
 import 'native_mcp.dart';
 import 'sandbox_service.dart';
+import 'secure_store.dart';
 import 'plugin_manifest.dart';
 import 'plugin_registry.dart';
 import 'state.dart';
+
+/// OAuth access token for one MCP server (item 6). Stored per-server in
+/// secure storage via [McpService.storeMcpOAuthToken] — never in the
+/// config file or prefs. Expired tokens are refreshed automatically when
+/// the config carries a refresh token and a `token_url`.
+class McpOAuthToken {
+  final String accessToken;
+  final String? refreshToken;
+  final String tokenType;
+  final DateTime? expiresAt;
+
+  const McpOAuthToken({
+    required this.accessToken,
+    this.refreshToken,
+    this.tokenType = 'Bearer',
+    this.expiresAt,
+  });
+
+  bool get isExpired =>
+      expiresAt != null &&
+      DateTime.now().isAfter(expiresAt!.subtract(const Duration(seconds: 30)));
+
+  bool get canRefresh =>
+      refreshToken != null && refreshToken!.isNotEmpty;
+
+  Map<String, dynamic> toJson() => {
+    'access_token': accessToken,
+    'refresh_token': refreshToken,
+    'token_type': tokenType,
+    'expires_at': expiresAt?.toIso8601String(),
+  };
+
+  factory McpOAuthToken.fromJson(Map<String, dynamic> j) => McpOAuthToken(
+    accessToken: j['access_token']?.toString() ?? '',
+    refreshToken: j['refresh_token']?.toString(),
+    tokenType: j['token_type']?.toString() ?? 'Bearer',
+    expiresAt: switch (j['expires_at']) {
+      String s => DateTime.tryParse(s),
+      int ms => DateTime.fromMillisecondsSinceEpoch(ms),
+      _ => null,
+    },
+  );
+
+  /// Parse an OAuth token endpoint response (`access_token`, optional
+  /// `refresh_token`/`token_type`/`expires_in`).
+  factory McpOAuthToken.fromTokenResponse(Map<String, dynamic> j) {
+    final expiresIn = j['expires_in'];
+    return McpOAuthToken(
+      accessToken: j['access_token']?.toString() ?? '',
+      refreshToken: j['refresh_token']?.toString(),
+      tokenType: j['token_type']?.toString() ?? 'Bearer',
+      expiresAt: expiresIn is num
+          ? DateTime.now().add(Duration(seconds: expiresIn.toInt()))
+          : null,
+    );
+  }
+}
+
+/// Legacy MCP SSE transport channel (GET /sse event stream + POST
+/// /message endpoint — the pre-Streamable-HTTP protocol). One channel per
+/// connected `sse` server:
+///
+///  1. `open()` GETs the SSE URL with `Accept: text/event-stream` and waits
+///     for the first `event: endpoint` carrying the POST URL.
+///  2. `post()` POSTs a JSON-RPC message to that endpoint.
+///  3. `nextResponse(id)` awaits the SSE event whose JSON `id` matches.
+///
+/// The GET stream stays open for the channel's lifetime; [close] tears it
+/// down. All waits are bounded by caller-supplied timeouts.
+class _SseMcpChannel {
+  _SseMcpChannel._(this._client, this._ownsClient);
+
+  factory _SseMcpChannel({http.Client? client}) =>
+      _SseMcpChannel._(client ?? http.Client(), client == null);
+
+  final http.Client _client;
+  final bool _ownsClient;
+  StreamSubscription<String>? _sub;
+
+  Uri? messageEndpoint;
+  bool get isOpen => messageEndpoint != null && !_closed;
+  bool _closed = false;
+
+  final List<Map<String, dynamic>> _pending = [];
+  Completer<void>? _waiter;
+  final StringBuffer _buf = StringBuffer();
+
+  /// Open the SSE stream and resolve the POST endpoint. Throws on
+  /// non-200, on timeout waiting for the `endpoint` event, or when the
+  /// stream closes early.
+  Future<void> open(
+    Uri sseUrl,
+    Map<String, String> headers, {
+    Duration? timeout,
+  }) async {
+    final req = http.Request('GET', sseUrl);
+    req.headers.addAll({
+      'Accept': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      ...headers,
+    });
+    final res = await _client
+        .send(req)
+        .timeout(timeout ?? const Duration(seconds: 30));
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      _closeClient();
+      throw Exception('SSE stream failed: HTTP ${res.statusCode}');
+    }
+    _sub = res.stream.transform(utf8.decoder).listen(
+      _onChunk,
+      onError: (_) => _onDone(),
+      onDone: _onDone,
+      cancelOnError: true,
+    );
+    // The endpoint event must arrive promptly — without it nothing can be
+    // posted. Bound the wait so a hanging stream can't wedge connect().
+    final deadline = timeout ?? const Duration(seconds: 30);
+    final start = DateTime.now();
+    while (messageEndpoint == null && !_closed) {
+      final elapsed = DateTime.now().difference(start);
+      final left = deadline - elapsed;
+      if (left.isNegative) break;
+      _waiter = Completer<void>();
+      try {
+        await _waiter!.future.timeout(left);
+      } on TimeoutException {
+        break;
+      } finally {
+        _waiter = null;
+      }
+    }
+    if (messageEndpoint == null) {
+      await close();
+      throw TimeoutException(
+        'SSE endpoint event not received within ${deadline.inSeconds}s',
+        deadline,
+      );
+    }
+  }
+
+  void _onChunk(String chunk) {
+    _buf.write(chunk);
+    var text = _buf.toString();
+    // SSE framing: events are separated by a blank line.
+    while (true) {
+      final idx = text.indexOf('\n\n');
+      final idx2 = text.indexOf('\r\n\r\n');
+      var sep = -1;
+      var sepLen = 2;
+      if (idx >= 0 && (idx2 < 0 || idx < idx2)) {
+        sep = idx;
+      } else if (idx2 >= 0) {
+        sep = idx2;
+        sepLen = 4;
+      }
+      if (sep < 0) break;
+      final rawEvent = text.substring(0, sep);
+      text = text.substring(sep + sepLen);
+      _onEvent(rawEvent);
+    }
+    _buf.clear();
+    _buf.write(text);
+  }
+
+  void _onEvent(String rawEvent) {
+    String? eventType;
+    final dataParts = <String>[];
+    for (final rawLine in rawEvent.split('\n')) {
+      final line = rawLine.trimRight();
+      if (line.startsWith('event:')) {
+        eventType = line.substring(6).trim();
+      } else if (line.startsWith('data:')) {
+        dataParts.add(line.substring(5).trim());
+      }
+      // `:` comments / `id:` / `retry:` are ignored.
+    }
+    if (dataParts.isEmpty) return;
+    final data = dataParts.join('\n');
+    if (eventType == 'endpoint') {
+      messageEndpoint = _resolveEndpoint(data);
+      _wake();
+      return;
+    }
+    try {
+      final decoded = jsonDecode(data);
+      if (decoded is Map<String, dynamic>) {
+        _pending.add(decoded);
+        _wake();
+      }
+    } catch (_) {
+      // Non-JSON SSE data (pings, comments) — ignore.
+    }
+  }
+
+  Uri? _resolveEndpoint(String data) {
+    try {
+      final uri = Uri.parse(data.trim());
+      return uri.hasScheme ? uri : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _wake() {
+    final w = _waiter;
+    if (w != null && !w.isCompleted) w.complete();
+  }
+
+  void _onDone() {
+    _closed = true;
+    _wake();
+  }
+
+  /// POST a JSON-RPC message to the resolved endpoint.
+  Future<void> post(
+    Map<String, dynamic> message,
+    Map<String, String> headers, {
+    Duration? timeout,
+  }) async {
+    final endpoint = messageEndpoint;
+    if (endpoint == null || _closed) {
+      throw StateError('SSE channel is not open');
+    }
+    final res = await _client
+        .post(
+          endpoint,
+          headers: {'Content-Type': 'application/json', ...headers},
+          body: jsonEncode(message),
+        )
+        .timeout(timeout ?? const Duration(seconds: 60));
+    if (res.statusCode == 401 || res.statusCode == 403) {
+      throw Exception(
+        'authentication failed (HTTP ${res.statusCode}) — check the '
+        'server\'s auth headers/token and re-connect after fixing them.',
+      );
+    }
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw Exception('SSE POST failed: HTTP ${res.statusCode}');
+    }
+  }
+
+  /// Await the SSE event whose JSON-RPC `id` matches [id]. Returns null on
+  /// timeout or when the stream closed first.
+  Future<Map<String, dynamic>?> nextResponse(
+    int id, {
+    Duration? timeout,
+  }) async {
+    final deadline = DateTime.now().add(timeout ?? const Duration(seconds: 60));
+    while (true) {
+      for (var i = 0; i < _pending.length; i++) {
+        if (_pending[i]['id']?.toString() == id.toString()) {
+          return _pending.removeAt(i);
+        }
+      }
+      if (_closed) return null;
+      final left = deadline.difference(DateTime.now());
+      if (left.isNegative) return null;
+      _waiter = Completer<void>();
+      try {
+        await _waiter!.future.timeout(left);
+      } on TimeoutException {
+        return null;
+      } finally {
+        _waiter = null;
+      }
+    }
+  }
+
+  Future<void> close() async {
+    _closed = true;
+    _wake();
+    final sub = _sub;
+    _sub = null;
+    if (sub != null) {
+      // Cancel WITHOUT awaiting: an async* generator parked in `await for`
+      // on the event stream may never acknowledge the cancellation while
+      // the server keeps the stream open, and disconnect must not hang on
+      // it. `_closed` already makes the channel dead; closing the owned
+      // HTTP client below tears down a real socket, which unparks the
+      // generator via stream-done.
+      unawaited(sub.cancel());
+    }
+    _closeClient();
+  }
+
+  void _closeClient() {
+    if (_ownsClient) {
+      try {
+        _client.close();
+      } catch (_) {}
+    }
+  }
+}
 
 /// Real MCP client — connects to each server over its configured
 /// transport (stdio: spawn inside the sandbox and speak JSON-RPC over
@@ -296,12 +591,10 @@ class McpService {
       if (!existing.handshakeDone) return '"${server.name}" is connecting…';
       return '"${server.name}" is already connected';
     }
-    if (server.transport == 'sse') {
-      // Task 4: legacy SSE (GET /sse + POST /message) is NOT the same as
-      // Streamable HTTP and is not implemented — fail clearly so the user
-      // re-configures instead of silently doing nothing.
-      return 'SSE transport not supported, use Streamable HTTP '
-          '(set transport to "http" with a url).';
+    if (server.transport == 'sse' && (server.url ?? '').isEmpty) {
+      // Legacy SSE needs its event-stream URL — without one there is
+      // nothing to dial; say so instead of failing inside the handshake.
+      return 'SSE transport needs a url (the GET /sse event-stream endpoint).';
     }
     final missing = await _missingCredentials(server);
     if (missing.isNotEmpty) {
@@ -321,6 +614,9 @@ class McpService {
     _running[key] = rs;
     if (server.transport == 'http') {
       return _connectHttp(server, rs);
+    }
+    if (server.transport == 'sse') {
+      return _connectSse(server, rs);
     }
     if (server.transport == 'native') {
       return _connectNative(server, rs);
@@ -407,6 +703,8 @@ class McpService {
       _running[key] = rs;
       final message = server.transport == 'http'
           ? await _connectHttp(server, rs, deadline: deadline)
+          : server.transport == 'sse'
+          ? await _connectSse(server, rs, deadline: deadline)
           : server.transport == 'native'
           ? await _connectNative(server, rs, deadline: deadline)
           : await _connectStdio(server, rs, deadline: deadline);
@@ -535,16 +833,507 @@ class McpService {
   /// Structural transport gate used by health checks: null when the transport
   /// can run on this device, otherwise the actionable unsupported reason.
   String? unsupportedTransportReason(McpServer server) {
-    if (server.transport == 'sse') {
-      return 'SSE transport not supported, use Streamable HTTP '
-          '(set transport to "http" with a url).';
-    }
+    // 'sse' (legacy GET /sse + POST /message) is supported via
+    // [_connectSse] — Streamable HTTP ('http') remains the recommended
+    // transport for new servers.
     if (server.transport != 'http' &&
         server.transport != 'stdio' &&
+        server.transport != 'sse' &&
         server.transport != 'native') {
       return 'Unsupported transport "${server.transport}"';
     }
     return null;
+  }
+
+  // ── OAuth for hosted MCP servers (item 6) ──────────────────────────
+  //
+  // Browser-based OAuth flow API. The actual browser UI is OUT OF SCOPE —
+  // the UI gap: some screen must (1) call [buildMcpAuthorizeUrl], (2) open
+  // it in a browser / Custom Tab, (3) capture the redirect
+  // (`?code=…&state=…`), and (4) call [exchangeMcpOAuthCode] +
+  // [storeMcpOAuthToken]. The token is then attached as
+  // `Authorization: Bearer …` to every HTTP/SSE request for that server,
+  // and refreshed automatically on 401 when a refresh token exists.
+  //
+  // [McpServer] (state.dart) carries no oauth field, so the per-server
+  // config rides in this sidecar, keyed by canonical id and persisted in
+  // secure storage. The import path (`ImportedMcp.oauth`) should call
+  // [setMcpOAuthConfig] when it materializes the McpServer row.
+
+  static String _oauthTokenKey(String serverKey) => 'ovid_mcp_oauth_$serverKey';
+  static String _oauthConfigKey(String serverKey) =>
+      'ovid_mcp_oauth_cfg_$serverKey';
+
+  final Map<String, McpOAuthConfig> _oauthConfigs = {};
+  final Map<String, McpOAuthToken> _oauthTokens = {};
+
+  /// Test seam: OAuth tokens never touch the real secure storage.
+  @visibleForTesting
+  static bool oauthSecureStorageDisabledForTest = false;
+
+  /// Record the OAuth config for [serverKey] (a server canonical id).
+  /// Persists to secure storage (client_id is not a secret; no token
+  /// material is stored here).
+  Future<void> setMcpOAuthConfig(
+    String serverKey,
+    McpOAuthConfig config,
+  ) async {
+    _oauthConfigs[serverKey] = config;
+    if (oauthSecureStorageDisabledForTest) return;
+    try {
+      await ovidSecureStorage().write(
+        key: _oauthConfigKey(serverKey),
+        value: jsonEncode(config.toJson()),
+      );
+    } catch (_) {}
+  }
+
+  /// In-memory OAuth config, or null when none was registered.
+  McpOAuthConfig? mcpOAuthConfigFor(String serverKey) =>
+      _oauthConfigs[serverKey];
+
+  /// OAuth config, falling back to secure storage (survives restarts).
+  Future<McpOAuthConfig?> mcpOAuthConfigForAsync(String serverKey) async {
+    final mem = _oauthConfigs[serverKey];
+    if (mem != null) return mem;
+    if (oauthSecureStorageDisabledForTest) return null;
+    try {
+      final raw = await ovidSecureStorage().read(
+        key: _oauthConfigKey(serverKey),
+      );
+      if (raw == null || raw.isEmpty) return null;
+      final cfg = McpOAuthConfig.fromJson(
+        (jsonDecode(raw) as Map).cast<String, dynamic>(),
+      );
+      _oauthConfigs[serverKey] = cfg;
+      return cfg;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Persist an OAuth token for [serverKey] (secure storage, never prefs).
+  Future<void> storeMcpOAuthToken(
+    String serverKey,
+    McpOAuthToken token,
+  ) async {
+    _oauthTokens[serverKey] = token;
+    if (oauthSecureStorageDisabledForTest) return;
+    try {
+      await ovidSecureStorage().write(
+        key: _oauthTokenKey(serverKey),
+        value: jsonEncode(token.toJson()),
+      );
+    } catch (_) {}
+  }
+
+  /// The stored OAuth token for [serverKey], or null when none / unreadable.
+  Future<McpOAuthToken?> mcpOAuthTokenFor(String serverKey) async {
+    final mem = _oauthTokens[serverKey];
+    if (mem != null) return mem;
+    if (oauthSecureStorageDisabledForTest) return null;
+    try {
+      final raw = await ovidSecureStorage().read(
+        key: _oauthTokenKey(serverKey),
+      );
+      if (raw == null || raw.isEmpty) return null;
+      final token = McpOAuthToken.fromJson(
+        (jsonDecode(raw) as Map).cast<String, dynamic>(),
+      );
+      _oauthTokens[serverKey] = token;
+      return token;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Drop the stored OAuth token for [serverKey] (disconnect/revoke path).
+  Future<void> clearMcpOAuthToken(String serverKey) async {
+    _oauthTokens.remove(serverKey);
+    if (oauthSecureStorageDisabledForTest) return;
+    try {
+      await ovidSecureStorage().delete(key: _oauthTokenKey(serverKey));
+    } catch (_) {}
+  }
+
+  /// Build the browser authorize URL for the OAuth flow (step 1 of the
+  /// flow; the UI opens this URL and captures the redirect). [state]
+  /// should be an unguessable per-attempt value the UI verifies on
+  /// return. Pass [codeChallenge] for PKCE (S256).
+  static String buildMcpAuthorizeUrl({
+    required McpOAuthConfig config,
+    required String state,
+    String? codeChallenge,
+  }) {
+    final authUrl = config.authorizationUrl;
+    if (authUrl == null || authUrl.trim().isEmpty) {
+      throw ArgumentError('OAuth config has no authorization_url');
+    }
+    if ((config.clientId ?? '').isEmpty) {
+      throw ArgumentError('OAuth config has no client_id');
+    }
+    final uri = Uri.parse(authUrl.trim());
+    return uri
+        .replace(
+          queryParameters: {
+            ...uri.queryParameters,
+            'response_type': 'code',
+            'client_id': config.clientId!,
+            if ((config.redirectUri ?? '').isNotEmpty)
+              'redirect_uri': config.redirectUri!,
+            if (config.scopes.isNotEmpty) 'scope': config.scopes.join(' '),
+            'state': state,
+            if (codeChallenge != null && codeChallenge.isNotEmpty) ...{
+              'code_challenge': codeChallenge,
+              'code_challenge_method': 'S256',
+            },
+          },
+        )
+        .toString();
+  }
+
+  /// Exchange an authorization `code` for tokens (step 3 of the flow, after
+  /// the browser redirects back). Returns the token — the caller persists
+  /// it with [storeMcpOAuthToken].
+  Future<McpOAuthToken> exchangeMcpOAuthCode({
+    required McpOAuthConfig config,
+    required String code,
+    String? codeVerifier,
+  }) async {
+    final tokenUrl = config.tokenUrl;
+    if (tokenUrl == null || tokenUrl.trim().isEmpty) {
+      throw ArgumentError('OAuth config has no token_url');
+    }
+    final client = httpClientForTest ?? http.Client();
+    try {
+      final res = await client
+          .post(
+            Uri.parse(tokenUrl.trim()),
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: {
+              'grant_type': 'authorization_code',
+              'code': code,
+              'redirect_uri': config.redirectUri ?? '',
+              'client_id': config.clientId ?? '',
+              if (codeVerifier != null && codeVerifier.isNotEmpty)
+                'code_verifier': codeVerifier,
+            },
+          )
+          .timeout(const Duration(seconds: 30));
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw Exception(
+          'OAuth token exchange failed: HTTP ${res.statusCode}',
+        );
+      }
+      final j = jsonDecode(res.body) as Map<String, dynamic>;
+      if ((j['access_token']?.toString() ?? '').isEmpty) {
+        throw Exception('OAuth token exchange returned no access_token');
+      }
+      return McpOAuthToken.fromTokenResponse(j);
+    } finally {
+      if (httpClientForTest == null) client.close();
+    }
+  }
+
+  /// Refresh the stored token for [serverKey] via its refresh token.
+  /// Returns the new token (already stored), or null when refresh is not
+  /// possible/failed.
+  Future<McpOAuthToken?> refreshMcpOAuthToken(String serverKey) async {
+    final config = await mcpOAuthConfigForAsync(serverKey);
+    final current = await mcpOAuthTokenFor(serverKey);
+    final tokenUrl = config?.tokenUrl;
+    if (tokenUrl == null ||
+        tokenUrl.trim().isEmpty ||
+        current == null ||
+        !current.canRefresh) {
+      return null;
+    }
+    final client = httpClientForTest ?? http.Client();
+    try {
+      final res = await client
+          .post(
+            Uri.parse(tokenUrl.trim()),
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: {
+              'grant_type': 'refresh_token',
+              'refresh_token': current.refreshToken!,
+              'client_id': config!.clientId ?? '',
+            },
+          )
+          .timeout(const Duration(seconds: 30));
+      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+      final j = jsonDecode(res.body) as Map<String, dynamic>;
+      if ((j['access_token']?.toString() ?? '').isEmpty) return null;
+      final next = McpOAuthToken.fromTokenResponse(j);
+      // A refresh response may omit the refresh token — keep the old one.
+      final merged = next.refreshToken == null || next.refreshToken!.isEmpty
+          ? McpOAuthToken(
+              accessToken: next.accessToken,
+              refreshToken: current.refreshToken,
+              tokenType: next.tokenType,
+              expiresAt: next.expiresAt,
+            )
+          : next;
+      await storeMcpOAuthToken(serverKey, merged);
+      return merged;
+    } catch (_) {
+      return null;
+    } finally {
+      if (httpClientForTest == null) client.close();
+    }
+  }
+
+  /// `Authorization` header for [rs]'s server from the stored OAuth token.
+  /// Empty when no usable token exists (expired tokens are refreshed
+  /// lazily on 401 by the HTTP/SSE transports, not here).
+  Future<Map<String, String>> _authHeaders(_RunningServer rs) async {
+    final token = await mcpOAuthTokenFor(_key(rs.server));
+    if (token == null || token.accessToken.isEmpty || token.isExpired) {
+      return const {};
+    }
+    return {'Authorization': '${token.tokenType} ${token.accessToken}'};
+  }
+
+  /// Attempt one silent refresh for [rs]'s server. True when a fresh token
+  /// is now stored.
+  Future<bool> _tryRefreshOAuth(_RunningServer rs) async {
+    return await refreshMcpOAuthToken(_key(rs.server)) != null;
+  }
+
+  // ── Legacy SSE transport (item 6) ──────────────────────────────────
+  //
+  // GET <url> (text/event-stream) → first `event: endpoint` gives the POST
+  // URL → POST each JSON-RPC message there → responses arrive as SSE
+  // `data:` events correlated by `id`. Streamable HTTP ('http') stays the
+  // recommended transport; 'sse' exists for servers that only speak the
+  // legacy protocol.
+
+  /// Connect a legacy-SSE server: open the event stream, resolve the POST
+  /// endpoint, then run the standard MCP handshake over it.
+  Future<String> _connectSse(
+    McpServer server,
+    _RunningServer rs, {
+    DateTime? deadline,
+  }) async {
+    final key = _key(server);
+    Duration timeoutFor() => deadline == null
+        ? Duration(seconds: server.startupTimeoutS)
+        : _remainingUntil(deadline);
+    Duration phaseTimeout(String phase) {
+      final timeout = timeoutFor();
+      _recordConnectPhase(phase, timeout);
+      return timeout;
+    }
+
+    Future<void> openChannel(Map<String, String> headers) async {
+      final channel = _SseMcpChannel(client: httpClientForTest);
+      rs.sseChannel = channel;
+      try {
+        await channel.open(
+          Uri.parse(server.url!),
+          headers,
+          timeout: phaseTimeout('sse/open'),
+        );
+      } catch (_) {
+        rs.sseChannel = null;
+        rethrow;
+      }
+    }
+
+    try {
+      if (deadline != null && !_now().isBefore(deadline)) {
+        throw TimeoutException('MCP handshake timed out', Duration.zero);
+      }
+      final url = server.url;
+      if (url == null || url.isEmpty) {
+        throw Exception('no url configured for SSE transport');
+      }
+      var headers = {...server.headers, ...await _authHeaders(rs)};
+      try {
+        await openChannel(headers);
+      } catch (e) {
+        // One silent OAuth refresh on auth failure, then give up (never
+        // loop — the HTTP transport treats 401 the same way).
+        final msg = e.toString();
+        if ((msg.contains('401') || msg.contains('403')) &&
+            await _tryRefreshOAuth(rs)) {
+          headers = {...server.headers, ...await _authHeaders(rs)};
+          await openChannel(headers);
+        } else {
+          rethrow;
+        }
+      }
+      final initResult = await _rpcSse(rs, 'initialize', {
+        'protocolVersion': '2024-11-05',
+        'capabilities': {},
+        'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
+      }, timeout: phaseTimeout('initialize'));
+      if (initResult.isTimeout) {
+        throw TimeoutException('initialize timed out', timeoutFor());
+      }
+      if (initResult.isError) {
+        throw Exception('initialize failed: ${initResult.error}');
+      }
+      _rememberInitializeResult(rs, initResult.value);
+      await _sendNotificationSse(
+        rs,
+        'notifications/initialized',
+        {},
+        timeout: phaseTimeout('notifications/initialized'),
+      );
+      rs.tools =
+          await _listToolsSse(rs, timeout: phaseTimeout('tools/list')) ??
+          <McpToolDef>[];
+      if (!identical(_running[key], rs) || rs.userDisconnected) {
+        return 'connect aborted';
+      }
+      rs.handshakeDone = true;
+      _reconnectAttempts.remove(key);
+      return '"${server.name}" connected (sse) · ${rs.tools.length} tools';
+    } catch (e) {
+      if (identical(_running[key], rs)) _running.remove(key);
+      final channel = rs.sseChannel;
+      rs.sseChannel = null;
+      try {
+        await channel?.close();
+      } catch (_) {}
+      return 'connect failed: $e';
+    }
+  }
+
+  /// JSON-RPC over the SSE channel: POST the message, await the SSE event
+  /// with the matching `id`. Same [McpRpcResult] contract as [_rpcHttp].
+  Future<McpRpcResult> _rpcSse(
+    _RunningServer rs,
+    String method,
+    Map<String, dynamic> params, {
+    Duration? timeout,
+  }) async {
+    final channel = rs.sseChannel;
+    if (channel == null || !channel.isOpen) {
+      return McpRpcResult._error('SSE channel is not open');
+    }
+    final id = _nextId++;
+    final effectiveTimeout = timeout ?? Duration(seconds: _rpcTimeoutSeconds);
+
+    Future<void> doPost(Map<String, String> headers) => channel.post({
+      'jsonrpc': '2.0',
+      'id': id,
+      'method': method,
+      'params': params,
+    }, headers, timeout: effectiveTimeout);
+
+    try {
+      try {
+        await doPost({...rs.server.headers, ...await _authHeaders(rs)});
+      } catch (e) {
+        // One silent OAuth refresh on auth failure, then accept the
+        // outcome — mirrors the Streamable-HTTP transport.
+        if (e.toString().contains('authentication failed') &&
+            await _tryRefreshOAuth(rs)) {
+          await doPost({...rs.server.headers, ...await _authHeaders(rs)});
+        } else {
+          rethrow;
+        }
+      }
+    } catch (e) {
+      final msg = e.toString();
+      if (msg.contains('authentication failed')) {
+        return McpRpcResult._error(msg);
+      }
+      _markSseFailure(rs);
+      return McpRpcResult._error('$e');
+    }
+    final j = await channel.nextResponse(id, timeout: effectiveTimeout);
+    if (j == null) {
+      if (!channel.isOpen) {
+        // The stream died mid-call — same treatment as a dead stdio pipe.
+        _markSseFailure(rs);
+        return McpRpcResult._error('SSE stream closed before response');
+      }
+      return const McpRpcResult._timeout();
+    }
+    if (j.containsKey('error')) {
+      final err = j['error'];
+      return McpRpcResult._error(
+        err is Map ? '${err['message'] ?? err['code'] ?? 'error'}' : '$err',
+      );
+    }
+    return McpRpcResult._ok(j['result']);
+  }
+
+  /// Fire-and-forget JSON-RPC notification over SSE.
+  Future<void> _sendNotificationSse(
+    _RunningServer rs,
+    String method,
+    Map<String, dynamic> params, {
+    Duration? timeout,
+  }) async {
+    final channel = rs.sseChannel;
+    if (channel == null || !channel.isOpen) return;
+    try {
+      final headers = {...rs.server.headers, ...await _authHeaders(rs)};
+      await channel.post({
+        'jsonrpc': '2.0',
+        'method': method,
+        'params': params,
+      }, headers, timeout: timeout ?? Duration(seconds: _rpcTimeoutSeconds));
+    } catch (_) {
+      // Notifications are fire-and-forget by design.
+    }
+  }
+
+  /// `tools/list` over SSE, following `nextCursor` exactly like the HTTP
+  /// and stdio variants. Returns null when the first page isn't a JSON
+  /// object.
+  Future<List<McpToolDef>?> _listToolsSse(
+    _RunningServer rs, {
+    Duration? timeout,
+  }) async {
+    final tools = <McpToolDef>[];
+    var sawMap = false;
+    String? cursor;
+    for (var page = 0; page < _maxToolListPages; page++) {
+      final res = await _rpcSse(rs, 'tools/list', {
+        'cursor': ?cursor,
+      }, timeout: timeout);
+      if (res.isTimeout) {
+        throw TimeoutException('tools/list timed out', timeout);
+      }
+      if (res.isError) {
+        throw Exception('tools/list failed: ${res.error}');
+      }
+      final payload = res.value;
+      if (payload is! Map<String, dynamic>) break;
+      sawMap = true;
+      final pageTools = payload['tools'];
+      if (pageTools is List) {
+        tools.addAll(
+          pageTools.whereType<Map>().map(
+            (t) => McpToolDef.fromJson(t.cast<String, dynamic>()),
+          ),
+        );
+      }
+      final next = payload['nextCursor'];
+      if (next is! String || next.isEmpty) break;
+      cursor = next;
+    }
+    return sawMap ? tools : null;
+  }
+
+  /// An SSE server whose stream dies unexpectedly gets the same treatment
+  /// as a dead stdio process / failed HTTP call: drop it and schedule an
+  /// automatic reconnect (unless the user disconnected it).
+  void _markSseFailure(_RunningServer rs) {
+    if (!rs.handshakeDone) return;
+    final key = _key(rs.server);
+    if (!identical(_running[key], rs)) return; // already superseded
+    _running.remove(key);
+    _lastDeath = (server: key, code: -1, at: DateTime.now());
+    final channel = rs.sseChannel;
+    rs.sseChannel = null;
+    unawaited(channel?.close());
+    if (!rs.userDisconnected) _scheduleReconnect(rs.server);
   }
 
   Future<List<String>> _missingCredentials(McpServer server) async {
@@ -1244,6 +2033,13 @@ class McpService {
       } catch (_) {}
       return;
     }
+    if (rs.server.transport == 'sse') {
+      try {
+        final merged = await _listToolsSse(rs);
+        if (merged != null) rs.tools = merged;
+      } catch (_) {}
+      return;
+    }
     final res = rs.server.transport == 'native'
         ? await _listNativeTools(rs)
         : await _rpc(rs, 'tools/list', {});
@@ -1295,6 +2091,10 @@ class McpService {
     try {
       rs.process?.kill();
     } catch (_) {}
+    try {
+      await rs.sseChannel?.close();
+    } catch (_) {}
+    rs.sseChannel = null;
     if (sessionDelete != null) await sessionDelete;
   }
 
@@ -1324,6 +2124,13 @@ class McpService {
             {'name': toolName, 'arguments': args},
             timeout: effectiveTimeout,
             cancelOnTimeout: true,
+          )
+        : rs.server.transport == 'sse'
+        ? await _rpcSse(
+            rs,
+            'tools/call',
+            {'name': toolName, 'arguments': args},
+            timeout: effectiveTimeout,
           )
         : rs.server.transport == 'native'
         ? await _callNativeTool(rs, toolName, args, timeout: effectiveTimeout)
@@ -1484,6 +2291,7 @@ class McpService {
     if (url == null) return;
     final client = httpClientForTest ?? http.Client();
     try {
+      final authHeaders = await _authHeaders(rs);
       final res = await client
           .post(
             Uri.parse(url),
@@ -1493,6 +2301,7 @@ class McpService {
               if (rs.sessionId != null) 'Mcp-Session-Id': rs.sessionId!,
               if (rs.protocolVersion != null)
                 'MCP-Protocol-Version': rs.protocolVersion!,
+              ...authHeaders,
               ...rs.server.headers,
             },
             body: jsonEncode({
@@ -1540,39 +2349,59 @@ class McpService {
     final id = _nextId++;
     final client = httpClientForTest ?? http.Client();
     try {
-      final res = await client
-          .post(
-            Uri.parse(url),
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json, text/event-stream',
-              if (rs.sessionId != null) 'Mcp-Session-Id': rs.sessionId!,
-              if (method != 'initialize' && rs.protocolVersion != null)
-                'MCP-Protocol-Version': rs.protocolVersion!,
-              ...rs.server.headers,
-            },
-            body: jsonEncode({
-              'jsonrpc': '2.0',
-              'id': id,
-              'method': method,
-              'params': params,
-            }),
-          )
-          .timeout(timeout ?? Duration(seconds: _rpcTimeoutSeconds));
-      _rememberSessionId(rs, res.headers);
-      // A single-object JSON response is the common case; a
-      // "text/event-stream" response carries one or more SSE events
-      // (`event:` + `data:` lines separated by blank lines). Take the
-      // event whose `data` decodes to our `id` (earlier events are
-      // unrelated notifications the server may have flushed first).
-      final contentType = res.headers['content-type'] ?? '';
-      Map<String, dynamic>? j;
-      if (contentType.contains('text/event-stream')) {
-        j = _parseSseResponse(res.body, id);
-      } else if (res.body.trim().isNotEmpty) {
-        try {
-          j = jsonDecode(res.body) as Map<String, dynamic>;
-        } catch (_) {}
+      var authHeaders = await _authHeaders(rs);
+
+      // One POST attempt; factored out so a 401 can trigger a single
+      // silent OAuth refresh + retry.
+      Future<(http.Response, Map<String, dynamic>?)> doPost() async {
+        final res = await client
+            .post(
+              Uri.parse(url),
+              headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json, text/event-stream',
+                if (rs.sessionId != null) 'Mcp-Session-Id': rs.sessionId!,
+                if (method != 'initialize' && rs.protocolVersion != null)
+                  'MCP-Protocol-Version': rs.protocolVersion!,
+                ...authHeaders,
+                ...rs.server.headers,
+              },
+              body: jsonEncode({
+                'jsonrpc': '2.0',
+                'id': id,
+                'method': method,
+                'params': params,
+              }),
+            )
+            .timeout(timeout ?? Duration(seconds: _rpcTimeoutSeconds));
+        _rememberSessionId(rs, res.headers);
+        // A single-object JSON response is the common case; a
+        // "text/event-stream" response carries one or more SSE events
+        // (`event:` + `data:` lines separated by blank lines). Take the
+        // event whose `data` decodes to our `id` (earlier events are
+        // unrelated notifications the server may have flushed first).
+        final contentType = res.headers['content-type'] ?? '';
+        Map<String, dynamic>? j;
+        if (contentType.contains('text/event-stream')) {
+          j = _parseSseResponse(res.body, id);
+        } else if (res.body.trim().isNotEmpty) {
+          try {
+            j = jsonDecode(res.body) as Map<String, dynamic>;
+          } catch (_) {}
+        }
+        return (res, j);
+      }
+
+      var (res, j) = await doPost();
+      if ((res.statusCode == 401 || res.statusCode == 403) &&
+          authHeaders.isNotEmpty &&
+          await _tryRefreshOAuth(rs)) {
+        // The stored token was stale and a refresh token existed — one
+        // retry with the fresh token, then accept whatever comes back.
+        authHeaders = await _authHeaders(rs);
+        final retry = await doPost();
+        res = retry.$1;
+        j = retry.$2;
       }
       if (res.statusCode == 401 || res.statusCode == 403) {
         // Authentication failure is NOT a transient connection problem —
@@ -1643,6 +2472,7 @@ class McpService {
     final injected = httpClientForTest;
     final client = injected ?? http.Client();
     try {
+      final authHeaders = await _authHeaders(rs);
       await client
           .delete(
             Uri.parse(url),
@@ -1650,6 +2480,7 @@ class McpService {
               'Mcp-Session-Id': sessionId,
               if (rs.protocolVersion != null)
                 'MCP-Protocol-Version': rs.protocolVersion!,
+              ...authHeaders,
               ...rs.server.headers,
             },
           )
@@ -1888,6 +2719,10 @@ class _RunningServer {
   final McpServer server;
   Process? process;
   NativeMcpHandler? nativeHandler;
+
+  /// Legacy-SSE channel (`sse` transport); non-null while connected.
+  _SseMcpChannel? sseChannel;
+
   bool handshakeDone = false;
   List<McpToolDef> tools = [];
   final stdoutLines = _LineStream();

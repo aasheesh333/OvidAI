@@ -467,6 +467,36 @@ private const val DESKTOP_FEATURE_SHIM = """
       return list;
     };
   } catch (e) {}
+  try {
+    Object.defineProperty(window, 'innerWidth', {
+      get: function(){ return 1280; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    Object.defineProperty(window, 'innerHeight', {
+      get: function(){ return 800; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    Object.defineProperty(screen, 'width', {
+      get: function(){ return 1280; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    Object.defineProperty(screen, 'availWidth', {
+      get: function(){ return 1280; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    Object.defineProperty(screen, 'height', {
+      get: function(){ return 800; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    Object.defineProperty(screen, 'availHeight', {
+      get: function(){ return 800; }, configurable: true
+    });
+  } catch (e) {}
 })();
 """
 

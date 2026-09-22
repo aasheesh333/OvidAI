@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import '../core/github_service.dart';
+import '../core/global_repo_registry.dart';
 import '../core/agent_service.dart';
 import '../core/repo_cache.dart';
 import '../core/studio_terminal.dart';
@@ -77,6 +78,7 @@ class _StudioScreenState extends State<StudioScreen> {
   bool _syncing = false;
   bool _handledInitialAuth = false;
   String? _syncError;
+  String? _cloneStatus;
 
   String? get _repo => AgentService.I.sessionRepoFull;
 
@@ -161,16 +163,31 @@ class _StudioScreenState extends State<StudioScreen> {
     setState(() => _syncing = false);
   }
 
-  /// After a repo is bound + synced, offer to pin a working folder for this
-  /// chat so edits land in a real project directory instead of only the
-  /// in-memory repo cache. Skipped when the session already has one.
-  Future<void> _offerWorkspaceFolder(String repo) async {
+  /// After a repo+branch is picked, ask where this chat's working copy
+  /// should live. Two REAL options — both run a real `git clone`
+  /// the first time (with `-b <branch>`):
+  ///   1. "Session clone" — clone once into Ovid's shared repo storage
+  ///      ([GlobalRepoRegistry.ensureCloned]); a new session picking an
+  ///      already-cloned repo+branch hits the registry and reuses the SAME
+  ///      folder, no re-clone.
+  ///   2. "Local folder clone" — the user picks a device folder; the repo
+  ///      is cloned into a sanitized subfolder there.
+  /// Either way the session is bound to the working copy. Skipped when the
+  /// session already has a binding or a pinned folder; dismissing the
+  /// dialog keeps the default session-sandbox workspace.
+  Future<void> _offerCloneTarget(String repo, String branch) async {
     final s = AppState.I.activeSession;
     if (!mounted || s == null) return;
-    final existing = s.workspaceFolder;
-    if (existing != null && existing.isNotEmpty) return;
-    final sandbox = await SandboxService.I.workDirFor(s.sandboxId ?? s.id);
+    final sid = s.sandboxId ?? s.id;
+    // Private repos need the OAuth token at clone time.
+    GlobalRepoRegistry.gitTokenProvider ??= () => GitHubService.I.token;
+    final reg = await GlobalRepoRegistry.instance();
     if (!mounted) return;
+    final existing = s.workspaceFolder;
+    if ((existing != null && existing.isNotEmpty) ||
+        reg.boundWorkspaceFor(sid) != null) {
+      return;
+    }
     final choice = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: Aether.surface,
@@ -198,7 +215,7 @@ class _StudioScreenState extends State<StudioScreen> {
               padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
               child: Text(
                 'The agent runs shell commands and writes files inside this '
-                'folder for this chat.',
+                'working copy for this chat.',
                 style: TextStyle(fontSize: 12, color: Aether.textMuted),
               ),
             ),
@@ -210,16 +227,14 @@ class _StudioScreenState extends State<StudioScreen> {
                 color: Aether.accent,
               ),
               title: const Text(
-                'Session sandbox (recommended)',
+                'Session clone',
                 style: TextStyle(fontSize: 13.5),
               ),
               subtitle: Text(
-                sandbox.path,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+                'Clone once into Ovid storage — reused by future sessions',
                 style: TextStyle(fontSize: 11, color: Aether.textFaint),
               ),
-              onTap: () => Navigator.pop(sheetCtx, 'sandbox'),
+              onTap: () => Navigator.pop(sheetCtx, 'session'),
             ),
             ListTile(
               dense: true,
@@ -229,14 +244,14 @@ class _StudioScreenState extends State<StudioScreen> {
                 color: Aether.textMuted,
               ),
               title: const Text(
-                'Pick a folder on this device',
+                'Local folder clone',
                 style: TextStyle(fontSize: 13.5),
               ),
               subtitle: Text(
-                'Clone/edit inside a folder you choose',
+                'Pick a device folder; the repo is cloned into a subfolder',
                 style: TextStyle(fontSize: 11, color: Aether.textFaint),
               ),
-              onTap: () => Navigator.pop(sheetCtx, 'pick'),
+              onTap: () => Navigator.pop(sheetCtx, 'local'),
             ),
             const SizedBox(height: 10),
           ],
@@ -244,12 +259,85 @@ class _StudioScreenState extends State<StudioScreen> {
       ),
     );
     if (!mounted || choice == null) return;
-    if (choice == 'sandbox') {
-      AppState.I.setSessionWorkspaceFolder(null);
-      _toast('Working in the session sandbox.');
+    if (choice == 'session') {
+      await _cloneIntoRegistry(reg, sid, repo, branch);
+    } else {
+      await _cloneIntoPickedFolder(reg, sid, repo, branch);
+    }
+  }
+
+  /// "Session clone": clone-once into the global registry (registry hit →
+  /// same folder, no re-clone), then bind this session's workspace to it.
+  Future<void> _cloneIntoRegistry(
+    GlobalRepoRegistry reg,
+    String sid,
+    String repo,
+    String branch,
+  ) async {
+    setState(() => _cloneStatus = 'Cloning $repo@$branch …');
+    try {
+      final path = await reg.ensureCloned(repo, branch);
+      await reg.bindSession(sid, repo, branch, path);
+      AppState.I.setSessionWorkspaceFolder(path);
+      _toast('Working copy: ${path.split('/').last}');
+    } catch (e) {
+      _toast('Clone failed: $e');
+    } finally {
+      if (mounted) setState(() => _cloneStatus = null);
+    }
+  }
+
+  /// "Local folder clone": the user picks a device folder; the repo is
+  /// really cloned (with `git clone -b <branch>`) into a sanitized
+  /// subfolder there, and the session workspace is bound to that subfolder.
+  Future<void> _cloneIntoPickedFolder(
+    GlobalRepoRegistry reg,
+    String sid,
+    String repo,
+    String branch,
+  ) async {
+    String? dir;
+    try {
+      dir =
+          studioFolderPickOverrideForTest ??
+          await FilePicker.platform.getDirectoryPath(
+            dialogTitle: 'Pick a folder to clone $repo into',
+          );
+    } catch (_) {
+      dir = null;
+    }
+    if (!mounted || dir == null) return;
+    if (!Directory(dir).existsSync()) {
+      _toast('That folder is not accessible.');
       return;
     }
-    await _pickAndPinFolder(dialogTitle: 'Pick working folder for $repo');
+    var writable = _probeWritable(dir);
+    if (!writable) {
+      final granted = await AgentService.I.requestAllFilesAccess();
+      if (granted) writable = _probeWritable(dir);
+    }
+    if (!mounted) return;
+    if (!writable) {
+      _toast(
+        'That folder is read-only for Ovid — grant All Files Access or pick '
+        'another folder.',
+      );
+      return;
+    }
+    final dest = '$dir/${GlobalRepoRegistry.folderNameFor(repo, branch)}';
+    setState(() => _cloneStatus = 'Cloning $repo@$branch …');
+    try {
+      final destDir = Directory(dest);
+      if (destDir.existsSync()) await destDir.delete(recursive: true);
+      await reg.cloneRepo(repo, branch, dest);
+      await reg.bindSession(sid, repo, branch, dest);
+      AppState.I.setSessionWorkspaceFolder(dest);
+      _toast('Working copy: ${dest.split('/').last}');
+    } catch (e) {
+      _toast('Clone failed: $e');
+    } finally {
+      if (mounted) setState(() => _cloneStatus = null);
+    }
   }
 
   /// Studio affordance (opened from the app-bar folder button): change or
@@ -439,9 +527,11 @@ class _StudioScreenState extends State<StudioScreen> {
         // repo's branch, whose ref may not exist (tree fetch would 404).
         AgentService.I.sessionBranch = branchForPickedRepo(pickedRepo);
         await _autoSync();
-        // Freshly bound repo → ask where the work should happen (the studio workspace prompt asks
-        // for a workspace directory before it starts editing).
-        await _offerWorkspaceFolder(picked);
+        // Freshly picked repo+branch → offer a real working copy: a
+        // clone-once session clone, or a clone into a picked device folder.
+        // A new session picking an already-cloned repo+branch hits the
+        // registry and reuses the SAME folder (no re-clone).
+        await _offerCloneTarget(picked, AgentService.I.sessionBranch);
       }
     } catch (e) {
       if (mounted) {
@@ -618,6 +708,34 @@ class _StudioScreenState extends State<StudioScreen> {
                 child: Text(
                   'Sync failed: $_syncError',
                   style: TextStyle(fontSize: 11.5, color: Aether.warnLight),
+                ),
+              ),
+            if (_cloneStatus != null)
+              Container(
+                width: double.infinity,
+                color: Aether.accent.withValues(alpha: 0.12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
+                child: Row(
+                  children: [
+                    const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _cloneStatus!,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: Aether.text,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             Expanded(

@@ -237,7 +237,7 @@ void main() {
 
   group('MCP transport parity', () {
     test(
-      'SSE server is rejected as required (spec: SSE-only definitions fail)',
+      'SSE server is accepted (spec: SSE is a supported transport)',
       () async {
         final root = Directory.systemTemp.createTempSync('ovid-sse-e2e');
         addTearDown(() => root.deleteSync(recursive: true));
@@ -255,17 +255,16 @@ void main() {
 
         final m = await const ClaudePluginAdapter().inspect(root);
 
-        final sseNotes = m.compatibility.where(
-          (i) => i.fields.any((f) => f.contains('legacy')),
-        );
-        expect(sseNotes, isNotEmpty);
+        // The SSE server is imported as a supported transport — never
+        // rejected, and nothing about it blocks the install.
+        final sse = m.mcpServers.singleWhere((s) => s.name == 'legacy');
+        expect(sse.transport, 'sse');
+        expect(sse.url, 'https://example.com/sse');
         expect(
-          sseNotes.every((i) => i.severity == CompatibilitySeverity.required),
-          isTrue,
-        );
-        expect(
-          sseNotes.every((i) => i.message.contains('Streamable HTTP')),
-          isTrue,
+          m.compatibility.where(
+            (i) => i.severity == CompatibilitySeverity.required,
+          ),
+          isEmpty,
         );
       },
     );

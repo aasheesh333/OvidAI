@@ -240,17 +240,30 @@ void main() {
     });
   });
 
-  group('P21: addCustomMcpServer rejects SSE', () {
-    test('rejects sse without creating a dead row', () {
+  group('P21: addCustomMcpServer accepts SSE', () {
+    test('accepts sse and records the server', () {
       final err = app.addCustomMcpServer(
         name: 'settings-sse',
         command: '',
         transport: 'sse',
         url: 'https://example.com/sse',
       );
+      expect(err, isNull);
+      final s = app.mcpServers.firstWhere((e) => e.name == 'settings-sse');
+      expect(s.transport, 'sse');
+      expect(s.url, 'https://example.com/sse');
+    });
+
+    test('still rejects unknown transports without creating a dead row', () {
+      final err = app.addCustomMcpServer(
+        name: 'settings-bogus',
+        command: '',
+        transport: 'bogus',
+        url: 'https://example.com/x',
+      );
       expect(err, isNotNull);
-      expect(err, contains('SSE'));
-      expect(app.mcpServers.any((e) => e.name == 'settings-sse'), isFalse);
+      expect(err, contains('bogus'));
+      expect(app.mcpServers.any((e) => e.name == 'settings-bogus'), isFalse);
     });
 
     test('still accepts stdio and http transports', () {

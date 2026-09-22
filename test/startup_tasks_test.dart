@@ -351,8 +351,14 @@ void main() {
       expect(requests, 0, reason: 'credential gate must not dial');
     });
 
-    test('sse and unknown transports are unsupported', () async {
+    test('sse is supported, unknown transports stay unsupported', () async {
       AppState.createForTest();
+      // The SSE GET fails (no real server behind the URL), but the point is
+      // the transport gate no longer rejects it — only genuinely unknown
+      // transports do.
+      McpService.I.httpClientForTest = MockClient((request) async {
+        return http.Response('not an sse stream', 500);
+      });
       final sse = _httpServer('legacy-sse', transport: 'sse');
       final weird = _httpServer('weird', transport: 'carrier-pigeon');
 
@@ -365,7 +371,8 @@ void main() {
         handshakeBudget: const Duration(seconds: 5),
       );
 
-      expect(sseOutcome.kind, McpConnectOutcomeKind.unsupported);
+      expect(sseOutcome.kind, isNot(McpConnectOutcomeKind.unsupported));
+      expect(sseOutcome.kind, McpConnectOutcomeKind.failed);
       expect(weirdOutcome.kind, McpConnectOutcomeKind.unsupported);
       expect(weirdOutcome.reason, contains('carrier-pigeon'));
     });

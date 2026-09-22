@@ -165,7 +165,12 @@ void main() {
     // envelope. Raise deliberately only with a measured justification.
     // Baseline before the schema compactor was ~8597; the compactor must
     // keep it under 8000 while advertising every required tool above.
+    //
+    // Measured 2026-09-23: 8080 (~+80 over the old ceiling). The growth is
+    // intentional — the 6-workstream batch adds the `git_clone` tool
+    // (Studio: session/global repo clone + local-folder clone). No schema
+    // regression; ceiling raised to 8200 to cover it.
     expect(tools.length, greaterThan(80));
-    expect(approxTokens, lessThan(8000));
+    expect(approxTokens, lessThan(8200));
   });
 }
