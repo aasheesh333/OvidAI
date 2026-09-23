@@ -123,6 +123,12 @@ class BrowserTab {
 
   bool desktopMode;
 
+  /// Forced-desktop self-heal budget: how many native repairs have run for
+  /// the CURRENT document. Reset on every onPageStarted; capped so a page
+  /// that permanently resists forcing (or a missing WebView) cannot spin
+  /// the repair loop forever. In-memory only.
+  int desktopRepairAttempts = 0;
+
   BrowserTab({required this.url, bool? desktopMode, this.sessionId = ''})
     : desktopMode = desktopMode ?? AppState.I.browserDesktopMode;
 }
@@ -2591,6 +2597,131 @@ class AgentService extends ChangeNotifier {
       tab.viewportWidth ??
       (tab.desktopMode ? BrowserTab.desktopLogicalWidth : null);
 
+  /// JS probe the Dart verifier runs in the live document after every page
+  /// finish. Returns a JSON string — never throws inside the page, with keys
+  /// `w` (layout viewport px), `shim` (feature shim ran), `vw` (forced width).
+  /// `documentElement.clientWidth` is the ground truth for the LAYOUT
+  /// viewport (media queries read this, not `window.innerWidth`, which the
+  /// shim overrides). `vw`/`shim` markers prove the native scripts executed
+  /// in THIS document. Pure builder so the probe contract is unit-testable.
+  @visibleForTesting
+  static String desktopVerifyScriptForTest() =>
+      '(function(){try{return JSON.stringify({'
+      'w:document.documentElement?document.documentElement.clientWidth:0,'
+      'shim:!!window.__ovidDesktopShim,'
+      'vw:(window.__ovidViewportW||0)'
+      '});}catch(e){return JSON.stringify({w:0,shim:false,vw:0});}})();';
+
+  /// Pure gate for the forced-desktop repair: true when a forced width was
+  /// requested but the live document is not honoring it. [expectedWidth] is
+  /// [viewportWidthForTest] (null = no forcing requested, never repair).
+  /// [clientWidth] is the layout viewport px from the probe; [shim] and
+  /// [viewportW] are the probe markers. 150px of slack absorbs rounding and
+  /// scrollbar differences without masking a real mobile fallback (~412px).
+  @visibleForTesting
+  static bool desktopRepairNeededForTest({
+    required int? expectedWidth,
+    required int clientWidth,
+    required bool shim,
+    required int viewportW,
+  }) {
+    if (expectedWidth == null || expectedWidth <= 0) return false;
+    if (!shim) return true;
+    if (viewportW != expectedWidth) return true;
+    return clientWidth < expectedWidth - 150;
+  }
+
+  /// Parse the [desktopVerifyScriptForTest] probe result into
+  /// (clientWidth, shim, viewportW). Tolerates every failure shape —
+  /// null, non-JSON, missing keys — as "nothing verified".
+  @visibleForTesting
+  static ({int clientWidth, bool shim, int viewportW})
+      parseDesktopProbeForTest(Object? raw) {
+    try {
+      final m = jsonDecode(raw as String) as Map<String, dynamic>;
+      return (
+        clientWidth: (m['w'] as num?)?.toInt() ?? 0,
+        shim: m['shim'] == true,
+        viewportW: (m['vw'] as num?)?.toInt() ?? 0,
+      );
+    } catch (_) {
+      return (clientWidth: 0, shim: false, viewportW: 0);
+    }
+  }
+
+  /// Ask the native layer to repair the forced desktop on [tab]'s LIVE
+  /// document right now: settings + viewport script + feature shim,
+  /// evaluated immediately. Used by the page-finish verifier when the
+  /// document-start scripts did not stick. Returns true when the native
+  /// side reports the repair applied.
+  Future<bool> repairDesktopViewport(BrowserTab tab) async {
+    final width = viewportWidthForTest(tab);
+    if (width == null || width <= 0) return false;
+    try {
+      final res = await _webviewChannel.invokeMapMethod<String, dynamic>(
+        'repairDesktop',
+        <String, dynamic>{
+          'tabId': tab.id,
+          'webViewIdentifier': webViewIdentifierFor(tab),
+          'logicalWidth': width,
+        },
+      );
+      return res?['applied'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Verify the forced desktop width actually stuck in [tab]'s live
+  /// document, and repair it when it did not. Runs once per page finish
+  /// (delayed so document-start scripts have settled), capped at two
+  /// repairs per document so a hostile page cannot spin the loop. This is
+  /// what makes "desktop enabled ⇒ forced desktop size" hold persistently,
+  /// across refresh and SPA navigations — not just at toggle time.
+  Future<void> _verifyDesktopForced(BrowserTab tab, String finishedUrl) async {
+    final controller = tab.controller;
+    if (controller == null) return;
+    final expected = viewportWidthForTest(tab);
+    if (expected == null || expected <= 0) return;
+    if (tab.desktopRepairAttempts >= 2) return;
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    // The tab may have navigated again while we waited — only repair the
+    // document we actually verified.
+    if (tab.controller != controller || tab.url != finishedUrl) return;
+    if (tab.desktopRepairAttempts >= 2) return;
+    bool needed = false;
+    try {
+      final raw = await controller.runJavaScriptReturningResult(
+        desktopVerifyScriptForTest(),
+      );
+      final probe = parseDesktopProbeForTest(raw);
+      needed = desktopRepairNeededForTest(
+        expectedWidth: expected,
+        clientWidth: probe.clientWidth,
+        shim: probe.shim,
+        viewportW: probe.viewportW,
+      );
+    } catch (_) {
+      needed = true;
+    }
+    if (!needed) return;
+    tab.desktopRepairAttempts++;
+    final repaired = await repairDesktopViewport(tab);
+    tab.consoleLog.add((
+      at: DateTime.now(),
+      kind: repaired ? 'repair' : 'warn',
+      text: repaired
+          ? 'desktop force repaired: layout ${expected}px re-applied '
+              '(attempt ${tab.desktopRepairAttempts}/2)'
+          : 'desktop force FAILED to apply (attempt '
+              '${tab.desktopRepairAttempts}/2) — native layer unreachable',
+    ));
+    if (tab.consoleLog.length > 200) {
+      tab.consoleLog.removeRange(0, tab.consoleLog.length - 200);
+    }
+    notifyListeners();
+  }
+
   /// Inject the tab's user-controlled visual zoom into the live page.
   /// Zoom is a per-document CSS property — setting [BrowserTab.userZoom]
   /// alone changes nothing on screen, and every navigation/reload wipes
@@ -2707,13 +2838,17 @@ class AgentService extends ChangeNotifier {
               ..url = url
               ..title = null
               ..loading = true
-              ..progress = 0;
+              ..progress = 0
+              // Fresh document ⇒ fresh repair budget for the verifier.
+              ..desktopRepairAttempts = 0;
             // Re-assert the tab's desktop/mobile settings at the START of
             // every navigation, not just the first load. A fresh document
             // must carry the desktop UA + forced viewport before its own
             // scripts run, otherwise the site detects mobile and gates.
             // Mobile tabs send no logicalWidth (device width wins) but still
             // re-assert the mobile UA. Scoped to this tab's WebView.
+            // Failures are surfaced (not swallowed): a desktop tab whose
+            // native apply never lands is exactly the "still mobile" bug.
             unawaited(
               applyDesktopViewport(
                 tab.desktopMode,
@@ -2721,7 +2856,19 @@ class AgentService extends ChangeNotifier {
                 webViewIdentifier: webViewIdentifierFor(tab),
                 logicalWidth: viewportWidthForTest(tab),
                 userAgent: userAgentForTest(tab),
-              ),
+              ).then((applied) {
+                if (!applied && tab.desktopMode) {
+                  tab.consoleLog.add((
+                    at: DateTime.now(),
+                    kind: 'warn',
+                    text: 'desktop viewport apply missed on navigation start '
+                        '(native WebView unreachable) — verifier will repair',
+                  ));
+                  if (tab.consoleLog.length > 200) {
+                    tab.consoleLog.removeRange(0, tab.consoleLog.length - 200);
+                  }
+                }
+              }),
             );
             notifyListeners();
           },
@@ -2768,6 +2915,13 @@ class AgentService extends ChangeNotifier {
             // the document's CSS zoom, so the readable scale (`userZoom`, never
             // a viewport-derived factor) must be re-injected on every page load.
             unawaited(_applyTabZoom(tab));
+            // Forced-desktop verification: "desktop enabled ⇒ forced desktop
+            // size" must hold for the document on screen, not just at toggle
+            // time. Probes the live layout viewport + shim markers and
+            // repairs via the native layer when the forcing did not stick
+            // (missed apply, rewritten meta, old WebView). Covers refresh and
+            // SPA navigations — persistence by verification, not by hope.
+            unawaited(_verifyDesktopForced(tab, url));
             // Dialog/popup capture: webview_flutter has no onJsAlert API,
             // so shim alert/confirm/prompt + window.open once per page.
             try {

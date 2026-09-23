@@ -108,9 +108,66 @@ class OvidWebViewHandler(
                             "applied" to true,
                             "enabled" to enabled,
                             "tabId" to tabId,
+                            "webViewFound" to true,
+                            "docStartSupported" to WebViewFeature.isFeatureSupported(
+                                WebViewFeature.DOCUMENT_START_SCRIPT
+                            ),
                             "useWideViewPort" to enabled,
                             "loadWithOverviewMode" to !enabled,
                             "supportMultipleWindows" to true,
+                            "logicalWidth" to logicalWidth
+                        )
+                    )
+                }
+            }
+            // ── Forced-desktop repair ───────────────────────────────────
+            // The Dart side verifies every page finish (documentElement.
+            // clientWidth + shim markers). When the forced width did NOT
+            // stick — old WebView without document-start support, a page
+            // that rewrote its viewport meta, a missed apply — it calls
+            // here for an immediate, in-place repair of the LIVE document:
+            // settings + viewport script + feature shim, evaluated now.
+            // Document-start scripts (when supported) keep covering future
+            // navigations; this call fixes the document on screen.
+            "repairDesktop" -> {
+                val identifier = call.argument<Number>("webViewIdentifier")?.toLong()
+                val logicalWidth = call.argument<Number>("logicalWidth")?.toInt()
+                    ?: 1280
+                val tabId = call.argument<Number>("tabId")?.toInt()
+                val webView = resolveWebView(identifier)
+                val act = activity
+                if (webView == null || act == null) {
+                    result.success(
+                        mapOf(
+                            "applied" to false,
+                            "webViewFound" to false,
+                            "tabId" to tabId
+                        )
+                    )
+                    return
+                }
+                act.runOnUiThread {
+                    applySettings(webView.settings, true)
+                    applyLogicalViewport(webView, logicalWidth)
+                    applyUserAgentMetadata(webView, true)
+                    applyFeatureShim(webView, true)
+                    // Immediate repair of the live document — the
+                    // document-start scripts cover the NEXT navigation, but
+                    // the page on screen needs the forcing NOW.
+                    try {
+                        webView.evaluateJavascript(
+                            viewportScript(logicalWidth) + DESKTOP_FEATURE_SHIM,
+                            null
+                        )
+                    } catch (_: Throwable) {}
+                    result.success(
+                        mapOf(
+                            "applied" to true,
+                            "webViewFound" to true,
+                            "docStartSupported" to WebViewFeature.isFeatureSupported(
+                                WebViewFeature.DOCUMENT_START_SCRIPT
+                            ),
+                            "tabId" to tabId,
                             "logicalWidth" to logicalWidth
                         )
                     )
@@ -271,11 +328,16 @@ class OvidWebViewHandler(
      * Document-start script: runs before the page's own scripts, so detection
      * sees the wide layout from the first read. Re-asserts on DOMContentLoaded
      * and load because the parser can append the page's own viewport meta
-     * AFTER document-start (last meta wins in Chromium).
+     * AFTER document-start (last meta wins in Chromium). A MutationObserver
+     * keeps the forcing alive when SPAs rewrite <head> later — the Dart-side
+     * verifier only calls the native repair path when this script never ran.
+     * Sets window.__ovidViewportW so the Dart verifier can confirm the script
+     * executed in THIS document.
      */
     private fun viewportScript(width: Int): String = """
 (function(){
   var W = $width;
+  window.__ovidViewportW = W;
   function apply(){
     try {
       var head = document.head || document.documentElement;
@@ -294,6 +356,14 @@ class OvidWebViewHandler(
   apply();
   document.addEventListener('DOMContentLoaded', apply, {once: true});
   window.addEventListener('load', apply, {once: true});
+  try {
+    var mo = new MutationObserver(function(){ apply(); });
+    var target = document.head || document.documentElement;
+    if (target && !window.__ovidViewportObs) {
+      window.__ovidViewportObs = true;
+      mo.observe(target, {childList: true, subtree: true});
+    }
+  } catch (e) {}
 })();
 """
 
@@ -375,6 +445,12 @@ class OvidWebViewHandler(
      * Install the desktop feature shim at document start (desktop tabs only).
      * Runs before any page script, so detection libraries see desktop values.
      * Added once per WebView — document-start scripts survive navigations.
+     *
+     * When the WebView build has no document-start support (old System
+     * WebView), the shim used to be silently skipped and the tab kept
+     * reporting mobile touch/UA-data signals. Now it falls back to an
+     * immediate evaluateJavascript so the live document still gets the
+     * overrides; the Dart verifier repairs any document the fallback missed.
      */
     private fun applyFeatureShim(webView: WebView, desktop: Boolean) {
         if (!desktop) {
@@ -383,6 +459,13 @@ class OvidWebViewHandler(
         }
         if (featureShimHandlers.containsKey(webView)) return
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            // No document-start support: best-effort immediate install on the
+            // live document instead of silently leaving mobile signals in
+            // place. The Dart-side verifier re-runs this on every page finish
+            // until the __ovidDesktopShim marker is present.
+            try {
+                webView.evaluateJavascript(DESKTOP_FEATURE_SHIM, null)
+            } catch (_: Throwable) {}
             return
         }
         try {
@@ -415,6 +498,7 @@ class OvidWebViewHandler(
  */
 private const val DESKTOP_FEATURE_SHIM = """
 (function(){
+  window.__ovidDesktopShim = true;
   try {
     Object.defineProperty(navigator, 'maxTouchPoints', {
       get: function(){ return 0; }, configurable: true
