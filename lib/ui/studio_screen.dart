@@ -181,6 +181,11 @@ class _StudioScreenState extends State<StudioScreen> {
     final sid = s.sandboxId ?? s.id;
     // Private repos need the OAuth token at clone time.
     GlobalRepoRegistry.gitTokenProvider ??= () => GitHubService.I.token;
+    // Android ships no usable system git — a host `git clone` dies with
+    // `ProcessException: Permission denied`. Route registry clones through
+    // the sandbox's git (same one the agent's git_clone tool uses), with
+    // the sandbox env (PATH, GIT_EXEC_PATH, GIT_SSL_CAINFO, HOME).
+    GlobalRepoRegistry.cloneRunnerOverride ??= _sandboxGitClone;
     final reg = await GlobalRepoRegistry.instance();
     if (!mounted) return;
     final existing = s.workspaceFolder;
@@ -263,6 +268,76 @@ class _StudioScreenState extends State<StudioScreen> {
       await _cloneIntoRegistry(reg, sid, repo, branch);
     } else {
       await _cloneIntoPickedFolder(reg, sid, repo, branch);
+    }
+  }
+
+  /// Sandbox-backed git clone for [GlobalRepoRegistry.cloneRunnerOverride].
+  ///
+  /// Runs `<prefix>/bin/git` with the full sandbox env — the only working
+  /// git on-device. Mirrors the token handling of the old host runner
+  /// (process-scoped credential helper; no `.git-credentials` file), and
+  /// fails fast with an actionable message when the sandbox or its git is
+  /// missing/broken instead of the cryptic host `Permission denied`.
+  static Future<void> _sandboxGitClone(
+    String repoFull,
+    String branch,
+    String dest,
+  ) async {
+    final svc = SandboxService.I;
+    final ready = svc.isInstalled || await svc.checkExisting();
+    if (!ready) {
+      throw Exception(
+        'Linux sandbox not installed — open Studio once to install it, '
+        'then retry the clone.',
+      );
+    }
+    // Fail fast when the sandbox git itself is broken.
+    try {
+      final (vCode, vOut) = await svc
+          .execChecked(['git', '--version'])
+          .timeout(const Duration(seconds: 30));
+      if (vCode != 0 || !vOut.contains('git version')) {
+        throw Exception(
+          'sandbox git is not working '
+          '(${vOut.trim().split('\n').last}); reinstall it from the Health '
+          'screen, then retry.',
+        );
+      }
+    } catch (e) {
+      if ('$e'.contains('sandbox git is not working')) rethrow;
+      throw Exception(
+        'could not run sandbox git (${e.toString().split('\n').first}); '
+        'reinstall the Linux sandbox from the Health screen, then retry.',
+      );
+    }
+    final token = GlobalRepoRegistry.gitTokenProvider?.call();
+    final env = <String, String>{'GIT_TERMINAL_PROMPT': '0'};
+    if (token != null && token.isNotEmpty) {
+      env['GIT_CONFIG_COUNT'] = '1';
+      env['GIT_CONFIG_KEY_0'] = 'credential.https://github.com.helper';
+      env['GIT_CONFIG_VALUE_0'] =
+          '!f() { echo username=x-access-token; echo password=$token; }; f';
+    }
+    final parent = Directory(dest).parent;
+    await parent.create(recursive: true);
+    final (code, out) = await svc
+        .execChecked(
+          [
+            'git',
+            'clone',
+            '-b',
+            branch,
+            'https://github.com/$repoFull.git',
+            dest,
+          ],
+          hostWorkDir: parent,
+          env: env,
+        )
+        .timeout(const Duration(minutes: 10));
+    if (code != 0) {
+      throw Exception(
+        'git clone $repoFull@$branch failed (exit $code): ${out.trim()}',
+      );
     }
   }
 

@@ -170,7 +170,14 @@ void main() {
     // intentional — the 6-workstream batch adds the `git_clone` tool
     // (Studio: session/global repo clone + local-folder clone). No schema
     // regression; ceiling raised to 8200 to cover it.
+    //
+    // Measured 2026-09-23: 8487 (~+407). The growth is intentional — the
+    // GitHub-native batch adds `git_push` (declared but never implemented
+    // until now), `git_pull`, `git_status`, `git_log`, `git_diff` (Studio:
+    // the full git workflow for any cloned repo) plus a `gh` mention in
+    // the run_shell description. Schemas kept terse; ceiling raised to
+    // 8600 to cover it.
     expect(tools.length, greaterThan(80));
-    expect(approxTokens, lessThan(8200));
+    expect(approxTokens, lessThan(8600));
   });
 }

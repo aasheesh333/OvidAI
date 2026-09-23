@@ -8656,12 +8656,13 @@ block</pre>
     test('eager apt list carries the real-Linux CLI set', () {
       final src = File('lib/core/sandbox_service.dart').readAsStringSync();
       // Eager apt install — small, always-needed tools ride with node/
-      // python/git so they're present from first launch.
+      // python/git so they're present from first launch. `gh` (GitHub CLI)
+      // rides the same list so Studio agents are GitHub-native from day one.
       expect(
         src,
         contains(
           "'nodejs npm python python-pip uv git curl zlib make binutils '\n"
-          "        'ripgrep openssh rsync jq unzip tmux'",
+          "        'ripgrep openssh rsync jq unzip tmux gh'",
         ),
       );
       // Deb-direct fallback (apt-https-broken devices) carries the same set.

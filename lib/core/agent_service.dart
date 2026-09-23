@@ -3426,6 +3426,31 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     return SandboxService.I.workDirFor(sid);
   }
 
+  /// Run a git argv in the session work dir through the sandbox git
+  /// (the only working git on-device). Returns the combined output, or a
+  /// user-facing error string when the sandbox/git is unavailable.
+  Future<String> _sandboxGit(List<String> args) async {
+    late final Directory work;
+    try {
+      work = await _sessionWorkDir();
+    } catch (e) {
+      return 'git ${args.join(' ')} failed: $e';
+    }
+    final ready =
+        SandboxService.I.isInstalled || await SandboxService.I.checkExisting();
+    if (!ready) {
+      return 'sandbox not installed yet. Tell the user: "Open Studio and '
+          'install the sandbox (one-time, ~320 MB), then retry."';
+    }
+    try {
+      return await SandboxService.I
+          .exec(['git', ...args], hostWorkDir: work)
+          .timeout(const Duration(minutes: 5));
+    } catch (e) {
+      return 'git ${args.join(' ')} failed: $e';
+    }
+  }
+
   /// Resolve the ACTIVE session's workspace directory (also used by the
   /// spill store for oversized tool output).
   Future<Directory> sessionWorkDirForTest() async => _sessionWorkDir();
@@ -5395,8 +5420,8 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         'description':
             'Run a shell command. Execution tier is automatic:\n'
             '• Native Linux sandbox installed (one-time setup) → bash, '
-            'python3, node/npm, git, curl via apt — all access modes, in '
-            'the current session workspace.\n'
+            'python3, node/npm, git, gh (GitHub CLI), curl via apt — all '
+            'access modes, in the current session workspace.\n'
             '• Sandbox not installed → phone terminal (Android device shell: '
             'ls, cat, grep, cp, mv, ps, uname, toybox utilities — instant).\n'
             'If a phone-terminal command reports "not found", tell the user '
@@ -6289,6 +6314,109 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             },
           },
           'required': ['url'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'git_push',
+        'description':
+            'Push the current branch to the git remote. Pass `branch` to '
+            'push (and set upstream for) a specific branch.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'remote': {
+              'type': 'string',
+              'description': 'Remote name. Defaults to "origin".',
+            },
+            'branch': {
+              'type': 'string',
+              'description':
+                  'Branch to push. Omit to push the current branch.',
+            },
+          },
+          'required': [],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'git_pull',
+        'description':
+            'Pull latest changes from the git remote into the current '
+            'branch (fast-forward only; fails cleanly on divergence).',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'remote': {
+              'type': 'string',
+              'description': 'Remote name. Defaults to "origin".',
+            },
+            'branch': {
+              'type': 'string',
+              'description':
+                  'Branch to pull. Omit for the upstream branch.',
+            },
+          },
+          'required': [],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'git_status',
+        'description':
+            'Show working-tree status (short format) with branch tracking '
+            'info. Read-only.',
+        'parameters': {
+          'type': 'object',
+          'properties': {},
+          'required': [],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'git_log',
+        'description':
+            'Show recent commit history, one line per commit. Read-only.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'n': {
+              'type': 'integer',
+              'description': 'Number of commits to show (1-50).',
+            },
+          },
+          'required': [],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'git_diff',
+        'description':
+            'Show uncommitted changes in the working tree. Read-only.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'staged': {
+              'type': 'boolean',
+              'description':
+                  'Show staged changes (`git diff --cached`).',
+            },
+            'stat': {
+              'type': 'boolean',
+              'description': 'Show only the per-file summary.',
+            },
+          },
+          'required': [],
         },
       },
     },
@@ -7964,7 +8092,8 @@ ${mode == AgentMode.safe ? '''
 MODE RESTRICTIONS (Read-Only): you are in a read-only session. You may read
 files, list directories, search, browse pages and run read-only shell commands.
 The following are HARD-BLOCKED and will fail if you try them: file_write,
-fs_edit (create/str_replace/insert), commit, git_clone, git_push, job_start,
+fs_edit (create/str_replace/insert), commit, git_clone, git_push, git_pull,
+job_start,
 job_kill, catalog mutations, plugin/MCP installs, browser typing/clicking.
 Do not attempt them — instead explain what needs to change and ask the user
 to switch to General or Studio mode.''' : ''}
@@ -9252,6 +9381,7 @@ ${await _agentsMdBlock()}
       'generate_image' => const Duration(seconds: 120),
       'fs_grep' || 'fs_glob' => const Duration(seconds: 45),
       'commit' || 'repo_sync' => const Duration(minutes: 3),
+      'git_push' || 'git_pull' || 'git_clone' => const Duration(minutes: 5),
       _ => const Duration(minutes: 2),
     };
   }
@@ -12497,6 +12627,78 @@ ${await _agentsMdBlock()}
           return 'git clone failed: $e';
         }
 
+      case 'git_push':
+        final pushRemote = ((args['remote'] as String?) ?? 'origin').trim();
+        if (pushRemote.isEmpty) return 'git_push needs a remote name.';
+        final pushBranch = ((args['branch'] as String?) ?? '').trim();
+        final pushArgs = <String>['push'];
+        if (pushBranch.isNotEmpty) pushArgs.add('--set-upstream');
+        pushArgs.add(pushRemote);
+        if (pushBranch.isNotEmpty) pushArgs.add(pushBranch);
+        final okPush = await _maybeApprove(
+          'git_push',
+          'Push${pushBranch.isEmpty ? '' : ' branch $pushBranch'} to $pushRemote',
+          'PUSH TO GIT REMOTE\n$pushRemote'
+              '${pushBranch.isEmpty ? '' : '\nBranch: $pushBranch'}',
+        );
+        if (!okPush) return 'DENIED by user';
+        _emit('shell', 'git ${pushArgs.join(' ')}');
+        final pushOut = await _sandboxGit(pushArgs);
+        for (final l in const LineSplitter().convert(pushOut.trim())) {
+          _emit('shellOut', l);
+        }
+        return pushOut.trim().isEmpty ? 'pushed ✓' : pushOut.trim();
+
+      case 'git_pull':
+        final pullRemote = ((args['remote'] as String?) ?? 'origin').trim();
+        if (pullRemote.isEmpty) return 'git_pull needs a remote name.';
+        final pullBranch = ((args['branch'] as String?) ?? '').trim();
+        final pullArgs = <String>['pull', '--ff-only', pullRemote];
+        if (pullBranch.isNotEmpty) pullArgs.add(pullBranch);
+        final okPull = await _maybeApprove(
+          'git_pull',
+          'Pull${pullBranch.isEmpty ? '' : ' $pullBranch'} from $pullRemote (fast-forward only)',
+          'PULL FROM GIT REMOTE\n$pullRemote'
+              '${pullBranch.isEmpty ? '' : '\nBranch: $pullBranch'}\n'
+              'Fast-forward only — fails cleanly on divergence.',
+        );
+        if (!okPull) return 'DENIED by user';
+        _emit('shell', 'git ${pullArgs.join(' ')}');
+        final pullOut = await _sandboxGit(pullArgs);
+        for (final l in const LineSplitter().convert(pullOut.trim())) {
+          _emit('shellOut', l);
+        }
+        unawaited(syncOpenFilesFromDisk());
+        return pullOut.trim().isEmpty ? 'already up to date ✓' : pullOut.trim();
+
+      case 'git_status':
+        final statusOut =
+            (await _sandboxGit(['status', '--short', '--branch'])).trim();
+        return statusOut.isEmpty ? 'no output' : statusOut;
+
+      case 'git_log':
+        final n = (((args['n'] as num?)?.toInt() ?? 20)).clamp(1, 50);
+        final logOut =
+            (await _sandboxGit(['log', '--oneline', '-$n'])).trim();
+        return logOut.isEmpty ? 'no commits' : logOut;
+
+      case 'git_diff':
+        final staged = (args['staged'] as bool?) ?? false;
+        final stat = (args['stat'] as bool?) ?? false;
+        final diffArgs = <String>['diff'];
+        if (staged) diffArgs.add('--cached');
+        if (stat) diffArgs.add('--stat');
+        var diffOut = (await _sandboxGit(diffArgs)).trim();
+        if (diffOut.isEmpty) return 'no changes';
+        const diffCap = 8000;
+        if (diffOut.length > diffCap) {
+          diffOut =
+              '${diffOut.substring(0, diffCap)}\n…(truncated '
+              '${diffOut.length - diffCap} chars — call again with '
+              'stat:true for the summary)';
+        }
+        return diffOut;
+
       case 'preview':
         _emit('think', 'rendering preview…');
         try {
@@ -12963,6 +13165,7 @@ ${await _agentsMdBlock()}
       case 'commit':
       case 'git_clone':
       case 'git_push':
+      case 'git_pull':
       case 'job_start':
       case 'job_kill':
       case 'catalog_add_provider':
@@ -13418,6 +13621,12 @@ ${await _agentsMdBlock()}
     'workflow' => 'Workflow',
     'ralph' => 'Ralph loop',
     'commit' => 'Commit',
+    'git_clone' => 'Clone repo',
+    'git_push' => 'Push',
+    'git_pull' => 'Pull',
+    'git_status' => 'Git status',
+    'git_log' => 'Git log',
+    'git_diff' => 'Git diff',
     'repo_sync' => 'Sync repo',
     'repo_tree' => 'Repo tree',
     'job_start' => 'Start job',
@@ -15193,6 +15402,7 @@ ${await _agentsMdBlock()}
     'commit',
     'git_clone',
     'git_push',
+    'git_pull',
     'request_permission',
     'catalog_add_provider',
     'catalog_remove_provider',

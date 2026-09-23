@@ -788,7 +788,7 @@ class SandboxService {
     // a slow/metered connection isn't forced to download it every time.
     const pkgs =
         'nodejs npm python python-pip uv git curl zlib make binutils '
-        'ripgrep openssh rsync jq unzip tmux';
+        'ripgrep openssh rsync jq unzip tmux gh';
     var installed = false;
     for (var attempt = 1; attempt <= 3 && !installed; attempt++) {
       final tag = attempt == 1
@@ -878,6 +878,7 @@ class SandboxService {
           'git',
           'curl',
           'zlib', // PR30: node's link-time dependency (libz.so.1)
+          'gh', // GitHub CLI — PR/issue/release workflows for the agent
           'ripgrep', // PR38: real Linux CLI parity
           'openssh',
           'rsync',

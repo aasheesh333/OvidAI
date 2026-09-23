@@ -201,4 +201,59 @@ void main() {
       expect(r.boundWorkspaceFor('s2'), isNull);
     });
   });
+
+  group('cloneRunnerOverride (sandbox git)', () {
+    tearDown(() {
+      GlobalRepoRegistry.cloneRunnerOverride = null;
+    });
+
+    test('static override is used when no injected runner is given', () async {
+      final seen = <(String, String, String)>[];
+      GlobalRepoRegistry.cloneRunnerOverride =
+          (repoFull, branch, dest) async {
+        seen.add((repoFull, branch, dest));
+        await Directory(dest).create(recursive: true);
+      };
+      final r = GlobalRepoRegistry.createForTest(
+        baseDir: Directory('${tmp.path}/global-override'),
+      );
+      final path = await r.ensureCloned('acme/app', 'main');
+      expect(seen, hasLength(1));
+      expect(seen.single.$1, 'acme/app');
+      expect(seen.single.$2, 'main');
+      expect(seen.single.$3, path);
+    });
+
+    test('injected runner wins over the static override', () async {
+      final staticSeen = <(String, String, String)>[];
+      final injectedSeen = <(String, String, String)>[];
+      GlobalRepoRegistry.cloneRunnerOverride =
+          (repoFull, branch, dest) async {
+        staticSeen.add((repoFull, branch, dest));
+        await Directory(dest).create(recursive: true);
+      };
+      final r = GlobalRepoRegistry.createForTest(
+        baseDir: Directory('${tmp.path}/global-injected'),
+        gitRunner: (repoFull, branch, dest) async {
+          injectedSeen.add((repoFull, branch, dest));
+          await Directory(dest).create(recursive: true);
+        },
+      );
+      await r.ensureCloned('acme/app', 'main');
+      expect(injectedSeen, hasLength(1));
+      expect(staticSeen, isEmpty);
+    });
+
+    test('null override falls back without throwing at wiring time', () async {
+      GlobalRepoRegistry.cloneRunnerOverride = null;
+      final r = GlobalRepoRegistry.createForTest(
+        baseDir: Directory('${tmp.path}/global-null'),
+        gitRunner: (repoFull, branch, dest) async {
+          await Directory(dest).create(recursive: true);
+        },
+      );
+      final path = await r.ensureCloned('acme/app', 'main');
+      expect(Directory(path).existsSync(), isTrue);
+    });
+  });
 }

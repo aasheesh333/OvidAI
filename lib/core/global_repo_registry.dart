@@ -39,6 +39,20 @@ class GlobalRepoRegistry {
   /// cycle with the GitHub/sandbox services). Null → anonymous clone.
   static String? Function()? gitTokenProvider;
 
+  /// Production override for the git runner, wired once by the app layer
+  /// (which owns the Linux sandbox) — e.g. in Studio setup:
+  /// `GlobalRepoRegistry.cloneRunnerOverride ??= _sandboxGitClone;`
+  /// Precedence: injected [_gitRunner] (tests) first, then this override,
+  /// then the host-`git` [_defaultGitClone] fallback. Null → host `git`
+  /// (desktop/CLI use).
+  ///
+  /// This exists because Android ships no usable system `git`: spawning a
+  /// host `git clone` fails with `ProcessException: Permission denied`.
+  /// Every working git in Ovid (the agent's git_clone, the Health probes)
+  /// goes through the sandbox's `<prefix>/bin/git` with the sandbox env
+  /// (PATH, GIT_EXEC_PATH, GIT_SSL_CAINFO, HOME) — Studio clones must too.
+  static GitCloneRunner? cloneRunnerOverride;
+
   // ── singleton (production) ─────────────────────────────────────────
   static GlobalRepoRegistry? _instance;
 
@@ -187,9 +201,11 @@ class GlobalRepoRegistry {
     }
   }
 
-  /// The effective git runner: the injected fake in tests, else the real
-  /// `git clone -b BRANCH` below.
-  GitCloneRunner get _effectiveRunner => _gitRunner ?? _defaultGitClone;
+  /// The effective git runner: the injected fake in tests, else the
+  /// app-wired sandbox runner ([cloneRunnerOverride]), else the real
+  /// host `git clone -b BRANCH` below.
+  GitCloneRunner get _effectiveRunner =>
+      _gitRunner ?? cloneRunnerOverride ?? _defaultGitClone;
 
   /// Real clone used in production. Never prompts (a hung credential
   /// prompt is worse than a clean failure); when the UI wired
