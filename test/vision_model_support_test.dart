@@ -54,24 +54,52 @@ void main() {
         name: 'InferHub',
         description: '',
         baseUrl: 'https://api.inferhub.dev/v1',
-        models: ['cb/deepseek-v4.1-flash'],
+        models: ['zz/no-such-route-9'],
       );
       expect(
-        AgentService.modelSupportsImagesResolved(
-          'cb/deepseek-v4.1-flash',
-          p,
-        ),
+        AgentService.modelSupportsImagesResolved('zz/no-such-route-9', p),
         isFalse,
       );
-      p.setModelVisionSupport('cb/deepseek-v4.1-flash', true);
+      p.setModelVisionSupport('zz/no-such-route-9', true);
       expect(
-        AgentService.modelSupportsImagesResolved(
-          'cb/deepseek-v4.1-flash',
-          p,
-        ),
+        AgentService.modelSupportsImagesResolved('zz/no-such-route-9', p),
         isTrue,
       );
     });
+
+    test(
+      'a published modality field beats the name heuristic in both '
+      'directions',
+      () {
+        // Inferhub serves cb/deepseek-v4.1-flash with modality text,image —
+        // a name heuristic cannot parse it, the gateway can.
+        final vision = ProviderConfig(
+          name: 'InferHub',
+          description: '',
+          baseUrl: 'https://api.inferhub.dev/v1',
+          models: const ['cb/deepseek-v4.1-flash', 'ali/glm-5.2'],
+        );
+        expect(
+          AgentService.modelSupportsImagesResolved(
+            'cb/deepseek-v4.1-flash',
+            vision,
+          ),
+          isTrue,
+        );
+        // ali/glm-5.2 is announced text-only, so image input is refused even
+        // though a similar-sounding route might otherwise look capable.
+        expect(
+          AgentService.modelSupportsImagesResolved('ali/glm-5.2', vision),
+          isFalse,
+        );
+        // The manual toggle still outranks the gateway.
+        vision.setModelVisionSupport('ali/glm-5.2', true);
+        expect(
+          AgentService.modelSupportsImagesResolved('ali/glm-5.2', vision),
+          isTrue,
+        );
+      },
+    );
 
     test('force-off disables a normally auto-detected model', () {
       final p = ProviderConfig(

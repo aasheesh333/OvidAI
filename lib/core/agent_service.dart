@@ -40,6 +40,7 @@ import 'pty_service.dart';
 import 'skills.dart';
 import 'commands.dart';
 import 'device_control_service.dart';
+import 'model_limits.dart';
 
 /// A persistent browser tab — owns its WebView controller lazily so the
 /// page state survives across BrowserScreen open/close cycles.
@@ -7026,9 +7027,14 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// BYOK across many providers, so we keep a keyword map (longest match
   /// wins) with the same 1M default for unknown models.
   static const _contextWindows = <(String, int)>[
-    ('nemotron-3.5-lightning-30b', 32768), // NVIDIA NIM — real limit, was 1M
-    ('nemotron-3-nano', 262144),
-    ('nemotron-3-super', 262144),
+    // NVIDIA NIM keyword fallbacks. The exact ids are measured in
+    // ModelLimits (NIM's own 400s); these bare-family rows only catch
+    // hand-typed variants. nemotron-3.5-lightning-30b and -3-super both
+    // answered "maximum context length is 1000000" when probed — the old
+    // 32768/262144 guesses were wrong and are corrected here.
+    ('nemotron-3.5-lightning-30b', 1000000),
+    ('nemotron-3-nano', 1000000),
+    ('nemotron-3-super', 1000000),
     ('nemotron', 131072), // safe default for unknown nemotron variants
     ('gemini-2.5-pro', 1048576),
     ('gemini-2.5-flash', 1048576),
@@ -7067,8 +7073,15 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// default when the model doesn't declare a window: 1,000,000 tokens.
   static const defaultContextWindow = 1000000;
 
-  /// Context window (tokens) for [model] — keyword match, longest first.
-  static int contextWindowFor(String model) {
+  /// Context window (tokens) for [model].
+  ///
+  /// Order: numbers the provider itself published or spelled out in an error
+  /// ([ModelLimits] — measured live against every catalog provider; pass
+  /// [providerId] so a gateway's own numbers beat another vendor's route with
+  /// the same name) → the keyword table below → [defaultContextWindow].
+  static int contextWindowFor(String model, [String? providerId]) {
+    final measured = ModelLimits.inputTokens(model, providerId);
+    if (measured != null && measured > 0) return measured;
     final m = model.split('·').first.trim().toLowerCase();
     for (final (key, window) in _contextWindows) {
       if (m.contains(key)) return window;
@@ -7076,13 +7089,26 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     return defaultContextWindow;
   }
 
-  /// Context window in effect for the ACTIVE session — the user's Settings
-  /// override wins; otherwise the model-keyword table (1M default for
-  /// unknown/custom models).
+  /// Completion cap to send as `max_tokens` for [model], or null to omit it.
+  /// A value above the model's measured output ceiling is clamped down, so a
+  /// big Settings cap cannot 400 on a small-window gateway.
+  static int? clampMaxOutput(
+    String model,
+    int requested, [
+    String? providerId,
+  ]) {
+    final cap = ModelLimits.maxOutputTokens(model, providerId);
+    if (cap == null || cap <= 0) return requested;
+    return requested > cap ? cap : requested;
+  }
+
+  /// Context window in effect for this session — the user's Settings override
+  /// wins; otherwise the window the provider itself published for the exact
+  /// model id, then the keyword table (1M default for unknown models).
   static int contextWindowForSession(ChatSession s) {
     final o = AppState.I.contextWindowOverride;
     if (o > 0) return o;
-    return contextWindowFor(s.model);
+    return contextWindowFor(s.model, s.providerId);
   }
 
   /// default policy: compact when the measured request envelope reaches
@@ -9559,8 +9585,11 @@ ${await _agentsMdBlock()}
       if (effort != null) body['reasoning_effort'] = effort;
       // User-set output cap (Settings → Context & output); 0 = let the
       // provider default decide — never a synthetic default injected.
+      // Clamped to the model's measured ceiling when we have one.
       final maxOut = AppState.I.maxOutputTokens;
-      if (maxOut > 0) body['max_tokens'] = maxOut;
+      if (maxOut > 0) {
+        body['max_tokens'] = clampMaxOutput(modelId, maxOut, p.id);
+      }
 
       final bodyStr = jsonEncode(body);
       final bodyBytes = utf8.encode(bodyStr);
@@ -10034,9 +10063,12 @@ ${await _agentsMdBlock()}
       final maxOut = AppState.I.maxOutputTokens;
       final body = <String, dynamic>{
         'model': modelId,
-        // Anthropic REQUIRES max_tokens. Use the user cap when set, else a
-        // sane ceiling that still fits every current Claude model.
-        'max_tokens': maxOut > 0 ? maxOut : 8192,
+        // Anthropic REQUIRES max_tokens. Use the user cap when set (clamped
+        // to what this model actually accepts), else a sane ceiling that
+        // still fits every current Claude model.
+        'max_tokens': maxOut > 0
+            ? clampMaxOutput(modelId, maxOut, p.id)
+            : clampMaxOutput(modelId, 8192, p.id),
         'stream': true,
         if (converted.system.isNotEmpty) 'system': converted.system,
         'messages': converted.messages,
@@ -14573,6 +14605,10 @@ ${await _agentsMdBlock()}
     String model,
     ProviderConfig? provider,
   ) {
+    // ProviderConfig.modelVisionSupport already resolves, in order: the
+    // user's manual toggle, then the modality the provider itself published
+    // for that exact route. Only when both are silent does the name
+    // heuristic get a vote.
     final override = provider?.modelVisionSupport(_baseModelOf(model));
     if (override != null) return override;
     return modelSupportsImages(model);

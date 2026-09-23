@@ -65,3 +65,9 @@ android/release-keystore.jks
 keystore.properties
 android/app/src/main/jniLibs/*/libovid_bootstrap.so
 android/build/
+
+# Live provider probing scratch: raw /v1/models dumps and 400-body transcripts.
+# Local only — the probe logs are provider responses captured with private
+# keys, and nothing here is a source of truth (the vetted numbers live in
+# lib/core/model_limits.dart instead).
+.prov/

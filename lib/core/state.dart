@@ -17,6 +17,7 @@ import 'grant_store.dart';
 import 'hook_service.dart';
 import 'mcp_config_parse.dart';
 import 'mcp_service.dart';
+import 'model_limits.dart';
 import 'plugin_adapters.dart';
 import 'plugin_manifest.dart';
 import 'plugin_permissions.dart';
@@ -122,7 +123,14 @@ class ProviderConfig {
   /// loosening detection for every other model.
   final Map<String, bool> _visionOverrides = {};
 
-  bool? modelVisionSupport(String model) => _visionOverrides[model.trim()];
+  bool? modelVisionSupport(String model) {
+    final key = model.trim();
+    final manual = _visionOverrides[key];
+    if (manual != null) return manual;
+    // No manual toggle: ask the numbers this provider published for that
+    // exact route (modality / input_types, read live off its /v1/models).
+    return ModelLimits.acceptsImages(key, id);
+  }
 
   /// Set (or clear, with `null`) the vision override for [model].
   void setModelVisionSupport(String model, bool? supported) {
@@ -7675,14 +7683,21 @@ class AppState extends ChangeNotifier {
       ProviderConfig(
         name: 'NVIDIA NIM',
         description:
-            'Free credits for hosted open models: Llama, DeepSeek, Qwen, Mistral on build.nvidia.com.',
+            'Free credits for hosted open models on build.nvidia.com. '
+            '82 models are live on the endpoint; context windows for the '
+            'flagship Nemotron routes were read out of the API\'s own 400 '
+            'responses (see ModelLimits).',
         baseUrl: 'https://integrate.api.nvidia.com/v1',
         isFree: true,
+        // Every id here was checked against the live endpoint's model list
+        // (2026-09-23). llama-3.3-70b-instruct, deepseek-r1 and
+        // qwen2.5-coder-32b-instruct used to be seeded and now answer 404, so
+        // they are gone rather than left as dead buttons.
         models: [
+          'nvidia/nemotron-3-super-120b-a12b',
+          'nvidia/nemotron-3-ultra-550b-a55b',
           'nvidia/nemotron-3.5-lightning-30b-a3b',
-          'meta/llama-3.3-70b-instruct',
-          'deepseek-ai/deepseek-r1',
-          'qwen/qwen2.5-coder-32b-instruct',
+          'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
           'mistralai/mistral-nemotron',
         ],
       ),

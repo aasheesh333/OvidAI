@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
+import '../core/model_limits.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 
@@ -784,9 +785,13 @@ class _ModelChip extends StatefulWidget {
 class _ModelChipState extends State<_ModelChip> {
   bool _confirming = false;
 
+  /// Walk the MANUAL override only: none -> on -> off -> none. "None" falls
+  /// back to whatever this provider published for the route, so clearing an
+  /// override on a measured model returns it to the measured answer, not to
+  /// a blind guess.
   void _cycleVision() {
-    final current = widget.provider.modelVisionSupport(widget.model);
-    final next = current == null ? true : (current ? false : null);
+    final manual = widget.provider.visionOverrides[widget.model.trim()];
+    final next = manual == null ? true : (manual ? false : null);
     widget.provider.setModelVisionSupport(widget.model, next);
     AppState.I.refresh();
     AppState.I.persistProviderState();
@@ -794,23 +799,44 @@ class _ModelChipState extends State<_ModelChip> {
 
   @override
   Widget build(BuildContext context) {
-    final vision = widget.provider.modelVisionSupport(widget.model);
+    // Three states, in priority order: the user's manual toggle, then the
+    // modality this provider itself published for this exact route, then the
+    // name heuristic.
+    final manual = widget.provider.visionOverrides[widget.model.trim()];
+    final published = ModelLimits.acceptsImages(
+      widget.model,
+      widget.provider.id,
+    );
     final IconData visionIcon;
     final Color visionColor;
     final String visionTooltip;
-    if (vision == true) {
-      visionIcon = Icons.image_outlined;
+    if (manual != null) {
+      visionIcon = manual ? Icons.image_outlined : Icons.text_fields;
       visionColor = Aether.accent;
-      visionTooltip = 'Image support: On (forced)';
-    } else if (vision == false) {
-      visionIcon = Icons.text_fields;
-      visionColor = Aether.textMuted;
-      visionTooltip = 'Image support: Off (forced)';
+      final providerSays = published == null
+          ? ''
+          : ' \u00b7 provider says ${published ? "yes" : "no"}';
+      visionTooltip =
+          'Image support: ${manual ? "On" : "Off"} (your override)'
+          '$providerSays \u2014 tap to clear';
+    } else if (published != null) {
+      visionIcon = published ? Icons.image_outlined : Icons.text_fields;
+      visionColor = published ? Aether.accent : Aether.textMuted;
+      visionTooltip =
+          'Image support: ${published ? "yes" : "no"} \u2014 published by this '
+          'provider for this exact model id (tap to override)';
     } else {
       visionIcon = Icons.help_outline;
       visionColor = Aether.textFaint;
-      visionTooltip = 'Image support: Auto (detected)';
+      visionTooltip = 'Image support: Auto (nothing published for this id)';
     }
+
+    // `1M/128K` — the input window and output ceiling this provider itself
+    // announced (or that its API spelled out when the model was probed).
+    final limits = ModelLimits.compactLabel(
+      widget.model,
+      widget.provider.id,
+    );
 
     return Container(
       padding: const EdgeInsets.only(left: 9, top: 4.5, bottom: 4.5),
@@ -834,6 +860,30 @@ class _ModelChipState extends State<_ModelChip> {
               color: _confirming ? Aether.danger : Aether.textMuted,
             ),
           ),
+          if (limits != null) ...[
+            const SizedBox(width: 5),
+            Tooltip(
+              message:
+                  'Measured for this provider: '
+                  '${ModelLimits.label(widget.model, widget.provider.id)}',
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                decoration: BoxDecoration(
+                  color: Aether.surface,
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: Aether.hairline),
+                ),
+                child: Text(
+                  limits,
+                  style: const TextStyle(
+                    fontSize: 9.5,
+                    fontFamily: Aether.mono,
+                    color: Aether.textFaint,
+                  ),
+                ),
+              ),
+            ),
+          ],
           const SizedBox(width: 4),
           Tooltip(
             message: visionTooltip,

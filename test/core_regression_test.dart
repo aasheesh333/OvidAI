@@ -55,6 +55,7 @@ import 'package:ovid_ai/ui/plugins_screen.dart'
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
 import 'package:ovid_ai/core/sandbox_pkg.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
+import 'package:ovid_ai/core/model_limits.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -1102,19 +1103,140 @@ void main() {
         expect(AgentService.contextWindowFor('claude-opus-4-20250514'), 200000);
         expect(AgentService.contextWindowFor('gemini-2.5-flash'), 1048576);
         expect(AgentService.contextWindowFor('grok-3'), 256000);
+        // NVIDIA NIM: both rows were guesses (32K / 262K) until the endpoint
+        // answered "maximum context length is 1000000" when probed with an
+        // oversized prompt — the measured number now wins.
         expect(
           AgentService.contextWindowFor('nvidia/nemotron-3-super'),
-          262144,
+          1000000,
         );
         expect(
           AgentService.contextWindowFor('nvidia/nemotron-3.5-lightning-30b'),
-          32768,
+          1000000,
         );
         // Variant suffixes (· Medium) fall back to the base model window.
         expect(AgentService.contextWindowFor('deepseek-chat · High'), 128000);
         // Custom-provider / unknown models get the 1M default.
         expect(AgentService.contextWindowFor('my-custom-model-x1'), 1000000);
         expect(AgentService.contextWindowFor(''), 1000000);
+
+        // ── measured per-model data (ModelLimits) outranks the keyword table
+        // Inferhub publishes input_token_limit/max_output_tokens per route.
+        expect(
+          AgentService.contextWindowFor('ali/glm-5.2'),
+          1000000,
+        ); // keyword table would have said 131072
+        expect(
+          AgentService.contextWindowFor('ali/kimi-k2.7-code'),
+          262144,
+        );
+        expect(AgentService.contextWindowFor('cb/gpt-5.5'), 272000);
+        // A measured small window must not be inflated to the 1M default.
+        expect(
+          AgentService.contextWindowFor('nvidia/nemotron-parse-2.0'),
+          4096,
+        );
+        expect(
+          AgentService.contextWindowFor(
+            'nvidia/riva-translate-4b-instruct-v2',
+          ),
+          8192,
+        );
+        // The effort suffix is stripped before the measured lookup too.
+        expect(
+          AgentService.contextWindowFor('ali/glm-5.2 · High'),
+          1000000,
+        );
+        // The same bare id is a different route per gateway: Fiqstr measured
+        // 990,000 in its own 400 body, KiraAi publishes 1,000,000. Passing the
+        // provider id picks the right one; with no provider the shared table
+        // keeps only numbers every gateway agrees on, so the keyword row wins.
+        expect(
+          AgentService.contextWindowFor('glm-5.2', 'custom-fiqstr'),
+          990000,
+        );
+        expect(
+          AgentService.contextWindowFor('glm-5.2', 'custom-kiraai'),
+          1000000,
+        );
+        expect(AgentService.contextWindowFor('glm-5.2'), 131072);
+        // Output ceilings are gateway-specific too: Apinex answers
+        // "maximum output limit of 1048576" for deepseek-v4-flash while
+        // KiraAi publishes 128,000 on its own route.
+        expect(
+          AgentService.clampMaxOutput(
+            'deepseek-v4-flash',
+            2000000,
+            'custom-apinex',
+          ),
+          1048576,
+        );
+        expect(
+          AgentService.clampMaxOutput(
+            'deepseek-v4-flash',
+            2000000,
+            'custom-kiraai',
+          ),
+          128000,
+        );
+
+        // ── measured output ceilings clamp the user cap
+        expect(AgentService.clampMaxOutput('ali/glm-5.2', 200000), 128000);
+        expect(AgentService.clampMaxOutput('ali/glm-5.2', 4096), 4096);
+        expect(
+          AgentService.clampMaxOutput('minimax-m2.7', 2000000),
+          512000,
+        );
+        // Unmeasured model: the requested cap passes through untouched.
+        expect(AgentService.clampMaxOutput('mystery-llm-9', 200000), 200000);
+
+        // ── Nvidia NIM exact rows, measured from its own 400 bodies
+        expect(
+          AgentService.contextWindowFor(
+            'nvidia/nemotron-3-ultra-550b-a55b',
+            'custom-nvidia',
+          ),
+          1048576,
+        );
+        expect(
+          AgentService.contextWindowFor(
+            'poolside/laguna-xs-2.1',
+            'custom-nvidia',
+          ),
+          262144,
+        );
+        // NIM never published an output ceiling for the nemotron routes, so
+        // nothing is invented: the user's cap is sent as-is.
+        expect(
+          AgentService.clampMaxOutput(
+            'nvidia/nemotron-3-super-120b-a12b',
+            2000000,
+            'custom-nvidia',
+          ),
+          2000000,
+        );
+
+        // ── published modality, per provider, no name guessing
+        expect(
+          ModelLimits.acceptsImages(
+            'meta/llama-3.2-11b-vision-instruct',
+            'custom-nvidia',
+          ),
+          isTrue,
+        );
+        expect(
+          ModelLimits.acceptsImages(
+            'nvidia/nemotron-3-super-120b-a12b',
+            'custom-nvidia',
+          ),
+          isNull,
+        );
+        // A route one gateway calls multimodal stays unknown on a gateway
+        // that never said anything about it.
+        expect(
+          ModelLimits.lookup('mystery-llm-9'),
+          isNull,
+        );
       },
     );
 

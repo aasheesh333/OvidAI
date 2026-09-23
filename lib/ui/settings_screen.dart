@@ -10,6 +10,7 @@ import '../core/agent_service.dart';
 import '../core/app_info.dart';
 import '../core/firebase_service.dart';
 import '../core/hook_service.dart';
+import '../core/model_limits.dart';
 import '../core/presets.dart';
 import '../core/skills.dart';
 import '../core/session_browser_profiles.dart';
@@ -1296,7 +1297,18 @@ class _ContextModelScreen extends StatelessWidget {
         builder: (_, _) {
           final app = AppState.I;
           final s = app.activeSession;
-          final autoWindow = AgentService.contextWindowFor(s?.model ?? '');
+          // Provider-scoped: the same model id can be a different route (and
+          // a different window) on two gateways, so ask the provider that owns
+          // this session first.
+          final model = s?.model ?? '';
+          final autoWindow = AgentService.contextWindowFor(
+            model,
+            s?.providerId,
+          );
+          final measuredLimits = ModelLimits.label(model, s?.providerId);
+          final limitSource = measuredLimits == null
+              ? 'family table / default \u2014 this model published no limits'
+              : 'measured for this provider \u2014 $measuredLimits';
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
@@ -1316,8 +1328,10 @@ class _ContextModelScreen extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 18),
                 child: Text(
-                  'Current model: ${s?.model ?? '—'}\n'
-                  'Auto-detected window: ${(autoWindow / 1000).toStringAsFixed(0)}K tokens',
+                  'Current model: ${s?.model ?? '\u2014'}\n'
+                  'Window used for compaction: '
+                  '${(autoWindow / 1000).toStringAsFixed(0)}K tokens\n'
+                  'Source: $limitSource',
                   style: TextStyle(
                     fontSize: 11.5,
                     height: 1.55,
