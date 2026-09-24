@@ -874,14 +874,48 @@ class AgentService extends ChangeNotifier {
   set pendingApproval(ApprovalRequest? v) => _runResolved.pendingApproval = v;
 
   /// Whether an interactive approval UI is currently mounted and able to
-  /// present approval cards to the user. The chat screen sets this in its
-  /// [State.initState] and clears it in [State.dispose]; it is false in
-  /// unit tests, background isolates, and whenever the user is on another
-  /// screen. [_askUser] consults it: with nobody able to answer, tool
-  /// approvals fail closed after a short grace period instead of wedging
-  /// the run on a completer nobody will complete (the full 120 s window
-  /// only applies when the UI is actually there to answer).
-  static bool approvalUiReady = false;
+  /// present approval cards to the user. [_askUser] consults it: with nobody
+  /// able to answer, tool approvals fail closed after a short grace period
+  /// instead of wedging the run on a completer nobody will complete (the full
+  /// 120 s window only applies when the UI is actually there to answer).
+  ///
+  /// BUG FIX (2026-09-24): this was a single static bool — set `true` in
+  /// `ChatScreen.initState` and `false` in `dispose`. Any navigation overlap ran
+  /// the OUTGOING screen's `dispose` after the INCOMING one's `initState`,
+  /// clearing the flag while a fully visible approval UI was mounted, so
+  /// approvals silently auto-denied after 5 s instead of 120 s. It was also
+  /// process-global, so one hidden chat pane shortened the grace for every
+  /// session's run. It is now a MOUNT COUNT: overlapping lifecycles cancel out
+  /// correctly and the flag is true exactly while at least one UI can answer.
+  static int _approvalUiCount = 0;
+
+  /// True while at least one approval-capable UI is mounted.
+  static bool get approvalUiReady => _approvalUiCount > 0;
+
+  /// An approval UI was mounted. Pair every call with
+  /// [markApprovalUiDisposed] in the same State's `dispose`.
+  static void markApprovalUiMounted() => _approvalUiCount++;
+
+  /// An approval UI was disposed. Never drives the count negative.
+  static void markApprovalUiDisposed() {
+    if (_approvalUiCount > 0) _approvalUiCount--;
+  }
+
+  /// Legacy assignment form, kept so existing call sites and tests compile:
+  /// `= true` mounts one UI, `= false` disposes one.
+  static set approvalUiReady(bool v) {
+    if (v) {
+      markApprovalUiMounted();
+    } else {
+      markApprovalUiDisposed();
+    }
+  }
+
+  @visibleForTesting
+  static int get approvalUiCountForTest => _approvalUiCount;
+
+  @visibleForTesting
+  static void resetApprovalUiCountForTest() => _approvalUiCount = 0;
 
   /// Plan mode, PERSISTED per session (the plan mode coordinator parity): the run bucket reads
   /// through to the session's `planMode` field, so `/plan` survives
@@ -2787,12 +2821,33 @@ class AgentService extends ChangeNotifier {
     if (!needed) return;
     tab.desktopRepairAttempts++;
     final repaired = await repairDesktopViewport(tab);
+    // HONESTY (2026-09-24): `repaired` only ever meant "the channel call
+    // reached a WebView and evaluated a script" — the old log then claimed
+    // "layout 1280px re-applied" WITHOUT MEASURING ANYTHING, so a no-op repair
+    // (the injected meta losing to the page's own `width=device-width`) was
+    // reported as a success while the page stayed phone-width. Re-probe and
+    // report the layout width actually observed.
+    var measured = -1;
+    if (repaired) {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      try {
+        final after = await controller.runJavaScriptReturningResult(
+          desktopVerifyScriptForTest(),
+        );
+        measured = parseDesktopProbeForTest(after).clientWidth;
+      } catch (_) {}
+    }
+    final confirmed = repaired && measured >= expected - 40;
     tab.consoleLog.add((
       at: DateTime.now(),
-      kind: repaired ? 'repair' : 'warn',
-      text: repaired
-          ? 'desktop force repaired: layout ${expected}px re-applied '
+      kind: confirmed ? 'repair' : 'warn',
+      text: confirmed
+          ? 'desktop viewport confirmed at ${measured}px '
                 '(attempt ${tab.desktopRepairAttempts}/2)'
+          : repaired
+          ? 'desktop repair ran but the layout is still '
+                '${measured < 0 ? 'unmeasurable' : '${measured}px'} — expected '
+                '${expected}px (attempt ${tab.desktopRepairAttempts}/2)'
           : 'desktop force FAILED to apply (attempt '
                 '${tab.desktopRepairAttempts}/2) — native layer unreachable',
     ));

@@ -637,13 +637,16 @@ isolation and on a full-suite re-run — the same 30 s per-test default-timeout
 flakiness previously seen in `studio_git_reliability_test.dart`, not a
 regression from this phase.
 | 3 — Studio login + clone-once + label | partial | `032a29a`+ | **label done**; login race + clone-once gaps remain |
-| 4a — Browser geometry | not started | — | |
+| 4a — Browser geometry | **done** | see below | real 1280×800 layout; verifier made honest |
 | 4b — CDP | deferred | — | D2 |
 | 5 — Accessibility restart | not started | — | |
 | 6 — Plan mode allowlist | **done** | see below | blocklist → allowlist, default-deny |
 | 7 — Subagents 49 + no nesting | **done** | see below | cap + zero nesting + ledger FD fix (#8) |
 | 8 — Codex parity | not started | — | |
-| 9 — Correctness & leaks | partial | — | #8 done (ledger); #9 #13–#19 remain |
+| 9 — Correctness & leaks | partial | — | #8 (ledger) and #14 (approval readiness) done; #9 #13 #15–#19 remain |
+| 10 — Performance | not started | — | |
+| 11 — UI/UX + queue dock | partial | see below | **queue dock + Hinglish done**; tap targets/semantics remain |
+| 12 — Google Doc | deferred | — | D1, awaiting URL |
 
 ### Phase 7 detail — 49 ceiling, zero nesting, no leaked descriptors
 
@@ -700,9 +703,74 @@ refused, child roster lacks the spawn tools but keeps the management ones).
 depth limit, which permitted one nesting level — it now asserts no subagent may
 spawn another at any depth.
 
-### Suite-wide timeout (test infrastructure)
+### Phase 4a detail — desktop mode gets real geometry
 
-`dart_test.yaml` raises the per-test timeout from package:test's 30s default to
+`_SizedBrowserView` (new, `lib/ui/browser_screen.dart`) now frames each tab: a
+mobile tab fills the space exactly as before, a desktop tab is laid out at
+**1280×800 logical pixels** and scaled to fit via `FittedBox(fit: contain)`
+inside an `InteractiveViewer` (pinch-zoom, without which a 1280px page on a
+400px screen is unreadable).
+
+`FittedBox`, not `Transform.scale`, is the correct primitive: it lays the child
+out with unbounded constraints at its own size and scales the paint, so a
+1280-wide child inside a 360-wide parent is not a layout overflow.
+
+Because the native view is now genuinely 1280 CSS px wide, `width=device-width`
+resolves to 1280 and media queries, `vw`/`vh`, `innerWidth` and `visualViewport`
+all become truly desktop — the JS shim, the injected viewport meta and the
+repair loop are no longer load-bearing. They were left in place for this pass
+(removing them breaks six test files that pin their source strings); they are now
+redundant and should be deleted in a follow-up. `browserDesktopLogicalSize` is
+exposed as a test seam and is asserted to stay in lockstep with
+`BrowserTab.desktopLogicalWidth/Height`, which is what the native side
+advertises — if those diverge, the page's own layout logic contradicts the
+metrics it reads back.
+
+**Honesty fix:** `_verifyDesktopForced` logged *"desktop force repaired: layout
+1280px re-applied"* whenever the channel call merely succeeded, without ever
+measuring anything — so a no-op repair (the injected meta losing to the page's
+own `width=device-width`) was reported as a success. It now re-probes
+`clientWidth` after the repair and logs the width actually observed, with a
+distinct warning when the layout is still phone-sized.
+
+**Still owed (cannot be done without a device):** on-device confirmation that
+Chromium reports `document.documentElement.clientWidth == 1280`. A widget test
+proves the Flutter geometry; only the clientWidth probe proves what Chromium
+does with it. This is the single highest-value manual check in the whole plan —
+`audits/2026-09-10-browser-desktop.md` §7 records that desktop mode shipped
+without ever being executed on a device.
+
+New test: `test/browser_desktop_geometry_test.dart` — a desktop tab is laid out
+at exactly 1280×800 with a `BoxFit.contain` frame and an `InteractiveViewer`; a
+mobile tab has no such frame; toggling the mode switches the laid-out size.
+
+### Phase 9 (partial) — approval readiness is a mount count
+
+Defect #14. `AgentService.approvalUiReady` was a single static bool set in
+`ChatScreen.initState` and cleared in `dispose`. During a navigation overlap the
+outgoing screen's `dispose` runs *after* the incoming one's `initState`, clearing
+the flag while a fully visible approval UI was mounted — so `_askUser` treated
+pending approvals as unanswerable and **auto-denied them after 5 s instead of
+120 s**, under a card the user could still tap. It was also process-global, so
+one hidden chat pane shortened the grace for every session's run. Now a mount
+count (`markApprovalUiMounted` / `markApprovalUiDisposed`), which makes
+overlapping lifecycles cancel out correctly and can never go negative. The
+legacy `approvalUiReady = bool` assignment form still compiles for existing call
+sites.
+
+New test: `test/approval_ui_ready_test.dart`, including the exact regression —
+mount, mount, dispose-one must leave readiness **true**.
+
+### Test-infrastructure note
+
+`test/git_clone_registry_test.dart` wrapped each dispatch in an explicit
+`.timeout(const Duration(seconds: 30))`. That is a hang guard, not a performance
+budget (the dispatch completes instantly when the file runs alone), and under
+full-suite parallel load it fired spuriously — a recurring phantom failure that
+`dart_test.yaml` cannot fix, because an in-body `.timeout()` overrides the suite
+default. Raised to 2 minutes.
+
+`dart_test.yaml` also raises the per-test timeout from package:test's 30s default to
 3m. The suite is 2400+ tests run in parallel across files; on a loaded machine
 the slow ones (real git operations, large-history widget pumps) exceeded 30s and
 failed with a `TimeoutException` that vanished when the file ran alone. That
@@ -711,11 +779,11 @@ produced recurring phantom failures — `studio_git_reliability_test.dart`, then
 previously "fixed" by annotating one more test. Full-suite wall time dropped from
 7:29 to 3:59 once nothing was hitting the timeout.
 
-Verification: `dart analyze lib test` 0 issues · full suite **2385 pass,
-1 skipped** · `:app:compileDebugKotlin` BUILD SUCCESSFUL (Phase 1).
-| 10 — Performance | not started | — | |
-| 11 — UI/UX + queue dock | partial | see below | **queue dock + Hinglish done**; tap targets/semantics remain |
-| 12 — Google Doc | deferred | — | D1, awaiting URL |
+### Verification (current)
+
+`dart analyze lib test` → 0 issues · full suite **2395 pass, 1 skipped** ·
+`:app:compileDebugKotlin --offline` → BUILD SUCCESSFUL · CI green through
+`032a29a`.
 
 ### Phase 6 detail — plan mode is now default-deny
 

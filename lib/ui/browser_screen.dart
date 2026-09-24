@@ -372,22 +372,31 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 backgroundColor: Aether.hairline,
                 color: Aether.accent,
               ),
-            // WebView — IndexedStack keeps every tab's platform view alive
+            // WebView — IndexedStack keeps every tab's platform view alive.
+            //
+            // DESKTOP MODE (2026-09-24): a desktop tab is now laid out at REAL
+            // desktop dimensions and scaled to fit, instead of being squeezed
+            // into the phone screen and asked to *pretend*. See
+            // [_SizedBrowserView] for why the old approach could never work.
             Expanded(
               child: IndexedStack(
                 index: agent.activeTabIndex,
                 children: [
                   for (final t in agent.browserTabs)
-                    browserWebViewBuilderForTest?.call(t) ??
-                        WebViewWidget(
-                          // Key on the tab's STABLE id, not its URL:
-                          // in-page navigation (t.url changes constantly)
-                          // must not tear down and recreate the platform
-                          // view. desktopMode stays in the key because the
-                          // controller is intentionally recreated on toggle.
-                          key: ValueKey('tab_${t.id}_${t.desktopMode}'),
-                          controller: agent.controllerForTab(t),
-                        ),
+                    _SizedBrowserView(
+                      // Key on the tab's STABLE id, not its URL:
+                      // in-page navigation (t.url changes constantly)
+                      // must not tear down and recreate the platform
+                      // view. desktopMode stays in the key because the
+                      // controller is intentionally recreated on toggle.
+                      key: ValueKey('tab_${t.id}_${t.desktopMode}'),
+                      tab: t,
+                      child:
+                          browserWebViewBuilderForTest?.call(t) ??
+                          WebViewWidget(
+                            controller: agent.controllerForTab(t),
+                          ),
+                    ),
                 ],
               ),
             ),
@@ -408,6 +417,78 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
 /// Agent-activity status dot (the browser status indicator StateDot semantics):
 /// blue = agent actively driving the browser, green = ready.
+/// Lays a desktop-mode tab out at REAL desktop dimensions and scales it to fit;
+/// a mobile tab fills the available space unchanged.
+///
+/// WHY THIS EXISTS (2026-09-24). Desktop mode used to leave the WebView
+/// hard-constrained to the phone screen (a bare `Expanded` above) and instead
+/// tried to *convince* the page it was on a desktop: a Windows UA, client hints,
+/// a JS shim faking `innerWidth`/`screen.*`, and an injected
+/// `<meta name=viewport content=width=1280>`. None of that can work:
+///
+///   • CSS media queries, `vw`/`vh`, container queries and `visualViewport`
+///     read the REAL layout viewport. JS getters cannot fake it, so the shim was
+///     cosmetic.
+///   • Chromium's rule is *last meta wins* — the page's own
+///     `width=device-width` is parsed after a document-start injection and beats
+///     it. The injected meta was then shadowed by a first-match `querySelector`,
+///     so every "repair" re-ran the same no-op and reported success.
+///   • Height was never forced at all.
+///
+/// Giving the native view genuine 1280×800 logical pixels makes
+/// `width=device-width` resolve to 1280, so every one of those signals becomes
+/// truly desktop with no fakery.
+///
+/// `FittedBox` (not `Transform.scale`) is the correct primitive: it lays the
+/// child out with unbounded constraints at its own size and then scales the
+/// paint, so a 1280-wide child inside a 360-wide parent is not a layout
+/// overflow. `InteractiveViewer` restores pinch-zoom and panning, which the
+/// shrink-to-fit would otherwise make unusable on a phone screen.
+class _SizedBrowserView extends StatelessWidget {
+  const _SizedBrowserView({
+    super.key,
+    required this.tab,
+    required this.child,
+  });
+
+  final BrowserTab tab;
+  final Widget child;
+
+  /// CSS pixels a desktop tab is laid out at. Kept in lockstep with
+  /// [BrowserTab.desktopLogicalWidth]/[BrowserTab.desktopLogicalHeight], which
+  /// are what the native viewport override advertises — the geometry and the
+  /// reported size must agree or the page's own layout logic contradicts the
+  /// metrics it reads back.
+  static const double desktopWidth = 1280;
+  static const double desktopHeight = 800;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!tab.desktopMode) return child;
+    return InteractiveViewer(
+      minScale: 0.9,
+      maxScale: 5,
+      child: FittedBox(
+        fit: BoxFit.contain,
+        alignment: Alignment.topLeft,
+        child: SizedBox(
+          width: desktopWidth,
+          height: desktopHeight,
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+/// Test seam: the desktop geometry this screen applies, so a widget test can
+/// assert real dimensions rather than a source string.
+@visibleForTesting
+const browserDesktopLogicalSize = Size(
+  _SizedBrowserView.desktopWidth,
+  _SizedBrowserView.desktopHeight,
+);
+
 class _AgentDot extends StatelessWidget {
   final bool busy;
   const _AgentDot({required this.busy});

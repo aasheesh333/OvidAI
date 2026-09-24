@@ -162,7 +162,7 @@ void main() {
           .dispatchForTest('git_clone', {
             'url': 'https://github.com/acme/widget.git',
           })
-          .timeout(const Duration(seconds: 30));
+          .timeout(const Duration(minutes: 2));
 
       expect(fake.calls.length, 1);
       expect(fake.calls.single, ['acme/widget', 'feature-x']);
@@ -178,7 +178,7 @@ void main() {
           .dispatchForTest('git_clone', {
             'url': 'https://github.com/acme/widget.git',
           })
-          .timeout(const Duration(seconds: 30));
+          .timeout(const Duration(minutes: 2));
       expect(fake.calls.length, 1, reason: 'clone-once: no second clone');
       expect(out2, contains(bound));
     });
@@ -194,7 +194,7 @@ void main() {
             'url': 'git@github.com:acme/widget.git',
             'branch': 'release-2',
           })
-          .timeout(const Duration(seconds: 30));
+          .timeout(const Duration(minutes: 2));
 
       expect(fake.calls.length, 1);
       expect(fake.calls.single, ['acme/widget', 'release-2']);
@@ -211,7 +211,7 @@ void main() {
             'url': 'https://github.com/acme/widget.git',
             'path': 'my-checkout',
           })
-          .timeout(const Duration(seconds: 30));
+          .timeout(const Duration(minutes: 2));
 
       // Registry untouched — the raw clone path runs (and reports the
       // missing sandbox in tests instead of cloning).
@@ -229,7 +229,7 @@ void main() {
           .dispatchForTest('git_clone', {
             'url': 'https://gitlab.com/acme/widget.git',
           })
-          .timeout(const Duration(seconds: 30));
+          .timeout(const Duration(minutes: 2));
 
       expect(fake.calls, isEmpty);
       expect(out, contains('sandbox not installed'));
@@ -257,7 +257,7 @@ void main() {
           .dispatchForTest('git_clone', {
             'url': 'https://github.com/acme/widget.git',
           })
-          .timeout(const Duration(seconds: 30));
+          .timeout(const Duration(minutes: 2));
 
       // General mode keeps isolated per-session workspaces: no registry.
       expect(fake.calls, isEmpty);

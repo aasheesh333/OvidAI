@@ -8758,7 +8758,15 @@ block</pre>
       // isolates, user on another screen): a short grace instead of the
       // full 2-minute wedge.
       expect(src, contains('const Duration(seconds: 5)'));
-      expect(src, contains('static bool approvalUiReady = false;'));
+      // 2026-09-24: the readiness signal is a MOUNT COUNT, not a bool. A plain
+      // bool was cleared by the outgoing ChatScreen's dispose during a
+      // navigation overlap that began after the incoming one's initState, so
+      // approvals auto-denied in 5s while a visible UI could have answered.
+      expect(src, contains('static int _approvalUiCount = 0;'));
+      expect(
+        src,
+        contains('static bool get approvalUiReady => _approvalUiCount > 0;'),
+      );
       expect(src, contains('approval unanswered with no approval UI'));
       expect(src, contains("req.questions == null && t != 'exit_plan_mode'"));
       expect(src, contains('approval unanswered for 120s'));

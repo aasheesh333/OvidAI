@@ -891,14 +891,17 @@ class _ChatScreenState extends State<ChatScreen>
     super.initState();
     // An approval UI is now mounted: tool approval cards are answerable.
     // (AgentService.approvalUiReady gates the fail-closed grace in _askUser.)
-    AgentService.approvalUiReady = true;
+    // Counted, not a bool: during a navigation overlap this screen's initState
+    // can run before the outgoing one's dispose, and a plain flag would be
+    // cleared by that dispose while a visible UI is still here to answer.
+    AgentService.markApprovalUiMounted();
     _scroll.addListener(_onScroll);
   }
 
   @override
   void dispose() {
-    // No approval UI can answer anymore: fail approvals closed.
-    AgentService.approvalUiReady = false;
+    // One fewer approval UI able to answer.
+    AgentService.markApprovalUiDisposed();
     _scroll.dispose();
     _input.dispose();
     _inputFocus.dispose();
