@@ -5923,7 +5923,7 @@ class _QueueDock extends StatelessWidget {
           top: false,
           child: Container(
             margin: const EdgeInsets.fromLTRB(12, 0, 12, 0),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
             decoration: BoxDecoration(
               color: Aether.surface,
               borderRadius: const BorderRadius.vertical(
@@ -5975,21 +5975,25 @@ class _QueueDock extends StatelessWidget {
                     ),
                   ],
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 3),
                 // Queued message rows — keyed by the message's stable id so
                 // a delete/steer/edit never rebinds another row's State.
-                // Guardrail: the rows scroll inside ~38% of the available
+                // Guardrail: the rows scroll inside ~24% of the available
                 // height instead of growing until the composer is pushed
                 // off-screen. (The dock sits in a min-sized Column, so the
                 // incoming maxHeight is unbounded — fall back to the
                 // viewport height, which is always finite.)
+                //
+                // 2026-09-24: was 38%, which made the dock dominate the
+                // screen. Rows still auto-size to their text — only the
+                // ceiling and the chrome shrank.
                 LayoutBuilder(
                   builder: (context, constraints) {
                     final reference = constraints.maxHeight.isFinite
                         ? constraints.maxHeight
                         : MediaQuery.sizeOf(context).height;
                     return ConstrainedBox(
-                      constraints: BoxConstraints(maxHeight: reference * 0.38),
+                      constraints: BoxConstraints(maxHeight: reference * 0.24),
                       child: SingleChildScrollView(
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
@@ -6113,7 +6117,7 @@ class _QueueRowState extends State<_QueueRow> {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(top: 4),
+      padding: const EdgeInsets.only(top: 2),
       child: Row(
         children: [
           Expanded(
@@ -6177,7 +6181,10 @@ class _QueueAction extends StatelessWidget {
         child: SizedBox(
           width: 48,
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
+            // 12 -> 9 (2026-09-24): a one-line queued message used to cost
+            // ~44dp of dock height. Width stays 48 so the tap target is still
+            // easy to hit; rows keep sizing to their text.
+            padding: const EdgeInsets.symmetric(vertical: 9),
             child: Center(child: Icon(icon, size: 16, color: color)),
           ),
         ),
@@ -6844,9 +6851,14 @@ class _StudioFolderChip extends StatelessWidget {
         final repo = (AgentService.I.sessionRepoFull ?? '').trim();
         final hasFolder = folder.isNotEmpty;
         final hasRepo = repo.isNotEmpty;
-        final label = hasFolder
-            ? folder.split('/').last
-            : (hasRepo ? repo.split('/').last : 'sandbox');
+        // The REPO NAME wins. The folder branch used to come first, and for a
+        // registry clone the folder is `<owner>__<repo>__<branch>`, so the chip
+        // read `aasheesh333__OvidAI__main` — the owner's username, which is
+        // exactly what must not appear here. The folder basename is now only a
+        // fallback for a pinned local folder with no repo connected.
+        final label = hasRepo
+            ? repo.split('/').last
+            : (hasFolder ? folder.split('/').last : 'sandbox');
         final isConfigured = hasFolder || hasRepo;
 
         return Padding(

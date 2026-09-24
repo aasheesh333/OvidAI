@@ -140,6 +140,14 @@ void main() {
         reason: 'cap must be a fraction of the viewport, not the full height',
       );
       expect(cap.constraints.maxHeight, greaterThan(0));
+      // 2026-09-24: the cap was 38% of the viewport, which made the dock
+      // dominate the screen (the owner's complaint). It is now ~24%; assert a
+      // ceiling below the old value so it cannot silently grow back.
+      expect(
+        cap.constraints.maxHeight,
+        lessThanOrEqualTo(900 * 0.30),
+        reason: 'the queue dock must stay compact — it was 38% of the screen',
+      );
     }
   });
 }

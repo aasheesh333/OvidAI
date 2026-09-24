@@ -192,6 +192,44 @@ void main() {
       // Studio mode: folder chip is shown with folder basename
       expect(find.text('some-pinned-folder'), findsOneWidget);
     });
+
+    testWidgets(
+      'shows the REPO NAME, never the owner__repo__branch clone dir',
+      (tester) async {
+        // A registry clone pins workspaceFolder to
+        // `<appSupport>/global/repos/<owner>__<repo>__<branch>`. The chip used
+        // to prefer that folder's basename, so it rendered the owner's
+        // username first — `aasheesh333__OvidAI__main` — instead of the repo
+        // name the user recognises.
+        final app = AppState.I;
+        final s = ChatSession(
+          id: 'ws-chip-repo',
+          title: 'WS',
+          model: 'm',
+          mode: 'studio',
+        );
+        s.workspaceFolder =
+            '/data/user/0/com.dhanuk.ovidai/files/app_support/global/repos/'
+            'aasheesh333__OvidAI__main';
+        s.repo = 'aasheesh333/OvidAI';
+        s.branch = 'main';
+        app.sessions.add(s);
+        app.activeSessionId = s.id;
+
+        await tester.pumpWidget(
+          MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+
+        expect(find.text('OvidAI'), findsOneWidget);
+        expect(find.text('aasheesh333__OvidAI__main'), findsNothing);
+        expect(find.textContaining('aasheesh333'), findsNothing);
+
+        app.sessions.removeWhere((x) => x.id == s.id);
+        app.activeSessionId = null;
+      },
+    );
   });
 
   // ── C1: plan mode exit must release the plan-owned read-only mode ──────

@@ -10692,13 +10692,16 @@ ${await _agentsMdBlock()}
           'to load a different skill (which replaces this scope).';
     }
     // ── Plan mode enforcement (the plan mode gate exit_plan_mode flow) ──
-    // While planning, only read-only tools are allowed.  The AI must
-    // present its plan via exit_plan_mode and get user approval first.
-    if (planMode && _isMutatingTool(name)) {
-      return 'PLAN MODE ACTIVE: "$name" is a mutating tool. Use read-only '
-          '(read/list/search/browse) tools to explore, finalize your plan, '
-          'and call exit_plan_mode for user approval. After approval, '
-          'execution tools unlock.';
+    // While planning, ONLY allowlisted read/search/plan tools run. This is an
+    // allowlist, not a blocklist: an unlisted tool — including plugin and MCP
+    // contributions and anything added later — is refused by default. The AI
+    // must present its plan via exit_plan_mode and get user approval first.
+    if (planMode && !_isPlanModeAllowedTool(name)) {
+      return 'PLAN MODE ACTIVE: "$name" is not a read-only tool. Plan mode '
+          'allows reading, searching and planning only — use the '
+          'read/list/search tools to explore, record your plan with '
+          'todo_write, and call exit_plan_mode for user approval. After '
+          'approval, execution tools unlock.';
     }
     // ── Read-Only mode hard gate (the read-only gate plan-mode-style block) ──
     // In Read-Only mode the agent is RESTRICTED, not merely asked: writes,
@@ -16119,72 +16122,81 @@ ${await _agentsMdBlock()}
 
   // ── WAVE 2 HANDLERS — plan mode, background jobs, session events ────
 
-  /// Tools that modify state — blocked during plan mode.
-  static const _mutatingTools = {
-    'file_write',
-    'fs_edit',
-    'run_shell',
-    'run_code',
-    'dispatch_agent',
-    'workflow',
-    'ralph',
-    'commit',
-    'git_clone',
-    'git_push',
-    'git_pull',
-    'request_permission',
-    'catalog_add_provider',
-    'catalog_remove_provider',
-    'catalog_update_provider',
-    'catalog_set_provider_key',
-    'catalog_clear_provider_key',
-    'catalog_add_provider_model',
-    'catalog_remove_provider_model',
-    'catalog_select_model',
-    'catalog_add_mcp',
-    'catalog_remove_mcp',
-    'catalog_add_plugin',
-    'agent_install_plugin',
-    'agent_install_mcp',
-    'catalog_add_marketplace',
-    'catalog_configure_plugin',
+  /// Plan mode is PLAN-ONLY: explore, read, write the plan, ask for approval.
+  ///
+  /// SECURITY (2026-09-24): this replaced a BLOCKLIST (`_mutatingTools`), which
+  /// fails OPEN — every tool not listed ran freely while "planning", including
+  /// any tool added later. Two escapes actually shipped:
+  ///   • all the non-interaction `browser_*` tools were unlisted, so a planning
+  ///     agent could open tabs, navigate live pages, resize and **close the
+  ///     user's tabs**, with unrestricted network egress;
+  ///   • `interrupt_agent` / `send_message` were unlisted, so it could stop or
+  ///     steer ANOTHER session — which is not in plan mode — into doing the
+  ///     mutation instead.
+  /// An allowlist makes the default refusal, so a new tool is blocked until
+  /// someone deliberately decides it is safe to plan with.
+  ///
+  /// Deliberately EXCLUDED: every `device_*` tool (they act on other apps and
+  /// capture their screens), all `plugin_*` / canonical plugin calls and MCP
+  /// tools (arbitrary third-party code whose effect cannot be known here),
+  /// `preview` / `generate_image` (they write files), and the native
+  /// content tools that can send (`sms`, `phone`, `contacts`, `calendar`).
+  static const _planModeAllowedTools = {
+    // ── reading the workspace ────────────────────────────────────────
+    'file_read',
+    'fs_view',
+    'fs_glob',
+    'fs_grep',
+    'view',
+    'read_attachment',
+    'read_image',
+    // ── reading repo state (GitHub API + local git) ──────────────────
+    'repo_read',
+    'repo_tree',
+    'git_status',
+    'git_log',
+    'git_diff',
+    // ── research ─────────────────────────────────────────────────────
+    'fetch_url',
+    'web_search',
+    'memory_search',
+    'session_search',
+    // ── reading the browser WITHOUT driving it ───────────────────────
+    'browser_read',
+    'browser_list_tabs',
+    'browser_find',
+    'browser_wait_for',
+    'browser_snapshot',
+    'browser_outline',
+    // ── reading background state ─────────────────────────────────────
+    'job_list',
+    'job_output',
+    'get_goal',
+    'schedule_list',
+    'catalog_get_provider',
+    'catalog_list_mcp',
+    'catalog_list_models',
+    'catalog_list_plugins',
+    'catalog_list_providers',
+    // ── planning itself ──────────────────────────────────────────────
+    // todo_write is the plan artifact: session-local UI state that never
+    // touches disk, repo or network (same reasoning as Read-Only mode).
     'todo_write',
-    'job_start',
-    'job_kill',
-    'browser_click',
-    'browser_type',
-    'browser_evaluate',
-    'browser_dialog',
-    'browser_popups',
-    'browser_console',
-    'browser_network',
-    'browser_download',
-    'browser_upload',
-    'browser_press_key',
-    'browser_fill',
-    'browser_drag',
-    'browser_select',
-    'browser_desktop',
-    'memory_save',
-    'create_goal',
-    'update_goal',
-    'schedule_create',
-    'schedule_delete',
-    'device_read',
-    'device_tap',
-    'device_type',
-    'device_swipe',
-    'device_system_nav',
-    'device_screenshot',
-    'device_key',
-    'device_long_press',
-    'device_scroll',
+    'ask_user_question',
+    'exit_plan_mode',
+    'list_agents',
+    'report',
+    'skill',
   };
 
-  bool _isMutatingTool(String name) =>
-      _mutatingTools.contains(name) ||
-      name.startsWith('plugin_') ||
-      _isCanonicalPluginCall(name);
+  /// True when [name] may run while planning. Anything unlisted — including
+  /// plugin/MCP contributions and any tool added later — is refused.
+  bool _isPlanModeAllowedTool(String name) =>
+      _planModeAllowedTools.contains(name);
+
+  /// Test seam for the plan-mode allowlist.
+  @visibleForTesting
+  static Set<String> get planModeAllowedToolsForTest => _planModeAllowedTools;
 
   /// True when [name] is the canonical §4.4 spelling
   /// (`plugin:<pid>/command:<name>`, `…/skill:…`, `…/agent:…`) of a

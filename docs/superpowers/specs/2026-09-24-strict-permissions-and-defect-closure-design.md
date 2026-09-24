@@ -636,16 +636,65 @@ Note: `CTRL6` failed once under full-suite parallel load and passed both in
 isolation and on a full-suite re-run — the same 30 s per-test default-timeout
 flakiness previously seen in `studio_git_reliability_test.dart`, not a
 regression from this phase.
-| 3 — Studio login + clone-once + label | not started | — | |
+| 3 — Studio login + clone-once + label | partial | `032a29a`+ | **label done**; login race + clone-once gaps remain |
 | 4a — Browser geometry | not started | — | |
 | 4b — CDP | deferred | — | D2 |
 | 5 — Accessibility restart | not started | — | |
-| 6 — Plan mode allowlist | not started | — | |
+| 6 — Plan mode allowlist | **done** | see below | blocklist → allowlist, default-deny |
 | 7 — Subagents 49 + no nesting | not started | — | |
 | 8 — Codex parity | not started | — | |
 | 9 — Correctness & leaks | not started | — | |
 | 10 — Performance | not started | — | |
-| 11 — UI/UX + queue dock | not started | — | |
+| 11 — UI/UX + queue dock | partial | see below | **queue dock + Hinglish done**; tap targets/semantics remain |
 | 12 — Google Doc | deferred | — | D1, awaiting URL |
+
+### Phase 6 detail — plan mode is now default-deny
+
+`_mutatingTools` (a 56-name blocklist) is gone, replaced by
+`_planModeAllowedTools` — an allowlist of read/search/plan tools. Anything
+unlisted is refused with the existing `PLAN MODE ACTIVE` message, which now also
+points the model at `todo_write` and `exit_plan_mode`.
+
+Closed escapes: `browser_open`, `browser_navigate`, `browser_new_tab`,
+`browser_close_tab`, `browser_switch_tab`, `browser_back`, `browser_forward`,
+`browser_reload`, `browser_resize`, `browser_scroll`, `browser_hover` (a
+"planning" agent could open, drive and **close the user's tabs**), plus
+`interrupt_agent` and `send_message` (it could stop or steer *another* session —
+which is not in plan mode — into doing the mutation).
+
+Deliberately excluded from the allowlist: all `device_*` tools, every
+`plugin_*` / canonical plugin call and MCP tool (arbitrary third-party code
+whose effect cannot be known statically), `preview` / `generate_image` (they
+write files), and the native content tools that can send (`sms`, `phone`,
+`contacts`, `calendar`). `todo_write` moved from blocked to allowed — the plan
+artifact is the point of plan mode, and Read-Only mode already allowed it for
+the same reason.
+
+New test: `test/plan_mode_allowlist_test.dart` — including the case that matters
+most, that a **tool added in a future release is refused by default** (a
+blocklist would have allowed it).
+
+### Phase 3 (partial) — chatbox repo label
+
+`_StudioFolderChip` preferred `workspaceFolder.split('/').last`, which for a
+registry clone is `<owner>__<repo>__<branch>` — so the chip read
+`aasheesh333__OvidAI__main`. The repo name now wins and the folder basename is
+only a fallback for a pinned local folder with no repo connected. Pinned by a new
+widget test asserting `find.textContaining('aasheesh333')` is `findsNothing`.
+
+### Phase 11 (partial) — queue dock height
+
+Rows still auto-size to their text (the owner's "height auto-adjusts per text
+lines", and the existing `maxLines == null` contract is untouched). What shrank
+is the chrome and the ceiling: rows region **38% → 24%** of viewport, container
+vertical padding 8 → 5, header gap 6 → 3, row gap 4 → 2, `_QueueAction` vertical
+padding 12 → 9 (width stays 48 so the tap target is still easy to hit). A
+one-line queued message went from ~44dp to ~36dp of row height.
+`test/queue_dock_layout_test.dart` now asserts a ceiling below the old 38% so it
+cannot silently grow back.
+
+Verification after Phases 1 + 6 + the two partials: `dart analyze lib test`
+0 issues · full suite **2373 pass, 1 skipped** · `:app:compileDebugKotlin`
+BUILD SUCCESSFUL (checked after Phase 1).
 
 Test count at baseline: to be recorded in Phase 0.
