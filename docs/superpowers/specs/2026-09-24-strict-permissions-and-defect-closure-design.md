@@ -639,7 +639,7 @@ regression from this phase.
 | 3 — Studio login + clone-once + label | partial | `032a29a`+ | **label done**; login race + clone-once gaps remain |
 | 4a — Browser geometry | **done** | see below | real 1280×800 layout; verifier made honest |
 | 4b — CDP | deferred | — | D2 |
-| 5 — Accessibility restart | not started | — | |
+| 5 — Accessibility restart | **done** | see below | stale-bind signal, cold-start probe, honest copy, screenshot capability |
 | 6 — Plan mode allowlist | **done** | see below | blocklist → allowlist, default-deny |
 | 7 — Subagents 49 + no nesting | **done** | see below | cap + zero nesting + ledger FD fix (#8) |
 | 8 — Codex parity | not started | — | |
@@ -779,11 +779,62 @@ produced recurring phantom failures — `studio_git_reliability_test.dart`, then
 previously "fixed" by annotating one more test. Full-suite wall time dropped from
 7:29 to 3:59 once nothing was hitting the timeout.
 
+### Phase 5 detail — accessibility survives a restart, or says why it cannot
+
+The ordinary case already self-healed: `AccessibilityManagerService` rebinds an
+enabled service after a normal process death and `onServiceConnected`
+republishes the static `instance`. The case that never healed is a **force-stop**
+(the package enters the stopped state and the system will not restart its
+services) or an **OEM autostart blocker** — the service stays listed in
+`Settings.Secure`, so Settings still shows it ON, while `instance` is null for
+the whole process lifetime. `cfc44f0` had removed the only programmatic repair
+(correctly: toggling the component makes the system *drop* it from
+`Settings.Secure` permanently) but left pure waiting and no honesty about it.
+
+- **Native** (`MainActivity.deviceServiceState`) gained a fourth state,
+  `connecting_stale`: enabled in Settings, unbound, and the process has been up
+  longer than a 60 s rebind grace. That is the only way to tell "the OS is still
+  working on it" from "the OS will never rebind it".
+- **`deviceService()`** now returns `SERVICE_STALE` (with the toggle
+  instruction) instead of `SERVICE_CONNECTING` for that state, so Dart stops
+  retrying something terminal.
+- **Dart** `_invokeGuarded` fails fast on `SERVICE_STALE` rather than burning the
+  90 s budget; `staleBindingDetected` is published for the UI and cleared when
+  the service binds. `_connectingExhaustedError` re-reads the state and tells the
+  truth: the old copy ended in "Wait a moment and retry — it should bind on its
+  own" for *every* non-disabled state, which is exactly the false promise that
+  sent users in a circle.
+- **Cold start** now probes. A new `device.serviceBinding` readiness task calls
+  `refreshServiceBinding()`; kind `localState` so the coordinator can never
+  deadline-skip it. Previously the only trigger was
+  `AppLifecycleState.resumed`, which Android dispatches from
+  `FlutterActivity.onResume()` *before* `runApp` — so the shell's late-registered
+  observer never received it and nothing ran on a cold start at all.
+- **UI**: `_ControlServiceNotice` read `isEnabled()` (Settings-level, returns
+  `true` in the stuck state), so the one row that could have offered a toggle
+  never rendered. It now reads `serviceState()` and renders a distinct
+  "On in Settings but Android has not restarted it — toggle it off and on" row
+  with the Settings action.
+- **`android:canTakeScreenshot="true"`** restored to
+  `ovid_accessibility_service.xml`. `AccessibilityService.takeScreenshot()`
+  requires it, so `device_screenshot` failed unconditionally on API 30+; the
+  2026-09-06 plan template included the attribute and the shipped file had lost
+  it.
+
+No programmatic component toggle was reintroduced, and a test pins that
+`setComponentEnabledSetting` stays absent from `MainActivity.kt`.
+
+New test: `test/accessibility_stale_bind_test.dart` — state pass-through and
+fail-closed, stale clears on bind, one call and no retry loop on
+`SERVICE_STALE`, an exhausted *connecting* budget re-reads state and returns the
+toggle copy (while a genuinely slow rebind still gets the patient message), and
+source contracts for the startup task, the XML capability and the notice.
+
 ### Verification (current)
 
-`dart analyze lib test` → 0 issues · full suite **2395 pass, 1 skipped** ·
+`dart analyze lib test` → 0 issues · full suite **2405 pass, 1 skipped** ·
 `:app:compileDebugKotlin --offline` → BUILD SUCCESSFUL · CI green through
-`032a29a`.
+`2388ae3`.
 
 ### Phase 6 detail — plan mode is now default-deny
 

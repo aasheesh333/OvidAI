@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'agent_notification_service.dart';
+import 'device_control_service.dart';
 import 'agent_service.dart' show AgentService;
 import 'firebase_service.dart';
 import 'github_service.dart';
@@ -2442,6 +2443,20 @@ class AppState extends ChangeNotifier {
         repos: () => List.of(marketplaces),
         refresh: _refreshMarketplaceForStartup,
         lastFailedAt: marketplaceMemo,
+      ),
+      // Accessibility binding probe. MUST run on cold start: the only other
+      // trigger was AppLifecycleState.resumed, which Android dispatches from
+      // FlutterActivity.onResume() BEFORE runApp — i.e. before the shell
+      // registers its observer — so on a cold start it never fired at all and
+      // a stale bind stayed invisible until the user tried to use Control mode.
+      // Kind is localState (one method-channel read) so the coordinator can
+      // never deadline-skip it.
+      _startupTask(
+        id: 'device.serviceBinding',
+        kind: StartupItemKind.localState,
+        label: 'Check device-control service',
+        timeout: const Duration(seconds: 10),
+        body: DeviceControlService.I.refreshServiceBinding,
       ),
       _startupTask(
         id: 'github.initialize',

@@ -94,9 +94,28 @@ class MainActivity : FlutterActivity() {
     /// (not enabled in Settings), or `connecting` (enabled in Settings but the
     /// OS has not rebound our process yet). Pure read — never blocks the main
     /// thread waiting for a bind.
+    /// How long the OS gets before a missing bind stops being called
+    /// "connecting". Ordinary process death rebinds within seconds. Force-stop
+    /// (the package enters the stopped state, and AccessibilityManagerService
+    /// will not restart services of a stopped package) and OEM autostart
+    /// blockers NEVER rebind: the service stays listed in Settings.Secure — so
+    /// Settings still shows it ON — while `instance` stays null for the whole
+    /// process lifetime. Without this distinction the app told the user to keep
+    /// waiting for a bind that was never coming.
+    private val rebindGraceMs = 60_000L
+
     private fun deviceServiceState(): String {
         if (OvidAccessibilityService.instance != null) return "bound"
-        return if (isAccessibilityServiceEnabled(this)) "connecting" else "disabled"
+        if (!isAccessibilityServiceEnabled(this)) return "disabled"
+        // Enabled in Settings, not bound in this process. Transient right after
+        // a restart; permanent after a force-stop or on an OEM that blocks
+        // background restarts. Tell them apart by process age.
+        val uptime = try {
+            SystemClock.uptimeMillis() - android.os.Process.getStartUptimeMillis()
+        } catch (_: Throwable) {
+            rebindGraceMs + 1
+        }
+        return if (uptime < rebindGraceMs) "connecting" else "connecting_stale"
     }
 
     private fun deviceService(result: MethodChannel.Result): OvidAccessibilityService? {
@@ -117,9 +136,27 @@ class MainActivity : FlutterActivity() {
         // waited on (and risk an ANR), leaving the service permanently
         // "gone" until the user toggles it. Answer immediately; the Dart
         // side retries with backoff while the bind lands.
+        //
+        // A STALE bind is different and must not be retried: after a
+        // force-stop, or on an OEM that blocks background service restart, the
+        // system will never rebind on its own — the service stays listed in
+        // Settings.Secure while `instance` stays null for the whole process
+        // lifetime. Only a user action in Settings can restore it, so say that
+        // plainly instead of promising an automatic retry.
+        val stale = deviceServiceState() == "connecting_stale"
         result.error(
-            "SERVICE_CONNECTING",
-            "Ovid accessibility service is still connecting after app restart. Retrying automatically — no need to toggle it off and on.",
+            if (stale) "SERVICE_STALE" else "SERVICE_CONNECTING",
+            if (stale) {
+                "Android has not restarted Ovid's accessibility service even " +
+                    "though it is still switched on in Settings. This happens " +
+                    "after a force-stop, or on phones that block apps from " +
+                    "restarting in the background. Open Settings > " +
+                    "Accessibility > Ovid AI and switch it off and on again."
+            } else {
+                "Ovid accessibility service is still connecting after app " +
+                    "restart. Retrying automatically — no need to toggle it " +
+                    "off and on."
+            },
             null,
         )
         return null

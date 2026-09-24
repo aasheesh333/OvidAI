@@ -147,6 +147,16 @@ class DeviceControlService {
         if (generation != _deviceGeneration) return cancelledSupersededMessage;
         return result;
       } on PlatformException catch (e) {
+        // A stale bind is terminal: Android is not going to rebind, so burning
+        // the 90s retry budget before saying so only delays the one piece of
+        // advice that helps. Fail fast and mark it for the UI.
+        if (e.code == 'SERVICE_STALE') {
+          staleBindingDetected = true;
+          if (generation != _deviceGeneration) {
+            return cancelledSupersededMessage;
+          }
+          rethrow;
+        }
         if (e.code == 'SERVICE_CONNECTING') {
           final delay = _connectingDelayForAttempt(attempt);
           if (waited + delay >= connectingRetryBudgetForTest) {
@@ -182,15 +192,25 @@ class DeviceControlService {
   }
 
   /// Budget-exhausted error. The state is re-read so a service that is
-  /// genuinely disabled gets the Settings guidance while a slow rebind gets
-  /// a wait/retry message — never a dead end that demands a manual toggle.
+  /// genuinely disabled gets the Settings guidance, a STALE bind gets the
+  /// toggle instruction it actually needs, and only a genuinely slow rebind
+  /// gets a wait/retry message.
+  ///
+  /// HONESTY (2026-09-24): this used to end in "Wait a moment and retry — it
+  /// should bind on its own" for everything that was not `disabled`. That is
+  /// false after a force-stop or on an OEM that blocks background restarts:
+  /// the system will never rebind, and the advice sent the user in a circle.
   Future<PlatformException> _connectingExhaustedError() async {
-    if (await serviceState() == 'disabled') {
+    final state = await serviceState();
+    if (state == 'disabled') {
       return PlatformException(
         code: 'SERVICE_DISABLED',
         message:
             'Control mode needs the Ovid accessibility service. Enable it in Settings > Accessibility > Ovid.',
       );
+    }
+    if (state == staleState) {
+      return PlatformException(code: 'SERVICE_STALE', message: staleMessage);
     }
     return PlatformException(
       code: 'SERVICE_CONNECTING',
@@ -199,13 +219,38 @@ class DeviceControlService {
     );
   }
 
-  /// Three-state native accessibility status: `disabled` (off in Settings),
-  /// `connecting` (enabled but not yet rebound), or `bound`. Fails closed to
+  /// Native state meaning "enabled in Settings, but Android has not rebound it
+  /// and is not going to". See `MainActivity.deviceServiceState`.
+  static const staleState = 'connecting_stale';
+
+  /// Set once a stale bind has been observed, so the UI can offer the toggle
+  /// instead of silently waiting. Cleared when the service binds again.
+  bool staleBindingDetected = false;
+
+  /// User-facing explanation + the only action that actually fixes a stale
+  /// bind. Android requires user consent to restore an accessibility service it
+  /// dropped, so there is no programmatic repair — an earlier attempt to force
+  /// one by toggling the component made the system REMOVE the service from
+  /// Settings.Secure permanently.
+  static const staleMessage =
+      "Android has not restarted Ovid's accessibility service even though it is "
+      'still switched on in Settings. This happens after a force-stop, or on '
+      'phones that block apps from restarting in the background. Open '
+      'Settings > Accessibility > Ovid AI and switch it off and on again.';
+
+  /// Four-state native accessibility status: `disabled` (off in Settings),
+  /// `connecting` (enabled, rebind still plausible), `connecting_stale`
+  /// (enabled, Android is not going to rebind it), or `bound`. Fails closed to
   /// `disabled` when the channel is unreadable.
   Future<String> serviceState() async {
     try {
       final state = await _channel.invokeMethod<String>('deviceServiceState');
-      if (state == 'bound' || state == 'connecting' || state == 'disabled') {
+      if (state == 'bound' ||
+          state == 'connecting' ||
+          state == staleState ||
+          state == 'disabled') {
+        if (state == 'bound') staleBindingDetected = false;
+        if (state == staleState) staleBindingDetected = true;
         return state!;
       }
     } catch (_) {}

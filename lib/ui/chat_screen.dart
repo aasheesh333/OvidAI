@@ -7317,6 +7317,12 @@ class _ControlServiceNotice extends StatefulWidget {
 class _ControlServiceNoticeState extends State<_ControlServiceNotice>
     with WidgetsBindingObserver {
   bool? _enabled;
+
+  /// Four-state native binding status. `_enabled` alone is NOT enough: it is a
+  /// Settings-level check, so it stays true when Android has the service
+  /// switched on but has never rebound it after a force-stop — the exact state
+  /// where Control mode is broken and this notice used to stay silent.
+  String? _serviceState;
   String? _error;
   Timer? _retryTimer;
   bool? _batteryExempt;
@@ -7352,8 +7358,16 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
     final enabled = await DeviceControlService.I.isEnabled().catchError(
       (_) => false,
     );
+    final state = await DeviceControlService.I.serviceState().catchError(
+      (_) => 'disabled',
+    );
     if (!mounted) return;
-    if (mounted) setState(() => _enabled = enabled);
+    if (mounted) {
+      setState(() {
+        _enabled = enabled;
+        _serviceState = state;
+      });
+    }
     if (isResume && !enabled && _enabled != true) {
       // Retry once after 600ms on resume in case the OS is still binding the service
       _retryTimer = Timer(const Duration(milliseconds: 600), () async {
@@ -7403,13 +7417,19 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
         return const SizedBox.shrink();
       }
       final showOffWarning = _enabled == false;
+      // Enabled in Settings but Android is not going to rebind it. Needs a
+      // different message and the same Settings action — "wait, it will bind
+      // on its own" is false in this state.
+      final showStaleWarning =
+          _enabled == true &&
+          _serviceState == DeviceControlService.staleState;
       // OEM-killer guidance: service is up, but this ROM kills background
       // apps without the battery exemption. Pixel-class ROMs never match.
       final showHealthGuidance =
           _enabled == true &&
           _batteryExempt == false &&
           DeviceControlService.isKillerOem(_manufacturer);
-      if (!showOffWarning && !showHealthGuidance) {
+      if (!showOffWarning && !showStaleWarning && !showHealthGuidance) {
         return const SizedBox.shrink();
       }
       return Column(
@@ -7427,6 +7447,28 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
                 Expanded(
                   child: Text(
                     'Control service is off',
+                    style: TextStyle(fontSize: 11, color: Aether.warnLight),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _retry,
+                  child: const Text('Open Accessibility Settings'),
+                ),
+              ],
+            ),
+          if (showStaleWarning)
+            Row(
+              children: [
+                Icon(
+                  Icons.sync_problem_rounded,
+                  size: 15,
+                  color: Aether.warnLight,
+                ),
+                const SizedBox(width: 5),
+                Expanded(
+                  child: Text(
+                    'On in Settings but Android has not restarted it — '
+                    'toggle it off and on',
                     style: TextStyle(fontSize: 11, color: Aether.warnLight),
                   ),
                 ),
