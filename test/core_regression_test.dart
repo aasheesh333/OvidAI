@@ -5065,7 +5065,13 @@ Translate the following. This is the skill body.''');
       expect(blocked, contains('file_read'));
     });
 
-    test('depth cap counts the real session lineage', () async {
+    test('no subagent may spawn another — nesting is refused at any depth',
+        () async {
+      // 2026-09-24: this used to assert only the DEPTH cap, which permitted one
+      // level of nesting — a child at depth 1 passed `1 < 2` and spawned a
+      // grandchild. Nesting is now refused outright: a subagent is already a
+      // child, and the parent is the only one who can see the whole picture.
+      // The depth cap stays as defence in depth.
       final app = AppState.I;
       final parent = newParent('sa-p4');
       final child = app.createSubagentSession(
@@ -5078,13 +5084,34 @@ Translate the following. This is the skill body.''');
         label: 'depth-2',
         mode: 'auto',
       );
-      app.activeSessionId = grandchild.id;
 
-      final res = await AgentService.I.dispatchForTest('dispatch_agent', {
+      // A CHILD may not dispatch. (`child` already has `grandchild` from the
+      // setup above, so compare the count rather than expecting empty.)
+      final beforeChild = app.childrenOf(child.id).length;
+      app.activeSessionId = child.id;
+      AgentService.setRunSessionForTest(child.id);
+      var res = await AgentService.I.dispatchForTest('dispatch_agent', {
         'prompt': 'go deeper',
       });
-      expect(res, contains('depth limit'));
-      expect(app.childrenOf(grandchild.id), isEmpty);
+      expect(res, contains('SUBAGENT'));
+      expect(app.childrenOf(child.id).length, beforeChild);
+
+      // Neither may a GRANDCHILD (lineage is durable, so a fresh service
+      // instance cannot escape it).
+      final beforeGrand = app.childrenOf(grandchild.id).length;
+      app.activeSessionId = grandchild.id;
+      AgentService.setRunSessionForTest(grandchild.id);
+      res = await AgentService.I.dispatchForTest('dispatch_agent', {
+        'prompt': 'go deeper',
+      });
+      expect(res, contains('SUBAGENT'));
+      expect(app.childrenOf(grandchild.id).length, beforeGrand);
+
+      // The root chat still may.
+      app.activeSessionId = parent.id;
+      AgentService.setRunSessionForTest(parent.id);
+      expect(parent.isSubagent, isFalse);
+      AgentService.setRunSessionForTest('');
     });
 
     test(

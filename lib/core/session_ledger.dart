@@ -24,9 +24,19 @@ class SessionLedger {
   static final SessionLedger I = SessionLedger._();
 
   Directory? _root;
-  final Map<String, IOSink?> _sinks = {};
+
+  /// Session → the (single) append sink, memoised as a FUTURE so the
+  /// check-and-insert is atomic — see [_sinkFor].
+  final Map<String, Future<IOSink>> _sinks = {};
   final Map<String, int> _seqs = {};
   final Map<String, List<Map<String, dynamic>>> _replayCache = {};
+
+  /// Test seam: how many append sinks have been OPENED for a session in its
+  /// current lifetime. Must be exactly 1 no matter how many appends race —
+  /// every extra open orphans a sink (leaked descriptor, possibly a lost
+  /// buffered line). Reset by [close].
+  @visibleForTesting
+  final Map<String, int> sinkOpensForTest = {};
 
   /// Test seam: fixed ledger root (no path_provider channel). Also used
   /// when the platform channel is unavailable — the ledger degrades to
@@ -54,6 +64,42 @@ class SessionLedger {
         '_',
       );
 
+  /// The session's append sink, opened at most once per lifetime.
+  ///
+  /// LEAK FIX (2026-09-24): this used to be an inline
+  /// `if (sink != null) … else { await _fileFor(); openWrite(); _sinks[id] = s; }`
+  /// — a check-then-`await`-then-assign race. Appends arrive concurrently (a
+  /// run start fires `turn_start` and `checkpoint` back to back, both
+  /// `unawaited`; a subagent fan-out opens many fresh sessions at once), so two
+  /// first-appenders both saw `null`, both called `openWrite`, and the second
+  /// assignment orphaned the first sink: never flushed, never closed. One
+  /// leaked file descriptor per fresh session, plus any line still buffered in
+  /// it. The check and the insert below are both synchronous, so in this single
+  /// isolate they are atomic and late callers share one future.
+  Future<IOSink> _sinkFor(String sessionId) {
+    final existing = _sinks[sessionId];
+    if (existing != null) return existing;
+    sinkOpensForTest[sessionId] = (sinkOpensForTest[sessionId] ?? 0) + 1;
+    final future = () async {
+      final f = await _fileFor(sessionId);
+      return f.openWrite(mode: FileMode.append);
+    }();
+    _sinks[sessionId] = future;
+    // If the open FAILS (path_provider unavailable, disk full) do not leave the
+    // rejected future cached: that would poison the session's ledger for the
+    // rest of the process, where the old code simply retried next time. This
+    // handler also marks the error as observed, so a future nobody else awaits
+    // cannot surface as an unhandled async error — the real awaiters
+    // ([append], [flush]) still see it inside their own try/catch.
+    future.then(
+      (_) {},
+      onError: (Object _) {
+        if (identical(_sinks[sessionId], future)) _sinks.remove(sessionId);
+      },
+    );
+    return future;
+  }
+
   /// Append one event. [kind] is one of: turn_start, turn_end, tool_start,
   /// tool_end, subagent_start, subagent_end, checkpoint, note.
   Future<void> append(String sessionId, String kind, Map<String, dynamic> data) async {
@@ -68,15 +114,8 @@ class SessionLedger {
         ...data,
       };
       final line = jsonEncode(event);
-      final sink = _sinks[sessionId];
-      if (sink != null) {
-        sink.writeln(line);
-      } else {
-        final f = await _fileFor(sessionId);
-        final s = f.openWrite(mode: FileMode.append);
-        _sinks[sessionId] = s;
-        s.writeln(line);
-      }
+      final sink = await _sinkFor(sessionId);
+      sink.writeln(line);
       _replayCache[sessionId]?.add(event);
     } catch (_) {
       // Best-effort durability — a ledger write failure must never break a
@@ -157,12 +196,20 @@ class SessionLedger {
 
   /// Close (and forget) a session's sink — call on session delete.
   Future<void> close(String sessionId) async {
-    try {
-      await _sinks.remove(sessionId)?.flush();
-    } catch (_) {}
-    _sinks.remove(sessionId);
+    final pending = _sinks.remove(sessionId);
+    if (pending != null) {
+      try {
+        // LEAK FIX (2026-09-24): `close()` implies `flush()` AND releases the
+        // descriptor. This used to call `flush()` only and then delete the file
+        // underneath the still-open handle, so *every* session deletion leaked
+        // one descriptor pointing at an unlinked inode for the rest of the
+        // process's life.
+        await (await pending).close();
+      } catch (_) {}
+    }
     _seqs.remove(sessionId);
     _replayCache.remove(sessionId);
+    sinkOpensForTest.remove(sessionId);
     try {
       final f = await _fileFor(sessionId);
       f.deleteSync();
@@ -171,8 +218,10 @@ class SessionLedger {
 
   /// Flush a session's sink (checkpoint durability barrier).
   Future<void> flush(String sessionId) async {
+    final pending = _sinks[sessionId];
+    if (pending == null) return;
     try {
-      await _sinks[sessionId]?.flush();
+      await (await pending).flush();
     } catch (_) {}
   }
 }

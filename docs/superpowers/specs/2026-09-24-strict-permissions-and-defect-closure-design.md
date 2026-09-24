@@ -641,9 +641,78 @@ regression from this phase.
 | 4b — CDP | deferred | — | D2 |
 | 5 — Accessibility restart | not started | — | |
 | 6 — Plan mode allowlist | **done** | see below | blocklist → allowlist, default-deny |
-| 7 — Subagents 49 + no nesting | not started | — | |
+| 7 — Subagents 49 + no nesting | **done** | see below | cap + zero nesting + ledger FD fix (#8) |
 | 8 — Codex parity | not started | — | |
-| 9 — Correctness & leaks | not started | — | |
+| 9 — Correctness & leaks | partial | — | #8 done (ledger); #9 #13–#19 remain |
+
+### Phase 7 detail — 49 ceiling, zero nesting, no leaked descriptors
+
+**Ceiling.** `_maxConcurrentSubagents = 49`, enforced at all three spawn sites —
+`_handleDispatchAgent`, `_spawnChild` (which serves `workflow`'s 6-way fan-out
+and `ralph`), and `continueSubagent` (resuming a settled child makes it live
+again, so a resume storm could otherwise push past the cap). The check is
+**per parent session** (the owner's requirement) with a global net at the same
+number, because the resources that break are process-wide: one main isolate
+carrying every SSE stream, one FD table, one SharedPreferences blob rewritten on
+every child's row.
+
+It is atomic by construction: `_handleDispatchAgent` has no `await` between the
+check and `_subagents[id] = sub`, so in a single-threaded isolate a wide fan-out
+in one turn cannot overshoot. Restored handles from a cold start are
+`finished = true` and never consume budget.
+
+**Zero nesting**, three independent layers:
+1. `_childDeniedTools` gains `dispatch_agent`, `workflow`, `ralph` — the dispatch
+   gate refuses them for any child.
+2. The `_tools` roster strips them when `_runSession.isSubagent`, so a child
+   never even sees them and cannot plan around the refusal.
+3. An `isSubagent` refusal at each spawn site, keyed on durable lineage so a
+   fresh service instance cannot escape it.
+
+`_maxSubagentDepth` stays as defence in depth. Management tools
+(`send_message`, `list_agents`, `interrupt_agent`, `report`) remain in a child's
+roster — a child must still coordinate with its parent and siblings. The root
+roster is untouched, so `token_budget_test.dart` still passes.
+
+**Ledger FD leaks (#8), fixed as the prerequisite for raising concurrency:**
+- `_sinks` became `Map<String, Future<IOSink>>` with a synchronous
+  check-and-insert. Two concurrent first-appenders used to both `openWrite` and
+  the loser was orphaned — never flushed, never closed: one leaked descriptor
+  per fresh session, which at 49 concurrent children is 49 per fan-out.
+- A **rejected** open is evicted from the map rather than cached, so a transient
+  failure (path_provider unavailable, disk full) does not poison that session's
+  ledger for the rest of the process; the handler also marks the error observed
+  so it cannot surface as an unhandled async error. This regression was caught
+  by `session_stop_isolation_test.dart` during development.
+- `close()` now calls `close()` (which implies flush **and** releases the
+  descriptor) instead of `flush()` followed by deleting the file underneath the
+  still-open handle — every session deletion previously leaked one descriptor to
+  an unlinked inode, forever.
+- The subagent mirror's `card.toolDetail` is capped at 12k like every other tool
+  stream; it is serialized into the session JSON and re-split on every build.
+
+New tests: `test/session_ledger_fd_test.dart` (one sink per session under 40
+concurrent appends, no lost events, close releases and resets),
+`test/subagent_ceiling_test.dart` (admission flips exactly at 49, finished
+handles free budget, dispatch refused at the ceiling spawning nothing, nesting
+refused, child roster lacks the spawn tools but keeps the management ones).
+`core_regression_test.dart`'s depth-cap test was rewritten: it asserted only the
+depth limit, which permitted one nesting level — it now asserts no subagent may
+spawn another at any depth.
+
+### Suite-wide timeout (test infrastructure)
+
+`dart_test.yaml` raises the per-test timeout from package:test's 30s default to
+3m. The suite is 2400+ tests run in parallel across files; on a loaded machine
+the slow ones (real git operations, large-history widget pumps) exceeded 30s and
+failed with a `TimeoutException` that vanished when the file ran alone. That
+produced recurring phantom failures — `studio_git_reliability_test.dart`, then
+`git_clone_registry_test.dart`, then `core_regression_test.dart` CTRL6 — each
+previously "fixed" by annotating one more test. Full-suite wall time dropped from
+7:29 to 3:59 once nothing was hitting the timeout.
+
+Verification: `dart analyze lib test` 0 issues · full suite **2385 pass,
+1 skipped** · `:app:compileDebugKotlin` BUILD SUCCESSFUL (Phase 1).
 | 10 — Performance | not started | — | |
 | 11 — UI/UX + queue dock | partial | see below | **queue dock + Hinglish done**; tap targets/semantics remain |
 | 12 — Google Doc | deferred | — | D1, awaiting URL |

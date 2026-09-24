@@ -1,0 +1,13 @@
+# package:test defaults to a 30s per-test timeout.
+#
+# This suite is 2400+ tests that `flutter test` runs in PARALLEL across files.
+# On a loaded machine the slow ones — real git operations, large-history widget
+# pumps, sandbox provisioning — exceed 30s and fail with a TimeoutException
+# that vanishes when the file is run on its own. That produced recurring
+# phantom failures (`studio_git_reliability_test.dart`, then
+# `git_clone_registry_test.dart`, then `core_regression_test.dart` CTRL6), each
+# previously "fixed" by annotating one more test.
+#
+# Raise the default once instead. A genuinely hung test still fails, just after
+# 3 minutes rather than 30 seconds; CI has its own job-level timeout above this.
+timeout: 3m

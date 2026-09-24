@@ -4563,12 +4563,22 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // Control — a smaller, more honest per-request payload.
     final runningMode = _runSession?.mode ?? AppState.I.activeSession?.mode;
     final controlMode = runningMode == AgentMode.control.name;
+    // Zero nesting, layer 2 of 3: a subagent never even SEES the spawn tools,
+    // so it cannot plan around the dispatch-gate refusal. Layer 1 is
+    // `_childDeniedTools` at dispatch, layer 3 is the `isSubagent` refusal at
+    // each spawn site. The management tools stay in a child's roster —
+    // send_message, list_agents, interrupt_agent, report — because a child must
+    // still be able to talk to its parent and coordinate with siblings.
+    final isChild = _runSession?.isSubagent ?? false;
     for (final t in _coreTools) {
       final fn = t['function'];
       if (fn is Map && _repoToolNames.contains(fn['name'])) continue;
       if (!controlMode &&
           fn is Map &&
           (fn['name'] as String?)?.startsWith('device_') == true) {
+        continue;
+      }
+      if (isChild && fn is Map && _childDeniedTools.contains(fn['name'])) {
         continue;
       }
       tools.add(t);
@@ -7942,12 +7952,19 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   ///   • user-facing tools are refused (a child must not hijack the parent's
   ///     composer with questions or plan reviews),
   ///   • a parent-supplied `allowed_tools` filter is enforced,
-  ///   • children cannot dispatch grandchildren past the depth cap (that is
-  ///     enforced in _handleDispatchAgent via the session lineage).
+  ///   • a child can NEVER spawn a child of its own. It is already a subagent:
+  ///     nesting multiplies cost and latency with no benefit, and the parent is
+  ///     the only one who can see the whole picture. Enforced three ways —
+  ///     here (dispatch gate), in the roster (`_tools` never advertises the
+  ///     spawn tools to a child), and at each spawn site (`isSubagent`
+  ///     refusal). `_maxSubagentDepth` stays as defence in depth.
   static const _childDeniedTools = {
     'ask_user_question',
     'exit_plan_mode',
     'request_permission',
+    'dispatch_agent',
+    'workflow',
+    'ralph',
   };
 
   String? _subagentToolBlock(ChatSession child, String name) {
@@ -16568,6 +16585,43 @@ ${await _agentsMdBlock()}
   // so a child cannot spawn an unbounded tower of grandchildren.
   static const _maxSubagentDepth = 2;
 
+  /// Hard ceiling on subagents running at once (2026-09-24).
+  ///
+  /// There was no width limit at all before this: background `dispatch_agent`
+  /// calls were fired with `unawaited` and nothing counted them, so a model
+  /// could start an unbounded number of concurrent children — each with its own
+  /// SSE stream, workspace, mirror timer and full-blob session write, all on
+  /// the main isolate. 49 is the owner's chosen ceiling: high enough that a
+  /// wide fan-out is never the bottleneck, low enough that the isolate, the
+  /// file-descriptor table and the notification rotation survive it.
+  static const _maxConcurrentSubagents = 49;
+
+  /// Subagents currently running, globally. Restored handles from a cold start
+  /// are marked finished, so they never consume budget.
+  int get _liveSubagents =>
+      _subagents.values.where((s) => !s.finished).length;
+
+  /// Subagents currently running for one parent session.
+  int _liveSubagentsOf(String parentSessionId) => _subagents.values
+      .where((s) => !s.finished && s.parentSessionId == parentSessionId)
+      .length;
+
+  /// Refusal text when the concurrency ceiling is hit. Names the ceiling and
+  /// the two ways out so the model waits or narrows instead of retrying.
+  String _subagentConcurrencyRefusal(String tool) =>
+      '$tool refused: the subagent ceiling ($_maxConcurrentSubagents running '
+      'at once) is reached. Wait for a running subagent to finish '
+      '(list_agents shows them), interrupt one you no longer need, or do this '
+      'task yourself — do not retry in a loop.';
+
+  /// Test seams for the ceiling.
+  @visibleForTesting
+  static int get maxConcurrentSubagentsForTest => _maxConcurrentSubagents;
+  @visibleForTesting
+  int get liveSubagentCountForTest => _liveSubagents;
+  @visibleForTesting
+  bool canAdmitSubagentForTest() => _liveSubagents < _maxConcurrentSubagents;
+
   // ── Skills (reusable instruction bundles) ─────────────────────────────
   Future<void> _refreshSkillRoots(String sessionId) async {
     final reservation = SkillService.I.reserveSessionCatalog(sessionId);
@@ -17338,6 +17392,13 @@ ${await _agentsMdBlock()}
       return 'queued as the next turn for ${sub.id}';
     }
     // Settled but continuable → start a fresh turn on the same transcript.
+    // Resuming makes the child LIVE again, so it consumes ceiling budget;
+    // without this check a resume storm (a retrying UI, or the model calling
+    // send_message in a loop) could push the live count past the cap. We only
+    // reach here when the handle is absent or already finished.
+    if (_liveSubagents >= _maxConcurrentSubagents) {
+      return _subagentConcurrencyRefusal('send_message');
+    }
     final handle =
         sub ??
         SubagentInfo(
@@ -17606,6 +17667,31 @@ ${await _agentsMdBlock()}
     final parent = _runSession;
     if (parent == null) return 'No active session to dispatch from.';
 
+    // Zero nesting: a subagent is already a child, so it may not spawn one.
+    // Lineage is durable (`parentId`), so this cannot be escaped by starting
+    // from a fresh service instance.
+    if (parent.isSubagent) {
+      return 'SUBAGENT: a subagent cannot dispatch subagents — you are one. '
+          'Do the task yourself with the tools you have, or report back to '
+          'your parent with what you need.';
+    }
+
+    // Concurrency ceiling — per PARENT SESSION (the owner's requirement: up to
+    // 49 at once per session) with a global net at the same number, because the
+    // resources that break are process-wide, not per-session: one main isolate
+    // carrying every SSE stream, one file-descriptor table, and one
+    // SharedPreferences blob rewritten on every child's row. Two sessions at 49
+    // each would be 98 concurrent streams on a phone.
+    //
+    // This check sits in the same synchronous window as the registration below
+    // (no `await` between them), so a wide fan-out in a single turn cannot
+    // overshoot it — Dart runs this isolate single-threaded and the handle is
+    // registered before anything yields.
+    if (_liveSubagentsOf(parent.id) >= _maxConcurrentSubagents ||
+        _liveSubagents >= _maxConcurrentSubagents) {
+      return _subagentConcurrencyRefusal('dispatch_agent');
+    }
+
     // Depth comes from the real session lineage, so a grandchild cannot
     // escape the cap by starting from a fresh service instance.
     final depth = AppState.I.lineageOf(parent.id).length - 1;
@@ -17694,6 +17780,23 @@ ${await _agentsMdBlock()}
   }) async {
     final parent = _runSession;
     if (parent == null) throw StateError('No active session.');
+    // Zero nesting + concurrency ceiling — same rules as dispatch_agent. This
+    // path serves `workflow` (which fans out up to 6 children per phase in
+    // parallel) and `ralph`, so the ceiling check must be here too or a
+    // workflow could blow straight past it. The check is synchronous with the
+    // registration below: each fan-out branch registers its handle before it
+    // reaches its first `await`.
+    if (parent.isSubagent) {
+      throw StateError(
+        'A subagent cannot spawn subagents — it is already one.',
+      );
+    }
+    if (_liveSubagentsOf(parent.id) >= _maxConcurrentSubagents ||
+        _liveSubagents >= _maxConcurrentSubagents) {
+      throw StateError(
+        'Subagent ceiling ($_maxConcurrentSubagents running at once) reached.',
+      );
+    }
     final depth = AppState.I.lineageOf(parent.id).length - 1;
     if (depth >= _maxSubagentDepth) {
       throw StateError('Subagent depth limit ($_maxSubagentDepth) reached.');
@@ -17936,6 +18039,15 @@ ${await _agentsMdBlock()}
                   : '· ${cleanTruncate(m.content, 100)}',
           };
           card.toolDetail = '${card.toolDetail ?? ''}$line\n';
+          // Cap the mirror exactly like every other tool stream. `toolDetail`
+          // is serialized into the session JSON and re-split on EVERY build, so
+          // an uncapped mirror turns a long run into megabytes of blob and a
+          // progressively slower UI — and with up to 49 concurrent children
+          // that is the difference between usable and unusable.
+          final detail = card.toolDetail!;
+          if (detail.length > 12000) {
+            card.toolDetail = '…${detail.substring(detail.length - 12000)}';
+          }
         }
         lastSeen = child.messages.length;
         card.toolSummary = cleanTruncate(
