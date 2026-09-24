@@ -23,6 +23,13 @@ class SessionsSidebar extends StatefulWidget {
 
 class _SessionsSidebarState extends State<SessionsSidebar> {
   String _query = '';
+  final TextEditingController _searchController = TextEditingController();
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -123,6 +130,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: TextField(
+                controller: _searchController,
                 onChanged: (v) => setState(() => _query = v.trim()),
                 style: const TextStyle(fontSize: 13),
                 decoration: InputDecoration(
@@ -138,7 +146,10 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                       : IconButton(
                           visualDensity: VisualDensity.compact,
                           icon: const Icon(Icons.close, size: 14),
-                          onPressed: () => setState(() => _query = ''),
+                          onPressed: () {
+                            _searchController.clear();
+                            setState(() => _query = '');
+                          },
                         ),
                 ),
               ),
@@ -185,49 +196,19 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                       ),
                     );
                   }
-                  // Workspace browser (the workspace tree projects parity): group sessions
-                  // by their pinned working folder — "(no workspace)" for
-                  // per-session sandbox chats.
-                  final groups = <String, List<ChatSession>>{};
-                  for (final s in visible) {
-                    final wf = (s.workspaceFolder ?? '').trim();
-                    final key = wf.isEmpty
-                        ? '(no workspace)'
-                        : wf
-                              .split(RegExp(r'[/\\]'))
-                              .where((p) => p.isNotEmpty)
-                              .last;
-                    groups.putIfAbsent(key, () => []).add(s);
-                  }
-                  final keys = groups.keys.toList()..sort();
+                  // Sessions list — flat, in stored order. No grouping
+                  // headers: the sidebar deliberately shows no repo or
+                  // workspace labels (user decision 2026-09-24); the repo
+                  // name still appears in the studio chatbox folder chip.
                   return ListView.builder(
                     padding: const EdgeInsets.symmetric(horizontal: 8),
-                    itemCount: keys.length,
-                    itemBuilder: (_, gi) {
-                      final key = keys[gi];
-                      final list = groups[key]!;
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(8, 10, 8, 4),
-                            child: Text(
-                              key.toUpperCase(),
-                              style: TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 1.4,
-                                color: Aether.textFaint,
-                              ),
-                            ),
-                          ),
-                          for (final s in list)
-                            _SessionTile(
-                              session: s,
-                              active: s.id == app.activeSessionId,
-                              isDrawer: widget.isDrawer,
-                            ),
-                        ],
+                    itemCount: visible.length,
+                    itemBuilder: (_, i) {
+                      final s = visible[i];
+                      return _SessionTile(
+                        session: s,
+                        active: s.id == app.activeSessionId,
+                        isDrawer: widget.isDrawer,
                       );
                     },
                   );
@@ -364,6 +345,9 @@ class _SessionTile extends StatelessWidget {
         return Dismissible(
           key: ValueKey(session.id),
           direction: DismissDirection.endToStart,
+          // Swipe delete must confirm like the delete button does — an
+          // accidental swipe used to delete the chat with no way back.
+          confirmDismiss: (_) => _askDeleteConfirmed(context),
           onDismissed: (_) => app.deleteSession(session.id),
           background: Container(
             alignment: Alignment.centerRight,
@@ -491,12 +475,22 @@ class _SessionTile extends StatelessWidget {
     );
   }
 
-  Future<void> _confirmDelete(BuildContext context) async {
+  /// Delete confirmation dialog shared by the swipe gesture (via
+  /// [confirmDismiss]) and the delete button. Returns true when the user
+  /// confirmed; the caller performs the deletion.
+  Future<bool> _askDeleteConfirmed(BuildContext context) async {
+    // Deleting a running chat stops its agent — say so in the dialog.
+    final running = AgentService.I.busyFor(session.id);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text('Delete ${session.title}?'),
-        content: const Text('This chat cannot be recovered.'),
+        content: Text(
+          running
+              ? 'This chat is running — deleting it stops the agent. '
+                    'This chat cannot be recovered.'
+              : 'This chat cannot be recovered.',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
@@ -509,7 +503,13 @@ class _SessionTile extends StatelessWidget {
         ],
       ),
     );
-    if (confirmed == true) AppState.I.deleteSession(session.id);
+    return confirmed == true;
+  }
+
+  Future<void> _confirmDelete(BuildContext context) async {
+    if (await _askDeleteConfirmed(context)) {
+      AppState.I.deleteSession(session.id);
+    }
   }
 
   void _showActions(BuildContext context) {

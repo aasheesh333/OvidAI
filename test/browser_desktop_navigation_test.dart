@@ -161,5 +161,14 @@ void main() {
       final src = kotlinSource();
       expect(src, contains('clearViewport'));
     });
+
+    test('forced height rides the same channel payload as width', () {
+      final src = kotlinSource();
+      expect(src, contains('"logicalHeight"'));
+      expect(
+        src,
+        contains('applyLogicalViewport(webView, logicalWidth, logicalHeight)'),
+      );
+    });
   });
 }

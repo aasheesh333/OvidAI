@@ -9,16 +9,15 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../core/agent_service.dart';
 import '../core/app_info.dart';
 import '../core/firebase_service.dart';
-import '../core/hook_service.dart';
 import '../core/model_limits.dart';
 import '../core/presets.dart';
 import '../core/skills.dart';
 import '../core/session_browser_profiles.dart';
-import '../core/session_data_sharing.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'auth_screen.dart';
 import 'health_screen.dart';
+import 'permissions_screen.dart';
 import 'providers_screen.dart';
 import 'plugins_screen.dart';
 import 'usage_screen.dart';
@@ -188,32 +187,6 @@ class SettingsScreen extends StatelessWidget {
             const _PresetsScreen(),
           ),
           const _ShareMemoryTile(),
-          const _SessionDataSharingTile(),
-          const _SettingsSwitchTile(
-            icon: Icons.folder_shared_outlined,
-            title: 'GitHub sync',
-            subtitleOn: 'ON — AI edits push to your connected repo',
-            subtitleOff: 'OFF — AI edits stay in local workspace only',
-            getter: _getGithubSync,
-            setter: _setGithubSync,
-          ),
-          const _SettingsSwitchTile(
-            icon: Icons.flash_on,
-            title: 'Auto-run safe commands',
-            subtitleOn: 'ON — read-only terminal commands run without confirm',
-            subtitleOff: 'OFF — every terminal command asks first',
-            getter: _getAutoRunSafe,
-            setter: _setAutoRunSafe,
-          ),
-          const _SettingsSwitchTile(
-            icon: Icons.handyman_outlined,
-            title: 'Plugin hooks',
-            subtitleOn:
-                'ON — installed plugins run their hook commands at agent events',
-            subtitleOff: 'OFF — no plugin hook ever executes (kill-switch)',
-            getter: _getHooksEnabled,
-            setter: _setHooksEnabled,
-          ),
           const _SettingsSwitchTile(
             icon: Icons.desktop_windows_outlined,
             title: 'Browser: desktop mode',
@@ -223,22 +196,6 @@ class SettingsScreen extends StatelessWidget {
                 'OFF — new tabs use the device\'s mobile viewport (default)',
             getter: _getBrowserDesktop,
             setter: _setBrowserDesktop,
-          ),
-          const _ChoiceTile(
-            icon: Icons.send_outlined,
-            title: 'Send behavior while busy',
-            subtitle: 'What sending does while the agent is still running',
-            getter: _getSendWhileBusy,
-            options: [('queue', 'Queue'), ('interrupt', 'Interrupt')],
-            onChanged: _setSendWhileBusy,
-          ),
-          const _ChoiceTile(
-            icon: Icons.view_agenda_outlined,
-            title: 'Conversation display',
-            subtitle: 'Controls process content in completed turns',
-            getter: _getConversationDisplay,
-            options: [('compact', 'Compact'), ('full', 'Full')],
-            onChanged: _setConversationDisplay,
           ),
           const SectionHeader('Data controls'),
           _navTile(
@@ -260,6 +217,23 @@ class SettingsScreen extends StatelessWidget {
           const SectionHeader('Privacy'),
           _TelemetryTile(),
           _privacyPolicyTile(context),
+
+          // ── Always-allowed grants (agent file/network access) ──────────
+          const SectionHeader('Permissions'),
+          ListTile(
+            leading: const Icon(Icons.key_outlined),
+            title: const Text('Permissions', style: TextStyle(fontSize: 14)),
+            subtitle: const Text(
+              'Paths and hosts the agent may always access',
+              style: TextStyle(fontSize: 11.5),
+            ),
+            trailing: const Icon(Icons.chevron_right, size: 18),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => const PermissionsScreen(),
+              ),
+            ),
+          ),
 
           const SectionHeader('General'),
           const _KeepAliveToggle(),
@@ -352,64 +326,6 @@ class SettingsScreen extends StatelessWidget {
           ],
         ),
       ),
-    );
-  }
-}
-
-/// A labeled two-option selector (e.g. Queue / Interrupt) bound to an
-/// AppState string pref. Shows the options as tappable chips.
-class _ChoiceTile extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final String Function() getter;
-  final List<(String value, String label)> options;
-  final Future<void> Function(String) onChanged;
-  const _ChoiceTile({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.getter,
-    required this.options,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: AppState.I,
-      builder: (_, _) {
-        final value = getter();
-        return ListTile(
-          dense: true,
-          contentPadding: const EdgeInsets.fromLTRB(16, 2, 16, 2),
-          leading: Icon(icon, size: 19, color: Aether.textMuted),
-          title: Text(title, style: const TextStyle(fontSize: 14)),
-          subtitle: Text(
-            subtitle,
-            style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-          ),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (final o in options)
-                Padding(
-                  padding: const EdgeInsets.only(left: 6),
-                  child: ChoiceChip(
-                    label: Text(o.$2, style: const TextStyle(fontSize: 11.5)),
-                    selected: value == o.$1,
-                    showCheckmark: false,
-                    selectedColor: Aether.accent.withValues(alpha: 0.18),
-                    side: BorderSide(
-                      color: value == o.$1 ? Aether.accent : Aether.hairline,
-                    ),
-                    onSelected: (_) => onChanged(o.$1),
-                  ),
-                ),
-            ],
-          ),
-        );
-      },
     );
   }
 }
@@ -555,23 +471,9 @@ bool _getSecureScreen() => AppState.I.secureScreen;
 Future<void> _setSecureScreen(bool v) => AppState.I.setSecureScreen(v);
 bool _getShowReasoning() => AppState.I.showReasoning;
 Future<void> _setShowReasoning(bool v) => AppState.I.setShowReasoning(v);
-bool _getGithubSync() => AppState.I.githubSync;
-Future<void> _setGithubSync(bool v) => AppState.I.setGithubSync(v);
-bool _getAutoRunSafe() => AppState.I.autoRunSafeCommands;
-Future<void> _setAutoRunSafe(bool v) => AppState.I.setAutoRunSafeCommands(v);
-
-bool _getHooksEnabled() => HookService.I.enabled;
-Future<void> _setHooksEnabled(bool v) => HookService.I.setEnabled(v);
 
 bool _getBrowserDesktop() => AppState.I.browserDesktopMode;
 Future<void> _setBrowserDesktop(bool v) => AppState.I.setBrowserDesktopMode(v);
-
-String _getSendWhileBusy() => AppState.I.sendWhileBusy;
-Future<void> _setSendWhileBusy(String v) => AppState.I.setSendWhileBusy(v);
-
-String _getConversationDisplay() => AppState.I.conversationDisplay;
-Future<void> _setConversationDisplay(String v) =>
-    AppState.I.setConversationDisplay(v);
 
 /// Human-readable byte counts for the Storage screen. Visible for tests.
 String formatStorageBytes(int bytes) {
@@ -930,129 +832,6 @@ class _ShareMemoryTile extends StatelessWidget {
   }
 }
 
-/// Per-session data sharing ON RESTART (Studio repo/branch + browser logins).
-///
-/// While the app runs, sessions are fully isolated: each one has its own
-/// Studio repo/branch/open files and its own browser tabs AND its own WebView
-/// cookie jar, so a login in one chat is invisible from another.
-///
-/// These two switches decide what happens at the NEXT launch — and ONLY for
-/// *data*, never for *state*: the logins (cookies) and the Studio repo/branch
-/// are merged once, so the user is signed in and connected everywhere; tabs,
-/// open pages, open files/buffers and visit history are NEVER carried into
-/// another session. Each chat still restores exactly its own tabs.
-class _SessionDataSharingTile extends StatelessWidget {
-  const _SessionDataSharingTile();
-
-  @override
-  Widget build(BuildContext context) {
-    final app = AppState.I;
-    final sharing = SessionDataSharing.I;
-    return AnimatedBuilder(
-      animation: Listenable.merge([app, sharing]),
-      builder: (_, _) {
-        final report = sharing.lastBrowserReport;
-        return Column(
-          children: [
-            ListTile(
-              dense: true,
-              leading: Icon(
-                Icons.badge_outlined,
-                size: 19,
-                color: Aether.textMuted,
-              ),
-              title: const Text(
-                'Share browser logins on restart',
-                style: TextStyle(fontSize: 14),
-              ),
-              subtitle: Text(
-                app.shareBrowserOnRestart
-                    ? 'ON — each session browses in its OWN profile (separate '
-                          'cookies); at restart the logins are merged once '
-                          'into every session. Tabs and visit history are '
-                          'never shared.'
-                    : 'OFF — cookies stay strictly per session, even across '
-                          'restarts.',
-                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-              ),
-              trailing: SizedBox(
-                height: 26,
-                child: Switch(
-                  value: app.shareBrowserOnRestart,
-                  activeTrackColor: Aether.accent,
-                  onChanged: (v) => app.setShareBrowserOnRestart(v),
-                ),
-              ),
-              onTap: () =>
-                  app.setShareBrowserOnRestart(!app.shareBrowserOnRestart),
-            ),
-            ListTile(
-              dense: true,
-              leading: Icon(
-                Icons.account_tree_outlined,
-                size: 19,
-                color: Aether.textMuted,
-              ),
-              title: const Text(
-                'Share Studio repo on restart',
-                style: TextStyle(fontSize: 14),
-              ),
-              subtitle: Text(
-                app.shareStudioOnRestart
-                    ? 'ON — each session keeps its own repo/branch/open files; '
-                          'at restart the last connected repo is offered to '
-                          'every session.'
-                    : 'OFF — repo/branch stay strictly per session.',
-                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-              ),
-              trailing: SizedBox(
-                height: 26,
-                child: Switch(
-                  value: app.shareStudioOnRestart,
-                  activeTrackColor: Aether.accent,
-                  onChanged: (v) => app.setShareStudioOnRestart(v),
-                ),
-              ),
-              onTap: () => app.setShareStudioOnRestart(!app.shareStudioOnRestart),
-            ),
-            ListTile(
-              dense: true,
-              leading: Icon(
-                Icons.sync_outlined,
-                size: 19,
-                color: Aether.textMuted,
-              ),
-              title: const Text('Share session data now', style: TextStyle(fontSize: 14)),
-              subtitle: Text(
-                report == null
-                    ? 'Runs the same merge the next app restart performs — '
-                          'useful right after logging in somewhere.'
-                    : report.message,
-                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-              ),
-              trailing: const Icon(Icons.chevron_right, size: 18),
-              onTap: () async {
-                final messenger = ScaffoldMessenger.of(context);
-                await sharing.shareBrowserOnRestart(force: true);
-                final filled = await sharing.shareStudioOnRestart(force: true);
-                final msg = sharing.lastBrowserReport?.message ?? '';
-                messenger.showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      '$msg Studio repo filled for $filled session'
-                      '${filled == 1 ? '' : 's'}.',
-                    ),
-                  ),
-                );
-              },
-            ),
-          ],
-        );
-      },
-    );
-  }
-}
-
 /// AI response timeout picker — real, persisted in AppState (responseTimeoutSec).
 /// Background keep-alive toggle — keeps foreground service active in idle state.
 class _KeepAliveToggle extends StatelessWidget {
@@ -1083,59 +862,6 @@ class _KeepAliveToggle extends StatelessWidget {
             value: app.keepAliveEnabled,
             activeTrackColor: Aether.accent,
             onChanged: (v) => app.keepAliveEnabled = v,
-          ),
-          // 24/7: battery-optimization exemption + in-app service stop.
-          ListTile(
-            dense: true,
-            leading: Icon(
-              Icons.battery_saver_outlined,
-              size: 19,
-              color: Aether.textMuted,
-            ),
-            title: const Text(
-              'Battery optimization exemption',
-              style: TextStyle(fontSize: 14),
-            ),
-            subtitle: Text(
-              'Ask Android to stop killing Ovid in the background',
-              style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-            ),
-            trailing: const Icon(Icons.chevron_right, size: 18),
-            onTap: () async {
-              final ok = await AgentService.I.requestBatteryExemption();
-              if (!context.mounted) return;
-              // Battery exemption alone does not stop OEM ROMs from
-              // swipe-killing the app — offer the autostart whitelist as
-              // the follow-up step on the same tap flow.
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(
-                    ok
-                        ? 'Ovid is exempt from battery optimization.'
-                        : 'Follow the system prompt to allow Ovid to run in the background.',
-                  ),
-                  behavior: SnackBarBehavior.floating,
-                  action: SnackBarAction(
-                    label: 'Autostart',
-                    onPressed: () async {
-                      final opened = await AgentService.I
-                          .openAutoStartSettings();
-                      if (!context.mounted) return;
-                      if (!opened) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                              'Could not open autostart settings on this device.',
-                            ),
-                            behavior: SnackBarBehavior.floating,
-                          ),
-                        );
-                      }
-                    },
-                  ),
-                ),
-              );
-            },
           ),
         ],
       ),

@@ -40,8 +40,15 @@ void main() {
       FlutterSecureStorage.setMockInitialValues({
         'ovid_github_token': 'invalid-token',
       });
+      // A CONFIRMED bad-credentials 401 (GitHub's own JSON wording) is the
+      // only 401 that signs the user out; a lone 401 never does.
       final client = MockClient(
-        (request) async => http.Response('unauthorized', 401),
+        (request) async => http.Response(
+          '{"message": "Bad credentials",'
+          ' "documentation_url": "https://docs.github.com/rest"}',
+          401,
+          headers: {'content-type': 'application/json'},
+        ),
       );
 
       var prompted = false;

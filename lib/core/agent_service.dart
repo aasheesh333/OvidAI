@@ -74,14 +74,6 @@ class BrowserTab {
   /// what makes [AgentService.ensureTabProfile] idempotent.
   bool profileBound = false;
 
-  /// Logical viewport factor (B10, browser-resize parity): drives the
-  /// media-query width ([logicalWidth]/[logicalHeight]) only. It is NOT the
-  /// visual CSS scale — see [userZoom]. 0.5 describes a ~2× wider logical
-  /// window, 2.0 a narrower one.
-  double zoom = 1.0;
-  int get logicalWidth => (devW / zoom).round();
-  int get logicalHeight => (devH / zoom).round();
-
   /// Visual CSS scale injected into the page (document zoom). User-controlled
   /// and independent of the device width, so desktop mode stays readable
   /// instead of auto-shrinking to ~28%. Always clamped to the readable range.
@@ -120,7 +112,15 @@ class BrowserTab {
   /// device width (mobile default). In-memory only; restores default from
   /// the tab's mode.
   static const int desktopLogicalWidth = 1280;
+
+  /// Forced layout viewport height (CSS px). Desktop mode pins this to
+  /// [desktopLogicalHeight] so `window.innerHeight` reports a desktop-size
+  /// height too — the native shim's `window.innerHeight` override rides
+  /// this value. Null means device height (mobile default). In-memory
+  /// only, like [viewportWidth].
+  static const int desktopLogicalHeight = 800;
   int? viewportWidth;
+  int? viewportHeight;
 
   bool desktopMode;
 
@@ -2548,12 +2548,16 @@ class AgentService extends ChangeNotifier {
   /// tab's native WebView so settings never leak across tabs. Identity keys
   /// are omitted when absent to keep the legacy bool-only payload valid.
   /// [logicalWidth] (browser_resize) sets the layout viewport width the page
-  /// uses for media queries — the visual scale is never derived from it.
+  /// uses for media queries, [logicalHeight] the layout viewport height —
+  /// the visual scale is never derived from either. Both ride the native
+  /// desktop shim (window.innerWidth/innerHeight overrides) so height
+  /// probes report the forced size too.
   static Future<bool> applyDesktopViewport(
     bool enabled, {
     int? tabId,
     int? webViewIdentifier,
     int? logicalWidth,
+    int? logicalHeight,
     String? userAgent,
   }) async {
     try {
@@ -2563,6 +2567,7 @@ class AgentService extends ChangeNotifier {
         args['webViewIdentifier'] = webViewIdentifier;
       }
       if (logicalWidth != null) args['logicalWidth'] = logicalWidth;
+      if (logicalHeight != null) args['logicalHeight'] = logicalHeight;
       if (userAgent != null) args['userAgent'] = userAgent;
       final res = await _webviewChannel.invokeMapMethod<String, dynamic>(
         'setDesktopViewport',
@@ -2598,87 +2603,108 @@ class AgentService extends ChangeNotifier {
       tab.viewportWidth ??
       (tab.desktopMode ? BrowserTab.desktopLogicalWidth : null);
 
+  /// Effective layout viewport height for [tab]: an explicit resize value
+  /// wins, else desktop mode pins [BrowserTab.desktopLogicalHeight], else
+  /// null (device height). Pure so desktop-height routing is unit-testable
+  /// without a WebView platform.
+  @visibleForTesting
+  static int? viewportHeightForTest(BrowserTab tab) =>
+      tab.viewportHeight ??
+      (tab.desktopMode ? BrowserTab.desktopLogicalHeight : null);
+
   /// JS probe the Dart verifier runs in the live document after every page
-  /// finish. Returns a JSON string — never throws inside the page, with keys
-  /// `w` (layout viewport px), `shim` (feature shim ran), `vw` (forced width).
-  /// `documentElement.clientWidth` is the ground truth for the LAYOUT
-  /// viewport (media queries read this, not `window.innerWidth`, which the
-  /// shim overrides). `vw`/`shim` markers prove the native scripts executed
-  /// in THIS document. Pure builder so the probe contract is unit-testable.
+  /// finish. Returns a JSON string — never throws inside the page — with
+  /// the REAL layout viewport in CSS px: `w` (`documentElement.clientWidth`)
+  /// and `h` (`documentElement.clientHeight`). Media queries read these,
+  /// and the native viewport-meta script sets them for real, so they are
+  /// ground truth for "did the forcing stick".
+  ///
+  /// Deliberately NOT self-referential: the probe must not read the shim's
+  /// own markers (`window.__ovidDesktopShim`, `window.__ovidViewportW`) or
+  /// the shim-overridden `window.innerWidth`/`innerHeight` — those echo
+  /// what we injected, so a verifier built on them can never fail. Pure
+  /// builder so the probe contract is unit-testable.
   @visibleForTesting
   static String desktopVerifyScriptForTest() =>
       '(function(){try{return JSON.stringify({'
       'w:document.documentElement?document.documentElement.clientWidth:0,'
-      'shim:!!window.__ovidDesktopShim,'
-      'vw:(window.__ovidViewportW||0)'
-      '});}catch(e){return JSON.stringify({w:0,shim:false,vw:0});}})();';
+      'h:document.documentElement?document.documentElement.clientHeight:0'
+      '});}catch(e){return JSON.stringify({w:0,h:0});}})();';
 
-  /// Pure gate for the forced-desktop repair: true when a forced width was
-  /// requested but the live document is not honoring it. [expectedWidth] is
-  /// [viewportWidthForTest] (null = no forcing requested, never repair).
-  /// [clientWidth] is the layout viewport px from the probe; [shim] and
-  /// [viewportW] are the probe markers. 150px of slack absorbs rounding and
+  /// Pure gate for the forced-desktop repair: true when a forced size was
+  /// requested but the live document's REAL layout viewport is not
+  /// honoring it. [expectedWidth]/[expectedHeight] come from
+  /// [viewportWidthForTest]/[viewportHeightForTest] (null = no forcing
+  /// requested, never repair). 150px of slack absorbs rounding and
   /// scrollbar differences without masking a real mobile fallback (~412px).
+  ///
+  /// The gate is width-driven on purpose: the layout width is really forced
+  /// by the native viewport-meta script, while the layout HEIGHT always
+  /// follows the device screen (only the shim's JS-visible `innerHeight` /
+  /// `screen.height` overrides carry the forced height — and probing those
+  /// would be circular again, since they echo our own injection).
   @visibleForTesting
   static bool desktopRepairNeededForTest({
     required int? expectedWidth,
+    required int? expectedHeight,
     required int clientWidth,
-    required bool shim,
-    required int viewportW,
+    required int clientHeight,
   }) {
     if (expectedWidth == null || expectedWidth <= 0) return false;
-    if (!shim) return true;
-    if (viewportW != expectedWidth) return true;
     return clientWidth < expectedWidth - 150;
   }
 
   /// Parse the [desktopVerifyScriptForTest] probe result into
-  /// (clientWidth, shim, viewportW). Tolerates every failure shape —
+  /// (clientWidth, clientHeight). Tolerates every failure shape —
   /// null, non-JSON, missing keys — as "nothing verified".
   @visibleForTesting
-  static ({int clientWidth, bool shim, int viewportW})
-      parseDesktopProbeForTest(Object? raw) {
+  static ({int clientWidth, int clientHeight}) parseDesktopProbeForTest(
+    Object? raw,
+  ) {
     try {
       final m = jsonDecode(raw as String) as Map<String, dynamic>;
       return (
         clientWidth: (m['w'] as num?)?.toInt() ?? 0,
-        shim: m['shim'] == true,
-        viewportW: (m['vw'] as num?)?.toInt() ?? 0,
+        clientHeight: (m['h'] as num?)?.toInt() ?? 0,
       );
     } catch (_) {
-      return (clientWidth: 0, shim: false, viewportW: 0);
+      return (clientWidth: 0, clientHeight: 0);
     }
   }
 
   /// Ask the native layer to repair the forced desktop on [tab]'s LIVE
-  /// document right now: settings + viewport script + feature shim,
-  /// evaluated immediately. Used by the page-finish verifier when the
-  /// document-start scripts did not stick. Returns true when the native
-  /// side reports the repair applied.
+  /// document right now: settings + viewport script + feature shim (sized
+  /// to the tab's forced width AND height), evaluated immediately. Used by
+  /// the page-finish verifier when the document-start scripts did not
+  /// stick. Returns true when the native side reports the repair applied.
   Future<bool> repairDesktopViewport(BrowserTab tab) async {
     final width = viewportWidthForTest(tab);
     if (width == null || width <= 0) return false;
+    final height = viewportHeightForTest(tab);
     try {
-      final res = await _webviewChannel.invokeMapMethod<String, dynamic>(
-        'repairDesktop',
-        <String, dynamic>{
-          'tabId': tab.id,
-          'webViewIdentifier': webViewIdentifierFor(tab),
-          'logicalWidth': width,
-        },
-      );
+      final res = await _webviewChannel
+          .invokeMapMethod<String, dynamic>('repairDesktop', <String, dynamic>{
+            'tabId': tab.id,
+            'webViewIdentifier': webViewIdentifierFor(tab),
+            'logicalWidth': width,
+            if (height != null && height > 0) 'logicalHeight': height,
+          });
       return res?['applied'] == true;
     } catch (_) {
       return false;
     }
   }
 
-  /// Verify the forced desktop width actually stuck in [tab]'s live
+  /// Verify the forced desktop size actually stuck in [tab]'s live
   /// document, and repair it when it did not. Runs once per page finish
   /// (delayed so document-start scripts have settled), capped at two
   /// repairs per document so a hostile page cannot spin the loop. This is
   /// what makes "desktop enabled ⇒ forced desktop size" hold persistently,
   /// across refresh and SPA navigations — not just at toggle time.
+  ///
+  /// The probe reads the REAL layout viewport (`documentElement`
+  /// clientWidth/clientHeight) — never the shim's own markers or its
+  /// `window.innerWidth` override, which would make the check circular.
   Future<void> _verifyDesktopForced(BrowserTab tab, String finishedUrl) async {
     final controller = tab.controller;
     if (controller == null) return;
@@ -2698,9 +2724,9 @@ class AgentService extends ChangeNotifier {
       final probe = parseDesktopProbeForTest(raw);
       needed = desktopRepairNeededForTest(
         expectedWidth: expected,
+        expectedHeight: viewportHeightForTest(tab),
         clientWidth: probe.clientWidth,
-        shim: probe.shim,
-        viewportW: probe.viewportW,
+        clientHeight: probe.clientHeight,
       );
     } catch (_) {
       needed = true;
@@ -2713,9 +2739,9 @@ class AgentService extends ChangeNotifier {
       kind: repaired ? 'repair' : 'warn',
       text: repaired
           ? 'desktop force repaired: layout ${expected}px re-applied '
-              '(attempt ${tab.desktopRepairAttempts}/2)'
+                '(attempt ${tab.desktopRepairAttempts}/2)'
           : 'desktop force FAILED to apply (attempt '
-              '${tab.desktopRepairAttempts}/2) — native layer unreachable',
+                '${tab.desktopRepairAttempts}/2) — native layer unreachable',
     ));
     if (tab.consoleLog.length > 200) {
       tab.consoleLog.removeRange(0, tab.consoleLog.length - 200);
@@ -2778,9 +2804,10 @@ class AgentService extends ChangeNotifier {
     bool reload = true,
   }) async {
     tab.desktopMode = desktop;
-    // The mode owns the forced width: desktop pins 1280, mobile clears it
-    // (an explicit browser_resize wins again on the next resize call).
+    // The mode owns the forced size: desktop pins 1280×800, mobile clears
+    // it (an explicit browser_resize wins again on the next resize call).
     tab.viewportWidth = desktop ? BrowserTab.desktopLogicalWidth : null;
+    tab.viewportHeight = desktop ? BrowserTab.desktopLogicalHeight : null;
     // WebSettings.setUseWideViewPort takes effect at initialization / load
     // time, so recreate the controller fresh with the new viewport settings
     // and UA. Recreating first avoids applying to the OLD WebView, which is
@@ -2795,6 +2822,7 @@ class AgentService extends ChangeNotifier {
         desktop,
         tabId: tab.id,
         logicalWidth: viewportWidthForTest(tab),
+        logicalHeight: viewportHeightForTest(tab),
       );
     }
   }
@@ -2856,13 +2884,15 @@ class AgentService extends ChangeNotifier {
                 tabId: tab.id,
                 webViewIdentifier: webViewIdentifierFor(tab),
                 logicalWidth: viewportWidthForTest(tab),
+                logicalHeight: viewportHeightForTest(tab),
                 userAgent: userAgentForTest(tab),
               ).then((applied) {
                 if (!applied && tab.desktopMode) {
                   tab.consoleLog.add((
                     at: DateTime.now(),
                     kind: 'warn',
-                    text: 'desktop viewport apply missed on navigation start '
+                    text:
+                        'desktop viewport apply missed on navigation start '
                         '(native WebView unreachable) — verifier will repair',
                   ));
                   if (tab.consoleLog.length > 200) {
@@ -2909,6 +2939,7 @@ class AgentService extends ChangeNotifier {
                 tabId: tab.id,
                 webViewIdentifier: webViewIdentifierFor(tab),
                 logicalWidth: viewportWidthForTest(tab),
+                logicalHeight: viewportHeightForTest(tab),
                 userAgent: userAgentForTest(tab),
               ),
             );
@@ -3114,6 +3145,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       tabId: tab.id,
       webViewIdentifier: webViewIdentifierFor(tab),
       logicalWidth: viewportWidthForTest(tab),
+      logicalHeight: viewportHeightForTest(tab),
       userAgent: userAgentForTest(tab),
     );
     if (tab.controller != controller) return;
@@ -3294,8 +3326,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       return true;
     }
     try {
-      final host =
-          await _resolveFsPath(path) ?? await _resolveFsPath(cleanPath);
+      final r1 = await _resolveFsPath(path);
+      final r2 = r1.path != null ? r1 : await _resolveFsPath(cleanPath);
+      final host = r2.path;
       if (host != null && host.startsWith('repo:')) {
         final rel = host.substring('repo:'.length);
         final content = RepoCache.I.read(rel);
@@ -3336,7 +3369,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// Returns null when the file is not on this device's disk.
   Future<String?> hostDirOf(String path) async {
     try {
-      final host = await _resolveFsPath(path);
+      final host = (await _resolveFsPath(path)).path;
       if (host == null || host.startsWith('repo:')) return null;
       return File(host).parent.path;
     } catch (_) {
@@ -3346,7 +3379,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
 
   void _touchSyncedMtime(String path) async {
     try {
-      final host = await _resolveFsPath(path);
+      final host = (await _resolveFsPath(path)).path;
       if (host == null || host.startsWith('repo:')) return;
       final f = File(host);
       if (f.existsSync()) {
@@ -3365,7 +3398,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     var changed = false;
     for (final path in st.openFiles.toList()) {
       try {
-        final host = await _resolveFsPath(path);
+        final host = (await _resolveFsPath(path)).path;
         if (host == null || host.startsWith('repo:')) continue;
         final f = File(host);
         if (!f.existsSync()) continue;
@@ -3982,7 +4015,12 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     final req = pendingApproval;
     pendingApproval = null;
     if (req == null) return;
-    if (note != null && note.trim().isNotEmpty) req.note = note.trim();
+    if (note != null && note.trim().isNotEmpty) {
+      req.note = note.trim();
+      // A denied card with a note: the note rides back to the model with
+      // the denial (ACCESS_DENIED message or approval ledger entry).
+      if (!ok) _lastDenyNote = req.note;
+    }
     if (!req.completer.isCompleted) req.completer.complete(ok);
     notifyListeners();
   }
@@ -3993,7 +4031,11 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// — the UI never offers the action otherwise, so destructive commands,
   /// plugin installs, device permissions, questions and plan reviews can
   /// never land in memory.
-  void approveAlways() {
+  ///
+  /// [global]: when true (the approval card's "All sessions" scope toggle),
+  /// path/host grants are recorded as GLOBAL grants via
+  /// [AppState.addGlobalPermissionGrant] instead of session grants.
+  void approveAlways({bool global = false}) {
     final req = pendingApproval;
     pendingApproval = null;
     if (req == null) return;
@@ -4004,26 +4046,37 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       // existing per-session _alwaysAllowedTools behavior. The two systems
       // are complementary: tool names vs paths/hosts.
       final s = _runSession ?? AppState.I.activeSession;
-      if (req.tool.startsWith('grant:path:') && s != null) {
-        final p = req.tool.substring('grant:path:'.length);
-        if (p.isNotEmpty &&
-            !s.grants.any(
-              (g) =>
-                  g.kind == PermissionGrant.kindPath &&
-                  pathCoveredBy(g.value, p),
-            )) {
-          s.grants.add(PermissionGrant.path(p, sessionId: s.id));
-          AppState.I.persistSessions();
-        }
-      } else if (req.tool.startsWith('grant:host:') && s != null) {
-        final h = req.tool.substring('grant:host:'.length);
-        if (h.isNotEmpty &&
-            !s.grants.any(
-              (g) =>
-                  g.kind == PermissionGrant.kindHost &&
-                  hostCoveredBy(g.value, h),
-            )) {
-          s.grants.add(PermissionGrant.host(h, sessionId: s.id));
+      final paths = _grantPathsFromToolKey(req.tool);
+      final hosts = _grantHostsFromToolKey(req.tool);
+      if ((paths.isNotEmpty || hosts.isNotEmpty) && s != null) {
+        if (global) {
+          for (final p in paths) {
+            unawaited(
+              AppState.I.addGlobalPermissionGrant(
+                PermissionGrant.path(p, global: true),
+              ),
+            );
+          }
+          for (final h in hosts) {
+            unawaited(
+              AppState.I.addGlobalPermissionGrant(
+                PermissionGrant.host(h, global: true),
+              ),
+            );
+          }
+        } else {
+          for (final p in paths) {
+            if (p.isNotEmpty &&
+                !_sessionGrantCovers(s, PermissionGrant.kindPath, p)) {
+              s.grants.add(PermissionGrant.path(p, sessionId: s.id));
+            }
+          }
+          for (final h in hosts) {
+            if (h.isNotEmpty &&
+                !_sessionGrantCovers(s, PermissionGrant.kindHost, h)) {
+              s.grants.add(PermissionGrant.host(h, sessionId: s.id));
+            }
+          }
           AppState.I.persistSessions();
         }
       } else {
@@ -4034,6 +4087,56 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     if (!req.completer.isCompleted) req.completer.complete(true);
     notifyListeners();
   }
+
+  /// The session approvals attach to (public for the Permissions screen).
+  ChatSession? get currentSession => _runSession;
+
+  /// Revokes a session-scoped grant, persists the session, and refreshes —
+  /// the Settings → Permissions revoke action for current-session grants.
+  Future<void> revokeSessionPermissionGrant(PermissionGrant grant) async {
+    final s = _runSession;
+    if (s == null) return;
+    s.grants.removeWhere((g) => g.kind == grant.kind && g.value == grant.value);
+    await AppState.I.persistSessions();
+    notifyListeners();
+  }
+
+  /// Path targets encoded in a grant approval key: `grant:path:<p>` (single)
+  /// or `grant:paths:<p1>,<p2>` (combined card).
+  static List<String> _grantPathsFromToolKey(String toolKey) {
+    if (toolKey.startsWith('grant:paths:')) {
+      return toolKey
+          .substring('grant:paths:'.length)
+          .split(',')
+          .where((p) => p.isNotEmpty)
+          .toList();
+    }
+    if (toolKey.startsWith('grant:path:')) {
+      final p = toolKey.substring('grant:path:'.length);
+      return p.isEmpty ? const [] : [p];
+    }
+    return const [];
+  }
+
+  /// Host targets encoded in a grant approval key (`grant:host:<h>`).
+  static List<String> _grantHostsFromToolKey(String toolKey) {
+    if (toolKey.startsWith('grant:host:')) {
+      final h = toolKey.substring('grant:host:'.length);
+      return h.isEmpty ? const [] : [h];
+    }
+    return const [];
+  }
+
+  /// True when [s] already holds a grant covering [value] (hierarchically),
+  /// so "Always allow" never stacks redundant grants.
+  static bool _sessionGrantCovers(ChatSession s, String kind, String value) =>
+      s.grants.any(
+        (g) =>
+            g.kind == kind &&
+            (kind == PermissionGrant.kindPath
+                ? pathCoveredBy(g.value, value)
+                : hostCoveredBy(g.value, value)),
+      );
 
   /// Per-session "always allow" memory: session id → remembered tool names.
   /// Never persisted; entries die with the session (see dropSessionRun) and
@@ -4633,21 +4736,28 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     final out = Map<String, dynamic>.from(params);
     final props = params['properties'];
     if (props is Map) {
-      final propsOut = <String, dynamic>{};
-      for (final e in props.entries) {
-        final v = e.value;
-        if (v is Map) {
-          final pOut = Map<String, dynamic>.from(v);
-          final d = v['description'];
-          if (d is String) {
-            pOut['description'] = compactDescription(d, paramDescBudget);
+      // Issue 8: zero-arg tools ('properties': {}) normalize to
+      // {'type':'object'} — some gateways 400 on an explicitly empty
+      // properties object, and it wastes tokens on every request.
+      if (props.isEmpty) {
+        out.remove('properties');
+      } else {
+        final propsOut = <String, dynamic>{};
+        for (final e in props.entries) {
+          final v = e.value;
+          if (v is Map) {
+            final pOut = Map<String, dynamic>.from(v);
+            final d = v['description'];
+            if (d is String) {
+              pOut['description'] = compactDescription(d, paramDescBudget);
+            }
+            propsOut[e.key.toString()] = pOut;
+          } else {
+            propsOut[e.key.toString()] = v;
           }
-          propsOut[e.key.toString()] = pOut;
-        } else {
-          propsOut[e.key.toString()] = v;
         }
+        out['properties'] = propsOut;
       }
-      out['properties'] = propsOut;
     }
     return out;
   }
@@ -4688,7 +4798,6 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
               'enum': ['delta', 'full'],
             },
           },
-          'additionalProperties': false,
         },
       },
     },
@@ -4713,7 +4822,6 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
               'required': ['x', 'y'],
             },
           ],
-          'additionalProperties': false,
         },
       },
     },
@@ -4731,7 +4839,6 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             'submit': {'type': 'boolean'},
           },
           'required': ['text'],
-          'additionalProperties': false,
         },
       },
     },
@@ -4750,7 +4857,6 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             'duration_ms': {'type': 'integer'},
           },
           'required': ['from_x', 'from_y', 'to_x', 'to_y'],
-          'additionalProperties': false,
         },
       },
     },
@@ -4776,7 +4882,6 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             },
           },
           'required': ['action'],
-          'additionalProperties': false,
         },
       },
     },
@@ -4796,7 +4901,6 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             },
           },
           'required': ['package'],
-          'additionalProperties': false,
         },
       },
     },
@@ -4806,11 +4910,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         'name': 'device_screenshot',
         'description':
             'Explicitly capture foreground pixels into the session workspace as a fallback.',
-        'parameters': {
-          'type': 'object',
-          'properties': {},
-          'additionalProperties': false,
-        },
+        'parameters': {'type': 'object', 'properties': {}},
       },
     },
     {
@@ -4836,7 +4936,6 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             },
           },
           'required': ['key'],
-          'additionalProperties': false,
         },
       },
     },
@@ -4862,7 +4961,6 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
               'required': ['x', 'y'],
             },
           ],
-          'additionalProperties': false,
         },
       },
     },
@@ -4882,7 +4980,6 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             },
           },
           'required': ['node', 'direction'],
-          'additionalProperties': false,
         },
       },
     },
@@ -6291,9 +6388,15 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'git_clone',
         'description':
-            'Clone a git repository into the session workspace. Pass '
-            '`branch` to check out a specific branch or tag on clone '
-            '(`git clone -b <branch>`); omit it to clone the default branch.',
+            'Clone a git repository. GITHUB URLS ARE SHARED/CLONE-ONCE: in '
+            'Studio mode a github.com URL (https or git@github.com: form) '
+            'resolves to the persistent global repo registry — the repo is '
+            'cloned once per (repo, branch) and reused by every session, so '
+            'do NOT re-clone it per session. Pass `branch` to check out a '
+            'specific branch or tag (`git clone -b <branch>`); omit it to '
+            'use the branch picked in the Studio screen. Non-GitHub URLs, '
+            'and any clone with an explicit `path`, go to the session '
+            'workspace instead.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -6334,8 +6437,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             },
             'branch': {
               'type': 'string',
-              'description':
-                  'Branch to push. Omit to push the current branch.',
+              'description': 'Branch to push. Omit to push the current branch.',
             },
           },
           'required': [],
@@ -6358,8 +6460,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             },
             'branch': {
               'type': 'string',
-              'description':
-                  'Branch to pull. Omit for the upstream branch.',
+              'description': 'Branch to pull. Omit for the upstream branch.',
             },
           },
           'required': [],
@@ -6373,11 +6474,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         'description':
             'Show working-tree status (short format) with branch tracking '
             'info. Read-only.',
-        'parameters': {
-          'type': 'object',
-          'properties': {},
-          'required': [],
-        },
+        'parameters': {'type': 'object', 'properties': {}, 'required': []},
       },
     },
     {
@@ -6409,8 +6506,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
           'properties': {
             'staged': {
               'type': 'boolean',
-              'description':
-                  'Show staged changes (`git diff --cached`).',
+              'description': 'Show staged changes (`git diff --cached`).',
             },
             'stat': {
               'type': 'boolean',
@@ -8159,6 +8255,14 @@ tabs AND its own cookie jar / logins (WebView profile), so a site the user
 signed into in ANOTHER chat is NOT logged in here, and vice versa. Never claim
 a login exists here because it exists elsewhere. ${AppState.I.shareBrowserOnRestart ? 'The user enabled "Share browser logins on restart": only the LOGINS (cookies) are merged across sessions, once, at app restart — never during this launch, and never tabs or visit history.' : 'Cross-session login sharing is OFF.'}
 Studio isolation: the repo, branch and open Studio files are per session as well.
+ACCESS CONTROL: file and network access outside the workspace needs the user's
+grant. A tool result starting with ACCESS_DENIED means the user refused (or the
+request timed out unanswered) — it is FINAL for that target. Do NOT retry the
+same path or host, and do NOT route around the denial (no symlinks, no copies
+via other tools, no shell tricks to reach the same data). Explain briefly why
+you needed that path or host, then ask the user what to do next — e.g. offer to
+do the work inside the workspace instead. Only the user can grant it, via the
+approval card (Allow once / Deny / Always allow).
 
 RESPONSE STYLE (default): Be concise and lightweight, like a fast coding assistant.
 Lead with the answer or result. Skip long preambles, restating the question, and
@@ -9423,6 +9527,48 @@ ${await _agentsMdBlock()}
   )?
   llmOnceForTest;
 
+  /// Test seam: run one raw LLM attempt through the real HTTP path
+  /// (including the Issue 8 reasoning_effort / tool-rejection fallbacks)
+  /// without the retry wrapper or the run machinery.
+  @visibleForTesting
+  Future<Map<String, dynamic>?> callLlmOnceForTest(
+    ProviderConfig p,
+    List<Map<String, dynamic>> msgs,
+    ChatSession session, {
+    bool includeTools = true,
+  }) => _callLlmOnce(p, msgs, session, includeTools: includeTools);
+
+  /// Test seam: overrides the [GlobalRepoRegistry] the git_clone tool
+  /// routes GitHub URLs through (Issue 3). Null in production — the real
+  /// singleton is used.
+  @visibleForTesting
+  static GlobalRepoRegistry? registryOverrideForTest;
+
+  /// Extract `owner/repo` from a GitHub repo URL, or null when [url] is not
+  /// a github.com repo URL. Accepts `https://github.com/owner/repo(.git)`
+  /// and scp-like `git@github.com:owner/repo(.git)` forms.
+  @visibleForTesting
+  static String? githubRepoFullForTest(String url) => _githubRepoFull(url);
+
+  static String? _githubRepoFull(String url) {
+    final u = url.trim();
+    final String path;
+    final scp = RegExp(r'^[\w.+-]+@github\.com:([^/]+/.+)$').firstMatch(u);
+    if (scp != null) {
+      path = scp.group(1)!;
+    } else {
+      final uri = Uri.tryParse(u);
+      if (uri == null || uri.host.toLowerCase() != 'github.com') return null;
+      path = uri.path;
+    }
+    final segs = path.split('/').where((s) => s.isNotEmpty).toList();
+    if (segs.length != 2) return null;
+    var repo = segs[1];
+    if (repo.endsWith('.git')) repo = repo.substring(0, repo.length - 4);
+    if (segs[0].isEmpty || repo.isEmpty) return null;
+    return '${segs[0]}/$repo';
+  }
+
   /// Test seam: overrides the retry backoff so a retry test never sleeps.
   @visibleForTesting
   static List<Duration> retryDelaysForTest = const [
@@ -9510,6 +9656,10 @@ ${await _agentsMdBlock()}
     ChatSession session, {
     bool includeTools = true,
     bool streamToTranscript = true,
+    // Issue 8: when a gateway rejects the injected `reasoning_effort`
+    // field, the first attempt retries with it dropped (tools intact).
+    // True only on that single retry — never set by callers.
+    bool dropReasoningEffort = false,
   }) async {
     final onceOverride = llmOnceForTest;
     if (onceOverride != null) {
@@ -9582,14 +9732,13 @@ ${await _agentsMdBlock()}
       };
       final toolList = includeTools ? _tools : const <Map<String, dynamic>>[];
       if (toolList.isNotEmpty) body['tools'] = toolList;
-      if (effort != null) body['reasoning_effort'] = effort;
+      if (effort != null && !dropReasoningEffort) {
+        body['reasoning_effort'] = effort;
+      }
       // User-set output cap (Settings → Context & output); 0 = let the
       // provider default decide — never a synthetic default injected.
-      // Clamped to the model's measured ceiling when we have one.
       final maxOut = AppState.I.maxOutputTokens;
-      if (maxOut > 0) {
-        body['max_tokens'] = clampMaxOutput(modelId, maxOut, p.id);
-      }
+      if (maxOut > 0) body['max_tokens'] = maxOut;
 
       final bodyStr = jsonEncode(body);
       final bodyBytes = utf8.encode(bodyStr);
@@ -9621,21 +9770,54 @@ ${await _agentsMdBlock()}
         }
         final txt = utf8.decode(data, allowMalformed: true);
         client.close(force: true);
+        // ── Issue 8: reasoning_effort rejections are NOT tool rejections ──
+        // A model label like "deepseek-v4.1-flash · High" injects
+        // body['reasoning_effort']='high'; some gateways 400 with
+        // "reasoning_effort is not supported for this model". The old
+        // heuristic matched the bare "not supported" substring and wrongly
+        // disabled tools (the retry even re-sent reasoning_effort). Drop
+        // the field and retry ONCE with tools intact, BEFORE ever
+        // suspecting the tool schemas.
+        final mightBeReasoningEffortRejection =
+            (res.statusCode == 400 ||
+                res.statusCode == 404 ||
+                res.statusCode == 422) &&
+            effort != null &&
+            !dropReasoningEffort &&
+            txt.toLowerCase().contains('reasoning_effort');
+        if (mightBeReasoningEffortRejection) {
+          _emit(
+            'think',
+            'provider rejected reasoning_effort — retrying without it '
+                '(tools intact)',
+          );
+          return await _callLlmOnce(
+            p,
+            msgs,
+            session,
+            includeTools: includeTools,
+            streamToTranscript: streamToTranscript,
+            dropReasoningEffort: true,
+          );
+        }
         // ── Auto-fallback for providers that reject tool schemas ──
         // Many compatible endpoints (older OpenRouter models, some
-        // providers' BYOK gateways) return 400/404/422 with
-        // "tools"/"tool_calls"/"function" in the error body. The web-IDE
-        // behaviour is to retry WITHOUT tools so the model still answers.
+        // providers' BYOK gateways) return 400/404/422 naming the tool
+        // schema in the error body. The web-IDE behaviour is to retry
+        // WITHOUT tools so the model still answers. Narrow on purpose: a
+        // bare "not supported" (reasoning_effort, max_tokens, …) must never
+        // disable tools — handled by the check above.
         final mightBeToolRejection =
             (res.statusCode == 400 ||
                 res.statusCode == 404 ||
                 res.statusCode == 422) &&
             includeTools &&
             toolList.isNotEmpty &&
-            (txt.contains('tool') ||
-                txt.contains('function') ||
-                txt.contains('tool_choice') ||
-                txt.contains('not supported'));
+            RegExp(
+              r'\b(tools?|function|tool_calls?)\b'
+              r'.*\b(not supported|unsupported|invalid|rejected)\b',
+              caseSensitive: false,
+            ).hasMatch(txt);
         if (mightBeToolRejection) {
           _emit(
             'think',
@@ -10008,8 +10190,7 @@ ${await _agentsMdBlock()}
       out.add({
         'name': fn['name'],
         'description': fn['description'] ?? '',
-        'input_schema':
-            fn['parameters'] ?? {'type': 'object', 'properties': {}},
+        'input_schema': fn['parameters'] ?? {'type': 'object'},
       });
     }
     return out;
@@ -10063,12 +10244,9 @@ ${await _agentsMdBlock()}
       final maxOut = AppState.I.maxOutputTokens;
       final body = <String, dynamic>{
         'model': modelId,
-        // Anthropic REQUIRES max_tokens. Use the user cap when set (clamped
-        // to what this model actually accepts), else a sane ceiling that
-        // still fits every current Claude model.
-        'max_tokens': maxOut > 0
-            ? clampMaxOutput(modelId, maxOut, p.id)
-            : clampMaxOutput(modelId, 8192, p.id),
+        // Anthropic REQUIRES max_tokens. Use the user cap when set, else a
+        // sane ceiling that still fits every current Claude model.
+        'max_tokens': maxOut > 0 ? maxOut : 8192,
         'stream': true,
         if (converted.system.isNotEmpty) 'system': converted.system,
         'messages': converted.messages,
@@ -10501,6 +10679,13 @@ ${await _agentsMdBlock()}
             return policyCheck;
           }
         }
+        // Strict permission model: absolute paths in the command that fall
+        // outside the session workspace need a grant — one combined
+        // approval card for all of them, pre-execution. Sits before the
+        // tool approval so it covers every execution branch below
+        // (PtyPool persistent shell included).
+        final pathDenial = await _checkCommandPaths(cmd, tool: 'run_shell');
+        if (pathDenial != null) return pathDenial;
         // Route through the native Linux sandbox whenever it is installed —
         // in EVERY access mode (not just Studio).  The sandbox provides
         // bash/python/node/git via apt; the phone terminal (toybox) is only
@@ -10683,6 +10868,20 @@ ${await _agentsMdBlock()}
         browserBusy = true;
         notifyListeners();
         try {
+          // Strict permission model: off-allowlist hosts prompt (Allow /
+          // Deny / Always allow) instead of loading silently.
+          final navUri = Uri.tryParse(url);
+          final navScheme = navUri?.scheme.toLowerCase() ?? '';
+          if ((navScheme == 'http' || navScheme == 'https') &&
+              (navUri?.host ?? '').isNotEmpty) {
+            if (!await _checkHostGrant(navUri!.host, tool: 'browser_open')) {
+              browserBusy = false;
+              notifyListeners();
+              return _accessDeniedMessage([
+                'host ${navUri.host}',
+              ], noun: 'host');
+            }
+          }
           // Drive the persistent browser tab (creates one if needed).
           // navigateTab binds the session's browser profile BEFORE the load,
           // so the page opens in THIS session's cookie jar (no cross-session
@@ -10742,6 +10941,15 @@ ${await _agentsMdBlock()}
             return 'preview rendered in Browser panel ✓ (local file)';
           }
           return 'local file not found: $url';
+        }
+        // Strict permission model: same host-grant gate as browser_open.
+        final navUri2 = Uri.tryParse(url);
+        final navScheme2 = navUri2?.scheme.toLowerCase() ?? '';
+        if ((navScheme2 == 'http' || navScheme2 == 'https') &&
+            (navUri2?.host ?? '').isNotEmpty) {
+          if (!await _checkHostGrant(navUri2!.host, tool: 'browser_navigate')) {
+            return _accessDeniedMessage(['host ${navUri2.host}'], noun: 'host');
+          }
         }
         final tab = _activeTab;
         await navigateTab(tab, url);
@@ -10842,7 +11050,7 @@ ${await _agentsMdBlock()}
             tool: 'read_attachment',
           );
           if (safe == null) {
-            return 'path escapes the session workspace: $fname — access denied.';
+            return _accessDeniedMessage([fname], noun: 'path');
           }
           final f = File(safe);
           if (!f.existsSync()) {
@@ -10881,6 +11089,11 @@ ${await _agentsMdBlock()}
       case 'run_code':
         final code = args['code'] as String;
         final lang = args['lang'] as String? ?? 'python';
+        // Strict permission model: absolute paths referenced by the code
+        // that fall outside the session workspace need a grant — one
+        // combined approval card, pre-execution.
+        final codePathDenial = await _checkCommandPaths(code, tool: 'run_code');
+        if (codePathDenial != null) return codePathDenial;
         final ok2 = await _maybeApprove(
           'run_code',
           code,
@@ -11057,6 +11270,13 @@ ${await _agentsMdBlock()}
         }
         _emit('shell', 'MCP: ${match.name} → $action');
         if (!McpService.I.isConnected(match.canonicalId)) {
+          // Strict permission model: an http/sse server dials a network
+          // host — gate it like any other off-allowlist fetch.
+          if (!await _mcpServerHostGrantOk(match, tool: 'mcp_connect')) {
+            return _accessDeniedMessage([
+              'host ${_mcpServerHost(match)}',
+            ], noun: 'host');
+          }
           final res = await McpService.I.connect(match);
           if (!res.contains('connected')) return res;
         }
@@ -11363,6 +11583,13 @@ ${await _agentsMdBlock()}
               return 'Plugin "$pluginName" installed, but no MCP server by '
                   'that name is configured — add it in Plugins → MCP.';
             }
+            // Strict permission model: gate the network dial for http/sse
+            // servers before connecting.
+            if (!await _mcpServerHostGrantOk(server, tool: 'mcp_connect')) {
+              return _accessDeniedMessage([
+                'host ${_mcpServerHost(server)}',
+              ], noun: 'host');
+            }
             final msg = await McpService.I.connect(server);
             server.connected = McpService.I.isConnected(server.canonicalId);
             app.persistMcpIntent();
@@ -11435,6 +11662,13 @@ ${await _agentsMdBlock()}
           // REAL connect — spawns the process, runs the MCP handshake,
           // discovers tools.  (Previously this only flipped a bool, so
           // the UI said "connected" but nothing actually ran.)
+          // Strict permission model: gate the network dial for http/sse
+          // servers before connecting.
+          if (!await _mcpServerHostGrantOk(match, tool: 'mcp_connect')) {
+            return _accessDeniedMessage([
+              'host ${_mcpServerHost(match)}',
+            ], noun: 'host');
+          }
           final res = await McpService.I.connect(match);
           match.connected = McpService.I.isConnected(match.canonicalId);
           app.persistMcpIntent();
@@ -11868,21 +12102,21 @@ ${await _agentsMdBlock()}
           return 'viewport out of range (240-3840 × 320-2160)';
         }
         final tab = _activeTab;
-        // Logical viewport width for media queries. `zoom` is the logical
-        // factor that keeps logicalWidth == w; it is NOT a visual scale.
-        tab.zoom = (BrowserTab.devW / w).clamp(0.25, 3.0);
-        // Remember the width on the tab so navigations (which wipe the
+        // Remember the forced size on the tab so navigations (which wipe the
         // DOM-injected meta) re-apply it on page finish. A later mode
-        // toggle resets to that mode's default.
+        // toggle resets to that mode's default. Both dimensions ride the
+        // native channel + shim so height probes report the forced size.
         tab.viewportWidth = w;
+        tab.viewportHeight = h;
         // Drive the layout viewport through the per-tab native API (wide
-        // viewport + requested width). The injected CSS scale stays
+        // viewport + requested size). The injected CSS scale stays
         // `userZoom` only — resize must never shrink the readable content.
         await applyDesktopViewport(
           tab.desktopMode,
           tabId: tab.id,
           webViewIdentifier: webViewIdentifierFor(tab),
           logicalWidth: w,
+          logicalHeight: h,
         );
         _emit('nav', 'viewport ${w}x$h');
         return 'viewport set to ${w}x$h (logical width; visual zoom stays '
@@ -12478,12 +12712,24 @@ ${await _agentsMdBlock()}
         if (offset < 1) offset = 1;
         if (limit < 1) limit = 1;
         if (limit > 2000) limit = 2000;
+        // Strict permission model: an absolute host path outside the
+        // workspace prompts up front; a denial returns the structured
+        // message DIRECTLY — it must never enter the content pipeline
+        // below (no openStudioFile caching, no windowing as file content).
+        String? gatedHost;
+        if (path.startsWith('/')) {
+          final resolved = await _resolveFsPath(path, gateTool: 'file_read');
+          if (resolved.denied) {
+            return _accessDeniedMessage([path], noun: 'path');
+          }
+          gatedHost = resolved.path;
+        }
         final c =
             RepoCache.I.read(path) ??
             await () async {
               // Host workspace fallback: sandbox files are readable even
               // when no GitHub repo is synced (mirrors fs_edit view).
-              final host = await _resolveFsPath(path);
+              final host = gatedHost ?? (await _resolveFsPath(path)).path;
               if (host == null || host.startsWith('repo:')) return null;
               try {
                 return await File(host).readAsString();
@@ -12631,6 +12877,39 @@ ${await _agentsMdBlock()}
               '${dest.isEmpty ? '' : '\nDestination: $dest'}',
         );
         if (!okClone) return 'DENIED by user';
+        // Issue 3: GitHub clones in Studio mode are clone-once through
+        // GlobalRepoRegistry — a raw per-session clone here would re-clone
+        // the same repo for every new session. Non-GitHub URLs, explicit
+        // `path` destinations, and non-Studio modes keep the raw clone
+        // below (general mode keeps isolated per-session workspaces).
+        final githubRepo = _githubRepoFull(url);
+        if (githubRepo != null && dest.isEmpty && mode == AgentMode.studio) {
+          final cloneBranch = branch.isNotEmpty
+              ? branch
+              : (sessionBranch.isNotEmpty ? sessionBranch : 'main');
+          _emit('shell', 'registry clone $githubRepo@$cloneBranch');
+          try {
+            final registry =
+                registryOverrideForTest ?? await GlobalRepoRegistry.instance();
+            final sharedPath = await registry.ensureCloned(
+              githubRepo,
+              cloneBranch,
+            );
+            final sid =
+                _runSession?.sandboxId ?? _runSession?.id ?? _currentRunKey();
+            if (sid.isNotEmpty) {
+              await registry.bindSession(
+                sid,
+                githubRepo,
+                cloneBranch,
+                sharedPath,
+              );
+            }
+            return 'cloned $url ✓\nshared registry: $sharedPath';
+          } catch (e) {
+            return 'git clone failed: $e';
+          }
+        }
         _emit('shell', 'git clone${branch.isEmpty ? '' : ' -b $branch'} $url');
         try {
           final work = await _sessionWorkDir();
@@ -12704,14 +12983,16 @@ ${await _agentsMdBlock()}
         return pullOut.trim().isEmpty ? 'already up to date ✓' : pullOut.trim();
 
       case 'git_status':
-        final statusOut =
-            (await _sandboxGit(['status', '--short', '--branch'])).trim();
+        final statusOut = (await _sandboxGit([
+          'status',
+          '--short',
+          '--branch',
+        ])).trim();
         return statusOut.isEmpty ? 'no output' : statusOut;
 
       case 'git_log':
         final n = (((args['n'] as num?)?.toInt() ?? 20)).clamp(1, 50);
-        final logOut =
-            (await _sandboxGit(['log', '--oneline', '-$n'])).trim();
+        final logOut = (await _sandboxGit(['log', '--oneline', '-$n'])).trim();
         return logOut.isEmpty ? 'no commits' : logOut;
 
       case 'git_diff':
@@ -12982,9 +13263,13 @@ ${await _agentsMdBlock()}
   /// absolute path when access is allowed, null when denied:
   /// * inside the root → allowed, no prompt;
   /// * drive/control → allowed, no prompt (full access);
-  /// * outside the root in auto/studio → granted paths pass, otherwise the
-  ///   user is prompted (Allow / Deny / Always allow).
-  /// Safe (read-only) keeps the old hard-refusal behavior.
+  /// * outside the root → granted paths pass, otherwise the user is
+  ///   prompted (Allow / Deny / Always allow) in every agent mode —
+  ///   including safe (read-only).
+  ///
+  /// Symlinks are canonicalized BEFORE any matching, so a workspace-local
+  /// symlink pointing outside (e.g. `link -> /etc`) cannot smuggle access
+  /// past the grant check.
   Future<String?> _resolveGrantedPath(
     String rel, {
     required String tool,
@@ -13008,37 +13293,211 @@ ${await _agentsMdBlock()}
         root = workDir.path;
       }
     }
-    final inside = containedPath(Directory(root), rel);
+    // Canonicalize symlinks (best-effort) before matching: the grant check
+    // must see the REAL location, not the lexical one.
+    final canonicalRoot = await _canonicalFsPath(root);
+    final abs = normalizeGrantPath(rel, base: canonicalRoot);
+    final canonicalAbs = await _canonicalFsPath(abs);
+    final inside = containedPath(Directory(canonicalRoot), canonicalAbs);
     if (inside != null) return inside;
     if (m == AgentMode.drive || m == AgentMode.control) {
       // Full access: no prompts, no confinement.
-      return normalizeGrantPath(rel, base: workDir.path);
+      return canonicalAbs;
     }
-    if (m == AgentMode.safe) return null;
-    final abs = normalizeGrantPath(rel, base: workDir.path);
-    if (_grantStoreFor(sid).isPathGranted(sid, abs)) return abs;
+    // Safe (read-only) still prompts: the user explicitly approves each
+    // outside path — the old silent hard refusal is gone.
+    if (_grantStoreFor(sid).isPathGranted(sid, canonicalAbs)) {
+      return canonicalAbs;
+    }
     final ok = await _askUser(
-      'grant:path:$abs',
+      'grant:path:$canonicalAbs',
       'Access outside the workspace',
       'The agent ($tool) wants to touch a path outside the session workspace:\n'
-          '$abs\n\n'
+          '$canonicalAbs\n\n'
           'Allow once, Deny, or "Always allow" to grant this path (and everything '
           'under it) for this session.',
       allowAlways: true,
     );
-    return ok ? abs : null;
+    return ok ? canonicalAbs : null;
+  }
+
+  /// Best-effort symlink canonicalization of an absolute path: resolves the
+  /// longest existing ancestor and re-appends the remainder lexically, so
+  /// not-yet-existing targets (a file about to be created) still resolve
+  /// their parent chain. Falls back to the lexical path when nothing on the
+  /// chain exists.
+  Future<String> _canonicalFsPath(String abs) async {
+    var dir = abs;
+    final tail = <String>[];
+    for (var i = 0; i < 64; i++) {
+      try {
+        final resolved = await File(dir).resolveSymbolicLinks();
+        if (tail.isEmpty) return resolved;
+        return normalizeGrantPath('$resolved/${tail.join('/')}');
+      } catch (_) {
+        final idx = dir.lastIndexOf('/');
+        if (idx <= 0) return abs;
+        tail.insert(0, dir.substring(idx + 1));
+        dir = dir.substring(0, idx);
+      }
+    }
+    return abs;
+  }
+
+  /// Batched form of [_resolveGrantedPath]: every path gets the silent
+  /// checks (inside the workspace root, or covered by a grant), and the
+  /// REMAINDER is surfaced in ONE combined approval card instead of one
+  /// card per path. Returns the resolved paths keyed by input token, or
+  /// null when the user denied (fail-closed: an unanswered card auto-denies
+  /// after the grace period).
+  Future<Map<String, String>?> _resolveGrantedPaths(
+    Iterable<String> rels, {
+    required String tool,
+  }) async {
+    final rs = _runSession;
+    final sid = rs?.id ?? AppState.I.activeSession?.id;
+    final m = mode;
+    final workDir = await _sessionWorkDir();
+    // Studio bound workspace — same GlobalRepoRegistry authority as the
+    // single-path form; never weakened here.
+    var root = workDir.path;
+    if (m == AgentMode.studio) {
+      try {
+        final registry = await GlobalRepoRegistry.instance();
+        root =
+            registry.boundWorkspaceFor(rs?.sandboxId ?? rs?.id ?? '') ??
+            workDir.path;
+      } catch (_) {
+        root = workDir.path;
+      }
+    }
+    final canonicalRoot = await _canonicalFsPath(root);
+    final resolved = <String, String>{};
+    final outside = <String>[];
+    final store = _grantStoreFor(sid);
+    for (final rel in rels) {
+      final abs = normalizeGrantPath(rel, base: canonicalRoot);
+      final canonicalAbs = await _canonicalFsPath(abs);
+      if (containedPath(Directory(canonicalRoot), canonicalAbs) != null ||
+          m == AgentMode.drive ||
+          m == AgentMode.control ||
+          store.isPathGranted(sid, canonicalAbs)) {
+        resolved[rel] = canonicalAbs;
+      } else {
+        outside.add(canonicalAbs);
+      }
+    }
+    if (outside.isEmpty) return resolved;
+    // Safe (read-only) still prompts: the user explicitly approves each
+    // outside path — the old silent hard refusal is gone.
+    final unique = outside.toSet().toList()..sort();
+    final ok = await _askUser(
+      'grant:paths:${unique.join(',')}',
+      'Access outside the workspace '
+          '(${unique.length} path${unique.length == 1 ? '' : 's'})',
+      'The agent ($tool) wants to touch paths outside the session workspace:\n'
+          '${unique.map((p) => '• $p').join('\n')}\n\n'
+          'Allow once, Deny, or "Always allow" to grant these paths (and '
+          'everything under them) for this session.',
+      allowAlways: true,
+    );
+    if (!ok) return null;
+    for (final p in unique) {
+      resolved[p] = p;
+    }
+    return resolved;
+  }
+
+  /// Absolute paths that never need a permission grant — kernel
+  /// pseudo-files every command line touches (`2>/dev/null`, …).
+  static const _noGrantPseudoPaths = <String>{
+    '/dev/null',
+    '/dev/zero',
+    '/dev/stdin',
+    '/dev/stdout',
+    '/dev/stderr',
+    '/dev/tty',
+    '/dev/urandom',
+    '/dev/random',
+  };
+
+  /// Candidate absolute-path tokens in a shell command (or code text), so
+  /// the strict permission model can gate outside-workspace paths
+  /// pre-execution. Quote-aware: `cat "/etc/passwd"` yields `/etc/passwd`.
+  /// Conservative by design — tokens are CANDIDATES; the grant check
+  /// decides what actually prompts. `$VAR`-rooted paths are NOT expanded
+  /// (their runtime value is unknowable here) and are left to the
+  /// workspace-relative handling of the execution tier.
+  @visibleForTesting
+  static Set<String> extractShellPathTokens(String cmd) {
+    final out = <String>{};
+    final tokenRe = RegExp(r'''"([^"]*)"|'([^']*)'|([^\s'"`;&|()<>]+)''');
+    for (final m in tokenRe.allMatches(cmd)) {
+      final tok = (m.group(1) ?? m.group(2) ?? m.group(3) ?? '').trim();
+      if (tok.length < 2 || !tok.startsWith('/')) continue;
+      // URL-ish / comment markers, never filesystem paths.
+      if (tok.startsWith('//')) continue;
+      final clean = tok.replaceAll(RegExp(r'[;,]+$'), '');
+      if (clean.length < 2 || !clean.startsWith('/')) continue;
+      if (_noGrantPseudoPaths.contains(clean)) continue;
+      out.add(clean);
+    }
+    return out;
+  }
+
+  /// Strict-permission gate for run_shell / run_code / job_start: extracts
+  /// candidate absolute-path tokens from [cmd], resolves them through the
+  /// grant model (ONE combined approval card for every outside path), and
+  /// returns null when execution may proceed — or the structured
+  /// ACCESS_DENIED message when the user denied.
+  Future<String?> _checkCommandPaths(String cmd, {required String tool}) async {
+    final tokens = extractShellPathTokens(cmd);
+    if (tokens.isEmpty) return null;
+    final granted = await _resolveGrantedPaths(tokens, tool: tool);
+    if (granted != null) return null;
+    return _accessDeniedMessage(tokens, noun: 'path');
+  }
+
+  /// The note the user attached to the most recent denial, if any.
+  /// Consumed (cleared) on read so it annotates exactly one tool result or
+  /// ledger entry — a stale note must never leak into a later denial.
+  String? _lastDenyNote;
+
+  /// Reads and clears [_lastDenyNote], formatted as a suffix for a tool
+  /// result. Empty when the denial carried no note.
+  String _denyNoteSuffix() {
+    final n = _lastDenyNote;
+    _lastDenyNote = null;
+    return (n == null || n.isEmpty) ? '' : '\nUser\'s note: "$n"';
+  }
+
+  /// Structured denial for the strict permission model: the model must
+  /// explain why it needed the target and ask the user what to do next
+  /// instead of retrying the same target or routing around the denial. Any
+  /// deny-note the user attached rides along.
+  String _accessDeniedMessage(
+    Iterable<String> targets, {
+    String noun = 'path',
+  }) {
+    final list = targets.toList();
+    final which = list.length == 1 ? 'this $noun' : 'these ${noun}s';
+    return 'ACCESS_DENIED: ${list.join(', ')}. Explain briefly why you '
+        'needed $which and ask the user what to do next.${_denyNoteSuffix()}';
   }
 
   /// Network gate for General/Studio: allowlisted hosts and granted hosts
   /// pass; everything else prompts (Allow / Deny / Always allow).
-  /// drive/control never prompt; safe keeps existing behavior.
+  /// drive/control never prompt (the user is actively driving the
+  /// interaction); safe/auto/studio prompt — the tool-level approval in
+  /// safe mode covers the action, the host grant covers the network
+  /// destination, and "Always allow" on the tool must not silently bless
+  /// every future host.
   Future<bool> _checkHostGrant(String rawHost, {required String tool}) async {
     final host = normalizeGrantHost(rawHost);
     if (host.isEmpty) return false;
     if (defaultAllowedHosts.contains(host)) return true;
     final m = mode;
     if (m == AgentMode.drive || m == AgentMode.control) return true;
-    if (m == AgentMode.safe) return true;
     final sid = _runSession?.id ?? AppState.I.activeSession?.id;
     if (_grantStoreFor(sid).isHostGranted(sid, host)) return true;
     return _askUser(
@@ -13050,6 +13509,32 @@ ${await _agentsMdBlock()}
           'subdomains) for this session.',
       allowAlways: true,
     );
+  }
+
+  /// The network host an MCP server dials, for http/sse transports — null
+  /// for stdio/native transports (local processes, no host to gate) and
+  /// when the URL carries no host (connect() reports that itself).
+  static String? _mcpServerHost(McpServer server) {
+    final t = server.transport.toLowerCase();
+    if (t != 'http' && t != 'sse') return null;
+    final host = Uri.tryParse(server.url ?? '')?.host ?? '';
+    return host.isEmpty ? null : host;
+  }
+
+  /// Host-grant gate for AGENT-triggered MCP server connects (tool proxy
+  /// auto-connect, plugin/MCP install flows). UI/startup-driven connects
+  /// are deliberately ungated: the user tapped connect themselves (or the
+  /// plugin config did), and the approval dock isn't visible on those
+  /// screens — a prompt there would auto-deny after 5s and break manual
+  /// setup. stdio/native transports spawn local processes; their network
+  /// reach is the plugin sandbox's concern, not a host grant.
+  Future<bool> _mcpServerHostGrantOk(
+    McpServer server, {
+    required String tool,
+  }) async {
+    final host = _mcpServerHost(server);
+    if (host == null) return true;
+    return _checkHostGrant(host, tool: tool);
   }
 
   Future<bool> _maybeApprove(String tool, String summary, String detail) async {
@@ -13102,9 +13587,14 @@ ${await _agentsMdBlock()}
     }) async {
       final ok = await _askUser(t, s, d, allowAlways: allowAlways);
       if (sessionId != null) {
+        // Consume any deny-note here so it annotates exactly this ledger
+        // entry and can never leak into a later, unrelated denial.
+        final note = _lastDenyNote;
+        _lastDenyNote = null;
         await SessionLedger.I.append(sessionId, 'approval', {
           'tool': tool,
           'ok': ok,
+          if (!ok && note != null && note.isNotEmpty) 'note': note,
         });
       }
       return ok;
@@ -13957,25 +14447,47 @@ ${await _agentsMdBlock()}
 
   /// Resolve a workspace-relative path.  Repo files take precedence; falls
   /// back to the session's sandbox workdir on the host filesystem.
-  Future<String?> _resolveFsPath(String rel) async {
+  ///
+  /// [gateTool]: agent-tool callers pass their tool name so an ABSOLUTE host
+  /// path goes through the permission grant gate (prompt in General/Studio
+  /// when outside the workspace) instead of resolving silently — the old
+  /// absolute-path bypass is gone. UI/background callers (file chips, "show
+  /// in folder", disk sync) pass nothing and keep the plain existence check:
+  /// nobody is there to answer a prompt, and an auto-deny would break them.
+  /// Resolves [rel] to a host path. The record's [denied] flag is true only
+  /// when an agent tool's grant prompt (gateTool != null) was DENIED (or
+  /// timed out) — callers must surface the structured ACCESS_DENIED
+  /// message rather than "file not found" so the model knows the user
+  /// refused instead of guessing the file is missing.
+  Future<({String? path, bool denied})> _resolveFsPath(
+    String rel, {
+    String? gateTool,
+  }) async {
     // Repo cache hit?
-    if (RepoCache.I.files.containsKey(rel)) return 'repo:$rel';
-    // If absolute path already exists on device directly:
+    if (RepoCache.I.files.containsKey(rel)) {
+      return (path: 'repo:$rel', denied: false);
+    }
+    // Absolute host path: resolve only when it exists; agent tools route
+    // through the grant gate, everything else keeps the existence check.
     if (rel.startsWith('/')) {
       final direct = File(rel);
-      if (direct.existsSync()) return direct.path;
+      if (!direct.existsSync()) return (path: null, denied: false);
+      if (gateTool == null) return (path: direct.path, denied: false);
+      final granted = await _resolveGrantedPath(rel, tool: gateTool);
+      if (granted == null) return (path: null, denied: true);
+      return (path: granted, denied: false);
     }
     // Host filesystem under session workdir.
     final work = await _sessionWorkDir();
     final safe = containedPath(work, rel);
     if (safe != null) {
       final f = File(safe);
-      if (f.existsSync()) return f.path;
+      if (f.existsSync()) return (path: f.path, denied: false);
     }
     // Also try resolving relative to work directly
     final directRel = File('${work.path}/$rel');
-    if (directRel.existsSync()) return directRel.path;
-    return null;
+    if (directRel.existsSync()) return (path: directRel.path, denied: false);
+    return (path: null, denied: false);
   }
 
   Future<String> _handleBrowserDialog(Map<String, dynamic> args) async {
@@ -14009,6 +14521,16 @@ ${await _agentsMdBlock()}
     if (action == 'open') {
       final url = args['url'] as String? ?? tab.popupRequests.lastOrNull ?? '';
       if (url.isEmpty) return 'no popup url given';
+      // Strict permission model: popups must pass the same host-grant gate
+      // as browser_open — a popup URL is a navigation the user didn't ask for.
+      final popupUri = Uri.tryParse(url);
+      final popupScheme = popupUri?.scheme.toLowerCase() ?? '';
+      if ((popupScheme == 'http' || popupScheme == 'https') &&
+          (popupUri?.host ?? '').isNotEmpty) {
+        if (!await _checkHostGrant(popupUri!.host, tool: 'browser_popups')) {
+          return _accessDeniedMessage(['host ${popupUri.host}'], noun: 'host');
+        }
+      }
       newBrowserTab(url);
       return 'popup opened ✓ — $url';
     }
@@ -14168,10 +14690,22 @@ ${await _agentsMdBlock()}
         name = 'download-${DateTime.now().millisecondsSinceEpoch}';
       }
     }
-    final work = await _sessionWorkDir();
-    final safe = containedPath(work, name);
+    // Strict permission model: an outside-workspace destination prompts
+    // (Allow / Deny / Always allow) instead of the old hard refusal.
+    final safe = await _resolveGrantedPath(name, tool: 'browser_download');
     if (safe == null) {
-      return 'path escapes the session workspace: $name — use a path inside the workspace.';
+      return _accessDeniedMessage([name], noun: 'path');
+    }
+    // Strict permission model: the download URL host needs a grant too —
+    // this tool has no tool-level approval, so the host gate is the only
+    // user check on the network destination.
+    final dlUri = Uri.tryParse(url);
+    final dlScheme = dlUri?.scheme.toLowerCase() ?? '';
+    if ((dlScheme == 'http' || dlScheme == 'https') &&
+        (dlUri?.host ?? '').isNotEmpty) {
+      if (!await _checkHostGrant(dlUri!.host, tool: 'browser_download')) {
+        return _accessDeniedMessage(['host ${dlUri.host}'], noun: 'host');
+      }
     }
     _emit('nav', 'downloading: $name');
     final client = browserDownloadClientFactoryForTest?.call() ?? HttpClient();
@@ -14267,8 +14801,14 @@ ${await _agentsMdBlock()}
           _emit('file', 'view $path');
           return _numberedLines(repoContent, 6000);
         }
-        // Host file?
-        final host = await _resolveFsPath(path);
+        // Host file? Strict permission model: an absolute path outside the
+        // workspace prompts (Allow / Deny / Always allow) instead of
+        // resolving silently; a denial surfaces as ACCESS_DENIED.
+        final viewResolved = await _resolveFsPath(path, gateTool: 'fs_edit');
+        if (viewResolved.denied) {
+          return _accessDeniedMessage([path], noun: 'path');
+        }
+        final host = viewResolved.path;
         if (host == null) return 'file not found: $path';
         final hf = File(host);
         final content = await hf.readAsString();
@@ -14287,7 +14827,7 @@ ${await _agentsMdBlock()}
         // a hard refusal; an existing grant lets the create proceed.
         final safe = await _resolveGrantedPath(path, tool: 'fs_edit');
         if (safe == null) {
-          return 'path escapes the session workspace: $path — access denied.';
+          return _accessDeniedMessage([path], noun: 'path');
         }
         if (File(safe).existsSync()) {
           return 'file already exists: $path — use str_replace to edit it';
@@ -14338,7 +14878,11 @@ ${await _agentsMdBlock()}
           return 'edited $path ✓ (str_replace)';
         }
         // Host file?
-        final host = await _resolveFsPath(path);
+        final editResolved = await _resolveFsPath(path, gateTool: 'fs_edit');
+        if (editResolved.denied) {
+          return _accessDeniedMessage([path], noun: 'path');
+        }
+        final host = editResolved.path;
         if (host == null) return 'file not found: $path';
         final hf = File(host);
         // CAS version guard (PR18): the file changed since the last view —
@@ -14384,7 +14928,11 @@ ${await _agentsMdBlock()}
               'fs_edit view), then edit it.';
         }
         final repoContent = RepoCache.I.read(path);
-        final host = await _resolveFsPath(path);
+        final insertResolved = await _resolveFsPath(path, gateTool: 'fs_edit');
+        if (insertResolved.denied) {
+          return _accessDeniedMessage([path], noun: 'path');
+        }
+        final host = insertResolved.path;
         final raw =
             repoContent ??
             (host != null ? await File(host).readAsString() : null);
@@ -14605,10 +15153,6 @@ ${await _agentsMdBlock()}
     String model,
     ProviderConfig? provider,
   ) {
-    // ProviderConfig.modelVisionSupport already resolves, in order: the
-    // user's manual toggle, then the modality the provider itself published
-    // for that exact route. Only when both are silent does the name
-    // heuristic get a vote.
     final override = provider?.modelVisionSupport(_baseModelOf(model));
     if (override != null) return override;
     return modelSupportsImages(model);
@@ -15047,12 +15591,16 @@ ${await _agentsMdBlock()}
       }
     }
     // Search host filesystem under session workdir.
+    // Strict permission model: an outside-workspace base prompts (Allow /
+    // Deny / Always allow) instead of the old hard refusal.
     final work = await _sessionWorkDir();
     final rootPath = basePath != null && basePath.isNotEmpty
-        ? containedPath(work, basePath)
+        ? await _resolveGrantedPath(basePath, tool: 'fs_glob')
         : work.path;
     if (rootPath == null) {
-      return 'path escapes the session workspace: $basePath';
+      // basePath is non-null here (null/empty base falls back to work.path
+      // above); the ?? is belt-and-braces for future edits.
+      return _accessDeniedMessage([basePath ?? ''], noun: 'path');
     }
     final searchRoot = Directory(rootPath);
     if (searchRoot.existsSync() && hits.length < cap) {
@@ -15063,8 +15611,12 @@ ${await _agentsMdBlock()}
         followLinks: false,
       )) {
         if (entity is! File) continue;
-        if (!entity.path.startsWith('${work.path}/')) continue;
-        final rel = entity.path.substring(work.path.length + 1);
+        if (entity.path != rootPath && !entity.path.startsWith('$rootPath/')) {
+          continue;
+        }
+        final rel = rootPath == work.path
+            ? entity.path.substring(work.path.length + 1)
+            : entity.path;
         if (!re.hasMatch(rel)) continue;
         if (!seen.add(rel)) continue;
         var mtime = 0;
@@ -15124,12 +15676,16 @@ ${await _agentsMdBlock()}
       }
     }
     // Search host filesystem.
+    // Strict permission model: an outside-workspace base prompts (Allow /
+    // Deny / Always allow) instead of the old hard refusal.
     final work = await _sessionWorkDir();
     final rootPath = basePath != null && basePath.isNotEmpty
-        ? containedPath(work, basePath)
+        ? await _resolveGrantedPath(basePath, tool: 'fs_grep')
         : work.path;
     if (rootPath == null) {
-      return 'path escapes the session workspace: $basePath';
+      // basePath is non-null here (null/empty base falls back to work.path
+      // above); the ?? is belt-and-braces for future edits.
+      return _accessDeniedMessage([basePath ?? ''], noun: 'path');
     }
     final searchRoot = Directory(rootPath);
     if (searchRoot.existsSync() && matches < maxMatches) {
@@ -15141,17 +15697,23 @@ ${await _agentsMdBlock()}
       // e.g. lookarounds, which Dart RegExp supports) — then the Dart
       // walk runs instead, so a dialect difference can never lose
       // results; it only changes WHICH engine found them.
-      final relRoot = rootPath == work.path
-          ? '.'
-          : rootPath.substring(work.path.length + 1);
-      final rgOut = await _tryRgGrep(
-        pattern: pattern,
-        relRoot: relRoot,
-        remaining: maxMatches - matches,
-        ctxLines: ctxLines,
-        include: include,
-        work: work,
-      );
+      // Outside-workspace roots skip the rg fast path: rg runs with
+      // cwd=work and a host-absolute root is not guaranteed visible the
+      // same way inside the sandbox — the Dart walk below handles it.
+      final underWork =
+          rootPath == work.path || rootPath.startsWith('${work.path}/');
+      final rgOut = underWork
+          ? await _tryRgGrep(
+              pattern: pattern,
+              relRoot: rootPath == work.path
+                  ? '.'
+                  : rootPath.substring(work.path.length + 1),
+              remaining: maxMatches - matches,
+              ctxLines: ctxLines,
+              include: include,
+              work: work,
+            )
+          : null;
       if (rgOut != null) {
         for (final line in rgOut.split('\n')) {
           final t = line.trim();
@@ -15175,8 +15737,13 @@ ${await _agentsMdBlock()}
         )) {
           if (matches >= maxMatches) break;
           if (entity is! File) continue;
-          if (!entity.path.startsWith('${work.path}/')) continue;
-          final rel = entity.path.substring(work.path.length + 1);
+          if (entity.path != rootPath &&
+              !entity.path.startsWith('$rootPath/')) {
+            continue;
+          }
+          final rel = underWork
+              ? entity.path.substring(work.path.length + 1)
+              : entity.path;
           if (includeRe != null && !includeRe.hasMatch(rel)) continue;
           try {
             if (await entity.length() > maxFileBytes) {
@@ -17374,6 +17941,10 @@ ${await _agentsMdBlock()}
   Future<String> _handleJobStart(Map<String, dynamic> args) async {
     final cmd = args['command'] as String;
     final name = args['name'] as String? ?? 'job';
+    // Strict permission model: same combined path-grant card as run_shell,
+    // pre-execution.
+    final jobPathDenial = await _checkCommandPaths(cmd, tool: 'job_start');
+    if (jobPathDenial != null) return jobPathDenial;
     final id = ++_jobCounter;
     final work = await _sessionWorkDir();
     final job = BgJob(id: id, name: name, command: cmd);

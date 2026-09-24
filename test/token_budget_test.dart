@@ -141,7 +141,12 @@ void main() {
       expect((fn['description'] as String).isNotEmpty, isTrue);
       final params = fn['parameters'] as Map;
       expect(params['type'], 'object');
-      expect(params['properties'], isA<Map>());
+      // Issue 8: zero-arg tools normalize to {'type':'object'} — empty
+      // `properties` is omitted, never sent as {}.
+      final props = params['properties'];
+      expect(props == null || props is Map, isTrue,
+          reason:
+              '${fn['name']}: properties must be a Map or omitted when empty');
     }
   });
 

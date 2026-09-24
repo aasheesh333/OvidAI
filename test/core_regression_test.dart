@@ -17,6 +17,7 @@ import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/commands.dart';
 import 'package:ovid_ai/core/device_control_service.dart';
 import 'package:ovid_ai/core/github_service.dart';
+import 'package:ovid_ai/core/grant_store.dart';
 import 'package:ovid_ai/core/hook_service.dart';
 import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/mcp_config_parse.dart';
@@ -55,7 +56,6 @@ import 'package:ovid_ai/ui/plugins_screen.dart'
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
 import 'package:ovid_ai/core/sandbox_pkg.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
-import 'package:ovid_ai/core/model_limits.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -326,7 +326,10 @@ void main() {
     const storage = FlutterSecureStorage();
     await storage.write(key: 'ovid_github_token', value: 'invalid-token');
     final client = MockClient((request) async {
-      return http.Response('unauthorized', 401);
+      // GitHub's own JSON "Bad credentials" — the two-step confirmation
+      // only treats THIS as a dead token. A bare/non-JSON 401 (proxy, WAF,
+      // edge page) keeps the login and re-arms the profile retry instead.
+      return http.Response('{"message": "Bad credentials"}', 401);
     });
 
     await GitHubService.I.initialize(client: client);
@@ -1103,9 +1106,6 @@ void main() {
         expect(AgentService.contextWindowFor('claude-opus-4-20250514'), 200000);
         expect(AgentService.contextWindowFor('gemini-2.5-flash'), 1048576);
         expect(AgentService.contextWindowFor('grok-3'), 256000);
-        // NVIDIA NIM: both rows were guesses (32K / 262K) until the endpoint
-        // answered "maximum context length is 1000000" when probed with an
-        // oversized prompt — the measured number now wins.
         expect(
           AgentService.contextWindowFor('nvidia/nemotron-3-super'),
           1000000,
@@ -1119,124 +1119,6 @@ void main() {
         // Custom-provider / unknown models get the 1M default.
         expect(AgentService.contextWindowFor('my-custom-model-x1'), 1000000);
         expect(AgentService.contextWindowFor(''), 1000000);
-
-        // ── measured per-model data (ModelLimits) outranks the keyword table
-        // Inferhub publishes input_token_limit/max_output_tokens per route.
-        expect(
-          AgentService.contextWindowFor('ali/glm-5.2'),
-          1000000,
-        ); // keyword table would have said 131072
-        expect(
-          AgentService.contextWindowFor('ali/kimi-k2.7-code'),
-          262144,
-        );
-        expect(AgentService.contextWindowFor('cb/gpt-5.5'), 272000);
-        // A measured small window must not be inflated to the 1M default.
-        expect(
-          AgentService.contextWindowFor('nvidia/nemotron-parse-2.0'),
-          4096,
-        );
-        expect(
-          AgentService.contextWindowFor(
-            'nvidia/riva-translate-4b-instruct-v2',
-          ),
-          8192,
-        );
-        // The effort suffix is stripped before the measured lookup too.
-        expect(
-          AgentService.contextWindowFor('ali/glm-5.2 · High'),
-          1000000,
-        );
-        // The same bare id is a different route per gateway: Fiqstr measured
-        // 990,000 in its own 400 body, KiraAi publishes 1,000,000. Passing the
-        // provider id picks the right one; with no provider the shared table
-        // keeps only numbers every gateway agrees on, so the keyword row wins.
-        expect(
-          AgentService.contextWindowFor('glm-5.2', 'custom-fiqstr'),
-          990000,
-        );
-        expect(
-          AgentService.contextWindowFor('glm-5.2', 'custom-kiraai'),
-          1000000,
-        );
-        expect(AgentService.contextWindowFor('glm-5.2'), 131072);
-        // Output ceilings are gateway-specific too: Apinex answers
-        // "maximum output limit of 1048576" for deepseek-v4-flash while
-        // KiraAi publishes 128,000 on its own route.
-        expect(
-          AgentService.clampMaxOutput(
-            'deepseek-v4-flash',
-            2000000,
-            'custom-apinex',
-          ),
-          1048576,
-        );
-        expect(
-          AgentService.clampMaxOutput(
-            'deepseek-v4-flash',
-            2000000,
-            'custom-kiraai',
-          ),
-          128000,
-        );
-
-        // ── measured output ceilings clamp the user cap
-        expect(AgentService.clampMaxOutput('ali/glm-5.2', 200000), 128000);
-        expect(AgentService.clampMaxOutput('ali/glm-5.2', 4096), 4096);
-        expect(
-          AgentService.clampMaxOutput('minimax-m2.7', 2000000),
-          512000,
-        );
-        // Unmeasured model: the requested cap passes through untouched.
-        expect(AgentService.clampMaxOutput('mystery-llm-9', 200000), 200000);
-
-        // ── Nvidia NIM exact rows, measured from its own 400 bodies
-        expect(
-          AgentService.contextWindowFor(
-            'nvidia/nemotron-3-ultra-550b-a55b',
-            'custom-nvidia',
-          ),
-          1048576,
-        );
-        expect(
-          AgentService.contextWindowFor(
-            'poolside/laguna-xs-2.1',
-            'custom-nvidia',
-          ),
-          262144,
-        );
-        // NIM never published an output ceiling for the nemotron routes, so
-        // nothing is invented: the user's cap is sent as-is.
-        expect(
-          AgentService.clampMaxOutput(
-            'nvidia/nemotron-3-super-120b-a12b',
-            2000000,
-            'custom-nvidia',
-          ),
-          2000000,
-        );
-
-        // ── published modality, per provider, no name guessing
-        expect(
-          ModelLimits.acceptsImages(
-            'meta/llama-3.2-11b-vision-instruct',
-            'custom-nvidia',
-          ),
-          isTrue,
-        );
-        expect(
-          ModelLimits.acceptsImages(
-            'nvidia/nemotron-3-super-120b-a12b',
-            'custom-nvidia',
-          ),
-          isNull,
-        );
-        // A route one gateway calls multimodal stays unknown on a gateway
-        // that never said anything about it.
-        expect(
-          ModelLimits.lookup('mystery-llm-9'),
-          isNull,
-        );
       },
     );
 
@@ -2728,7 +2610,10 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       final res = await AgentService.I.dispatchForTest('read_attachment', {
         'filename': '../../etc/passwd',
       });
-      expect(res, contains('escapes the session workspace'));
+      // Strict permission model: an outside-workspace path goes through the
+      // grant flow and fails closed on deny — the file is never read.
+      expect(res, contains('ACCESS_DENIED'));
+      expect(res, isNot(contains('root:')));
     });
 
     test('SEC4: destructive gate runs before subagent auto-approve', () {
@@ -3039,10 +2924,21 @@ libncursesw.so.6.5←./lib/libncurses.so.6
           if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
         });
 
-        final result = await AgentService.I.dispatchForTest(
-          'browser_download',
-          {'url': 'https://example.test/large.bin'},
-        );
+        final dlFut = AgentService.I.dispatchForTest('browser_download', {
+          'url': 'https://example.test/large.bin',
+        });
+        // Strict permission model: the off-allowlist download host raises a
+        // grant card first (this test is about streaming, not permissions).
+        final dlDeadline = DateTime.now().add(const Duration(seconds: 15));
+        while (AgentService.I.pendingApproval == null) {
+          if (DateTime.now().isAfter(dlDeadline)) break;
+          await Future<void>.delayed(const Duration(milliseconds: 25));
+        }
+        final dlReq = AgentService.I.pendingApproval;
+        expect(dlReq, isNotNull, reason: 'download host must prompt');
+        expect(dlReq!.tool, 'grant:host:example.test');
+        AgentService.I.approve(true);
+        final result = await dlFut.timeout(const Duration(seconds: 60));
 
         expect(result, contains('downloaded ✓'));
         expect(
@@ -3082,10 +2978,18 @@ libncursesw.so.6.5←./lib/libncurses.so.6
           if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
         });
 
-        final result = await AgentService.I.dispatchForTest(
-          'browser_download',
-          {'url': 'https://example.test/missing.bin'},
-        );
+        final dlFut2 = AgentService.I.dispatchForTest('browser_download', {
+          'url': 'https://example.test/missing.bin',
+        });
+        final dlDeadline2 = DateTime.now().add(const Duration(seconds: 15));
+        while (AgentService.I.pendingApproval == null) {
+          if (DateTime.now().isAfter(dlDeadline2)) break;
+          await Future<void>.delayed(const Duration(milliseconds: 25));
+        }
+        final dlReq2 = AgentService.I.pendingApproval;
+        expect(dlReq2, isNotNull, reason: 'download host must prompt');
+        AgentService.I.approve(true);
+        final result = await dlFut2.timeout(const Duration(seconds: 60));
 
         expect(result, contains('HTTP 404'));
         expect(response.completed, isTrue);
@@ -3126,10 +3030,18 @@ libncursesw.so.6.5←./lib/libncurses.so.6
           if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
         });
 
-        final result = await AgentService.I.dispatchForTest(
-          'browser_download',
-          {'url': 'https://example.test/partial.bin'},
-        );
+        final dlFut3 = AgentService.I.dispatchForTest('browser_download', {
+          'url': 'https://example.test/partial.bin',
+        });
+        final dlDeadline3 = DateTime.now().add(const Duration(seconds: 15));
+        while (AgentService.I.pendingApproval == null) {
+          if (DateTime.now().isAfter(dlDeadline3)) break;
+          await Future<void>.delayed(const Duration(milliseconds: 25));
+        }
+        final dlReq3 = AgentService.I.pendingApproval;
+        expect(dlReq3, isNotNull, reason: 'download host must prompt');
+        AgentService.I.approve(true);
+        final result = await dlFut3.timeout(const Duration(seconds: 60));
 
         expect(result, contains('download failed'));
         expect(client.closedWithForce, isTrue);
@@ -3165,9 +3077,18 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
       });
 
-      final result = await AgentService.I.dispatchForTest('browser_download', {
+      final dlFut4 = AgentService.I.dispatchForTest('browser_download', {
         'url': 'https://example.test/unreachable.bin',
       });
+      final dlDeadline4 = DateTime.now().add(const Duration(seconds: 15));
+      while (AgentService.I.pendingApproval == null) {
+        if (DateTime.now().isAfter(dlDeadline4)) break;
+        await Future<void>.delayed(const Duration(milliseconds: 25));
+      }
+      final dlReq4 = AgentService.I.pendingApproval;
+      expect(dlReq4, isNotNull, reason: 'download host must prompt');
+      AgentService.I.approve(true);
+      final result = await dlFut4.timeout(const Duration(seconds: 60));
 
       expect(result, contains('download failed'));
       expect(client.closedWithForce, isTrue);
@@ -3436,12 +3357,10 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         expect(tab.desktopMode, isTrue);
         // Task 1: desktop mode is UA + wide viewport only. It must NOT shrink
         // the visual scale from the device width (old devW/1280 ≈ 0.28).
-        expect(tab.zoom, 1.0);
         expect(tab.userZoom, 1.0);
 
         await AgentService.I.setTabDesktopMode(tab, false, reload: false);
         expect(tab.desktopMode, isFalse);
-        expect(tab.zoom, 1.0);
         expect(tab.userZoom, 1.0);
 
         // 4. Tool exists in roster
@@ -3567,7 +3486,9 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       }
       expect(schemas.keys.toSet(), names);
       for (final schema in schemas.values) {
-        expect(schema['additionalProperties'], isFalse);
+        // Issue 8: `additionalProperties: false` is never sent — providers
+        // that reject unknown schema keys 400 on it.
+        expect(schema.containsKey('additionalProperties'), isFalse);
       }
       expect((schemas['device_read']!['properties'] as Map)['mode']['enum'], [
         'delta',
@@ -3594,9 +3515,19 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       ]);
       expect(
         (schemas['device_system_nav']!['properties'] as Map)['action']['enum'],
-        ['back', 'home', 'recents', 'notifications', 'quick_settings', 'settings'],
+        [
+          'back',
+          'home',
+          'recents',
+          'notifications',
+          'quick_settings',
+          'settings',
+        ],
       );
-      expect(schemas['device_screenshot']!['properties'], isEmpty);
+      // Issue 8: zero-arg tools normalize to {'type':'object'} — no empty
+      // `properties` object is sent on the wire.
+      expect(schemas['device_screenshot']!.containsKey('properties'), isFalse);
+      expect(schemas['device_screenshot']!['type'], 'object');
       // Policy gate: read-only mode denies every device tool.
       s.mode = 'safe';
       for (final name in names) {
@@ -5755,57 +5686,59 @@ block</pre>
       },
     );
 
-    test('settlement notice reaches an idle parent as a passive row, never a new turn',
-        () async {
-      final parent = newParent('sg-p3');
-      parent.messages.add(
-        Message(role: 'user', content: 'kick off the parent transcript'),
-      );
+    test(
+      'settlement notice reaches an idle parent as a passive row, never a new turn',
+      () async {
+        final parent = newParent('sg-p3');
+        parent.messages.add(
+          Message(role: 'user', content: 'kick off the parent transcript'),
+        );
 
-      // Dispatch a background child; its run fails fast (no provider in
-      // tests), which settles it and delivers the notice.
-      await AgentService.I.dispatchForTest('dispatch_agent', {
-        'prompt': 'do a thing',
-        'run_in_background': true,
-      });
+        // Dispatch a background child; its run fails fast (no provider in
+        // tests), which settles it and delivers the notice.
+        await AgentService.I.dispatchForTest('dispatch_agent', {
+          'prompt': 'do a thing',
+          'run_in_background': true,
+        });
 
-      // The parent transcript now holds a PASSIVE settlement notice — a
-      // settling child must never start a brand-new run on an idle parent
-      // after the response looked done.
-      final notices = parent.messages
-          .where((m) => m.content.contains('Background agent'))
-          .toList();
-      expect(
-        notices,
-        isNotEmpty,
-        reason: 'background settlement delivers a passive parent notice',
-      );
-      expect(notices.first.content, contains('⛁'));
-      // The old "new turn" form must NOT appear — no run was started.
-      final newTurnNotices = parent.messages
-          .where((m) => m.content.contains('Background subagent'))
-          .length;
-      expect(
-        newTurnNotices,
-        0,
-        reason: 'idle parent must not get a new-turn settlement notice',
-      );
-      // Foreground children must NOT deliver a notice — their result IS
-      // the tool result (double-delivery check).
-      final fgBefore = parent.messages.length;
-      await AgentService.I.dispatchForTest('dispatch_agent', {
-        'prompt': 'foreground thing',
-      });
-      final fgNotices = parent.messages
-          .skip(fgBefore)
-          .where((m) => m.content.contains('Background agent'))
-          .length;
-      expect(
-        fgNotices,
-        0,
-        reason: 'foreground dispatch returns the result, no notice',
-      );
-    });
+        // The parent transcript now holds a PASSIVE settlement notice — a
+        // settling child must never start a brand-new run on an idle parent
+        // after the response looked done.
+        final notices = parent.messages
+            .where((m) => m.content.contains('Background agent'))
+            .toList();
+        expect(
+          notices,
+          isNotEmpty,
+          reason: 'background settlement delivers a passive parent notice',
+        );
+        expect(notices.first.content, contains('⛁'));
+        // The old "new turn" form must NOT appear — no run was started.
+        final newTurnNotices = parent.messages
+            .where((m) => m.content.contains('Background subagent'))
+            .length;
+        expect(
+          newTurnNotices,
+          0,
+          reason: 'idle parent must not get a new-turn settlement notice',
+        );
+        // Foreground children must NOT deliver a notice — their result IS
+        // the tool result (double-delivery check).
+        final fgBefore = parent.messages.length;
+        await AgentService.I.dispatchForTest('dispatch_agent', {
+          'prompt': 'foreground thing',
+        });
+        final fgNotices = parent.messages
+            .skip(fgBefore)
+            .where((m) => m.content.contains('Background agent'))
+            .length;
+        expect(
+          fgNotices,
+          0,
+          reason: 'foreground dispatch returns the result, no notice',
+        );
+      },
+    );
 
     test('report tool: child → parent, quiet and waking forms', () async {
       final app = AppState.I;
@@ -7312,11 +7245,9 @@ block</pre>
       BrowserTab.devW = 360;
       BrowserTab.devH = 720;
       final mobile = BrowserTab(url: 'https://x.test');
-      expect(mobile.zoom, 1.0);
       expect(mobile.userZoom, 1.0);
 
       final desktop = BrowserTab(url: 'https://x.test', desktopMode: true);
-      expect(desktop.zoom, 1.0);
       expect(desktop.userZoom, 1.0);
     });
 
@@ -7513,45 +7444,51 @@ block</pre>
       );
     });
 
-    test('manual /compact folds a long session below the auto retain floor',
-        () async {
-      final app = AppState.I;
-      final prov = fakeProvider();
-      app.providers.add(prov);
-      addTearDown(() => app.providers.removeWhere((p) => p.id == 'prov-c29'));
-      // 349 messages ≈ 37k tokens: the 16%-of-window auto retain floor
-      // (160k on a 1M window) can never touch it, but an explicit user
-      // request must still fold it.
-      final s = newCompactSession('c29-long', msgs: 349);
-      s.providerId = prov.id;
-      app.activeSessionId = s.id;
-      addTearDown(() => app.activeSessionId = '');
-      AgentService.I.compactionSummarizerForTest = (sess, from, cutoff) async {
-        return '## Primary Request and Intent\n- long goal';
-      };
-      addTearDown(() => AgentService.I.compactionSummarizerForTest = null);
+    test(
+      'manual /compact folds a long session below the auto retain floor',
+      () async {
+        final app = AppState.I;
+        final prov = fakeProvider();
+        app.providers.add(prov);
+        addTearDown(() => app.providers.removeWhere((p) => p.id == 'prov-c29'));
+        // 349 messages ≈ 37k tokens: the 16%-of-window auto retain floor
+        // (160k on a 1M window) can never touch it, but an explicit user
+        // request must still fold it.
+        final s = newCompactSession('c29-long', msgs: 349);
+        s.providerId = prov.id;
+        app.activeSessionId = s.id;
+        addTearDown(() => app.activeSessionId = '');
+        AgentService.I.compactionSummarizerForTest =
+            (sess, from, cutoff) async {
+              return '## Primary Request and Intent\n- long goal';
+            };
+        addTearDown(() => AgentService.I.compactionSummarizerForTest = null);
 
-      final status = await AgentService.I.compactNow(s, prov);
-      expect(status, contains('Session compacted'));
-      expect(s.compactedAtCount, greaterThan(0));
-      expect(s.compactedSummary, contains('long goal'));
-    });
+        final status = await AgentService.I.compactNow(s, prov);
+        expect(status, contains('Session compacted'));
+        expect(s.compactedAtCount, greaterThan(0));
+        expect(s.compactedSummary, contains('long goal'));
+      },
+    );
 
-    test('auto-compaction fires on absolute size below 80% of a 1M window',
-        () async {
-      final prov = fakeProvider();
-      // ~107k tokens of history: far below 80% of 1M, above the absolute
-      // floor — must compact instead of growing unboundedly.
-      final s = newCompactSession('c29-abs', msgs: 1000);
-      AgentService.I.compactionSummarizerForTest = (sess, from, cutoff) async {
-        return '## Primary Request and Intent\n- abs goal';
-      };
-      addTearDown(() => AgentService.I.compactionSummarizerForTest = null);
+    test(
+      'auto-compaction fires on absolute size below 80% of a 1M window',
+      () async {
+        final prov = fakeProvider();
+        // ~107k tokens of history: far below 80% of 1M, above the absolute
+        // floor — must compact instead of growing unboundedly.
+        final s = newCompactSession('c29-abs', msgs: 1000);
+        AgentService.I.compactionSummarizerForTest =
+            (sess, from, cutoff) async {
+              return '## Primary Request and Intent\n- abs goal';
+            };
+        addTearDown(() => AgentService.I.compactionSummarizerForTest = null);
 
-      await AgentService.I.maybeCompactForTest(s, prov);
-      expect(s.compactedSummary, contains('abs goal'));
-      expect(s.compactedAtCount, greaterThan(0));
-    });
+        await AgentService.I.maybeCompactForTest(s, prov);
+        expect(s.compactedSummary, contains('abs goal'));
+        expect(s.compactedAtCount, greaterThan(0));
+      },
+    );
 
     test('summarizer failure is reported honestly (nothing changes)', () async {
       final app = AppState.I;
@@ -7862,13 +7799,20 @@ block</pre>
       expect(src, isNot(contains('cancelRunFor(kid.id)')));
       // Chat red button stops only the current session for 100% session isolation
       // (queues preserved so a queued message still sends next).
+      // Whitespace-tolerant: the call may be formatted across lines.
       final chat = File('lib/ui/chat_screen.dart').readAsStringSync();
-      expect(chat, contains('stopRequested(sessionId: sessionId)'));
+      expect(
+        chat,
+        matches(RegExp(r'stopRequested\(\s*sessionId:\s*sessionId,?\s*\)')),
+      );
       // Notification Stop still targets the displayed session only.
       final notif = File(
         'lib/core/agent_notification_service.dart',
       ).readAsStringSync();
-      expect(notif, contains('stopRequested(sessionId: sessionId)'));
+      expect(
+        notif,
+        matches(RegExp(r'stopRequested\(\s*sessionId:\s*sessionId,?\s*\)')),
+      );
       // Notification Exit remains the explicit global panic path.
       expect(notif, contains('cancelAllRuns'));
     });
@@ -8335,11 +8279,11 @@ block</pre>
 
         final kids = AppState.I.childrenOf(parent.id);
         expect(kids.length, 3);
-        expect(
-          kids.map((c) => c.agentLabel).toSet(),
-          {'a', 'b', 'c'},
-          reason: 'each task got its own child session',
-        );
+        expect(kids.map((c) => c.agentLabel).toSet(), {
+          'a',
+          'b',
+          'c',
+        }, reason: 'each task got its own child session');
       },
     );
 
@@ -12609,9 +12553,7 @@ You are an expert security auditor reviewing code for vulnerabilities.
     test(
       'WS2: enabledByDefault round-trips through manifest JSON and defaults to true',
       () {
-        NormalizedPluginManifest manifest({
-          required bool enabledByDefault,
-        }) =>
+        NormalizedPluginManifest manifest({required bool enabledByDefault}) =>
             NormalizedPluginManifest(
               id: 'acme-inc/reviewer-pro',
               name: 'Reviewer Pro',
@@ -13168,9 +13110,7 @@ Find security defects.''');
         ]);
         expect(manifest.mcpServers.first.envNames, ['ACME_TOKEN']);
         expect(
-          manifest.mcpServers
-              .firstWhere((s) => s.name == 'remote')
-              .headerNames,
+          manifest.mcpServers.firstWhere((s) => s.name == 'remote').headerNames,
           ['Authorization'],
         );
         expect(
@@ -17139,9 +17079,7 @@ cwd = 'tools'
         final result = await svc.install(manifest, null, onProgress: lines.add);
 
         expect(result.status, PluginDependencyStatus.failed);
-        final entry = result.entries.singleWhere(
-          (e) => e.name == 'left-pad',
-        );
+        final entry = result.entries.singleWhere((e) => e.name == 'left-pad');
         expect(entry.status, PluginDependencyStatus.failed);
         expect(entry.error, contains('node is not installed'));
         expect(entry.error, contains('install it, then retry'));
@@ -17153,16 +17091,11 @@ cwd = 'tools'
         );
         // … and no package-manager command ever ran.
         expect(
-          runner.cmds.where(
-            (c) => c.args.isNotEmpty && c.args.first == 'npm',
-          ),
+          runner.cmds.where((c) => c.args.isNotEmpty && c.args.first == 'npm'),
           isEmpty,
         );
         // The actionable error reached the progress stream for the UI.
-        expect(
-          lines.any((l) => l.contains('node is not installed')),
-          isTrue,
-        );
+        expect(lines.any((l) => l.contains('node is not installed')), isTrue);
       },
     );
 
@@ -17183,10 +17116,7 @@ cwd = 'tools'
 
         runner.queue((0, 'OK node'));
         runner.queue((0, 'added 1 package'));
-        runner.queue((
-          0,
-          '{"dependencies":{"left-pad":{"version":"1.3.11"}}}',
-        ));
+        runner.queue((0, '{"dependencies":{"left-pad":{"version":"1.3.11"}}}'));
         final lines = <String>[];
         final result = await svc.install(manifest, null, onProgress: lines.add);
 
@@ -17194,9 +17124,7 @@ cwd = 'tools'
         // Tagged `[kind]` lines stream to the UI callback — the live
         // progress sheet renders them without polling.
         expect(
-          lines.any(
-            (l) => l.startsWith('[npm]') && l.contains('left-pad'),
-          ),
+          lines.any((l) => l.startsWith('[npm]') && l.contains('left-pad')),
           isTrue,
           reason: 'npm stage lines must reach onProgress, got: $lines',
         );
@@ -17647,10 +17575,10 @@ cwd = 'tools'
         // NOTE: no grant saved — the agent must surface an approval card
         // for the user to decide, never auto-approve.
 
-        final fut = AgentService.I.dispatchForTest(
-          'agent_install_plugin',
-          {'plugin_name': 'P7 Runtime Kit', 'local_path': src.path},
-        );
+        final fut = AgentService.I.dispatchForTest('agent_install_plugin', {
+          'plugin_name': 'P7 Runtime Kit',
+          'local_path': src.path,
+        });
         ApprovalRequest? req;
         final deadline = DateTime.now().add(const Duration(seconds: 15));
         while (AgentService.I.pendingApproval == null) {
@@ -17904,9 +17832,7 @@ cwd = 'tools'
 
         // The pending entry promoted into the disabled set — never
         // active — and persists as disabled so later boots skip it.
-        final rec = await PluginRuntimeManager.I.recordFor(
-          'p7org/runtime-kit',
-        );
+        final rec = await PluginRuntimeManager.I.recordFor('p7org/runtime-kit');
         expect(rec!.state, PluginActivation.disabled);
         expect(rec.promoteOnNextBoot, isFalse);
         final entries = await PluginRuntimeManager.I.installedEntries();
@@ -18491,195 +18417,187 @@ cwd = 'tools'
       );
     });
 
-    test(
-      'user_prompt_submit fires once per prompt at runTask entry',
-      () async {
-        final app = AppState.I;
-        final agent = AgentService.I;
-        final server = await HttpServer.bind('127.0.0.1', 0);
-        addTearDown(() => server.close(force: true));
-        final provider = app.providerById('ollama-local')!;
-        final originals = {
-          'baseUrl': provider.baseUrl,
-          'models': provider.models,
-          'selectedModel': provider.selectedModel,
-        };
-        addTearDown(() {
-          provider
-            ..baseUrl = originals['baseUrl'] as String
-            ..models = originals['models'] as List<String>
-            ..selectedModel = originals['selectedModel'] as String?;
-        });
-        final session = ChatSession(
-          id: 'p8-ups',
-          title: 'ups',
-          providerId: provider.id,
-          model: 'test-model',
-          mode: 'auto',
-          messages: [Message(role: 'user', content: 'go')],
-        );
-        app.sessions.insert(0, session);
-        addTearDown(() => app.sessions.removeWhere((x) => x.id == session.id));
+    test('user_prompt_submit fires once per prompt at runTask entry', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final server = await HttpServer.bind('127.0.0.1', 0);
+      addTearDown(() => server.close(force: true));
+      final provider = app.providerById('ollama-local')!;
+      final originals = {
+        'baseUrl': provider.baseUrl,
+        'models': provider.models,
+        'selectedModel': provider.selectedModel,
+      };
+      addTearDown(() {
         provider
-          ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
-          ..models = ['test-model'];
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+      });
+      final session = ChatSession(
+        id: 'p8-ups',
+        title: 'ups',
+        providerId: provider.id,
+        model: 'test-model',
+        mode: 'auto',
+        messages: [Message(role: 'user', content: 'go')],
+      );
+      app.sessions.insert(0, session);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == session.id));
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['test-model'];
 
-        p8Register('p8/ups', [
-          p8Hook('user_prompt_submit', 'ups-cmd', ordinal: 0),
-        ]);
-        final upsEvents = <String>[];
-        final svc = HookService.I;
-        svc.executorForTest = (cmd, env) async {
-          upsEvents.add(env['PLUGIN_EVENT']!);
-          return '';
-        };
-        addTearDown(() => svc.executorForTest = null);
+      p8Register('p8/ups', [
+        p8Hook('user_prompt_submit', 'ups-cmd', ordinal: 0),
+      ]);
+      final upsEvents = <String>[];
+      final svc = HookService.I;
+      svc.executorForTest = (cmd, env) async {
+        upsEvents.add(env['PLUGIN_EVENT']!);
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
 
-        // Turn 1: one tool round + final → 2 LLM requests, ONE prompt.
-        var requestCount = 0;
-        final serverTask = () async {
-          await for (final request in server) {
-            await utf8.decoder.bind(request).join();
-            requestCount++;
-            request.response.headers.chunkedTransferEncoding = true;
-            if (requestCount == 1) {
-              request.response.add(
-                utf8.encode(
-                  'data: ${jsonEncode({
-                    'choices': [
-                      {
-                        'delta': {
-                          'tool_calls': [
-                            {
-                              'index': 0,
-                              'id': 'call_1',
-                              'function': {'name': 'file_read', 'arguments': '{"path":"x.txt"}'},
-                            },
-                          ],
-                        },
-                        'finish_reason': 'tool_calls',
-                      },
-                    ],
-                  })}\n\n',
-                ),
-              );
-            } else {
-              request.response.add(
-                utf8.encode(
-                  'data: ${jsonEncode({
-                    'choices': [
-                      {
-                        'delta': {'content': 'all done'},
-                        'finish_reason': 'stop',
-                      },
-                    ],
-                  })}\n\n',
-                ),
-              );
-            }
-            await request.response.flush();
-            await request.response.close();
-          }
-        }();
-        unawaited(serverTask);
-
-        await agent
-            .runTask('go', sessionId: session.id)
-            .timeout(const Duration(seconds: 30));
-
-        expect(
-          upsEvents.where((e) => e == 'user_prompt_submit').length,
-          1,
-          reason:
-              'canonical user_prompt_submit is once per user prompt, '
-              'not per LLM turn',
-        );
-      },
-      timeout: const Timeout(Duration(seconds: 60)),
-    );
-
-    test(
-      'post_request fires after each LLM response',
-      () async {
-        final app = AppState.I;
-        final agent = AgentService.I;
-        final server = await HttpServer.bind('127.0.0.1', 0);
-        addTearDown(() => server.close(force: true));
-        final provider = app.providerById('ollama-local')!;
-        final originals = {
-          'baseUrl': provider.baseUrl,
-          'models': provider.models,
-          'selectedModel': provider.selectedModel,
-        };
-        addTearDown(() {
-          provider
-            ..baseUrl = originals['baseUrl'] as String
-            ..models = originals['models'] as List<String>
-            ..selectedModel = originals['selectedModel'] as String?;
-        });
-        final session = ChatSession(
-          id: 'p8-postreq',
-          title: 'postreq',
-          providerId: provider.id,
-          model: 'test-model',
-          mode: 'auto',
-          messages: [Message(role: 'user', content: 'go')],
-        );
-        app.sessions.insert(0, session);
-        addTearDown(() => app.sessions.removeWhere((x) => x.id == session.id));
-        provider
-          ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
-          ..models = ['test-model'];
-
-        p8Register('p8/postreq', [
-          p8Hook('post_request', 'post-req-cmd', ordinal: 0),
-        ]);
-        final events = <String>[];
-        final svc = HookService.I;
-        svc.executorForTest = (cmd, env) async {
-          events.add(env['PLUGIN_EVENT']!);
-          return '';
-        };
-        addTearDown(() => svc.executorForTest = null);
-
-        var requestCount = 0;
-        final serverTask = () async {
-          await for (final request in server) {
-            await utf8.decoder.bind(request).join();
-            requestCount++;
-            request.response.headers.chunkedTransferEncoding = true;
+      // Turn 1: one tool round + final → 2 LLM requests, ONE prompt.
+      var requestCount = 0;
+      final serverTask = () async {
+        await for (final request in server) {
+          await utf8.decoder.bind(request).join();
+          requestCount++;
+          request.response.headers.chunkedTransferEncoding = true;
+          if (requestCount == 1) {
             request.response.add(
               utf8.encode(
                 'data: ${jsonEncode({
                   'choices': [
                     {
-                      'delta': {'content': 'reply $requestCount'},
+                      'delta': {
+                        'tool_calls': [
+                          {
+                            'index': 0,
+                            'id': 'call_1',
+                            'function': {'name': 'file_read', 'arguments': '{"path":"x.txt"}'},
+                          },
+                        ],
+                      },
+                      'finish_reason': 'tool_calls',
+                    },
+                  ],
+                })}\n\n',
+              ),
+            );
+          } else {
+            request.response.add(
+              utf8.encode(
+                'data: ${jsonEncode({
+                  'choices': [
+                    {
+                      'delta': {'content': 'all done'},
                       'finish_reason': 'stop',
                     },
                   ],
                 })}\n\n',
               ),
             );
-            await request.response.flush();
-            await request.response.close();
           }
-        }();
-        unawaited(serverTask);
+          await request.response.flush();
+          await request.response.close();
+        }
+      }();
+      unawaited(serverTask);
 
-        await agent
-            .runTask('go', sessionId: session.id)
-            .timeout(const Duration(seconds: 30));
-        // Fire-and-forget post_request hooks need a microtask turn to land.
-        await Future<void>.delayed(const Duration(milliseconds: 200));
+      await agent
+          .runTask('go', sessionId: session.id)
+          .timeout(const Duration(seconds: 30));
 
-        expect(
-          events.where((e) => e == 'post_request').length,
-          greaterThanOrEqualTo(1),
-          reason: 'post_request must fire after each LLM response',
-        );
-      },
-      timeout: const Timeout(Duration(seconds: 60)),
-    );
+      expect(
+        upsEvents.where((e) => e == 'user_prompt_submit').length,
+        1,
+        reason:
+            'canonical user_prompt_submit is once per user prompt, '
+            'not per LLM turn',
+      );
+    }, timeout: const Timeout(Duration(seconds: 60)));
+
+    test('post_request fires after each LLM response', () async {
+      final app = AppState.I;
+      final agent = AgentService.I;
+      final server = await HttpServer.bind('127.0.0.1', 0);
+      addTearDown(() => server.close(force: true));
+      final provider = app.providerById('ollama-local')!;
+      final originals = {
+        'baseUrl': provider.baseUrl,
+        'models': provider.models,
+        'selectedModel': provider.selectedModel,
+      };
+      addTearDown(() {
+        provider
+          ..baseUrl = originals['baseUrl'] as String
+          ..models = originals['models'] as List<String>
+          ..selectedModel = originals['selectedModel'] as String?;
+      });
+      final session = ChatSession(
+        id: 'p8-postreq',
+        title: 'postreq',
+        providerId: provider.id,
+        model: 'test-model',
+        mode: 'auto',
+        messages: [Message(role: 'user', content: 'go')],
+      );
+      app.sessions.insert(0, session);
+      addTearDown(() => app.sessions.removeWhere((x) => x.id == session.id));
+      provider
+        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
+        ..models = ['test-model'];
+
+      p8Register('p8/postreq', [
+        p8Hook('post_request', 'post-req-cmd', ordinal: 0),
+      ]);
+      final events = <String>[];
+      final svc = HookService.I;
+      svc.executorForTest = (cmd, env) async {
+        events.add(env['PLUGIN_EVENT']!);
+        return '';
+      };
+      addTearDown(() => svc.executorForTest = null);
+
+      var requestCount = 0;
+      final serverTask = () async {
+        await for (final request in server) {
+          await utf8.decoder.bind(request).join();
+          requestCount++;
+          request.response.headers.chunkedTransferEncoding = true;
+          request.response.add(
+            utf8.encode(
+              'data: ${jsonEncode({
+                'choices': [
+                  {
+                    'delta': {'content': 'reply $requestCount'},
+                    'finish_reason': 'stop',
+                  },
+                ],
+              })}\n\n',
+            ),
+          );
+          await request.response.flush();
+          await request.response.close();
+        }
+      }();
+      unawaited(serverTask);
+
+      await agent
+          .runTask('go', sessionId: session.id)
+          .timeout(const Duration(seconds: 30));
+      // Fire-and-forget post_request hooks need a microtask turn to land.
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      expect(
+        events.where((e) => e == 'post_request').length,
+        greaterThanOrEqualTo(1),
+        reason: 'post_request must fire after each LLM response',
+      );
+    }, timeout: const Timeout(Duration(seconds: 60)));
 
     test('permission_request gate denies a tool approval', () async {
       final app = AppState.I;
@@ -19222,6 +19140,12 @@ cwd = 'tools'
         final server = ownedServer('encoded/plugin', name: 'remote');
         registerOwner('encoded/plugin', serverName: 'remote');
         app.mcpServers.add(server);
+        // Strict permission model: the agent-triggered MCP connect dials
+        // host "encoded" — grant it for this test (the gate itself is
+        // covered by the permission-model tests).
+        final hostGrant = PermissionGrant.host('encoded', global: true);
+        app.globalPermissionGrants.add(hostGrant);
+        addTearDown(() => app.globalPermissionGrants.remove(hostGrant));
         final session = ChatSession(
           id: 'p9-encoded-session',
           title: 'encoded',
@@ -19283,7 +19207,16 @@ cwd = 'tools'
         );
         app.mcpServers.addAll([advertised, encodedTarget]);
         McpService.I.httpClientForTest = mcpHttpClient();
+        // Strict permission model: grant ONLY the intended host. The
+        // wrong-target host must stay ungranted so the test proves the
+        // encoded lookup cannot capture the ownerless legacy stub.
+        final hostGrant = PermissionGrant.host(
+          'actual-legacy.example',
+          global: true,
+        );
+        app.globalPermissionGrants.add(hostGrant);
         addTearDown(() async {
+          app.globalPermissionGrants.remove(hostGrant);
           app.mcpServers.removeWhere(
             (server) =>
                 identical(server, advertised) ||
@@ -19416,7 +19349,7 @@ cwd = 'tools'
             ),
           ],
         );
-      final entry = PluginInstallEntry(
+        final entry = PluginInstallEntry(
           activation: PluginActivationRecord(
             pluginId: owner,
             state: PluginActivation.pendingGlobal,
@@ -19429,18 +19362,18 @@ cwd = 'tools'
           disabled: true,
         );
         final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(
-        kPluginActivationPrefKey,
-        jsonEncode({owner: jsonEncode(entry.toJson())}),
-      );
-      await PluginPermissionStore().save(
-        PluginPermissionGrant(
-          pluginId: owner,
-          manifestDigest: pluginManifestDigest(manifest),
-          capabilities: inferRequestedCapabilities(manifest),
-          approvedAt: DateTime.now(),
-        ),
-      );
+        await prefs.setString(
+          kPluginActivationPrefKey,
+          jsonEncode({owner: jsonEncode(entry.toJson())}),
+        );
+        await PluginPermissionStore().save(
+          PluginPermissionGrant(
+            pluginId: owner,
+            manifestDigest: pluginManifestDigest(manifest),
+            capabilities: inferRequestedCapabilities(manifest),
+            approvedAt: DateTime.now(),
+          ),
+        );
         var requests = 0;
         McpService.I.httpClientForTest = MockClient((request) async {
           requests++;
@@ -20817,6 +20750,7 @@ cwd = 'tools'
           serverClosed = true;
           await server.close(force: true);
         }
+
         server.listen((request) async {
           final path = request.uri.path;
           List<int>? body;
@@ -21886,16 +21820,19 @@ cwd = 'tools'
         // other session does not until the next-boot promotion.
         expect(
           SkillService.I
-              .resolveForSession(
-                'A',
-                'plugin:acme/research-kit/skill:research',
-              )
+              .resolveForSession('A', 'plugin:acme/research-kit/skill:research')
               .unique
               ?.content,
           'RESEARCH BODY',
         );
-        expect(SkillService.I.resolveForSession('A', 'research').isUnique, isTrue);
-        expect(SkillService.I.resolveForSession('B', 'research').isAbsent, isTrue);
+        expect(
+          SkillService.I.resolveForSession('A', 'research').isUnique,
+          isTrue,
+        );
+        expect(
+          SkillService.I.resolveForSession('B', 'research').isAbsent,
+          isTrue,
+        );
 
         // Boot 2 (one restart): the coordinator promotes the runtime globally
         // and remounts every session.
@@ -21907,8 +21844,14 @@ cwd = 'tools'
         );
         await app.initializeReadiness();
 
-        expect(SkillService.I.resolveForSession('A', 'research').isUnique, isTrue);
-        expect(SkillService.I.resolveForSession('B', 'research').isUnique, isTrue);
+        expect(
+          SkillService.I.resolveForSession('A', 'research').isUnique,
+          isTrue,
+        );
+        expect(
+          SkillService.I.resolveForSession('B', 'research').isUnique,
+          isTrue,
+        );
         final promoted = app.plugins.singleWhere(
           (plugin) => plugin.runtimeId == 'acme/research-kit',
         );
@@ -22126,7 +22069,9 @@ cwd = 'tools'
           'RESEARCH BODY',
         );
         expect(
-          SkillService.I.resolveForSession(recovery.id, 'legacy-skill').isAbsent,
+          SkillService.I
+              .resolveForSession(recovery.id, 'legacy-skill')
+              .isAbsent,
           isTrue,
         );
         expect(HookService.I.hasRegisteredHooks('acme/research-kit'), isTrue);
@@ -22160,56 +22105,57 @@ cwd = 'tools'
       },
     );
 
-    test('title generation runs once per session and applies the title', () async {
-      final app = AppState.createForTest();
-      addTearDown(AppState.resetTestInstance);
-      const providerId = 'title-prov';
-      app.providers.add(
-        ProviderConfig(
-          id: providerId,
-          name: 'Title Test',
-          description: '',
-          baseUrl: 'https://example.test/v1',
-          apiKey: 'test-key',
-          models: const ['m'],
-        ),
-      );
-      addTearDown(
-        () => app.providers.removeWhere((p) => p.id == providerId),
-      );
+    test(
+      'title generation runs once per session and applies the title',
+      () async {
+        final app = AppState.createForTest();
+        addTearDown(AppState.resetTestInstance);
+        const providerId = 'title-prov';
+        app.providers.add(
+          ProviderConfig(
+            id: providerId,
+            name: 'Title Test',
+            description: '',
+            baseUrl: 'https://example.test/v1',
+            apiKey: 'test-key',
+            models: const ['m'],
+          ),
+        );
+        addTearDown(() => app.providers.removeWhere((p) => p.id == providerId));
 
-      var calls = 0;
-      AgentService.titleLlmForTest = (provider, messages, session) async {
-        calls++;
-        return {
-          'choices': [
-            {
-              'message': {'content': 'Generated Title'},
-            },
-          ],
+        var calls = 0;
+        AgentService.titleLlmForTest = (provider, messages, session) async {
+          calls++;
+          return {
+            'choices': [
+              {
+                'message': {'content': 'Generated Title'},
+              },
+            ],
+          };
         };
-      };
-      addTearDown(AgentService.resetTitleStateForTest);
+        addTearDown(AgentService.resetTitleStateForTest);
 
-      final s = ChatSession(
-        id: 'title-once',
-        title: 'New chat',
-        providerId: providerId,
-        model: 'm',
-        mode: 'auto',
-      );
-      s.messages.addAll([
-        Message(role: 'user', content: 'hello world'),
-        Message(role: 'assistant', content: 'hi there'),
-      ]);
-      app.sessions.insert(0, s);
+        final s = ChatSession(
+          id: 'title-once',
+          title: 'New chat',
+          providerId: providerId,
+          model: 'm',
+          mode: 'auto',
+        );
+        s.messages.addAll([
+          Message(role: 'user', content: 'hello world'),
+          Message(role: 'assistant', content: 'hi there'),
+        ]);
+        app.sessions.insert(0, s);
 
-      await AgentService.I.maybeGenerateSessionTitle(s);
-      await AgentService.I.maybeGenerateSessionTitle(s);
+        await AgentService.I.maybeGenerateSessionTitle(s);
+        await AgentService.I.maybeGenerateSessionTitle(s);
 
-      expect(calls, 1, reason: 'the LLM title call runs once per session');
-      expect(s.title, 'Generated Title');
-    });
+        expect(calls, 1, reason: 'the LLM title call runs once per session');
+        expect(s.title, 'Generated Title');
+      },
+    );
   });
 }
 

@@ -66,6 +66,7 @@ void main() {
       expect(payload['enabled'], isTrue);
       expect(payload['tabId'], tab.id);
       expect(payload['logicalWidth'], 1280);
+      expect(payload['logicalHeight'], 800);
     });
 
     test('toggling desktop off clears the forced width', () async {

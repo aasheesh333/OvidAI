@@ -161,6 +161,32 @@ void main() {
     });
   });
 
+  group('combined multi-target grants', () {
+    test('several path grants each cover their own subtree', () {
+      // Mirrors a combined approval card ("Always allow" on several
+      // paths): each granted path is checked independently.
+      final store = GrantStore();
+      store.addPathGrant('s1', '/data/a');
+      store.addPathGrant('s1', '/data/b');
+      expect(store.isPathGranted('s1', '/data/a/f.txt'), isTrue);
+      expect(store.isPathGranted('s1', '/data/b/deep/f.txt'), isTrue);
+      expect(store.isPathGranted('s1', '/data/c/f.txt'), isFalse);
+      // Revoking one leaves the other intact.
+      expect(store.revokePathGrant('s1', '/data/a'), isTrue);
+      expect(store.isPathGranted('s1', '/data/a/f.txt'), isFalse);
+      expect(store.isPathGranted('s1', '/data/b/f.txt'), isTrue);
+    });
+
+    test('path and host grants coexist independently', () {
+      final store = GrantStore();
+      store.addPathGrant('s1', '/data/work');
+      store.addHostGrant('s1', 'example.com');
+      expect(store.isPathGranted('s1', '/data/work/f'), isTrue);
+      expect(store.isHostGranted('s1', 'api.example.com'), isTrue);
+      expect(store.sessionGrantsJson('s1'), hasLength(2));
+    });
+  });
+
   group('workspace root resolution', () {
     test('general mode pins the session workspace', () {
       expect(

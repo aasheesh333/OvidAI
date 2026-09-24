@@ -85,7 +85,27 @@ void main() {
       expect(kotlin, contains('Win32'));
       expect(kotlin, contains('userAgentData'));
       expect(kotlin, contains('pointer'));
-      expect(shim, contains('DESKTOP_FEATURE_SHIM'));
+      expect(shim, contains('desktopFeatureShim'));
+    });
+
+    test('shim dimensions are parameterized, not hardcoded 1280x800', () {
+      final kotlin = _kotlinSource();
+      final gen = _functionBody(kotlin, 'desktopFeatureShim');
+      expect(gen, contains('width: Int'));
+      expect(gen, contains('height: Int'));
+      expect(gen, contains('return \$width;'));
+      expect(gen, contains('return \$height;'));
+      // No hardcoded desktop dimensions left in the generated getters.
+      expect(gen, isNot(contains('return 1280;')));
+      expect(gen, isNot(contains('return 800;')));
+    });
+
+    test('feature shim re-installs when the forced size changes', () {
+      final kotlin = _kotlinSource();
+      final shim = _functionBody(kotlin, 'applyFeatureShim');
+      // Dimension-aware dedupe: same size ⇒ keep, different size ⇒ reinstall.
+      expect(shim, contains('existing.first == w'));
+      expect(shim, contains('existing.second == h'));
     });
   });
 }

@@ -73,10 +73,7 @@ void main() {
     });
 
     test('merge keeps the first value for a duplicate name', () {
-      expect(
-        CookieMerge.merge(['a=1; b=2', 'a=9; c=3']),
-        'a=1; b=2; c=3',
-      );
+      expect(CookieMerge.merge(['a=1; b=2', 'a=9; c=3']), 'a=1; b=2; c=3');
     });
 
     test('merge skips null/empty sources', () {
@@ -88,7 +85,10 @@ void main() {
         CookieMerge.originOf('https://accounts.google.com/o/oauth2?q=secret#x'),
         'https://accounts.google.com/',
       );
-      expect(CookieMerge.originOf('http://localhost:8080/app'), 'http://localhost:8080/');
+      expect(
+        CookieMerge.originOf('http://localhost:8080/app'),
+        'http://localhost:8080/',
+      );
       // Never a path/query — those can carry session-specific data.
       expect(CookieMerge.originOf('https://a.test/'), 'https://a.test/');
     });
@@ -103,7 +103,9 @@ void main() {
 
   group('BrowserShareReport', () {
     test('nothing() explains itself instead of claiming success', () {
-      const report = BrowserShareReport.nothing('No browsed sites recorded yet.');
+      const report = BrowserShareReport.nothing(
+        'No browsed sites recorded yet.',
+      );
       expect(report.applied, isFalse);
       expect(report.copied, 0);
       expect(report.message, 'No browsed sites recorded yet.');
@@ -144,32 +146,38 @@ void main() {
       expect(await SessionBrowserProfiles.I.rememberedOrigins(), isEmpty);
     });
 
-    test('visit records are per session — one chat cannot read another', () async {
-      await SessionBrowserProfiles.I.rememberOrigin(
-        'https://github.com/a/b',
-        sessionId: 's1',
-      );
-      await SessionBrowserProfiles.I.rememberOrigin(
-        'https://mail.google.com',
-        sessionId: 's2',
-      );
-      expect(
-        await SessionBrowserProfiles.I.rememberedOrigins(sessionId: 's1'),
-        ['https://github.com/'],
-      );
-      expect(
-        await SessionBrowserProfiles.I.rememberedOrigins(sessionId: 's2'),
-        ['https://mail.google.com/'],
-      );
-      expect(
-        await SessionBrowserProfiles.I.rememberedOrigins(sessionId: 's3'),
-        isEmpty,
-      );
-      // Only the merge helper unions them (it exists purely so the restart
-      // login copy knows which origins to replay).
-      final all = await SessionBrowserProfiles.I.allRememberedOrigins();
-      expect(all.toSet(), {'https://github.com/', 'https://mail.google.com/'});
-    });
+    test(
+      'visit records are per session — one chat cannot read another',
+      () async {
+        await SessionBrowserProfiles.I.rememberOrigin(
+          'https://github.com/a/b',
+          sessionId: 's1',
+        );
+        await SessionBrowserProfiles.I.rememberOrigin(
+          'https://mail.google.com',
+          sessionId: 's2',
+        );
+        expect(
+          await SessionBrowserProfiles.I.rememberedOrigins(sessionId: 's1'),
+          ['https://github.com/'],
+        );
+        expect(
+          await SessionBrowserProfiles.I.rememberedOrigins(sessionId: 's2'),
+          ['https://mail.google.com/'],
+        );
+        expect(
+          await SessionBrowserProfiles.I.rememberedOrigins(sessionId: 's3'),
+          isEmpty,
+        );
+        // Only the merge helper unions them (it exists purely so the restart
+        // login copy knows which origins to replay).
+        final all = await SessionBrowserProfiles.I.allRememberedOrigins();
+        expect(all.toSet(), {
+          'https://github.com/',
+          'https://mail.google.com/',
+        });
+      },
+    );
 
     test('forgetting one session leaves the others intact', () async {
       await SessionBrowserProfiles.I.rememberOrigin(
@@ -327,27 +335,41 @@ void main() {
     });
 
     test('tabs carry the owning session id', () {
+      expect(agentSrc.contains('BrowserTab(url: url, sessionId: key)'), isTrue);
       expect(
-        agentSrc.contains('BrowserTab(url: url, sessionId: key)'),
-        isTrue,
-      );
-      expect(
-        agentSrc.contains('BrowserTab(url: _defaultBrowserUrl, sessionId: sessionId)'),
+        agentSrc.contains(
+          'BrowserTab(url: _defaultBrowserUrl, sessionId: sessionId)',
+        ),
         isTrue,
       );
     });
 
     test('the system prompt tells the model the browser is per session', () {
-      expect(agentSrc.contains('Browser isolation: the Browser panel is per session too'), isTrue);
-      expect(agentSrc.contains('Studio isolation: the repo, branch and open Studio files are per session'), isTrue);
+      expect(
+        agentSrc.contains(
+          'Browser isolation: the Browser panel is per session too',
+        ),
+        isTrue,
+      );
+      expect(
+        agentSrc.contains(
+          'Studio isolation: the repo, branch and open Studio files are per session',
+        ),
+        isTrue,
+      );
     });
 
     test('cookies clear covers every session profile', () {
-      expect(agentSrc.contains('SessionBrowserProfiles.I.clearCookies('), isTrue);
+      expect(
+        agentSrc.contains('SessionBrowserProfiles.I.clearCookies('),
+        isTrue,
+      );
     });
 
     test('deleting a chat drops its tab state, visit record and profile', () {
-      final start = agentSrc.indexOf('AppState.I.onSessionDeleted = (sessionId)');
+      final start = agentSrc.indexOf(
+        'AppState.I.onSessionDeleted = (sessionId)',
+      );
       expect(start, greaterThan(-1));
       final body = agentSrc.substring(start, start + 1200);
       expect(body.contains('_sessionBrowsers.remove(sessionId)'), isTrue);
@@ -357,7 +379,10 @@ void main() {
       final helper = agentSrc.indexOf('Future<void> _dropSessionBrowserPrefs(');
       expect(helper, greaterThan(-1));
       final helperBody = agentSrc.substring(helper, helper + 900);
-      expect(helperBody.contains(r"$_kBrowserSessionV2Prefix$sessionId"), isTrue);
+      expect(
+        helperBody.contains(r"$_kBrowserSessionV2Prefix$sessionId"),
+        isTrue,
+      );
       expect(
         helperBody.contains('forgetOrigins(sessionId: sessionId)'),
         isTrue,
@@ -368,8 +393,9 @@ void main() {
       // The only cross-session readers are the restart login merge and the
       // manual "share now" — both in SessionDataSharing, and both touch
       // cookies/repo only.
-      final sharingSrc = File('lib/core/session_data_sharing.dart')
-          .readAsStringSync();
+      final sharingSrc = File(
+        'lib/core/session_data_sharing.dart',
+      ).readAsStringSync();
       expect(sharingSrc.contains('shareOnRestart'), isTrue);
       for (final forbidden in <String>[
         'browserTabs',
@@ -406,10 +432,30 @@ void main() {
     });
 
     test('both sharing switches persist and default ON', () {
-      expect(stateSrc.contains("_kShareStudioOnRestart = 'ovid_share_studio_on_restart'"), isTrue);
-      expect(stateSrc.contains("_kShareBrowserOnRestart = 'ovid_share_browser_on_restart'"), isTrue);
-      expect(stateSrc.contains('shareStudioOnRestart = prefs.getBool(_kShareStudioOnRestart) ?? true'), isTrue);
-      expect(stateSrc.contains('shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? true'), isTrue);
+      expect(
+        stateSrc.contains(
+          "_kShareStudioOnRestart = 'ovid_share_studio_on_restart'",
+        ),
+        isTrue,
+      );
+      expect(
+        stateSrc.contains(
+          "_kShareBrowserOnRestart = 'ovid_share_browser_on_restart'",
+        ),
+        isTrue,
+      );
+      expect(
+        stateSrc.contains(
+          'shareStudioOnRestart = prefs.getBool(_kShareStudioOnRestart) ?? true',
+        ),
+        isTrue,
+      );
+      expect(
+        stateSrc.contains(
+          'shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? true',
+        ),
+        isTrue,
+      );
     });
 
     test('the restart merge runs as a startup task', () {
@@ -417,10 +463,15 @@ void main() {
       expect(stateSrc.contains('SessionDataSharing.I.runOnStartup'), isTrue);
     });
 
-    test('Settings exposes both switches and a manual sync', () {
-      expect(settingsSrc.contains('Share browser logins on restart'), isTrue);
-      expect(settingsSrc.contains('Share Studio repo on restart'), isTrue);
-      expect(settingsSrc.contains('Share session data now'), isTrue);
+    test('Settings no longer exposes the restart-sharing rows', () {
+      // Issue 6: the _SessionDataSharingTile rows were removed from
+      // Settings — merges now happen at restart only. The feature itself
+      // stays alive (SessionDataSharing.I.runOnStartup); only the rows are
+      // gone.
+      expect(settingsSrc.contains('Share browser logins on restart'), isFalse);
+      expect(settingsSrc.contains('Share Studio repo on restart'), isFalse);
+      expect(settingsSrc.contains('Share session data now'), isFalse);
+      expect(settingsSrc.contains('_SessionDataSharingTile'), isFalse);
     });
   });
 }

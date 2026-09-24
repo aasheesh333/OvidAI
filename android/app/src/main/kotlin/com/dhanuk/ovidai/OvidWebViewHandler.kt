@@ -23,8 +23,9 @@ import java.util.WeakHashMap
  * .webViewIdentifier). There is no global companion static and no decor-view
  * traversal: toggling one tab can never change another tab's viewport.
  *
- * Desktop: useWideViewPort(true), loadWithOverviewMode(false) — desktop layout
- * width without the overview auto-fit that shrinks readable content.
+ * Desktop: useWideViewPort(true), loadWithOverviewMode(true) — desktop layout
+ * width with the overview fit that keeps the forced viewport fully visible
+ * (the old `false` left pages zoomed into the top-left at device scale).
  * Mobile: useWideViewPort(false), loadWithOverviewMode(true), NARROW_COLUMNS.
  *
  * Desktop mode also spoofs the UA *string* on the Dart side, but modern sites
@@ -45,20 +46,23 @@ class OvidWebViewHandler(
     private val channel = MethodChannel(messenger, "ovid/webview")
 
     /**
-     * Document-start shim installed per WebView, keyed weakly so a discarded
-     * tab cannot leak. The script persists across navigations, so it is added
-     * once and only removed when the tab switches back to mobile.
+     * Document-start shim installed per WebView, as (width, height, handler),
+     * keyed weakly so a discarded tab cannot leak. The script persists
+     * across navigations, so it is added once and only re-installed when the
+     * forced dimensions change or removed when the tab switches to mobile.
      */
-    private val featureShimHandlers = WeakHashMap<WebView, ScriptHandler>()
+    private val featureShimHandlers =
+        WeakHashMap<WebView, Triple<Int, Int, ScriptHandler>>()
 
     /**
-     * Forced-width viewport script per WebView, as (width, handler). A
+     * Forced-size viewport script per WebView, as (width, height, handler). A
      * document-start script applies to EVERY new document, so the desktop
      * layout survives navigation/reload — unlike a post-load DOM mutation,
      * which the fresh document wipes and which runs after the page's own
      * "is this mobile?" detection.
      */
-    private val viewportHandlers = WeakHashMap<WebView, Pair<Int, ScriptHandler>>()
+    private val viewportHandlers =
+        WeakHashMap<WebView, Triple<Int, Int, ScriptHandler>>()
 
     constructor(messenger: BinaryMessenger) : this(null, null, messenger)
 
@@ -77,6 +81,7 @@ class OvidWebViewHandler(
                 val tabId = call.argument<Number>("tabId")?.toInt()
                 val identifier = call.argument<Number>("webViewIdentifier")?.toLong()
                 val logicalWidth = call.argument<Number>("logicalWidth")?.toInt()
+                val logicalHeight = call.argument<Number>("logicalHeight")?.toInt()
                 val userAgent = call.argument<String>("userAgent")
                 val webView = resolveWebView(identifier)
                 val act = activity
@@ -100,9 +105,9 @@ class OvidWebViewHandler(
                             webView.settings.userAgentString = userAgent
                         } catch (_: Throwable) {}
                     }
-                    applyLogicalViewport(webView, logicalWidth)
+                    applyLogicalViewport(webView, logicalWidth, logicalHeight)
                     applyUserAgentMetadata(webView, enabled)
-                    applyFeatureShim(webView, enabled)
+                    applyFeatureShim(webView, enabled, logicalWidth, logicalHeight)
                     result.success(
                         mapOf(
                             "applied" to true,
@@ -113,9 +118,10 @@ class OvidWebViewHandler(
                                 WebViewFeature.DOCUMENT_START_SCRIPT
                             ),
                             "useWideViewPort" to enabled,
-                            "loadWithOverviewMode" to !enabled,
+                            "loadWithOverviewMode" to enabled,
                             "supportMultipleWindows" to true,
-                            "logicalWidth" to logicalWidth
+                            "logicalWidth" to logicalWidth,
+                            "logicalHeight" to logicalHeight
                         )
                     )
                 }
@@ -133,6 +139,8 @@ class OvidWebViewHandler(
                 val identifier = call.argument<Number>("webViewIdentifier")?.toLong()
                 val logicalWidth = call.argument<Number>("logicalWidth")?.toInt()
                     ?: 1280
+                val logicalHeight = call.argument<Number>("logicalHeight")?.toInt()
+                    ?: 800
                 val tabId = call.argument<Number>("tabId")?.toInt()
                 val webView = resolveWebView(identifier)
                 val act = activity
@@ -148,15 +156,16 @@ class OvidWebViewHandler(
                 }
                 act.runOnUiThread {
                     applySettings(webView.settings, true)
-                    applyLogicalViewport(webView, logicalWidth)
+                    applyLogicalViewport(webView, logicalWidth, logicalHeight)
                     applyUserAgentMetadata(webView, true)
-                    applyFeatureShim(webView, true)
+                    applyFeatureShim(webView, true, logicalWidth, logicalHeight)
                     // Immediate repair of the live document — the
                     // document-start scripts cover the NEXT navigation, but
                     // the page on screen needs the forcing NOW.
                     try {
                         webView.evaluateJavascript(
-                            viewportScript(logicalWidth) + DESKTOP_FEATURE_SHIM,
+                            viewportScript(logicalWidth) +
+                                desktopFeatureShim(logicalWidth, logicalHeight),
                             null
                         )
                     } catch (_: Throwable) {}
@@ -168,7 +177,8 @@ class OvidWebViewHandler(
                                 WebViewFeature.DOCUMENT_START_SCRIPT
                             ),
                             "tabId" to tabId,
-                            "logicalWidth" to logicalWidth
+                            "logicalWidth" to logicalWidth,
+                            "logicalHeight" to logicalHeight
                         )
                     )
                 }
@@ -258,7 +268,7 @@ class OvidWebViewHandler(
     private fun applySettings(settings: WebSettings, desktop: Boolean) {
         if (desktop) {
             settings.useWideViewPort = true
-            settings.loadWithOverviewMode = false
+            settings.loadWithOverviewMode = true
             settings.layoutAlgorithm = WebSettings.LayoutAlgorithm.NORMAL
         } else {
             settings.useWideViewPort = false
@@ -269,7 +279,7 @@ class OvidWebViewHandler(
     }
 
     /**
-     * Force the layout viewport width used for media queries (browser_resize
+     * Force the layout viewport size used for media queries (browser_resize
      * and desktop mode).
      *
      * Desktop mode pins `width=1280` so `window.innerWidth` reports a large
@@ -278,9 +288,20 @@ class OvidWebViewHandler(
      * own mobile-detection code and is wiped by every navigation, which is
      * exactly why sites kept showing "better on a large screen" after a link
      * click or reload. A null/0 width clears any previous force so a mobile
-     * tab lays out at its own viewport meta again.
+     * tab lays out at its own viewport meta again. The height rides the
+     * feature shim (`window.innerHeight` / `screen.*` overrides) so height
+     * probes report the forced size; a null height keeps the default 800.
      */
-    private fun applyLogicalViewport(webView: WebView, logicalWidth: Int?) {
+    private fun applyLogicalViewport(
+        webView: WebView,
+        logicalWidth: Int?,
+        logicalHeight: Int?
+    ) {
+        val height = if (logicalHeight != null && logicalHeight > 0) {
+            logicalHeight
+        } else {
+            800
+        }
         // Mobile: drop any forced width so the page's own meta wins.
         if (logicalWidth == null || logicalWidth <= 0) {
             removeViewportScript(webView)
@@ -289,15 +310,17 @@ class OvidWebViewHandler(
             } catch (_: Throwable) {}
             return
         }
-        // Already forcing this exact width — the document-start script
+        // Already forcing this exact size — the document-start script
         // persists across navigations, so there is nothing to re-install.
         val existing = viewportHandlers[webView]
-        if (existing != null && existing.first == logicalWidth) return
+        if (existing != null && existing.first == logicalWidth &&
+            existing.second == height
+        ) return
         removeViewportScript(webView)
 
         val settings = webView.settings
         settings.useWideViewPort = true
-        settings.loadWithOverviewMode = false
+        settings.loadWithOverviewMode = true
 
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             try {
@@ -306,7 +329,7 @@ class OvidWebViewHandler(
                     viewportScript(logicalWidth),
                     setOf("*")
                 )
-                viewportHandlers[webView] = logicalWidth to handler
+                viewportHandlers[webView] = Triple(logicalWidth, height, handler)
                 return
             } catch (_: Throwable) {
                 // Fall through to the best-effort post-load path.
@@ -318,7 +341,7 @@ class OvidWebViewHandler(
     }
 
     private fun removeViewportScript(webView: WebView) {
-        val handler = viewportHandlers.remove(webView)?.second ?: return
+        val handler = viewportHandlers.remove(webView)?.third ?: return
         try {
             handler.remove()
         } catch (_: Throwable) {}
@@ -442,46 +465,61 @@ class OvidWebViewHandler(
         .build()
 
     /**
-     * Install the desktop feature shim at document start (desktop tabs only).
-     * Runs before any page script, so detection libraries see desktop values.
-     * Added once per WebView — document-start scripts survive navigations.
+     * Install the desktop feature shim at document start (desktop tabs only),
+     * generated from the forced [width]×[height] so `window.innerWidth`,
+     * `window.innerHeight` and `screen.*` report the forced size instead of
+     * hardcoded 1280×800. Runs before any page script, so detection
+     * libraries see desktop values. Added once per WebView — document-start
+     * scripts survive navigations; when the forced size changes
+     * (browser_resize) the old script is removed and re-installed.
      *
      * When the WebView build has no document-start support (old System
-     * WebView), the shim used to be silently skipped and the tab kept
-     * reporting mobile touch/UA-data signals. Now it falls back to an
-     * immediate evaluateJavascript so the live document still gets the
-     * overrides; the Dart verifier repairs any document the fallback missed.
+     * WebView), falls back to an immediate evaluateJavascript so the live
+     * document still gets the overrides; the Dart verifier repairs any
+     * document the fallback missed.
      */
-    private fun applyFeatureShim(webView: WebView, desktop: Boolean) {
+    private fun applyFeatureShim(
+        webView: WebView,
+        desktop: Boolean,
+        width: Int?,
+        height: Int?
+    ) {
         if (!desktop) {
             removeFeatureShim(webView)
             return
         }
-        if (featureShimHandlers.containsKey(webView)) return
+        val w = if (width != null && width > 0) width else 1280
+        val h = if (height != null && height > 0) height else 800
+        val existing = featureShimHandlers[webView]
+        if (existing != null && existing.first == w && existing.second == h) {
+            return
+        }
+        removeFeatureShim(webView)
+        val script = desktopFeatureShim(w, h)
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             // No document-start support: best-effort immediate install on the
             // live document instead of silently leaving mobile signals in
             // place. The Dart-side verifier re-runs this on every page finish
-            // until the __ovidDesktopShim marker is present.
+            // until the layout width actually sticks.
             try {
-                webView.evaluateJavascript(DESKTOP_FEATURE_SHIM, null)
+                webView.evaluateJavascript(script, null)
             } catch (_: Throwable) {}
             return
         }
         try {
             val handler = WebViewCompat.addDocumentStartJavaScript(
                 webView,
-                DESKTOP_FEATURE_SHIM,
+                script,
                 setOf("*")
             )
-            featureShimHandlers[webView] = handler
+            featureShimHandlers[webView] = Triple(w, h, handler)
         } catch (_: Throwable) {
             // Unsupported build: client hints + UA string still apply.
         }
     }
 
     private fun removeFeatureShim(webView: WebView) {
-        val handler = featureShimHandlers.remove(webView) ?: return
+        val handler = featureShimHandlers.remove(webView)?.third ?: return
         try {
             handler.remove()
         } catch (_: Throwable) {}
@@ -492,11 +530,15 @@ class OvidWebViewHandler(
  * Neutralizes the JS-level mobile signals that a spoofed UA string and
  * client hints do not cover: touch points, `navigator.platform`, the
  * `userAgentData` object, and coarse-pointer / no-hover media queries.
- * Property overrides are `configurable` and each wrapped so a hostile
- * page cannot break the shim itself. A file-level const (not a companion
- * static) keeps the handler free of global mutable state.
+ * Generated from the forced [width]×[height] so `window.innerWidth`,
+ * `window.innerHeight` and `screen.*` report the forced size the tab asked
+ * for (desktop default 1280×800, or the `browser_resize` size) instead of
+ * hardcoded constants. Property overrides are `configurable` and each
+ * wrapped so a hostile page cannot break the shim itself. A file-level
+ * function (not a companion static) keeps the handler free of global
+ * mutable state.
  */
-private const val DESKTOP_FEATURE_SHIM = """
+private fun desktopFeatureShim(width: Int, height: Int): String = """
 (function(){
   window.__ovidDesktopShim = true;
   try {
@@ -553,32 +595,32 @@ private const val DESKTOP_FEATURE_SHIM = """
   } catch (e) {}
   try {
     Object.defineProperty(window, 'innerWidth', {
-      get: function(){ return 1280; }, configurable: true
+      get: function(){ return $width; }, configurable: true
     });
   } catch (e) {}
   try {
     Object.defineProperty(window, 'innerHeight', {
-      get: function(){ return 800; }, configurable: true
+      get: function(){ return $height; }, configurable: true
     });
   } catch (e) {}
   try {
     Object.defineProperty(screen, 'width', {
-      get: function(){ return 1280; }, configurable: true
+      get: function(){ return $width; }, configurable: true
     });
   } catch (e) {}
   try {
     Object.defineProperty(screen, 'availWidth', {
-      get: function(){ return 1280; }, configurable: true
+      get: function(){ return $width; }, configurable: true
     });
   } catch (e) {}
   try {
     Object.defineProperty(screen, 'height', {
-      get: function(){ return 800; }, configurable: true
+      get: function(){ return $height; }, configurable: true
     });
   } catch (e) {}
   try {
     Object.defineProperty(screen, 'availHeight', {
-      get: function(){ return 800; }, configurable: true
+      get: function(){ return $height; }, configurable: true
     });
   } catch (e) {}
 })();

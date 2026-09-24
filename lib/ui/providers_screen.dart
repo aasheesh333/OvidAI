@@ -875,7 +875,7 @@ class _ModelChipState extends State<_ModelChip> {
                 ),
                 child: Text(
                   limits,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 9.5,
                     fontFamily: Aether.mono,
                     color: Aether.textFaint,

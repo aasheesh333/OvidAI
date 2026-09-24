@@ -246,6 +246,7 @@ void main() {
       expect(viewportCalls, hasLength(1));
       final payload = viewportCalls.single.arguments as Map;
       expect(payload['logicalWidth'], 1280);
+      expect(payload['logicalHeight'], 800);
       expect(payload['tabId'], tab.id);
     });
 

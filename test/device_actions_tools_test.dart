@@ -144,7 +144,9 @@ void main() {
         'device_scroll',
       });
       for (final schema in schemas.values) {
-        expect(schema['additionalProperties'], isFalse);
+        // Issue 8: `additionalProperties: false` is never sent — providers
+        // that reject unknown schema keys 400 on it.
+        expect(schema.containsKey('additionalProperties'), isFalse);
       }
       expect(schemas['device_key']!['required'], ['key']);
       expect(

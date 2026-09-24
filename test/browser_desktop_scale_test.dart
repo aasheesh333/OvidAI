@@ -53,15 +53,9 @@ void main() {
       BrowserTab.devW = 360;
       BrowserTab.devH = 720;
       final tab = BrowserTab(url: 'https://example.com', desktopMode: false);
-      expect(tab.zoom, 1.0);
 
       await AgentService.I.setTabDesktopMode(tab, true, reload: false);
       expect(tab.desktopMode, isTrue);
-      expect(
-        tab.zoom,
-        1.0,
-        reason: 'zoom is the browser_resize logical factor, not devW/1280',
-      );
       expect(
         tab.userZoom,
         1.0,
@@ -80,18 +74,16 @@ void main() {
   });
 
   group('injected CSS scale', () {
-    test('equals userZoom and ignores the logical (viewport) zoom', () {
+    test('equals userZoom (the only CSS scale source)', () {
       final tab = BrowserTab(url: 'https://example.com', desktopMode: true)
-        ..userZoom = 1.75
-        // A viewport-derived factor set by browser_resize must not leak in.
-        ..zoom = 0.28;
+        ..userZoom = 1.75;
       expect(
         AgentService.browserZoomScriptForTest(tab.userZoom),
         'document.documentElement.style.zoom = "1.75";',
       );
     });
 
-    test('_applyTabZoom injects userZoom, never the logical zoom', () {
+    test('_applyTabZoom injects userZoom only', () {
       final src = _agentSource();
       final start = src.indexOf('Future<void> _applyTabZoom');
       expect(start, isNot(-1), reason: '_applyTabZoom exists');

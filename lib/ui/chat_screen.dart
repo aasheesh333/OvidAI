@@ -3304,11 +3304,9 @@ class _ColorPaletteView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hexMatches = RegExp(r'#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b')
-        .allMatches(content)
-        .map((m) => m.group(0)!)
-        .toSet()
-        .toList();
+    final hexMatches = RegExp(
+      r'#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b',
+    ).allMatches(content).map((m) => m.group(0)!).toSet().toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -5361,7 +5359,9 @@ class _InputBarState extends State<_InputBar> {
                 // composer: 16px input, 24px line-height.
                 style: const TextStyle(fontSize: 16, height: 24 / 16),
                 decoration: InputDecoration(
-                  hintText: locked ? 'Answer the approval card above first…' : 'Describe what you want to build…  / commands  @ agents',
+                  hintText: locked
+                      ? 'Answer the approval card above first…'
+                      : 'Describe what you want to build…  / commands  @ agents',
                   hintStyle: TextStyle(
                     fontSize: 16,
                     height: 24 / 16,
@@ -5472,7 +5472,9 @@ class _InputBarState extends State<_InputBar> {
                           onPressed: () {
                             if (runningNow && !hasDraft) {
                               if (hasSession) {
-                                AgentService.I.stopRequested(sessionId: sessionId);
+                                AgentService.I.stopRequested(
+                                  sessionId: sessionId,
+                                );
                               } else {
                                 AgentService.I.hardStopAll();
                               }
@@ -5976,15 +5978,39 @@ class _QueueDock extends StatelessWidget {
                 const SizedBox(height: 6),
                 // Queued message rows — keyed by the message's stable id so
                 // a delete/steer/edit never rebinds another row's State.
-                for (var i = 0; i < queue.length; i++)
-                  _QueueRow(
-                    key: ValueKey(ids.length == queue.length ? ids[i] : 'q-$i'),
-                    id: ids.length == queue.length ? ids[i] : null,
-                    index: i,
-                    text: queue[i],
-                    onEdited: onEdited,
-                    onEditToComposer: onEditToComposer,
-                  ),
+                // Guardrail: the rows scroll inside ~38% of the available
+                // height instead of growing until the composer is pushed
+                // off-screen. (The dock sits in a min-sized Column, so the
+                // incoming maxHeight is unbounded — fall back to the
+                // viewport height, which is always finite.)
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final reference = constraints.maxHeight.isFinite
+                        ? constraints.maxHeight
+                        : MediaQuery.sizeOf(context).height;
+                    return ConstrainedBox(
+                      constraints: BoxConstraints(maxHeight: reference * 0.38),
+                      child: SingleChildScrollView(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            for (var i = 0; i < queue.length; i++)
+                              _QueueRow(
+                                key: ValueKey(
+                                  ids.length == queue.length ? ids[i] : 'q-$i',
+                                ),
+                                id: ids.length == queue.length ? ids[i] : null,
+                                index: i,
+                                text: queue[i],
+                                onEdited: onEdited,
+                                onEditToComposer: onEditToComposer,
+                              ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
               ],
             ),
           ),
@@ -6036,16 +6062,8 @@ const queueRowActions = <QueueRowAction>[
     'Quick send: stop current run and send this now',
     'quickSend',
   ),
-  QueueRowAction(
-    Icons.edit_outlined,
-    'Edit in composer',
-    'editInComposer',
-  ),
-  QueueRowAction(
-    Icons.delete_outline,
-    'Delete',
-    'delete',
-  ),
+  QueueRowAction(Icons.edit_outlined, 'Edit in composer', 'editInComposer'),
+  QueueRowAction(Icons.delete_outline, 'Delete', 'delete'),
 ];
 
 class _QueueRowState extends State<_QueueRow> {
@@ -6101,8 +6119,6 @@ class _QueueRowState extends State<_QueueRow> {
           Expanded(
             child: Text(
               widget.text,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
               style: TextStyle(fontSize: 12.5, color: Aether.text),
             ),
           ),
@@ -6135,8 +6151,10 @@ class _QueueRowState extends State<_QueueRow> {
   }
 }
 
-/// A queue-row action with a real 48dp tap target (the old rows used ~26px
-/// GestureDetectors, which were easy to miss).
+/// A queue-row action with a real 48dp-wide tap target (the old rows used
+/// ~26px GestureDetectors, which were easy to miss). The height is NOT
+/// pinned — a fixed height would pin every queue row's height; vertical
+/// padding keeps the target ~40dp tall while rows size to their text.
 class _QueueAction extends StatelessWidget {
   final IconData icon;
   final Color color;
@@ -6158,8 +6176,10 @@ class _QueueAction extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
         child: SizedBox(
           width: 48,
-          height: 48,
-          child: Center(child: Icon(icon, size: 16, color: color)),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Center(child: Icon(icon, size: 16, color: color)),
+          ),
         ),
       ),
     );
@@ -6213,8 +6233,59 @@ class _CopyButtonState extends State<_CopyButton> {
 /// Approval dock — replaces the old _AgentActivityBar under the AppBar.
 /// Shown only when a tool needs user confirmation. Live agent log stays in
 /// the chat stream itself; approvals float above the input (web-IDE style).
-class _ApprovalDock extends StatelessWidget {
+class _ApprovalDock extends StatefulWidget {
   const _ApprovalDock();
+
+  @override
+  State<_ApprovalDock> createState() => _ApprovalDockState();
+}
+
+class _ApprovalDockState extends State<_ApprovalDock> {
+  /// Scope for the "Always Allow" grant action: this session, or every
+  /// session (global). Reset for each new approval request.
+  bool _globalScope = false;
+  ApprovalRequest? _reqForScope;
+
+  /// Deny WITH a note — the note rides back to the model with the denial
+  /// so it can revise instead of guessing why access was refused.
+  Future<void> _denyWithNote(BuildContext context) async {
+    final c = TextEditingController();
+    final note = await showDialog<String>(
+      context: context,
+      builder: (d) => AlertDialog(
+        backgroundColor: Aether.surface,
+        title: const Text('Deny with a note', style: TextStyle(fontSize: 15)),
+        content: TextField(
+          controller: c,
+          autofocus: true,
+          minLines: 2,
+          maxLines: 4,
+          style: const TextStyle(fontSize: 13.5),
+          decoration: const InputDecoration(
+            hintText: 'Why is this denied? (sent back to the AI)',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(d).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(d).pop(c.text.trim()),
+            child: const Text('Deny'),
+          ),
+        ],
+      ),
+    );
+    if (note != null) {
+      if (note.isNotEmpty) {
+        AgentService.I.approve(false, note: note);
+      } else {
+        // Empty note: plain deny.
+        AgentService.I.approve(false);
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -6223,6 +6294,10 @@ class _ApprovalDock extends StatelessWidget {
       builder: (_, _) {
         final req = AgentService.I.pendingApproval;
         if (req == null) return const SizedBox.shrink();
+        if (!identical(req, _reqForScope)) {
+          _reqForScope = req;
+          _globalScope = false;
+        }
         // ── ask_user_question mode — structured Q&A card ──
         if (req.questions != null && req.questions!.isNotEmpty) {
           return _QuestionsCard(req);
@@ -6231,6 +6306,11 @@ class _ApprovalDock extends StatelessWidget {
         if (req.tool == 'exit_plan_mode') {
           return _PlanReviewCard(req);
         }
+        // Grant prompts (path/host) offer a session/global scope toggle
+        // for "Always Allow"; plain tool prompts keep session-only memory.
+        final isGrant =
+            req.tool.startsWith('grant:path') ||
+            req.tool.startsWith('grant:host');
         // ── Standard approve/deny card ──
         return Container(
           margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
@@ -6240,57 +6320,108 @@ class _ApprovalDock extends StatelessWidget {
             borderRadius: BorderRadius.circular(12),
             border: Border.all(color: Aether.warnLight.withValues(alpha: 0.4)),
           ),
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Icon(
-                Icons.warning_amber_rounded,
-                size: 16,
-                color: Aether.warnLight,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  req.detail.isNotEmpty && req.detail != req.summary
-                      ? req.detail
-                      : req.summary,
-                  maxLines: 8,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    height: 1.4,
-                    color: Aether.text,
-                    fontFamily: Aether.mono,
+              Row(
+                children: [
+                  Icon(
+                    Icons.warning_amber_rounded,
+                    size: 16,
+                    color: Aether.warnLight,
                   ),
-                ),
-              ),
-              const SizedBox(width: 6),
-              TextButton(
-                style: TextButton.styleFrom(
-                  foregroundColor: Aether.danger,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  minimumSize: Size.zero,
-                ),
-                child: const Text('Deny', style: TextStyle(fontSize: 12)),
-                onPressed: () => AgentService.I.approve(false),
-              ),
-              TextButton(
-                style: TextButton.styleFrom(
-                  foregroundColor: Aether.successLight,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  minimumSize: Size.zero,
-                ),
-                child: const Text('Allow', style: TextStyle(fontSize: 12)),
-                onPressed: () => AgentService.I.approve(true),
-              ),
-              if (req.allowAlways)
-                TextButton(
-                  style: TextButton.styleFrom(
-                    foregroundColor: Aether.accent,
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    minimumSize: Size.zero,
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      req.detail.isNotEmpty && req.detail != req.summary
+                          ? req.detail
+                          : req.summary,
+                      maxLines: 8,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.4,
+                        color: Aether.text,
+                        fontFamily: Aether.mono,
+                      ),
+                    ),
                   ),
-                  child: const Text('Always', style: TextStyle(fontSize: 12)),
-                  onPressed: () => AgentService.I.approveAlways(),
+                  const SizedBox(width: 6),
+                  IconButton(
+                    icon: const Icon(Icons.sticky_note_2_outlined, size: 16),
+                    color: Aether.textMuted,
+                    tooltip: 'Deny with a note',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    onPressed: () => _denyWithNote(context),
+                  ),
+                  TextButton(
+                    style: TextButton.styleFrom(
+                      foregroundColor: Aether.danger,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: Size.zero,
+                    ),
+                    child: const Text('Deny', style: TextStyle(fontSize: 12)),
+                    onPressed: () => AgentService.I.approve(false),
+                  ),
+                  TextButton(
+                    style: TextButton.styleFrom(
+                      foregroundColor: Aether.successLight,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: Size.zero,
+                    ),
+                    child: const Text('Allow', style: TextStyle(fontSize: 12)),
+                    onPressed: () => AgentService.I.approve(true),
+                  ),
+                  if (req.allowAlways)
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        foregroundColor: Aether.accent,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        minimumSize: Size.zero,
+                      ),
+                      child: const Text(
+                        'Always Allow',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                      onPressed: () => AgentService.I.approveAlways(
+                        global: _globalScope && isGrant,
+                      ),
+                    ),
+                ],
+              ),
+              if (req.allowAlways && isGrant)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6, left: 26),
+                  child: Row(
+                    children: [
+                      Text(
+                        'Always allow for:',
+                        style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                      ),
+                      const SizedBox(width: 8),
+                      ChoiceChip(
+                        label: const Text(
+                          'This session',
+                          style: TextStyle(fontSize: 11),
+                        ),
+                        selected: !_globalScope,
+                        visualDensity: VisualDensity.compact,
+                        onSelected: (_) => setState(() => _globalScope = false),
+                      ),
+                      const SizedBox(width: 6),
+                      ChoiceChip(
+                        label: const Text(
+                          'All sessions',
+                          style: TextStyle(fontSize: 11),
+                        ),
+                        selected: _globalScope,
+                        visualDensity: VisualDensity.compact,
+                        onSelected: (_) => setState(() => _globalScope = true),
+                      ),
+                    ],
+                  ),
                 ),
             ],
           ),
@@ -7537,8 +7668,9 @@ Future<void> _openLink(
     // Bare-domain text ("example.com", "www.x.dev/y") — open it too.
     final t = text.trim();
     if (t.isEmpty) return;
-    final domainLike = RegExp(r'^(www\.)?[\w-]+(\.[\w-]+)+(/.*)?$')
-        .firstMatch(t);
+    final domainLike = RegExp(
+      r'^(www\.)?[\w-]+(\.[\w-]+)+(/.*)?$',
+    ).firstMatch(t);
     if (domainLike == null) return;
     raw = t.startsWith('www.') ? 'https://$t' : 'https://$t';
   }

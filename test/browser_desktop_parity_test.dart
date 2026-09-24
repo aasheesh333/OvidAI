@@ -84,7 +84,6 @@ void main() {
 
       expect(a.desktopMode, isTrue);
       expect(a.userZoom, 1.0);
-      expect(a.zoom, 1.0);
       expect(
         AgentService.browserZoomScriptForTest(a.userZoom),
         'document.documentElement.style.zoom = "1.0";',
@@ -147,6 +146,7 @@ void main() {
         (c) => (c.arguments as Map).containsKey('logicalWidth'),
       );
       expect((resizeCall.arguments as Map)['logicalWidth'], 1280);
+      expect((resizeCall.arguments as Map)['logicalHeight'], 800);
       expect((resizeCall.arguments as Map)['tabId'], a.id);
 
       await AgentService.I.setTabDesktopMode(b, true, reload: false);

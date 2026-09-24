@@ -237,7 +237,7 @@ void main() {
       expect(find.text(activeChat.title), findsOneWidget);
     });
 
-    testWidgets('swipe deletes only the targeted row', (tester) async {
+    testWidgets('swipe asks for confirmation before deleting', (tester) async {
       await pumpChats(tester);
 
       await tester.drag(
@@ -246,9 +246,20 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      // Swipe-to-delete now asks for confirmation (an accidental swipe used
+      // to delete the chat with no way back) — nothing is deleted yet.
+      expect(app.sessionById(targetChat.id), same(targetChat));
+      expect(find.text('Delete ${targetChat.title}?'), findsOneWidget);
+      expect(app.activeSessionId, activeChat.id);
+
+      await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+      await tester.pumpAndSettle();
+
       expect(app.sessionById(targetChat.id), isNull);
       expect(app.sessionById(activeChat.id), same(activeChat));
       expect(app.activeSessionId, activeChat.id);
+      expect(find.text(targetChat.title), findsNothing);
+      expect(find.text(activeChat.title), findsOneWidget);
     });
   });
 }

@@ -11,6 +11,12 @@ import 'package:ovid_ai/core/state.dart';
 /// document — not just requested at toggle time. The Dart verifier probes
 /// every page finish and repairs via the native `repairDesktop` channel
 /// when the forcing did not stick.
+///
+/// The probe is deliberately NOT self-referential: it reads the REAL layout
+/// viewport (`documentElement.clientWidth/clientHeight`) and never the
+/// shim's own markers (`__ovidDesktopShim`, `__ovidViewportW`) or the
+/// shim-overridden `window.innerWidth` — those echo our own injection, so a
+/// verifier built on them could never fail.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -32,31 +38,36 @@ void main() {
   });
 
   group('desktop verify probe', () {
-    test('probe script reads layout viewport + shim markers as JSON', () {
+    test('probe reads the real layout viewport, never shim markers', () {
       final js = AgentService.desktopVerifyScriptForTest();
       expect(js, contains('document.documentElement.clientWidth'));
-      expect(js, contains('__ovidDesktopShim'));
-      expect(js, contains('__ovidViewportW'));
+      expect(js, contains('document.documentElement.clientHeight'));
       expect(js, contains('JSON.stringify'));
       // Never throws inside the page — a probe failure must not break load.
       expect(js, contains('catch(e)'));
     });
 
+    test('probe is not circular: no shim markers, no innerWidth', () {
+      final js = AgentService.desktopVerifyScriptForTest();
+      expect(js, isNot(contains('__ovidDesktopShim')));
+      expect(js, isNot(contains('__ovidViewportW')));
+      expect(js, isNot(contains('innerWidth')));
+      expect(js, isNot(contains('innerHeight')));
+    });
+
     test('probe parses a healthy desktop document', () {
       final probe = AgentService.parseDesktopProbeForTest(
-        '{"w":1280,"shim":true,"vw":1280}',
+        '{"w":1280,"h":800}',
       );
       expect(probe.clientWidth, 1280);
-      expect(probe.shim, isTrue);
-      expect(probe.viewportW, 1280);
+      expect(probe.clientHeight, 800);
     });
 
     test('probe tolerates garbage, null and missing keys', () {
       for (final raw in <Object?>[null, 'not json', '{}', '[]', 42]) {
         final probe = AgentService.parseDesktopProbeForTest(raw);
         expect(probe.clientWidth, 0);
-        expect(probe.shim, isFalse);
-        expect(probe.viewportW, 0);
+        expect(probe.clientHeight, 0);
       }
     });
   });
@@ -66,9 +77,9 @@ void main() {
       expect(
         AgentService.desktopRepairNeededForTest(
           expectedWidth: null,
+          expectedHeight: null,
           clientWidth: 412,
-          shim: false,
-          viewportW: 0,
+          clientHeight: 900,
         ),
         isFalse,
       );
@@ -78,33 +89,9 @@ void main() {
       expect(
         AgentService.desktopRepairNeededForTest(
           expectedWidth: 1280,
+          expectedHeight: 800,
           clientWidth: 412,
-          shim: true,
-          viewportW: 1280,
-        ),
-        isTrue,
-      );
-    });
-
-    test('missing shim marker → repair even at desktop width', () {
-      expect(
-        AgentService.desktopRepairNeededForTest(
-          expectedWidth: 1280,
-          clientWidth: 1280,
-          shim: false,
-          viewportW: 1280,
-        ),
-        isTrue,
-      );
-    });
-
-    test('viewport script ran with wrong width → repair', () {
-      expect(
-        AgentService.desktopRepairNeededForTest(
-          expectedWidth: 1280,
-          clientWidth: 980,
-          shim: true,
-          viewportW: 980,
+          clientHeight: 900,
         ),
         isTrue,
       );
@@ -114,9 +101,9 @@ void main() {
       expect(
         AgentService.desktopRepairNeededForTest(
           expectedWidth: 1280,
+          expectedHeight: 800,
           clientWidth: 1280,
-          shim: true,
-          viewportW: 1280,
+          clientHeight: 700,
         ),
         isFalse,
       );
@@ -126,9 +113,9 @@ void main() {
       expect(
         AgentService.desktopRepairNeededForTest(
           expectedWidth: 1280,
+          expectedHeight: 800,
           clientWidth: 1265,
-          shim: true,
-          viewportW: 1280,
+          clientHeight: 700,
         ),
         isFalse,
       );
@@ -139,9 +126,9 @@ void main() {
       expect(
         AgentService.desktopRepairNeededForTest(
           expectedWidth: 800,
+          expectedHeight: 600,
           clientWidth: 800,
-          shim: true,
-          viewportW: 800,
+          clientHeight: 600,
         ),
         isFalse,
       );
@@ -149,17 +136,53 @@ void main() {
       expect(
         AgentService.desktopRepairNeededForTest(
           expectedWidth: 800,
+          expectedHeight: 600,
           clientWidth: 600,
-          shim: true,
-          viewportW: 800,
+          clientHeight: 600,
         ),
         isTrue,
+      );
+    });
+
+    test('device-height layout does not trigger repair on its own', () {
+      // The layout HEIGHT always follows the device screen; only the
+      // shim's JS-visible innerHeight carries the forced height. A tall
+      // phone (clientHeight 900 vs forced 800) must not repair a tab whose
+      // WIDTH is correctly forced.
+      expect(
+        AgentService.desktopRepairNeededForTest(
+          expectedWidth: 1280,
+          expectedHeight: 800,
+          clientWidth: 1280,
+          clientHeight: 900,
+        ),
+        isFalse,
       );
     });
 
     test('new tabs start with a fresh repair budget', () {
       final tab = BrowserTab(url: 'https://w.test', desktopMode: true);
       expect(tab.desktopRepairAttempts, 0);
+    });
+  });
+
+  group('forced-size routing', () {
+    test('desktop mode pins 1280x800, mobile clears both', () async {
+      final tab = BrowserTab(url: 'https://w.test', desktopMode: false);
+      await AgentService.I.setTabDesktopMode(tab, true, reload: false);
+      expect(AgentService.viewportWidthForTest(tab), 1280);
+      expect(AgentService.viewportHeightForTest(tab), 800);
+      await AgentService.I.setTabDesktopMode(tab, false, reload: false);
+      expect(AgentService.viewportWidthForTest(tab), isNull);
+      expect(AgentService.viewportHeightForTest(tab), isNull);
+    });
+
+    test('explicit resize wins over the desktop default', () {
+      final tab = BrowserTab(url: 'https://w.test', desktopMode: true)
+        ..viewportWidth = 1440
+        ..viewportHeight = 900;
+      expect(AgentService.viewportWidthForTest(tab), 1440);
+      expect(AgentService.viewportHeightForTest(tab), 900);
     });
   });
 
@@ -179,6 +202,7 @@ void main() {
                 'webViewFound': true,
                 'tabId': call.arguments['tabId'],
                 'logicalWidth': call.arguments['logicalWidth'],
+                'logicalHeight': call.arguments['logicalHeight'],
               };
             }
             return null;
@@ -189,12 +213,14 @@ void main() {
       });
     });
 
-    test('desktop tab repair sends logicalWidth 1280', () async {
+    test('desktop tab repair sends logicalWidth 1280 + logicalHeight 800',
+        () async {
       final tab = BrowserTab(url: 'https://w.test', desktopMode: true);
       final ok = await AgentService.I.repairDesktopViewport(tab);
       expect(ok, isTrue);
       final call = calls.singleWhere((c) => c.method == 'repairDesktop');
       expect(call.arguments['logicalWidth'], 1280);
+      expect(call.arguments['logicalHeight'], 800);
       expect(call.arguments['tabId'], tab.id);
     });
 
@@ -208,13 +234,15 @@ void main() {
       );
     });
 
-    test('explicit resize width rides the repair call', () async {
+    test('explicit resize size rides the repair call', () async {
       final tab = BrowserTab(url: 'https://w.test', desktopMode: false)
-        ..viewportWidth = 800;
+        ..viewportWidth = 800
+        ..viewportHeight = 600;
       final ok = await AgentService.I.repairDesktopViewport(tab);
       expect(ok, isTrue);
       final call = calls.singleWhere((c) => c.method == 'repairDesktop');
       expect(call.arguments['logicalWidth'], 800);
+      expect(call.arguments['logicalHeight'], 600);
     });
   });
 }

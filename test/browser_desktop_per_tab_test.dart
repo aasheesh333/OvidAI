@@ -133,7 +133,7 @@ void main() {
       expect(kotlin, isNot(contains('lastDesktopViewport')));
     });
 
-    test('desktop branch uses wide viewport without overview; mobile is inverse', () {
+    test('desktop branch uses wide viewport with overview; mobile is inverse', () {
       final branches = _applySettingsBranches(_kotlinSource());
       expect(
         branches,
@@ -152,8 +152,8 @@ void main() {
       );
       expect(
         desktop,
-        matches(RegExp(r'loadWithOverviewMode\s*=\s*false')),
-        reason: 'desktop must NOT auto-fit (overview mode)',
+        matches(RegExp(r'loadWithOverviewMode\s*=\s*true')),
+        reason: 'desktop keeps overview mode so the forced viewport fits',
       );
       expect(
         desktop,

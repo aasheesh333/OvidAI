@@ -38,6 +38,14 @@ class GitHubAuthException implements Exception {
 ///   2. User opens github.com/login/device and enters the code
 ///   3. Poll POST /login/oauth/access_token until authorized
 ///   4. Use token for API calls + git push/pull from Studio
+///
+/// No refresh token exists in this flow: GitHub's OAuth App device flow
+/// returns only `access_token` in the token response (no `refresh_token` /
+/// `expires_in` — those belong to GitHub Apps with expiring user tokens,
+/// not this OAuth App), and the token does not expire unless the user
+/// revokes it. So there is nothing to persist and no
+/// `grant_type=refresh_token` exchange to attempt on 401 — the
+/// confirm-before-wipe + background-retry path below is the whole story.
 class GitHubService extends ChangeNotifier {
   GitHubService._();
   static final GitHubService I = GitHubService._();
@@ -101,6 +109,34 @@ class GitHubService extends ChangeNotifier {
     _profileRetryTimer = null;
   }
 
+  /// Reads the stored auth token, retrying up to 3 times with a short
+  /// backoff. Cold starts right after the process was killed can hit
+  /// Keystore / EncryptedSharedPreferences hiccups that surface as
+  /// transient read failures — without the retry the app concludes "no
+  /// login" and the user lands signed out on every process death. After
+  /// the attempts are exhausted the read is treated as absent, exactly as
+  /// a clean miss would be.
+  @visibleForTesting
+  static Future<String?> readTokenWithRetriesForTest(
+    Future<String?> Function() read,
+  ) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        await Future<void>.delayed(Duration(milliseconds: 100 * attempt));
+      }
+      try {
+        return await read();
+      } catch (_) {
+        // Transient secure-storage failure — back off and try again.
+      }
+    }
+    return null;
+  }
+
+  /// Test seam: true while a background profile retry is armed.
+  @visibleForTesting
+  bool get hasProfileRetryScheduledForTest => _profileRetryTimer != null;
+
   Future<void> initialize({http.Client? client}) async {
     final generation = ++_authGeneration;
     _cancelProfileRetry();
@@ -109,7 +145,9 @@ class GitHubService extends ChangeNotifier {
     final c = client ?? http.Client();
     final ownsClient = client == null;
     try {
-      final token = await _secureStorage.read(key: _tokenStorageKey);
+      final token = await readTokenWithRetriesForTest(
+        () => _secureStorage.read(key: _tokenStorageKey),
+      );
       if (token == null || token.isEmpty || generation != _authGeneration) {
         return;
       }
@@ -124,10 +162,21 @@ class GitHubService extends ChangeNotifier {
     } on GitHubAuthException catch (error) {
       if (generation != _authGeneration) return;
       if (error.code == 'invalid_token') {
-        _setToken(null);
-        _user = null;
-        notifyListeners();
-        await _persistToken(null);
+        // A 401 alone is NEVER proof the token died — a proxy, WAF or edge
+        // error page can 401 a request the token would have passed. Confirm
+        // GitHub's own `Bad credentials` JSON before even thinking about
+        // deleting the stored token. (`token` is not safely readable here —
+        // the throw may predate its assignment — but `_token` is only set
+        // when a real stored token existed, so it is the right suspect.)
+        final suspect = _token;
+        if (suspect != null && suspect.isNotEmpty) {
+          await _handleSuspectToken(
+            generation,
+            suspect,
+            confirmationClient: c,
+            retryClient: client,
+          );
+        }
       } else {
         _scheduleProfileRetry(generation, client);
       }
@@ -147,8 +196,8 @@ class GitHubService extends ChangeNotifier {
   }
 
   /// Retries a transient profile failure without ever clearing the stored
-  /// token. A later 401 from the profile endpoint is the only thing that
-  /// signs the user out.
+  /// token. Only a CONFIRMED bad-credentials 401 (see [_handleSuspectToken])
+  /// signs the user out -- a lone 401 just re-arms this retry.
   void _scheduleProfileRetry(int generation, http.Client? client) {
     final token = _token;
     if (token == null) return;
@@ -164,13 +213,18 @@ class GitHubService extends ChangeNotifier {
         _user = user;
         notifyListeners();
       } on GitHubAuthException catch (error) {
-        if (generation == _authGeneration &&
-            _token == token &&
-            error.code == 'invalid_token') {
-          _setToken(null);
-          _user = null;
-          notifyListeners();
-          await _persistToken(null);
+        if (generation == _authGeneration && error.code == 'invalid_token') {
+          // Even the retry's 401 can be an edge/proxy artifact -- confirm
+          // before deleting; inconclusive keeps the token and re-arms.
+          // The confirmation uses this attempt's client `c`; the re-armed
+          // retry uses the ORIGINAL `client` (possibly null) so it never
+          // reuses `c` after this block's finally closes it.
+          await _handleSuspectToken(
+            generation,
+            token,
+            confirmationClient: c,
+            retryClient: client,
+          );
         }
       } catch (_) {
         // Still authenticated-but-unknown; keep the token.
@@ -178,6 +232,71 @@ class GitHubService extends ChangeNotifier {
         if (ownsClient) c.close();
       }
     });
+  }
+
+  /// Handles a profile fetch that came back 401: the token is deleted only
+  /// when a second, dedicated fetch confirms GitHub's own JSON
+  /// `Bad credentials` response. Anything inconclusive (proxy/WAF 401s,
+  /// HTML error pages, timeouts, offline) KEEPS the token and falls back
+  /// to the background retry instead of signing the user out.
+  ///
+  /// [confirmationClient] performs the second-chance check; [retryClient]
+  /// is the client the re-armed retry should use (null = create+own one).
+  /// They are separate because callers often own+close the confirmation
+  /// client in a `finally` -- handing it to the retry would make the retry
+  /// reuse a closed client.
+  Future<void> _handleSuspectToken(
+    int generation,
+    String token, {
+    required http.Client confirmationClient,
+    required http.Client? retryClient,
+  }) async {
+    if (generation != _authGeneration) return;
+    final confirmed = await _confirmTokenInvalid(token, confirmationClient);
+    if (generation != _authGeneration) return;
+    if (confirmed) {
+      _setToken(null);
+      _user = null;
+      notifyListeners();
+      await _persistToken(null);
+    } else {
+      // Not confirmed dead -- keep the token; the profile retry re-checks
+      // in the background without touching the stored secret.
+      _scheduleProfileRetry(generation, retryClient);
+    }
+  }
+
+  /// Second-chance check that the stored token is REALLY dead: issues one
+  /// more `GET /user` and returns true only when the response is 401 with
+  /// GitHub's JSON `{"message": "Bad credentials", ...}` body. Returns
+  /// false (inconclusive -- keep the token) for any other status, any
+  /// non-JSON or differently-worded body, and any transport failure.
+  Future<bool> _confirmTokenInvalid(String token, http.Client client) async {
+    try {
+      final res = await client
+          .get(
+            Uri.parse('$_apiBase/user'),
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Accept': 'application/vnd.github+json',
+            },
+          )
+          .timeout(const Duration(seconds: 20));
+      if (res.statusCode != 401) return false;
+      try {
+        final body = jsonDecode(res.body);
+        if (body is Map<String, dynamic>) {
+          final message = (body['message'] as String?) ?? '';
+          return message.toLowerCase().contains('bad credentials');
+        }
+      } catch (_) {
+        return false;
+      }
+      return false;
+    } catch (_) {
+      // The confirmation fetch itself failed -- inconclusive, keep token.
+      return false;
+    }
   }
 
   Future<void> _persistToken(String? token, {int? generation}) {
@@ -451,6 +570,12 @@ class GitHubService extends ChangeNotifier {
     }
   }
 
+  /// Percent-encodes each path segment for GitHub API URLs (repo names and
+  /// file paths with spaces or special chars broke requests when interpolated
+  /// raw). Slashes are preserved as separators.
+  static String _encodeApiPath(String p) =>
+      p.split('/').map(Uri.encodeComponent).join('/');
+
   /// List branch names of a repo (Studio branch picker).
   ///
   /// Capped at GitHub's maximum 100 branches per page; pagination is not
@@ -466,7 +591,7 @@ class GitHubService extends ChangeNotifier {
       final res = await c
           .get(
             Uri.parse(
-              '$_apiBase/repos/$owner/$repo/branches?per_page=100',
+              '$_apiBase/repos/${Uri.encodeComponent(owner)}/${Uri.encodeComponent(repo)}/branches?per_page=100',
             ),
             headers: {
               'Authorization': 'Bearer $token',
@@ -499,7 +624,7 @@ class GitHubService extends ChangeNotifier {
   }) async {
     final token = _requireToken();
     final uri = Uri.parse(
-      '$_apiBase/repos/$owner/$repo/contents/$path'
+      '$_apiBase/repos/${Uri.encodeComponent(owner)}/${Uri.encodeComponent(repo)}/contents/${_encodeApiPath(path)}'
       '${branch == null || branch.isEmpty ? '' : '?ref=${Uri.encodeQueryComponent(branch)}'}',
     );
     final c = client ?? http.Client();
@@ -540,7 +665,7 @@ class GitHubService extends ChangeNotifier {
       throw ArgumentError.value(repoFull, 'repoFull', 'Expected owner/repo');
     }
     final uri = Uri.parse(
-      '$_apiBase/repos/${parts[0]}/${parts[1]}/contents/$path',
+      '$_apiBase/repos/${Uri.encodeComponent(parts[0])}/${Uri.encodeComponent(parts[1])}/contents/${_encodeApiPath(path)}',
     );
     final c = client ?? http.Client();
     try {

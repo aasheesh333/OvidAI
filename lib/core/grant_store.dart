@@ -93,15 +93,38 @@ class PermissionGrant {
     'grantedAt': grantedAt.toIso8601String(),
   };
 
-  factory PermissionGrant.fromJson(Map<String, dynamic> j) => PermissionGrant(
-    kind: j['kind'] as String? ?? kindPath,
-    value: j['value'] as String? ?? '',
-    scope: j['scope'] as String? ?? scopeSession,
-    sessionId: j['sessionId'] as String?,
-    grantedAt:
-        DateTime.tryParse(j['grantedAt'] as String? ?? '') ??
-        DateTime.fromMillisecondsSinceEpoch(0),
-  );
+  /// Parses persisted JSON. Unknown [kind]/[scope] values and empty values
+  /// are rejected (callers like [listFromJson] skip rejected entries) so
+  /// hand-edited or corrupt persisted data can never smuggle in a grant
+  /// with an unrecognized kind, and values are re-normalized by kind.
+  factory PermissionGrant.fromJson(Map<String, dynamic> j) {
+    final kind = j['kind'] as String?;
+    final scope = j['scope'] as String?;
+    final rawValue = j['value'] as String?;
+    if (kind != kindPath && kind != kindHost) {
+      throw FormatException('unknown grant kind: $kind');
+    }
+    if (scope != scopeSession && scope != scopeGlobal) {
+      throw FormatException('unknown grant scope: $scope');
+    }
+    final validKind = kind as String;
+    final validScope = scope as String;
+    final value = validKind == kindPath
+        ? normalizeGrantPath(rawValue ?? '')
+        : normalizeGrantHost(rawValue ?? '');
+    if (value.isEmpty) {
+      throw const FormatException('grant value is empty');
+    }
+    return PermissionGrant(
+      kind: validKind,
+      value: value,
+      scope: validScope,
+      sessionId: j['sessionId'] as String?,
+      grantedAt:
+          DateTime.tryParse(j['grantedAt'] as String? ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0),
+    );
+  }
 
   /// Parses a JSON list into grants; null/malformed entries are skipped so
   /// old or hand-edited session JSON never crashes the load path.
@@ -169,11 +192,24 @@ String normalizeGrantHost(String raw) {
 
 /// True when [candidate] is inside (or equal to) [grantPath]: a strict
 /// segment-boundary check, so `/a/b` covers `/a/b/c` but NOT `/a/bc`.
+/// A grant on the filesystem root `/` covers every absolute path.
 bool pathCoveredBy(String grantPath, String candidate) {
   final g = normalizeGrantPath(grantPath);
   final c = normalizeGrantPath(candidate);
   if (c == g) return true;
+  if (g == '/') return true;
   return c.startsWith('$g/');
+}
+
+/// True for an IP literal (IPv4 or IPv6) after [normalizeGrantHost].
+bool _isIpLiteral(String host) {
+  if (host.contains(':')) return true; // IPv6 (brackets already stripped).
+  final v4 = RegExp(r'^\d{1,3}(\.\d{1,3}){3}$');
+  if (!v4.hasMatch(host)) return false;
+  return host.split('.').every((p) {
+    final n = int.tryParse(p);
+    return n != null && n >= 0 && n <= 255;
+  });
 }
 
 /// True when [candidateHost] is covered by [grantHost]: exact match or a
@@ -185,6 +221,9 @@ bool hostCoveredBy(String grantHost, String candidateHost) {
   final c = normalizeGrantHost(candidateHost);
   if (g.isEmpty || c.isEmpty) return false;
   if (c == g) return true;
+  // IP literals match only themselves — a suffix match would let an
+  // attacker-controlled name like `evil.127.0.0.1` ride on a loopback grant.
+  if (_isIpLiteral(g)) return false;
   return c.endsWith('.$g');
 }
 
@@ -242,7 +281,11 @@ class GrantStore {
 
   /// Records an "always allow" for a path. Exactly the granted path (and
   /// its children) is covered — parents and siblings are not.
+  /// A non-global grant with a null/empty [sessionId] is refused: it would
+  /// land in an unreachable bucket that [grantsFor] never reads, so the
+  /// user would believe they allowed something that never applies.
   void addPathGrant(String? sessionId, String rawPath, {bool global = false}) {
+    if (!global && (sessionId == null || sessionId.isEmpty)) return;
     final g = PermissionGrant.path(
       rawPath,
       sessionId: sessionId,
@@ -259,7 +302,10 @@ class GrantStore {
   }
 
   /// Records an "always allow" for a host (covers child domains too).
+  /// A non-global grant with a null/empty [sessionId] is refused: it would
+  /// land in an unreachable bucket that [grantsFor] never reads.
   void addHostGrant(String? sessionId, String rawHost, {bool global = false}) {
+    if (!global && (sessionId == null || sessionId.isEmpty)) return;
     final g = PermissionGrant.host(
       rawHost,
       sessionId: sessionId,
