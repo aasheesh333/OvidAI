@@ -209,6 +209,8 @@ class AgentNotificationService {
         _invoke(_active ? 'agentServiceUpdate' : 'agentServiceStart', {
           'title': 'Ovid AI',
           'text': 'Agent: $clean',
+          // A run IS in flight → the service may hold the partial wake lock.
+          'wake': 'true',
         }).then((ok) {
           if (!ok || generation <= _committedGeneration) return;
           _committedGeneration = generation;
@@ -276,6 +278,9 @@ class AgentNotificationService {
         _invoke('agentServiceUpdate', {
           'title': 'Ovid AI',
           'text': 'Control mode active',
+          // Presence only — no run in flight, so no wake lock. The next
+          // agentWorking() re-acquires it.
+          'wake': 'false',
         }).then((ok) {
           if (ok && _committedGeneration == barrier && !_isAnyRunActive()) {
             _active = true;
@@ -291,6 +296,10 @@ class AgentNotificationService {
         _invoke('agentServiceUpdate', {
           'title': 'Ovid AI',
           'text': 'Ready & Listening',
+          // Idle presence: keep the notification, release the wake lock. An
+          // idle service holding a 6h PARTIAL_WAKE_LOCK drains battery all
+          // night with no agent work happening.
+          'wake': 'false',
         }).then((ok) {
           if (ok && _committedGeneration == barrier && !_isAnyRunActive()) {
             _active = true;

@@ -181,6 +181,11 @@ class _StudioScreenState extends State<StudioScreen> {
     final sid = s.sandboxId ?? s.id;
     // Private repos need the OAuth token at clone time.
     GlobalRepoRegistry.gitTokenProvider ??= () => GitHubService.I.token;
+    // SECURITY: hand the registry a secret-free auth env (a host-scoped
+    // `store` helper naming a 0600 file) instead of letting it interpolate
+    // the token into GIT_CONFIG_VALUE_0.
+    GlobalRepoRegistry.gitCredentialEnvProvider ??=
+        SandboxService.I.gitCredentialEnv;
     // Android ships no usable system git — a host `git clone` dies with
     // `ProcessException: Permission denied`. Route registry clones through
     // the sandbox's git (same one the agent's git_clone tool uses), with
@@ -310,14 +315,12 @@ class _StudioScreenState extends State<StudioScreen> {
         'reinstall the Linux sandbox from the Health screen, then retry.',
       );
     }
-    final token = GlobalRepoRegistry.gitTokenProvider?.call();
-    final env = <String, String>{'GIT_TERMINAL_PROMPT': '0'};
-    if (token != null && token.isNotEmpty) {
-      env['GIT_CONFIG_COUNT'] = '1';
-      env['GIT_CONFIG_KEY_0'] = 'credential.https://github.com.helper';
-      env['GIT_CONFIG_VALUE_0'] =
-          '!f() { echo username=x-access-token; echo password=$token; }; f';
-    }
+    // SECURITY: secret-free auth env — git reads the token from the 0600
+    // credential store named by GIT_CONFIG_VALUE_0, never from the env value.
+    final env = <String, String>{
+      'GIT_TERMINAL_PROMPT': '0',
+      ...SandboxService.I.gitCredentialEnv(),
+    };
     final parent = Directory(dest).parent;
     await parent.create(recursive: true);
     final (code, out) = await svc

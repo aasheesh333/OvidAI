@@ -39,6 +39,13 @@ class GlobalRepoRegistry {
   /// cycle with the GitHub/sandbox services). Null → anonymous clone.
   static String? Function()? gitTokenProvider;
 
+  /// Supplies the git auth **env** for a clone, wired by the sandbox layer:
+  /// `GlobalRepoRegistry.gitCredentialEnvProvider = SandboxService.I.gitCredentialEnv;`
+  /// SECURITY (2026-09-24): clones must not interpolate the token into an env
+  /// value — the provider returns a host-scoped `store` helper that names a
+  /// 0600 credential file instead. Null → anonymous clone (tests, host git).
+  static Map<String, String> Function()? gitCredentialEnvProvider;
+
   /// Production override for the git runner, wired once by the app layer
   /// (which owns the Linux sandbox) — e.g. in Studio setup:
   /// `GlobalRepoRegistry.cloneRunnerOverride ??= _sandboxGitClone;`
@@ -208,23 +215,20 @@ class GlobalRepoRegistry {
       _gitRunner ?? cloneRunnerOverride ?? _defaultGitClone;
 
   /// Real clone used in production. Never prompts (a hung credential
-  /// prompt is worse than a clean failure); when the UI wired
-  /// [gitTokenProvider], private repos clone via a process-scoped
-  /// credential helper — no `.git-credentials` file is written.
+  /// prompt is worse than a clean failure); when the app wired
+  /// [gitCredentialEnvProvider], private repos clone through a host-scoped
+  /// credential store file. The token is never interpolated into an env
+  /// value here — see that field's SECURITY note.
   Future<void> _defaultGitClone(
     String repoFull,
     String branch,
     String dest,
   ) async {
     _validate(repoFull, branch);
-    final env = <String, String>{'GIT_TERMINAL_PROMPT': '0'};
-    final token = gitTokenProvider?.call();
-    if (token != null && token.isNotEmpty) {
-      env['GIT_CONFIG_COUNT'] = '1';
-      env['GIT_CONFIG_KEY_0'] = 'credential.https://github.com.helper';
-      env['GIT_CONFIG_VALUE_0'] =
-          '!f() { echo username=x-access-token; echo password=$token; }; f';
-    }
+    final env = <String, String>{
+      'GIT_TERMINAL_PROMPT': '0',
+      ...?gitCredentialEnvProvider?.call(),
+    };
     final res = await Process.run('git', [
       'clone',
       '-b',

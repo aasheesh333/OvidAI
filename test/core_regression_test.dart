@@ -2010,6 +2010,20 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         'reboot',
         'shutdown -h now',
         'find / -name x -delete',
+        // SECURITY (2026-09-24): the old patterns required a SINGLE-DASH
+        // option cluster AND an absolute/`~`/`$HOME` target, so both of these
+        // walked straight through the destructive gate with no prompt:
+        //   • long options  — `--recursive` / `--force`
+        //   • relative escapes — `../../shared_prefs` never names `/`
+        // `../../shared_prefs` from a workspace cwd is the app's own
+        // SharedPreferences dir: every session, setting and grant.
+        'rm --recursive --force ../../shared_prefs',
+        'rm -rf ../../shared_prefs',
+        'rm -r -f ../shared_prefs',
+        'rm --recursive --force /data',
+        r'rm --recursive $PREFIX',
+        'find . -name "*.log" -delete',
+        'find .. -delete',
       ];
       for (final k in killers) {
         expect(
@@ -2029,6 +2043,14 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         'git push origin main',
         'find src -name "*.dart" | xargs grep foo',
         'ls -la',
+        // In-workspace deletes stay normal agent work — the widened patterns
+        // must only catch escapes and absolute targets, not every `rm`.
+        'rm file.txt',
+        'rm -i file.txt',
+        'rm -f ./tmp/x.log',
+        'rm -rf node_modules/.cache',
+        'find src -type d',
+        'find . -name "*.dart"',
       ];
       for (final f in fine) {
         expect(

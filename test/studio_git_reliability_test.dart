@@ -497,7 +497,8 @@ void main() {
       if (prefix.existsSync()) prefix.deleteSync(recursive: true);
     });
 
-    test('login injects a github.com-scoped env credential and sign-out clears it', () async {
+    test('login hands git a github.com-scoped store file and sign-out clears it',
+        () async {
       await storage.write(key: 'ovid_github_token', value: 'stored-token');
       await GitHubService.I.initialize(
         client: MockClient(
@@ -511,15 +512,28 @@ void main() {
       expect(env['GIT_TERMINAL_PROMPT'], '0');
       expect(env['GIT_CONFIG_COUNT'], '1');
       expect(env['GIT_CONFIG_KEY_0'], 'credential.https://github.com.helper');
-      expect(env['GIT_CONFIG_VALUE_0'], contains('password=stored-token'));
-      // Host-scoped: no unscoped credential.helper, no persisted store.
+      // SECURITY: the env names the credential file; it never carries the
+      // secret. This map is merged into EVERY child process, so a token here
+      // is one `printenv` away from the transcript and the LLM provider.
+      expect(env['GIT_CONFIG_VALUE_0'], contains('store --file='));
+      for (final e in env.entries) {
+        expect(
+          e.value,
+          isNot(contains('stored-token')),
+          reason: '${e.key} leaks the git token',
+        );
+      }
+      // Host-scoped: no unscoped credential.helper, no askpass shim.
       expect(env.containsKey('credential.helper'), isFalse);
       expect(env.containsKey('GIT_ASKPASS'), isFalse);
-      expect(
-        env.values.any((v) => v.contains('.git-credentials')),
-        isFalse,
-        reason: 'credentials must never be written to disk',
-      );
+
+      // The secret lives in an owner-only file inside the prefix.
+      final path = SandboxService.I.gitCredentialFilePath!;
+      expect(File(path).readAsStringSync(),
+          'https://x-access-token:stored-token@github.com\n');
+      expect(File(path).statSync().mode & 0x1ff, 0x180,
+          reason: 'credential store must be mode 0600');
+      expect(SandboxService.I.protectedPaths, contains(path));
 
       await GitHubService.I.signOut();
 
@@ -528,6 +542,8 @@ void main() {
         SandboxService.I.sandboxEnvForTest().containsKey('GIT_CONFIG_COUNT'),
         isFalse,
       );
+      expect(File(path).existsSync(), isFalse,
+          reason: 'sign-out must delete the credential store');
     });
   });
 }

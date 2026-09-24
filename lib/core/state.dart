@@ -3043,7 +3043,7 @@ class AppState extends ChangeNotifier {
       maxOutputTokens = prefs.getInt(_kMaxOutputTokens) ?? 0;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
       shareStudioOnRestart = prefs.getBool(_kShareStudioOnRestart) ?? true;
-      shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? true;
+      shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? false;
       lightTheme = prefs.getBool(_kTheme) ?? false;
       secureScreen = prefs.getBool(_kSecureScreen) ?? false;
       memoryEnabled = prefs.getBool(_kMemoryEnabled) ?? true;
@@ -4085,7 +4085,7 @@ class AppState extends ChangeNotifier {
       autoRunSafeCommands = true;
       shareSessionMemory = false;
       shareStudioOnRestart = true;
-      shareBrowserOnRestart = true;
+      shareBrowserOnRestart = false;
       lastSelectedModel = '';
       lastSelectedProviderId = null;
       try {
@@ -4177,12 +4177,16 @@ class AppState extends ChangeNotifier {
   /// (persisted, default ON).
   ///
   /// Each session browses in its own WebView profile, so a Google login in
-  /// one chat is invisible from another while the app runs. On the next
-  /// launch the accumulated logins are copied into every session, so the user
-  /// is signed in everywhere, then the sessions diverge again. Turn this OFF
-  /// for strict per-session cookies.
+  /// one chat is invisible from another while the app runs.
+  ///
+  /// SECURITY (2026-09-24): this used to default ON, which meant every launch
+  /// merged every remembered origin's cookies into EVERY session profile —
+  /// directly contradicting the per-session isolation the WebView profiles
+  /// exist to provide. A prompt-injected agent in chat B could then act on any
+  /// site the user had ever logged into in chat A, under a different model,
+  /// provider and plugin set. It is now opt-in.
   static const _kShareBrowserOnRestart = 'ovid_share_browser_on_restart';
-  bool shareBrowserOnRestart = true;
+  bool shareBrowserOnRestart = false;
 
   Future<void> setShareStudioOnRestart(bool v) async {
     shareStudioOnRestart = v;

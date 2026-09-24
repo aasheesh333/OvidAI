@@ -123,11 +123,90 @@ class SandboxService {
   bool _installed = false;
   bool _checked = false;
 
-  /// GitHub token injected into sandbox process env so terminal/agent git
-  /// against github.com can authenticate. Process-env only — never written
-  /// to `.git-credentials` or global config. Set by [GitHubService] on
-  /// login/initialize and cleared on sign-out.
-  String? gitCredentialToken;
+  /// GitHub token used for git auth against github.com. Set by
+  /// [GitHubService] on login/initialize, cleared on sign-out.
+  ///
+  /// SECURITY (2026-09-24): the token is NEVER placed in a child process
+  /// env. It used to be interpolated into `GIT_CONFIG_VALUE_0`, which
+  /// [_sandboxEnv] merges into *every* spawned process — the agent shell, the
+  /// Studio terminal, MCP stdio servers and plugin hooks — so a single
+  /// `printenv` (auto-approved in Read-Only mode) put the raw token into tool
+  /// output, the transcript, and the LLM provider. It now lives in a 0600
+  /// file inside the prefix that git reads through a host-scoped `store`
+  /// helper, and [protectedPaths] keeps that file behind the permission jail.
+  String? get gitCredentialToken => _gitCredentialToken;
+  set gitCredentialToken(String? value) {
+    _gitCredentialToken = value;
+    if (value == null || value.isEmpty) clearGitCredentialFile();
+  }
+
+  String? _gitCredentialToken;
+
+  /// Path + token currently materialised in the store file, so a rewrite
+  /// happens only when one of them actually changed.
+  String? _gitCredFilePath;
+  String? _gitCredFileToken;
+
+  /// Absolute path of the materialised 0600 git-credentials file, or null
+  /// when nothing has been written (no token, no prefix, or signed out).
+  String? get gitCredentialFilePath => _gitCredFilePath;
+
+  /// Paths holding secret material. Reading one must require an explicit
+  /// user grant — [checkPolicy] refuses them outright for spawned commands,
+  /// and the agent path gate treats them as outside every mode's root.
+  Set<String> get protectedPaths =>
+      _gitCredFilePath != null ? {_gitCredFilePath!} : const <String>{};
+
+  /// Materialise the 0600 credential store; returns its path, or null when
+  /// there is no token or no prefix yet. Idempotent.
+  String? _ensureGitCredentialFile() {
+    final p = _prefix?.path;
+    final token = _gitCredentialToken;
+    if (p == null || token == null || token.isEmpty) return null;
+    final path = '$p/.ovid-git-credentials';
+    if (_gitCredFilePath == path && _gitCredFileToken == token) return path;
+    try {
+      File(
+        path,
+      ).writeAsStringSync('https://x-access-token:$token@github.com\n',
+          flush: true);
+      // Owner-only. The sandbox runs as the app UID, so any wider mode would
+      // expose the token to every process on the device.
+      Process.runSync('chmod', ['600', path]);
+      _gitCredFilePath = path;
+      _gitCredFileToken = token;
+    } catch (_) {
+      return null;
+    }
+    return path;
+  }
+
+  /// Delete the credential store — sign-out, token rotation, uninstall.
+  void clearGitCredentialFile() {
+    final path = _gitCredFilePath;
+    _gitCredFilePath = null;
+    _gitCredFileToken = null;
+    if (path == null) return;
+    try {
+      final f = File(path);
+      if (f.existsSync()) f.deleteSync();
+    } catch (_) {}
+  }
+
+  /// Git auth env: host-scoped `store` helper + no interactive prompt (a hung
+  /// prompt is what this originally fixed). Contains NO secret — the value
+  /// names the credential file, never its contents. Returns an empty map when
+  /// signed out, so callers can spread it unconditionally.
+  Map<String, String> gitCredentialEnv() {
+    final path = _ensureGitCredentialFile();
+    if (path == null) return const {};
+    return {
+      'GIT_TERMINAL_PROMPT': '0',
+      'GIT_CONFIG_COUNT': '1',
+      'GIT_CONFIG_KEY_0': 'credential.https://github.com.helper',
+      'GIT_CONFIG_VALUE_0': 'store --file=$path',
+    };
+  }
 
   bool get isInstalled => _installed;
 
@@ -2082,20 +2161,13 @@ audit=false
     // PYTHONPATH would pollute sys.path with cwd).
     final pysp = _pythonSitePackages;
     if (pysp != null && pysp.isNotEmpty) env['PYTHONPATH'] = pysp;
-    // ── git credentials: host-scoped, process-env only ────────────────
-    // When signed in, hand git a credential helper scoped to github.com
-    // through GIT_CONFIG_* env vars. Never write `.git-credentials` or any
-    // global config, and suppress interactive prompts (a hung prompt is
-    // the bug this fixes). The token lives only in this process env.
-    final token = gitCredentialToken;
-    if (token != null && token.isNotEmpty) {
-      env['GIT_TERMINAL_PROMPT'] = '0';
-      env['GIT_CONFIG_COUNT'] = '1';
-      env['GIT_CONFIG_KEY_0'] = 'credential.https://github.com.helper';
-      env['GIT_CONFIG_VALUE_0'] =
-          '!f() { echo username=x-access-token; '
-          'echo password=$token; }; f';
-    }
+    // ── git credentials: host-scoped store helper, secret stays on disk ──
+    // Never interpolate the token into an env value: this map is merged into
+    // EVERY child process (agent shell, Studio terminal, MCP servers, plugin
+    // hooks), so a token here is one `printenv` away from the transcript and
+    // the LLM provider. gitCredentialEnv() points git at a 0600 file instead
+    // — see [protectedPaths] and [checkPolicy].
+    env.addAll(gitCredentialEnv());
     return env;
   }
 
@@ -2390,9 +2462,20 @@ audit=false
     }
   }
 
+  /// Catastrophic commands — HARD denied by [checkPolicy], never promptable.
+  ///
+  /// SECURITY (2026-09-24): the `rm` pattern used to require a single-dash
+  /// option cluster (`-[a-zA-Z]*[rf][a-zA-Z]*`), so `rm --recursive --force
+  /// /data` matched nothing and ran. Option spelling is now `-{1,2}` with long
+  /// names allowed.
+  ///
+  /// Relative escapes (`rm -rf ../../x`) are deliberately NOT here. Deleting
+  /// outside the workspace is the permission jail's business — the user gets
+  /// an Allow / Deny / Always Allow prompt — whereas this list is for commands
+  /// that must never run even with approval. See
+  /// `AgentService.destructivePatternsForTest`.
   static const defaultDeniedCommands = [
-    r'\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+(/[^\s]*|\$HOME|~)([^\w]|$)',
-    r'\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(/|\$HOME|~)',
+    r'\brm\s+(-{1,2}[a-zA-Z-]*[rf][a-zA-Z-]*\s+)+(/[^\s]*|\$HOME\b|\$PREFIX\b|~)',
     r'\bdd\s+[^|]*if=/dev/(block|zero|random)',
     r'\bmkfs(\.\w+)?\s',
     r':\s*\(\s*\)\s*\{.*\}\s*;\s*:',
@@ -2400,8 +2483,7 @@ audit=false
     r'\bchown\s+-R\s+\S+\s+/\s*$',
     r'\b(reboot|shutdown|halt)\b',
     r'>\s*/dev/sd[a-z]',
-    r'\brm\s+-rf\s+\$PREFIX',
-    r'\bfind\s+/.*-delete\b',
+    r'\bfind\s+/[^|;&]*-delete\b',
   ];
 
   SandboxPolicy policy = (
@@ -2429,6 +2511,17 @@ audit=false
           }
         }
       } catch (_) {}
+    }
+
+    // Secret material is never readable by a spawned command. The git
+    // credential store holds the GitHub token; git itself reaches it through
+    // GIT_CONFIG_VALUE_0 (an env value naming the file, not argv), so a
+    // legitimate git invocation never mentions the path here. Matching the
+    // basename too catches `$PREFIX/.ovid-git-credentials` and relative forms.
+    if (_gitCredFilePath != null &&
+        (cmdLine.contains(_gitCredFilePath!) ||
+            cmdLine.contains('.ovid-git-credentials'))) {
+      return 'DENIED by sandbox policy: path holds app credentials';
     }
 
     final effectiveCwd = cwd ?? hostWorkDir?.path;
@@ -3535,5 +3628,10 @@ echo INSTALLED
     _pythonSitePackages = null;
     _payloadAbi = null;
     _payloadReadError = null;
+    // The uninstall above removed the whole prefix, so the credential store
+    // is already gone; drop the cache so the next install re-materialises it
+    // from the in-memory token.
+    _gitCredFilePath = null;
+    _gitCredFileToken = null;
   }
 }

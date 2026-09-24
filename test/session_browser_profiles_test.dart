@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ovid_ai/core/session_browser_profiles.dart';
+import 'package:ovid_ai/core/state.dart';
 
 /// Per-session browser identity + restart-sharing contract.
 ///
@@ -308,13 +309,23 @@ void main() {
         'Future<void> navigateTab(BrowserTab tab, String url) async',
       );
       expect(start, greaterThan(-1));
-      final body = agentSrc.substring(start, start + 1200);
+      // Window sized for the whole body: navigateTab grew a scheme guard (and
+      // its SECURITY comment) ahead of the profile bind, so a 1200-char window
+      // stopped before loadRequest and the ordering assertion silently tested
+      // nothing (loadIndex == -1).
+      final body = agentSrc.substring(start, start + 3000);
       final bindIndex = body.indexOf('await ensureTabProfile(tab);');
       final loadIndex = body.indexOf(
         'await controller.loadRequest(Uri.parse(url));',
       );
       expect(bindIndex, greaterThan(-1));
       expect(loadIndex, greaterThan(bindIndex));
+      // The scheme guard must run BEFORE anything else, so a refused URL is
+      // never bound, recorded, or loaded.
+      final guardIndex = body.indexOf('if (!isLoadableTabUrl(url)) return;');
+      expect(guardIndex, greaterThan(-1));
+      expect(guardIndex, lessThan(bindIndex));
+      expect(guardIndex, lessThan(loadIndex));
     });
 
     test('every navigation goes through navigateTab', () {
@@ -450,12 +461,18 @@ void main() {
         ),
         isTrue,
       );
+      // SECURITY (2026-09-24): the cross-session cookie merge defaults OFF.
+      // Merging every remembered origin's cookies into every session profile
+      // on each launch contradicted the per-session isolation the WebView
+      // profiles exist to provide, and let a prompt-injected agent in one chat
+      // act on sites the user logged into in a different chat.
       expect(
         stateSrc.contains(
-          'shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? true',
+          'shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? false',
         ),
         isTrue,
       );
+      expect(AppState.createForTest().shareBrowserOnRestart, isFalse);
     });
 
     test('the restart merge runs as a startup task', () {

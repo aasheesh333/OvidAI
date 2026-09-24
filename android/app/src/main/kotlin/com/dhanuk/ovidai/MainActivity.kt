@@ -456,6 +456,14 @@ class MainActivity : FlutterActivity() {
                                 AgentForegroundService.EXTRA_TEXT,
                                 call.argument<String>("text") ?: "Agent is working…"
                             )
+                            // Hold the partial wake lock only while a run is
+                            // actually in flight. Absent/false → the service
+                            // releases it (idle presence must not keep the CPU
+                            // awake). See AgentForegroundService.EXTRA_WAKE.
+                            intent.putExtra(
+                                AgentForegroundService.EXTRA_WAKE,
+                                call.argument<String>("wake") == "true"
+                            )
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                                 startForegroundService(intent)
                             } else {
@@ -482,6 +490,14 @@ class MainActivity : FlutterActivity() {
                             intent.putExtra(
                                 AgentForegroundService.EXTRA_TEXT,
                                 call.argument<String>("text") ?: "Agent is working…"
+                            )
+                            // Hold the partial wake lock only while a run is
+                            // actually in flight. Absent/false → the service
+                            // releases it (idle presence must not keep the CPU
+                            // awake). See AgentForegroundService.EXTRA_WAKE.
+                            intent.putExtra(
+                                AgentForegroundService.EXTRA_WAKE,
+                                call.argument<String>("wake") == "true"
                             )
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                                 startForegroundService(intent)

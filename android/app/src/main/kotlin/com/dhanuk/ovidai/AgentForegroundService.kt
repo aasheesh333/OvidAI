@@ -42,10 +42,27 @@ class AgentForegroundService : Service() {
         const val ACTION_EXIT = "com.dhanuk.ovidai.AGENT_EXIT"
         const val EXTRA_TITLE = "title"
         const val EXTRA_TEXT = "text"
+
+        /// True only while an agent run is actually in flight. The Dart side
+        /// sends it on every start/update so the service knows whether the
+        /// partial wake lock is justified.
+        ///
+        /// BATTERY / PLAY POLICY (2026-09-24): this used to be implicit — ANY
+        /// startForegroundService call acquired a renewable 6-hour
+        /// PARTIAL_WAKE_LOCK, including the idle "Ready & Listening" update and
+        /// the BootReceiver start. That held the CPU awake all night on every
+        /// device with keep-alive on (the default) while no agent work existed,
+        /// and a permanently-running specialUse FGS with no task is a Play
+        /// policy exposure. The lock is now tied to real work.
+        const val EXTRA_WAKE = "wake"
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wakeLockAcquiredAt: Long = 0L
+
+    /// Whether the current state justifies holding the wake lock. Survives a
+    /// START_STICKY restart with a null intent.
+    private var wantWakeLock = false
     private var lastTitle: String = "Ovid AI"
     private var lastText: String = "Agent is working…"
 
@@ -54,9 +71,11 @@ class AgentForegroundService : Service() {
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
         // Recents survival: swiping Ovid from recent apps must NOT stop foreground service.
-        // Re-assert notification and partial wake-lock so background tasks continue uninterrupted.
+        // Re-assert the notification, and the wake-lock ONLY if a run is
+        // actually in flight (see EXTRA_WAKE) — an idle service must not hold
+        // the CPU awake.
         try {
-            acquireWakeLock()
+            if (wantWakeLock) acquireWakeLock()
             startForeground(NOTIFICATION_ID, buildNotification(lastTitle, lastText))
         } catch (_: Exception) {}
     }
@@ -74,6 +93,9 @@ class AgentForegroundService : Service() {
         if (action == ACTION_STOP) {
             // ACTION_STOP: cancels running agent jobs, but keeps foreground service running if configured or if tasks remain.
             // Dart onAgentStop cancels active runs. We update notification copy without calling stopSelf().
+            // No run is in flight any more, so the wake lock goes too.
+            wantWakeLock = false
+            releaseWakeLock()
             lastText = "Agent stopped"
             try {
                 startForeground(NOTIFICATION_ID, buildNotification(lastTitle, lastText))
@@ -82,6 +104,9 @@ class AgentForegroundService : Service() {
         }
         val title = intent?.getStringExtra(EXTRA_TITLE) ?: lastTitle
         val text = intent?.getStringExtra(EXTRA_TEXT) ?: lastText
+        // A null intent (START_STICKY restart) carries no extra: keep whatever
+        // state we already had rather than dropping the lock mid-run.
+        intent?.let { wantWakeLock = it.getBooleanExtra(EXTRA_WAKE, wantWakeLock) }
         lastTitle = title
         lastText = text
         try {
@@ -97,7 +122,9 @@ class AgentForegroundService : Service() {
             releaseWakeLock()
             return START_STICKY
         }
-        acquireWakeLock()
+        // Hold the CPU awake only while an agent run is in flight; an idle
+        // "Ready & Listening" service must not (see EXTRA_WAKE).
+        if (wantWakeLock) acquireWakeLock() else releaseWakeLock()
         // STICKY: if the system kills us under memory pressure, restart —
         // the Dart side re-syncs notification state on the next event.
         return START_STICKY
