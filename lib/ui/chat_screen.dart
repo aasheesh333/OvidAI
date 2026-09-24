@@ -7221,8 +7221,9 @@ Future<void> _enableControlMode(BuildContext context) async {
   }
   AgentService.I.setMode(AgentMode.control);
   // If the accessibility service is enabled but unbound after an app
-  // restart, nudge the OS to rebind now — control mode must not need a
-  // manual off/on toggle to start working.
+  // restart, absorb the OS rebind window now (pure wait, no programmatic
+  // toggle) — control mode must not need a manual off/on toggle to start
+  // working.
   unawaited(DeviceControlService.I.refreshServiceBinding());
   // Battery exemption once: control mode means permanent presence, which
   // Doze/OEM killers will end without the exemption. Asked only on first

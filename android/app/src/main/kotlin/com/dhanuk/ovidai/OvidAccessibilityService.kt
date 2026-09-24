@@ -790,7 +790,11 @@ class OvidAccessibilityService : AccessibilityService() {
         removeOverlayNow()
         resetTree()
         if (instance === this) instance = null
-        return super.onUnbind(intent)
+        // Return true so the framework calls onRebind() (which re-publishes
+        // `instance`) when the system rebinds without destroying us. The
+        // default AccessibilityService.onUnbind() returns false, which left
+        // the existing onRebind handler as dead code.
+        return true
     }
 
     override fun onDestroy() {

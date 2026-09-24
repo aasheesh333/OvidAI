@@ -1602,8 +1602,17 @@ class AppState extends ChangeNotifier {
   static AppState get I => _testInstance ?? _singleton;
   static final AppState _singleton = AppState._();
 
+  /// Cold-start mode normalization. Previously downgraded a persisted
+  /// `control` session to `drive`; that made the agent silently lose its
+  /// device_* tools after every app restart (they are hard-denied outside
+  /// Control mode) even though the OS accessibility service was healthy —
+  /// the "accessibility stopped working after restart" report. The mode is
+  /// now restored as-is: no run auto-resumes after a restart (a persisted
+  /// `running` agentState is restored as `stopped`), so restoring `control`
+  /// is safe — the user must still explicitly start a task before anything
+  /// can drive the device.
   static String sanitizeColdStartMode(String mode) {
-    return mode == 'control' ? 'drive' : mode;
+    return mode;
   }
 
   @visibleForTesting

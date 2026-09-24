@@ -3439,7 +3439,7 @@ libncursesw.so.6.5←./lib/libncurses.so.6
                 as Map;
         expect(modeSchema['enum'], contains('control'));
 
-        expect(AppState.sanitizeColdStartMode('control'), 'drive');
+        expect(AppState.sanitizeColdStartMode('control'), 'control');
         expect(AppState.sanitizeColdStartMode('auto'), 'auto');
         expect(
           ChatSession.fromJson({
@@ -3448,7 +3448,7 @@ libncursesw.so.6.5←./lib/libncurses.so.6
             'model': 'm',
             'mode': 'control',
           }).mode,
-          'drive',
+          'control',
         );
       },
     );

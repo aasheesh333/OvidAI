@@ -22,6 +22,8 @@ void main() {
         const Duration(milliseconds: 1);
     DeviceControlService.connectingRetryBudgetForTest =
         const Duration(milliseconds: 50);
+    // Skip the OS-rebind grace period for determinism (default 20s).
+    DeviceControlService.reconnectGracePeriodForTest = Duration.zero;
     DeviceControlService.setMethodChannelForTest(channel);
   });
 
@@ -32,6 +34,8 @@ void main() {
         const Duration(seconds: 5);
     DeviceControlService.connectingRetryBudgetForTest =
         const Duration(seconds: 90);
+    DeviceControlService.reconnectGracePeriodForTest =
+        const Duration(seconds: 20);
     DeviceControlService.setMethodChannelForTest(null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
@@ -186,8 +190,7 @@ void main() {
     expect(await DeviceControlService.I.reconnectService(), 'connecting');
   });
 
-  test('refreshServiceBinding nudges once, then waits for the bind',
-      () async {
+  test('refreshServiceBinding never nudges: pure wait, no toggle', () async {
     final calls = <String>[];
     var polls = 0;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -195,7 +198,7 @@ void main() {
       calls.add(call.method);
       if (call.method == 'deviceServiceState') {
         polls++;
-        // First read: still connecting; after the nudge the bind lands.
+        // First reads: still connecting; then the OS bind lands on its own.
         return polls <= 2 ? 'connecting' : 'bound';
       }
       if (call.method == 'deviceServiceReconnect') return 'connecting';
@@ -205,8 +208,10 @@ void main() {
     await DeviceControlService.I.refreshServiceBinding();
     expect(
       calls.where((c) => c == 'deviceServiceReconnect').length,
-      1,
-      reason: 'exactly one programmatic nudge per refresh',
+      0,
+      reason:
+          'no programmatic nudge: the component toggle was removed because '
+          'it could permanently disable the service in Settings',
     );
     expect(polls, greaterThan(1));
   });
@@ -225,19 +230,20 @@ void main() {
     expect(reconnects, 0);
   });
 
-  test('native reconnect route forces a rebind without touching Settings',
-      () {
+  test('native reconnect route is a pure probe: no component toggle', () {
     final kt = File(
       'android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt',
     ).readAsStringSync();
     expect(kt.contains('"deviceServiceReconnect"'), isTrue);
-    // Programmatic off/on of OUR OWN component = the manual toggle's
-    // binding effect, without killing our process mid-call.
-    expect(kt.contains('setComponentEnabledSetting'), isTrue);
-    expect(kt.contains('DONT_KILL_APP'), isTrue);
-    // A genuinely disabled service is reported, never force-enabled.
+    // The DISABLE→ENABLE component toggle was removed (2026-09-24): while
+    // disabled, AccessibilityManagerService drops the service from
+    // Settings.Secure ENABLED_ACCESSIBILITY_SERVICES and re-enabling the
+    // component does NOT restore it — the app could permanently turn its
+    // own accessibility service off after an app restart.
     final idx = kt.indexOf('"deviceServiceReconnect"');
     final body = kt.substring(idx, idx + 2500);
+    expect(body.contains('setComponentEnabledSetting'), isFalse);
+    // A genuinely disabled service is reported, never force-enabled.
     expect(body.contains('"disabled"'), isTrue);
   });
 

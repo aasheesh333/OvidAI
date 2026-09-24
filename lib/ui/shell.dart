@@ -76,8 +76,10 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
       case AppLifecycleState.resumed:
         unawaited(AppState.I.reconnectServicesAfterResume());
         // If Ovid's accessibility service is enabled in Settings but the
-        // OS has not rebound it (app restart), nudge the rebind now so
-        // control mode works without a manual off/on toggle.
+        // OS has not rebound it (app restart), absorb the rebind window
+        // now (pure wait — no programmatic toggle, which could disable the
+        // service in Settings) so control mode works without a manual
+        // off/on toggle.
         unawaited(DeviceControlService.I.refreshServiceBinding());
         // Control overlay is visible only while backgrounded.
         unawaited(AgentService.I.setAppForegrounded(true));

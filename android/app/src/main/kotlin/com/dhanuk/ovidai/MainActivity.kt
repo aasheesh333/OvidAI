@@ -508,43 +508,32 @@ class MainActivity : FlutterActivity() {
                         result.success(deviceServiceState())
                     }
                     "deviceServiceReconnect" -> {
-                        // Enabled in Settings but the OS has not rebound our
-                        // process yet after an app restart — the state users
-                        // previously fixed with a manual off/on toggle.
-                        // Toggling OUR OWN component state programmatically
-                        // forces AccessibilityManagerService to re-evaluate
-                        // and rebind, with no user action and no extra
-                        // permission (own package). A genuinely disabled
-                        // service is left alone and reported as such.
+                        // Pure state probe — intentionally side-effect free.
+                        // NOTE (2026-09-24): this handler used to toggle our
+                        // own component DISABLED then ENABLED again to
+                        // "force" a rebind. That toggle is a known Android
+                        // footgun: while the component is disabled, AccessibilityManagerService
+                        // treats the service as unavailable and DROPS it from
+                        // Settings.Secure ENABLED_ACCESSIBILITY_SERVICES
+                        // (the Settings toggle flips OFF), and re-enabling
+                        // the component does NOT restore the Settings entry
+                        // (that needs user consent). Fired automatically on
+                        // every app resume during the normal transient
+                        // "connecting" window, it could permanently disable
+                        // the service right after an app restart — the exact
+                        // "accessibility stopped working" report. Removed.
+                        // The OS rebinds an enabled accessibility service on
+                        // its own after a process restart; the Dart side
+                        // already waits with capped backoff (90s budget) while
+                        // the bind lands. A genuinely disabled service is
+                        // reported as such so callers show Settings guidance.
                         try {
                             if (OvidAccessibilityService.instance != null) {
                                 result.success("bound")
                             } else if (!isAccessibilityServiceEnabled(this)) {
                                 result.success("disabled")
                             } else {
-                                try {
-                                    val cn = ComponentName(
-                                        this,
-                                        OvidAccessibilityService::class.java,
-                                    )
-                                    packageManager.setComponentEnabledSetting(
-                                        cn,
-                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                                        android.content.pm.PackageManager.DONT_KILL_APP,
-                                    )
-                                    packageManager.setComponentEnabledSetting(
-                                        cn,
-                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                                        android.content.pm.PackageManager.DONT_KILL_APP,
-                                    )
-                                } catch (_: Exception) {}
-                                result.success(
-                                    if (OvidAccessibilityService.instance != null) {
-                                        "bound"
-                                    } else {
-                                        "connecting"
-                                    },
-                                )
+                                result.success("connecting")
                             }
                         } catch (e: Exception) {
                             result.error(

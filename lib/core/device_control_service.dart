@@ -99,6 +99,13 @@ class DeviceControlService {
   @visibleForTesting
   static Duration connectingRetryBudgetForTest = const Duration(seconds: 90);
 
+  /// Grace period at the start of [refreshServiceBinding]: the OS rebinds an
+  /// enabled accessibility service on its own after a process restart, so
+  /// the first stretch only polls instead of treating still-connecting as a
+  /// problem. Tests set this to [Duration.zero] for determinism.
+  @visibleForTesting
+  static Duration reconnectGracePeriodForTest = const Duration(seconds: 20);
+
   @visibleForTesting
   int get deviceGenerationForTest => _deviceGeneration;
 
@@ -205,12 +212,14 @@ class DeviceControlService {
     return 'disabled';
   }
 
-  /// Asks the native side to force an accessibility rebind when the service
-  /// is enabled in Settings but the OS has not rebound it after an app
-  /// restart — the state users previously fixed with a manual off/on toggle.
-  /// Returns the state after the nudge: `bound`, `connecting`, or
-  /// `disabled`. Never throws; a genuinely disabled service is reported as
-  /// such so callers show the Settings guidance instead of retrying.
+  /// Asks the native side for the current accessibility state when the
+  /// service is enabled in Settings but the OS has not rebound it after an
+  /// app restart. Pure probe — the native side performs NO programmatic
+  /// toggle (a DISABLE→ENABLE component toggle used to live here; it could
+  /// permanently drop the service from Settings.Secure on some devices, so
+  /// it was removed 2026-09-24). Returns the state: `bound`, `connecting`,
+  /// or `disabled`. Never throws; a genuinely disabled service is reported
+  /// as such so callers show the Settings guidance instead of retrying.
   Future<String> reconnectService() async {
     try {
       final state = await _channel.invokeMethod<String>(
@@ -224,17 +233,37 @@ class DeviceControlService {
   }
 
   /// Absorbs an in-progress accessibility rebind. Intended for app-resume
-  /// callers: when the state is `connecting`, first nudges the OS to rebind
-  /// (the programmatic equivalent of the manual toggle), then waits with
-  /// the same capped backoff until bound or the budget is exhausted.
-  /// Non-throwing.
+  /// callers. Grace period first: the OS rebinds an enabled service on its
+  /// own after a process restart, so for the first ~20s this only polls —
+  /// the old immediate programmatic nudge is gone (it could permanently
+  /// disable the service in Settings; see the native handler note). After
+  /// the grace period, still-`connecting` is simply waited out with the
+  /// same capped backoff until bound or the 90s budget is exhausted — there
+  /// is no programmatic toggle left to fire. Non-throwing.
   Future<void> refreshServiceBinding() async {
     try {
       if (await serviceState() != 'connecting') return;
-      await reconnectService();
+      // Grace period: give the OS up to [reconnectGracePeriodForTest] to
+      // rebind on its own before treating still-connecting as a problem
+      // worth polling harder. Bounded by the total retry budget so tests
+      // with a shortened budget stay fast.
       final generation = _deviceGeneration;
       var attempt = 0;
       var waited = Duration.zero;
+      final grace = reconnectGracePeriodForTest < connectingRetryBudgetForTest
+          ? reconnectGracePeriodForTest
+          : connectingRetryBudgetForTest;
+      while (waited < grace) {
+        final delay = _connectingDelayForAttempt(attempt);
+        waited += delay;
+        if (delay > Duration.zero) await Future.delayed(delay);
+        if (generation != _deviceGeneration) return;
+        if (await serviceState() != 'connecting') return;
+        attempt++;
+      }
+      // Post-grace: keep waiting out the rebind with the same capped
+      // backoff until the total 90s budget is exhausted. No toggle, no
+      // side effects — the OS owns the bind.
       while (true) {
         final delay = _connectingDelayForAttempt(attempt);
         if (waited + delay >= connectingRetryBudgetForTest) return;
