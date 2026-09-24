@@ -129,6 +129,11 @@ class _StudioScreenState extends State<StudioScreen> {
       return;
     }
     if (github.isInitializing) return;
+    // A FAILED storage read is not a sign-out: the token is still on disk and
+    // retryRestoreIfNotLoggedIn() may recover it seconds later. Latching here
+    // would show "sign in" over a session that is about to come back — and then
+    // never offer it again once it does.
+    if (github.restoreFailed) return;
     _handledInitialAuth = true;
     (studioLoginPromptOverrideForTest ?? showGithubLoginSheet)(context);
   }

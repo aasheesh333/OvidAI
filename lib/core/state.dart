@@ -4103,6 +4103,13 @@ class AppState extends ChangeNotifier {
       shareBrowserOnRestart = false;
       lastSelectedModel = '';
       lastSelectedProviderId = null;
+      // Clear the in-memory GitHub login as well: deleteAll() wipes the token
+      // from secure storage, and leaving isLoggedIn true meant Studio kept
+      // rendering a signed-in UI until the next restart — memory and disk
+      // disagreeing about the same fact.
+      try {
+        await GitHubService.I.signOut();
+      } catch (_) {}
       try {
         await _secureStorage.deleteAll();
       } catch (_) {}

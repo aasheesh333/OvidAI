@@ -636,7 +636,7 @@ Note: `CTRL6` failed once under full-suite parallel load and passed both in
 isolation and on a full-suite re-run — the same 30 s per-test default-timeout
 flakiness previously seen in `studio_git_reliability_test.dart`, not a
 regression from this phase.
-| 3 — Studio login + clone-once + label | partial | `032a29a`+ | **label done**; login race + clone-once gaps remain |
+| 3 — Studio login + clone-once + label | partial | see below | **label + login restore done**; the six clone-once gaps remain |
 | 4a — Browser geometry | **done** | see below | real 1280×800 layout; verifier made honest |
 | 4b — CDP | deferred | — | D2 |
 | 5 — Accessibility restart | **done** | see below | stale-bind signal, cold-start probe, honest copy, screenshot capability |
@@ -830,11 +830,69 @@ fail-closed, stale clears on bind, one call and no retry loop on
 toggle copy (while a genuinely slow rebind still gets the patient message), and
 source contracts for the startup task, the XML capability and the notice.
 
+### Phase 3 (partial) — Studio login survives a restart
+
+Two independent paths lost a valid login; both are closed.
+
+**A failed storage read is no longer reported as "signed out".**
+`readTokenWithRetriesForTest` retried 3× over ~300 ms and then returned `null`,
+which `initialize()` could not distinguish from reading an empty key — so Studio
+showed logged-out for the whole launch while the token sat intact on disk. On
+Android a Keystore / EncryptedSharedPreferences read can fail far longer than
+300 ms (cold-start contention, an OS update, a damaged Tink keyset), which is
+exactly why the report was intermittent and "fixed itself" next launch. The
+helper now records `lastReadFailedForTest`, surfaced as the instance flag
+`restoreFailed`, and:
+
+- `initialize()` sets `restoreFailed`, clears `_isInitializing` and arms
+  `_scheduleRestoreRetry` (5 s → 30 s → 2 min) instead of concluding signed-out;
+- `retryRestoreIfNotLoggedIn()` re-reads and restores the login with no user
+  action, then loads the profile tolerantly (a profile failure can never put the
+  restored token at risk);
+- `shell.dart` calls it on `AppLifecycleState.resumed`;
+- `studio_screen.dart` declines to latch `_handledInitialAuth` while
+  `restoreFailed`, so the sign-in sheet is not shown over a session that is about
+  to come back — and is still offered later if it does not.
+
+**A freshly issued token is never discarded.** `_persistToken` re-checked the
+auth generation *inside* the queued write: it skipped the write, and then
+**deleted the token it had just written**, whenever a concurrent `initialize()`
+bumped the generation while the write sat in the queue. A successful device-flow
+sign-in therefore survived only for that process lifetime. Writes are now
+unconditional — a newly issued token is the newest fact about the account —
+because staleness is already gated at the call site by `ensureCurrent()`, and a
+queued `signOut()` clear always runs after the write it supersedes.
+
+Also: `deleteAllData()` now calls `GitHubService.I.signOut()` before wiping
+secure storage, so memory and disk stop disagreeing (the Studio UI previously
+kept rendering signed-in until the next restart).
+
+Not done: the profile (`@login`, avatar) is still not persisted, so the account
+chip renders empty while offline even though the token is valid — cosmetic, but
+it reads as a logout.
+
+New test: `test/github_login_restore_test.dart` — throw-vs-empty read
+distinction, retry-and-recover, no-op when logged in, the `_persistToken` code
+shape that caused the race, sign-out still clears storage, and the three caller
+contracts (Studio latch, resume retry, delete-all-data ordering).
+
+### Remaining in Phase 3 — the six clone-once gaps
+
+Unchanged and still to do, in priority order: (1) new chat sessions default to
+mode `auto` while registry routing requires `studio`, so **every fresh session
+raw-clones into `ws_<id>`** — this is the reported "baar baar clone"; (2) the
+branch picker rebinds the API `RepoCache` but never the git clone; (3)
+`_offerCloneTarget` early-returns on an inherited folder, so switching repo A→B
+keeps working in A; (4) `ensureCloned` has no in-flight dedup, so two concurrent
+callers delete each other's clone; (5) the registry binding and the pinned
+`workspaceFolder` disagree, so agent cwd ≠ terminal cwd; (6) the first-selected
+branch is not recorded per repo.
+
 ### Verification (current)
 
-`dart analyze lib test` → 0 issues · full suite **2405 pass, 1 skipped** ·
+`dart analyze lib test` → 0 issues · full suite **2416 pass, 1 skipped** ·
 `:app:compileDebugKotlin --offline` → BUILD SUCCESSFUL · CI green through
-`2388ae3`.
+`3d080bb`.
 
 ### Phase 6 detail — plan mode is now default-deny
 

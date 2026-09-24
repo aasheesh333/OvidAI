@@ -125,17 +125,100 @@ class GitHubService extends ChangeNotifier {
         await Future<void>.delayed(Duration(milliseconds: 100 * attempt));
       }
       try {
-        return await read();
+        final v = await read();
+        lastReadFailedForTest = false;
+        return v;
       } catch (_) {
         // Transient secure-storage failure — back off and try again.
       }
     }
+    // Every attempt THREW. That is not the same as reading the key and finding
+    // nothing, and treating it as the same was the second login-loss path: on
+    // Android a Keystore / EncryptedSharedPreferences read can fail for far
+    // longer than this ~300 ms window (cold-start contention, an OS update, a
+    // damaged Tink keyset), and the app then reported "signed out" for the whole
+    // launch while the token sat intact on disk — so the next launch looked
+    // fine again. Callers must consult [lastReadFailedForTest] and retry.
+    lastReadFailedForTest = true;
     return null;
   }
+
+  /// True when the most recent [readTokenWithRetriesForTest] exhausted its
+  /// attempts by THROWING rather than by reading an empty key. Mirrored onto the
+  /// instance as [restoreFailed].
+  @visibleForTesting
+  static bool lastReadFailedForTest = false;
+
+  /// The login state is UNKNOWN because secure storage could not be read, not
+  /// because the user is signed out. The UI must not latch a "please sign in"
+  /// prompt on this, and [retryRestoreIfNotLoggedIn] keeps trying.
+  bool restoreFailed = false;
 
   /// Test seam: true while a background profile retry is armed.
   @visibleForTesting
   bool get hasProfileRetryScheduledForTest => _profileRetryTimer != null;
+
+  Timer? _restoreRetryTimer;
+  int _restoreRetryIndex = 0;
+
+  /// Backoff for re-reading secure storage after a FAILED read. A read that
+  /// fails during cold-start contention usually succeeds seconds later; without
+  /// a retry the app reported "signed out" for the whole launch while the token
+  /// sat intact on disk — which is exactly the intermittent "Studio logs me out
+  /// after reopening Ovid" report.
+  static const _restoreRetryDelays = [
+    Duration(seconds: 5),
+    Duration(seconds: 30),
+    Duration(minutes: 2),
+  ];
+
+  void _scheduleRestoreRetry(int generation) {
+    _restoreRetryTimer?.cancel();
+    if (_restoreRetryIndex >= _restoreRetryDelays.length) return;
+    final delay = _restoreRetryDelays[_restoreRetryIndex++];
+    _restoreRetryTimer = Timer(delay, () {
+      if (generation != _authGeneration || isLoggedIn) return;
+      unawaited(retryRestoreIfNotLoggedIn());
+    });
+  }
+
+  /// Re-read the stored token after a restore FAILURE (not after finding no
+  /// token). Invoked by the backoff timer and on app resume.
+  ///
+  /// A successful retry restores the login without any user action. A failed one
+  /// keeps [restoreFailed] true and re-arms the backoff, so the UI can decline
+  /// to latch a "please sign in" prompt on a state that may still resolve.
+  Future<void> retryRestoreIfNotLoggedIn() async {
+    if (isLoggedIn) {
+      restoreFailed = false;
+      return;
+    }
+    final generation = _authGeneration;
+    final token = await readTokenWithRetriesForTest(
+      () => _secureStorage.read(key: _tokenStorageKey),
+    );
+    if (generation != _authGeneration) return;
+    if (token == null || token.isEmpty) {
+      restoreFailed = lastReadFailedForTest;
+      if (restoreFailed) _scheduleRestoreRetry(generation);
+      return;
+    }
+    restoreFailed = false;
+    _restoreRetryIndex = 0;
+    _setToken(token);
+    notifyListeners();
+    // The profile is cosmetic; loading it must never put the restored token at
+    // risk, so failures are swallowed rather than treated as a suspect token.
+    try {
+      final user = await _fetchUser(token, http.Client());
+      if (generation == _authGeneration) {
+        _user = user;
+        notifyListeners();
+      }
+    } catch (_) {
+      if (generation == _authGeneration) _scheduleProfileRetry(generation, null);
+    }
+  }
 
   Future<void> initialize({http.Client? client}) async {
     final generation = ++_authGeneration;
@@ -148,9 +231,21 @@ class GitHubService extends ChangeNotifier {
       final token = await readTokenWithRetriesForTest(
         () => _secureStorage.read(key: _tokenStorageKey),
       );
-      if (token == null || token.isEmpty || generation != _authGeneration) {
+      if (generation != _authGeneration) return;
+      if (token == null || token.isEmpty) {
+        // "No token stored" and "storage could not be read" are DIFFERENT
+        // facts. Only the second is retryable, and it must never be presented
+        // to the user as a sign-out.
+        restoreFailed = lastReadFailedForTest;
+        if (restoreFailed) {
+          _isInitializing = false;
+          notifyListeners();
+          _scheduleRestoreRetry(generation);
+        }
         return;
       }
+      restoreFailed = false;
+      _restoreRetryIndex = 0;
       // The stored token is trusted immediately so `isLoggedIn` is true across
       // restarts; the profile is loaded (and retried) separately.
       _setToken(token);
@@ -299,16 +394,27 @@ class GitHubService extends ChangeNotifier {
     }
   }
 
+  /// Persist (or clear) the token. Writes are serialized on [_tokenWrite] so
+  /// the last queued operation always wins.
+  ///
+  /// LOGIN-LOSS FIX (2026-09-24): this used to re-check [generation] *inside*
+  /// the queued closure — skipping the write, and then DELETING the token it had
+  /// just written, whenever a concurrent `initialize()` had bumped the
+  /// generation while the write sat in the queue. A successful device-flow
+  /// sign-in therefore survived only for that process lifetime: logged in now,
+  /// logged out after the next restart, with nothing on screen to explain it.
+  ///
+  /// A newly issued token is the newest fact about the account, so it is always
+  /// written. Staleness is already gated at the call site by `ensureCurrent()`
+  /// before this is reached, and a queued `signOut()` clear always runs AFTER
+  /// the write it supersedes, so ordering — not a generation re-check — is what
+  /// keeps a sign-out from being undone.
   Future<void> _persistToken(String? token, {int? generation}) {
     final write = _tokenWrite.then((_) async {
-      if (generation != null && generation != _authGeneration) return;
       if (token == null || token.isEmpty) {
         await _secureStorage.delete(key: _tokenStorageKey);
       } else {
         await _secureStorage.write(key: _tokenStorageKey, value: token);
-        if (generation != null && generation != _authGeneration) {
-          await _secureStorage.delete(key: _tokenStorageKey);
-        }
       }
     });
     _tokenWrite = write.then<void>((_) {}, onError: (_) {});

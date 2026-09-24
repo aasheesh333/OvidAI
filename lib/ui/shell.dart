@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../core/agent_notification_service.dart';
 import '../core/agent_service.dart';
 import '../core/device_control_service.dart';
+import '../core/github_service.dart';
 import '../core/firebase_service.dart';
 import '../core/mcp_service.dart';
 import '../core/startup_coordinator.dart';
@@ -81,6 +82,10 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
         // service in Settings) so control mode works without a manual
         // off/on toggle.
         unawaited(DeviceControlService.I.refreshServiceBinding());
+        // A secure-storage read that FAILED at cold start is not a sign-out:
+        // the token is still on disk and usually readable moments later. Retry
+        // it here so Studio does not sit "logged out" for the whole launch.
+        unawaited(GitHubService.I.retryRestoreIfNotLoggedIn());
         // Control overlay is visible only while backgrounded.
         unawaited(AgentService.I.setAppForegrounded(true));
         // PR32: a run that survived the background must keep its
