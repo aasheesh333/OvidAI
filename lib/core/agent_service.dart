@@ -859,6 +859,34 @@ class AgentService extends ChangeNotifier {
   // Every session owns an independent _AgentRun (cancel flag, HTTP
   // request, queue, approval, jobs, plan mode, live streaming buffers).
   // 10+ sessions can run at once; switching sessions NEVER stops a run.
+  /// Tools that execute a shell command, and therefore need the sandbox's
+  /// target jail scoped to what this session may actually reach.
+  static bool _isShellLikeTool(String name) =>
+      name == 'run_shell' || name == 'run_code' || name == 'job_start';
+
+  /// Roots the sandbox may reach for this dispatch: the session workspace plus
+  /// every path grant that applies in this session and mode.
+  ///
+  /// Passing the granted paths in is what keeps the target jail from breaking
+  /// the approval flow: without them an approved outside path would be
+  /// hard-denied at the sandbox layer after the user had said yes.
+  Future<List<String>> _sandboxAllowedRoots() async {
+    final roots = <String>[];
+    try {
+      roots.add((await _sessionWorkDir()).path);
+    } catch (_) {}
+    final sid = _runSession?.id ?? AppState.I.activeSession?.id;
+    if (sid != null && sid.isNotEmpty) {
+      try {
+        for (final g in _grantStoreFor(sid).grantsFor(sid, mode: mode.name)) {
+          if (g.isDeny || g.kind != PermissionGrant.kindPath) continue;
+          if (g.value.isNotEmpty) roots.add(g.value);
+        }
+      } catch (_) {}
+    }
+    return roots;
+  }
+
   /// Monotonic id for scoping one tool invocation's processes.
   int _toolCallSeq = 0;
 
@@ -9074,9 +9102,23 @@ ${await _agentsMdBlock()}
               // Killing by RUN key would also take down legitimate background
               // `job_start` work that is meant to outlive the call.
               final callKey = 'toolcall-${++_toolCallSeq}';
+              final zoneValues = <Object, Object>{
+                SandboxService.callZoneKey: callKey,
+              };
+              // Shell-like tools also get the sandbox's allowed ROOTS: the
+              // session workspace plus every path granted in this session+mode,
+              // so checkPolicy can refuse a TARGET outside them (relative
+              // escapes and `$VAR` paths that the agent-level token gate never
+              // sees) while still permitting an approved outside path.
+              if (_isShellLikeTool(name)) {
+                final roots = await _sandboxAllowedRoots();
+                if (roots.isNotEmpty) {
+                  zoneValues[SandboxService.allowedRootsZoneKey] = roots;
+                }
+              }
               result = await runZoned(
                 () => _dispatch(name, args),
-                zoneValues: {SandboxService.callZoneKey: callKey},
+                zoneValues: zoneValues,
               ).timeout(
                 budget,
                 onTimeout: () {
@@ -10986,6 +11028,17 @@ ${await _agentsMdBlock()}
         if (RegExp(r'\bam\s+start\b').hasMatch(cmd)) {
           return 'SHELL_RESTRICTION: Do not use `am start` in shell. Android forbids unprivileged shell processes from launching activities (startActivityAsUser permission denial). Use the native `device_open_app(package: "...")` tool instead to launch apps directly!';
         }
+        // Strict permission model FIRST (2026-09-24): absolute paths in the
+        // command that fall outside the session workspace need a grant — one
+        // combined approval card for all of them, pre-execution.
+        //
+        // This MUST run before the sandbox policy check. `checkPolicy` now jails
+        // command TARGETS, not just the cwd, so it would hard-deny an outside
+        // path before the user was ever asked — and an approved path could never
+        // run. Prompting first means the grant is recorded and passed to
+        // `checkPolicy` as an allowed root for this dispatch.
+        final pathDenial = await _checkCommandPaths(cmd, tool: 'run_shell');
+        if (pathDenial != null) return pathDenial;
         final isSubagent = _runSession?.isSubagent ?? false;
         if (!isSubagent) {
           final work = await _sessionWorkDir();
@@ -10999,13 +11052,6 @@ ${await _agentsMdBlock()}
             return policyCheck;
           }
         }
-        // Strict permission model: absolute paths in the command that fall
-        // outside the session workspace need a grant — one combined
-        // approval card for all of them, pre-execution. Sits before the
-        // tool approval so it covers every execution branch below
-        // (PtyPool persistent shell included).
-        final pathDenial = await _checkCommandPaths(cmd, tool: 'run_shell');
-        if (pathDenial != null) return pathDenial;
         // Route through the native Linux sandbox whenever it is installed —
         // in EVERY access mode (not just Studio).  The sandbox provides
         // bash/python/node/git via apt; the phone terminal (toybox) is only

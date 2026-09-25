@@ -121,7 +121,8 @@ void main() {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       final i = src.indexOf('final budget = _toolTimeoutFor(name);');
       expect(i, greaterThan(-1));
-      final region = src.substring(i, i + 2200);
+      // Window covers the zone scoping that precedes the timeout message.
+      final region = src.substring(i, i + 3600);
 
       expect(region, contains('were KILLED'));
       expect(region, contains('killCallProcesses(callKey)'));

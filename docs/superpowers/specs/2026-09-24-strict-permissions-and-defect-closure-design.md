@@ -599,7 +599,7 @@ Updated as each phase lands.
 |---|---|---|---|
 | 0 — Baseline build | **done** | `cfc44f0` | analyze 0 issues; **2335 tests pass** (1 skipped); CI green on run `35963908982`. On-device confirmation still owed by the owner — the latest APK is produced by every CI run on this branch. |
 | 1 — Security criticals | **done** | see below | defects #1 #2 #3 #4(gate) #5(redirect) #6 #7 #10 #11 #12 #26 |
-| 2 — Permission model | **done (core)** | see below | per-mode isolation, Control jailed, 3 options exactly; #4's target-canonicalisation and #5's loopback default remain |
+| 2 — Permission model | **done** | see below | per-mode + per-session isolation, Control jailed, 3 options, **target-based shell jail** |
 
 ### Phase 1 detail — what landed
 
@@ -1317,9 +1317,52 @@ a fixed 700 ms for a 600 ms debounce (100 ms of slack) and failed only under
 full-suite parallel load; it now polls for the observable state, with the
 `settleUntil` helper polling the channel call rather than the re-arm flag.
 
+### Target-based shell jail (the last Phase 2 deferral)
+
+`checkPolicy` verified only that the **cwd** was inside the allowed roots. A
+command whose cwd was inside the workspace could therefore still read, write or
+delete anything the app UID can reach:
+
+```
+cat ../../shared_prefs/x.xml      ← the app's own settings/sessions dir
+cat $HOME/.ssh/id_rsa
+ln -s /data/data/<pkg> l && cat l/x
+```
+
+The agent-layer token gate only inspects ABSOLUTE tokens, so relative escapes and
+`$VAR` forms slipped past it too.
+
+`checkPolicy` now also scans command **targets**: absolute paths,
+`~`/`$HOME`/`$PREFIX` expansions, and `../` escapes are resolved against the cwd
+and denied when they land outside the roots. It is deliberately conservative — a
+token that merely *contains* `..` (`a/../b`) is not matched, only one that starts
+with it — so ordinary in-workspace paths are never denied. `/dev`, `/proc` and
+`/sys` are exempt as runtime pseudo-paths.
+
+**Wiring, because a jail alone would break the approval flow.** Roots come from
+the dispatch zone (`allowedRootsZoneKey`), carrying the session workspace **plus
+every path granted in this session and mode**. Zone-scoped rather than a field:
+with parallel sessions a field would leak one session's roots into another's
+command. And `run_shell` now runs the agent-level path gate **before**
+`checkPolicy` — otherwise the sandbox would hard-deny an outside path before the
+user was asked, and an approved path could never run. Caught by
+`tool_approval_always_allow_test`'s combined-card test, which failed the moment the
+order was wrong.
+
+Loopback remains allowed in `defaultAllowedHosts` on purpose: local dev servers
+and local MCP servers are a real workflow, and it is a one-tap "Always Allow"
+otherwise. That is the one Phase 2 item deliberately NOT changed, and it is
+recorded as a decision rather than an oversight.
+
+New test: `test/sandbox_target_jail_test.dart` (10) — relative escapes denied,
+in-workspace relatives allowed, absolute inside allowed / outside denied, a
+**granted** outside path permitted once passed as a zone root (the approval flow),
+unresolvable `$HOME`/`$PREFIX`/`~` denied rather than allowed, and pseudo-paths
+exempt.
+
 ### Verification (current)
 
-`dart analyze lib test` → 0 issues · full suite **2488 pass, 1 skipped** ·
+`dart analyze lib test` → 0 issues · full suite **2498 pass, 1 skipped** ·
 `:app:compileDebugKotlin --offline` → BUILD SUCCESSFUL · CI green through
 `c7d92e8`.
 

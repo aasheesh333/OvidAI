@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'grant_store.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -2340,6 +2341,13 @@ audit=false
   /// dispatch can scope its processes to one call.
   static const callZoneKey = #ovidCallKey;
 
+  /// Zone key carrying the filesystem roots a dispatch may reach: the session
+  /// workspace plus every path the user granted for this session and mode.
+  ///
+  /// Zone-scoped rather than a field on purpose — with parallel sessions a field
+  /// would let one session's roots leak into another's command.
+  static const allowedRootsZoneKey = #ovidAllowedRoots;
+
   /// PR32 test seam: access to the tracked-process registry.
   @visibleForTesting
   List<Process> get liveProcessesForTest => _liveProcesses;
@@ -2551,6 +2559,50 @@ audit=false
     deniedCommands: defaultDeniedCommands,
   );
 
+  /// Path-ish tokens that name a target outside the sandbox: absolute paths,
+  /// `~`/`$HOME`/`$PREFIX` expansions, and relative escapes (`../`).
+  ///
+  /// Deliberately conservative — a token that merely CONTAINS `..` (e.g.
+  /// `a/../b`) is not matched, only ones that START with it, so ordinary
+  /// in-workspace paths are never denied.
+  static final _targetToken = RegExp(
+    r'''(?:^|[\s"'=<>|;&(),])((?:~|\$HOME|\$PREFIX|/)[^\s"'|;&()<>]*|(?:\.\./)+[^\s"'|;&()<>]*)''',
+  );
+
+  /// Returns the first target in [cmdLine] that resolves outside [roots], or
+  /// null when every target stays inside. Best-effort and lexical: the goal is to
+  /// stop a plain escape, not to model every shell expansion.
+  String? _escapingTarget(String cmdLine, String cwd, List<String> roots) {
+    final prefix = _prefix?.path;
+    for (final m in _targetToken.allMatches(cmdLine)) {
+      var token = m.group(1) ?? '';
+      if (token.isEmpty) continue;
+      // Runtime-owned pseudo-paths, never real filesystem targets.
+      if (token.startsWith('/dev/') ||
+          token.startsWith('/proc/') ||
+          token.startsWith('/sys/')) {
+        continue;
+      }
+      if (prefix != null) {
+        token = token
+            .replaceAll(r'$PREFIX', prefix)
+            .replaceAll(r'$HOME', '$prefix/home');
+      } else if (token.contains(r'$PREFIX') || token.contains(r'$HOME')) {
+        // No prefix known (uninstalled sandbox): cannot resolve it, so treat it
+        // as an escape rather than silently allowing it.
+        return token;
+      }
+      if (token == '~' || token.startsWith('~/')) {
+        if (prefix == null) return token;
+        token = '$prefix/home${token.substring(1)}';
+      }
+      final abs = normalizeGrantPath(token, base: cwd);
+      if (abs.isEmpty) continue;
+      if (!roots.any((root) => isPathContained(root, abs))) return abs;
+    }
+    return null;
+  }
+
   /// Check a command and cwd against the sandbox policy. Returns a denial
   /// message if blocked, or null if permitted.
   String? checkPolicy(
@@ -2585,13 +2637,34 @@ audit=false
     }
 
     final effectiveCwd = cwd ?? hostWorkDir?.path;
-    final roots = policy.allowedRoots.isNotEmpty
+    final baseRoots = policy.allowedRoots.isNotEmpty
         ? policy.allowedRoots
         : (hostWorkDir != null ? [hostWorkDir.path] : const <String>[]);
+    final zoneRoots = Zone.current[allowedRootsZoneKey];
+    final roots = <String>{
+      ...baseRoots,
+      if (zoneRoots is List) ...zoneRoots.whereType<String>(),
+    }.toList();
     if (effectiveCwd != null && roots.isNotEmpty) {
       final allowed = roots.any((root) => isPathContained(root, effectiveCwd));
       if (!allowed) {
         return 'DENIED by sandbox policy: cwd escapes allowed roots';
+      }
+    }
+    // TARGET-based jail (2026-09-24). Only the CWD used to be checked, so a
+    // command whose working directory was inside the workspace could still read,
+    // write or delete anything the app UID can reach — `cat ../../shared_prefs/
+    // x.xml`, `cat $HOME/.ssh/id_rsa`, `ln -s /data/... l && cat l/x`. The agent
+    // layer's token gate only inspects ABSOLUTE tokens, so relative escapes and
+    // `$VAR` forms slipped past it as well.
+    //
+    // Additive: this only ever denies MORE. A legitimate outside path still works
+    // through the approval flow — the granted path is passed in as a root for
+    // that dispatch, so approving it makes the command run.
+    if (effectiveCwd != null && roots.isNotEmpty) {
+      final escaped = _escapingTarget(cmdLine, effectiveCwd, roots);
+      if (escaped != null) {
+        return 'DENIED by sandbox policy: target escapes allowed roots ($escaped)';
       }
     }
     return null;
