@@ -374,11 +374,29 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
 /// Parse Codex inline `[[hooks.<Event>]]` / `[[hooks.<Event>.hooks]]`
 /// tables into the `{'hooks': {...}}` shape [CC] `hooks.json` uses, so
 /// [_addHooks] normalizes both identically (Codex hooks guide).
+/// The first non-empty capture group of [m]. The hook-event patterns offer
+/// two alternatives (double-quoted or bare) so exactly one group is ever
+/// populated.
+String? _firstNamedGroup(RegExpMatch m) {
+  for (var i = 1; i <= m.groupCount; i++) {
+    final g = m.group(i);
+    if (g != null && g.isNotEmpty) return g;
+  }
+  return null;
+}
+
 Map<String, dynamic> _parseCodexInlineHooks(String config) {
+  // Quoted keys are legal TOML — `[[hooks."SessionStart"]]` — and Codex configs
+  // do use them. The previous pattern accepted only bare identifiers, so every
+  // quoted-event hook was silently skipped with at most an "optional issue".
+  // Hyphens are allowed too (`session-start`).
   final handlerHeader = RegExp(
-    r'^\[\[\s*hooks\s*\.\s*([A-Za-z0-9_]+)\s*\.\s*hooks\s*\]\]$',
+    r'^\[\[\s*hooks\s*\.\s*(?:"([^"]+)"|([A-Za-z0-9_-]+))'
+    r'\s*\.\s*hooks\s*\]\]$',
   );
-  final eventHeader = RegExp(r'^\[\[\s*hooks\s*\.\s*([A-Za-z0-9_]+)\s*\]\]$');
+  final eventHeader = RegExp(
+    r'^\[\[\s*hooks\s*\.\s*(?:"([^"]+)"|([A-Za-z0-9_-]+))\s*\]\]$',
+  );
   final assignment = RegExp(r'^([A-Za-z0-9_]+)\s*=\s*(.+)$');
   final events = <String, List<Map<String, dynamic>>>{};
   Map<String, dynamic>? group;
@@ -394,8 +412,10 @@ Map<String, dynamic> _parseCodexInlineHooks(String config) {
     }
     final eventMatch = eventHeader.firstMatch(line);
     if (eventMatch != null) {
+      final event = _firstNamedGroup(eventMatch);
+      if (event == null) continue;
       group = <String, dynamic>{'hooks': <dynamic>[]};
-      events.putIfAbsent(eventMatch.group(1)!, () => []).add(group);
+      events.putIfAbsent(event, () => []).add(group);
       handler = null;
       continue;
     }
@@ -914,6 +934,14 @@ class CodexPluginAdapter {
       Directory('${root.path}/.agents/personas'),
       asAgent: true,
     );
+    // CODEX PARITY (2026-09-24): the Claude adapter also scans the plain
+    // top-level `commands/`, `agents/` and `skills/` directories. A Codex tree
+    // using that layout contributed NOTHING — no commands, no agents — while an
+    // identical Claude tree worked, which is most of why "Codex plugins don't
+    // work" was reported.
+    await _addMarkdown(b, Directory('${root.path}/commands'), asAgent: false);
+    await _addMarkdown(b, Directory('${root.path}/agents'), asAgent: true);
+    await _addSkills(b, Directory('${root.path}/skills'));
 
     // The manifest's `skills` pointer (e.g. `"skills": "./skills/"`) —
     // honor it in addition to the legacy `.agents/skills` scan above.

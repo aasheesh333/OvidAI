@@ -642,7 +642,7 @@ regression from this phase.
 | 5 — Accessibility restart | **done** | see below | stale-bind signal, cold-start probe, honest copy, screenshot capability |
 | 6 — Plan mode allowlist | **done** | see below | blocklist → allowlist, default-deny |
 | 7 — Subagents 49 + no nesting | **done** | see below | cap + zero nesting + ledger FD fix (#8) |
-| 8 — Codex parity | **done (config paths)** | see below | TOML MCP mounting, transport, allowlist, roots, marketplace; AGENTS.md injection still open |
+| 8 — Codex parity | partial | see below | config paths + adapter dir scanning done; AGENTS.md injection and inline-hook end-to-end remain |
 | 9 — Correctness & leaks | **done except #13-cancel** | see below | #8 #9 #13(message) #14 #15 #16 #17 #18 #19 #29 all closed |
 | 10 — Performance | partial | see below | #20 #23 #24 #25 done; #21 (per-session persistence) remains |
 | 11 — UI/UX + queue dock | **done** | see below | queue dock, Hinglish, all tap targets, semantics, IME action |
@@ -1229,11 +1229,37 @@ round-trip and index shape, the cross-session approval surface, the reminder no
 longer calling `selectSession`, the 5 s tick, the null-safe title read, the
 serialized origin writes, and `cacheWidth` at every image site.
 
+### Codex adapter contributions
+
+`CodexPluginAdapter` scanned only `.agents/skills` and `.agents/personas`, while
+the Claude adapter also scanned the plain top-level `commands/`, `agents/` and
+`skills/`. A Codex tree using that layout contributed **nothing** — no commands, no
+agents — while an identical Claude tree worked. All three are now scanned, covered
+by `test/codex_contributions_test.dart`.
+
+`_parseCodexInlineHooks` also had zero tests and its header regex matched only
+bare `[A-Za-z0-9_]+`, silently skipping the legal TOML quoted spelling
+`[[hooks."SessionStart"]]` and hyphenated names. The regex now accepts both.
+
+**Honest gap — not closed.** Inspecting a minimal Codex tree produced no
+`PluginHook`s even for the *bare* spelling the old regex already accepted, so
+there is a second defect downstream of the header match. That is recorded here
+rather than papered over with a passing assertion; the test file carries the same
+note. Investigating it needs a debugger session against `_addHooks`, not another
+guess.
+
+**Also not done: `AGENTS.md` injection.** The adapter collects the paths into
+`unknown['instructionPaths']` and nothing reads them. Wiring it is a design
+decision, not a one-liner: there is no existing plugin-level system-prompt
+injection point, so adding one means deciding where a plugin's instructions rank
+against the user's persona and preset — and getting that wrong is a
+prompt-injection surface. It should be designed, not slipped in.
+
 ### Verification (current)
 
-`dart analyze lib test` → 0 issues · full suite **2482 pass, 1 skipped** ·
+`dart analyze lib test` → 0 issues · full suite **2484 pass, 1 skipped** ·
 `:app:compileDebugKotlin --offline` → BUILD SUCCESSFUL · CI green through
-`b3b6bb8`.
+`c7d92e8`.
 
 ### Phase 6 detail — plan mode is now default-deny
 
