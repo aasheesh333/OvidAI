@@ -365,4 +365,67 @@ void main() {
     final res = await fut.timeout(const Duration(seconds: 60));
     expect(res, startsWith('ACCESS_DENIED'));
   });
+
+  group('Control mode is jailed like every other mode', () {
+    // Control used to share Full Access's exemption in the path and host gates,
+    // so a Control session could read and write ANYWHERE on the device with no
+    // prompt. Its device tools still auto-approve (a tap-by-tap prompt would
+    // make the mode unusable), but its filesystem and network are now confined
+    // to the session directory.
+    test('a path outside the session dir prompts instead of passing silently',
+        () async {
+      await testSession('aaa-control-jail', mode: 'control');
+      final outside = File('${ledgerDir.path}/control-outside.txt')
+        ..writeAsStringSync('secret');
+
+      final fut = AgentService.I.dispatchForTest('file_read', {
+        'path': outside.path,
+      });
+      final req = await waitForApproval();
+      expect(
+        req,
+        isNotNull,
+        reason: 'Control must prompt for a path outside its session dir',
+      );
+      expect(req!.tool, 'grant:path:${outside.path}');
+      expect(req.allowAlways, isTrue);
+      // Captured at prompt time, so the grant is tagged with the mode that
+      // actually asked — not whichever session is foreground when answered.
+      expect(req.modeName, 'control');
+
+      AgentService.I.approve(false);
+      final res = await fut.timeout(const Duration(seconds: 60));
+      expect(res, startsWith('ACCESS_DENIED:'));
+      expect(res, contains('ask the user what to do next'));
+    });
+
+    test('a Control grant does not carry into General', () async {
+      await testSession('aaa-control-grant', mode: 'control');
+      final outside = File('${ledgerDir.path}/control-grant.txt')
+        ..writeAsStringSync('g');
+
+      var fut = AgentService.I.dispatchForTest('file_read', {
+        'path': outside.path,
+      });
+      var req = await waitForApproval();
+      expect(req, isNotNull);
+      AgentService.I.approveAlways();
+      await fut.timeout(const Duration(seconds: 60));
+
+      // Same session, switched to General: the Control grant must not apply.
+      final s = AppState.I.sessionById('aaa-control-grant')!;
+      s.mode = AgentMode.auto.name;
+      expect(s.grants.every((g) => g.mode == 'control'), isTrue);
+
+      fut = AgentService.I.dispatchForTest('file_read', {'path': outside.path});
+      req = await waitForApproval();
+      expect(
+        req,
+        isNotNull,
+        reason: 'switching mode must re-prompt — that is the isolation',
+      );
+      AgentService.I.approve(false);
+      await fut.timeout(const Duration(seconds: 60));
+    });
+  });
 }

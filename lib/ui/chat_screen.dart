@@ -6251,52 +6251,11 @@ class _ApprovalDock extends StatefulWidget {
 }
 
 class _ApprovalDockState extends State<_ApprovalDock> {
-  /// Scope for the "Always Allow" grant action: this session, or every
-  /// session (global). Reset for each new approval request.
-  bool _globalScope = false;
-  ApprovalRequest? _reqForScope;
-
-  /// Deny WITH a note — the note rides back to the model with the denial
-  /// so it can revise instead of guessing why access was refused.
-  Future<void> _denyWithNote(BuildContext context) async {
-    final c = TextEditingController();
-    final note = await showDialog<String>(
-      context: context,
-      builder: (d) => AlertDialog(
-        backgroundColor: Aether.surface,
-        title: const Text('Deny with a note', style: TextStyle(fontSize: 15)),
-        content: TextField(
-          controller: c,
-          autofocus: true,
-          minLines: 2,
-          maxLines: 4,
-          style: const TextStyle(fontSize: 13.5),
-          decoration: const InputDecoration(
-            hintText: 'Why is this denied? (sent back to the AI)',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(d).pop(),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(d).pop(c.text.trim()),
-            child: const Text('Deny'),
-          ),
-        ],
-      ),
-    );
-    if (note != null) {
-      if (note.isNotEmpty) {
-        AgentService.I.approve(false, note: note);
-      } else {
-        // Empty note: plain deny.
-        AgentService.I.approve(false);
-      }
-    }
-  }
-
+  // The scope toggle and the "deny with a note" dialog were removed on
+  // 2026-09-24: the card is now exactly Deny / Allow / Always Allow, and
+  // grants are per mode + per session by construction, so there is no scope to
+  // pick. `AgentService.approve(false, note:)` still exists for programmatic
+  // callers.
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -6304,10 +6263,6 @@ class _ApprovalDockState extends State<_ApprovalDock> {
       builder: (_, _) {
         final req = AgentService.I.pendingApproval;
         if (req == null) return const SizedBox.shrink();
-        if (!identical(req, _reqForScope)) {
-          _reqForScope = req;
-          _globalScope = false;
-        }
         // ── ask_user_question mode — structured Q&A card ──
         if (req.questions != null && req.questions!.isNotEmpty) {
           return _QuestionsCard(req);
@@ -6316,12 +6271,7 @@ class _ApprovalDockState extends State<_ApprovalDock> {
         if (req.tool == 'exit_plan_mode') {
           return _PlanReviewCard(req);
         }
-        // Grant prompts (path/host) offer a session/global scope toggle
-        // for "Always Allow"; plain tool prompts keep session-only memory.
-        final isGrant =
-            req.tool.startsWith('grant:path') ||
-            req.tool.startsWith('grant:host');
-        // ── Standard approve/deny card ──
+        // ── Standard approve/deny card: exactly three actions ──
         return Container(
           margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -6358,14 +6308,12 @@ class _ApprovalDockState extends State<_ApprovalDock> {
                     ),
                   ),
                   const SizedBox(width: 6),
-                  IconButton(
-                    icon: const Icon(Icons.sticky_note_2_outlined, size: 16),
-                    color: Aether.textMuted,
-                    tooltip: 'Deny with a note',
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                    onPressed: () => _denyWithNote(context),
-                  ),
+                  // EXACTLY THREE actions (owner requirement, 2026-09-24):
+                  // Deny, Allow, Always Allow. The card used to carry a fourth
+                  // "Deny with a note" icon button plus a This session /
+                  // All sessions scope row. The note dialog is gone, and the
+                  // scope choice is gone with it — grants are now per MODE and
+                  // per session by construction, so there is nothing to choose.
                   TextButton(
                     style: TextButton.styleFrom(
                       foregroundColor: Aether.danger,
@@ -6395,44 +6343,13 @@ class _ApprovalDockState extends State<_ApprovalDock> {
                         'Always Allow',
                         style: TextStyle(fontSize: 12),
                       ),
-                      onPressed: () => AgentService.I.approveAlways(
-                        global: _globalScope && isGrant,
-                      ),
+                      // No scope choice: an Always Allow is recorded for THIS
+                      // mode and THIS session, persists across restarts, and is
+                      // purged when the session is deleted.
+                      onPressed: () => AgentService.I.approveAlways(),
                     ),
                 ],
               ),
-              if (req.allowAlways && isGrant)
-                Padding(
-                  padding: const EdgeInsets.only(top: 6, left: 26),
-                  child: Row(
-                    children: [
-                      Text(
-                        'Always allow for:',
-                        style: TextStyle(fontSize: 11, color: Aether.textFaint),
-                      ),
-                      const SizedBox(width: 8),
-                      ChoiceChip(
-                        label: const Text(
-                          'This session',
-                          style: TextStyle(fontSize: 11),
-                        ),
-                        selected: !_globalScope,
-                        visualDensity: VisualDensity.compact,
-                        onSelected: (_) => setState(() => _globalScope = false),
-                      ),
-                      const SizedBox(width: 6),
-                      ChoiceChip(
-                        label: const Text(
-                          'All sessions',
-                          style: TextStyle(fontSize: 11),
-                        ),
-                        selected: _globalScope,
-                        visualDensity: VisualDensity.compact,
-                        onSelected: (_) => setState(() => _globalScope = true),
-                      ),
-                    ],
-                  ),
-                ),
             ],
           ),
         );

@@ -25,13 +25,28 @@
 /// unit-testable in `test/grant_store_test.dart`.
 library;
 
-/// A single "always allow" grant.
+/// A single persisted permission decision.
+///
+/// STRICT MODEL (2026-09-24): an entry now carries the MODE it was made in and
+/// the DECISION it records. Both were missing, which is why grants leaked across
+/// modes: switching a session from Studio to General left its Studio grants fully
+/// in force, because the store had no mode dimension at all. A grant made in one
+/// mode is now invisible in every other mode.
+///
+/// Denials are persisted too. They never were ("a Deny is never recorded"), so a
+/// user who denied a path was asked again on the very next attempt — and the
+/// model had no durable signal to stop asking.
 class PermissionGrant {
   static const kindPath = 'path';
   static const kindHost = 'host';
 
   static const scopeSession = 'session';
   static const scopeGlobal = 'global';
+
+  /// Decisions. `allow` is one-time and never persisted; only `deny` and
+  /// `always` are written to disk.
+  static const decisionAlways = 'always';
+  static const decisionDeny = 'deny';
 
   /// 'path' or 'host'.
   final String kind;
@@ -46,6 +61,17 @@ class PermissionGrant {
   /// Owning session for session-scoped grants; null for global grants.
   final String? sessionId;
 
+  /// AgentMode name this decision was made in ('safe', 'auto', 'studio',
+  /// 'control', 'drive'). A grant only applies when the session is STILL in
+  /// this mode — that is what makes the modes unable to conflict.
+  ///
+  /// Empty means a legacy entry written before mode tagging existed; those are
+  /// honoured in General mode only, the most conservative reading.
+  final String mode;
+
+  /// 'always' (persistent allow) or 'deny' (persistent refusal).
+  final String decision;
+
   final DateTime grantedAt;
 
   const PermissionGrant({
@@ -53,20 +79,29 @@ class PermissionGrant {
     required this.value,
     required this.scope,
     this.sessionId,
+    this.mode = '',
+    this.decision = decisionAlways,
     required this.grantedAt,
   });
+
+  /// True when this entry is a persistent refusal rather than a grant.
+  bool get isDeny => decision == decisionDeny;
 
   /// Creates a path grant; [rawPath] is normalized to an absolute path.
   factory PermissionGrant.path(
     String rawPath, {
     String? sessionId,
     bool global = false,
+    String mode = '',
+    String decision = decisionAlways,
     DateTime? at,
   }) => PermissionGrant(
     kind: kindPath,
     value: normalizeGrantPath(rawPath),
     scope: global ? scopeGlobal : scopeSession,
     sessionId: global ? null : sessionId,
+    mode: mode,
+    decision: decision,
     grantedAt: at ?? DateTime.now(),
   );
 
@@ -76,12 +111,16 @@ class PermissionGrant {
     String rawHost, {
     String? sessionId,
     bool global = false,
+    String mode = '',
+    String decision = decisionAlways,
     DateTime? at,
   }) => PermissionGrant(
     kind: kindHost,
     value: normalizeGrantHost(rawHost),
     scope: global ? scopeGlobal : scopeSession,
     sessionId: global ? null : sessionId,
+    mode: mode,
+    decision: decision,
     grantedAt: at ?? DateTime.now(),
   );
 
@@ -90,6 +129,8 @@ class PermissionGrant {
     'value': value,
     'scope': scope,
     if (sessionId != null) 'sessionId': sessionId,
+    if (mode.isNotEmpty) 'mode': mode,
+    if (decision != decisionAlways) 'decision': decision,
     'grantedAt': grantedAt.toIso8601String(),
   };
 
@@ -115,11 +156,17 @@ class PermissionGrant {
     if (value.isEmpty) {
       throw const FormatException('grant value is empty');
     }
+    final decision = j['decision'] as String? ?? decisionAlways;
+    if (decision != decisionAlways && decision != decisionDeny) {
+      throw FormatException('unknown grant decision: $decision');
+    }
     return PermissionGrant(
       kind: validKind,
       value: value,
       scope: validScope,
       sessionId: j['sessionId'] as String?,
+      mode: j['mode'] as String? ?? '',
+      decision: decision,
       grantedAt:
           DateTime.tryParse(j['grantedAt'] as String? ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
@@ -243,40 +290,109 @@ class GrantStore {
   }) : sessionGrants = sessionGrants ?? {},
        globalGrants = globalGrants ?? [];
 
-  /// All grants visible to [sessionId]: its session grants + global grants.
-  List<PermissionGrant> grantsFor(String? sessionId) {
+  /// Entries written before mode tagging existed carry an empty [PermissionGrant.mode].
+  /// They are honoured in General mode only — the most conservative reading of a
+  /// decision whose mode is unknown.
+  static const legacyModeFallback = 'auto';
+
+  static bool _modeMatches(PermissionGrant g, String mode) =>
+      g.mode.isEmpty ? mode == legacyModeFallback : g.mode == mode;
+
+  /// All decisions visible to [sessionId] **in [mode]**: its own entries plus
+  /// global ones, filtered to the mode.
+  ///
+  /// The mode filter is what makes the modes unable to conflict. Before it, a
+  /// path granted while a session was in Studio stayed fully in force after the
+  /// same session switched to General, because the store had no mode dimension.
+  List<PermissionGrant> grantsFor(
+    String? sessionId, {
+    String mode = legacyModeFallback,
+  }) {
     final out = <PermissionGrant>[];
     if (sessionId != null && sessionId.isNotEmpty) {
-      out.addAll(sessionGrants[sessionId] ?? const []);
+      out.addAll(
+        (sessionGrants[sessionId] ?? const <PermissionGrant>[]).where(
+          (g) => _modeMatches(g, mode),
+        ),
+      );
     }
-    out.addAll(globalGrants);
+    out.addAll(globalGrants.where((g) => _modeMatches(g, mode)));
     return out;
   }
 
-  bool _coversPath(String? sessionId, String normalizedPath) {
-    for (final g in grantsFor(sessionId)) {
+  bool _coversPath(
+    String? sessionId,
+    String normalizedPath, {
+    String mode = legacyModeFallback,
+    bool deny = false,
+  }) {
+    for (final g in grantsFor(sessionId, mode: mode)) {
       if (g.kind != PermissionGrant.kindPath) continue;
+      if (g.isDeny != deny) continue;
       if (pathCoveredBy(g.value, normalizedPath)) return true;
     }
     return false;
   }
 
-  /// True when [rawPath] may be touched: some visible grant covers it
-  /// (hierarchically). Deny is not a stored state — "not granted" is the
-  /// deny, so there is nothing to persist for a denial.
-  bool isPathGranted(String? sessionId, String rawPath) =>
-      _coversPath(sessionId, normalizeGrantPath(rawPath));
-
-  /// True when [rawHost] may be contacted: some visible grant covers it —
-  /// exact host or child domain; a host grant covers all ports/paths.
-  bool isHostGranted(String? sessionId, String rawHost) {
-    final c = normalizeGrantHost(rawHost);
-    if (c.isEmpty) return false;
-    for (final g in grantsFor(sessionId)) {
+  bool _coversHost(
+    String? sessionId,
+    String canonicalHost, {
+    String mode = legacyModeFallback,
+    bool deny = false,
+  }) {
+    for (final g in grantsFor(sessionId, mode: mode)) {
       if (g.kind != PermissionGrant.kindHost) continue;
-      if (hostCoveredBy(g.value, c)) return true;
+      if (g.isDeny != deny) continue;
+      if (hostCoveredBy(g.value, canonicalHost)) return true;
     }
     return false;
+  }
+
+  /// True when [rawPath] may be touched: some visible grant covers it
+  /// (hierarchically) and no denial does. **A recorded deny always wins over a
+  /// recorded allow** — otherwise a stale "always allow" would silently
+  /// override the user's later, more specific refusal.
+  bool isPathGranted(
+    String? sessionId,
+    String rawPath, {
+    String mode = legacyModeFallback,
+  }) {
+    final c = normalizeGrantPath(rawPath);
+    if (_coversPath(sessionId, c, mode: mode, deny: true)) return false;
+    return _coversPath(sessionId, c, mode: mode);
+  }
+
+  /// True when the user has explicitly and persistently refused [rawPath].
+  bool isPathDenied(
+    String? sessionId,
+    String rawPath, {
+    String mode = legacyModeFallback,
+  }) => _coversPath(sessionId, normalizeGrantPath(rawPath),
+      mode: mode, deny: true);
+
+  /// True when [rawHost] may be contacted: some visible grant covers it —
+  /// exact host or child domain; a host grant covers all ports/paths — and no
+  /// denial does.
+  bool isHostGranted(
+    String? sessionId,
+    String rawHost, {
+    String mode = legacyModeFallback,
+  }) {
+    final c = normalizeGrantHost(rawHost);
+    if (c.isEmpty) return false;
+    if (_coversHost(sessionId, c, mode: mode, deny: true)) return false;
+    return _coversHost(sessionId, c, mode: mode);
+  }
+
+  /// True when the user has explicitly and persistently refused [rawHost].
+  bool isHostDenied(
+    String? sessionId,
+    String rawHost, {
+    String mode = legacyModeFallback,
+  }) {
+    final c = normalizeGrantHost(rawHost);
+    if (c.isEmpty) return false;
+    return _coversHost(sessionId, c, mode: mode, deny: true);
   }
 
   /// Records an "always allow" for a path. Exactly the granted path (and
@@ -284,12 +400,20 @@ class GrantStore {
   /// A non-global grant with a null/empty [sessionId] is refused: it would
   /// land in an unreachable bucket that [grantsFor] never reads, so the
   /// user would believe they allowed something that never applies.
-  void addPathGrant(String? sessionId, String rawPath, {bool global = false}) {
+  void addPathGrant(
+    String? sessionId,
+    String rawPath, {
+    bool global = false,
+    String mode = '',
+    String decision = PermissionGrant.decisionAlways,
+  }) {
     if (!global && (sessionId == null || sessionId.isEmpty)) return;
     final g = PermissionGrant.path(
       rawPath,
       sessionId: sessionId,
       global: global,
+      mode: mode,
+      decision: decision,
     );
     if (g.value.isEmpty) return;
     if (global) {
@@ -304,12 +428,20 @@ class GrantStore {
   /// Records an "always allow" for a host (covers child domains too).
   /// A non-global grant with a null/empty [sessionId] is refused: it would
   /// land in an unreachable bucket that [grantsFor] never reads.
-  void addHostGrant(String? sessionId, String rawHost, {bool global = false}) {
+  void addHostGrant(
+    String? sessionId,
+    String rawHost, {
+    bool global = false,
+    String mode = '',
+    String decision = PermissionGrant.decisionAlways,
+  }) {
     if (!global && (sessionId == null || sessionId.isEmpty)) return;
     final g = PermissionGrant.host(
       rawHost,
       sessionId: sessionId,
       global: global,
+      mode: mode,
+      decision: decision,
     );
     if (g.value.isEmpty) return;
     if (global) {
@@ -362,8 +494,58 @@ class GrantStore {
     sessionGrants.remove(sessionId ?? '');
   }
 
-  bool _contains(List<PermissionGrant> list, PermissionGrant g) =>
-      list.any((e) => e.kind == g.kind && e.value == g.value);
+  /// Identity of a stored decision. Mode and decision are part of it, so a
+  /// persistent allow and a persistent deny on the SAME value can coexist (the
+  /// deny wins at match time) and the same path granted in two modes is two
+  /// separate entries rather than one that leaks across both.
+  bool _contains(List<PermissionGrant> list, PermissionGrant g) => list.any(
+    (e) =>
+        e.kind == g.kind &&
+        e.value == g.value &&
+        e.mode == g.mode &&
+        e.decision == g.decision,
+  );
+
+  /// Records a persistent DENY, replacing any allow on the same value+mode so
+  /// the user's most recent, more specific decision is the one that stands.
+  void addPathDeny(String? sessionId, String rawPath, {String mode = ''}) {
+    _removeMatching(sessionId, rawPath, PermissionGrant.kindPath, mode);
+    addPathGrant(
+      sessionId,
+      rawPath,
+      mode: mode,
+      decision: PermissionGrant.decisionDeny,
+    );
+  }
+
+  /// Records a persistent DENY for a host.
+  void addHostDeny(String? sessionId, String rawHost, {String mode = ''}) {
+    _removeMatching(sessionId, rawHost, PermissionGrant.kindHost, mode);
+    addHostGrant(
+      sessionId,
+      rawHost,
+      mode: mode,
+      decision: PermissionGrant.decisionDeny,
+    );
+  }
+
+  void _removeMatching(
+    String? sessionId,
+    String rawValue,
+    String kind,
+    String mode,
+  ) {
+    final value = kind == PermissionGrant.kindPath
+        ? normalizeGrantPath(rawValue)
+        : normalizeGrantHost(rawValue);
+    if (value.isEmpty) return;
+    bool matches(PermissionGrant e) =>
+        e.kind == kind && e.value == value && _modeMatches(e, mode);
+    if (sessionId != null && sessionId.isNotEmpty) {
+      sessionGrants[sessionId]?.removeWhere(matches);
+    }
+    globalGrants.removeWhere(matches);
+  }
 
   /// Serializes one session's grants for the ChatSession JSON `grants`
   /// field.
@@ -392,5 +574,17 @@ String permissionWorkspaceRoot({
   required String sessionWorkDir,
   String? sessionId,
 }) {
+  // Full Access is unconfinable BY DESIGN: the user explicitly opted out of
+  // prompts, so there is no root to enforce. Callers must treat an empty return
+  // as "no jail" rather than as a jail rooted at "".
+  if (modeName == 'drive') return '';
+  // Every other mode — Read-Only, General, Studio AND Control — is jailed to
+  // the session workspace. Studio's root is the bound repo clone, which the
+  // CALLER resolves (an async registry lookup cannot live in this pure helper)
+  // and passes in as [sessionWorkDir].
+  //
+  // Control used to be treated as full access by the agent-side gate, which is
+  // why a Control session could read and write anywhere on the device with no
+  // prompt. It is jailed like the rest.
   return sessionWorkDir;
 }

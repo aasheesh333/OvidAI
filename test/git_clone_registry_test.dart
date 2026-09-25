@@ -67,7 +67,7 @@ void main() {
       model: 'test-model',
       mode: 'studio',
     );
-    s.grants.add(PermissionGrant.host(host, sessionId: s.id));
+    s.grants.add(PermissionGrant.host(host, sessionId: s.id, mode: 'studio'));
     app.sessions.add(s);
     app.activeSessionId = s.id;
     AgentService.setRunSessionForTest(s.id);
@@ -221,7 +221,7 @@ void main() {
 
     test('non-GitHub URL keeps the raw per-session clone', () async {
       final s = makeStudioSession('gc-4', 'gitlab.com');
-      s.grants.add(PermissionGrant.host('github.com', sessionId: s.id));
+      s.grants.add(PermissionGrant.host('github.com', sessionId: s.id, mode: 'studio'));
       final fake = fakeRegistry();
       AgentService.registryOverrideForTest = fake.registry;
 
@@ -243,7 +243,7 @@ void main() {
         model: 'test-model',
         mode: 'auto',
       );
-      s.grants.add(PermissionGrant.host('github.com', sessionId: s.id));
+      s.grants.add(PermissionGrant.host('github.com', sessionId: s.id, mode: 'auto'));
       app.sessions.add(s);
       app.activeSessionId = s.id;
       AgentService.setRunSessionForTest(s.id);
@@ -296,7 +296,7 @@ void main() {
       );
       s.repo = repo;
       s.branch = branch;
-      s.grants.add(PermissionGrant.host('github.com', sessionId: s.id));
+      s.grants.add(PermissionGrant.host('github.com', sessionId: s.id, mode: 'auto'));
       app.sessions.add(s);
       app.activeSessionId = s.id;
       AgentService.setRunSessionForTest(s.id);

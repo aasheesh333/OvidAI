@@ -4567,8 +4567,17 @@ class AppState extends ChangeNotifier {
   /// Adds a global "always allow" grant (applies to every session).
   Future<void> addGlobalPermissionGrant(PermissionGrant grant) async {
     if (grant.value.isEmpty) return;
+    // Identity includes MODE and DECISION. This used to rebuild the entry from
+    // kind/value/scope only, which silently dropped the mode tag — so every
+    // global grant became mode-less and the mode-scoped match never saw it.
+    // Two decisions on the same value (allowed in Studio, denied in General)
+    // are two different facts and must both survive.
     final exists = globalPermissionGrants.any(
-      (g) => g.kind == grant.kind && g.value == grant.value,
+      (g) =>
+          g.kind == grant.kind &&
+          g.value == grant.value &&
+          g.mode == grant.mode &&
+          g.decision == grant.decision,
     );
     if (!exists) {
       globalPermissionGrants.add(
@@ -4576,6 +4585,8 @@ class AppState extends ChangeNotifier {
           kind: grant.kind,
           value: grant.value,
           scope: PermissionGrant.scopeGlobal,
+          mode: grant.mode,
+          decision: grant.decision,
           grantedAt: grant.grantedAt,
         ),
       );

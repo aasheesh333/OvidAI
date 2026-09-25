@@ -396,6 +396,15 @@ class ApprovalRequest {
   /// approvals set this — destructive commands, plugin installs, device
   /// permissions, questions and plan reviews never do.
   final bool allowAlways;
+
+  /// AgentMode name of the run that raised this prompt, captured at creation.
+  ///
+  /// `approveAlways` runs from the UI, OUTSIDE any run zone, so reading the
+  /// `mode` getter there would resolve to whichever session happens to be
+  /// foreground — and tag the grant with the wrong mode. Capturing it on the
+  /// request is what makes per-mode grants correct with parallel sessions.
+  final String modeName;
+
   ApprovalRequest({
     required this.tool,
     required this.summary,
@@ -403,6 +412,7 @@ class ApprovalRequest {
     this.questions,
     this.planBody,
     this.allowAlways = false,
+    this.modeName = '',
   });
 }
 
@@ -1681,7 +1691,10 @@ class AgentService extends ChangeNotifier {
   /// Drop a session's run entirely (called from AppState.deleteSession).
   void dropSessionRun(String sessionId) {
     final r = _runs.remove(sessionId);
-    _alwaysAllowedTools.remove(sessionId);
+    // Keyed per (session, mode), so drop every mode variant for this session —
+    // plus the bare legacy key.
+    _alwaysAllowedTools.removeWhere((k, _) =>
+        k == sessionId || k.startsWith('$sessionId|'));
     if (r == null) return;
     r.cancelRequested = true;
     try {
@@ -4179,6 +4192,11 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       // existing per-session _alwaysAllowedTools behavior. The two systems
       // are complementary: tool names vs paths/hosts.
       final s = _runSession ?? AppState.I.activeSession;
+      // The mode captured when the prompt was RAISED, not the foreground
+      // session's mode now (this runs from the UI, outside any run zone).
+      final modeName = req.modeName.isEmpty
+          ? (s?.mode ?? AgentMode.auto.name)
+          : req.modeName;
       final paths = _grantPathsFromToolKey(req.tool);
       final hosts = _grantHostsFromToolKey(req.tool);
       if ((paths.isNotEmpty || hosts.isNotEmpty) && s != null) {
@@ -4186,34 +4204,48 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
           for (final p in paths) {
             unawaited(
               AppState.I.addGlobalPermissionGrant(
-                PermissionGrant.path(p, global: true),
+                PermissionGrant.path(p, global: true, mode: modeName),
               ),
             );
           }
           for (final h in hosts) {
             unawaited(
               AppState.I.addGlobalPermissionGrant(
-                PermissionGrant.host(h, global: true),
+                PermissionGrant.host(h, global: true, mode: modeName),
               ),
             );
           }
         } else {
           for (final p in paths) {
             if (p.isNotEmpty &&
-                !_sessionGrantCovers(s, PermissionGrant.kindPath, p)) {
-              s.grants.add(PermissionGrant.path(p, sessionId: s.id));
+                !_sessionGrantCovers(
+                  s,
+                  PermissionGrant.kindPath,
+                  p,
+                  modeName,
+                )) {
+              s.grants.add(
+                PermissionGrant.path(p, sessionId: s.id, mode: modeName),
+              );
             }
           }
           for (final h in hosts) {
             if (h.isNotEmpty &&
-                !_sessionGrantCovers(s, PermissionGrant.kindHost, h)) {
-              s.grants.add(PermissionGrant.host(h, sessionId: s.id));
+                !_sessionGrantCovers(
+                  s,
+                  PermissionGrant.kindHost,
+                  h,
+                  modeName,
+                )) {
+              s.grants.add(
+                PermissionGrant.host(h, sessionId: s.id, mode: modeName),
+              );
             }
           }
           AppState.I.persistSessions();
         }
       } else {
-        final sid = s?.id ?? '';
+        final sid = _alwaysAllowKey(s?.id ?? '', modeName);
         _alwaysAllowedTools.putIfAbsent(sid, () => <String>{}).add(req.tool);
       }
     }
@@ -4262,20 +4294,36 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
 
   /// True when [s] already holds a grant covering [value] (hierarchically),
   /// so "Always allow" never stacks redundant grants.
-  static bool _sessionGrantCovers(ChatSession s, String kind, String value) =>
-      s.grants.any(
-        (g) =>
-            g.kind == kind &&
-            (kind == PermissionGrant.kindPath
-                ? pathCoveredBy(g.value, value)
-                : hostCoveredBy(g.value, value)),
-      );
+  /// Whether [s] already holds this decision **in [mode]**. Mode is part of the
+  /// identity: the same path granted in Studio must not suppress the prompt in
+  /// General, which is the whole point of per-mode grants.
+  static bool _sessionGrantCovers(
+    ChatSession s,
+    String kind,
+    String value,
+    String mode,
+  ) => s.grants.any(
+    (g) =>
+        g.kind == kind &&
+        g.mode == mode &&
+        !g.isDeny &&
+        (kind == PermissionGrant.kindPath
+            ? pathCoveredBy(g.value, value)
+            : hostCoveredBy(g.value, value)),
+  );
 
-  /// Per-session "always allow" memory: session id → remembered tool names.
-  /// Never persisted; entries die with the session (see dropSessionRun) and
-  /// with the process. Destructive commands bypass it by construction (the
-  /// destructive gate prompts before this memory is ever consulted).
+  /// Per-(session, mode) "always allow" memory: `"<sessionId>|<mode>"` →
+  /// remembered tool names. Never persisted; entries die with the session (see
+  /// [dropSessionRun]) and with the process. Destructive commands bypass it by
+  /// construction (the destructive gate prompts before this is consulted).
+  ///
+  /// The mode is part of the key: a tool remembered while a session was in
+  /// Studio must not stay auto-approved after the same session switches to
+  /// General.
   final Map<String, Set<String>> _alwaysAllowedTools = {};
+
+  static String _alwaysAllowKey(String sessionId, String modeName) =>
+      '$sessionId|$modeName';
 
   // ── Provider / endpoint resolution ────────────────────────────────────
   Uri _endpoint(ProviderConfig p) {
@@ -13507,6 +13555,15 @@ ${await _agentsMdBlock()}
       } catch (_) {
         root = workDir.path;
       }
+    } else if (m != AgentMode.drive) {
+      // One authoritative root per mode. Control is jailed to the session
+      // directory like General and Read-Only; it used to be exempt here, which
+      // let a Control session touch anything on the device with no prompt.
+      root = permissionWorkspaceRoot(
+        modeName: m.name,
+        sessionWorkDir: workDir.path,
+        sessionId: sid,
+      );
     }
     // Canonicalize symlinks (best-effort) before matching: the grant check
     // must see the REAL location, not the lexical one.
@@ -13515,13 +13572,14 @@ ${await _agentsMdBlock()}
     final canonicalAbs = await _canonicalFsPath(abs);
     final inside = containedPath(Directory(canonicalRoot), canonicalAbs);
     if (inside != null) return inside;
-    if (m == AgentMode.drive || m == AgentMode.control) {
-      // Full access: no prompts, no confinement.
+    if (m == AgentMode.drive) {
+      // Full Access is the ONLY unconfinable mode: the user explicitly opted
+      // out of prompts. Control is no longer exempt (see the root above).
       return canonicalAbs;
     }
     // Safe (read-only) still prompts: the user explicitly approves each
     // outside path — the old silent hard refusal is gone.
-    if (_grantStoreFor(sid).isPathGranted(sid, canonicalAbs)) {
+    if (_grantStoreFor(sid).isPathGranted(sid, canonicalAbs, mode: m.name)) {
       return canonicalAbs;
     }
     final ok = await _askUser(
@@ -13585,6 +13643,15 @@ ${await _agentsMdBlock()}
       } catch (_) {
         root = workDir.path;
       }
+    } else if (m != AgentMode.drive) {
+      // One authoritative root per mode. Control is jailed to the session
+      // directory like General and Read-Only; it used to be exempt here, which
+      // let a Control session touch anything on the device with no prompt.
+      root = permissionWorkspaceRoot(
+        modeName: m.name,
+        sessionWorkDir: workDir.path,
+        sessionId: sid,
+      );
     }
     final canonicalRoot = await _canonicalFsPath(root);
     final resolved = <String, String>{};
@@ -13593,10 +13660,10 @@ ${await _agentsMdBlock()}
     for (final rel in rels) {
       final abs = normalizeGrantPath(rel, base: canonicalRoot);
       final canonicalAbs = await _canonicalFsPath(abs);
+      // Control is NOT a free pass here (it was): only Full Access is.
       if (containedPath(Directory(canonicalRoot), canonicalAbs) != null ||
           m == AgentMode.drive ||
-          m == AgentMode.control ||
-          store.isPathGranted(sid, canonicalAbs)) {
+          store.isPathGranted(sid, canonicalAbs, mode: m.name)) {
         resolved[rel] = canonicalAbs;
       } else {
         outside.add(canonicalAbs);
@@ -13712,9 +13779,16 @@ ${await _agentsMdBlock()}
     if (host.isEmpty) return false;
     if (defaultAllowedHosts.contains(host)) return true;
     final m = mode;
-    if (m == AgentMode.drive || m == AgentMode.control) return true;
+    // Full Access is the only mode that skips the host gate. Control used to
+    // as well, which meant a Control session could reach any host on the
+    // network — including the LAN and loopback — with no prompt. Control's
+    // device tools do not touch the network, so jailing it here costs the mode
+    // nothing and closes a real hole.
+    if (m == AgentMode.drive) return true;
     final sid = _runSession?.id ?? AppState.I.activeSession?.id;
-    if (_grantStoreFor(sid).isHostGranted(sid, host)) return true;
+    if (_grantStoreFor(sid).isHostGranted(sid, host, mode: m.name)) {
+      return true;
+    }
     return _askUser(
       'grant:host:$host',
       'Network access: $host',
@@ -13837,7 +13911,7 @@ ${await _agentsMdBlock()}
     // "Always allow for this command": per-session memory for plain tool
     // approvals. Checked after the destructive and subagent gates above,
     // so a remembered tool never bypasses them.
-    final rememberedSid = sessionId ?? '';
+    final rememberedSid = _alwaysAllowKey(sessionId ?? '', mode.name);
     if ((_alwaysAllowedTools[rememberedSid]?.contains(tool) ?? false)) {
       if (sessionId != null) {
         await SessionLedger.I.append(sessionId, 'approval', {
@@ -14082,6 +14156,7 @@ ${await _agentsMdBlock()}
       detail: d,
       planBody: planBody,
       allowAlways: allowAlways,
+      modeName: mode.name,
     );
     pendingApproval = req;
     notifyListeners();

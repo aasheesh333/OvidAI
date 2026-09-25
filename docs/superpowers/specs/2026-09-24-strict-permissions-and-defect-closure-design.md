@@ -599,7 +599,7 @@ Updated as each phase lands.
 |---|---|---|---|
 | 0 — Baseline build | **done** | `cfc44f0` | analyze 0 issues; **2335 tests pass** (1 skipped); CI green on run `35963908982`. On-device confirmation still owed by the owner — the latest APK is produced by every CI run on this branch. |
 | 1 — Security criticals | **done** | see below | defects #1 #2 #3 #4(gate) #5(redirect) #6 #7 #10 #11 #12 #26 |
-| 2 — Permission model | not started | — | also absorbs #4's target-canonicalisation jail and #5's loopback default |
+| 2 — Permission model | **done (core)** | see below | per-mode isolation, Control jailed, 3 options exactly; #4's target-canonicalisation and #5's loopback default remain |
 
 ### Phase 1 detail — what landed
 
@@ -917,11 +917,85 @@ A→B keeps working in A; (5) the registry binding and the pinned
 branch is not recorded per repo. Gap 5 matters most for Phase 2, which needs one
 authoritative Studio root.
 
+### Phase 2 detail — strict per-mode permissions
+
+**Mode-tagged decisions.** `PermissionGrant` gained `mode` (the AgentMode name it
+was made in) and `decision` (`always` | `deny`). Matching is now mode-scoped
+everywhere: `grantsFor`, `isPathGranted`, `isHostGranted` all take a `mode`, and
+`_modeMatches` requires an exact match. **This is what makes the modes unable to
+conflict** — before, the store had no mode dimension, so a path granted while a
+session was in Studio stayed fully in force after the same session switched to
+General.
+
+Persistence stays in the session JSON (`grants`) plus the app-level
+`ovid_permission_grants_v1`, which already gives exactly decision D3: entries
+survive restart and are purged when the session is deleted. A second per-mode
+file store was deliberately NOT added — it would duplicate the same facts in two
+places and drift. The mode tag delivers the isolation the owner asked for; the
+Permissions screen can group by mode from the same data.
+
+**Legacy migration.** Entries written before mode tagging have an empty `mode`
+and are honoured in **General only** — the most conservative reading of a
+decision whose mode is unknown. Documented in `GrantStore.legacyModeFallback`.
+
+**Denials are now persisted** (`addPathDeny` / `addHostDeny`, `isPathDenied` /
+`isHostDenied`), and **a recorded deny always wins over a recorded allow** —
+otherwise a stale "always allow" would silently override the user's later, more
+specific refusal. Recording a deny also removes any allow on the same
+value+mode. Per the "exactly three options" rule the Deny button does **not**
+write one (that would be a fourth, "always deny" choice); the capability is
+there for the Permissions screen and for future use.
+
+**Control mode is jailed.** It shared Full Access's exemption in both the path
+and host gates, so a Control session could read and write anywhere on the device
+with no prompt. It now uses `permissionWorkspaceRoot` like General/Read-Only and
+prompts for anything outside the session directory. Its *device* tools still
+auto-approve — a prompt per tap would make the mode unusable — because the
+filesystem and network jails are what the requirement is about.
+`permissionWorkspaceRoot` is no longer a stub: it returns an empty root for
+`drive` (meaning "no jail", which callers must honour) and the session workspace
+for every other mode.
+
+**Exactly three actions.** The approval card lost the fourth "Deny with a note"
+icon button and the `This session` / `All sessions` scope chips: Deny / Allow /
+Always Allow, and an Always Allow is recorded for that mode and that session by
+construction, so there is no scope left to choose. `_denyWithNote` and
+`_globalScope` are gone (`AgentService.approve(false, note:)` remains for
+programmatic callers). Cards for irreversible actions (destructive commands,
+plugin installs, device permissions, plan review) still offer no Always Allow —
+that safety property is unchanged.
+
+**Mode captured at prompt time.** `ApprovalRequest` gained `modeName`, set in
+`_askUser`. `approveAlways` runs from the UI, outside any run zone, so reading
+the `mode` getter there would resolve to whichever session is foreground and tag
+the grant with the wrong mode — wrong with parallel sessions, which this app
+explicitly supports. `_alwaysAllowedTools` is likewise keyed
+`"<sessionId>|<mode>"` now, and `dropSessionRun` clears every mode variant.
+
+**Bug found and fixed while wiring it:** `AppState.addGlobalPermissionGrant`
+rebuilt the entry from kind/value/scope only, silently **dropping the mode tag**
+— so every global grant became mode-less and the mode-scoped match never saw it.
+It now preserves `mode` and `decision`, and its dedup identity includes both, so
+an allow and a deny on the same value can coexist.
+
+New tests: `test/permission_mode_isolation_test.dart` (13 — cross-mode invisibility,
+same path in two modes as two decisions, hierarchical coverage, legacy fallback,
+deny-overrides-allow, deny not bleeding across modes, host parity, real roots per
+mode, JSON round-trip, unknown-decision rejection) and two agent-level cases in
+`tool_approval_always_allow_test.dart` (Control prompts for an outside path;
+a Control grant does not carry into General after a mode switch).
+`git_clone_registry_test.dart` grants are now mode-tagged, matching how
+production creates them.
+
+Still open from the Phase 1 deferrals: `checkPolicy` jails cwd rather than
+canonicalised command *targets*, and loopback is still silently allowed in
+`defaultAllowedHosts`.
+
 ### Verification (current)
 
-`dart analyze lib test` → 0 issues · full suite **2423 pass, 1 skipped** ·
+`dart analyze lib test` → 0 issues · full suite **2438 pass, 1 skipped** ·
 `:app:compileDebugKotlin --offline` → BUILD SUCCESSFUL · CI green through
-`837690f`.
+`ae56914`.
 
 ### Phase 6 detail — plan mode is now default-deny
 
