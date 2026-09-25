@@ -642,7 +642,7 @@ regression from this phase.
 | 5 — Accessibility restart | **done** | see below | stale-bind signal, cold-start probe, honest copy, screenshot capability |
 | 6 — Plan mode allowlist | **done** | see below | blocklist → allowlist, default-deny |
 | 7 — Subagents 49 + no nesting | **done** | see below | cap + zero nesting + ledger FD fix (#8) |
-| 8 — Codex parity | not started | — | |
+| 8 — Codex parity | **done (config paths)** | see below | TOML MCP mounting, transport, allowlist, roots, marketplace; AGENTS.md injection still open |
 | 9 — Correctness & leaks | partial | — | #8 (ledger) and #14 (approval readiness) done; #9 #13 #15–#19 remain |
 | 10 — Performance | not started | — | |
 | 11 — UI/UX + queue dock | partial | see below | **queue dock + Hinglish done**; tap targets/semantics remain |
@@ -991,11 +991,61 @@ Still open from the Phase 1 deferrals: `checkPolicy` jails cwd rather than
 canonicalised command *targets*, and loopback is still silently allowed in
 `defaultAllowedHosts`.
 
+### Phase 8 detail — Codex config paths now reach production
+
+Codex plugin *bundles* already worked. What was missing was the Codex
+*ecosystem config* — and in every case the capability existed but no production
+code path reached it.
+
+- **`mountPluginMcpServers` read only `.mcp.json` through a raw `jsonDecode`**, so
+  a Codex plugin declaring servers in `config.toml` under `[mcp_servers.<name>]`
+  mounted **nothing, silently**. It now tries `.mcp.json` then `config.toml`,
+  both through `parseMcpConfig` (which sniffs JSON vs TOML), normalised into one
+  map shape by a new `importedMcpToMap`. `.mcp.json` wins a name collision as the
+  more specific declaration.
+- **`type = "streamable-http"`** — Codex's spelling of the remote transport —
+  survived parsing and fell through to the stdio branch, dying with the
+  misleading *"declares no command"*. New `normalizeMcpTransport` maps every
+  variant (`streamableHttp`, `streamable_http`, `http-streamable`, SSE spellings)
+  at parse time, so all consumers see one spelling.
+- **The legacy install allowlist was Claude-shaped** and staged **zero** files
+  from a Codex tree. It now accepts `config.toml`, `AGENTS.md`,
+  `.codex-plugin/plugin.json`, `.codex-plugin/marketplace.json`, `.agents/**` and
+  `.codex/**`.
+- **Workspace roots**: `.codex/` was recognised for `skills` only, so a repo
+  carrying `.codex/commands` or `.codex/agents` exposed nothing while its
+  `.claude/` equivalent worked. Added `commands`, `prompts` and `agents`, plus
+  the matching `_pathMatchesKind` cases.
+- **Marketplace discovery** probes `.codex-plugin/marketplace.json`,
+  `.codex/plugins/marketplace.json` and `.codex/marketplace.json`; a Codex
+  marketplace previously failed with "No marketplace.json found".
+- **`${CODEX_PLUGIN_ROOT}`** added to `kPluginRootVariables` and exported in both
+  the hook env and the MCP server env — expanding the variable is useless if the
+  child process cannot see it.
+
+**A green test was pinning the gap as correct behaviour.**
+`plugin_runtime_skills_test.dart` asserted that a manifest-*declared*
+`.codex/agents/rogue.md` must NOT mount. Inverted: a declared `.codex` agent and
+command now mount, while `.agents/commands/` (not a convention any harness uses)
+stays unmounted.
+
+Still open: `AGENTS.md` is collected into `instructionPaths` and never consumed
+(plan blocker B6); `_parseCodexInlineHooks` has no tests and misses quoted keys
+(`[[hooks."SessionStart"]]`); `CodexPluginAdapter` does not scan top-level
+`commands/`, `agents/` or root `skills/`; `importMcpFromSettings` still has no
+production caller; and there is no paste/import UI for a config file, which is
+the only realistic way to get a Codex `config.toml` onto a device (nothing creates
+`~/.codex/` in the sandbox home).
+
+New test: `test/codex_parity_test.dart` (11) — transport normalisation, a real
+Codex `config.toml` parsing into stdio/http/env-bearing servers, JSON through the
+same entry point, and source contracts for each wiring point above.
+
 ### Verification (current)
 
-`dart analyze lib test` → 0 issues · full suite **2438 pass, 1 skipped** ·
+`dart analyze lib test` → 0 issues · full suite **2450 pass, 1 skipped** ·
 `:app:compileDebugKotlin --offline` → BUILD SUCCESSFUL · CI green through
-`ae56914`.
+`05a7c6f`.
 
 ### Phase 6 detail — plan mode is now default-deny
 

@@ -16814,7 +16814,13 @@ ${await _agentsMdBlock()}
         '${work.path}/.claude/skills',
         '${work.path}/.claude/commands',
         '${work.path}/.claude/agents',
+        // Codex got only `skills` here, so a repo carrying `.codex/commands`
+        // or `.codex/agents` exposed nothing while its `.claude/` equivalent
+        // worked. Same convention, same treatment.
         '${work.path}/.codex/skills',
+        '${work.path}/.codex/commands',
+        '${work.path}/.codex/prompts',
+        '${work.path}/.codex/agents',
       ]);
     } catch (_) {}
     final mounts = <PluginCatalogMount>[];

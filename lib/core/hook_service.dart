@@ -859,6 +859,8 @@ class HookService extends ChangeNotifier {
       // without this the command expands to `/hooks/...` and fails. Setting
       // the CC name also steers polyglot hooks to their CC output shape.
       'CLAUDE_PLUGIN_ROOT': root,
+      // Codex hooks reference their own root variable.
+      'CODEX_PLUGIN_ROOT': root,
       'OVID_PLUGIN_ROOT': root,
       // Missing-env parity (item 8): real [CC] hooks read these.
       'CLAUDE_PROJECT_DIR': workspace,

@@ -652,7 +652,13 @@ class SkillService {
     return switch (kind) {
       SkillContributionKind.command =>
         (path.startsWith('commands/') ||
-                path.startsWith('.claude/commands/')) &&
+                path.startsWith('.claude/commands/') ||
+                // CODEX PARITY (2026-09-24): Codex repos carry slash commands
+                // under `.codex/commands/` (and some under `.codex/prompts/`).
+                // Only `.codex/skills/` was recognised, so a declared Codex
+                // command was refused even though the manifest named it.
+                path.startsWith('.codex/commands/') ||
+                path.startsWith('.codex/prompts/')) &&
             path.endsWith('.md') &&
             !path.endsWith('/SKILL.md') &&
             !path.endsWith('/AGENT.md'),
@@ -665,7 +671,8 @@ class SkillService {
       SkillContributionKind.agent =>
         (path.startsWith('agents/') ||
                 path.startsWith('.agents/personas/') ||
-                path.startsWith('.claude/agents/')) &&
+                path.startsWith('.claude/agents/') ||
+                path.startsWith('.codex/agents/')) &&
             path.endsWith('.md'),
     };
   }

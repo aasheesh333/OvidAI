@@ -5850,6 +5850,11 @@ class AppState extends ChangeNotifier {
       '.claude-plugin/marketplace.json',
       '.agents/plugins/marketplace.json',
       '.claude/marketplace.json',
+      // Codex-shaped marketplace layouts (2026-09-24). Without these a Codex
+      // marketplace failed with "No marketplace.json found".
+      '.codex-plugin/marketplace.json',
+      '.codex/plugins/marketplace.json',
+      '.codex/marketplace.json',
     ];
     final urls = <String>[
       // Test override (a local mock server) wins over the real network.
@@ -6035,13 +6040,36 @@ class AppState extends ChangeNotifier {
   /// The legacy selective allowlist for the plugin-content cache (PR40 +
   /// PR44 behavior): the files the chat/skills/hook mounts consume from
   /// a fetched plugin repo.
+  /// Normalises a parsed MCP entry back to the map shape
+  /// [mountPluginMcpServers] consumes, so one loop serves both the JSON and the
+  /// TOML (Codex) declaration styles.
+  static Map<String, dynamic> importedMcpToMap(ImportedMcp imp) => {
+    'command': imp.command,
+    'args': imp.args,
+    'url': imp.url,
+    'type': imp.type,
+    'headers': imp.headers,
+    'env': imp.env,
+    if (imp.cwd != null) 'cwd': imp.cwd,
+  };
+
   static bool _isLegacyPluginContentPath(String relPath) {
     return relPath.startsWith('commands/') ||
         (relPath.startsWith('skills/') && relPath.endsWith('SKILL.md')) ||
         (relPath.startsWith('agents/') && relPath.endsWith('.md')) ||
         relPath == 'hooks/hooks.json' ||
         relPath == '.claude-plugin/plugin.json' ||
-        relPath == '.mcp.json';
+        relPath == '.mcp.json' ||
+        // CODEX PARITY (2026-09-24): the allowlist was Claude-shaped, so a
+        // Codex plugin fetched through the legacy path staged ZERO files — no
+        // config.toml, no .codex-plugin manifest, no AGENTS.md, no .agents/
+        // tree — and therefore mounted nothing and exposed no skills.
+        relPath == 'config.toml' ||
+        relPath == 'AGENTS.md' ||
+        relPath == '.codex-plugin/plugin.json' ||
+        relPath == '.codex-plugin/marketplace.json' ||
+        relPath.startsWith('.agents/') ||
+        relPath.startsWith('.codex/');
   }
 
   /// Mount and optionally connect every MCP declaration in a normalized
@@ -6181,21 +6209,32 @@ class AppState extends ChangeNotifier {
   Future<int> mountPluginMcpServers(String source) async {
     try {
       final cache = await pluginCacheDirFor(source);
-      final f = File('${cache.path}/.mcp.json');
-      if (!f.existsSync()) return 0;
-      final raw = f.readAsStringSync();
-      if (raw.trim().isEmpty) return 0;
-      final j = (jsonDecode(raw) as Map?)?.cast<String, dynamic>();
-      if (j == null) return 0;
-      final servers = j['mcpServers'];
-      if (servers is! Map) return 0;
+      // CODEX PARITY (2026-09-24): this read ONLY `.mcp.json` through a raw
+      // `jsonDecode`, so a Codex plugin — which declares its MCP servers in
+      // `config.toml` under `[mcp_servers.<name>]` — mounted NOTHING, silently.
+      // Every candidate file now goes through `parseMcpConfig`, which sniffs
+      // JSON vs TOML, so both ecosystems mount through one path. `.mcp.json`
+      // wins on a name collision because it is the more specific declaration.
+      final servers = <String, Map<String, dynamic>>{};
+      for (final fileName in const ['.mcp.json', 'config.toml']) {
+        final f = File('${cache.path}/$fileName');
+        if (!f.existsSync()) continue;
+        final raw = f.readAsStringSync();
+        if (raw.trim().isEmpty) continue;
+        try {
+          for (final imp in parseMcpConfig(raw)) {
+            servers.putIfAbsent(imp.name, () => importedMcpToMap(imp));
+          }
+        } catch (_) {
+          // A malformed config in one format must not stop the other.
+        }
+      }
+      if (servers.isEmpty) return 0;
       var mounted = 0;
       for (final entry in servers.entries) {
-        final key = entry.key.toString();
-        final value = entry.value;
-        if (value is! Map) continue;
+        final key = entry.key;
         if (mcpServers.any((e) => e.name == key)) continue; // dedupe by name
-        final m = value;
+        final m = entry.value;
         final args =
             (m['args'] as List?)?.whereType<String>().toList() ?? const [];
         final url = m['url'] as String?;

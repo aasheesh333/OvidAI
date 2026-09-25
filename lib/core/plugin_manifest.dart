@@ -976,6 +976,11 @@ List<String> _mergedNames(Iterable<Iterable<String>> groups) {
 const List<String> kPluginRootVariables = [
   r'${CLAUDE_PLUGIN_ROOT}',
   r'$CLAUDE_PLUGIN_ROOT',
+  // Codex bundles reference their own root variable; without it a Codex hook
+  // or MCP args entry kept the literal `${CODEX_PLUGIN_ROOT}` text and the
+  // executable was never found.
+  r'${CODEX_PLUGIN_ROOT}',
+  r'$CODEX_PLUGIN_ROOT',
   r'${OVID_PLUGIN_ROOT}',
   r'$OVID_PLUGIN_ROOT',
   r'${PLUGIN_ROOT}',

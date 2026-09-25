@@ -528,8 +528,14 @@ void main() {
     },
   );
 
-  test('unlisted dot-root layouts stay unmounted', () async {
-    write('.codex/agents/rogue.md', '---\nname: rogue\n---\nROGUE');
+  // INVERTED 2026-09-24. This test used to assert that a manifest-DECLARED
+  // `.codex/agents/rogue.md` must NOT mount — a green test pinning the Codex gap
+  // as correct behaviour. `.codex/` is a real convention the app already honoured
+  // for skills, so refusing declared commands and agents from it meant a Codex
+  // plugin contributed nothing at all. `.agents/commands/` is not a convention
+  // any harness uses, so it stays unmounted.
+  test('a declared .codex agent mounts; an unknown dot-root does not', () async {
+    write('.codex/agents/tester.md', '---\nname: tester\n---\nCODEX AGENT');
     write('.agents/commands/rogue.md', '---\nname: rogue\n---\nROGUE');
     final manifest = NormalizedPluginManifest(
       id: 'acme/precise',
@@ -547,8 +553,8 @@ void main() {
       agents: const [
         PluginAgent(
           pluginId: 'acme/precise',
-          name: 'rogue',
-          path: '.codex/agents/rogue.md',
+          name: 'tester',
+          path: '.codex/agents/tester.md',
         ),
       ],
     );
@@ -559,7 +565,35 @@ void main() {
       mounts: [PluginCatalogMount(root.path, manifest)],
     );
 
-    expect(service.skillsForSession('A'), isEmpty);
+    final names = service.skillsForSession('A').map((s) => s.name).toSet();
+    expect(names, contains('tester'), reason: '.codex/agents is a real layout');
+    expect(names, isNot(contains('rogue')));
+  });
+
+  test('a declared .codex command mounts too', () async {
+    write('.codex/commands/lint.md', '---\nname: lint\n---\nLINT');
+    final manifest = NormalizedPluginManifest(
+      id: 'acme/cmds',
+      name: 'Cmds',
+      version: '1.0.0',
+      format: PluginFormat.claudeCode,
+      rootPath: root.path,
+      commands: const [
+        PluginCommand(
+          pluginId: 'acme/cmds',
+          name: 'lint',
+          path: '.codex/commands/lint.md',
+        ),
+      ],
+    );
+    final service = SkillService.forTest();
+
+    await service.publishSessionCatalog(
+      'A',
+      mounts: [PluginCatalogMount(root.path, manifest)],
+    );
+
+    expect(service.skillsForSession('A').map((s) => s.name), contains('lint'));
   });
 
   test('published skills deeply copy mutable collections', () {

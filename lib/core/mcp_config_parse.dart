@@ -174,6 +174,32 @@ String interpolateMcpValue(
 ///
 /// [env] supplies `${VAR}` / `${VAR:-default}` values; it defaults to the
 /// process environment.
+/// Canonical transport name for a declared MCP server.
+///
+/// CODEX PARITY (2026-09-24): Codex configs spell the remote transport
+/// `type = "streamable-http"` (also seen as `streamableHttp`, `streamable_http`
+/// and `http-streamable`). Ovid's connector only understands `stdio`, `http`,
+/// `sse` and `native`, so those declarations survived parsing intact and then
+/// fell through to the stdio path — dying with the misleading "declares no
+/// command" instead of connecting over HTTP. Normalising at parse time means
+/// every consumer sees one spelling.
+String normalizeMcpTransport(String raw) {
+  switch (raw.trim().toLowerCase()) {
+    case 'streamable-http':
+    case 'streamablehttp':
+    case 'streamable_http':
+    case 'http-streamable':
+    case 'http_streamable':
+      return 'http';
+    case 'server-sent-events':
+    case 'server_sent_events':
+    case 'serversentevents':
+      return 'sse';
+    default:
+      return raw.trim().toLowerCase();
+  }
+}
+
 List<ImportedMcp> parseMcpConfig(String raw, {Map<String, String>? env}) {
   final resolvedEnv = env ?? Platform.environment;
   final trimmed = raw.trim();
@@ -313,7 +339,7 @@ ImportedMcp importedMcpFromJson(
       ?.trim()
       .toLowerCase();
   final type = explicitType != null && explicitType.isNotEmpty
-      ? explicitType
+      ? normalizeMcpTransport(explicitType)
       : (url != null && url.isNotEmpty ? 'http' : 'stdio');
   final argsRaw = v['args'];
   final args = argsRaw is List
@@ -488,7 +514,7 @@ ImportedMcp _importedFromToml(_TomlServerAgg a, Map<String, String> env) {
   final rawUrl = a.url;
   final url = rawUrl == null ? null : interpolateMcpValue(rawUrl, env);
   final resolvedType = a.type != null && a.type!.isNotEmpty
-      ? a.type!
+      ? normalizeMcpTransport(a.type!)
       : (url != null && url.isNotEmpty ? 'http' : 'stdio');
   return ImportedMcp(
     name: a.name,

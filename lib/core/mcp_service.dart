@@ -414,6 +414,9 @@ class McpService {
     if (root.isEmpty) return const {};
     return {
       'CLAUDE_PLUGIN_ROOT': root,
+      // Codex bundles read their own variable; without it a Codex server's
+      // `${CODEX_PLUGIN_ROOT}/server.js` stays literal and never resolves.
+      'CODEX_PLUGIN_ROOT': root,
       'OVID_PLUGIN_ROOT': root,
       'PLUGIN_ROOT': root,
     };
