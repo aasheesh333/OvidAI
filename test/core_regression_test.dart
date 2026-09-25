@@ -19197,18 +19197,18 @@ cwd = 'tools'
         final server = ownedServer('encoded/plugin', name: 'remote');
         registerOwner('encoded/plugin', serverName: 'remote');
         app.mcpServers.add(server);
-        // Strict permission model: the agent-triggered MCP connect dials
-        // host "encoded" — grant it for this test (the gate itself is
-        // covered by the permission-model tests).
-        final hostGrant = PermissionGrant.host('encoded', global: true);
-        app.globalPermissionGrants.add(hostGrant);
-        addTearDown(() => app.globalPermissionGrants.remove(hostGrant));
         final session = ChatSession(
           id: 'p9-encoded-session',
           title: 'encoded',
           model: 'm',
         );
         app.sessions.add(session);
+        // STRICTLY PER-SESSION (2026-09-24): global grants are no longer
+        // consulted, so the host is granted on the session that will dial it —
+        // exactly how the approval card records it now.
+        session.grants.add(
+          PermissionGrant.host('encoded', sessionId: session.id, mode: 'auto'),
+        );
         AgentService.setRunSessionForTest(session.id);
         McpService.I.httpClientForTest = mcpHttpClient(toolName: 'lookup');
         addTearDown(() async {
@@ -19264,16 +19264,27 @@ cwd = 'tools'
         );
         app.mcpServers.addAll([advertised, encodedTarget]);
         McpService.I.httpClientForTest = mcpHttpClient();
-        // Strict permission model: grant ONLY the intended host. The
-        // wrong-target host must stay ungranted so the test proves the
-        // encoded lookup cannot capture the ownerless legacy stub.
-        final hostGrant = PermissionGrant.host(
-          'actual-legacy.example',
-          global: true,
+        // STRICTLY PER-SESSION (2026-09-24): grant ONLY the intended host, on
+        // the session that will dial it. The wrong-target host stays ungranted
+        // so the test proves the encoded lookup cannot capture the ownerless
+        // legacy stub.
+        final grantSession = ChatSession(
+          id: 'p9-legacy-grant',
+          title: 'grant',
+          model: 'm',
+          mode: 'auto',
         );
-        app.globalPermissionGrants.add(hostGrant);
+        app.sessions.add(grantSession);
+        grantSession.grants.add(
+          PermissionGrant.host(
+            'actual-legacy.example',
+            sessionId: grantSession.id,
+            mode: 'auto',
+          ),
+        );
+        AgentService.setRunSessionForTest(grantSession.id);
         addTearDown(() async {
-          app.globalPermissionGrants.remove(hostGrant);
+          app.sessions.removeWhere((s) => s.id == 'p9-legacy-grant');
           app.mcpServers.removeWhere(
             (server) =>
                 identical(server, advertised) ||

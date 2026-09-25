@@ -4242,9 +4242,12 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
   /// plugin installs, device permissions, questions and plan reviews can
   /// never land in memory.
   ///
-  /// [global]: when true (the approval card's "All sessions" scope toggle),
-  /// path/host grants are recorded as GLOBAL grants via
-  /// [AppState.addGlobalPermissionGrant] instead of session grants.
+  /// [global] is retained for source compatibility but is a NO-OP: grants are
+  /// ALWAYS recorded on the requesting session.
+  ///
+  /// STRICTLY PER-SESSION (2026-09-24, owner requirement). The approval card no
+  /// longer offers a scope choice, and an "Always Allow" must never be applied
+  /// to any session other than the one that was asked.
   void approveAlways({bool global = false}) {
     final req = pendingApproval;
     pendingApproval = null;
@@ -4264,23 +4267,9 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       final paths = _grantPathsFromToolKey(req.tool);
       final hosts = _grantHostsFromToolKey(req.tool);
       if ((paths.isNotEmpty || hosts.isNotEmpty) && s != null) {
-        if (global) {
-          for (final p in paths) {
-            unawaited(
-              AppState.I.addGlobalPermissionGrant(
-                PermissionGrant.path(p, global: true, mode: modeName),
-              ),
-            );
-          }
-          for (final h in hosts) {
-            unawaited(
-              AppState.I.addGlobalPermissionGrant(
-                PermissionGrant.host(h, global: true, mode: modeName),
-              ),
-            );
-          }
-        } else {
-          for (final p in paths) {
+        // Always the SESSION bucket — `global` is deliberately ignored so no
+        // call site can widen a grant beyond the session that asked.
+        for (final p in paths) {
             if (p.isNotEmpty &&
                 !_sessionGrantCovers(
                   s,
@@ -4306,8 +4295,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
               );
             }
           }
-          AppState.I.persistSessions();
-        }
+        AppState.I.persistSessions();
       } else {
         final sid = _alwaysAllowKey(s?.id ?? '', modeName);
         _alwaysAllowedTools.putIfAbsent(sid, () => <String>{}).add(req.tool);
@@ -13660,16 +13648,23 @@ ${await _agentsMdBlock()}
   // Control never prompt. This sits alongside _alwaysAllowedTools (which
   // remembers TOOL names per session); grants remember PATHS and HOSTS.
 
-  /// Live GrantStore view for [sessionId]: session grants + global grants.
+  /// Live GrantStore view for [sessionId]: THAT SESSION's grants only.
+  ///
+  /// STRICTLY PER-SESSION (2026-09-24, owner requirement). This used to also
+  /// merge `AppState.globalPermissionGrants` into every lookup, so a single
+  /// "Always Allow" recorded with the old "All sessions" scope (or written by
+  /// any older build) silently granted that path or host in EVERY session
+  /// forever. An approval is a decision about ONE conversation: allowing a path
+  /// in session A must never let session B reach it without asking.
+  ///
+  /// Legacy global grants are therefore NOT consulted. They are inert on disk;
+  /// the Permissions screen offers to remove them.
   GrantStore _grantStoreFor(String? sessionId) {
     final s = sessionId == null ? null : AppState.I.sessionById(sessionId);
     return GrantStore(
       sessionGrants: {
         if (s != null) s.id: List<PermissionGrant>.from(s.grants),
       },
-      globalGrants: List<PermissionGrant>.from(
-        AppState.I.globalPermissionGrants,
-      ),
     );
   }
 

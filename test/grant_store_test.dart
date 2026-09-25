@@ -103,7 +103,13 @@ void main() {
       expect(store.isPathGranted('s1', '/data/work/f'), isTrue);
     });
 
-    test('global grant applies to every session', () {
+    // NOTE (2026-09-24): this covers the GrantStore CLASS only. The agent no
+    // longer passes `globalGrants` into `_grantStoreFor`, so an "Always Allow"
+    // can never apply to another session (owner requirement) — see the
+    // "Always Allow never applies to another session" test in
+    // tool_approval_always_allow_test.dart. The capability is kept solely so the
+    // Permissions screen can list and delete grants an older build wrote.
+    test('the store class can still express an all-sessions grant', () {
       final store = GrantStore();
       store.addPathGrant('s1', '/data/work');
       store.addHostGrant(null, 'internal.corp', global: true);

@@ -1255,6 +1255,36 @@ injection point, so adding one means deciding where a plugin's instructions rank
 against the user's persona and preset — and getting that wrong is a
 prompt-injection surface. It should be designed, not slipped in.
 
+### Grants are now STRICTLY per-session (owner requirement)
+
+The mode tag stopped grants leaking across *modes*, but a second leak remained:
+`_grantStoreFor` still merged `AppState.globalPermissionGrants` into **every**
+session's lookup. So a grant recorded with the old "All sessions" scope — or
+written by any older build — silently authorised that path or host in every
+conversation, forever. That is exactly the behaviour the owner rejected: "ek baar
+allow/always allow karne per har session me apply ho aesa nahi".
+
+- `_grantStoreFor` now returns **that session's grants only**. Global grants are
+  not consulted anywhere in the agent path.
+- `approveAlways({global})` is a documented **no-op** for `global`: grants are
+  always written to the requesting session's bucket, so no call site can widen one.
+- The Permissions screen no longer shows an "All sessions" section as if it were
+  active. It lists THIS session's grants (labelled with the mode and whether the
+  entry is a denial), and if an older build left globals on disk they appear under
+  **"Legacy all-sessions grants (not applied)"** with per-entry removal — inert and
+  clearly labelled rather than silently believed.
+- `_label` now includes the mode, because two entries for the same path in two
+  modes are two different decisions.
+
+Tests: `tool_approval_always_allow_test.dart`'s cross-session test was
+**inverted** — it used to assert a global grant covered another session, which is
+the bug. It now asserts the opposite end-to-end: session A grants (even with
+`global: true`), A is silent on the next access, and **B is asked again**. Nothing
+is ever recorded globally. `core_regression_test.dart`'s two PLUGIN9 MCP tests were
+switched from global to session grants, matching how production records them.
+`grant_store_test.dart` keeps a note that the class-level global capability now
+exists only so the Permissions screen can list and delete legacy entries.
+
 ### Verification (current)
 
 `dart analyze lib test` → 0 issues · full suite **2484 pass, 1 skipped** ·

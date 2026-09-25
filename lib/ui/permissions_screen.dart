@@ -5,8 +5,14 @@ import '../core/grant_store.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 
-/// Settings → Permissions: every path/host "always allow" grant the agent
-/// holds — global (all sessions) and current-session — with revoke.
+/// Settings → Permissions: the path/host decisions THIS SESSION holds, with
+/// revoke.
+///
+/// STRICTLY PER-SESSION (2026-09-24): grants are recorded per session and per
+/// mode, and an "Always Allow" never applies to another conversation. The old
+/// "All sessions" section is gone because global grants are no longer consulted
+/// by the agent — showing them as active would have been a lie. Any left on disk
+/// by an older build are listed as inert with a one-tap cleanup.
 class PermissionsScreen extends StatefulWidget {
   const PermissionsScreen({super.key});
 
@@ -22,34 +28,16 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
       body: ListenableBuilder(
         listenable: AppState.I,
         builder: (context, _) {
-          final globalGrants = AppState.I.globalPermissionGrants;
+          final legacy = AppState.I.globalPermissionGrants;
           final sessionGrants = _currentSessionGrants();
           return ListView(
             padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
             children: [
               _section(
-                'All sessions',
-                'Applies to every session. Revoking one takes effect '
-                    'immediately; the next access asks again.',
-                globalGrants
-                    .map(
-                      (g) => _GrantTile(
-                        grant: g,
-                        global: true,
-                        onRevoke: () => _revokeGlobal(context, g),
-                      ),
-                    )
-                    .toList(),
-                empty:
-                    'No always-allow grants. New ones appear here when '
-                    'you pick "Always Allow" (all sessions) on an approval '
-                    'card.',
-              ),
-              const SizedBox(height: 16),
-              _section(
                 'This session',
-                'Granted for the current session only — they disappear '
-                    'when the session ends.',
+                'Granted for THIS conversation and the mode it was granted '
+                    'in — never for any other session. They persist across '
+                    'restarts and are removed when the session is deleted.',
                 sessionGrants
                     .map(
                       (g) => _GrantTile(
@@ -59,8 +47,29 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
                       ),
                     )
                     .toList(),
-                empty: 'No session grants yet.',
+                empty:
+                    'No grants for this session yet. They appear here when '
+                    'you pick "Always Allow" on an approval card.',
               ),
+              if (legacy.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                _section(
+                  'Legacy all-sessions grants (not applied)',
+                  'These were recorded by an older build when a grant could '
+                      'be scoped to every session. They are IGNORED now — '
+                      'nothing is granted by them. Remove them to tidy up.',
+                  legacy
+                      .map(
+                        (g) => _GrantTile(
+                          grant: g,
+                          global: true,
+                          onRevoke: () => _revokeGlobal(context, g),
+                        ),
+                      )
+                      .toList(),
+                  empty: '',
+                ),
+              ],
             ],
           );
         },
@@ -208,5 +217,13 @@ class _GrantTile extends StatelessWidget {
   }
 }
 
-String _label(PermissionGrant g) =>
-    g.kind == PermissionGrant.kindPath ? 'path ${g.value}' : 'host ${g.value}';
+String _label(PermissionGrant g) {
+  final what = g.kind == PermissionGrant.kindPath
+      ? 'path ${g.value}'
+      : 'host ${g.value}';
+  // Grants are mode-scoped now, so name the mode — two entries for the same
+  // path in two modes are two different decisions.
+  final mode = g.mode.isEmpty ? 'general (legacy)' : g.mode;
+  final deny = g.isDeny ? ' · denied' : '';
+  return '$what · $mode$deny';
+}

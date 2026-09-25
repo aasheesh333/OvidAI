@@ -5,7 +5,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/commands.dart';
-import 'package:ovid_ai/core/grant_store.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -304,50 +303,74 @@ void main() {
     await fut.timeout(const Duration(seconds: 60));
   });
 
-  test('global grant revoke removes cross-session access', () async {
-    await testSession('aaa-global-revoke');
-    final outside = File('${ledgerDir.path}/global-me.txt')
+  // INVERTED 2026-09-24 (owner requirement): grants are STRICTLY per-session.
+  // This test used to assert that an "Always Allow" with the "All sessions"
+  // scope covered a DIFFERENT session — the exact behaviour the owner rejected:
+  // one approval in one conversation must never silently authorise another.
+  test('Always Allow never applies to another session', () async {
+    final app = AppState.createForTest();
+    await app.initialize();
+    final s1 = ChatSession(id: 'scope-a', title: 'A', model: 'm', mode: 'safe');
+    final s2 = ChatSession(id: 'scope-b', title: 'B', model: 'm', mode: 'safe');
+    app.sessions.insert(0, s1);
+    app.sessions.insert(0, s2);
+    addTearDown(() {
+      AgentService.setRunSessionForTest('');
+      app.activeSessionId = null;
+      app.sessions.clear();
+    });
+
+    final outside = File('${ledgerDir.path}/scope-shared.txt')
       ..writeAsStringSync('g');
 
-    // Always-allow with the "all sessions" scope → global grant.
+    // ── Session A asks; the user picks Always Allow ──
+    app.activeSessionId = s1.id;
+    AgentService.setRunSessionForTest(s1.id);
     var fut = AgentService.I.dispatchForTest('file_read', {
       'path': outside.path,
     });
     var req = await waitForApproval();
     expect(req, isNotNull);
+
+    // `global: true` is a documented NO-OP: no call site may widen a grant.
     AgentService.I.approveAlways(global: true);
-    await fut.timeout(const Duration(seconds: 60));
-    // Flush the unawaited global-grant persistence.
+    await fut.timeout(const Duration(minutes: 2));
     await Future<void>.delayed(const Duration(milliseconds: 200));
+
     expect(
       AppState.I.globalPermissionGrants.any((g) => g.value == outside.path),
+      isFalse,
+      reason: 'nothing may ever be recorded for ALL sessions',
+    );
+    expect(
+      s1.grants.any((g) => g.value == outside.path),
       isTrue,
-      reason: 'global grant must be recorded',
+      reason: 'the grant belongs to the session that asked',
     );
 
-    // Another session sees no prompt while the grant lives.
-    await testSession('aaa-global-revoke-2');
+    // ── Session A, same mode: already granted, no prompt ──
     fut = AgentService.I.dispatchForTest('file_read', {'path': outside.path});
-    await Future<void>.delayed(const Duration(milliseconds: 500));
+    await Future<void>.delayed(const Duration(milliseconds: 400));
     expect(
       AgentService.I.pendingApproval,
       isNull,
-      reason: 'global grant covers other sessions',
+      reason: 'the granting session must not be asked again',
     );
-    final resOther = await fut.timeout(const Duration(seconds: 60));
-    expect(resOther, contains('g'));
+    await fut.timeout(const Duration(minutes: 2));
 
-    // Revoke globally; the other session now prompts.
-    final removed = await AppState.I.revokeGlobalPermissionGrant(
-      PermissionGrant.kindPath,
-      outside.path,
-    );
-    expect(removed, isTrue);
+    // ── Session B: MUST be asked ──
+    app.activeSessionId = s2.id;
+    AgentService.setRunSessionForTest(s2.id);
     fut = AgentService.I.dispatchForTest('file_read', {'path': outside.path});
     req = await waitForApproval();
-    expect(req, isNotNull, reason: 'revoked global grant must prompt again');
+    expect(
+      req,
+      isNotNull,
+      reason: 'a grant in one session must NEVER authorise another',
+    );
+    expect(req!.tool, 'grant:path:${outside.path}');
     AgentService.I.approve(false);
-    await fut.timeout(const Duration(seconds: 60));
+    await fut.timeout(const Duration(minutes: 2));
   });
 
   test('browser_popups open passes the host-grant gate', () async {
