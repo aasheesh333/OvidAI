@@ -636,15 +636,15 @@ Note: `CTRL6` failed once under full-suite parallel load and passed both in
 isolation and on a full-suite re-run — the same 30 s per-test default-timeout
 flakiness previously seen in `studio_git_reliability_test.dart`, not a
 regression from this phase.
-| 3 — Studio login + clone-once + label | partial | see below | label + login restore + clone-once gaps **1, 2, 4, 5** done; gaps 3 and 6 remain |
+| 3 — Studio login + clone-once + label | partial | see below | label + login restore + clone-once gaps **1, 2, 3, 4, 5** done; gap 6 remains |
 | 4a — Browser geometry | **done** | see below | real 1280×800 layout; verifier made honest |
 | 4b — CDP | deferred | — | D2 |
 | 5 — Accessibility restart | **done** | see below | stale-bind signal, cold-start probe, honest copy, screenshot capability |
 | 6 — Plan mode allowlist | **done** | see below | blocklist → allowlist, default-deny |
 | 7 — Subagents 49 + no nesting | **done** | see below | cap + zero nesting + ledger FD fix (#8) |
 | 8 — Codex parity | **done (config paths)** | see below | TOML MCP mounting, transport, allowlist, roots, marketplace; AGENTS.md injection still open |
-| 9 — Correctness & leaks | partial | see below | #8 #14 #16 #18 #29 done; #9 #13 #15 #17 #19 remain |
-| 10 — Performance | partial | see below | #20 (theme + root listener + stream coalescing) and #25 done; #21 #23 #24 remain |
+| 9 — Correctness & leaks | partial | see below | #8 #13(message) #14 #16 #18 #29 done; #9 #13(cancel) #15 #17 #19 remain |
+| 10 — Performance | partial | see below | #20 #24 #25 and the spill write done; #21 #23 remain |
 | 11 — UI/UX + queue dock | partial | see below | queue dock, Hinglish, **tab-close target, agent-dot semantics** done; 4 smaller targets remain |
 | 12 — Google Doc | deferred | — | D1, awaiting URL |
 
@@ -1119,11 +1119,56 @@ invalidation on a light/dark flip, the flush seam, the history cap keeping the
 *newest* lines, and widget tests for the tab-close hit area/label and the dot's
 announced state.
 
+### Storage / privacy / duplicate-execution batch
+
+**#24 — unbounded on-disk accumulation, including other apps' screens.**
+Oversized tool output was written to `<workspace>/.spill/<ts>.txt` and nothing
+anywhere pruned it, so heavy use accumulated hundreds of megabytes per workspace
+forever. New `pruneSpillDir` keeps the newest 20 (`maxSpillFilesPerWorkspace`) —
+far more than recent messages' `sed -n` / `grep -n` locator hints can reference —
+and is best-effort so a pruning failure can never lose the output the model is
+waiting for. The spill write also became async: it was `writeAsStringSync` on the
+UI isolate for multi-megabyte payloads.
+
+`device_screenshot` copied the capture into the workspace but left the native
+original in `cacheDir/device-captures`, so **every Control run accumulated
+full-screen PNGs of other apps** — banking screens, messages, whatever was
+visible — indefinitely and unencrypted. The cache original is now deleted once
+the workspace copy is confirmed on disk.
+
+**#13 (message half) — a tool timeout invited a blind retry.**
+`Future.timeout` abandons the future without cancelling the work, and the old copy
+said *"narrow the request and retry"*, so the model re-issued the same command and
+two copies of a mutating operation (`npm install`, `git push`, file writes) ran
+concurrently against one workspace — duplicated commits, corrupted builds,
+interleaved writes. The message now states plainly that the command was NOT
+cancelled and may have partially completed, and tells the model to check state
+first rather than re-run.
+
+Killing the process on timeout is **not** safe yet and is deliberately not done:
+sandbox processes are tracked per RUN key, so a kill would also take down
+legitimate background `job_start` work that is meant to outlive the call.
+Per-invocation process tracking is the real fix; it is recorded as remaining work
+rather than shipped half-right.
+
+**Phase 3 gap 3 — a repo switch was silently skipped.** `_offerCloneTarget` bailed
+out whenever a workspace folder existed at all. A new session inherits the previous
+repo's clone path, so picking repo B skipped the clone and the session kept reading
+and writing inside repo A's directory while the repo bar and the API view showed B.
+New `_folderMatchesRepo` compares the folder's directory name against
+`GlobalRepoRegistry.folderNameFor(repo, branch)`, so the offer is skipped only when
+the session is genuinely already in *this* repo's clone.
+
+New test: `test/storage_privacy_fixes_test.dart` (6) — pruning keeps the newest and
+drops the oldest, no-op under the cap, missing directory is safe, non-spill files
+are untouched, and source contracts for the screenshot cleanup ordering and the
+timeout wording.
+
 ### Verification (current)
 
-`dart analyze lib test` → 0 issues · full suite **2462 pass, 1 skipped** ·
+`dart analyze lib test` → 0 issues · full suite **2468 pass, 1 skipped** ·
 `:app:compileDebugKotlin --offline` → BUILD SUCCESSFUL · CI green through
-`a8e74e3`.
+`8d48728`.
 
 ### Phase 6 detail — plan mode is now default-deny
 

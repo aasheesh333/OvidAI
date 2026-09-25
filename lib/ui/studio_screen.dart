@@ -198,9 +198,19 @@ class _StudioScreenState extends State<StudioScreen> {
     GlobalRepoRegistry.cloneRunnerOverride ??= _sandboxGitClone;
     final reg = await GlobalRepoRegistry.instance();
     if (!mounted) return;
+    // Already working in the clone for THIS repo+branch? Then there is nothing
+    // to offer.
+    //
+    // CLONE-ONCE (2026-09-24): this used to bail out whenever a folder existed
+    // at all. A new session inherits the previous repo's clone path, so picking
+    // repo B skipped the clone entirely and the session kept reading and writing
+    // inside repo A's folder while the repo bar and the API view showed B.
     final existing = s.workspaceFolder;
-    if ((existing != null && existing.isNotEmpty) ||
-        reg.boundWorkspaceFor(sid) != null) {
+    final bound = reg.boundWorkspaceFor(sid);
+    final current = bound ?? (existing != null && existing.isNotEmpty
+        ? existing
+        : null);
+    if (current != null && _folderMatchesRepo(current, repo, branch)) {
       return;
     }
     final choice = await showModalBottomSheet<String>(
@@ -363,6 +373,23 @@ class _StudioScreenState extends State<StudioScreen> {
   ///
   /// Only sessions that actually work in a registry clone are repointed: a
   /// session pinned to an arbitrary local folder must not be hijacked into one.
+  /// True when [folder] is the registry clone for [repo]@[branch] — i.e. its
+  /// directory name is `GlobalRepoRegistry.folderNameFor(repo, branch)`.
+  ///
+  /// This is what distinguishes "already working in this repo's clone" (skip the
+  /// offer) from "inherited some OTHER repo's clone as a pinned folder" (must
+  /// re-offer). The old check could not tell them apart, so a repo switch was
+  /// silently skipped and the session kept reading and writing inside the
+  /// previous repo's directory while the repo bar showed the new one.
+  static bool _folderMatchesRepo(String folder, String repo, String branch) {
+    final parts = folder
+        .split(RegExp(r'[/\\]'))
+        .where((p) => p.isNotEmpty)
+        .toList();
+    if (parts.isEmpty) return false;
+    return parts.last == GlobalRepoRegistry.folderNameFor(repo, branch);
+  }
+
   Future<void> _rebindCloneToBranch(String repo, String branch) async {
     final s = AppState.I.activeSession;
     if (s == null) return;

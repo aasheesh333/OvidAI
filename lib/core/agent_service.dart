@@ -335,6 +335,40 @@ String cleanTruncate(String text, int max) {
 ///
 /// [toolName] names the calling tool for the locator hint. [cap] is the
 /// in-context character budget. Returns the exact same text when it fits.
+/// Spill files kept per workspace.
+///
+/// STORAGE (2026-09-24): oversized tool output was written to
+/// `<workspace>/.spill/<ts>.txt` and NEVER deleted — nothing in the codebase
+/// pruned it — so heavy use accumulated hundreds of megabytes per workspace,
+/// permanently. Twenty is far more than the recent messages' locator hints
+/// (`sed -n`, `grep -n` against a spill path) can still reference.
+const int maxSpillFilesPerWorkspace = 20;
+
+/// Drops all but the newest [maxSpillFilesPerWorkspace] spill files. Best-effort:
+/// a pruning failure must never lose the tool output the model is waiting for.
+void pruneSpillDir(Directory spillDir) {
+  try {
+    if (!spillDir.existsSync()) return;
+    int idOf(File f) {
+      final base = f.uri.pathSegments.last;
+      return int.tryParse(base.substring(0, base.length - 4)) ?? 0;
+    }
+
+    final files = spillDir
+        .listSync(followLinks: false)
+        .whereType<File>()
+        .where((f) => f.path.endsWith('.txt'))
+        .toList()
+      ..sort((a, b) => idOf(b).compareTo(idOf(a)));
+    if (files.length <= maxSpillFilesPerWorkspace) return;
+    for (final old in files.sublist(maxSpillFilesPerWorkspace)) {
+      try {
+        old.deleteSync();
+      } catch (_) {}
+    }
+  } catch (_) {}
+}
+
 Future<String> spillToolOutput(
   String toolName,
   String text, {
@@ -345,9 +379,12 @@ Future<String> spillToolOutput(
   final dir = await service.sessionWorkDirForTest();
   final spillDir = Directory('${dir.path}/.spill');
   spillDir.createSync(recursive: true);
+  pruneSpillDir(spillDir);
   final id = DateTime.now().millisecondsSinceEpoch;
   final f = File('${spillDir.path}/$id.txt');
-  f.writeAsStringSync(text);
+  // Async: a spill can be multiple MB and this ran on the UI isolate, stalling
+  // frames while the tool result was written.
+  await f.writeAsString(text);
   final relPath = '.spill/$id.txt';
 
   final headLen = cap ~/ 2;
@@ -9009,10 +9046,28 @@ ${await _agentsMdBlock()}
               final budget = _toolTimeoutFor(name);
               result = await _dispatch(name, args).timeout(
                 budget,
+                // DO NOT tell the model to retry (2026-09-24).
+                // `Future.timeout` abandons the future but does NOT cancel the
+                // work: a slow `run_shell` kept executing inside the sandbox
+                // while the old message said "narrow the request and retry", so
+                // the model re-issued it and TWO copies of a mutating command
+                // (npm install, git push, file writes) ran concurrently against
+                // the same workspace — duplicated commits, corrupted builds,
+                // interleaved writes.
+                //
+                // Killing the process here is not safe either: sandbox processes
+                // are tracked per RUN key, so a kill would also take down
+                // legitimate background `job_start` work that is meant to
+                // outlive the call. Per-invocation process tracking is the real
+                // fix; until then the message must at least stop the retry loop
+                // and state honestly that the work may still be running.
                 onTimeout: () =>
-                    'Error: tool "$name" timed out after ${budget.inSeconds}s '
-                    '— narrow the request (smaller path/pattern/range) and '
-                    'retry, or continue without it.',
+                    'Error: tool "$name" timed out after ${budget.inSeconds}s. '
+                    'The command was NOT cancelled and may still be running or '
+                    'may have partially completed — do NOT re-run it blindly. '
+                    'Check the current state first (e.g. read the file, '
+                    '`git status`), then narrow the request or continue without '
+                    'it.',
               );
             }
             if (toolMsg != null) {
@@ -15815,6 +15870,15 @@ ${await _agentsMdBlock()}
             ),
           );
           final bytes = await copied.readAsBytes();
+          // PRIVACY + STORAGE (2026-09-24): the native capture also stays in
+          // `cacheDir/device-captures` and was NEVER deleted, so every Control
+          // run accumulated full-screen PNGs OF OTHER APPS — whatever happened
+          // to be on screen, including banking and messages — indefinitely and
+          // unencrypted. The workspace copy is the one the model and the user
+          // see; the cache original is redundant the moment it lands.
+          try {
+            if (await copied.exists()) await source.delete();
+          } catch (_) {}
           _recordProduced(copied.path, bytes.length);
           _emit('shell', 'device_screenshot: ${copied.path}');
           if (!_stageVisionImage(
