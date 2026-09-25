@@ -406,12 +406,31 @@ class SessionBrowserProfiles extends ChangeNotifier {
 
   /// Record the origin of a browsed [url] so a later restart can find this
   /// session's cookies again.
-  Future<void> rememberOrigin(String url, {String sessionId = ''}) async {
+  /// Serializes origin writes per bucket.
+  ///
+  /// RACE FIX (2026-09-24): [rememberOrigin] is fired `unawaited` from both
+  /// `onPageFinished` and `navigateTab`, and several tabs can navigate at once.
+  /// Two interleaved calls each read the old list, and the last write silently
+  /// dropped the other's origin — so after a restart the cookie merge missed a
+  /// site and the user found themselves logged out of something they had logged
+  /// into during that session.
+  final Map<String, Future<void>> _originWrites = {};
+
+  Future<void> rememberOrigin(String url, {String sessionId = ''}) {
     final origin = CookieMerge.originOf(url);
-    if (origin == null) return;
+    if (origin == null) return Future.value();
+    final key = _originKey(sessionId);
+    final previous = _originWrites[key] ?? Future<void>.value();
+    final next = previous
+        .then((_) => _writeOrigin(key, origin))
+        .catchError((Object _) {});
+    _originWrites[key] = next;
+    return next;
+  }
+
+  Future<void> _writeOrigin(String key, String origin) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final key = _originKey(sessionId);
       final list = prefs.getStringList(key) ?? <String>[];
       if (list.contains(origin)) return;
       list.add(origin);

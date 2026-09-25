@@ -396,6 +396,10 @@ class _StudioScreenState extends State<StudioScreen> {
     final sid = s.sandboxId ?? s.id;
     try {
       final reg = await GlobalRepoRegistry.instance();
+      // Remember the choice per repo BEFORE the binding check: an unbound
+      // session still has a branch preference that the next re-pick of this
+      // repo should honour instead of resetting to the repository default.
+      await reg.rememberBranch(repo, branch);
       if (reg.boundWorkspaceFor(sid) == null) return;
       if (!mounted) return;
       await _cloneIntoRegistry(reg, sid, repo, branch);
@@ -662,7 +666,12 @@ class _StudioScreenState extends State<StudioScreen> {
         AgentService.I.sessionRepoFull = picked;
         // A new repo starts on its own default branch — never the previous
         // repo's branch, whose ref may not exist (tree fetch would 404).
-        AgentService.I.sessionBranch = branchForPickedRepo(pickedRepo);
+        // Honour the branch the user chose for THIS repo before, instead of
+        // resetting to the repository default on every re-pick.
+        final reg2 = await GlobalRepoRegistry.instance();
+        AgentService.I.sessionBranch =
+            reg2.branchFor(picked) ?? branchForPickedRepo(pickedRepo);
+        await reg2.rememberBranch(picked, AgentService.I.sessionBranch);
         await _autoSync();
         // Freshly picked repo+branch → offer a real working copy: a
         // clone-once session clone, or a clone into a picked device folder.
@@ -2016,6 +2025,9 @@ class _Avatar extends StatelessWidget {
         width: size,
         height: size,
         fit: BoxFit.cover,
+        // Avatars are drawn at `size` logical px; decoding the full upload is
+        // pure waste (MEMORY, 2026-09-24).
+        cacheWidth: Aether.imageCacheWidth(context, logicalWidth: size),
         errorBuilder: (_, _, _) => Container(
           width: size,
           height: size,

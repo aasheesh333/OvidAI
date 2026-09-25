@@ -4247,6 +4247,7 @@ class _MessageView extends StatelessWidget {
                   ? Image.file(
                       file,
                       fit: BoxFit.cover,
+                      cacheWidth: Aether.imageCacheWidth(context),
                       errorBuilder: (_, _, _) => _imageGenFallback(),
                     )
                   : _imageGenFallback(),
@@ -4309,16 +4310,30 @@ class _MessageView extends StatelessWidget {
     ),
   );
 
+  /// Fullscreen / Open / Share under a generated image.
+  ///
+  /// A11Y (2026-09-24): this was a bare 15px icon plus 11px text in a
+  /// GestureDetector with no padding — a ~16dp target, a third of the 48dp
+  /// Android minimum, and invisible to TalkBack. The visual size is unchanged;
+  /// the HIT area and the semantics are what grew.
   Widget _imageAction(IconData icon, String label, VoidCallback onTap) =>
-      GestureDetector(
-        onTap: onTap,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 15, color: Aether.accent),
-            const SizedBox(width: 4),
-            Text(label, style: TextStyle(fontSize: 11, color: Aether.accent)),
-          ],
+      Semantics(
+        button: true,
+        label: label,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 12),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 15, color: Aether.accent),
+                const SizedBox(width: 4),
+                Text(label, style: TextStyle(fontSize: 11, color: Aether.accent)),
+              ],
+            ),
+          ),
         ),
       );
 
@@ -4346,7 +4361,10 @@ class _MessageView extends StatelessWidget {
               boundaryMargin: const EdgeInsets.all(20),
               minScale: 0.5,
               maxScale: 5.0,
-              child: Image.file(file),
+              child: Image.file(
+                file,
+                cacheWidth: Aether.imageCacheWidth(context),
+              ),
             ),
           ),
         ),
@@ -6221,8 +6239,9 @@ class _CopyButtonState extends State<_CopyButton> {
           if (mounted) setState(() => copied = false);
         });
       },
+      // A11Y (2026-09-24): vertical padding was 2, giving a ~18dp target.
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
         child: Row(
           children: [
             Icon(
@@ -6248,6 +6267,52 @@ class _CopyButtonState extends State<_CopyButton> {
 /// Approval dock — replaces the old _AgentActivityBar under the AppBar.
 /// Shown only when a tool needs user confirmation. Live agent log stays in
 /// the chat stream itself; approvals float above the input (web-IDE style).
+/// A background session is waiting on an approval. Tapping Review switches to
+/// it, where the normal card renders.
+class _OtherSessionsApprovalRow extends StatelessWidget {
+  const _OtherSessionsApprovalRow({required this.items});
+
+  final List<({String sessionId, String title, ApprovalRequest request})> items;
+
+  @override
+  Widget build(BuildContext context) {
+    final first = items.first;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Aether.accent.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.notifications_active_outlined,
+            size: 16,
+            color: Aether.accent,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              items.length == 1
+                  ? '"${first.title}" is waiting for approval'
+                  : '${items.length} sessions are waiting for approval',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12, color: Aether.text),
+            ),
+          ),
+          TextButton(
+            onPressed: () => AppState.I.selectSession(first.sessionId),
+            child: const Text('Review', style: TextStyle(fontSize: 12)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _ApprovalDock extends StatefulWidget {
   const _ApprovalDock();
 
@@ -6267,7 +6332,14 @@ class _ApprovalDockState extends State<_ApprovalDock> {
       animation: AgentService.I,
       builder: (_, _) {
         final req = AgentService.I.pendingApproval;
-        if (req == null) return const SizedBox.shrink();
+        if (req == null) {
+          // Another session may be waiting on an approval this dock cannot
+          // show, because it renders the foreground session's bucket. Say so
+          // instead of letting it auto-deny in silence.
+          final elsewhere = AgentService.I.pendingApprovalsElsewhere;
+          if (elsewhere.isEmpty) return const SizedBox.shrink();
+          return _OtherSessionsApprovalRow(items: elsewhere);
+        }
         // ── ask_user_question mode — structured Q&A card ──
         if (req.questions != null && req.questions!.isNotEmpty) {
           return _QuestionsCard(req);

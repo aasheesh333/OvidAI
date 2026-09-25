@@ -920,6 +920,33 @@ class AgentService extends ChangeNotifier {
   ApprovalRequest? get pendingApproval => _runResolved.pendingApproval;
   set pendingApproval(ApprovalRequest? v) => _runResolved.pendingApproval = v;
 
+  /// Approvals waiting in sessions OTHER than the foreground one.
+  ///
+  /// CROSS-SESSION FIX (2026-09-24): [pendingApproval] resolves to the
+  /// foreground session's run bucket and the approval dock read only that, so a
+  /// run in a background session — and the app explicitly supports "10+ sessions
+  /// can run at once" — parked its request where no UI ever looked. It then
+  /// stalled for the whole grace period and auto-denied, and the model reported
+  /// "DENIED by user" although the user was never asked. Every permissioned tool
+  /// in every background session failed that way, silently.
+  List<({String sessionId, String title, ApprovalRequest request})>
+  get pendingApprovalsElsewhere {
+    final activeId = AppState.I.activeSessionId;
+    final out =
+        <({String sessionId, String title, ApprovalRequest request})>[];
+    for (final entry in _runs.entries) {
+      if (entry.key == activeId) continue;
+      final req = entry.value.pendingApproval;
+      if (req == null) continue;
+      out.add((
+        sessionId: entry.key,
+        title: AppState.I.sessionById(entry.key)?.title ?? entry.key,
+        request: req,
+      ));
+    }
+    return out;
+  }
+
   /// Whether an interactive approval UI is currently mounted and able to
   /// present approval cards to the user. [_askUser] consults it: with nobody
   /// able to answer, tool approvals fail closed after a short grace period
@@ -11269,8 +11296,19 @@ ${await _agentsMdBlock()}
         browserUrl = url;
         _emit('nav', url);
         await Future.delayed(const Duration(seconds: 2));
-        final title = await tab.controller!.getTitle();
-        return 'Navigated to $url\nTitle: ${title ?? "unknown"}';
+        // The controller can be recreated or dropped during that wait — a
+        // desktop-mode toggle rebuilds it, closing the tab nulls it — so the
+        // force-unwrap threw "Null check operator used on a null value" and the
+        // model saw a bogus tool failure for a navigation that had actually
+        // succeeded. Fall back to the title the page-finished callback recorded.
+        String? title;
+        final ctl = tab.controller;
+        if (ctl != null) {
+          try {
+            title = await ctl.getTitle();
+          } catch (_) {}
+        }
+        return 'Navigated to $url\nTitle: ${title ?? tab.title ?? "unknown"}';
 
       // ── Tab management so the model can drive the user-visible strip ──
       case 'browser_new_tab':
@@ -13887,10 +13925,48 @@ ${await _agentsMdBlock()}
   /// safe mode covers the action, the host grant covers the network
   /// destination, and "Always allow" on the tool must not silently bless
   /// every future host.
+  /// Cloud-metadata, link-local and other never-legitimate agent targets.
+  ///
+  /// Checked BEFORE any mode exemption, so not even Full Access can reach them.
+  /// Loopback (`127.0.0.1`, `localhost`) is deliberately NOT here: local dev
+  /// servers and local MCP servers are a real workflow, and loopback is already
+  /// handled by `defaultAllowedHosts`.
+  static bool isMetadataOrLinkLocalHost(String rawHost) {
+    final h = normalizeGrantHost(rawHost);
+    if (h.isEmpty) return false;
+    if (h == 'metadata.google.internal' ||
+        h == 'metadata' ||
+        h.endsWith('.metadata.google.internal')) {
+      return true;
+    }
+    // 169.254.0.0/16 — link-local, which is where AWS/GCP/Azure/OpenStack put
+    // their instance metadata service (169.254.169.254).
+    if (h.startsWith('169.254.')) return true;
+    // Alibaba Cloud metadata.
+    if (h == '100.100.100.200') return true;
+    // IPv6 link-local and the metadata alias some clouds publish there.
+    final lower = h.toLowerCase();
+    if (lower.startsWith('fe80:') || lower.startsWith('[')) {
+      return lower.startsWith('fe80:') ||
+          lower.contains('169.254.') ||
+          lower.contains('a9fe:a9fe'); // 169.254.169.254 in hex
+    }
+    return false;
+  }
+
   Future<bool> _checkHostGrant(String rawHost, {required String tool}) async {
     final host = normalizeGrantHost(rawHost);
     if (host.isEmpty) return false;
     if (defaultAllowedHosts.contains(host)) return true;
+    // SSRF (2026-09-24): cloud-metadata and link-local endpoints are refused in
+    // EVERY mode, including Full Access. `drive` returned true for every host,
+    // so a prompt-injected model could fetch
+    // `http://169.254.169.254/latest/meta-data/iam/...` and read instance
+    // credentials. "Full Access" means the agent is not asked about its own
+    // workspace; it does not mean it may reach the metadata service.
+    if (isMetadataOrLinkLocalHost(host)) {
+      return false;
+    }
     final m = mode;
     // Full Access is the only mode that skips the host gate. Control used to
     // as well, which meant a Control session could reach any host on the
@@ -16770,9 +16846,18 @@ ${await _agentsMdBlock()}
   // the session is live (the schedule delivery engine session-local delivery).
   Timer? _scheduleTimer;
 
+  /// Reminder tick interval.
+  ///
+  /// BATTERY (2026-09-24): this was 1 s, started in the constructor and never
+  /// stopped in production, so the isolate woke every second for the app's whole
+  /// lifetime — including all night with no schedules pending. Reminders are set
+  /// by humans at minute granularity; a 5 s tick cuts idle wakeups 5x and can
+  /// only make one fire up to 5 s late, which is imperceptible for a reminder.
+  static const scheduleTickInterval = Duration(seconds: 5);
+
   void _startScheduleTimer() {
     _scheduleTimer?.cancel();
-    _scheduleTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _scheduleTimer = Timer.periodic(scheduleTickInterval, (_) {
       _fireDueSchedules();
     });
   }
@@ -16828,17 +16913,27 @@ ${await _agentsMdBlock()}
           if (targetRun != null) _queueAdd(targetRun, delivery);
           _emit('think', 'queued reminder for running session ${s.title}');
         } else {
-          if (AppState.I.activeSessionId != s.id) {
-            // Session not visible — bring it to the user (the reminder is
-            // theirs; silent delivery into a background chat is a miss).
-            AppState.I.selectSession(s.id);
-          }
+          // Do NOT yank the user to another chat (2026-09-24). A reminder set in
+          // session A firing while the user was reading or typing in B used to
+          // call selectSession(A) — losing B's composer text and scroll position
+          // and rebuilding B's browser tabs — with no interaction at all. The
+          // reminder belongs to A: deliver it there, and surface it through the
+          // notification, which is where a background event should appear.
+          final wasVisible = AppState.I.activeSessionId == s.id;
           s.messages.add(Message(role: 'user', content: delivery));
           if (s.title == 'New chat' || s.title.isEmpty) {
             s.title = AppState.autoTitle(prompt);
           }
           AppState.I.refresh();
           AppState.I.persistSessions();
+          if (!wasVisible) {
+            unawaited(
+              AgentNotificationService.I.agentWorking(
+                'reminder fired in "${s.title}"',
+                sessionId: s.id,
+              ),
+            );
+          }
           unawaited(runTask(delivery, sessionId: s.id, freshTurn: false));
         }
       }

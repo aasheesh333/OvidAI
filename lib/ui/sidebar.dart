@@ -637,13 +637,21 @@ class _ConnectionChip extends StatelessWidget {
           ConnectionStatus.offline => 'offline',
           ConnectionStatus.checking => '…',
         };
-        return GestureDetector(
+        // A11Y (2026-09-24): a 6px dot plus 10.5px text with 3dp vertical
+        // padding made this ~18dp tall and tappable — well under the 48dp
+        // minimum, and it had no semantic label. The chip looks the same; the
+        // hit area is now opaque and padded, and it announces itself.
+        return Semantics(
+          button: true,
+          label: 'Connection status — tap to re-check',
+          child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
           onTap: () => c.probe(),
           child: Tooltip(
             message: 'Connection: $label — tap to re-check',
             waitDuration: const Duration(milliseconds: 500),
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 11),
               decoration: BoxDecoration(
                 color: color.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(10),
@@ -673,6 +681,7 @@ class _ConnectionChip extends StatelessWidget {
               ),
             ),
           ),
+        ),
         );
       },
     );

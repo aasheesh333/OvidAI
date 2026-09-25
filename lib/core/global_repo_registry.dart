@@ -125,9 +125,34 @@ class GlobalRepoRegistry {
   Directory get _reposDir => Directory('${_globalDir.path}/repos');
 
   /// (Re)load the index from disk. Missing or corrupt file → start empty.
+  /// The branch the user chose for each repo, remembered across restarts.
+  ///
+  /// CLONE-ONCE (2026-09-24): re-picking a repo always reset the branch to the
+  /// repository's `default_branch`, discarding the branch the user had selected
+  /// in Studio — so a new session cloned `main` while the user had been working
+  /// on `feature-x` the whole time. `lastBranch` was a single global slot, so
+  /// switching repos cross-wrote it. This is per repo and persisted in the index.
+  final Map<String, String> _chosenBranches = {};
+
+  /// The branch last chosen for [repoFull], or null if none was recorded.
+  String? branchFor(String repoFull) => _chosenBranches[_keyFor(repoFull)];
+
+  /// Records the branch the user chose for [repoFull].
+  Future<void> rememberBranch(String repoFull, String branch) async {
+    final b = branch.trim();
+    if (b.isEmpty) return;
+    final key = _keyFor(repoFull);
+    if (_chosenBranches[key] == b) return;
+    _chosenBranches[key] = b;
+    await _save();
+  }
+
+  static String _keyFor(String repoFull) => repoFull.toLowerCase();
+
   Future<void> reload() async {
     _repoPaths.clear();
     _sessions.clear();
+    _chosenBranches.clear();
     final f = _indexFile;
     if (!f.existsSync()) return;
     try {
@@ -137,6 +162,14 @@ class GlobalRepoRegistry {
         for (final e in repos.entries) {
           if (e.key is String && e.value is String) {
             _repoPaths[e.key as String] = e.value as String;
+          }
+        }
+      }
+      final branches = j['branches'];
+      if (branches is Map) {
+        for (final e in branches.entries) {
+          if (e.key is String && e.value is String) {
+            _chosenBranches[e.key as String] = e.value as String;
           }
         }
       }
@@ -154,6 +187,7 @@ class GlobalRepoRegistry {
     } catch (_) {
       _repoPaths.clear();
       _sessions.clear();
+      _chosenBranches.clear();
     }
   }
 
@@ -182,6 +216,7 @@ class GlobalRepoRegistry {
     final payload = jsonEncode({
       'version': 1,
       'repos': _repoPaths,
+      'branches': _chosenBranches,
       'sessions': {
         for (final e in _sessions.entries) e.key: e.value.toJson(),
       },

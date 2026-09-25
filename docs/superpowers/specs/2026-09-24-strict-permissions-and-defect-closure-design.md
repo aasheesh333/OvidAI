@@ -636,16 +636,16 @@ Note: `CTRL6` failed once under full-suite parallel load and passed both in
 isolation and on a full-suite re-run — the same 30 s per-test default-timeout
 flakiness previously seen in `studio_git_reliability_test.dart`, not a
 regression from this phase.
-| 3 — Studio login + clone-once + label | partial | see below | label + login restore + clone-once gaps **1, 2, 3, 4, 5** done; gap 6 remains |
+| 3 — Studio login + clone-once + label | **done** | see below | label + login restore + all six clone-once gaps |
 | 4a — Browser geometry | **done** | see below | real 1280×800 layout; verifier made honest |
 | 4b — CDP | deferred | — | D2 |
 | 5 — Accessibility restart | **done** | see below | stale-bind signal, cold-start probe, honest copy, screenshot capability |
 | 6 — Plan mode allowlist | **done** | see below | blocklist → allowlist, default-deny |
 | 7 — Subagents 49 + no nesting | **done** | see below | cap + zero nesting + ledger FD fix (#8) |
 | 8 — Codex parity | **done (config paths)** | see below | TOML MCP mounting, transport, allowlist, roots, marketplace; AGENTS.md injection still open |
-| 9 — Correctness & leaks | partial | see below | #8 #13(message) #14 #16 #18 #29 done; #9 #13(cancel) #15 #17 #19 remain |
-| 10 — Performance | partial | see below | #20 #24 #25 and the spill write done; #21 #23 remain |
-| 11 — UI/UX + queue dock | partial | see below | queue dock, Hinglish, **tab-close target, agent-dot semantics** done; 4 smaller targets remain |
+| 9 — Correctness & leaks | **done except #13-cancel** | see below | #8 #9 #13(message) #14 #15 #16 #17 #18 #19 #29 all closed |
+| 10 — Performance | partial | see below | #20 #23 #24 #25 done; #21 (per-session persistence) remains |
+| 11 — UI/UX + queue dock | **done** | see below | queue dock, Hinglish, all tap targets, semantics, IME action |
 | 12 — Google Doc | deferred | — | D1, awaiting URL |
 
 ### Phase 7 detail — 49 ceiling, zero nesting, no leaked descriptors
@@ -1164,11 +1164,76 @@ drops the oldest, no-op under the cap, missing directory is safe, non-spill file
 are untouched, and source contracts for the screenshot cleanup ordering and the
 timeout wording.
 
+### Closing batch — #9, #13, #15, #17, #19, #23, gap 6, SSRF metadata
+
+**#9 — background sessions' approvals were never rendered.** `pendingApproval`
+lives in the run bucket and resolves to the *foreground* session outside a run
+zone, and the dock read only that. With "10+ sessions can run at once" a
+documented feature, every permissioned tool in a background session stalled for
+the full grace period and then auto-denied — the model reported "DENIED by user"
+although the user was never asked. New `pendingApprovalsElsewhere` scans all
+buckets, and the dock renders a "N sessions are waiting for approval" row with a
+**Review** button that switches to the waiting session, where the real card
+renders.
+
+**SSRF remainder — cloud metadata is now refused in every mode, including Full
+Access.** `_checkHostGrant` returned `true` for every host in drive/control, so a
+prompt-injected model could read instance credentials from
+`169.254.169.254`. New `isMetadataOrLinkLocalHost` (169.254/16,
+`metadata.google.internal`, `100.100.100.200`, `fe80:`) is checked **before** any
+mode exemption. Loopback is deliberately still allowed — local dev servers and
+local MCP servers are a real workflow, and it is already covered by
+`defaultAllowedHosts`.
+
+**#15 — a reminder hijacked the visible session.** A reminder set in session A
+firing while the user read or typed in B called `selectSession(A)`, losing B's
+composer text and scroll position and rebuilding B's browser tabs, with no
+interaction at all. It now delivers into A and raises a notification
+("reminder fired in \"A\"") when A was not visible. The schedule tick also went
+1 Hz → 5 s: it was started in the constructor and never stopped, so the isolate
+woke every second for the app's whole life, all night, with nothing pending.
+
+**#17 — `browser_navigate` force-unwrapped `tab.controller!` after a fixed 2 s
+sleep.** A desktop-mode toggle rebuilds the controller and closing the tab nulls
+it, so the unwrap threw and the model saw a bogus failure for a navigation that
+had succeeded. Now null-safe, falling back to the title the page-finished
+callback recorded.
+
+**#19 — `rememberOrigin` lost visited origins.** Fired `unawaited` from both
+`onPageFinished` and `navigateTab`, two interleaved calls each read the old list
+and the last write dropped the other's origin, so after a restart the cookie merge
+missed a site. Writes are now serialized per bucket behind a queue.
+
+**#23 — images decoded at full resolution.** Generated images reach 16 MB JPEGs
+and `Image.file`/`Image.network` had no `cacheWidth`, so a handful in one chat was
+enough to spike RAM and risk an OOM kill — with no visual difference, since pixels
+beyond the display size are discarded at paint anyway. New
+`Aether.imageCacheWidth(context, {logicalWidth})` is applied at all three sites
+(inline card, fullscreen view, Studio avatar).
+
+**Clone-once gap 6 — the first-selected branch was not recorded per repo.**
+Re-picking a repo always reset to the repository's `default_branch`, discarding
+the branch the user had chosen; `lastBranch` was one global slot, so switching
+repos cross-wrote it. The registry now persists a per-repo `branches` map in
+`repo_index.json`, consulted by `_pickRepo` and updated by
+`_rebindCloneToBranch`.
+
+**A11y — the remaining tap targets.** The image actions (Fullscreen/Open/Share)
+were ~16dp with no semantics; the copy button ~18dp; the sidebar connection chip
+~18dp and tappable with nothing for TalkBack to announce. All three keep their
+visual size and gain an opaque, padded hit area plus a `Semantics` label.
+
+New tests: `test/remaining_fixes_test.dart` (14) — the metadata blocklist and its
+position ahead of the mode exemption, per-repo branch memory including restart
+round-trip and index shape, the cross-session approval surface, the reminder no
+longer calling `selectSession`, the 5 s tick, the null-safe title read, the
+serialized origin writes, and `cacheWidth` at every image site.
+
 ### Verification (current)
 
-`dart analyze lib test` → 0 issues · full suite **2468 pass, 1 skipped** ·
+`dart analyze lib test` → 0 issues · full suite **2482 pass, 1 skipped** ·
 `:app:compileDebugKotlin --offline` → BUILD SUCCESSFUL · CI green through
-`8d48728`.
+`b3b6bb8`.
 
 ### Phase 6 detail — plan mode is now default-deny
 

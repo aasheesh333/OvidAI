@@ -66,6 +66,20 @@ class Aether {
 
   static const mono = 'JetBrainsMono';
 
+  /// Decode width for an image that will be displayed at roughly [logicalWidth]
+  /// logical pixels on this device.
+  ///
+  /// MEMORY (2026-09-24): `Image.file` / `Image.network` without `cacheWidth`
+  /// decode at FULL resolution into the image cache. Generated images here reach
+  /// 16 MB JPEGs, so a handful of them in one chat was enough to spike RAM and
+  /// risk an OOM kill on a low-end device — with no visual difference, because
+  /// the pixels beyond the display size are thrown away at paint time anyway.
+  static int imageCacheWidth(BuildContext context, {double? logicalWidth}) {
+    final mq = MediaQuery.of(context);
+    final logical = (logicalWidth ?? mq.size.width).clamp(120.0, 1600.0);
+    return (logical * mq.devicePixelRatio).round().clamp(240, 3200);
+  }
+
   static ThemeData? _cachedTheme;
   static bool? _cachedThemeDark;
 
