@@ -636,7 +636,7 @@ Note: `CTRL6` failed once under full-suite parallel load and passed both in
 isolation and on a full-suite re-run — the same 30 s per-test default-timeout
 flakiness previously seen in `studio_git_reliability_test.dart`, not a
 regression from this phase.
-| 3 — Studio login + clone-once + label | partial | see below | **label + login restore done**; the six clone-once gaps remain |
+| 3 — Studio login + clone-once + label | partial | see below | label + login restore + **clone-once gaps 1 and 4** done (plus a newly found save race); gaps 2, 3, 5, 6 remain |
 | 4a — Browser geometry | **done** | see below | real 1280×800 layout; verifier made honest |
 | 4b — CDP | deferred | — | D2 |
 | 5 — Accessibility restart | **done** | see below | stale-bind signal, cold-start probe, honest copy, screenshot capability |
@@ -876,23 +876,52 @@ distinction, retry-and-recover, no-op when logged in, the `_persistToken` code
 shape that caused the race, sign-out still clears storage, and the three caller
 contracts (Studio latch, resume retry, delete-all-data ordering).
 
-### Remaining in Phase 3 — the six clone-once gaps
+### Phase 3 (continued) — clone-once gaps 1 and 4, plus a save race
 
-Unchanged and still to do, in priority order: (1) new chat sessions default to
-mode `auto` while registry routing requires `studio`, so **every fresh session
-raw-clones into `ws_<id>`** — this is the reported "baar baar clone"; (2) the
-branch picker rebinds the API `RepoCache` but never the git clone; (3)
-`_offerCloneTarget` early-returns on an inherited folder, so switching repo A→B
-keeps working in A; (4) `ensureCloned` has no in-flight dedup, so two concurrent
-callers delete each other's clone; (5) the registry binding and the pinned
+**Gap 1 — the reported "baar baar clone".** `git_clone` routed through the shared
+registry only when `mode == AgentMode.studio`. But `newSession()` never sets a
+mode and `ChatSession` defaults to `'auto'`, so every freshly created chat
+session took the raw per-session path and cloned the same repo again into
+`ws_<id>`. Routing now triggers on `mode == studio` **or** the URL matching the
+session's connected repo (`sessionRepoFull`, case-insensitive), so a new session
+reuses the global clone. An unrelated repo still takes the raw path — the
+registry is not a blanket hijack.
+
+**Gap 4 — `ensureCloned` had no in-flight dedup.** Two concurrent callers both
+missed the index; the second found the first's in-flight directory on disk and
+ran `delete(recursive: true)` on it, so the first failed and deleted again —
+a spurious "Clone failed" and sometimes two clones. Concurrent callers for one
+key now share a single `Future`, evicted on completion *either way* so a failure
+does not poison the key.
+
+**Newly found: the index save was not concurrency-safe.** Writing the dedup test
+exposed it. `_save()` used a fixed `repo_index.json.tmp`, so two concurrent
+saves (different branches, or a clone racing a `bindSession`) collided on the
+rename — the second threw `PathNotFoundException`, or with different timing
+persisted a payload captured before the other write and silently dropped a repo
+or binding from the index. Saves are now serialized on a queue and use a unique
+temp name per save, cleaned up in a `finally`.
+
+New tests: three concurrent callers share one clone; a failed clone does not
+poison the key; four concurrent clones of different repos all land in the
+persisted index with no temp files left behind; a General-mode session cloning
+its connected repo reuses the registry; **three successive new sessions produce
+exactly one clone**; an unrelated repo does not hit the registry.
+
+### Remaining in Phase 3
+
+(2) the branch picker rebinds the API `RepoCache` but never the git clone;
+(3) `_offerCloneTarget` early-returns on an inherited folder, so switching repo
+A→B keeps working in A; (5) the registry binding and the pinned
 `workspaceFolder` disagree, so agent cwd ≠ terminal cwd; (6) the first-selected
-branch is not recorded per repo.
+branch is not recorded per repo. Gap 5 matters most for Phase 2, which needs one
+authoritative Studio root.
 
 ### Verification (current)
 
-`dart analyze lib test` → 0 issues · full suite **2416 pass, 1 skipped** ·
+`dart analyze lib test` → 0 issues · full suite **2423 pass, 1 skipped** ·
 `:app:compileDebugKotlin --offline` → BUILD SUCCESSFUL · CI green through
-`3d080bb`.
+`837690f`.
 
 ### Phase 6 detail — plan mode is now default-deny
 

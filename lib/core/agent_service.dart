@@ -13052,7 +13052,21 @@ ${await _agentsMdBlock()}
         // `path` destinations, and non-Studio modes keep the raw clone
         // below (general mode keeps isolated per-session workspaces).
         final githubRepo = _githubRepoFull(url);
-        if (githubRepo != null && dest.isEmpty && mode == AgentMode.studio) {
+        // CLONE-ONCE (2026-09-24): route through the shared registry whenever
+        // this URL is the session's CONNECTED repo — not only in Studio mode.
+        // `newSession()` never sets a mode and ChatSession defaults to `auto`,
+        // so the old `mode == AgentMode.studio` condition sent every freshly
+        // created chat session down the raw per-session clone path: the same
+        // repo cloned again into `ws_<id>`, once per session. That is the
+        // reported "agent clones again and again for every new session".
+        final connectedRepo = (sessionRepoFull ?? '').trim();
+        final isConnectedRepo =
+            githubRepo != null &&
+            connectedRepo.isNotEmpty &&
+            connectedRepo.toLowerCase() == githubRepo.toLowerCase();
+        if (githubRepo != null &&
+            dest.isEmpty &&
+            (mode == AgentMode.studio || isConnectedRepo)) {
           final cloneBranch = branch.isNotEmpty
               ? branch
               : (sessionBranch.isNotEmpty ? sessionBranch : 'main');

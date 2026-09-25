@@ -282,4 +282,83 @@ void main() {
       expect(desc, contains('CLONE-ONCE'));
     });
   });
+
+  group('git_clone clone-once OUTSIDE Studio mode', () {
+    /// A General-mode session with [repo] connected and github.com granted.
+    /// `newSession()` never sets a mode, so a fresh chat defaults to `auto`.
+    ChatSession makeGeneralSession(String id, String repo, String branch) {
+      final s = ChatSession(
+        id: id,
+        title: 'General',
+        providerId: 'ollama-local',
+        model: 'test-model',
+        mode: 'auto',
+      );
+      s.repo = repo;
+      s.branch = branch;
+      s.grants.add(PermissionGrant.host('github.com', sessionId: s.id));
+      app.sessions.add(s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      return s;
+    }
+
+    test('cloning the CONNECTED repo reuses the shared registry', () async {
+      // CLONE-ONCE (2026-09-24): routing used to require mode == studio, so
+      // every freshly created chat session raw-cloned the same repo into its
+      // own ws_<id> — the reported "agent clones again for every new session".
+      makeGeneralSession('gc-auto-1', 'acme/widget', 'main');
+      final fake = fakeRegistry();
+      AgentService.registryOverrideForTest = fake.registry;
+
+      final out = await AgentService.I
+          .dispatchForTest('git_clone', {
+            'url': 'https://github.com/acme/widget.git',
+          })
+          .timeout(const Duration(minutes: 2));
+
+      expect(fake.calls.length, 1);
+      expect(fake.calls.single, ['acme/widget', 'main']);
+      expect(out, contains('shared registry'));
+    });
+
+    test('a second new session cloning the same repo does NOT clone again',
+        () async {
+      final fake = fakeRegistry();
+      AgentService.registryOverrideForTest = fake.registry;
+
+      for (final id in ['gc-auto-2', 'gc-auto-3', 'gc-auto-4']) {
+        makeGeneralSession(id, 'acme/widget', 'main');
+        await AgentService.I
+            .dispatchForTest('git_clone', {
+              'url': 'https://github.com/acme/widget.git',
+            })
+            .timeout(const Duration(minutes: 2));
+      }
+
+      expect(
+        fake.calls.length,
+        1,
+        reason: 'three sessions, one clone — the whole point of the registry',
+      );
+    });
+
+    test('an UNRELATED repo is not hijacked into the registry', () async {
+      makeGeneralSession('gc-auto-5', 'acme/widget', 'main');
+      final fake = fakeRegistry();
+      AgentService.registryOverrideForTest = fake.registry;
+
+      await AgentService.I
+          .dispatchForTest('git_clone', {
+            'url': 'https://github.com/other/project.git',
+          })
+          .timeout(const Duration(minutes: 2));
+
+      expect(
+        fake.calls,
+        isEmpty,
+        reason: 'only the connected repo may route through the shared clone',
+      );
+    });
+  });
 }

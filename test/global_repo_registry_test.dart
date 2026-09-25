@@ -256,4 +256,116 @@ void main() {
       expect(Directory(path).existsSync(), isTrue);
     });
   });
+
+  group('concurrent clones are deduplicated', () {
+    // RACE FIX (2026-09-24): with no in-flight dedup, two callers for the same
+    // repo+branch both missed the index; the second then found the first's
+    // in-flight directory on disk and deleted it mid-clone, so the first failed
+    // and deleted again. The user saw a spurious "Clone failed" and sometimes
+    // two clones of the same repo.
+    test('three concurrent callers share ONE clone', () async {
+      final calls = <(String, String, String)>[];
+      final reg = GlobalRepoRegistry.createForTest(
+        baseDir: Directory('${tmp.path}/global'),
+        gitRunner: (repoFull, branch, dest) async {
+          calls.add((repoFull, branch, dest));
+          // Overlap window: long enough for the other callers to arrive while
+          // the destination directory already exists.
+          await Directory(dest).create(recursive: true);
+          await Future<void>.delayed(const Duration(milliseconds: 40));
+          await File('$dest/.gitkeep').writeAsString('fake clone');
+        },
+      );
+
+      final results = await Future.wait([
+        reg.ensureCloned('acme/widget', 'main'),
+        reg.ensureCloned('acme/widget', 'main'),
+        reg.ensureCloned('acme/widget', 'main'),
+      ]);
+
+      expect(calls.length, 1, reason: 'clone-once must hold under concurrency');
+      expect(results.toSet().length, 1);
+      expect(Directory(results.first).existsSync(), isTrue);
+      expect(
+        File('${results.first}/.gitkeep').existsSync(),
+        isTrue,
+        reason: 'the winning clone must survive, not be deleted mid-flight',
+      );
+    });
+
+    test('a failed clone does not poison the key for later callers', () async {
+      var attempt = 0;
+      final reg = GlobalRepoRegistry.createForTest(
+        baseDir: Directory('${tmp.path}/global'),
+        gitRunner: (repoFull, branch, dest) async {
+          attempt++;
+          if (attempt == 1) throw Exception('network down');
+          await Directory(dest).create(recursive: true);
+        },
+      );
+
+      await expectLater(
+        reg.ensureCloned('acme/widget', 'main'),
+        throwsA(anything),
+      );
+      final path = await reg.ensureCloned('acme/widget', 'main');
+      expect(attempt, 2, reason: 'the failure must be evicted, not cached');
+      expect(Directory(path).existsSync(), isTrue);
+    });
+
+    test('different branches still clone separately', () async {
+      final calls = <(String, String, String)>[];
+      final reg = registryWith(calls: calls);
+      await Future.wait([
+        reg.ensureCloned('acme/widget', 'main'),
+        reg.ensureCloned('acme/widget', 'dev'),
+      ]);
+      expect(calls.length, 2);
+    });
+
+    test('concurrent saves never lose an index entry', () async {
+      // The save race: `_save()` used a fixed `repo_index.json.tmp`, so two
+      // concurrent clones collided on the rename — one threw
+      // PathNotFoundException, or the index persisted a payload captured before
+      // the other write and silently dropped an entry.
+      final calls = <(String, String, String)>[];
+      final reg = registryWith(calls: calls);
+      await Future.wait([
+        reg.ensureCloned('acme/widget', 'main'),
+        reg.ensureCloned('acme/widget', 'dev'),
+        reg.ensureCloned('acme/other', 'main'),
+        reg.ensureCloned('acme/third', 'release'),
+      ]);
+      expect(calls.length, 4);
+
+      // Read the persisted index directly: every repo must be in it. A lost
+      // entry here is exactly the silent corruption the save race caused.
+      final indexFile = File('${tmp.path}/global/repo_index.json');
+      expect(indexFile.existsSync(), isTrue);
+      final decoded =
+          jsonDecode(indexFile.readAsStringSync()) as Map<String, dynamic>;
+      final repos = (decoded['repos'] as Map).cast<String, dynamic>();
+      for (final key in [
+        'acme/widget@main',
+        'acme/widget@dev',
+        'acme/other@main',
+        'acme/third@release',
+      ]) {
+        expect(repos.containsKey(key), isTrue, reason: '$key lost to the race');
+        expect(
+          Directory(repos[key] as String).existsSync(),
+          isTrue,
+          reason: '$key is indexed but its clone is gone',
+        );
+      }
+      // No temp files left behind.
+      expect(
+        Directory('${tmp.path}/global')
+            .listSync()
+            .where((e) => e.path.endsWith('.tmp'))
+            .toList(),
+        isEmpty,
+      );
+    });
+  });
 }

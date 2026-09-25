@@ -157,7 +157,26 @@ class GlobalRepoRegistry {
     }
   }
 
-  Future<void> _save() async {
+  /// Serializes index writes.
+  ///
+  /// SAVE RACE FIX (2026-09-24): two concurrent clones — different branches of
+  /// the same repo, or a clone racing a `bindSession` — both call `_save()`. The
+  /// temp filename was fixed (`repo_index.json.tmp`), so the second `rename`
+  /// found the file already moved and threw `PathNotFoundException`; with
+  /// slightly different timing it could instead persist a payload captured
+  /// before the other write, silently dropping a repo or binding from the index.
+  Future<void> _saveQueue = Future.value();
+  int _saveSeq = 0;
+
+  Future<void> _save() {
+    final run = _saveQueue.then((_) => _saveNow());
+    // Keep the chain alive after a failure, and never surface an unhandled error
+    // from the queue itself — callers await `run`, which still throws.
+    _saveQueue = run.then<void>((_) {}, onError: (_) {});
+    return run;
+  }
+
+  Future<void> _saveNow() async {
     final f = _indexFile;
     await f.parent.create(recursive: true);
     final payload = jsonEncode({
@@ -167,10 +186,18 @@ class GlobalRepoRegistry {
         for (final e in _sessions.entries) e.key: e.value.toJson(),
       },
     });
-    // Atomic write: a crash mid-save never leaves a half-written index.
-    final tmp = File('${f.path}.tmp');
-    await tmp.writeAsString(payload);
-    await tmp.rename(f.path);
+    // Atomic write: a crash mid-save never leaves a half-written index. The
+    // temp name is unique per save, so even an unserialized caller cannot
+    // collide with another one.
+    final tmp = File('${f.path}.${_saveSeq++}.tmp');
+    try {
+      await tmp.writeAsString(payload);
+      await tmp.rename(f.path);
+    } finally {
+      try {
+        if (tmp.existsSync()) tmp.deleteSync();
+      } catch (_) {}
+    }
   }
 
   // ── folder naming ──────────────────────────────────────────────────
@@ -253,9 +280,46 @@ class GlobalRepoRegistry {
   /// into `<appSupport>/global/repos/` on a miss. A registry hit whose
   /// folder vanished from disk re-clones instead of returning a dead path.
   /// The same folder is returned for every session → no re-clone.
+  /// Clones currently in flight, by registry key, so concurrent callers for the
+  /// same repo+branch share ONE clone.
+  ///
+  /// RACE FIX (2026-09-24): there was no dedup. Two concurrent callers both saw
+  /// `hit == null`; the second then found the first's in-flight directory
+  /// already on disk and ran `destDir.delete(recursive: true)` on it — deleting
+  /// a clone that was still being written. The first caller failed and deleted
+  /// again, so the user saw a spurious "Clone failed" and sometimes two clones
+  /// of the same repo. A new chat session plus a Studio-screen clone is enough
+  /// to trigger it.
+  final Map<String, Future<String>> _inflight = {};
+
   Future<String> ensureCloned(String repoFull, String branch) async {
     _validate(repoFull, branch);
     final key = _repoKey(repoFull, branch);
+    final hit = _repoPaths[key];
+    if (hit != null && Directory(hit).existsSync()) return hit;
+    final pending = _inflight[key];
+    if (pending != null) return pending;
+    final future = _cloneInto(key, repoFull, branch);
+    _inflight[key] = future;
+    // Evict on completion either way: a success must fall back to the index,
+    // and a FAILURE must not poison the key so every later call rethrows the
+    // same stale error.
+    future.then(
+      (_) {
+        _inflight.remove(key);
+      },
+      onError: (Object _) {
+        _inflight.remove(key);
+      },
+    );
+    return future;
+  }
+
+  Future<String> _cloneInto(
+    String key,
+    String repoFull,
+    String branch,
+  ) async {
     final hit = _repoPaths[key];
     if (hit != null) {
       if (Directory(hit).existsSync()) return hit;
