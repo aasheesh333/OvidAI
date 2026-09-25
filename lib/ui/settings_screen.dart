@@ -1596,12 +1596,18 @@ class _PresetsScreen extends StatelessWidget {
         ],
       ),
     );
-    if (ok == true && idController.text.trim().isNotEmpty) {
+    // Read the values out, then dispose. Both controllers were leaked before:
+    // every Duplicate left two TextEditingController instances (and their
+    // listeners plus platform text-input resources) alive for the app's life.
+    final confirmed = ok == true;
+    final idText = idController.text.trim();
+    final nameText = nameController.text.trim();
+    nameController.dispose();
+    idController.dispose();
+    if (confirmed && idText.isNotEmpty) {
       final newPreset = AgentPreset(
-        id: idController.text.trim(),
-        label: nameController.text.trim().isEmpty
-            ? idController.text.trim()
-            : nameController.text.trim(),
+        id: idText,
+        label: nameText.isEmpty ? idText : nameText,
         description: preset.description,
         allowedTools: List.of(preset.allowedTools),
         deniedTools: List.of(preset.deniedTools),

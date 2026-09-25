@@ -171,8 +171,21 @@ class StudioShellSession extends ChangeNotifier {
     _notify();
   }
 
+  /// Maximum retained terminal lines.
+  ///
+  /// PERF (2026-09-24): `history` grew without bound, so a long-lived Studio tab
+  /// running builds (apt, npm, gradle) accumulated tens of thousands of strings —
+  /// steadily rising memory per tab, and an increasingly expensive rebuild of the
+  /// terminal pane on every new line. Trimming here covers all five append sites
+  /// at once, since every one of them notifies. Oldest lines go first; `clear`
+  /// still empties the buffer entirely.
+  static const int maxHistoryLines = 5000;
+
   void _notify() {
     if (_disposed) return;
+    if (history.length > maxHistoryLines) {
+      history.removeRange(0, history.length - maxHistoryLines);
+    }
     notifyListeners();
   }
 

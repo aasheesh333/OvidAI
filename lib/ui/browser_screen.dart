@@ -232,15 +232,32 @@ class _BrowserScreenState extends State<BrowserScreen> {
                                     ),
                                   ),
                                   const SizedBox(width: 5),
-                                  GestureDetector(
-                                    onTap: () {
-                                      agent.closeBrowserTab(i);
-                                      setState(() {});
-                                    },
-                                    child: Icon(
-                                      Icons.close,
-                                      size: 12,
-                                      color: Aether.textFaint,
+                                  // Was a bare 12x12dp Icon in a
+                                  // GestureDetector, sitting ~5px from the tab
+                                  // body: the easiest mis-tap in the app was
+                                  // closing the wrong tab, and TalkBack had
+                                  // nothing to announce. The hit area is now
+                                  // opaque and labelled.
+                                  Semantics(
+                                    button: true,
+                                    label: 'Close tab',
+                                    child: GestureDetector(
+                                      behavior: HitTestBehavior.opaque,
+                                      onTap: () {
+                                        agent.closeBrowserTab(i);
+                                        setState(() {});
+                                      },
+                                      child: SizedBox(
+                                        width: 32,
+                                        height: 32,
+                                        child: Center(
+                                          child: Icon(
+                                            Icons.close,
+                                            size: 12,
+                                            color: Aether.textFaint,
+                                          ),
+                                        ),
+                                      ),
                                     ),
                                   ),
                                 ],
@@ -495,22 +512,24 @@ class _AgentDot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (busy) {
-      return Container(
-        width: 10,
-        height: 10,
-        decoration: const BoxDecoration(
-          color: Aether.accent,
-          shape: BoxShape.circle,
+    // State was encoded by COLOUR ALONE on a 10px dot: colour-blind users could
+    // not tell "agent is driving this tab" from "idle", and a screen reader had
+    // nothing to announce. The label travels with the dot now.
+    final label = busy
+        ? 'Agent is driving this tab'
+        : 'Agent idle on this tab';
+    return Semantics(
+      label: label,
+      child: Tooltip(
+        message: label,
+        child: Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(
+            color: busy ? Aether.accent : Aether.successLight,
+            shape: BoxShape.circle,
+          ),
         ),
-      );
-    }
-    return Container(
-      width: 10,
-      height: 10,
-      decoration: BoxDecoration(
-        color: Aether.successLight,
-        shape: BoxShape.circle,
       ),
     );
   }

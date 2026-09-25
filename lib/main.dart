@@ -38,6 +38,14 @@ class OvidApp extends StatefulWidget {
 }
 
 class _OvidAppState extends State<OvidApp> {
+  /// The theme value this widget last built with.
+  ///
+  /// PERF (2026-09-24): this is the ROOT of the app and `AppState` notifies on
+  /// every streamed token, so an unconditional `setState` here invalidated
+  /// `MaterialApp`, its theme and every route once per token. Only a theme
+  /// toggle is worth a rebuild, so the listener now compares before rebuilding.
+  bool _builtDark = Aether.dark;
+
   @override
   void initState() {
     super.initState();
@@ -46,7 +54,9 @@ class _OvidAppState extends State<OvidApp> {
   }
 
   void _onThemeChanged() {
-    if (mounted) setState(() {});
+    if (!mounted || Aether.dark == _builtDark) return;
+    _builtDark = Aether.dark;
+    setState(() {});
   }
 
   @override

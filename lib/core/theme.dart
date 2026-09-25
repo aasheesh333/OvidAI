@@ -66,7 +66,34 @@ class Aether {
 
   static const mono = 'JetBrainsMono';
 
+  static ThemeData? _cachedTheme;
+  static bool? _cachedThemeDark;
+
+  /// Drops the cached [ThemeData]. Only tests need this; production rebuilds
+  /// happen through the [dark] key.
+  @visibleForTesting
+  static void resetThemeCacheForTest() {
+    _cachedTheme = null;
+    _cachedThemeDark = null;
+  }
+
+  /// The app theme, CACHED per [dark] value.
+  ///
+  /// PERF (2026-09-24): this built a fresh `ThemeData.dark()/light()` plus a
+  /// full `copyWith` on EVERY call, and the root widget calls it on every
+  /// rebuild — which, because the root also listened to all of `AppState`,
+  /// meant once per streamed token. Comparing a bool and returning the cached
+  /// instance removes that allocation from the hot path entirely.
   static ThemeData theme() {
+    final cached = _cachedTheme;
+    if (cached != null && _cachedThemeDark == dark) return cached;
+    final built = _buildTheme();
+    _cachedTheme = built;
+    _cachedThemeDark = dark;
+    return built;
+  }
+
+  static ThemeData _buildTheme() {
     final base = dark
         ? ThemeData.dark(useMaterial3: true)
         : ThemeData.light(useMaterial3: true);

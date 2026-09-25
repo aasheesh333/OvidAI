@@ -38,9 +38,9 @@ class _HealthScreenState extends State<HealthScreen> {
     setState(() {});
     try {
       await SandboxService.I.uninstall();
+      if (!mounted) return;
       _repairLog.add('ovid: deleted — reopening setup gate…');
       setState(() {});
-      if (!mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => const SandboxSetupScreen(gateMode: true),

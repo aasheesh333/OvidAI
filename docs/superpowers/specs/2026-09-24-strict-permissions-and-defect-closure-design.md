@@ -643,9 +643,9 @@ regression from this phase.
 | 6 — Plan mode allowlist | **done** | see below | blocklist → allowlist, default-deny |
 | 7 — Subagents 49 + no nesting | **done** | see below | cap + zero nesting + ledger FD fix (#8) |
 | 8 — Codex parity | **done (config paths)** | see below | TOML MCP mounting, transport, allowlist, roots, marketplace; AGENTS.md injection still open |
-| 9 — Correctness & leaks | partial | — | #8 (ledger) and #14 (approval readiness) done; #9 #13 #15–#19 remain |
-| 10 — Performance | not started | — | |
-| 11 — UI/UX + queue dock | partial | see below | **queue dock + Hinglish done**; tap targets/semantics remain |
+| 9 — Correctness & leaks | partial | see below | #8 #14 #16 #18 #29 done; #9 #13 #15 #17 #19 remain |
+| 10 — Performance | partial | see below | #20 (theme + root listener + stream coalescing) and #25 done; #21 #23 #24 remain |
+| 11 — UI/UX + queue dock | partial | see below | queue dock, Hinglish, **tab-close target, agent-dot semantics** done; 4 smaller targets remain |
 | 12 — Google Doc | deferred | — | D1, awaiting URL |
 
 ### Phase 7 detail — 49 ceiling, zero nesting, no leaked descriptors
@@ -1041,11 +1041,52 @@ New test: `test/codex_parity_test.dart` (11) — transport normalisation, a real
 Codex `config.toml` parsing into stdio/http/env-bearing servers, JSON through the
 same entry point, and source contracts for each wiring point above.
 
+### Perf / a11y / leak batch
+
+**#20 — every streamed token rebuilt the whole app.** Two causes, both fixed:
+`Aether.theme()` constructed a fresh `ThemeData.dark()/light()` plus a full
+`copyWith` on *every call*, and `_OvidAppState` — the root — listened to all of
+`AppState`, which notifies per token. The theme is now cached per light/dark
+value (`resetThemeCacheForTest` for tests), and the root listener compares
+`Aether.dark` before rebuilding, so a token no longer invalidates `MaterialApp`,
+its theme and every route. Stream-driven refreshes are additionally coalesced
+through a leading-edge throttle with a guaranteed trailing flush (~60 Hz instead
+of one per token), and all three live-message finalizers flush so the last token
+is never left unpainted and no timer outlives its turn.
+
+**#25 — Studio terminal `history` grew without bound.** A long-lived tab running
+apt/npm/gradle accumulated tens of thousands of strings. Trimmed to the newest
+5000 lines inside `_notify()`, which covers all five append sites at once.
+
+**#16 — `setState` after `await` with no `mounted` guard** in the code-block copy
+button (`chat_screen.dart`) and the Health screen's sandbox reset, which checked
+`mounted` one line *after* calling `setState`.
+
+**#18 — three leaked `TextEditingController`s** created for dialogs and never
+disposed: sidebar rename, the preset Duplicate sheet (two controllers, read after
+the dialog so the values are captured first), and the image-prompt dialog.
+
+**#29 — the rename dialog's IME action key was a dead end.** `textInputAction:
+done` plus `onSubmitted` sharing one `save()` with the Save button.
+
+**#27 (worst offender) — the browser tab-close button was a bare 12×12dp icon**
+in a `GestureDetector` ~5px from the tab body: the easiest mis-tap in the app had
+the worst outcome (closing the wrong tab) and TalkBack had nothing to announce.
+Now a 32×32 opaque hit area with `Semantics(button: true, label: 'Close tab')`.
+
+**#28 — `_AgentDot` encoded busy/idle by colour alone.** Now carries a `Tooltip`
+and `Semantics` label ("Agent is driving this tab" / "Agent idle on this tab").
+
+New test: `test/perf_and_a11y_fixes_test.dart` (6) — theme cache identity and
+invalidation on a light/dark flip, the flush seam, the history cap keeping the
+*newest* lines, and widget tests for the tab-close hit area/label and the dot's
+announced state.
+
 ### Verification (current)
 
-`dart analyze lib test` → 0 issues · full suite **2450 pass, 1 skipped** ·
+`dart analyze lib test` → 0 issues · full suite **2456 pass, 1 skipped** ·
 `:app:compileDebugKotlin --offline` → BUILD SUCCESSFUL · CI green through
-`05a7c6f`.
+`75ef982`.
 
 ### Phase 6 detail — plan mode is now default-deny
 

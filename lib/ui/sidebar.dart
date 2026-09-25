@@ -578,6 +578,12 @@ class _SessionTile extends StatelessWidget {
 
   void _rename(BuildContext context) {
     final c = TextEditingController(text: session.title);
+    void save(String value) {
+      AppState.I.renameSession(session.id, value.trim());
+      Navigator.pop(context);
+    }
+    // Dialog controllers were leaked: each rename left a TextEditingController
+    // (and its listeners plus platform text-input resources) alive forever.
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
@@ -589,6 +595,10 @@ class _SessionTile extends StatelessWidget {
           controller: c,
           autofocus: true,
           style: const TextStyle(fontSize: 14),
+          // The IME action key used to be a dead end: it showed a return key
+          // that did nothing, so the user had to reach for Save.
+          textInputAction: TextInputAction.done,
+          onSubmitted: save,
         ),
         actions: [
           TextButton(
@@ -596,15 +606,12 @@ class _SessionTile extends StatelessWidget {
             child: const Text('Cancel'),
           ),
           TextButton(
-            onPressed: () {
-              AppState.I.renameSession(session.id, c.text.trim());
-              Navigator.pop(context);
-            },
+            onPressed: () => save(c.text),
             child: const Text('Save', style: TextStyle(color: Aether.accent)),
           ),
         ],
       ),
-    );
+    ).whenComplete(c.dispose);
   }
 }
 

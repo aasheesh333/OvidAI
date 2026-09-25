@@ -5156,6 +5156,8 @@ class _InputBarState extends State<_InputBar> {
 
   void _imagePromptDialog(BuildContext context) {
     final c = TextEditingController();
+    // Disposed with the dialog: a leaked controller keeps its listeners and the
+    // platform text-input channel alive after the sheet is gone.
     showDialog<void>(
       context: context,
       builder: (d) => AlertDialog(
@@ -5186,7 +5188,7 @@ class _InputBarState extends State<_InputBar> {
           ),
         ],
       ),
-    );
+    ).whenComplete(c.dispose);
   }
 
   Widget _attachOption(
@@ -6211,6 +6213,9 @@ class _CopyButtonState extends State<_CopyButton> {
       borderRadius: BorderRadius.circular(6),
       onTap: () async {
         await Clipboard.setData(ClipboardData(text: widget.code));
+        // The row can be scrolled out and disposed during the await; calling
+        // setState then throws "setState() called after dispose()".
+        if (!mounted) return;
         setState(() => copied = true);
         Future.delayed(const Duration(seconds: 2), () {
           if (mounted) setState(() => copied = false);

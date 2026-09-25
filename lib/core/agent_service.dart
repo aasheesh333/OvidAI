@@ -9238,6 +9238,7 @@ ${await _agentsMdBlock()}
     if (m != null && owner != null && (s == null || identical(owner, s))) {
       removed = owner.messages.remove(m);
     }
+    _flushStreamRefresh();
     _liveContent.clear();
     _liveReasoning.clear();
     _liveMsg = null;
@@ -9275,6 +9276,7 @@ ${await _agentsMdBlock()}
       m.thinking = false;
       m.content = '*⏹ stopped by user*';
     }
+    _flushStreamRefresh();
     _liveContent.clear();
     _liveReasoning.clear();
     _liveSession = null;
@@ -10208,6 +10210,48 @@ ${await _agentsMdBlock()}
     _liveSession = s;
   }
 
+  /// Coalesces stream-driven UI refreshes.
+  ///
+  /// PERF (2026-09-24): every SSE token called `AppState.I.refresh()`, and the
+  /// app has ~20 `AnimatedBuilder`s listening to that notifier — so a fast model
+  /// produced hundreds of full-subtree rebuilds per second for no visual
+  /// benefit, since a display cannot show more than its refresh rate. This is a
+  /// leading-edge throttle with a guaranteed trailing flush: the first token
+  /// renders immediately, later ones coalesce to ~60 Hz, and the final state is
+  /// always painted.
+  Timer? _streamRefreshTimer;
+  bool _streamRefreshPending = false;
+  static const _streamRefreshInterval = Duration(milliseconds: 16);
+
+  void _refreshStreamThrottled() {
+    if (_streamRefreshTimer != null) {
+      _streamRefreshPending = true;
+      return;
+    }
+    AppState.I.refresh();
+    _streamRefreshTimer = Timer(_streamRefreshInterval, () {
+      _streamRefreshTimer = null;
+      if (!_streamRefreshPending) return;
+      _streamRefreshPending = false;
+      _refreshStreamThrottled();
+    });
+  }
+
+  /// Cancels any pending trailing refresh and paints once, immediately. Called
+  /// by every live-message finalizer so the last token is never left unrendered
+  /// (and so no timer outlives the turn).
+  void _flushStreamRefresh() {
+    _streamRefreshTimer?.cancel();
+    _streamRefreshTimer = null;
+    final hadPending = _streamRefreshPending;
+    _streamRefreshPending = false;
+    if (hadPending) AppState.I.refresh();
+  }
+
+  /// Test seam: drop any pending throttled refresh.
+  @visibleForTesting
+  void flushStreamRefreshForTest() => _flushStreamRefresh();
+
   void _streamToBubble(ChatSession s, String tok) {
     // Stop/output: drop tokens from a stale/cancelled chain — nothing
     // renders after Stop.
@@ -10216,7 +10260,7 @@ ${await _agentsMdBlock()}
     _liveContent.write(tok);
     _liveMsg!.content = _liveContent.toString();
     _liveMsg!.thinking = _liveContent.isEmpty;
-    AppState.I.refresh();
+    _refreshStreamThrottled();
   }
 
   void _streamReasoning(ChatSession s, String tok) {
@@ -10233,7 +10277,7 @@ ${await _agentsMdBlock()}
     _liveReasoning.write(tok);
     _liveMsg!.content = _liveReasoning.toString();
     _liveMsg!.thinking = true;
-    AppState.I.refresh();
+    _refreshStreamThrottled();
   }
 
   /// Promote the streaming bubble to a permanent text message.
@@ -10253,6 +10297,7 @@ ${await _agentsMdBlock()}
       m.thinking = false;
       m.content = cleanReasoningText(_liveReasoning.toString());
     }
+    _flushStreamRefresh();
     _liveContent.clear();
     _liveReasoning.clear();
     _liveSession = null;
