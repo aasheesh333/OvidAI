@@ -96,13 +96,26 @@ void main() {
       throw PlatformException(code: 'START_FAIL');
     });
 
+    // `agentWorking` debounces for 600 ms, so the old fixed 700 ms sleeps left
+    // only 100 ms of slack — under full-suite parallel load the timer could miss
+    // the window and the failure count never reached three, failing this test
+    // while it passed in isolation. Poll for the expected state instead.
+    Future<void> settleUntil(bool Function() done) async {
+      final deadline = DateTime.now().add(const Duration(seconds: 8));
+      while (!done() && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    }
+
     // Three failures disable the notifier…
     await AgentNotificationService.I.agentWorking('one');
-    await Future<void>.delayed(const Duration(milliseconds: 700));
+    await settleUntil(() => calls >= 1);
     await AgentNotificationService.I.agentWorking('two');
-    await Future<void>.delayed(const Duration(milliseconds: 700));
+    await settleUntil(() => calls >= 2);
     await AgentNotificationService.I.agentWorking('three');
-    await Future<void>.delayed(const Duration(milliseconds: 700));
+    await settleUntil(
+      () => !AgentNotificationService.I.supportedForTest,
+    );
     expect(AgentNotificationService.I.supportedForTest, isFalse);
 
     // …but the next run re-arms instead of staying dead for the session.
@@ -111,10 +124,17 @@ void main() {
       calls++;
       return true;
     });
+    final beforeReArm = calls;
     await AgentNotificationService.I.agentWorking('four');
-    await Future<void>.delayed(const Duration(milliseconds: 700));
-    expect(AgentNotificationService.I.supportedForTest, isTrue);
-    expect(calls, greaterThan(3));
+    // Poll the CHANNEL CALL, not the re-arm flag: the flag flips immediately
+    // while the actual invoke still waits out the 600 ms debounce.
+    await settleUntil(() => calls > beforeReArm);
+    expect(
+      AgentNotificationService.I.supportedForTest,
+      isTrue,
+      reason: 'the re-armed notifier must be usable again',
+    );
+    expect(calls, greaterThan(beforeReArm));
   });
 
   test('presence lock lifts when control mode turns off', () async {

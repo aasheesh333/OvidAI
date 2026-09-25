@@ -643,7 +643,7 @@ regression from this phase.
 | 6 — Plan mode allowlist | **done** | see below | blocklist → allowlist, default-deny |
 | 7 — Subagents 49 + no nesting | **done** | see below | cap + zero nesting + ledger FD fix (#8) |
 | 8 — Codex parity | partial | see below | config paths + adapter dir scanning done; AGENTS.md injection and inline-hook end-to-end remain |
-| 9 — Correctness & leaks | **done except #13-cancel** | see below | #8 #9 #13(message) #14 #15 #16 #17 #18 #19 #29 all closed |
+| 9 — Correctness & leaks | **done** | see below | #8 #9 #13 #14 #15 #16 #17 #18 #19 #29 all closed |
 | 10 — Performance | partial | see below | #20 #23 #24 #25 done; #21 (per-session persistence) remains |
 | 11 — UI/UX + queue dock | **done** | see below | queue dock, Hinglish, all tap targets, semantics, IME action |
 | 12 — Google Doc | deferred | — | D1, awaiting URL |
@@ -1285,9 +1285,41 @@ switched from global to session grants, matching how production records them.
 `grant_store_test.dart` keeps a note that the class-level global capability now
 exists only so the Permissions screen can list and delete legacy entries.
 
+### #13 closed — a tool timeout now KILLS its invocation
+
+`Future.timeout` abandons the future but leaves the work running, and the original
+copy told the model to "narrow the request and retry" — so it re-issued a slow
+`run_shell` and **two copies of a mutating command** (npm install, git push, file
+writes) ran concurrently against one workspace: duplicated commits, corrupted
+builds, interleaved writes.
+
+Killing by RUN key was too coarse: background `job_start` work is tagged to the
+same run and is meant to outlive the call that launched it, so a timeout would
+have destroyed it. Processes are now grouped **per tool invocation**:
+
+- `SandboxService` gained `_callProcesses`, `tagCall`, `killCallProcesses(key)` and
+  a shared `callZoneKey`. Both spawn sites register a process under the run key
+  **and** the call key, and both cleanup paths clear it.
+- `AgentService` wraps each tool dispatch in
+  `runZoned(..., zoneValues: {SandboxService.callZoneKey: callKey})` and, on
+  timeout, calls `killCallProcesses(callKey)` — so exactly the processes started
+  by the timed-out invocation die, and the message now says KILLED and warns the
+  command may have partially completed rather than inviting a retry.
+
+Tests: `test/tool_timeout_cancel_test.dart` (4) — a real `sleep` killed by its
+call key while another call's process and a run-tagged background job both
+survive; an unknown key is a no-op; and the dispatch contract. The earlier
+interim wording assertion in `storage_privacy_fixes_test.dart` was updated to the
+final contract.
+
+Also fixed a load-flaky test while verifying: `control_presence_test.dart` waited
+a fixed 700 ms for a 600 ms debounce (100 ms of slack) and failed only under
+full-suite parallel load; it now polls for the observable state, with the
+`settleUntil` helper polling the channel call rather than the re-arm flag.
+
 ### Verification (current)
 
-`dart analyze lib test` → 0 issues · full suite **2484 pass, 1 skipped** ·
+`dart analyze lib test` → 0 issues · full suite **2488 pass, 1 skipped** ·
 `:app:compileDebugKotlin --offline` → BUILD SUCCESSFUL · CI green through
 `c7d92e8`.
 

@@ -859,6 +859,9 @@ class AgentService extends ChangeNotifier {
   // Every session owns an independent _AgentRun (cancel flag, HTTP
   // request, queue, approval, jobs, plan mode, live streaming buffers).
   // 10+ sessions can run at once; switching sessions NEVER stops a run.
+  /// Monotonic id for scoping one tool invocation's processes.
+  int _toolCallSeq = 0;
+
   final Map<String, AgentRun> _runs = {};
 
   /// The run bound to the current target session.  Subagents (no session)
@@ -9059,30 +9062,31 @@ ${await _agentsMdBlock()}
               // tool-call-timeout-policy): each tool gets a deadline; slow
               // tools surface a structured timeout error the model can read.
               final budget = _toolTimeoutFor(name);
-              result = await _dispatch(name, args).timeout(
+              // CANCEL, don't just abandon (2026-09-24). `Future.timeout` leaves
+              // the work running, and the old copy told the model to "retry", so
+              // it re-issued a slow `run_shell` and TWO copies of a mutating
+              // command (npm install, git push, file writes) ran concurrently
+              // against one workspace — duplicated commits, corrupted builds,
+              // interleaved writes.
+              //
+              // The dispatch runs in a zone that scopes its processes to this
+              // one invocation, so the timeout kills exactly what it started.
+              // Killing by RUN key would also take down legitimate background
+              // `job_start` work that is meant to outlive the call.
+              final callKey = 'toolcall-${++_toolCallSeq}';
+              result = await runZoned(
+                () => _dispatch(name, args),
+                zoneValues: {SandboxService.callZoneKey: callKey},
+              ).timeout(
                 budget,
-                // DO NOT tell the model to retry (2026-09-24).
-                // `Future.timeout` abandons the future but does NOT cancel the
-                // work: a slow `run_shell` kept executing inside the sandbox
-                // while the old message said "narrow the request and retry", so
-                // the model re-issued it and TWO copies of a mutating command
-                // (npm install, git push, file writes) ran concurrently against
-                // the same workspace — duplicated commits, corrupted builds,
-                // interleaved writes.
-                //
-                // Killing the process here is not safe either: sandbox processes
-                // are tracked per RUN key, so a kill would also take down
-                // legitimate background `job_start` work that is meant to
-                // outlive the call. Per-invocation process tracking is the real
-                // fix; until then the message must at least stop the retry loop
-                // and state honestly that the work may still be running.
-                onTimeout: () =>
-                    'Error: tool "$name" timed out after ${budget.inSeconds}s. '
-                    'The command was NOT cancelled and may still be running or '
-                    'may have partially completed — do NOT re-run it blindly. '
-                    'Check the current state first (e.g. read the file, '
-                    '`git status`), then narrow the request or continue without '
-                    'it.',
+                onTimeout: () {
+                  SandboxService.I.killCallProcesses(callKey);
+                  return 'Error: tool "$name" timed out after '
+                      '${budget.inSeconds}s and its processes were KILLED. It '
+                      'may have partially completed — check the current state '
+                      '(read the file, `git status`) before doing anything '
+                      'else, and do NOT re-run it blindly.';
+                },
               );
             }
             if (toolMsg != null) {

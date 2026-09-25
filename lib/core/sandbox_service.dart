@@ -2322,8 +2322,23 @@ audit=false
   // the run parked for its full 10-minute timeout otherwise).
   final List<Process> _liveProcesses = [];
   final Map<String, List<Process>> _runProcesses = {};
+
+  /// Processes grouped by TOOL INVOCATION, so a timed-out tool can kill exactly
+  /// what it started (2026-09-24).
+  ///
+  /// Per-run grouping was too coarse: a timeout that killed by run key would also
+  /// take down legitimate background `job_start` work, which is meant to outlive
+  /// the call that launched it. Per-call grouping lets the timeout do the honest
+  /// thing — kill the command that hung — without collateral damage.
+  final Map<String, List<Process>> _callProcesses = {};
+
   String? _activeRunKey;
+  String? _activeCallKey;
   static const _runZoneKey = #ovidRunKey;
+
+  /// Zone key for the current tool invocation. Shared with `AgentService` so a
+  /// dispatch can scope its processes to one call.
+  static const callZoneKey = #ovidCallKey;
 
   /// PR32 test seam: access to the tracked-process registry.
   @visibleForTesting
@@ -2332,9 +2347,49 @@ audit=false
   @visibleForTesting
   Map<String, List<Process>> get runProcessesForTest => _runProcesses;
 
+  /// Test seam: register an already-started process under a tool-call key, so
+  /// the per-invocation kill can be exercised without a provisioned sandbox.
+  @visibleForTesting
+  void trackCallProcessForTest(String callKey, Process p) {
+    _liveProcesses.add(p);
+    _callProcesses.putIfAbsent(callKey, () => []).add(p);
+  }
+
+  @visibleForTesting
+  Map<String, List<Process>> get callProcessesForTest => _callProcesses;
+
   /// Tag spawned processes under [key] so killRunProcesses can stop only this run.
   void tagRun(String? key) {
     _activeRunKey = key;
+  }
+
+  /// Tag spawned processes under [key] so killCallProcesses can stop only this
+  /// tool invocation.
+  void tagCall(String? key) {
+    _activeCallKey = key;
+  }
+
+  String? get _currentCallKey =>
+      (Zone.current[callZoneKey] as String?) ?? _activeCallKey;
+
+  /// Kills only the processes started during the invocation tagged [key], and
+  /// forgets them everywhere else they were registered.
+  ///
+  /// Used when a tool times out: `Future.timeout` abandons the future but the
+  /// command keeps running, so the model used to be told "retry" and re-issued
+  /// it — two copies of a mutating command against one workspace.
+  void killCallProcesses(String key) {
+    final procs = _callProcesses.remove(key);
+    if (procs == null) return;
+    for (final p in List.of(procs)) {
+      try {
+        p.kill(ProcessSignal.sigkill);
+      } catch (_) {}
+      _liveProcesses.remove(p);
+      for (final bucket in _runProcesses.values) {
+        bucket.remove(p);
+      }
+    }
   }
 
   /// The currently-active run-key slot (read by nested tagged runs —
@@ -2383,6 +2438,7 @@ audit=false
     }
     _liveProcesses.clear();
     _runProcesses.clear();
+    _callProcesses.clear();
   }
 
   /// Tracked Process.run: registers the process so killAllProcesses()
@@ -2405,6 +2461,10 @@ audit=false
     final runKey = _currentRunKey;
     if (runKey != null && runKey.isNotEmpty) {
       _runProcesses.putIfAbsent(runKey, () => []).add(proc);
+    }
+    final callKey = _currentCallKey;
+    if (callKey != null && callKey.isNotEmpty) {
+      _callProcesses.putIfAbsent(callKey, () => []).add(proc);
     }
     try {
       // Streaming path: a long install must show progress line by line, not
@@ -3553,10 +3613,17 @@ echo INSTALLED
     if (runKey != null && runKey.isNotEmpty) {
       _runProcesses.putIfAbsent(runKey, () => []).add(proc);
     }
+    final callKey = _currentCallKey;
+    if (callKey != null && callKey.isNotEmpty) {
+      _callProcesses.putIfAbsent(callKey, () => []).add(proc);
+    }
     proc.exitCode.whenComplete(() {
       _liveProcesses.remove(proc);
       if (runKey != null && runKey.isNotEmpty) {
         _runProcesses[runKey]?.remove(proc);
+      }
+      if (callKey != null && callKey.isNotEmpty) {
+        _callProcesses[callKey]?.remove(proc);
       }
     });
     return proc;

@@ -110,19 +110,26 @@ void main() {
     });
   });
 
-  group('a tool timeout no longer invites a blind retry', () {
-    test('the message says the work was not cancelled', () {
+  group('a tool timeout cancels instead of inviting a blind retry', () {
+    // Superseded wording: this first shipped as an honest "the command was NOT
+    // cancelled" message (which already stopped the retry loop). Per-invocation
+    // process tracking now lets the timeout actually KILL the invocation, so the
+    // assertion moved to the stronger contract — see tool_timeout_cancel_test.dart
+    // for the behavioural coverage (one call's processes die, a run-tagged
+    // background job survives).
+    test('the message says KILLED and the invocation is killed by key', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       final i = src.indexOf('final budget = _toolTimeoutFor(name);');
       expect(i, greaterThan(-1));
       final region = src.substring(i, i + 2200);
 
-      expect(region, contains('was NOT cancelled'));
+      expect(region, contains('were KILLED'));
+      expect(region, contains('killCallProcesses(callKey)'));
       expect(region, contains('do NOT re-run it blindly'));
       expect(
         region,
         isNot(contains('narrow the request (smaller path/pattern/range) and ')),
-        reason: 'the old copy told the model to retry, which duplicated '
+        reason: 'the original copy told the model to retry, which duplicated '
             'mutating commands',
       );
     });
