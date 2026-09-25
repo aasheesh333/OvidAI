@@ -351,6 +351,33 @@ class _StudioScreenState extends State<StudioScreen> {
 
   /// "Session clone": clone-once into the global registry (registry hit →
   /// same folder, no re-clone), then bind this session's workspace to it.
+  /// Moves the session's working copy to [branch], cloning it once if needed.
+  ///
+  /// CLONE-ONCE (2026-09-24): `_autoSync` rebinds only the API-based RepoCache.
+  /// Without this, picking a new branch left the file tree and editor showing
+  /// branch B while the on-disk clone, the registry binding and the pinned
+  /// `workspaceFolder` all still pointed at branch A — and a later agent
+  /// `git_clone` with no explicit branch used `sessionBranch = B`, missed the
+  /// index, and created a SECOND global clone. "Exactly once" had quietly become
+  /// "once per (repo, branch) pair, plus a stale working copy".
+  ///
+  /// Only sessions that actually work in a registry clone are repointed: a
+  /// session pinned to an arbitrary local folder must not be hijacked into one.
+  Future<void> _rebindCloneToBranch(String repo, String branch) async {
+    final s = AppState.I.activeSession;
+    if (s == null) return;
+    final sid = s.sandboxId ?? s.id;
+    try {
+      final reg = await GlobalRepoRegistry.instance();
+      if (reg.boundWorkspaceFor(sid) == null) return;
+      if (!mounted) return;
+      await _cloneIntoRegistry(reg, sid, repo, branch);
+    } catch (_) {
+      // A failed rebind must not break the branch switch: the API view already
+      // moved, and _cloneIntoRegistry reports its own failure via a toast.
+    }
+  }
+
   Future<void> _cloneIntoRegistry(
     GlobalRepoRegistry reg,
     String sid,
@@ -675,6 +702,7 @@ class _StudioScreenState extends State<StudioScreen> {
       if (picked != null && picked != current) {
         AgentService.I.sessionBranch = picked;
         await _autoSync();
+        await _rebindCloneToBranch(repo, picked);
       }
     } catch (e) {
       _toast('Branch list failed: $e');

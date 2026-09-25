@@ -4922,8 +4922,16 @@ class AppState extends ChangeNotifier {
 
   /// Pin the ACTIVE session's working folder (composer folder picker).
   /// Null/empty clears it — the agent falls back to the sandbox workspace.
-  void setSessionWorkspaceFolder(String? path) {
-    final s = activeSession;
+  /// Pins a session's working folder.
+  ///
+  /// [sessionId] defaults to the foreground session for UI callers. Agent code
+  /// MUST pass its run session: with 10+ sessions able to run in parallel, an
+  /// agent clone that pinned "the active session" would repoint whichever chat
+  /// the user happened to be looking at.
+  void setSessionWorkspaceFolder(String? path, {String? sessionId}) {
+    final s = sessionId == null
+        ? activeSession
+        : (sessionById(sessionId) ?? activeSession);
     if (s == null) return;
     final normalized = (path == null || path.trim().isEmpty)
         ? null

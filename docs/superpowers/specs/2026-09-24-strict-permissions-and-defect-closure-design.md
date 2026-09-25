@@ -636,7 +636,7 @@ Note: `CTRL6` failed once under full-suite parallel load and passed both in
 isolation and on a full-suite re-run — the same 30 s per-test default-timeout
 flakiness previously seen in `studio_git_reliability_test.dart`, not a
 regression from this phase.
-| 3 — Studio login + clone-once + label | partial | see below | label + login restore + **clone-once gaps 1 and 4** done (plus a newly found save race); gaps 2, 3, 5, 6 remain |
+| 3 — Studio login + clone-once + label | partial | see below | label + login restore + clone-once gaps **1, 2, 4, 5** done; gaps 3 and 6 remain |
 | 4a — Browser geometry | **done** | see below | real 1280×800 layout; verifier made honest |
 | 4b — CDP | deferred | — | D2 |
 | 5 — Accessibility restart | **done** | see below | stale-bind signal, cold-start probe, honest copy, screenshot capability |
@@ -908,14 +908,51 @@ persisted index with no temp files left behind; a General-mode session cloning
 its connected repo reuses the registry; **three successive new sessions produce
 exactly one clone**; an unrelated repo does not hit the registry.
 
+### Phase 3 (continued) — clone-once gaps 2 and 5
+
+**Gap 2 — the branch picker moved the API view but not the working copy.**
+`_pickBranch` set `sessionBranch` and called `_autoSync()`, which rebinds only the
+API-based `RepoCache`. The file tree and editor then showed branch B while the
+on-disk clone, the registry binding and the pinned `workspaceFolder` all still
+pointed at branch A — and a later agent `git_clone` with no explicit branch used
+`sessionBranch = B`, missed the index, and created a **second** global clone.
+"Exactly once" had quietly become "once per (repo, branch) pair, plus a stale
+working copy". New `_rebindCloneToBranch` routes through the existing
+clone-once path (`ensureCloned` + `bindSession` + `setSessionWorkspaceFolder`).
+It only fires for sessions that actually hold a registry binding, so a session
+pinned to an arbitrary local folder cannot be hijacked into a clone.
+
+**Gap 5 — two disagreeing workspace authorities.** `_sessionWorkDir` prefers the
+pinned `workspaceFolder`; the Studio terminal prefers the registry binding. The
+Studio UI set both, but the agent's `git_clone` set only the binding — so after an
+agent clone the agent's cwd and the terminal's cwd could be different
+directories. The agent path now pins the folder too.
+
+That required `setSessionWorkspaceFolder` to accept a `sessionId`: it only ever
+touched the **foreground** session, so with 10+ sessions running in parallel an
+agent clone in a background session would have repointed whichever chat the user
+happened to be looking at. It now defaults to the foreground session for UI
+callers and takes an explicit id for agent code.
+
+New tests: `test/workspace_authority_test.dart` (explicit sessionId pins that
+session and not the foreground one; no-id keeps the old behaviour; unknown id
+falls back; per-session clearing; source contracts for the branch rebind and the
+agent pin), plus a workspaceFolder assertion in `git_clone_registry_test.dart`.
+
 ### Remaining in Phase 3
 
-(2) the branch picker rebinds the API `RepoCache` but never the git clone;
 (3) `_offerCloneTarget` early-returns on an inherited folder, so switching repo
-A→B keeps working in A; (5) the registry binding and the pinned
-`workspaceFolder` disagree, so agent cwd ≠ terminal cwd; (6) the first-selected
-branch is not recorded per repo. Gap 5 matters most for Phase 2, which needs one
-authoritative Studio root.
+A→B keeps working in A; (6) the first-selected branch is not recorded per repo,
+so re-picking a repo resets it to `default_branch`.
+
+### Test infrastructure (second pass)
+
+23 in-body `.timeout(const Duration(seconds: 5|10|15))` hang guards across three
+files were firing spuriously under full-suite parallel load — the same phantom
+class as `git_clone_registry_test.dart`, and invisible when the file runs alone.
+Raised to 90 s. They are hang guards, not performance budgets; the two tests that
+deliberately assert a timeout use millisecond values and are untouched.
+Full-suite wall time fell from 7:21 to 4:54 once nothing was hitting them.
 
 ### Phase 2 detail — strict per-mode permissions
 
@@ -1084,9 +1121,9 @@ announced state.
 
 ### Verification (current)
 
-`dart analyze lib test` → 0 issues · full suite **2456 pass, 1 skipped** ·
+`dart analyze lib test` → 0 issues · full suite **2462 pass, 1 skipped** ·
 `:app:compileDebugKotlin --offline` → BUILD SUCCESSFUL · CI green through
-`75ef982`.
+`a8e74e3`.
 
 ### Phase 6 detail — plan mode is now default-deny
 

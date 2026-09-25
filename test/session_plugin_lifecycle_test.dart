@@ -688,14 +688,14 @@ void main() {
               _session('bounded'),
               reason: SessionStartReason.created,
             )
-            .timeout(const Duration(seconds: 5));
+            .timeout(const Duration(seconds: 90));
 
         expect(
           events.where((event) => event.sessionId == 'bounded'),
           hasLength(1),
           reason: 'the barrier must settle within the stage timeout, not hang',
         );
-        await readiness.timeout(const Duration(seconds: 5));
+        await readiness.timeout(const Duration(seconds: 90));
       },
     );
 

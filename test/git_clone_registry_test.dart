@@ -171,6 +171,15 @@ void main() {
       expect(bound, isNotNull);
       expect(out, contains(bound!));
       expect(out, contains('shared registry'));
+      // ONE workspace authority (2026-09-24): the registry binding alone was
+      // not enough. `_sessionWorkDir` prefers the PINNED workspaceFolder while
+      // the Studio terminal prefers the BINDING, so an agent clone left the two
+      // pointing at different directories.
+      expect(
+        AppState.I.sessionById(s.id)!.workspaceFolder,
+        bound,
+        reason: 'an agent clone must pin the same folder the registry bound',
+      );
 
       // Second clone of the same repo+branch reuses the shared copy —
       // the git runner is NOT invoked again.

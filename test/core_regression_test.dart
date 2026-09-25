@@ -174,8 +174,8 @@ void main() {
         );
         app.activeSessionId = other.id;
         releaseResponse.complete();
-        await run.timeout(const Duration(seconds: 5));
-        await serverTask.timeout(const Duration(seconds: 5));
+        await run.timeout(const Duration(seconds: 90));
+        await serverTask.timeout(const Duration(seconds: 90));
 
         // Compaction now carries the long-tail; the transport sends the
         // FULL history (no 12-message slice) — that's what this asserts.
@@ -485,7 +485,7 @@ void main() {
         ),
         throwsA(isA<HttpException>()),
       );
-      await serverTask.timeout(const Duration(seconds: 5));
+      await serverTask.timeout(const Duration(seconds: 90));
     } finally {
       await server.close(force: true);
     }
@@ -516,7 +516,7 @@ void main() {
         ),
         throwsA(isA<TimeoutException>()),
       );
-      await serverTask.timeout(const Duration(seconds: 5));
+      await serverTask.timeout(const Duration(seconds: 90));
     } finally {
       await server.close(force: true);
     }
@@ -558,7 +558,7 @@ void main() {
         await requestReceived.future;
         // Headers (80ms) + trickle — the single 150ms window must cover both.
         expect(stopwatch.elapsedMilliseconds, lessThan(400));
-        await serverTask.timeout(const Duration(seconds: 5));
+        await serverTask.timeout(const Duration(seconds: 90));
       } finally {
         await server.close(force: true);
       }
@@ -601,8 +601,8 @@ void main() {
 
     try {
       final run = AgentService.I.runTask('unused');
-      await run.timeout(const Duration(seconds: 15));
-      await serverTask.timeout(const Duration(seconds: 15));
+      await run.timeout(const Duration(seconds: 90));
+      await serverTask.timeout(const Duration(seconds: 90));
 
       final errors = AgentService.I.events
           .where((event) => event.kind == 'err')
@@ -1261,8 +1261,8 @@ void main() {
             isEmpty,
             reason: 'B must not receive any of A\'s streaming or events',
           );
-          await run.timeout(const Duration(seconds: 10));
-          await serverTask.timeout(const Duration(seconds: 10));
+          await run.timeout(const Duration(seconds: 90));
+          await serverTask.timeout(const Duration(seconds: 90));
 
           // …and A must own the complete streamed answer.
           expect(sessionB.messages, isEmpty);
@@ -1348,7 +1348,7 @@ void main() {
           agent.enqueueMessage('queued follow-up');
           await Future<void>.delayed(const Duration(milliseconds: 150));
           app.selectSession(sessionB.id);
-          await run.timeout(const Duration(seconds: 10));
+          await run.timeout(const Duration(seconds: 90));
           // The queued follow-up must start a continuation run in A (not B).
           // Wait for the second request (the continuation).
           for (var i = 0; i < 50 && requests < 2; i++) {
@@ -1792,8 +1792,8 @@ libncursesw.so.6.5←./lib/libncurses.so.6
 
         app.sendMessage('analyze this');
         final run = agent.runTask('analyze this');
-        await run.timeout(const Duration(seconds: 10));
-        await serverTask.timeout(const Duration(seconds: 10));
+        await run.timeout(const Duration(seconds: 90));
+        await serverTask.timeout(const Duration(seconds: 90));
 
         // The user message now carries the attachment chip.
         final userMsg = session.messages.firstWhere(
@@ -1854,7 +1854,7 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       req.answers['q1'] = 'Postgres';
       AgentService.I.approve(true);
 
-      final result = await handler.timeout(const Duration(seconds: 5));
+      final result = await handler.timeout(const Duration(seconds: 90));
       expect(result, contains('q1: Postgres'));
       // The Q&A is recorded in the thread as a tool card.
       final qaMsg = session.messages.lastWhere(
@@ -2150,8 +2150,8 @@ libncursesw.so.6.5←./lib/libncurses.so.6
           // Start both runs — A on active session, B background via sessionId.
           final runA = agent.runTask('prompt A', sessionId: sessionA.id);
           final runB = agent.runTask('prompt B', sessionId: sessionB.id);
-          await runA.timeout(const Duration(seconds: 10));
-          await runB.timeout(const Duration(seconds: 10));
+          await runA.timeout(const Duration(seconds: 90));
+          await runB.timeout(const Duration(seconds: 90));
 
           // Each request was made with its OWN session's model.
           expect(bodies, contains('model-a'));
@@ -2248,8 +2248,8 @@ libncursesw.so.6.5←./lib/libncurses.so.6
           // Switch to B AND setModel on the shared provider mid-run.
           app.selectSession(sessionB.id);
           app.setModel(provider.id, 'deepseek-reasoner');
-          await run.timeout(const Duration(seconds: 10));
-          await serverTask.timeout(const Duration(seconds: 10));
+          await run.timeout(const Duration(seconds: 90));
+          await serverTask.timeout(const Duration(seconds: 90));
 
           // The model sent on the wire stayed deepseek-chat.
           expect(capturedModel, 'deepseek-chat');
@@ -2369,7 +2369,7 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       try {
         await agent
             .runTask('do the task', sessionId: session.id, freshTurn: false)
-            .timeout(const Duration(seconds: 10));
+            .timeout(const Duration(seconds: 90));
         expect(requestBodies, isNotEmpty);
         final messages = requestBodies.first['messages'] as List;
         final payloadText = messages
@@ -2455,7 +2455,7 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       try {
         await agent
             .runTask('fix the bug', sessionId: session.id, freshTurn: false)
-            .timeout(const Duration(seconds: 10));
+            .timeout(const Duration(seconds: 90));
         // First request: direct answer. Second: nudge continuation with
         // pending todos injected again. Then it stops cleanly.
         expect(bodies.length, greaterThanOrEqualTo(2));
@@ -5907,7 +5907,7 @@ block</pre>
       try {
         await agent
             .runTask('do the task', sessionId: session.id)
-            .timeout(const Duration(seconds: 10));
+            .timeout(const Duration(seconds: 90));
         // The turn STARTED fresh — the stale pending item is gone before
         // the first request is assembled (C5).
         expect(

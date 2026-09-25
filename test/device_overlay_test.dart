@@ -586,7 +586,7 @@ void main() {
       notification.supportedForTest = true;
       await notification.init();
       await notification.agentWorking('working', sessionId: s.id);
-      await displayed.future.timeout(const Duration(seconds: 5));
+      await displayed.future.timeout(const Duration(seconds: 90));
       await _sendProductionNativeCall(const MethodCall('onAgentStop'));
       expect(run.activeRunId, isNull);
       expect(run.cancelRequested, isTrue);

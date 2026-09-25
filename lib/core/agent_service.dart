@@ -13181,6 +13181,19 @@ ${await _agentsMdBlock()}
                 sharedPath,
               );
             }
+            // ONE workspace authority. The registry binding and the pinned
+            // workspaceFolder used to be set by different code paths: the
+            // Studio UI set both, the agent set only the binding — and
+            // `_sessionWorkDir` prefers the PINNED folder while the Studio
+            // terminal prefers the BINDING. So after an agent clone the agent's
+            // cwd and the terminal's cwd could point at different directories.
+            final runSid = _runSession?.id;
+            if (runSid != null && runSid.isNotEmpty) {
+              AppState.I.setSessionWorkspaceFolder(
+                sharedPath,
+                sessionId: runSid,
+              );
+            }
             return 'cloned $url ✓\nshared registry: $sharedPath';
           } catch (e) {
             return 'git clone failed: $e';
