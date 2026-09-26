@@ -77,18 +77,50 @@ void main() {
     // The view really is desktop-sized at layout time.
     expect(tester.getSize(find.byKey(stubKey)), browserDesktopLogicalSize);
 
-    // ...and it is scaled to fit rather than overflowing the screen.
+    // ...and it is scaled rather than overflowing the screen.
     expect(tester.takeException(), isNull);
     final fitted = find.byType(FittedBox);
     expect(fitted, findsWidgets);
     expect(
       tester.widgetList<FittedBox>(fitted).any((f) => f.fit == BoxFit.contain),
       isTrue,
-      reason: 'the desktop view must be fit-to-screen, not clipped',
+      reason: 'the desktop view must be scaled to fit, not clipped',
     );
-    // Pinch-zoom must be available: a 1280px page on a 400px screen is
-    // otherwise unreadable.
-    expect(find.byType(InteractiveViewer), findsWidgets);
+
+    // FILLS THE HEIGHT (2026-09-25). `BoxFit.contain` scaled to the WIDTH, so on
+    // this 400x900 test device the page came out 400/1280*800 = 250dp tall
+    // inside a much taller frame — a desktop page as a postage stamp with dead
+    // space below it. It must now occupy the whole available height, with the
+    // leftover width reachable by scrolling sideways.
+    final scroller = find.byType(SingleChildScrollView);
+    expect(
+      scroller,
+      findsWidgets,
+      reason: 'the overflow width must be scrollable, not clipped away',
+    );
+    final viewportH = tester.getSize(scroller.first).height;
+    expect(
+      viewportH,
+      greaterThan(250),
+      reason: 'a width-driven contain fit left the page ~250dp tall',
+    );
+    final paintedW = browserDesktopLogicalSize.width *
+        viewportH /
+        browserDesktopLogicalSize.height;
+    expect(
+      tester.widgetList<SizedBox>(find.byType(SizedBox)).any(
+            (b) =>
+                b.height == viewportH &&
+                b.width != null &&
+                (b.width! - paintedW).abs() < 0.5,
+          ),
+      isTrue,
+      reason: 'the painted frame must span the full height at desktop aspect',
+    );
+    // The WebView itself is still laid out at REAL 1280x800 — only the paint is
+    // scaled. If the layout size followed the screen, `width=device-width` would
+    // resolve to the phone width and the page would go mobile again.
+    expect(desktopFrameCount(tester), 1);
   });
 
   testWidgets('a mobile tab still fills the screen unchanged', (tester) async {

@@ -38,12 +38,4 @@ class SecurityService {
     return _status;
   }
 
-  Future<bool> setSecureScreen(bool enabled) async {
-    try {
-      await _channel.invokeMethod<bool>('setSecureScreen', {'enabled': enabled});
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
 }

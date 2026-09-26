@@ -184,10 +184,21 @@ void main() {
 
     test('app resume retries the restore', () {
       final src = File('lib/ui/shell.dart').readAsStringSync();
-      expect(
-        src,
-        contains('GitHubService.I.retryRestoreIfNotLoggedIn()'),
-      );
+      // The UI-initiated variant, not the plain one: it also restarts the
+      // automatic backoff window, which otherwise expires after ~2.5 minutes
+      // and leaves Studio signed out for the rest of the process.
+      expect(src, contains('GitHubService.I.retryRestoreFromUi()'));
+    });
+
+    test('opening Studio retries the restore too', () {
+      final src = File('lib/ui/studio_screen.dart').readAsStringSync();
+      expect(src, contains('GitHubService.I.retryRestoreFromUi()'));
+    });
+
+    test('the status dot does not call an unknown state signed-out', () {
+      final src = File('lib/ui/studio_screen.dart').readAsStringSync();
+      expect(src, contains('gh.restoreFailed'));
+      expect(src, contains('gh.isInitializing'));
     });
 
     test('delete-all-data clears the in-memory login too', () {

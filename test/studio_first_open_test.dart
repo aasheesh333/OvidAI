@@ -22,6 +22,23 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// NOTE on ordering: the SandboxService singleton is shared across tests in
 /// this file, so the "explicit user retry" test (which fakes an installed
 /// core and flips `_runtimesRequested`) runs LAST.
+/// Deletes a staging dir tolerantly.
+///
+/// `checkExisting()`/`selfHeal` leave async work that can still be writing when
+/// the teardown runs, and a plain `deleteSync(recursive: true)` then fails with
+/// "Directory not empty" — a flake that has nothing to do with the behaviour
+/// under test. Retry briefly, then give up quietly: the next setUp wipes the
+/// same path anyway.
+void deleteQuietly(Directory d) {
+  for (var i = 0; i < 3; i++) {
+    if (!d.existsSync()) return;
+    try {
+      d.deleteSync(recursive: true);
+      return;
+    } catch (_) {}
+  }
+}
+
 void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
@@ -37,8 +54,7 @@ void main() {
     SandboxService.I.setInstallInFlightForTest(false);
     SandboxService.I.resetCheckExistingForTest();
     SandboxService.execCheckedOverrideForTest = null;
-    final staging = Directory('${Directory.systemTemp.path}/sandbox-staging');
-    if (staging.existsSync()) staging.deleteSync(recursive: true);
+    deleteQuietly(Directory('${Directory.systemTemp.path}/sandbox-staging'));
   });
 
   group('gate removal', () {
@@ -268,7 +284,7 @@ void main() {
     test('banner Retry IS the apt path', () async {
       // Fake an installed core on disk so installCoreRuntimes proceeds.
       final sandboxDir = Directory('${Directory.systemTemp.path}/sandbox');
-      if (sandboxDir.existsSync()) sandboxDir.deleteSync(recursive: true);
+      deleteQuietly(sandboxDir);
       for (final rel in [
         'bin/bash',
         'bin/coreutils',
@@ -278,9 +294,7 @@ void main() {
         file.parent.createSync(recursive: true);
         file.createSync();
       }
-      addTearDown(() {
-        if (sandboxDir.existsSync()) sandboxDir.deleteSync(recursive: true);
-      });
+      addTearDown(() => deleteQuietly(sandboxDir));
       SandboxService.I.resetCheckExistingForTest();
       SandboxService.execCheckedOverrideForTest = null;
       expect(await SandboxService.I.checkExisting(), isTrue);

@@ -116,6 +116,43 @@ void main() {
     });
   });
 
+  group('an approval mid-dispatch reaches the jail', () {
+    // Regression for the report "Allow and Always Allow both come back DENIED".
+    //
+    // The dispatch zone is built BEFORE the tool runs, but the approval prompt
+    // happens INSIDE it. With the roots frozen at dispatch time, checkPolicy
+    // denied the path the user had just approved — so the card closed and the
+    // command still failed. The roots therefore have to be a mutable scope the
+    // approval can append to, not a snapshot.
+    test('addApprovedRoots unblocks a path denied a moment earlier', () {
+      final cmd = 'cat ${outside.path}/secret.txt';
+      final scope = SandboxRootScope([root.path]);
+      String? first;
+      String? second;
+      runZoned(() {
+        first = svc.checkPolicy(['sh', '-c', cmd], hostWorkDir: root);
+        // The user tapped Allow: _checkCommandPaths records the tokens.
+        SandboxService.addApprovedRoots([outside.path]);
+        second = svc.checkPolicy(['sh', '-c', cmd], hostWorkDir: root);
+      }, zoneValues: {SandboxService.allowedRootsZoneKey: scope});
+      expect(first, isNotNull, reason: 'denied before approval');
+      expect(second, isNull, reason: 'an approved path must actually run');
+      expect(scope.roots, contains(outside.path));
+    });
+
+    test('a legacy List zone value is still honoured', () {
+      expect(
+        check('cat ${outside.path}/s.txt', zoneRoots: [outside.path]),
+        isNull,
+      );
+    });
+
+    test('outside a dispatch zone addApprovedRoots is a no-op', () {
+      // No scope installed: nothing to record, and nothing must throw.
+      expect(() => SandboxService.addApprovedRoots(['/whatever']), returnsNormally);
+    });
+  });
+
   group('runtime pseudo-paths are not targets', () {
     test('/dev, /proc and /sys are exempt', () {
       expect(check('cat /dev/null'), isNull);

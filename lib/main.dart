@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import 'core/security_service.dart';
 import 'core/state.dart';
 import 'core/theme.dart';
 import 'ui/shell.dart';
@@ -14,11 +13,6 @@ Future<void> main() async {
   await AppState.I.initializeForFirstFrame();
   // Apply persisted theme BEFORE first frame (no dark flash on light).
   Aether.dark = !AppState.I.lightTheme;
-  // Apply the persisted screenshot-protection preference before first paint
-  // so protected content is never captured in a recents thumbnail.
-  if (AppState.I.secureScreen) {
-    unawaited(SecurityService.I.setSecureScreen(true));
-  }
   // First launch goes straight to the chat shell — there is no setup gate
   // anymore. The sandbox (core + runtimes) installs on Studio first-open
   // via openStudio(); the sandboxInstalled detection above stays available

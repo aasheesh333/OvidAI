@@ -86,6 +86,11 @@ class _StudioScreenState extends State<StudioScreen> {
   void initState() {
     super.initState();
     GitHubService.I.addListener(_handleInitialAuth);
+    // Opening Studio is an explicit "try again now". The automatic restore
+    // backoff runs out after ~2.5 minutes and nothing re-arms it, so a
+    // secure-storage hiccup longer than that left this screen signed out for the
+    // rest of the process. A UI-initiated retry restarts the window.
+    unawaited(GitHubService.I.retryRestoreFromUi());
     WidgetsBinding.instance.addPostFrameCallback((_) => _handleInitialAuth());
   }
 
@@ -799,16 +804,29 @@ class _StudioScreenState extends State<StudioScreen> {
             child: AnimatedBuilder(
               animation: Listenable.merge([AppState.I, GitHubService.I]),
               builder: (context, _) {
-                final loggedIn = GitHubService.I.isLoggedIn;
+                final gh = GitHubService.I;
+                final loggedIn = gh.isLoggedIn;
+                // A storage read that FAILED, or a restore still in flight, is
+                // not a sign-out — the token is on disk and a retry may recover
+                // it seconds later. Showing red here told the user they had been
+                // logged out when the app merely could not read the key yet,
+                // which is exactly the "Studio keeps logging me out" report.
+                final unknown = !loggedIn && (gh.restoreFailed || gh.isInitializing);
                 return Tooltip(
                   message: loggedIn
                       ? 'Signed in to GitHub'
+                      : unknown
+                      ? 'Checking your GitHub sign-in…'
                       : 'Not signed in to GitHub',
                   child: Container(
                     width: 9,
                     height: 9,
                     decoration: BoxDecoration(
-                      color: loggedIn ? Aether.successLight : Aether.dangerC,
+                      color: loggedIn
+                          ? Aether.successLight
+                          : unknown
+                          ? Aether.warnLight
+                          : Aether.dangerC,
                       shape: BoxShape.circle,
                     ),
                   ),

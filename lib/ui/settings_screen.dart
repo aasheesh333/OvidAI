@@ -247,14 +247,6 @@ class SettingsScreen extends StatelessWidget {
             getter: _getNotificationsEnabled,
             setter: _setNotificationsEnabled,
           ),
-          const _SettingsSwitchTile(
-            icon: Icons.screenshot_monitor_outlined,
-            title: 'Block screenshots',
-            subtitleOn: 'ON — app hidden from screenshots & recents',
-            subtitleOff: 'OFF — screenshots and recents previews allowed',
-            getter: _getSecureScreen,
-            setter: _setSecureScreen,
-          ),
           const _DeviceIntegrityTile(),
           _settingTile(Icons.info_outline, 'About', 'Ovid AI $kAppVersion'),
         ],
@@ -467,8 +459,6 @@ bool _getNotificationsEnabled() => AppState.I.notificationsEnabled;
 Future<void> _setNotificationsEnabled(bool v) =>
     AppState.I.setNotificationsEnabled(v);
 
-bool _getSecureScreen() => AppState.I.secureScreen;
-Future<void> _setSecureScreen(bool v) => AppState.I.setSecureScreen(v);
 bool _getShowReasoning() => AppState.I.showReasoning;
 Future<void> _setShowReasoning(bool v) => AppState.I.setShowReasoning(v);
 

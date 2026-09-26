@@ -9113,7 +9113,8 @@ ${await _agentsMdBlock()}
               if (_isShellLikeTool(name)) {
                 final roots = await _sandboxAllowedRoots();
                 if (roots.isNotEmpty) {
-                  zoneValues[SandboxService.allowedRootsZoneKey] = roots;
+                  zoneValues[SandboxService.allowedRootsZoneKey] =
+                      SandboxRootScope(roots);
                 }
               }
               result = await runZoned(
@@ -13932,7 +13933,16 @@ ${await _agentsMdBlock()}
     final tokens = extractShellPathTokens(cmd);
     if (tokens.isEmpty) return null;
     final granted = await _resolveGrantedPaths(tokens, tool: tool);
-    if (granted != null) return null;
+    if (granted != null) {
+      // Every token is permitted now — it was already granted, or the user just
+      // tapped Allow / Always Allow on the card. Tell the sandbox: its target
+      // jail would otherwise deny the very path the user just said yes to,
+      // because the dispatch zone's roots were frozen BEFORE the prompt. That
+      // is what made both approval buttons look broken — the card closed and
+      // the command still came back DENIED.
+      SandboxService.addApprovedRoots(tokens);
+      return null;
+    }
     return _accessDeniedMessage(tokens, noun: 'path');
   }
 

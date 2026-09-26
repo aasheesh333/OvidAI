@@ -3203,7 +3203,7 @@ class _DetailBodyState extends State<_DetailBody> {
         children: shown.map((l) => _DiffLine(l)).toList(),
       );
     }
-    return Text(
+    return SelectableText(
       shown.join('\n'),
       style: TextStyle(
         fontFamily: Aether.mono,
@@ -3241,7 +3241,7 @@ class _ModelCompareViewState extends State<_ModelCompareView> {
     }
 
     if (sections.isEmpty) {
-      return Text(
+      return SelectableText(
         widget.content,
         style: TextStyle(fontFamily: Aether.mono, fontSize: 11.5),
       );
@@ -3404,7 +3404,7 @@ class _DiffLine extends StatelessWidget {
     return Container(
       width: double.infinity,
       color: bg,
-      child: Text(
+      child: SelectableText(
         line,
         style: TextStyle(
           fontFamily: Aether.mono,
@@ -3535,7 +3535,7 @@ class _CompactionRowState extends State<_CompactionRow> {
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(color: Aether.hairline),
               ),
-              child: Text(
+              child: SelectableText(
                 m.toolDetail!,
                 style: TextStyle(
                   fontFamily: Aether.mono,
@@ -4258,7 +4258,7 @@ class _MessageView extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
+                SelectableText(
                   m.content,
                   style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
                 ),
@@ -7820,7 +7820,7 @@ class _OvidCodeBox extends StatelessWidget {
             padding: const EdgeInsets.all(16),
             child: _isDiff
                 ? _DiffLines(code: code)
-                : Text(
+                : SelectableText(
                     code,
                     style: TextStyle(
                       fontFamily: Aether.mono,
@@ -7893,7 +7893,7 @@ class _OvidInlineCodeBuilder extends MarkdownElementBuilder {
         color: Aether.surfaceAlt,
         borderRadius: BorderRadius.circular(5),
       ),
-      child: Text(
+      child: SelectableText(
         text,
         style: TextStyle(
           fontFamily: Aether.mono,

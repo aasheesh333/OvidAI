@@ -2348,6 +2348,26 @@ audit=false
   /// would let one session's roots leak into another's command.
   static const allowedRootsZoneKey = #ovidAllowedRoots;
 
+  /// Records paths the user just approved, onto the CURRENT dispatch's root
+  /// scope, so the target jail does not re-deny them.
+  ///
+  /// WHY THIS EXISTS (2026-09-25). The dispatch zone is built BEFORE the tool
+  /// runs, but the approval prompt happens INSIDE it — `_checkCommandPaths`
+  /// asks the user, and only then is the path permitted. With the roots frozen
+  /// at dispatch time, `checkPolicy`'s target jail denied the very path the user
+  /// had just said yes to, so "Allow" and "Always Allow" both looked broken:
+  /// the card closed, and the command came back DENIED.
+  ///
+  /// Scope, not a static: the roots belong to one invocation, so a parallel
+  /// session's approval can never widen another session's jail.
+  static void addApprovedRoots(Iterable<String> paths) {
+    final scope = Zone.current[allowedRootsZoneKey];
+    if (scope is! SandboxRootScope) return;
+    for (final p in paths) {
+      if (p.trim().isNotEmpty) scope.roots.add(p);
+    }
+  }
+
   /// PR32 test seam: access to the tracked-process registry.
   @visibleForTesting
   List<Process> get liveProcessesForTest => _liveProcesses;
@@ -2643,6 +2663,7 @@ audit=false
     final zoneRoots = Zone.current[allowedRootsZoneKey];
     final roots = <String>{
       ...baseRoots,
+      if (zoneRoots is SandboxRootScope) ...zoneRoots.roots,
       if (zoneRoots is List) ...zoneRoots.whereType<String>(),
     }.toList();
     if (effectiveCwd != null && roots.isNotEmpty) {
@@ -3774,4 +3795,16 @@ echo INSTALLED
     _gitCredFilePath = null;
     _gitCredFileToken = null;
   }
+}
+
+
+/// The filesystem roots one dispatch may reach.
+///
+/// Mutable on purpose: [SandboxService.addApprovedRoots] appends a path the user
+/// approved mid-invocation, which is the only way an approval can reach the
+/// target jail — the zone is created before the prompt is shown.
+class SandboxRootScope {
+  SandboxRootScope(Iterable<String> initial) : roots = <String>{...initial};
+
+  final Set<String> roots;
 }

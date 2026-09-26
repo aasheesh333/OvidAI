@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/theme.dart';
 import '../core/agent_service.dart';
@@ -379,6 +380,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 ],
               ),
             ),
+            // Google sign-in cannot complete inside an embedded WebView, so say
+            // so and offer the real browser instead of leaving the user staring
+            // at "this browser or app may not be secure".
+            if (tab != null) _ExternalSignInNotice(url: tab.url),
             // Progress bar
             if (tab?.loading ?? false)
               LinearProgressIndicator(
@@ -482,18 +487,38 @@ class _SizedBrowserView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!tab.desktopMode) return child;
-    return InteractiveViewer(
-      minScale: 0.9,
-      maxScale: 5,
-      child: FittedBox(
-        fit: BoxFit.contain,
-        alignment: Alignment.topLeft,
-        child: SizedBox(
-          width: desktopWidth,
-          height: desktopHeight,
-          child: child,
-        ),
-      ),
+    // FILL THE HEIGHT (2026-09-25). `BoxFit.contain` scaled to the WIDTH, so on
+    // a phone the 1280×800 frame came out ~225dp tall inside a much taller
+    // parent: a desktop page rendered as a postage stamp with dead space below
+    // it. Scaling to the height instead makes the page occupy the full browser
+    // area — ~70-80% of the device screen once the app bar, tab strip and
+    // omnibar are accounted for — and the leftover width scrolls sideways, the
+    // way a tall/tablet viewport reads a desktop layout.
+    //
+    // The inner SizedBox stays exactly 1280×800: that is what makes
+    // `width=device-width` resolve to a real desktop width. Only the PAINT is
+    // scaled, never the layout.
+    return LayoutBuilder(
+      builder: (context, c) {
+        if (!c.maxHeight.isFinite || c.maxHeight <= 0) return child;
+        final scale = c.maxHeight / desktopHeight;
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: desktopWidth * scale,
+            height: c.maxHeight,
+            child: FittedBox(
+              fit: BoxFit.contain,
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: desktopWidth,
+                height: desktopHeight,
+                child: child,
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -531,6 +556,59 @@ class _AgentDot extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+
+/// Hosts whose sign-in flow refuses to run inside an embedded WebView.
+///
+/// Google is the one users actually hit. Stripping the `; wv` token from the
+/// User-Agent (which [BrowserTab.mobileUserAgent] already does) is not enough:
+/// Android WebView also sends `X-Requested-With: <package>` on every request and
+/// there is no supported way to remove it, so Google still identifies the
+/// embedded browser and answers "this browser or app may not be secure". Rather
+/// than let that look like an Ovid bug, name the cause and offer the escape
+/// hatch — the same reason GitHub's device flow opens externally.
+@visibleForTesting
+bool isExternalSignInUrl(String url) {
+  final u = Uri.tryParse(url);
+  if (u == null) return false;
+  final h = u.host.toLowerCase();
+  return h == 'accounts.google.com' ||
+      h.endsWith('.accounts.google.com') ||
+      h == 'accounts.youtube.com';
+}
+
+class _ExternalSignInNotice extends StatelessWidget {
+  const _ExternalSignInNotice({required this.url});
+
+  final String url;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isExternalSignInUrl(url)) return const SizedBox.shrink();
+    return MaterialBanner(
+      backgroundColor: Aether.surfaceAlt,
+      leading: const Icon(Icons.gpp_maybe_outlined),
+      content: const Text(
+        'Google blocks sign-in inside an embedded browser. Open it in Chrome '
+        'to finish, then come back — your session cookie is kept here.',
+        style: TextStyle(fontSize: 12.5, height: 1.4),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () async {
+            try {
+              await launchUrl(
+                Uri.parse(url),
+                mode: LaunchMode.externalApplication,
+              );
+            } catch (_) {}
+          },
+          child: const Text('Open in Chrome'),
+        ),
+      ],
     );
   }
 }

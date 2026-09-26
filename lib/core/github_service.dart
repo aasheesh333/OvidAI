@@ -46,6 +46,16 @@ class GitHubAuthException implements Exception {
 /// revokes it. So there is nothing to persist and no
 /// `grant_type=refresh_token` exchange to attempt on 401 — the
 /// confirm-before-wipe + background-retry path below is the whole story.
+/// The outcome of a stored-token read: the value, plus whether exhausting the
+/// retries meant the storage THREW (unknown) or the key was genuinely absent
+/// (signed out). Those two facts need different handling and used to be
+/// collapsed into `null`.
+class TokenReadResult {
+  const TokenReadResult(this.token, {required this.failed});
+  final String? token;
+  final bool failed;
+}
+
 class GitHubService extends ChangeNotifier {
   GitHubService._();
   static final GitHubService I = GitHubService._();
@@ -116,8 +126,13 @@ class GitHubService extends ChangeNotifier {
   /// login" and the user lands signed out on every process death. After
   /// the attempts are exhausted the read is treated as absent, exactly as
   /// a clean miss would be.
-  @visibleForTesting
-  static Future<String?> readTokenWithRetriesForTest(
+  /// One read attempt's outcome. Returned per-call rather than through the
+  /// shared [lastReadFailedForTest] static, because concurrent callers used to
+  /// clobber each other's signal: a successful read from `initialize()` reset the
+  /// flag while a resume-triggered retry was mid-flight, so the retry concluded
+  /// "no token stored" instead of "the read failed", skipped its own retry, and
+  /// Studio sat signed out for the whole launch.
+  static Future<TokenReadResult> readTokenResult(
     Future<String?> Function() read,
   ) async {
     for (var attempt = 0; attempt < 3; attempt++) {
@@ -125,22 +140,21 @@ class GitHubService extends ChangeNotifier {
         await Future<void>.delayed(Duration(milliseconds: 100 * attempt));
       }
       try {
-        final v = await read();
-        lastReadFailedForTest = false;
-        return v;
+        return TokenReadResult(await read(), failed: false);
       } catch (_) {
         // Transient secure-storage failure — back off and try again.
       }
     }
-    // Every attempt THREW. That is not the same as reading the key and finding
-    // nothing, and treating it as the same was the second login-loss path: on
-    // Android a Keystore / EncryptedSharedPreferences read can fail for far
-    // longer than this ~300 ms window (cold-start contention, an OS update, a
-    // damaged Tink keyset), and the app then reported "signed out" for the whole
-    // launch while the token sat intact on disk — so the next launch looked
-    // fine again. Callers must consult [lastReadFailedForTest] and retry.
-    lastReadFailedForTest = true;
-    return null;
+    return const TokenReadResult(null, failed: true);
+  }
+
+  @visibleForTesting
+  static Future<String?> readTokenWithRetriesForTest(
+    Future<String?> Function() read,
+  ) async {
+    final r = await readTokenResult(read);
+    lastReadFailedForTest = r.failed;
+    return r.token;
   }
 
   /// True when the most recent [readTokenWithRetriesForTest] exhausted its
@@ -188,18 +202,31 @@ class GitHubService extends ChangeNotifier {
   /// A successful retry restores the login without any user action. A failed one
   /// keeps [restoreFailed] true and re-arms the backoff, so the UI can decline
   /// to latch a "please sign in" prompt on a state that may still resolve.
+  /// A UI-initiated restore (opening Studio, returning to the app).
+  ///
+  /// Restarts the automatic backoff first: the 5s/30s/2min window is only ~2.5
+  /// minutes long, and once it is exhausted nothing re-arms it. A secure-storage
+  /// hiccup lasting longer than that — cold-start contention, an OS update — left
+  /// Studio signed out for the rest of the process with no way to recover short
+  /// of a full app kill. An explicit retry should always get a fresh window.
+  Future<void> retryRestoreFromUi() async {
+    _restoreRetryIndex = 0;
+    await retryRestoreIfNotLoggedIn();
+  }
+
   Future<void> retryRestoreIfNotLoggedIn() async {
     if (isLoggedIn) {
       restoreFailed = false;
       return;
     }
     final generation = _authGeneration;
-    final token = await readTokenWithRetriesForTest(
+    final read = await readTokenResult(
       () => _secureStorage.read(key: _tokenStorageKey),
     );
     if (generation != _authGeneration) return;
+    final token = read.token;
     if (token == null || token.isEmpty) {
-      restoreFailed = lastReadFailedForTest;
+      restoreFailed = read.failed;
       if (restoreFailed) _scheduleRestoreRetry(generation);
       return;
     }
@@ -228,15 +255,18 @@ class GitHubService extends ChangeNotifier {
     final c = client ?? http.Client();
     final ownsClient = client == null;
     try {
-      final token = await readTokenWithRetriesForTest(
+      final read = await readTokenResult(
         () => _secureStorage.read(key: _tokenStorageKey),
       );
       if (generation != _authGeneration) return;
+      final token = read.token;
       if (token == null || token.isEmpty) {
         // "No token stored" and "storage could not be read" are DIFFERENT
         // facts. Only the second is retryable, and it must never be presented
-        // to the user as a sign-out.
-        restoreFailed = lastReadFailedForTest;
+        // to the user as a sign-out. Read per-call, not from the shared static:
+        // a concurrent retry used to reset that flag mid-flight and this caller
+        // would then conclude "signed out" and skip its own retry.
+        restoreFailed = read.failed;
         if (restoreFailed) {
           _isInitializing = false;
           notifyListeners();

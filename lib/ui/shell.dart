@@ -85,7 +85,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
         // A secure-storage read that FAILED at cold start is not a sign-out:
         // the token is still on disk and usually readable moments later. Retry
         // it here so Studio does not sit "logged out" for the whole launch.
-        unawaited(GitHubService.I.retryRestoreIfNotLoggedIn());
+        unawaited(GitHubService.I.retryRestoreFromUi());
         // Control overlay is visible only while backgrounded.
         unawaited(AgentService.I.setAppForegrounded(true));
         // PR32: a run that survived the background must keep its

@@ -34,7 +34,6 @@ void main() {
           call,
         ) async {
           if (call.method == 'getSecurityStatus') return status;
-          if (call.method == 'setSecureScreen') return true;
           return null;
         });
     addTearDown(() {

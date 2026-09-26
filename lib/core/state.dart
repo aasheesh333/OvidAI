@@ -3060,7 +3060,6 @@ class AppState extends ChangeNotifier {
       shareStudioOnRestart = prefs.getBool(_kShareStudioOnRestart) ?? true;
       shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? false;
       lightTheme = prefs.getBool(_kTheme) ?? false;
-      secureScreen = prefs.getBool(_kSecureScreen) ?? false;
       memoryEnabled = prefs.getBool(_kMemoryEnabled) ?? true;
       showReasoning = prefs.getBool(_kShowReasoning) ?? true;
       githubSync = prefs.getBool(_kGithubSync) ?? true;
@@ -4234,10 +4233,6 @@ class AppState extends ChangeNotifier {
   static const _kTheme = 'ovid_light_theme';
   bool lightTheme = false;
 
-  /// Block screenshots + recents thumbnails (FLAG_SECURE). Off by default so
-  /// the user opts in; applied on launch and toggle via SecurityService.
-  static const _kSecureScreen = 'ovid_secure_screen';
-  bool secureScreen = false;
 
   /// Native device-integrity probe results (root / hooking framework /
   /// debugger). Refreshed at readiness; drives the Settings integrity row
@@ -4475,19 +4470,6 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kTheme, v);
-    } catch (_) {}
-  }
-
-  /// Toggle screenshot protection (FLAG_SECURE) and persist the choice.
-  Future<void> setSecureScreen(bool v) async {
-    secureScreen = v;
-    notifyListeners();
-    try {
-      await SecurityService.I.setSecureScreen(v);
-    } catch (_) {}
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_kSecureScreen, v);
     } catch (_) {}
   }
 
