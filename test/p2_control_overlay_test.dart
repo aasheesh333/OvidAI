@@ -46,12 +46,22 @@ void main() {
     expect(agent.contains('device_tap'), isTrue);
   });
 
-  test('overlay is see-through (alpha lowered)', () {
+  test('the overlay barely occludes the app it is steering', () {
     final kt = File(
       'android/app/src/main/kotlin/com/dhanuk/ovidai/OvidAccessibilityService.kt',
     ).readAsStringSync();
-    expect(kt.contains('0xB31A1A1A'), isTrue);
-    expect(kt.contains('0xE61A1A1A'), isFalse);
+    // SUPERSEDED 2026-09-25. This used to pin a 70%-opaque dark pill
+    // (0xB31A1A1A) and assert the more opaque variant was absent. The redesign
+    // replaced the always-expanded pill with a 48dp circle that expands only on
+    // tap, so occlusion is now bounded by SIZE rather than by alpha — a small
+    // solid white circle hides far less of the screen than a permanently open
+    // translucent bar did. Pinning the old colour would have frozen the very
+    // thing the owner asked to change.
+    expect(kt.contains('0xB31A1A1A'), isFalse);
+    expect(kt.contains('overlayCircleView'), isTrue);
+    expect(kt.contains('(48 * density)'), isTrue, reason: 'collapsed footprint');
+    // And the expanded surface is the simple white the owner asked for.
+    expect(kt.contains('private fun overlayBoxView'), isTrue);
   });
 
   test('AI questions surface in the overlay and are answered there', () {

@@ -98,6 +98,7 @@ void main() {
             final pending = gate;
             if (pending != null &&
                 call.method != 'deviceRead' &&
+                call.method != 'deviceForegroundPackage' &&
                 call.method != 'deviceServiceEnabled') {
               return pending.future;
             }
@@ -276,6 +277,9 @@ void main() {
             calls.add(call);
             if (call.method == 'deviceRead') {
               return okRead('com.example.notes');
+            }
+            if (call.method == 'deviceForegroundPackage') {
+              return {'package': 'com.example.notes'};
             }
             final pending = gate;
             if (pending != null) return pending.future;

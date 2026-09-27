@@ -570,15 +570,58 @@ class _AgentDot extends StatelessWidget {
 /// embedded browser and answers "this browser or app may not be secure". Rather
 /// than let that look like an Ovid bug, name the cause and offer the escape
 /// hatch — the same reason GitHub's device flow opens externally.
+/// Identity providers that refuse to sign a user in from an embedded WebView.
+///
+/// These are not Ovid bugs and cannot be fixed by spoofing harder. Each of them
+/// detects the embedded browser through signals the app does not control —
+/// Android WebView sends `X-Requested-With: <package>` on every request and
+/// there is no supported way to remove it — and then answers "this browser or
+/// app may not be secure", "disallowed_useragent", or a blank redirect loop.
+/// Stripping the `; wv` token from the User-Agent (which
+/// [BrowserTab.mobileUserAgent] already does) is necessary but not sufficient.
+///
+/// So name the provider, say plainly why it will not work here, and offer the
+/// real browser. GitHub already does the equivalent thing by using the device
+/// flow with `LaunchMode.externalApplication`.
+const Map<String, String> _externalSignInHosts = {
+  'accounts.google.com': 'Google',
+  'accounts.youtube.com': 'Google',
+  'login.microsoftonline.com': 'Microsoft',
+  'login.live.com': 'Microsoft',
+  'login.microsoft.com': 'Microsoft',
+  'appleid.apple.com': 'Apple',
+  'id.apple.com': 'Apple',
+  'facebook.com': 'Facebook',
+  'm.facebook.com': 'Facebook',
+  'www.facebook.com': 'Facebook',
+  'linkedin.com': 'LinkedIn',
+  'www.linkedin.com': 'LinkedIn',
+  'x.com': 'X',
+  'twitter.com': 'X',
+};
+
+/// The provider name when [url] is a sign-in page that will not complete inside
+/// an embedded WebView, else null.
+///
+/// Suffix matching is exact-host-or-dot-boundary only: `accounts.google.com` and
+/// `mail.accounts.google.com` match, while `accounts.google.com.evil.example`
+/// must not.
 @visibleForTesting
-bool isExternalSignInUrl(String url) {
+String? externalSignInProvider(String url) {
   final u = Uri.tryParse(url);
-  if (u == null) return false;
+  if (u == null) return null;
   final h = u.host.toLowerCase();
-  return h == 'accounts.google.com' ||
-      h.endsWith('.accounts.google.com') ||
-      h == 'accounts.youtube.com';
+  if (h.isEmpty) return null;
+  final direct = _externalSignInHosts[h];
+  if (direct != null) return direct;
+  for (final entry in _externalSignInHosts.entries) {
+    if (h.endsWith('.${entry.key}')) return entry.value;
+  }
+  return null;
 }
+
+@visibleForTesting
+bool isExternalSignInUrl(String url) => externalSignInProvider(url) != null;
 
 class _ExternalSignInNotice extends StatelessWidget {
   const _ExternalSignInNotice({required this.url});
@@ -587,14 +630,17 @@ class _ExternalSignInNotice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (!isExternalSignInUrl(url)) return const SizedBox.shrink();
+    final provider = externalSignInProvider(url);
+    if (provider == null) return const SizedBox.shrink();
     return MaterialBanner(
       backgroundColor: Aether.surfaceAlt,
       leading: const Icon(Icons.gpp_maybe_outlined),
-      content: const Text(
-        'Google blocks sign-in inside an embedded browser. Open it in Chrome '
-        'to finish, then come back — your session cookie is kept here.',
-        style: TextStyle(fontSize: 12.5, height: 1.4),
+      content: Text(
+        '$provider blocks sign-in inside an embedded browser — this is the '
+        'provider\'s own rule, not an Ovid setting. Open it in your real '
+        'browser to finish. This tab keeps a separate cookie jar, so the '
+        'sign-in will not carry back into it automatically.',
+        style: const TextStyle(fontSize: 12.5, height: 1.4),
       ),
       actions: [
         TextButton(
@@ -606,7 +652,7 @@ class _ExternalSignInNotice extends StatelessWidget {
               );
             } catch (_) {}
           },
-          child: const Text('Open in Chrome'),
+          child: const Text('Open in browser'),
         ),
       ],
     );

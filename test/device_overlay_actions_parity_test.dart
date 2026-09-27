@@ -309,6 +309,9 @@ void main() {
         .setMockMethodCallHandler(channel, (call) async {
           calls.add(call);
           if (call.method == 'deviceRead') return liveRead('com.example.notes');
+          if (call.method == 'deviceForegroundPackage') {
+            return {'package': 'com.example.notes'};
+          }
           return true;
         });
     DeviceControlService.setMethodChannelForTest(channel);
@@ -368,6 +371,9 @@ void main() {
         .setMockMethodCallHandler(channel, (call) async {
           calls.add(call);
           if (call.method == 'deviceRead') return liveRead('com.example.notes');
+          if (call.method == 'deviceForegroundPackage') {
+            return {'package': 'com.example.notes'};
+          }
           final fn = override;
           if (fn != null) return fn(call);
           return true;
@@ -464,6 +470,9 @@ void main() {
         .setMockMethodCallHandler(channel, (call) async {
           calls.add(call);
           if (call.method == 'deviceRead') return liveRead('com.example.notes');
+          if (call.method == 'deviceForegroundPackage') {
+            return {'package': 'com.example.notes'};
+          }
           final pending = gate;
           if (pending != null) return pending.future;
           return true;
@@ -523,6 +532,9 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
           if (call.method == 'deviceRead') return liveRead('com.example.notes');
+          if (call.method == 'deviceForegroundPackage') {
+            return {'package': 'com.example.notes'};
+          }
           final fn = override;
           if (fn != null) return fn(call);
           return true;

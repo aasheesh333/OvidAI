@@ -799,6 +799,107 @@ class MainActivity : FlutterActivity() {
                             )
                         }
                     }
+                    // ── Full human gesture set (2026-09-25) ────────────────
+                    // Double/triple tap, hold-then-drag, two-finger pinch and
+                    // two-finger swipe. Each is ONE dispatchGesture with timed
+                    // strokes: sending two separate taps never reads as a
+                    // double-click, so galleries, maps and selection handles
+                    // ignored the old tool set entirely.
+                    "deviceMultiTap" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        val x = call.argument<Number>("x")?.toFloat()
+                        val y = call.argument<Number>("y")?.toFloat()
+                        if (x == null || y == null) {
+                            result.error("BAD_ARGS", "deviceMultiTap requires x and y.", null)
+                        } else {
+                            completeDeviceAction(
+                                result,
+                                service.multiTap(
+                                    x,
+                                    y,
+                                    (call.argument<Number>("count")?.toInt() ?: 2).coerceIn(2, 4),
+                                    call.argument<Number>("interval_ms")?.toLong() ?: 120L,
+                                ),
+                            )
+                        }
+                    }
+                    "deviceDrag" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        val fromX = call.argument<Number>("from_x")?.toFloat()
+                        val fromY = call.argument<Number>("from_y")?.toFloat()
+                        val toX = call.argument<Number>("to_x")?.toFloat()
+                        val toY = call.argument<Number>("to_y")?.toFloat()
+                        if (fromX == null || fromY == null || toX == null || toY == null) {
+                            result.error("BAD_ARGS", "deviceDrag requires from_x, from_y, to_x and to_y.", null)
+                        } else {
+                            completeDeviceAction(
+                                result,
+                                service.drag(
+                                    fromX,
+                                    fromY,
+                                    toX,
+                                    toY,
+                                    call.argument<Number>("hold_ms")?.toLong() ?: 250L,
+                                    call.argument<Number>("duration_ms")?.toLong() ?: 600L,
+                                ),
+                            )
+                        }
+                    }
+                    "devicePinch" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        val cx = call.argument<Number>("x")?.toFloat()
+                        val cy = call.argument<Number>("y")?.toFloat()
+                        val from = call.argument<Number>("from_radius")?.toFloat()
+                        val to = call.argument<Number>("to_radius")?.toFloat()
+                        if (cx == null || cy == null || from == null || to == null) {
+                            result.error("BAD_ARGS", "devicePinch requires x, y, from_radius and to_radius.", null)
+                        } else {
+                            completeDeviceAction(
+                                result,
+                                service.pinch(
+                                    cx,
+                                    cy,
+                                    from,
+                                    to,
+                                    call.argument<Number>("duration_ms")?.toLong() ?: 400L,
+                                ),
+                            )
+                        }
+                    }
+                    "deviceTwoFingerSwipe" -> {
+                        val service = deviceService(result) ?: return@setMethodCallHandler
+                        val fromX = call.argument<Number>("from_x")?.toFloat()
+                        val fromY = call.argument<Number>("from_y")?.toFloat()
+                        val toX = call.argument<Number>("to_x")?.toFloat()
+                        val toY = call.argument<Number>("to_y")?.toFloat()
+                        if (fromX == null || fromY == null || toX == null || toY == null) {
+                            result.error("BAD_ARGS", "deviceTwoFingerSwipe requires from_x, from_y, to_x and to_y.", null)
+                        } else {
+                            completeDeviceAction(
+                                result,
+                                service.twoFingerSwipe(
+                                    fromX,
+                                    fromY,
+                                    toX,
+                                    toY,
+                                    call.argument<Number>("duration_ms")?.toLong() ?: 500L,
+                                    call.argument<Number>("separation")?.toFloat() ?: 120f,
+                                ),
+                            )
+                        }
+                    }
+                    // Foreground package WITHOUT a tree walk. The per-action
+                    // sensitive-target guard only needs the package name; paying
+                    // for a full readScreen before every tap was the single
+                    // biggest avoidable cost in Control mode.
+                    "deviceForegroundPackage" -> {
+                        val service = OvidAccessibilityService.instance
+                        if (service == null) {
+                            result.error("SERVICE_DISABLED", "Accessibility service is not running.", null)
+                        } else {
+                            result.success(mapOf("package" to service.foregroundPackage()))
+                        }
+                    }
                     "deviceSystemNav" -> {
                         val service = deviceService(result) ?: return@setMethodCallHandler
                         val action = call.argument<String>("action")
@@ -886,6 +987,13 @@ class MainActivity : FlutterActivity() {
                     "deviceOverlayLive" -> {
                         OvidAccessibilityService.instance
                             ?.setOverlayLive(call.argument<Boolean>("live") == true)
+                        result.success(true)
+                    }
+                    // Run-state colour for the circle ring + edge glow:
+                    // running / permission / error / idle.
+                    "deviceOverlayState" -> {
+                        OvidAccessibilityService.instance
+                            ?.setOverlayState(call.argument<String>("state").orEmpty())
                         result.success(true)
                     }
                     "requestBatteryExemption" -> {

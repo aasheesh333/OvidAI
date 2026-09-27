@@ -182,7 +182,17 @@ void main() {
     // the full git workflow for any cloned repo) plus a `gh` mention in
     // the run_shell description. Schemas kept terse; ceiling raised to
     // 8600 to cover it.
+    //
+    // Measured 2026-09-25: 8808 (~+208). Intentional — the "full human
+    // gestures" batch adds eight tools the owner reported as missing:
+    // device_double_tap, device_drag, device_pinch, device_two_finger_swipe
+    // (Control mode could not produce a double-click, a hold-then-move drag, a
+    // pinch-zoom or a two-finger scroll at all) and browser_double_click,
+    // browser_tap_at, browser_long_press, browser_swipe (browser_click is
+    // element.click(), so dblclick handlers, context menus, canvas hit-testing
+    // and touch scrollers were unreachable). Descriptions kept terse; ceiling
+    // raised to 8900.
     expect(tools.length, greaterThan(80));
-    expect(approxTokens, lessThan(8600));
+    expect(approxTokens, lessThan(8900));
   });
 }

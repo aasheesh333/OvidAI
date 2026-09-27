@@ -395,6 +395,121 @@ class DeviceControlService {
     }),
   );
 
+  /// Double / triple tap. Clamped to 2-4 taps natively; the interval stays
+  /// inside the platform double-tap timeout so the target app reads it as a
+  /// multi-click rather than separate taps.
+  /// Clamps a requested tap count into the range a platform actually recognises
+  /// as a multi-click. 1 is just a tap (use [tap]); beyond 4 no app has a
+  /// handler, and an over-long stroke list is only a way to fail.
+  @visibleForTesting
+  static int multiTapClampForTest(int count) => count.clamp(2, 4);
+
+  Future<Object?> multiTap({
+    required num x,
+    required num y,
+    int count = 2,
+    int? intervalMs,
+  }) => _invokeGuarded(
+    () => _channel.invokeMethod<Object?>('deviceMultiTap', {
+      'x': x,
+      'y': y,
+      'count': multiTapClampForTest(count),
+      'interval_ms': ?intervalMs,
+    }),
+  );
+
+  /// Hold at the origin, then move — the drag that picks up icons, selection
+  /// handles, sliders and reorder rows.
+  Future<Object?> drag({
+    required num fromX,
+    required num fromY,
+    required num toX,
+    required num toY,
+    int? holdMs,
+    int? durationMs,
+  }) => _invokeGuarded(
+    () => _channel.invokeMethod<Object?>('deviceDrag', {
+      'from_x': fromX,
+      'from_y': fromY,
+      'to_x': toX,
+      'to_y': toY,
+      'hold_ms': ?holdMs,
+      'duration_ms': ?durationMs,
+    }),
+  );
+
+  /// Two-finger pinch (toRadius < fromRadius) or spread (toRadius > fromRadius).
+  Future<Object?> pinch({
+    required num x,
+    required num y,
+    required num fromRadius,
+    required num toRadius,
+    int? durationMs,
+  }) => _invokeGuarded(
+    () => _channel.invokeMethod<Object?>('devicePinch', {
+      'x': x,
+      'y': y,
+      'from_radius': fromRadius,
+      'to_radius': toRadius,
+      'duration_ms': ?durationMs,
+    }),
+  );
+
+  /// Two-finger swipe in one direction, for lists/pages that treat a single
+  /// finger as a back-swipe, a carousel page or a drawer.
+  Future<Object?> twoFingerSwipe({
+    required num fromX,
+    required num fromY,
+    required num toX,
+    required num toY,
+    int? durationMs,
+    num? separation,
+  }) => _invokeGuarded(
+    () => _channel.invokeMethod<Object?>('deviceTwoFingerSwipe', {
+      'from_x': fromX,
+      'from_y': fromY,
+      'to_x': toX,
+      'to_y': toY,
+      'duration_ms': ?durationMs,
+      'separation': ?separation,
+    }),
+  );
+
+  /// The foreground package, without walking the accessibility tree.
+  ///
+  /// Control mode used to run a full `readRaw()` before every single action just
+  /// to confirm which app was in front. On an animated screen the node cache is
+  /// dirty on every content-change event, so that guard cost a 300-node binder
+  /// walk on the main thread per tap — the biggest avoidable slice of the
+  /// "control mode is very slow" report. The guard only needs the package name.
+  Future<String?> foregroundPackage() async {
+    Object? r;
+    try {
+      r = await _invokeGuarded(
+        () => _channel.invokeMethod<Object?>('deviceForegroundPackage'),
+      );
+    } catch (_) {
+      r = null;
+    }
+    // A Map WITH a `package` key means the probe answered — including when the
+    // value is null, which is the real "no readable foreground window" case and
+    // must stay a denial. Requiring the key (rather than accepting any Map)
+    // matters: an unrelated native payload would otherwise be read as "no
+    // foreground app" and silently disable the sensitive-target guard.
+    if (r is Map && r.containsKey('package')) return r['package']?.toString();
+    // Anything else means the native side does not implement the cheap probe
+    // (an older build, or a test double that only stubs deviceRead). Fall back
+    // to the full read: a missing OPTIMISATION must never silently become a
+    // missing SECURITY CHECK, or the sensitive-target guard would stop running
+    // on exactly the builds where it was never verified.
+    try {
+      final raw = await readRaw();
+      return raw['package']?.toString();
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<Object?> systemNav(String action) => _invokeGuarded(
     () => _channel.invokeMethod<Object?>('deviceSystemNav', {'action': action}),
   );

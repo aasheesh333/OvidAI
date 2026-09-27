@@ -221,12 +221,14 @@ void main() {
       final src = kotlinServiceSource();
       expect(src, contains('fun setOverlayLive('));
       expect(src, contains('overlayLiveAnimator'));
-      expect(src, contains('overlayLiveDot'));
+      // The 2026-09-25 redesign dropped the separate 8dp dot: the collapsed
+      // overlay IS a circle now, so the circle itself breathes.
+      expect(src, contains('overlayCircle?.alpha'));
     });
 
     test('live pulse is subtle and cancellable, never leaks', () {
       final src = kotlinServiceSource();
-      // Subtle: small scale/alpha band, ~1.4s loop, dot 8dp.
+      // Subtle: small scale/alpha band, ~1.4s loop.
       expect(src, contains('1.08f'));
       expect(src, contains('1400'));
       expect(src, contains('cancel()'));

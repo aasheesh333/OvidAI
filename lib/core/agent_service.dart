@@ -843,6 +843,7 @@ class AgentService extends ChangeNotifier {
       // session is active, so no invisible touch target survives.
       unawaited(hideDeviceOverlay());
       unawaited(setOverlayLive(false));
+      unawaited(setOverlayState(overlayStateIdle));
     }
     // An explicit mode set means the plan preset no longer owns the
     // session's read-only mode: clear the remembered pre-plan mode so a
@@ -859,6 +860,46 @@ class AgentService extends ChangeNotifier {
   // Every session owns an independent _AgentRun (cancel flag, HTTP
   // request, queue, approval, jobs, plan mode, live streaming buffers).
   // 10+ sessions can run at once; switching sessions NEVER stops a run.
+  /// A full human tap at viewport coordinates: pointer, touch AND mouse phases,
+  /// then the click. Sites listen to any subset of those families, and
+  /// dispatching only one is why synthetic taps used to be ignored by canvas,
+  /// map and video-player surfaces.
+  static String _humanTapJs(double x, double y) => """
+(() => {
+  const el = document.elementFromPoint($x, $y);
+  if (!el) return 'nothing at $x,$y';
+  const o = {bubbles:true, cancelable:true, clientX:$x, clientY:$y,
+             button:0, buttons:1, detail:1};
+  el.dispatchEvent(new PointerEvent('pointerdown',
+    {...o, pointerId:1, pointerType:'touch', isPrimary:true}));
+  try {
+    const t = new Touch({identifier:1, target:el, clientX:$x, clientY:$y});
+    el.dispatchEvent(new TouchEvent('touchstart', {touches:[t],
+      targetTouches:[t], changedTouches:[t], bubbles:true, cancelable:true}));
+    el.dispatchEvent(new TouchEvent('touchend', {touches:[],
+      targetTouches:[], changedTouches:[t], bubbles:true, cancelable:true}));
+  } catch (e) {}
+  el.dispatchEvent(new MouseEvent('mousedown', o));
+  el.dispatchEvent(new PointerEvent('pointerup',
+    {...o, buttons:0, pointerId:1, pointerType:'touch', isPrimary:true}));
+  el.dispatchEvent(new MouseEvent('mouseup', {...o, buttons:0}));
+  el.dispatchEvent(new MouseEvent('click', o));
+  return 'tapped ' + el.tagName.toLowerCase() + ' at $x,$y';
+})()""";
+
+  /// Per-tool cap for the spill-to-disk path.
+  ///
+  /// `device_read` gets a much larger budget than the default. A 300-node
+  /// accessibility dump is 15-60 KB, so the 6000-char cap handed the model the
+  /// head and tail and dropped the MIDDLE of the screen — the part it had not
+  /// seen yet. It then re-read, got truncated the same way, and re-read again:
+  /// a large share of the "control mode is very slow" report was this loop, not
+  /// the gestures themselves.
+  static int _toolOutputCapFor(String name) => switch (name) {
+    'device_read' => 24000,
+    _ => 6000,
+  };
+
   /// Tools that execute a shell command, and therefore need the sandbox's
   /// target jail scoped to what this session may actually reach.
   static bool _isShellLikeTool(String name) =>
@@ -949,7 +990,20 @@ class AgentService extends ChangeNotifier {
   String? get activeRunId => _runResolved.activeRunId;
   set activeRunId(String? v) => _runResolved.activeRunId = v;
   ApprovalRequest? get pendingApproval => _runResolved.pendingApproval;
-  set pendingApproval(ApprovalRequest? v) => _runResolved.pendingApproval = v;
+  set pendingApproval(ApprovalRequest? v) {
+    _runResolved.pendingApproval = v;
+    // The overlay ring + edge glow must read "waiting on you" the moment a card
+    // is raised, and go back to running the moment it is answered. Hooked here
+    // rather than at the three `pendingApproval = req` sites so a new prompt
+    // path cannot forget it — an unanswered approval with a green glow looks
+    // exactly like a run that is still making progress.
+    final next = v != null
+        ? overlayStatePermission
+        : (_runResolved.activeRunId != null
+              ? overlayStateRunning
+              : overlayStateIdle);
+    if (next != _overlayState) unawaited(setOverlayState(next));
+  }
 
   /// Approvals waiting in sessions OTHER than the foreground one.
   ///
@@ -1223,6 +1277,7 @@ class AgentService extends ChangeNotifier {
     // re-shows it at run start.
     unawaited(hideDeviceOverlay());
     unawaited(setOverlayLive(false));
+    unawaited(setOverlayState(overlayStateIdle));
     // Only a RUNNING session promotes its queue on Stop; an idle session
     // with queued text must keep it (nothing to interrupt).
     final wasActive = r.activeRunId != null;
@@ -1279,6 +1334,7 @@ class AgentService extends ChangeNotifier {
     // The floating overlay must come down with the runs.
     unawaited(hideDeviceOverlay());
     unawaited(setOverlayLive(false));
+    unawaited(setOverlayState(overlayStateIdle));
     // Mark every live subagent interrupted so parents settle them as
     // stopped instead of waiting for reports that will never come.
     for (final sub in _subagents.values) {
@@ -1315,6 +1371,7 @@ class AgentService extends ChangeNotifier {
     // Panic-stop path: the floating overlay must come down with the runs.
     unawaited(hideDeviceOverlay());
     unawaited(setOverlayLive(false));
+    unawaited(setOverlayState(overlayStateIdle));
     // Cancellation releases each run's finally block. Clear continuations
     // first so no bucket can restart queued work during a global panic.
     for (final r in _runs.values) {
@@ -1354,6 +1411,13 @@ class AgentService extends ChangeNotifier {
       'deviceOverlayMicListening';
   static const String deviceOverlaySetPromptMethod = 'deviceOverlaySetPrompt';
   static const String deviceOverlayLiveMethod = 'deviceOverlayLive';
+  static const String deviceOverlayStateMethod = 'deviceOverlayState';
+
+  /// Run-state colours for the overlay ring and the edge glow.
+  static const overlayStateIdle = 'idle';
+  static const overlayStateRunning = 'running';
+  static const overlayStatePermission = 'permission';
+  static const overlayStateError = 'error';
 
   static const _overlayNativeChannel = MethodChannel('ovid/native');
   static MethodChannel? _overlayChannelOverrideForTest;
@@ -1405,6 +1469,7 @@ class AgentService extends ChangeNotifier {
       await _overlayChannel.invokeMethod(deviceOverlayShowMethod);
     } catch (_) {}
     await setOverlayLive(_overlayLive);
+    await setOverlayState(_overlayState);
   }
 
   /// Hide the floating overlay. Unguarded by design: hiding must always
@@ -1419,6 +1484,26 @@ class AgentService extends ChangeNotifier {
 
   @visibleForTesting
   bool get overlayLiveForTest => _overlayLive;
+
+  String _overlayState = overlayStateIdle;
+
+  @visibleForTesting
+  String get overlayStateForTest => _overlayState;
+
+  /// Push the run state to the overlay: green = running, amber = a permission
+  /// card is waiting, red = the run errored, grey = idle. Drives both the
+  /// circle's ring and the non-touchable edge glow, so the user can tell what
+  /// Ovid is doing without opening the app.
+  ///
+  /// Recorded even with no window, so a re-show mid-run restores the colour.
+  Future<void> setOverlayState(String state) async {
+    _overlayState = state;
+    try {
+      await _overlayChannel.invokeMethod(deviceOverlayStateMethod, {
+        'state': state,
+      });
+    } catch (_) {}
+  }
 
   /// Mark the overlay live (run active) or idle. The native side shows a
   /// subtle always-on pulse while live. Safe to call with no window: native
@@ -4219,6 +4304,16 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     } else if (kind == 'done') {
       run.statusLine = null;
     }
+    // Overlay colour follows the same single sink: an error turns the edge glow
+    // red, a completed turn drops it back to idle. Only while a run is live —
+    // an `err` from a long-finished session must not paint the screen.
+    if (run.activeRunId != null && _overlayState != overlayStatePermission) {
+      if (kind == 'err') {
+        unawaited(setOverlayState(overlayStateError));
+      } else if (kind == 'done') {
+        unawaited(setOverlayState(overlayStateIdle));
+      }
+    }
     // Mirror into the session event log (session_search queries this).
     // Tag with the RUNNING session so parallel sessions' events stay
     // isolated (session_search only sees its own session's events).
@@ -5137,6 +5232,110 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     {
       'type': 'function',
       'function': {
+        'name': 'device_double_tap',
+        'description':
+            'Double-tap (or triple-tap with count: 3) at screen coordinates. '
+            'Use this for galleries, maps, text selection and any onDoubleClick '
+            'handler. Two separate device_tap calls will NOT work: they arrive '
+            'as unrelated touches, so the app never sees a double-click.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'x': {'type': 'number'},
+            'y': {'type': 'number'},
+            'count': {
+              'type': 'integer',
+              'description': '2 (default) or 3 taps.',
+            },
+          },
+          'required': ['x', 'y'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'device_drag',
+        'description':
+            'Press and HOLD at the origin, then move to the destination and '
+            'release. This is the gesture that picks up home-screen icons, text '
+            'selection handles, sliders and reorder rows. Use device_swipe '
+            'instead for a fling/scroll.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'from_x': {'type': 'number'},
+            'from_y': {'type': 'number'},
+            'to_x': {'type': 'number'},
+            'to_y': {'type': 'number'},
+            'hold_ms': {
+              'type': 'integer',
+              'description': 'Dwell at the origin before moving (default 250).',
+            },
+            'duration_ms': {
+              'type': 'integer',
+              'description': 'Travel time from origin to destination (default 600).',
+            },
+          },
+          'required': ['from_x', 'from_y', 'to_x', 'to_y'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'device_pinch',
+        'description':
+            'Two-finger pinch or spread about a centre point. to_radius smaller '
+            'than from_radius zooms OUT; larger zooms IN. Use for maps, photos '
+            'and any two-finger scaler.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'x': {'type': 'number', 'description': 'Centre x.'},
+            'y': {'type': 'number', 'description': 'Centre y.'},
+            'from_radius': {
+              'type': 'number',
+              'description': 'Starting finger distance from centre (e.g. 200).',
+            },
+            'to_radius': {
+              'type': 'number',
+              'description': 'Ending finger distance from centre (e.g. 60).',
+            },
+            'duration_ms': {'type': 'integer'},
+          },
+          'required': ['x', 'y', 'from_radius', 'to_radius'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'device_two_finger_swipe',
+        'description':
+            'Two fingers swiping in the same direction. Use where a single '
+            'finger means something else: a back-swipe from the screen edge, a '
+            'carousel page turn, or a navigation drawer.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'from_x': {'type': 'number'},
+            'from_y': {'type': 'number'},
+            'to_x': {'type': 'number'},
+            'to_y': {'type': 'number'},
+            'separation': {
+              'type': 'number',
+              'description': 'Distance between the two fingers (default 120).',
+            },
+            'duration_ms': {'type': 'integer'},
+          },
+          'required': ['from_x', 'from_y', 'to_x', 'to_y'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
         'name': 'device_system_nav',
         'description':
             'Perform Android system navigation: back, home, recents, notifications, quick_settings, or open settings directly.',
@@ -5691,6 +5890,89 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             'steps': {'type': 'integer'},
           },
           'required': ['from', 'to'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_double_click',
+        'description':
+            'Real double-click (or triple with count: 3) on a CSS selector. '
+            'Dispatches two/three full click sequences with an incrementing '
+            '`detail` plus a dblclick event. Two browser_click calls will NOT '
+            'work: each fires detail:1, so no dblclick handler ever runs.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'selector': {'type': 'string'},
+            'count': {'type': 'integer', 'description': '2 (default) or 3.'},
+          },
+          'required': ['selector'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_tap_at',
+        'description':
+            'Tap at raw viewport coordinates with a full human event chain '
+            '(pointerdown/up + touchstart/end + mousedown/up + click). Use for '
+            'canvas, maps, video players and anything with no selectable DOM '
+            'element. Prefer browser_click when a selector exists.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'x': {'type': 'number'},
+            'y': {'type': 'number'},
+          },
+          'required': ['x', 'y'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_long_press',
+        'description':
+            'Press and HOLD on a selector or at x/y for duration_ms (default '
+            '600), then release. Triggers context menus, text-selection handles '
+            'and press-and-hold widgets. The hold is real elapsed time, not a '
+            'synthetic event.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'selector': {'type': 'string'},
+            'x': {'type': 'number'},
+            'y': {'type': 'number'},
+            'duration_ms': {'type': 'integer'},
+          },
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_swipe',
+        'description':
+            'Touch swipe between two viewport coordinates with interpolated '
+            'pointermove/touchmove frames and pointerType "touch". Use for '
+            'carousels, sliders, pull-to-refresh and touch-scrollers that ignore '
+            'window.scrollBy.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'from_x': {'type': 'number'},
+            'from_y': {'type': 'number'},
+            'to_x': {'type': 'number'},
+            'to_y': {'type': 'number'},
+            'steps': {
+              'type': 'integer',
+              'description': 'Interpolated move frames (default 8).',
+            },
+          },
+          'required': ['from_x', 'from_y', 'to_x', 'to_y'],
         },
       },
     },
@@ -8243,6 +8525,7 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     if (s.mode == AgentMode.control.name) {
       unawaited(showDeviceOverlay());
       unawaited(setOverlayLive(true));
+      unawaited(setOverlayState(overlayStateRunning));
     }
     // PR23/Q1: snapshot the model at run start — every LLM call of this
     // run uses it; a mid-run picker switch only affects the next run.
@@ -9200,7 +9483,11 @@ ${await _agentsMdBlock()}
             'tool_call_id': tc['id'],
             // Spill + retention (C8): oversized output is persisted to the
             // session workspace and the model gets head/tail + locator.
-            'content': await spillToolOutput(name, result, cap: 6000),
+            'content': await spillToolOutput(
+              name,
+              result,
+              cap: _toolOutputCapFor(name),
+            ),
           });
         }
         // Queued mid-run messages join the very next request (opencode
@@ -9258,6 +9545,7 @@ ${await _agentsMdBlock()}
       final userStopped = ctx.run.cancelRequested;
       // Run end always clears the live pop (stream over → overlay idle).
       unawaited(setOverlayLive(false));
+      unawaited(setOverlayState(overlayStateIdle));
       unawaited(checkpointRunEnd(s.id));
       SandboxService.I.tagRun(null);
       if (ownsRun) _cancelRequested = false;
@@ -11006,6 +11294,10 @@ ${await _agentsMdBlock()}
       case 'device_tap':
       case 'device_type':
       case 'device_swipe':
+      case 'device_double_tap':
+      case 'device_drag':
+      case 'device_pinch':
+      case 'device_two_finger_swipe':
       case 'device_system_nav':
       case 'device_open_app':
       case 'device_screenshot':
@@ -12821,6 +13113,201 @@ ${await _agentsMdBlock()}
           return 'drag failed: $e';
         }
 
+      // ── Real human gestures (2026-09-25) ────────────────────────────────
+      // `browser_click` is `element.click()`: no coordinates, no button phases,
+      // and `detail` always 1. That is enough for a link or a button and useless
+      // for everything that listens to real input — dblclick handlers, context
+      // menus, press-and-hold, canvas hit-testing, touch scrollers. These tools
+      // dispatch the chain a finger or a mouse would actually produce.
+      case 'browser_double_click':
+        final dcTab = _activeTab;
+        dcTab.controller ??= controllerForTab(dcTab);
+        final dcSel = args['selector'] as String;
+        final dcCount = ((args['count'] as num?)?.toInt() ?? 2).clamp(2, 3);
+        final dcJs = '''
+(() => {
+  const el = document.querySelector(${jsonEncode(dcSel)});
+  if (!el) return 'no element: $dcSel';
+  el.scrollIntoView({block:'center', behavior:'instant'});
+  const r = el.getBoundingClientRect();
+  const x = r.x + r.width/2, y = r.y + r.height/2;
+  const N = $dcCount;
+  for (let i = 1; i <= N; i++) {
+    const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+               button:0, buttons:1, detail:i};
+    el.dispatchEvent(new PointerEvent('pointerdown',
+      {...o, pointerId:1, pointerType:'mouse', isPrimary:true}));
+    el.dispatchEvent(new MouseEvent('mousedown', o));
+    el.dispatchEvent(new PointerEvent('pointerup',
+      {...o, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
+    el.dispatchEvent(new MouseEvent('mouseup', {...o, buttons:0}));
+    el.dispatchEvent(new MouseEvent('click', o));
+    if (i === 2) el.dispatchEvent(new MouseEvent('dblclick', o));
+  }
+  return (N === 2 ? 'double' : 'triple') + '-clicked $dcSel at ' +
+    Math.round(x) + ',' + Math.round(y);
+})()''';
+        try {
+          final r = await dcTab.controller!.runJavaScriptReturningResult(dcJs);
+          _emit('shell', 'double-click $dcSel');
+          return r.toString();
+        } catch (e) {
+          return 'double-click failed: $e';
+        }
+
+      case 'browser_tap_at':
+        final taTab = _activeTab;
+        taTab.controller ??= controllerForTab(taTab);
+        final taX = args['x'] as num?;
+        final taY = args['y'] as num?;
+        if (taX == null || taY == null) {
+          return 'browser_tap_at requires x and y.';
+        }
+        try {
+          final r = await taTab.controller!.runJavaScriptReturningResult(
+            _humanTapJs(taX.toDouble(), taY.toDouble()),
+          );
+          _emit('shell', 'tap ($taX, $taY)');
+          return r.toString();
+        } catch (e) {
+          return 'tap failed: $e';
+        }
+
+      case 'browser_long_press':
+        final lpTab = _activeTab;
+        lpTab.controller ??= controllerForTab(lpTab);
+        final lpSel = args['selector'] as String?;
+        final lpX = args['x'] as num?;
+        final lpY = args['y'] as num?;
+        final lpDur = ((args['duration_ms'] as num?)?.toInt() ?? 600).clamp(
+          150,
+          5000,
+        );
+        // Resolve the target, press down, then hold for REAL elapsed time before
+        // a second evaluation releases it. Faking the duration inside one
+        // synchronous script fires down and up with no time between them — and
+        // elapsed time is precisely what a long-press handler measures.
+        final lpDown = '''
+(() => {
+  const el = ${lpSel == null ? 'null' : 'document.querySelector(${jsonEncode(lpSel)})'};
+  let x = ${lpX ?? 'null'};
+  let y = ${lpY ?? 'null'};
+  if (el) {
+    el.scrollIntoView({block:'center', behavior:'instant'});
+    const r = el.getBoundingClientRect();
+    x = r.x + r.width/2; y = r.y + r.height/2;
+  }
+  if (x == null || y == null) return 'NO_TARGET';
+  const t = document.elementFromPoint(x, y);
+  if (!t) return 'NO_TARGET';
+  const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+             button:0, buttons:1, detail:1};
+  t.dispatchEvent(new PointerEvent('pointerdown',
+    {...o, pointerId:1, pointerType:'touch', isPrimary:true}));
+  try {
+    const touch = new Touch({identifier:1, target:t, clientX:x, clientY:y});
+    t.dispatchEvent(new TouchEvent('touchstart', {touches:[touch],
+      targetTouches:[touch], changedTouches:[touch], bubbles:true,
+      cancelable:true}));
+  } catch (e) {}
+  t.dispatchEvent(new MouseEvent('mousedown', o));
+  window.__ovidHold = {el: t, x: x, y: y};
+  return 'HELD ' + Math.round(x) + ',' + Math.round(y);
+})()''';
+        final lpUp = '''
+(() => {
+  const h = window.__ovidHold;
+  if (!h) return 'no hold in progress';
+  delete window.__ovidHold;
+  const o = {bubbles:true, cancelable:true, clientX:h.x, clientY:h.y,
+             button:0, buttons:0, detail:1};
+  h.el.dispatchEvent(new PointerEvent('pointerup',
+    {...o, pointerId:1, pointerType:'touch', isPrimary:true}));
+  try {
+    const touch = new Touch({identifier:1, target:h.el, clientX:h.x,
+      clientY:h.y});
+    h.el.dispatchEvent(new TouchEvent('touchend', {touches:[],
+      targetTouches:[], changedTouches:[touch], bubbles:true,
+      cancelable:true}));
+  } catch (e) {}
+  h.el.dispatchEvent(new MouseEvent('mouseup', o));
+  h.el.dispatchEvent(new MouseEvent('click', {...o, buttons:1}));
+  return 'released';
+})()''';
+        try {
+          final started = (await lpTab.controller!
+                  .runJavaScriptReturningResult(lpDown))
+              .toString();
+          if (started == 'NO_TARGET') {
+            return 'long-press found no element at that selector or coordinate.';
+          }
+          await Future<void>.delayed(Duration(milliseconds: lpDur));
+          final done = (await lpTab.controller!
+                  .runJavaScriptReturningResult(lpUp))
+              .toString();
+          final target = lpSel ?? '(${lpX ?? '?'}, ${lpY ?? '?'})';
+          _emit('shell', 'long-press $target ${lpDur}ms');
+          return 'long-pressed $target for ${lpDur}ms — $done';
+        } catch (e) {
+          return 'long-press failed: $e';
+        }
+
+      case 'browser_swipe':
+        final swTab = _activeTab;
+        swTab.controller ??= controllerForTab(swTab);
+        final swFromX = args['from_x'] as num?;
+        final swFromY = args['from_y'] as num?;
+        final swToX = args['to_x'] as num?;
+        final swToY = args['to_y'] as num?;
+        if (swFromX == null ||
+            swFromY == null ||
+            swToX == null ||
+            swToY == null) {
+          return 'browser_swipe requires from_x, from_y, to_x and to_y.';
+        }
+        final swSteps = ((args['steps'] as num?)?.toInt() ?? 8).clamp(2, 40);
+        final swJs = '''
+(() => {
+  const fx = $swFromX, fy = $swFromY, tx = $swToX, ty = $swToY;
+  const start = document.elementFromPoint(fx, fy);
+  if (!start) return 'nothing at ' + fx + ',' + fy;
+  const fire = (kind, x, y, el, buttons) => {
+    const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+               button:0, buttons:buttons, detail:1};
+    const p = kind === 'down' ? 'pointerdown'
+            : kind === 'up' ? 'pointerup' : 'pointermove';
+    const t = kind === 'down' ? 'touchstart'
+            : kind === 'up' ? 'touchend' : 'touchmove';
+    const m = kind === 'down' ? 'mousedown'
+            : kind === 'up' ? 'mouseup' : 'mousemove';
+    el.dispatchEvent(new PointerEvent(p,
+      {...o, pointerId:1, pointerType:'touch', isPrimary:true}));
+    try {
+      const touch = new Touch({identifier:1, target:el, clientX:x, clientY:y});
+      const ended = kind === 'up';
+      el.dispatchEvent(new TouchEvent(t, {
+        touches: ended ? [] : [touch],
+        targetTouches: ended ? [] : [touch],
+        changedTouches: [touch], bubbles:true, cancelable:true}));
+    } catch (e) {}
+    el.dispatchEvent(new MouseEvent(m, o));
+  };
+  fire('down', fx, fy, start, 1);
+  for (let i = 1; i <= $swSteps; i++) {
+    const x = fx + (tx - fx) * i / $swSteps;
+    const y = fy + (ty - fy) * i / $swSteps;
+    fire('move', x, y, document.elementFromPoint(x, y) || start, 1);
+  }
+  fire('up', tx, ty, document.elementFromPoint(tx, ty) || start, 0);
+  return 'swiped (' + fx + ',' + fy + ') to (' + tx + ',' + ty + ')';
+})()''';
+        try {
+          final r = await swTab.controller!.runJavaScriptReturningResult(swJs);
+          _emit('shell', 'swipe ($swFromX,$swFromY) to ($swToX,$swToY)');
+          return r.toString();
+        } catch (e) {
+          return 'swipe failed: $e';
+        }
       case 'browser_select':
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
@@ -14262,12 +14749,20 @@ ${await _agentsMdBlock()}
       case 'browser_upload':
       case 'browser_fill':
       case 'browser_drag':
+      case 'browser_double_click':
+      case 'browser_tap_at':
+      case 'browser_long_press':
+      case 'browser_swipe':
       case 'browser_select':
       case 'browser_desktop':
       case 'device_read':
       case 'device_tap':
       case 'device_type':
       case 'device_swipe':
+      case 'device_double_tap':
+      case 'device_drag':
+      case 'device_pinch':
+      case 'device_two_finger_swipe':
       case 'device_system_nav':
       case 'device_open_app':
       case 'device_screenshot':
@@ -15810,11 +16305,17 @@ ${await _agentsMdBlock()}
         return result;
       }
 
-      final metadata = await device.readRaw();
-      final packageName = metadata['package']?.toString();
-      if (metadata['status'] != 'ok' && metadata['status'] != 'unchanged' ||
-          packageName == null ||
-          packageName.trim().isEmpty) {
+      // Sensitive-target guard, WITHOUT a tree walk (2026-09-25).
+      //
+      // This used to call `device.readRaw()` before every single action. On an
+      // animated screen the native node cache is dirtied by every
+      // TYPE_WINDOW_CONTENT_CHANGED event, so the "verification" was a full
+      // 300-node binder walk on the main thread ahead of each tap — and the walk
+      // serialized against the action itself, since both are @Synchronized. That
+      // is the largest avoidable slice of the "control mode is very slow" report.
+      // The guard only ever needed the package name, so ask for exactly that.
+      final packageName = await device.foregroundPackage();
+      if (packageName == null || packageName.trim().isEmpty) {
         return 'DENIED: Ovid could not verify the live foreground app. Retry device_read before acting.';
       }
       if (_isSensitiveDeviceTarget(packageName)) {
@@ -15874,6 +16375,96 @@ ${await _agentsMdBlock()}
           final detail = 'swiped ($fromX, $fromY) to ($toX, $toY)';
           _emit('shell', 'device_swipe: $detail');
           return detail;
+        case 'device_double_tap':
+          final mtX = args['x'] as num?;
+          final mtY = args['y'] as num?;
+          if (mtX == null || mtY == null) {
+            return 'device_double_tap requires x and y.';
+          }
+          final taps = (args['count'] as num?)?.toInt() ?? 2;
+          final mtResult = await device.multiTap(
+            x: mtX,
+            y: mtY,
+            count: taps,
+            intervalMs: (args['interval_ms'] as num?)?.toInt(),
+          );
+          final mtCancelled = _cancelledDeviceResult(mtResult);
+          if (mtCancelled != null) return mtCancelled;
+          final mtDetail = '$taps-tap at ($mtX, $mtY)';
+          _emit('shell', 'device_double_tap: $mtDetail');
+          return mtDetail;
+        case 'device_drag':
+          final dFromX = args['from_x'] as num?;
+          final dFromY = args['from_y'] as num?;
+          final dToX = args['to_x'] as num?;
+          final dToY = args['to_y'] as num?;
+          if (dFromX == null ||
+              dFromY == null ||
+              dToX == null ||
+              dToY == null) {
+            return 'device_drag requires from_x, from_y, to_x, and to_y.';
+          }
+          final dragResult = await device.drag(
+            fromX: dFromX,
+            fromY: dFromY,
+            toX: dToX,
+            toY: dToY,
+            holdMs: (args['hold_ms'] as num?)?.toInt(),
+            durationMs: (args['duration_ms'] as num?)?.toInt(),
+          );
+          final dragCancelled = _cancelledDeviceResult(dragResult);
+          if (dragCancelled != null) return dragCancelled;
+          final dragDetail =
+              'held then dragged ($dFromX, $dFromY) to ($dToX, $dToY)';
+          _emit('shell', 'device_drag: $dragDetail');
+          return dragDetail;
+        case 'device_pinch':
+          final pX = args['x'] as num?;
+          final pY = args['y'] as num?;
+          final pFrom = args['from_radius'] as num?;
+          final pTo = args['to_radius'] as num?;
+          if (pX == null || pY == null || pFrom == null || pTo == null) {
+            return 'device_pinch requires x, y, from_radius, and to_radius.';
+          }
+          final pinchResult = await device.pinch(
+            x: pX,
+            y: pY,
+            fromRadius: pFrom,
+            toRadius: pTo,
+            durationMs: (args['duration_ms'] as num?)?.toInt(),
+          );
+          final pinchCancelled = _cancelledDeviceResult(pinchResult);
+          if (pinchCancelled != null) return pinchCancelled;
+          final pinchDetail = pTo < pFrom
+              ? 'pinched in at ($pX, $pY) radius $pFrom to $pTo'
+              : 'spread out at ($pX, $pY) radius $pFrom to $pTo';
+          _emit('shell', 'device_pinch: $pinchDetail');
+          return pinchDetail;
+        case 'device_two_finger_swipe':
+          final tFromX = args['from_x'] as num?;
+          final tFromY = args['from_y'] as num?;
+          final tToX = args['to_x'] as num?;
+          final tToY = args['to_y'] as num?;
+          if (tFromX == null ||
+              tFromY == null ||
+              tToX == null ||
+              tToY == null) {
+            return 'device_two_finger_swipe requires from_x, from_y, to_x, and to_y.';
+          }
+          final tfsResult = await device.twoFingerSwipe(
+            fromX: tFromX,
+            fromY: tFromY,
+            toX: tToX,
+            toY: tToY,
+            durationMs: (args['duration_ms'] as num?)?.toInt(),
+            separation: args['separation'] as num?,
+          );
+          final tfsCancelled = _cancelledDeviceResult(tfsResult);
+          if (tfsCancelled != null) return tfsCancelled;
+          final tfsDetail =
+              'two-finger swipe ($tFromX, $tFromY) to ($tToX, $tToY)';
+          _emit('shell', 'device_two_finger_swipe: $tfsDetail');
+          return tfsDetail;
         case 'device_system_nav':
           final action = args['action'] as String? ?? '';
           if (action == 'settings') {

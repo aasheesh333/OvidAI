@@ -15,6 +15,7 @@ import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.Point
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
@@ -29,6 +30,7 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
@@ -38,6 +40,7 @@ import android.view.accessibility.AccessibilityWindowInfo
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -317,7 +320,16 @@ class OvidAccessibilityService : AccessibilityService() {
         var instance: OvidAccessibilityService? = null
             private set
 
+        // Overlay run-state colours, pushed from Dart as deviceOverlayState.
+        const val OVERLAY_IDLE = "idle"
+        const val OVERLAY_RUNNING = "running"
+        const val OVERLAY_PERMISSION = "permission"
+        const val OVERLAY_ERROR = "error"
+
         private const val MAX_NODES = 300
+
+        /// Keyboard nodes admitted per read, on top of the app tree.
+        private const val IME_NODE_BUDGET = 80
         private const val MAX_DEPTH = 30
 
         /// Native→Dart bridge for overlay events. Set by MainActivity, which
@@ -331,18 +343,42 @@ class OvidAccessibilityService : AccessibilityService() {
         Thread(runnable, "ovid-device-screenshot").apply { isDaemon = true }
     }
 
-    // ── Floating control overlay (spec §5.1) ──────────────────────────
-    // TYPE_ACCESSIBILITY_OVERLAY: creatable from an accessibility service
-    // with no manifest permission, alive exactly while the service is bound.
-    // Hidden removes the window outright (no invisible touch target).
+    // ── Floating control overlay ────────────────────────────────────────
+    // TYPE_ACCESSIBILITY_OVERLAY: creatable from an accessibility service with
+    // no manifest permission, alive exactly while the service is bound. Hiding
+    // removes the window outright, so no invisible touch target can survive.
+    //
+    // REDESIGN (2026-09-25, owner request). The old overlay was a permanently
+    // expanded dark pill that could only be moved by a small 2×3-dot handle, and
+    // `updateViewLayout` was handed raw touch coordinates — dragging past an
+    // edge lost the window off-screen with no way back short of killing the run.
+    // It is now:
+    //
+    //   • a small WHITE CIRCLE, draggable from anywhere on itself to ANY
+    //     position, and clamped inside the real display bounds on every move,
+    //     on expand, and on configuration change — it can never be hidden
+    //     off-device;
+    //   • tap expands the steering box (cross · text field · mic · green send);
+    //     cross collapses back to the circle; long-press is the hard stop;
+    //   • a separate NON-TOUCHABLE edge glow reports run state at a glance —
+    //     green = running, amber = waiting on a permission, red = error.
     private var overlayView: View? = null
     private var overlayParams: WindowManager.LayoutParams? = null
     private var overlayInput: EditText? = null
-    private var overlayActionButton: ImageButton? = null
+    private var overlaySendButton: ImageButton? = null
     private var overlayMicButton: ImageButton? = null
-    private var overlayLiveDot: View? = null
+    private var overlayCircle: View? = null
+    private var overlayCircleBg: GradientDrawable? = null
+    private var overlayBox: View? = null
+    private var overlayExpanded = false
     private var overlayLiveAnimator: ValueAnimator? = null
     private var overlayActionPulse: Animator? = null
+    private var overlayGlowTop: View? = null
+    private var overlayGlowBottom: View? = null
+    private var overlayGlowTopBg: GradientDrawable? = null
+    private var overlayGlowBottomBg: GradientDrawable? = null
+    @Volatile
+    private var overlayState: String = OVERLAY_IDLE
 
     @Synchronized
     internal fun showOverlay(): DeviceActionResult {
@@ -351,7 +387,7 @@ class OvidAccessibilityService : AccessibilityService() {
             ?: return DeviceActionResult(false, "UNAVAILABLE", "Window manager is unavailable.")
         return try {
             val density = resources.displayMetrics.density
-            val container = overlayContainer(windowManager, density)
+            val root = overlayRoot(windowManager, density)
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -360,22 +396,20 @@ class OvidAccessibilityService : AccessibilityService() {
                 PixelFormat.TRANSLUCENT,
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
-                x = (24 * density).toInt()
-                y = (160 * density).toInt()
+                x = (16 * density).toInt()
+                y = (200 * density).toInt()
             }
-            windowManager.addView(container, params)
-            overlayView = container
+            windowManager.addView(root, params)
+            overlayView = root
             overlayParams = params
+            // Clamp once laid out: the window size is unknown until then.
+            root.post { clampOverlayIntoDisplay() }
+            showEdgeGlow(windowManager, density)
             DeviceActionResult(true)
         } catch (error: WindowManager.BadTokenException) {
             DeviceActionResult(false, "UNAVAILABLE", "Overlay window was refused: " + error.message)
         } catch (error: Throwable) {
-        overlayView = null
-        overlayParams = null
-        overlayInput = null
-        overlayActionButton = null
-        overlayMicButton = null
-        overlayLiveDot = null
+            clearOverlayRefs()
             DeviceActionResult(false, "UNAVAILABLE", "Overlay could not be shown: " + error.message)
         }
     }
@@ -383,29 +417,91 @@ class OvidAccessibilityService : AccessibilityService() {
     @Synchronized
     internal fun hideOverlay(): DeviceActionResult {
         val view = overlayView ?: return DeviceActionResult(true)
-        // Stop the live pulse first: no animator may outlive the window.
+        // Stop the pulse first: no animator may outlive the window.
         stopOverlayLivePulse()
-        overlayView = null
-        overlayParams = null
-        overlayInput = null
-        overlayActionButton = null
-        overlayMicButton = null
-        overlayLiveDot = null
+        clearOverlayRefs()
         return try {
             val windowManager = getSystemService(WINDOW_SERVICE) as? WindowManager
             windowManager?.removeView(view)
+            hideEdgeGlow()
             DeviceActionResult(true)
         } catch (_: Throwable) {
             // Hidden state is what matters: refs are already cleared, so no
             // invisible touch target can survive. Never crash a hide.
+            hideEdgeGlow()
             DeviceActionResult(true)
         }
     }
 
     internal fun isOverlayVisible(): Boolean = overlayView != null
 
+    private fun clearOverlayRefs() {
+        overlayView = null
+        overlayParams = null
+        overlayInput = null
+        overlaySendButton = null
+        overlayMicButton = null
+        overlayCircle = null
+        overlayCircleBg = null
+        overlayBox = null
+        overlayExpanded = false
+    }
+
+    /// Keeps the window wholly inside the real display bounds.
+    ///
+    /// This is the fix for "the circle disappears off my screen": raw touch
+    /// coordinates were being written straight into the layout params, so any
+    /// drag past an edge parked the window where no finger could reach it again.
+    /// Clamping on every move, on expand and on rotation means every part of it
+    /// stays touchable.
+    private fun clampOverlayIntoDisplay() {
+        val params = overlayParams ?: return
+        val view = overlayView ?: return
+        val wm = getSystemService(WINDOW_SERVICE) as? WindowManager ?: return
+        val size = displaySize(wm)
+        if (size.x <= 0 || size.y <= 0) return
+        val w = if (view.width > 0) view.width else params.width.coerceAtLeast(0)
+        val h = if (view.height > 0) view.height else params.height.coerceAtLeast(0)
+        val maxX = (size.x - w).coerceAtLeast(0)
+        val maxY = (size.y - h).coerceAtLeast(0)
+        val nx = params.x.coerceIn(0, maxX)
+        val ny = params.y.coerceIn(0, maxY)
+        if (nx == params.x && ny == params.y) return
+        params.x = nx
+        params.y = ny
+        try {
+            wm.updateViewLayout(view, params)
+        } catch (_: Throwable) {
+            // A racing hide must not crash the drag.
+        }
+    }
+
+    private fun displaySize(wm: WindowManager): Point {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val b = wm.currentWindowMetrics.bounds
+                Point(b.width(), b.height())
+            } else {
+                val metrics = android.util.DisplayMetrics()
+                @Suppress("DEPRECATION")
+                wm.defaultDisplay.getRealMetrics(metrics)
+                Point(metrics.widthPixels, metrics.heightPixels)
+            }
+        } catch (_: Throwable) {
+            val m = resources.displayMetrics
+            Point(m.widthPixels, m.heightPixels)
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Rotation/resplit changes the display bounds: re-clamp so a circle that
+        // was legitimately at the bottom-right is not left off-screen.
+        clampOverlayIntoDisplay()
+    }
+
     /// Overlay send seam: non-blank text goes to Dart as deviceOverlayText,
-    /// then the field is cleared (which morphs the button back to X).
+    /// then the field is cleared (which re-disables the green send button).
     internal fun onOverlaySend(text: String) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
@@ -413,7 +509,7 @@ class OvidAccessibilityService : AccessibilityService() {
         overlayInput?.text?.clear()
     }
 
-    /// Overlay X seam: an empty field is a hard stop for the run.
+    /// Overlay stop seam: a hard stop for the run (long-press on the circle).
     internal fun onOverlayStop() {
         overlayEventListener?.invoke("deviceOverlayStop", null)
     }
@@ -426,6 +522,7 @@ class OvidAccessibilityService : AccessibilityService() {
     /// Push recognized dictation text into the overlay field (from Dart).
     internal fun setOverlayInputText(text: String) {
         val input = overlayInput ?: return
+        if (!overlayExpanded) setOverlayExpanded(true)
         input.setText(text)
         input.setSelection(text.length)
     }
@@ -434,7 +531,7 @@ class OvidAccessibilityService : AccessibilityService() {
     internal fun setOverlayMicListening(listening: Boolean) {
         val button = overlayMicButton ?: return
         button.imageTintList = ColorStateList.valueOf(
-            if (listening) 0xFF4DA3FF.toInt() else 0xFFB0B0B0.toInt(),
+            if (listening) 0xFF1FA05F.toInt() else 0xFF6E6E6E.toInt(),
         )
         button.contentDescription = if (listening) "Stop dictation" else "Dictate"
     }
@@ -444,29 +541,42 @@ class OvidAccessibilityService : AccessibilityService() {
         overlayInput?.hint = prompt
     }
 
-    /// Live indicator: while a Control run is active the overlay breathes —
-    /// a small status dot fades in and pulses, and the X/send button gets a
-    /// very light scale pop, so the user can tell Ovid is live at a glance.
-    /// Safe with no window (records nothing, touches nothing).
+    /// Run-state colour, pushed from Dart. Drives both the circle's ring and the
+    /// edge glow: green = running, amber = a permission card is waiting, red =
+    /// the run errored. Unknown values fall back to idle (no glow).
+    internal fun setOverlayState(state: String) {
+        overlayState = state
+        val color = overlayColorFor(state)
+        overlayCircleBg?.setStroke((2 * resources.displayMetrics.density).toInt(), color)
+        updateEdgeGlow(color, state != OVERLAY_IDLE)
+        // The live pulse tracks "running" specifically.
+        setOverlayLive(state == OVERLAY_RUNNING)
+    }
+
+    private fun overlayColorFor(state: String): Int = when (state) {
+        OVERLAY_RUNNING -> 0xFF34C759.toInt()
+        OVERLAY_PERMISSION -> 0xFFFFB020.toInt()
+        OVERLAY_ERROR -> 0xFFFF453A.toInt()
+        else -> 0xFFB9B9B9.toInt()
+    }
+
+    /// Live indicator: while a Control run is active the circle breathes and the
+    /// send button gets a very light scale pop, so "Ovid is driving" is legible
+    /// at a glance. Safe with no window.
     internal fun setOverlayLive(live: Boolean) {
-        val button = overlayActionButton ?: return
         stopOverlayLivePulse()
         if (!live) return
-        // Status dot: 8dp green circle, alpha breathing 0.35↔1.0.
-        overlayLiveDot?.let {
-            it.visibility = View.VISIBLE
-            it.alpha = 1f
-        }
-        overlayLiveAnimator = ValueAnimator.ofFloat(0.35f, 1f).apply {
+        val circle = overlayCircle ?: return
+        overlayLiveAnimator = ValueAnimator.ofFloat(0.55f, 1f).apply {
             duration = 1200
             repeatCount = ValueAnimator.INFINITE
             repeatMode = ValueAnimator.REVERSE
             addUpdateListener { anim ->
-                overlayLiveDot?.alpha = anim.animatedValue as Float
+                circle.alpha = anim.animatedValue as Float
             }
             start()
         }
-        // X pop: deliberately subtle — 1.0↔1.08 scale, 1.0↔0.85 alpha.
+        val button = overlaySendButton ?: return
         val scaleX = ObjectAnimator.ofFloat(button, "scaleX", 1f, 1.08f).apply {
             duration = 1400
             repeatCount = ValueAnimator.INFINITE
@@ -477,13 +587,8 @@ class OvidAccessibilityService : AccessibilityService() {
             repeatCount = ValueAnimator.INFINITE
             repeatMode = ValueAnimator.REVERSE
         }
-        val fade = ObjectAnimator.ofFloat(button, "alpha", 1f, 0.85f).apply {
-            duration = 1400
-            repeatCount = ValueAnimator.INFINITE
-            repeatMode = ValueAnimator.REVERSE
-        }
         overlayActionPulse = AnimatorSet().apply {
-            playTogether(scaleX, scaleY, fade)
+            playTogether(scaleX, scaleY)
             start()
         }
     }
@@ -493,88 +598,261 @@ class OvidAccessibilityService : AccessibilityService() {
         overlayLiveAnimator = null
         overlayActionPulse?.cancel()
         overlayActionPulse = null
-        overlayLiveDot?.let {
-            it.visibility = View.GONE
-            it.alpha = 1f
-        }
-        overlayActionButton?.let {
+        overlayCircle?.alpha = 1f
+        overlaySendButton?.let {
             it.scaleX = 1f
             it.scaleY = 1f
-            it.alpha = 1f
         }
+    }
+
+    // ── Edge glow: a thin, mostly-transparent status line at the top and bottom
+    // of the screen. Non-touchable, so it can never eat a gesture meant for the
+    // app underneath; the gradient fades to nothing a short way in, exactly the
+    // "glow reaching a little way from the edge" the owner described.
+    private fun showEdgeGlow(windowManager: WindowManager, density: Float) {
+        if (overlayGlowTop != null) return
+        val thickness = (18 * density).toInt()
+        try {
+            val top = View(this).apply {
+                background = GradientDrawable(
+                    GradientDrawable.Orientation.TOP_BOTTOM,
+                    intArrayOf(overlayColorFor(overlayState), 0x00000000),
+                ).also { overlayGlowTopBg = it }
+            }
+            val bottom = View(this).apply {
+                background = GradientDrawable(
+                    GradientDrawable.Orientation.BOTTOM_TOP,
+                    intArrayOf(overlayColorFor(overlayState), 0x00000000),
+                ).also { overlayGlowBottomBg = it }
+            }
+            val mk = { v: View ->
+                WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    thickness,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                    PixelFormat.TRANSLUCENT,
+                ).apply { gravity = if (v === top) Gravity.TOP else Gravity.BOTTOM }
+            }
+            windowManager.addView(top, mk(top))
+            windowManager.addView(bottom, mk(bottom))
+            overlayGlowTop = top
+            overlayGlowBottom = bottom
+            updateEdgeGlow(overlayColorFor(overlayState), overlayState != OVERLAY_IDLE)
+        } catch (_: Throwable) {
+            // The glow is cosmetic: never fail the overlay over it.
+            hideEdgeGlow()
+        }
+    }
+
+    private fun updateEdgeGlow(color: Int, visible: Boolean) {
+        val alpha = if (visible) 0x66 else 0x00  // ~40% at the very edge
+        val argb = (color and 0x00FFFFFF) or (alpha shl 24)
+        overlayGlowTopBg?.colors = intArrayOf(argb, 0x00000000)
+        overlayGlowBottomBg?.colors = intArrayOf(argb, 0x00000000)
+    }
+
+    private fun hideEdgeGlow() {
+        val wm = getSystemService(WINDOW_SERVICE) as? WindowManager
+        for (v in listOfNotNull(overlayGlowTop, overlayGlowBottom)) {
+            try {
+                wm?.removeView(v)
+            } catch (_: Throwable) { }
+        }
+        overlayGlowTop = null
+        overlayGlowBottom = null
+        overlayGlowTopBg = null
+        overlayGlowBottomBg = null
     }
 
     private fun removeOverlayNow() {
         val view = overlayView ?: return
         stopOverlayLivePulse()
-        overlayView = null
-        overlayParams = null
-        overlayInput = null
-        overlayActionButton = null
-        overlayMicButton = null
-        overlayLiveDot = null
+        clearOverlayRefs()
         try {
             val windowManager = getSystemService(WINDOW_SERVICE) as? WindowManager
             windowManager?.removeView(view)
         } catch (_: Throwable) {
             // Tearing down: nothing left to report to.
         }
+        hideEdgeGlow()
     }
 
-    private fun overlayContainer(
+    /// Circle + box in one window; exactly one is visible at a time.
+    private fun overlayRoot(
         windowManager: WindowManager,
         density: Float,
+    ): FrameLayout {
+        val root = FrameLayout(this)
+        val circle = overlayCircleView(windowManager, root, density)
+        root.addView(circle, FrameLayout.LayoutParams(
+            (48 * density).toInt(), (48 * density).toInt()))
+        overlayCircle = circle
+        val box = overlayBoxView(windowManager, root, density)
+        box.visibility = View.GONE
+        root.addView(box, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        overlayBox = box
+        return root
+    }
+
+    private fun setOverlayExpanded(expand: Boolean) {
+        if (overlayExpanded == expand) return
+        overlayExpanded = expand
+        overlayCircle?.visibility = if (expand) View.GONE else View.VISIBLE
+        overlayBox?.visibility = if (expand) View.VISIBLE else View.GONE
+        if (!expand) {
+            overlayInput?.clearFocus()
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.hideSoftInputFromWindow(overlayInput?.windowToken, 0)
+        }
+        // The window is a different size now, so the old position may be
+        // off-display: re-clamp once the new size is measured.
+        overlayView?.post { clampOverlayIntoDisplay() }
+    }
+
+    /// The small white circle. Drag anywhere on it to move; tap to expand;
+    /// long-press to hard-stop the run.
+    private fun overlayCircleView(
+        windowManager: WindowManager,
+        root: View,
+        density: Float,
+    ): View {
+        val bg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0xFFFFFFFF.toInt())
+            setStroke((2 * density).toInt(), overlayColorFor(overlayState))
+        }
+        overlayCircleBg = bg
+        val circle = View(this).apply {
+            background = bg
+            elevation = 6 * density
+            contentDescription = "Ovid — drag to move, tap to steer"
+        }
+        // A small mark so it reads as Ovid rather than a stray dot.
+        circle.setOnTouchListener(overlayDragTouchListener(windowManager, root, density) {
+            setOverlayExpanded(true)
+        })
+        circle.setOnLongClickListener {
+            onOverlayStop()
+            true
+        }
+        return circle
+    }
+
+    /// Touch handler that both drags the window and recognises a tap.
+    ///
+    /// Coordinates are clamped as they are written, so the window follows the
+    /// finger but can never be parked off-display. A tap is a DOWN/UP pair that
+    /// never moved more than the touch slop and never exceeded the tap timeout —
+    /// that distinction is what lets the same surface be both handle and button.
+    private fun overlayDragTouchListener(
+        windowManager: WindowManager,
+        root: View,
+        density: Float,
+        onTap: () -> Unit,
+    ): View.OnTouchListener {
+        val slop = (10 * density)
+        val tapTimeout = ViewConfiguration.getLongPressTimeout()
+        return View.OnTouchListener { _, event ->
+            val params = overlayParams ?: return@OnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    dragOrigin = intArrayOf(
+                        params.x - event.rawX.toInt(),
+                        params.y - event.rawY.toInt(),
+                        event.eventTime.toInt(),
+                    )
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val origin = dragOrigin ?: return@OnTouchListener true
+                    var nx = event.rawX.toInt() + origin[0]
+                    var ny = event.rawY.toInt() + origin[1]
+                    val size = displaySize(windowManager)
+                    val w = if (root.width > 0) root.width else (48 * density).toInt()
+                    val h = if (root.height > 0) root.height else (48 * density).toInt()
+                    if (size.x > 0) nx = nx.coerceIn(0, (size.x - w).coerceAtLeast(0))
+                    if (size.y > 0) ny = ny.coerceIn(0, (size.y - h).coerceAtLeast(0))
+                    params.x = nx
+                    params.y = ny
+                    try {
+                        windowManager.updateViewLayout(root, params)
+                    } catch (_: Throwable) { }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    val origin = dragOrigin
+                    dragOrigin = null
+                    if (origin != null) {
+                        val moved = Math.hypot(
+                            (event.rawX.toInt() + origin[0] - params.x).toDouble(),
+                            (event.rawY.toInt() + origin[1] - params.y).toDouble(),
+                        )
+                        val quick = event.eventTime - origin[2].toLong() < tapTimeout
+                        if (moved <= slop && quick) onTap()
+                    }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    dragOrigin = null
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private var dragOrigin: IntArray? = null
+
+    /// The expanded steering box: simple white, cross · text · mic · green send.
+    private fun overlayBoxView(
+        windowManager: WindowManager,
+        root: View,
+        density: Float,
     ): LinearLayout {
-        val container = LinearLayout(this).apply {
+        val box = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             val pad = (10 * density).toInt()
             setPadding(pad, (8 * density).toInt(), pad, (8 * density).toInt())
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                // See-through so the content behind stays legible while the
-                // user is being steered (alpha 0xB3 ≈ 70%).
-                setColor(0xB31A1A1A.toInt())
-                setStroke((1 * density).toInt(), 0x33FFFFFF)
-                cornerRadius = 22 * density
+                setColor(0xFFFFFFFF.toInt())
+                setStroke((1 * density).toInt(), 0x22000000)
+                cornerRadius = 24 * density
             }
             elevation = 8 * density
         }
-        // Live status dot: 8dp green circle at the leading edge, shown only
-        // while a Control run is active (pulsed by setOverlayLive).
-        val dotSize = (8 * density).toInt()
-        val liveDot = View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dotSize, dotSize).apply {
-                leftMargin = (2 * density).toInt()
-                rightMargin = (2 * density).toInt()
-            }
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(0xFF4CAF50.toInt())
-            }
-            visibility = View.GONE
-            contentDescription = "Ovid live"
+        // Cross: collapse back to the circle.
+        val close = ImageButton(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                (44 * density).toInt(), (44 * density).toInt())
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            background = null
+            contentDescription = "Collapse"
+            setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
+            imageTintList = ColorStateList.valueOf(0xFF6E6E6E.toInt())
+            setOnClickListener { setOverlayExpanded(false) }
         }
-        container.addView(liveDot)
-        overlayLiveDot = liveDot
-        container.addView(overlayDragHandle(windowManager, container, density))
+        box.addView(close)
+
         val input = EditText(this).apply {
             layoutParams = LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1f,
-            ).apply {
-                leftMargin = (8 * density).toInt()
-                rightMargin = (8 * density).toInt()
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                leftMargin = (6 * density).toInt()
+                rightMargin = (6 * density).toInt()
             }
-            minEms = 8
+            minEms = 7
             maxLines = 1
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT
             imeOptions = EditorInfo.IME_ACTION_SEND
             hint = "Steer Ovid…"
             setHintTextColor(0xFF9A9A9A.toInt())
-            setTextColor(0xFFFFFFFF.toInt())
+            setTextColor(0xFF1A1A1A.toInt())
             background = null
             setOnEditorActionListener { _, actionId, _ ->
                 if (actionId == EditorInfo.IME_ACTION_SEND ||
@@ -607,141 +885,64 @@ class OvidAccessibilityService : AccessibilityService() {
                 }
             }
         }
-        container.addView(input)
+        box.addView(input)
         overlayInput = input
-        // Mic: toggles on-device dictation through Dart. Kept just left of
-        // the X/send action.
+
         val mic = ImageButton(this).apply {
             layoutParams = LinearLayout.LayoutParams(
-                (44 * density).toInt(),
-                (44 * density).toInt(),
-            )
+                (44 * density).toInt(), (44 * density).toInt())
             scaleType = ImageView.ScaleType.CENTER_INSIDE
             background = null
             contentDescription = "Dictate"
             setImageResource(android.R.drawable.ic_btn_speak_now)
-            imageTintList = ColorStateList.valueOf(0xFFB0B0B0.toInt())
+            imageTintList = ColorStateList.valueOf(0xFF6E6E6E.toInt())
             setOnClickListener { onOverlayMic() }
         }
-        container.addView(mic)
+        box.addView(mic)
         overlayMicButton = mic
-        val action = ImageButton(this).apply {
+
+        // Green send: only armed while there is text, so an accidental tap can
+        // never fire an empty message.
+        val send = ImageButton(this).apply {
             layoutParams = LinearLayout.LayoutParams(
-                (44 * density).toInt(),
-                (44 * density).toInt(),
-            )
+                (44 * density).toInt(), (44 * density).toInt()).apply {
+                leftMargin = (4 * density).toInt()
+            }
             scaleType = ImageView.ScaleType.CENTER_INSIDE
-            background = null
-            contentDescription = "Stop"
-            setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
-            imageTintList = ColorStateList.valueOf(0xFFB0B0B0.toInt())
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0xFFE4E4E4.toInt())
+            }
+            contentDescription = "Send"
+            setImageResource(android.R.drawable.ic_menu_send)
+            imageTintList = ColorStateList.valueOf(0xFF9A9A9A.toInt())
+            isEnabled = false
             setOnClickListener {
                 val current = overlayInput?.text?.toString().orEmpty()
-                if (current.isBlank()) {
-                    onOverlayStop()
-                } else {
-                    onOverlaySend(current)
-                    overlayInput?.clearFocus()
-                    val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
-                    imm?.hideSoftInputFromWindow(overlayInput?.windowToken, 0)
-                }
+                if (current.isBlank()) return@setOnClickListener
+                onOverlaySend(current)
+                overlayInput?.clearFocus()
+                val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+                imm?.hideSoftInputFromWindow(overlayInput?.windowToken, 0)
             }
         }
-        container.addView(action)
-        overlayActionButton = action
-        // X ⇄ send morph: any non-blank text shows a colored send arrow,
-        // a blank field shows the X again.
+        box.addView(send)
+        overlaySendButton = send
+
         input.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(
-                s: CharSequence?,
-                start: Int,
-                count: Int,
-                after: Int,
-            ) = Unit
-            override fun onTextChanged(
-                s: CharSequence?,
-                start: Int,
-                before: Int,
-                count: Int,
-            ) = Unit
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
             override fun afterTextChanged(s: Editable?) {
-                val button = overlayActionButton ?: return
-                if (!s.isNullOrBlank()) {
-                    button.setImageResource(android.R.drawable.ic_menu_send)
-                    button.imageTintList = ColorStateList.valueOf(0xFF4DA3FF.toInt())
-                    button.contentDescription = "Send"
-                } else {
-                    button.setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
-                    button.imageTintList = ColorStateList.valueOf(0xFFB0B0B0.toInt())
-                    button.contentDescription = "Stop"
-                }
+                val button = overlaySendButton ?: return
+                val armed = !s.isNullOrBlank()
+                button.isEnabled = armed
+                (button.background as? GradientDrawable)?.setColor(
+                    if (armed) 0xFF1FA05F.toInt() else 0xFFE4E4E4.toInt())
+                button.imageTintList = ColorStateList.valueOf(
+                    if (armed) 0xFFFFFFFF.toInt() else 0xFF9A9A9A.toInt())
             }
         })
-        return container
-    }
-
-    /// 2×3 dot drag handle (2 columns × 3 rows of plain dot Views, no
-    /// assets): touch-drag moves the window through updateViewLayout.
-    private fun overlayDragHandle(
-        windowManager: WindowManager,
-        container: View,
-        density: Float,
-    ): LinearLayout {
-        val handle = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            contentDescription = "Drag to move"
-        }
-        val dot = (4 * density).toInt().coerceAtLeast(2)
-        val gap = (3 * density).toInt()
-        repeat(2) {
-            val column = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
-            }
-            repeat(3) {
-                val dotView = View(this).apply {
-                    layoutParams = LinearLayout.LayoutParams(dot, dot).apply {
-                        setMargins(gap, gap, gap, gap)
-                    }
-                    background = GradientDrawable().apply {
-                        shape = GradientDrawable.OVAL
-                        setColor(0xFF8A8A8A.toInt())
-                    }
-                }
-                column.addView(dotView)
-            }
-            handle.addView(column)
-        }
-        handle.setOnTouchListener { touched, event ->
-            val params = overlayParams
-            if (params == null) {
-                false
-            } else when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    touched.tag = intArrayOf(
-                        params.x - event.rawX.toInt(),
-                        params.y - event.rawY.toInt(),
-                    )
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val offset = touched.tag as? IntArray
-                    if (offset != null && offset.size == 2) {
-                        params.x = event.rawX.toInt() + offset[0]
-                        params.y = event.rawY.toInt() + offset[1]
-                        try {
-                            windowManager.updateViewLayout(container, params)
-                        } catch (_: Throwable) {
-                            // A racing hide must not crash the drag.
-                        }
-                    }
-                    true
-                }
-                else -> false
-            }
-        }
-        return handle
+        return box
     }
 
     override fun onServiceConnected() {
@@ -821,6 +1022,50 @@ class OvidAccessibilityService : AccessibilityService() {
      * reading it would feed the agent its own input box instead of the
      * screen. Our MainActivity (TYPE_APPLICATION, Ovid package) IS readable.
      */
+    /// Root of the on-screen keyboard, if one is showing.
+    ///
+    /// Deliberately skips Ovid's own overlay window and any IME belonging to this
+    /// package, so the agent is never handed its own input box.
+    private fun imeRoot(): AccessibilityNodeInfo? {
+        return try {
+            val list = windows ?: return null
+            val myPkg = packageName
+            for (w in list) {
+                if (w.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+                val r = try { w.root } catch (_: Throwable) { null } ?: continue
+                if (r.packageName?.toString() == myPkg) {
+                    r.recycle()
+                    continue
+                }
+                return r
+            }
+            null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /// The foreground package WITHOUT walking the tree.
+    ///
+    /// Every device action used to pay for a full `readScreen` first, purely to
+    /// confirm which app is in front (the sensitive-target guard). On an animated
+    /// screen the node cache is dirty on every content-change event, so that
+    /// verification was a 300-node binder walk on the main thread before each
+    /// tap — the single biggest avoidable cost in Control mode. Reading one
+    /// node's package is enough for the guard.
+    internal fun foregroundPackage(): String? {
+        return try {
+            val active = rootInActiveWindow ?: return null
+            try {
+                active.packageName?.toString()
+            } finally {
+                active.recycle()
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     internal fun findTargetRootNode(): AccessibilityNodeInfo? {
         var active = try {
             rootInActiveWindow
@@ -931,11 +1176,15 @@ class OvidAccessibilityService : AccessibilityService() {
         val newNodes = mutableMapOf<Int, AccessibilityNodeInfo>()
         val newHandles = mutableMapOf<String, Int>()
         var candidateNextHandle = treeCache.nextHandle
+        // Node budget for this walk. Raised only for the app tree, then lowered
+        // before the keyboard so 40-80 key nodes cannot crowd out the screen the
+        // agent is actually driving.
+        var softCap = MAX_NODES
         val packageName = root.packageName?.toString().orEmpty()
         val windowId = root.windowId
 
         fun visit(node: AccessibilityNodeInfo, depth: Int) {
-            if (depth > MAX_DEPTH || rows.size >= MAX_NODES) return
+            if (depth > MAX_DEPTH || rows.size >= softCap) return
 
             val bounds = Rect()
             node.getBoundsInScreen(bounds)
@@ -980,9 +1229,9 @@ class OvidAccessibilityService : AccessibilityService() {
                 }
             }
 
-            if (depth == MAX_DEPTH || rows.size >= MAX_NODES) return
+            if (depth == MAX_DEPTH || rows.size >= softCap) return
             for (index in 0 until node.childCount) {
-                if (rows.size >= MAX_NODES) break
+                if (rows.size >= softCap) break
                 val child = node.getChild(index) ?: continue
                 try {
                     visit(child, depth + 1)
@@ -994,6 +1243,27 @@ class OvidAccessibilityService : AccessibilityService() {
 
         return try {
             visit(root, 0)
+            // THE SOFT KEYBOARD (2026-09-25, owner report: "the agent cannot see
+            // the keyboard"). It lives in a SEPARATE window of type
+            // TYPE_INPUT_METHOD owned by another process, so it is never part of
+            // the app window's node tree — and findTargetRootNode() returns a
+            // single root, so the keys, the candidate bar and the action-key
+            // label ("Search" vs "Enter" vs "Go") were all invisible. Coordinate
+            // taps into the keyboard were therefore blind guesses.
+            //
+            // Budget-capped on purpose: keyboards expose 40-80 key nodes, and
+            // letting them crowd out the app's own tree would trade one blindness
+            // for another. The app tree is visited first, so it keeps priority.
+            val ime = imeRoot()
+            if (ime != null) {
+                try {
+                    softCap = (rows.size + IME_NODE_BUDGET).coerceAtMost(MAX_NODES)
+                    visit(ime, 0)
+                } finally {
+                    softCap = MAX_NODES
+                    ime.recycle()
+                }
+            }
             val delta = treeCache.commit(
                 readGeneration = readGeneration,
                 packageName = packageName,
@@ -1258,6 +1528,105 @@ class OvidAccessibilityService : AccessibilityService() {
         }
     }
 
+    /// Double / triple tap at a point, or a multi-click on a node's centre.
+    ///
+    /// Sent as ONE gesture with N timed strokes: two separate dispatches arrive
+    /// as two unrelated touches, so `onDoubleClick` handlers, map zoom and
+    /// text-selection handles all ignored them.
+    @Synchronized
+    internal fun multiTap(
+        x: Float,
+        y: Float,
+        count: Int,
+        intervalMs: Long,
+    ): DeviceActionResult {
+        if (!x.isFinite() || !y.isFinite()) {
+            return DeviceActionResult(false, "BAD_ARGS", "Multi-tap coordinates must be finite.")
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return DeviceActionResult(false, "UNSUPPORTED", "Multi-tap gestures require Android 7.0 or newer.")
+        }
+        return if (Api24Actions.multiTap(this, x, y, count, intervalMs)) {
+            DeviceActionResult(true)
+        } else {
+            DeviceActionResult(false, message = "Android did not accept the multi-tap gesture.")
+        }
+    }
+
+    /// Long-press-then-move drag: icons, selection handles, reorder rows,
+    /// sliders. `holdMs` presses and holds at the origin before moving, which is
+    /// what makes a drag start rather than a fling.
+    @Synchronized
+    internal fun drag(
+        fromX: Float,
+        fromY: Float,
+        toX: Float,
+        toY: Float,
+        holdMs: Long,
+        durationMs: Long,
+    ): DeviceActionResult {
+        if (!listOf(fromX, fromY, toX, toY).all { it.isFinite() } || durationMs <= 0) {
+            return DeviceActionResult(false, "BAD_ARGS", "Drag coordinates must be finite and duration must be positive.")
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return DeviceActionResult(false, "UNSUPPORTED", "Drag gestures require Android 7.0 or newer.")
+        }
+        return if (Api24Actions.drag(this, fromX, fromY, toX, toY, holdMs, durationMs)) {
+            DeviceActionResult(true)
+        } else {
+            DeviceActionResult(false, message = "Android did not accept the drag gesture.")
+        }
+    }
+
+    /// Two-finger pinch (zoom out) or spread (zoom in) about a centre point.
+    @Synchronized
+    internal fun pinch(
+        centerX: Float,
+        centerY: Float,
+        fromRadius: Float,
+        toRadius: Float,
+        durationMs: Long,
+    ): DeviceActionResult {
+        if (!listOf(centerX, centerY, fromRadius, toRadius).all { it.isFinite() } ||
+            fromRadius <= 0f || toRadius <= 0f || durationMs <= 0
+        ) {
+            return DeviceActionResult(false, "BAD_ARGS", "Pinch needs a finite centre and positive radii/duration.")
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return DeviceActionResult(false, "UNSUPPORTED", "Pinch gestures require Android 7.0 or newer.")
+        }
+        return if (Api24Actions.pinch(this, centerX, centerY, fromRadius, toRadius, durationMs)) {
+            DeviceActionResult(true)
+        } else {
+            DeviceActionResult(false, message = "Android did not accept the pinch gesture.")
+        }
+    }
+
+    /// Two-finger swipe in one direction — the gesture a scrollable list, web
+    /// page or launcher expects where one finger means something else (back
+    /// swipe, carousel page, drawer).
+    @Synchronized
+    internal fun twoFingerSwipe(
+        fromX: Float,
+        fromY: Float,
+        toX: Float,
+        toY: Float,
+        durationMs: Long,
+        separation: Float,
+    ): DeviceActionResult {
+        if (!listOf(fromX, fromY, toX, toY).all { it.isFinite() } || durationMs <= 0) {
+            return DeviceActionResult(false, "BAD_ARGS", "Two-finger swipe coordinates must be finite and duration positive.")
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return DeviceActionResult(false, "UNSUPPORTED", "Two-finger swipes require Android 7.0 or newer.")
+        }
+        return if (Api24Actions.twoFingerSwipe(this, fromX, fromY, toX, toY, durationMs, separation)) {
+            DeviceActionResult(true)
+        } else {
+            DeviceActionResult(false, message = "Android did not accept the two-finger swipe.")
+        }
+    }
+
     @Synchronized
     internal fun pressKey(key: String): DeviceActionResult {
         // Closed vocabulary: Android denies INJECT_EVENTS to apps, so only
@@ -1464,6 +1833,125 @@ private object Api24Actions {
         val path = Path().apply { moveTo(x, y) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+            .build()
+        return service.dispatchGesture(gesture, null, null)
+    }
+
+    /// Double / triple tap: N short strokes at the SAME point, spaced inside the
+    /// platform double-tap timeout so the target app recognises the multi-click
+    /// rather than N independent taps.
+    ///
+    /// A plain `tap` twice in a row never worked: two separate
+    /// `dispatchGesture` calls arrive as two unrelated touches, so galleries,
+    /// maps, text-selection handles and every `onDoubleClick` handler ignored
+    /// them.
+    fun multiTap(
+        service: AccessibilityService,
+        x: Float,
+        y: Float,
+        count: Int,
+        intervalMs: Long,
+    ): Boolean {
+        val times = count.coerceIn(2, 4)
+        val gap = intervalMs.coerceIn(40L, 300L)
+        val path = Path().apply { moveTo(x, y) }
+        val builder = GestureDescription.Builder()
+        for (i in 0 until times) {
+            builder.addStroke(
+                GestureDescription.StrokeDescription(path, i * gap, 45L),
+            )
+        }
+        return service.dispatchGesture(builder.build(), null, null)
+    }
+
+    /// Drag: optional hold at the origin (so long-press-then-drag works, which
+    /// is how icons, selection handles and reorder rows are picked up), then a
+    /// move to the destination.
+    ///
+    /// `continueStroke` is API 26+; below that the hold and the move are sent as
+    /// two parallel-timed strokes in one gesture, which is close enough for a
+    /// drag and still a single touch sequence.
+    fun drag(
+        service: AccessibilityService,
+        fromX: Float,
+        fromY: Float,
+        toX: Float,
+        toY: Float,
+        holdMs: Long,
+        durationMs: Long,
+    ): Boolean {
+        val move = Path().apply {
+            moveTo(fromX, fromY)
+            lineTo(toX, toY)
+        }
+        val builder = GestureDescription.Builder()
+        val hold = holdMs.coerceAtLeast(0L)
+        if (hold > 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val holdPath = Path().apply { moveTo(fromX, fromY) }
+            val first = GestureDescription.StrokeDescription(holdPath, 0, hold, true)
+            builder.addStroke(first)
+            builder.addStroke(first.continueStroke(move, 0, durationMs, false))
+        } else if (hold > 0) {
+            val holdPath = Path().apply { moveTo(fromX, fromY) }
+            builder.addStroke(GestureDescription.StrokeDescription(holdPath, 0, hold))
+            builder.addStroke(
+                GestureDescription.StrokeDescription(move, hold, durationMs),
+            )
+        } else {
+            builder.addStroke(GestureDescription.StrokeDescription(move, 0, durationMs))
+        }
+        return service.dispatchGesture(builder.build(), null, null)
+    }
+
+    /// Pinch / spread: two fingers moving symmetrically about a centre. Used for
+    /// map zoom, image zoom and any two-finger scaler.
+    fun pinch(
+        service: AccessibilityService,
+        centerX: Float,
+        centerY: Float,
+        fromRadius: Float,
+        toRadius: Float,
+        durationMs: Long,
+    ): Boolean {
+        val a = Path().apply {
+            moveTo(centerX - fromRadius, centerY)
+            lineTo(centerX - toRadius, centerY)
+        }
+        val b = Path().apply {
+            moveTo(centerX + fromRadius, centerY)
+            lineTo(centerX + toRadius, centerY)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(a, 0, durationMs))
+            .addStroke(GestureDescription.StrokeDescription(b, 0, durationMs))
+            .build()
+        return service.dispatchGesture(gesture, null, null)
+    }
+
+    /// Two-finger swipe in the same direction: the gesture scrollable lists,
+    /// web pages and some launchers require where a one-finger swipe is taken as
+    /// something else (a back swipe, a carousel page, a drawer).
+    fun twoFingerSwipe(
+        service: AccessibilityService,
+        fromX: Float,
+        fromY: Float,
+        toX: Float,
+        toY: Float,
+        durationMs: Long,
+        separation: Float,
+    ): Boolean {
+        val half = separation / 2f
+        val a = Path().apply {
+            moveTo(fromX - half, fromY)
+            lineTo(toX - half, toY)
+        }
+        val b = Path().apply {
+            moveTo(fromX + half, fromY)
+            lineTo(toX + half, toY)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(a, 0, durationMs))
+            .addStroke(GestureDescription.StrokeDescription(b, 0, durationMs))
             .build()
         return service.dispatchGesture(gesture, null, null)
     }
