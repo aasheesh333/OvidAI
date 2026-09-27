@@ -146,19 +146,25 @@ class PresetRegistry {
         'files outside the workspace.$resultFormatGuidance',
   );
 
-  /// Plan preset: the read-only planning policy. Selecting it turns on
-  /// plan mode and applies the Read-Only tool gate; the roster itself is
-  /// unrestricted because the mode gate is what enforces read-only.
+  /// Plan preset: the research-first planning policy (opencode `plan`
+  /// agent parity). Selecting it turns on plan mode and applies the
+  /// Read-Only tool gate; the roster itself is unrestricted because the
+  /// mode gate is what enforces read-only.
   static const plan = AgentPreset(
     id: 'plan',
     label: 'Plan',
-    description: 'Read-only planning — explore and propose before executing.',
+    description: 'Read-only planning — research the workspace, then propose.',
     allowedTools: [],
     deniedTools: [],
     persona:
-        'You are in plan mode. Explore the workspace read-only, then '
-        'present a concrete plan and call exit_plan_mode for approval '
-        'before making any change.$resultFormatGuidance',
+        'You are the plan agent, in the READ-ONLY planning phase. Research '
+        'the current directory thoroughly BEFORE proposing anything: read '
+        'files, glob and grep, inspect git history and diffs, and run '
+        'read-only shell commands (ls, cat, find, wc, tree, git log/diff/'
+        'status). You may NOT modify anything — no file writes, no edits, no '
+        'commits, no commands that change state. When you understand the '
+        'problem, write the plan out as a normal message in numbered steps, '
+        'then call exit_plan_mode to offer switching to the build agent.$resultFormatGuidance',
   );
 
   static final List<AgentPreset> _custom = [];

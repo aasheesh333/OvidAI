@@ -128,10 +128,6 @@ void main() {
         contains('PLAN MODE ACTIVE'),
       );
       expect(
-        await call('run_shell', {'command': 'ls'}),
-        contains('PLAN MODE ACTIVE'),
-      );
-      expect(
         await call('file_write', {'path': 'x.txt', 'content': 'x'}),
         contains('PLAN MODE ACTIVE'),
       );
@@ -166,6 +162,31 @@ void main() {
           isNot(contains('PLAN MODE ACTIVE')),
           reason: '$tool is read-only and must be usable while planning',
         );
+      }
+    });
+
+    test('the shell is usable for research (opencode plan-agent parity)', () {
+      // opencode's plan agent leaves `bash` ALLOWED and denies only `edit`.
+      // Ovid mirrors that: run_shell is on the allowlist, and read-only
+      // intent inside the shell is carried by the plan-mode prompt.
+      expect(
+        AgentService.planModeAllowedToolsForTest,
+        containsAll(<String>['run_shell', 'file_read', 'fs_grep', 'git_log']),
+      );
+      // The things that MUTATE state stay refused — asserted one by one so
+      // a failure names the tool that leaked onto the allowlist.
+      final allowed = AgentService.planModeAllowedToolsForTest;
+      for (final t in const [
+        'file_write',
+        'fs_edit',
+        'commit',
+        'run_code',
+        'repo_sync',
+        'git_push',
+        'job_start',
+        'preview',
+      ]) {
+        expect(allowed.contains(t), isFalse, reason: '$t must stay refused');
       }
     });
 

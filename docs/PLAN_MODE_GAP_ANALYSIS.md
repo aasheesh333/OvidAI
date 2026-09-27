@@ -166,3 +166,117 @@ dsh: optional package, and *"the agent loop does not depend on it."* Ovid: gate,
 ---
 
 *Every Ovid claim above was verified against the live tree at `a611c53`. Line numbers may drift; the surrounding comments are distinctive enough to re-locate.*
+
+---
+
+## 6. Resolution — 2026-09-27 (opencode `plan`-agent parity)
+
+The requirement changed: plan mode must be a **research agent over the current
+directory**, and the plan must **not** be presented inside a question/approval
+card. Implemented as follows.
+
+### 6.1 What changed
+
+| Area | Before | After |
+|---|---|---|
+| Plan delivery | The plan rode in the `exit_plan_mode` tool argument and was rendered in a dedicated `_PlanReviewCard` (markdown, 260 px scroll, Approve / Decline / Chat-about-it) | The plan is a **normal assistant message**. The tool argument is only a short recap. `_PlanReviewCard` is deleted; `exit_plan_mode` now routes through the existing `_QuestionsCard` as **one yes/no question** |
+| Exit question | "Approve this plan?" (approve/deny an artefact) | `"Plan complete. Would you like to switch to the build agent and start implementing?"` — Yes / No, i.e. opencode's `plan_exit` wording |
+| Shell in plan mode | `run_shell` **refused** by the allowlist | `run_shell` **allowed**, matching opencode (`bash` is `"*": "allow"`; only `edit` is denied) |
+| Read-only enforcement | Gate only (tool-name based) | Gate **plus** a plan-mode system-prompt section — the `session/prompt/plan.txt` equivalent. A shell command's effect cannot be decided from its name, so the instruction carries the rule |
+| Plan-mode prompt | None (only the `plan` preset persona, applied only when the preset was selected) | A `planMode`-gated system-prompt block, so `/plan`, the preset and any other entry point all get the same read-only briefing |
+
+### 6.2 Gap status after this change
+
+| Gap | Status |
+|---|---|
+| **G8** — allowlist maintenance burden | **Improved.** Shell research now matches opencode, so the practical pressure to widen the allowlist drops. The allowlist remains default-deny |
+| **G4** — preset and plan mode are two half-mechanisms | **Partially closed.** Both now inject the same research-first policy and the preset no longer describes a different exit flow |
+| **G6** — no attachments on `/plan` | Open |
+| **G1** — `AgentRun.planMode` write-only | Open (`:604` written 5×, read 0×) |
+| **G2** — no turn-boundary queue | Open |
+| **G3** — no per-preset model/temperature | Open |
+| **G5** — policy not user-authorable | Open |
+| **G7** — not modular | Open |
+
+### 6.3 Accepted trade-off (explicit user decision)
+
+Allowing `run_shell` in plan mode **weakens** the hard default-deny allowlist:
+the gate can no longer stop a planning agent from running a mutating command.
+This is deliberate — it is exactly what opencode does, and the enforcement is
+prompt guidance in both. Everything that mutates state *by tool identity*
+(`file_write`, `fs_edit`, `commit`, `run_code`, `repo_sync`, `git_push`,
+`job_start`, `preview`, every `device_*`, every plugin/MCP tool) stays refused
+by the gate. The regression risk is therefore: a planning agent that ignores
+its instructions can mutate the workspace through the shell. Users who want
+the old hard guarantee should not enter plan mode.
+
+### 6.4 Tests touched
+
+- `test/plan_mode_allowlist_test.dart` — `run_shell` moved from the refused
+  list to a new "shell is usable for research" test; the mutating tools are
+  now asserted one by one so a leak names itself.
+- `test/composer_modes_test.dart` (×2), `test/chat_dsh_parity_test.dart`,
+  `test/core_regression_test.dart` — `exit_plan_mode` is now a *questions*
+  request, so the answer (`answers['plan_exit'] = 'Yes'`) must be recorded
+  before `approve(true)`, which is exactly what the real card does.
+
+*Verification: static only — exact-match patch assertions plus a
+delimiter-balance diff against the pre-patch files. `flutter analyze` /
+`flutter test` were not run locally (no aarch64 host SDK); CI is the verifier.*
+
+---
+
+## 6. Implementation (2026-09-27) — research-agent plan mode
+
+Requirement: plan mode should behave like opencode's **Plan agent** — research
+the current directory — and the plan must **not** be presented inside an
+approval/question card.
+
+### 6.1 What changed
+
+| Area | Before | After |
+|---|---|---|
+| Plan delivery | The plan rode in the `exit_plan_mode` argument and was rendered in a dedicated `_PlanReviewCard` (markdown, 260 px scroll, Chat-about-it / Decline / Approve) | The plan is a **normal assistant message**. The argument is only a short recap. `_PlanReviewCard` is deleted; `exit_plan_mode` routes through the existing `_QuestionsCard` as **one yes/no question** |
+| Exit question | "Approve this plan?" | "Plan complete. Would you like to switch to the build agent and start implementing?" — Yes / No, i.e. opencode's `plan_exit` wording |
+| Shell in plan mode | `run_shell` **refused** by the allowlist | `run_shell` **allowed** — opencode's plan agent leaves `bash` at `"*": "allow"` and denies only `edit` |
+| Read-only enforcement | Gate only (tool-name based) | Gate **plus** a plan-mode system-prompt section — the `session/prompt/plan.txt` equivalent, because a shell command's effect cannot be decided from its name |
+| Plan-mode briefing | None (only the `plan` preset persona, which applied only when that preset was selected) | A `planMode`-gated prompt block, so the plan command, the preset and any other entry point all get the same read-only briefing |
+
+### 6.2 Gap status after this change
+
+| Gap | Status |
+|---|---|
+| **G8** allowlist maintenance burden | **Improved.** Shell research now matches opencode, so the pressure to keep widening the allowlist drops. It stays default-deny |
+| **G4** preset + plan mode as two half-mechanisms | **Partially closed.** Both now inject the same research-first policy, and the preset no longer describes a different exit flow |
+| **G6** plan-command attachments | Open |
+| **G1** `AgentRun.planMode` write-only | Open (`:604` written 5x, read 0x) |
+| **G2** no turn-boundary queue | Open |
+| **G3** no per-preset model/temperature | Open |
+| **G5** policy not user-authorable | Open |
+| **G7** not modular | Open |
+
+### 6.3 Accepted trade-off (explicit user decision)
+
+Allowing `run_shell` in plan mode **weakens** the hard default-deny allowlist:
+the gate can no longer stop a planning agent from running a mutating command.
+This is deliberate — it is exactly what opencode does, and enforcement is
+prompt guidance in both. Everything that mutates state *by tool identity*
+(`file_write`, `fs_edit`, `commit`, `run_code`, `repo_sync`, `git_push`,
+`job_start`, `preview`, every `device_*`, every plugin/MCP tool) stays refused
+by the gate. Residual risk: a planning agent that ignores its instructions can
+mutate the workspace through the shell. A user who wants the old hard
+guarantee should not enter plan mode.
+
+### 6.4 Tests touched
+
+- `test/plan_mode_allowlist_test.dart` — `run_shell` moved from the refused
+  list to a new "shell is usable for research" test; the mutating tools are
+  asserted one by one so a leak names itself.
+- `test/composer_modes_test.dart` (x2), `test/chat_dsh_parity_test.dart`,
+  `test/core_regression_test.dart` — `exit_plan_mode` is now a *questions*
+  request, so the answer (`answers['plan_exit'] = 'Yes'`) is recorded before
+  `approve(true)`, which is exactly what the real card does.
+
+*Verification: static only — exact-match patch assertions plus a
+delimiter-balance diff against the pre-patch files. `flutter analyze` and
+`flutter test` were not run locally (no aarch64 host SDK); CI is the verifier.*

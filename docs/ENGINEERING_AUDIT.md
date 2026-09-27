@@ -249,3 +249,7 @@ a file's live line count (`wc -l`) before editing it in this repo.**
 *Audit generated from branch `hoplite/gortyn-77773150` @ `f817418`.
 `flutter analyze` / `flutter test` were not run in this environment — run them
 in CI or a Flutter-enabled sandbox before treating any finding as closed.*
+
+---
+
+_Verification status (2026-09-27): the four patches and this document are committed locally as a611c53. Static verification only: exact-match assertions plus a delimiter-balance diff against HEAD. flutter analyze and flutter test were NOT run locally because no aarch64 host SDK exists; CI is the verifier._

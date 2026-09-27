@@ -165,7 +165,9 @@ class CommandService {
           }
           agent.planMode = true;
           final msg = args.trim().isEmpty
-              ? 'Plan the next step. Explore first, then call exit_plan_mode with your plan.'
+              ? 'Research the current directory first, then write a numbered '
+                    'plan and call exit_plan_mode to offer switching to the '
+                    'build agent.'
               : args.trim();
           return CommandResult(prompt: msg, feedback: 'Plan mode on.');
         },

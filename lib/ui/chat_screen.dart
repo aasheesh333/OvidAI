@@ -6353,9 +6353,12 @@ class _ApprovalDockState extends State<_ApprovalDock> {
         if (req.questions != null && req.questions!.isNotEmpty) {
           return _QuestionsCard(req);
         }
-        // ── Plan review (exit_plan_mode) — PlanReviewPanel style ──
+        // ── Plan exit (exit_plan_mode) — opencode-style switch prompt ──
+        // The plan itself lives in the model's message; this asks the single
+        // yes/no "switch to the build agent?" question, exactly like
+        // opencode's plan_exit tool. There is no plan-review card.
         if (req.tool == 'exit_plan_mode') {
-          return _PlanReviewCard(req);
+          return _QuestionsCard(req);
         }
         // ── Standard approve/deny card: exactly three actions ──
         return Container(
@@ -6440,156 +6443,6 @@ class _ApprovalDockState extends State<_ApprovalDock> {
           ),
         );
       },
-    );
-  }
-}
-
-/// PlanReviewPanel parity — shows the actual plan markdown with
-/// Decline / Approve buttons (fixes: the plan was never rendered before).
-class _PlanReviewCard extends StatelessWidget {
-  final ApprovalRequest req;
-  const _PlanReviewCard(this.req);
-
-  /// "Chat about it" — decline WITH feedback so the model revises instead of
-  /// guessing why the plan was refused.
-  Future<void> _chatAboutIt(BuildContext context) async {
-    final c = TextEditingController();
-    final note = await showDialog<String>(
-      context: context,
-      builder: (d) => AlertDialog(
-        backgroundColor: Aether.surface,
-        title: const Text(
-          'Chat about the plan',
-          style: TextStyle(fontSize: 15.5),
-        ),
-        content: TextField(
-          controller: c,
-          autofocus: true,
-          minLines: 2,
-          maxLines: 5,
-          style: const TextStyle(fontSize: 13.5),
-          decoration: const InputDecoration(
-            hintText: 'What should change? (sent back to the AI)',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(d),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Aether.accent),
-            onPressed: () => Navigator.pop(d, c.text),
-            child: const Text('Send'),
-          ),
-        ],
-      ),
-    );
-    if (note == null) return;
-    AgentService.I.approve(false, note: note);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // planBody is the raw plan captured when the request was raised — no
-    // fragile re-parsing of the framing prose out of `detail`.
-    final plan = req.planBody ?? req.detail;
-
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-      decoration: BoxDecoration(
-        color: Aether.accent.withValues(alpha: 0.06),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Aether.accent.withValues(alpha: 0.35)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header strip.
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
-            child: Row(
-              children: [
-                _StateDot(Aether.accent),
-                const SizedBox(width: 7),
-                Text(
-                  'Plan review',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: Aether.text,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          // The plan body (markdown).
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 260),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
-              child: _OvidMarkdown(content: plan),
-            ),
-          ),
-          const SizedBox(height: 4),
-          // Decision row: Chat about it · Decline · Approve.
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                TextButton(
-                  style: TextButton.styleFrom(
-                    foregroundColor: Aether.textMuted,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 8,
-                    ),
-                    minimumSize: Size.zero,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  onPressed: () => _chatAboutIt(context),
-                  child: const Text(
-                    'Chat about it',
-                    style: TextStyle(fontSize: 12),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                OutlinedButton(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Aether.dangerC,
-                    side: BorderSide(
-                      color: Aether.dangerC.withValues(alpha: 0.5),
-                    ),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 8,
-                    ),
-                    minimumSize: Size.zero,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  onPressed: () => AgentService.I.approve(false),
-                  child: const Text('Decline', style: TextStyle(fontSize: 12)),
-                ),
-                const SizedBox(width: 8),
-                FilledButton(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Aether.accent,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 8,
-                    ),
-                    minimumSize: Size.zero,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  onPressed: () => AgentService.I.approve(true),
-                  child: const Text('Approve', style: TextStyle(fontSize: 12)),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

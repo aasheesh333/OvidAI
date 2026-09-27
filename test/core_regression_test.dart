@@ -10859,6 +10859,8 @@ url = "https://api.example.com/mcp"
         });
         await Future<void>.delayed(const Duration(milliseconds: 20));
         expect(AgentService.I.pendingApproval, isNotNull);
+        // exit_plan_mode now asks the opencode-style yes/no switch question.
+        AgentService.I.pendingApproval!.answers['plan_exit'] = 'Yes';
         AgentService.I.approve(true);
         final planRes = await planFuture;
         expect(planRes, contains('approved'));

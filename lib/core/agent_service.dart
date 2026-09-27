@@ -6421,19 +6421,22 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       'function': {
         'name': 'exit_plan_mode',
         'description':
-            'Present your plan to the user for approval BEFORE executing '
-            'it.  Call this when you have thought through a complex task '
-            'and have a multi-step plan.  The user sees the plan card and '
-            'can approve (you then execute) or give feedback (you revise '
-            'the plan).  Present plans as numbered steps.',
+            'Finish planning and offer to start building.  Call this once you '
+            'have researched the workspace and written the plan out in your '
+            'own words as a NORMAL MESSAGE.  This does not open a plan card: '
+            'it asks the user a single yes/no question — switch to the build '
+            'agent and start implementing?  Write the plan as numbered steps '
+            'in the message BEFORE calling this; the argument here is only a '
+            'short recap for context.',
         'parameters': {
           'type': 'object',
           'properties': {
             'plan': {
               'type': 'string',
               'description':
-                  'Your plan as numbered steps (e.g. "1. Read the file\\n'
-                  '2. Fix the bug\\n3. Test the fix")',
+                  'Short recap of the plan you already wrote out as a message '
+                  '(the user reads the full plan from that message, not from '
+                  'this field).',
             },
           },
           'required': ['plan'],
@@ -8783,6 +8786,23 @@ job_start,
 job_kill, catalog mutations, plugin/MCP installs, browser typing/clicking.
 Do not attempt them — instead explain what needs to change and ask the user
 to switch to General or Studio mode.''' : ''}
+${planMode ? '''
+PLAN MODE — READ-ONLY RESEARCH PHASE (opencode plan-agent parity):
+You are the PLAN agent. Your job is to RESEARCH and PROPOSE, not to change
+anything. Investigate the current directory thoroughly before you propose:
+read files, glob and grep, inspect git history and diffs, and run read-only
+shell commands (ls, cat, find, wc, tree, git log/diff/status, `sed -n`).
+CRITICAL: you are in the READ-ONLY phase. Do NOT use shell commands that
+modify anything — no redirects into files (`>`, `>>`), no `tee`, `sed -i`,
+`mv`, `rm`, `mkdir`, `touch`, no `git add/commit/checkout`, no installs.
+Do not use file_write, fs_edit, commit, or any device_* tool. If something
+looks like it needs a change, write the change down instead of making it.
+The plan is NOT a card and NOT a tool argument: write it out as a normal
+message — a numbered list of concrete steps naming the exact files and
+commands involved — and only THEN call exit_plan_mode, which asks the user
+one yes/no question: switch to the build agent and start implementing?
+Keep the plan tight and grounded in what you actually read.
+''' : ''}
 ${mode == AgentMode.control ? '''
 CONTROL MODE: the user has granted device control. You ARE expected to operate
 the device and other apps on the user's behalf — this is the point of the mode.
@@ -11270,17 +11290,20 @@ ${await _agentsMdBlock()}
           'permitted right now. Use an allowed tool, or call the `skill` tool '
           'to load a different skill (which replaces this scope).';
     }
-    // ── Plan mode enforcement (the plan mode gate exit_plan_mode flow) ──
-    // While planning, ONLY allowlisted read/search/plan tools run. This is an
-    // allowlist, not a blocklist: an unlisted tool — including plugin and MCP
-    // contributions and anything added later — is refused by default. The AI
-    // must present its plan via exit_plan_mode and get user approval first.
+    // ── Plan mode enforcement (the opencode plan-agent flow) ──
+    // While planning the agent is a RESEARCH agent: it reads, searches and
+    // runs read-only shell commands to investigate the current directory, but
+    // every mutating tool is refused. This is an allowlist, not a blocklist:
+    // an unlisted tool — including plugin/MCP contributions and anything
+    // added later — is refused by default. Read-only intent INSIDE the shell
+    // is carried by the plan-mode prompt (session/prompt/plan.txt parity),
+    // because a shell command's effect cannot be decided from its name.
     if (planMode && !_isPlanModeAllowedTool(name)) {
-      return 'PLAN MODE ACTIVE: "$name" is not a read-only tool. Plan mode '
-          'allows reading, searching and planning only — use the '
-          'read/list/search tools to explore, record your plan with '
-          'todo_write, and call exit_plan_mode for user approval. After '
-          'approval, execution tools unlock.';
+      return 'PLAN MODE ACTIVE: "$name" is a mutating tool. Plan mode is the '
+          'research phase — read, search and inspect with the allowlisted '
+          'tools (file_read, fs_glob, fs_grep, run_shell for read-only '
+          'commands, git_log, …), write the plan out as a message, then call '
+          'exit_plan_mode. Execution tools unlock once the user approves.';
     }
     // ── Read-Only mode hard gate (the read-only gate plan-mode-style block) ──
     // In Read-Only mode the agent is RESTRICTED, not merely asked: writes,
@@ -17136,19 +17159,29 @@ ${await _agentsMdBlock()}
 
   // ── WAVE 2 HANDLERS — plan mode, background jobs, session events ────
 
-  /// Plan mode is PLAN-ONLY: explore, read, write the plan, ask for approval.
+  /// Plan mode is the RESEARCH phase (opencode `plan` agent parity):
+  /// explore, read and inspect the workspace, then write the plan and offer
+  /// to build it.
   ///
-  /// SECURITY (2026-09-24): this replaced a BLOCKLIST (`_mutatingTools`), which
-  /// fails OPEN — every tool not listed ran freely while "planning", including
-  /// any tool added later. Two escapes actually shipped:
-  ///   • all the non-interaction `browser_*` tools were unlisted, so a planning
-  ///     agent could open tabs, navigate live pages, resize and **close the
-  ///     user's tabs**, with unrestricted network egress;
-  ///   • `interrupt_agent` / `send_message` were unlisted, so it could stop or
-  ///     steer ANOTHER session — which is not in plan mode — into doing the
-  ///     mutation instead.
+  /// SECURITY (2026-09-24): this replaced a BLOCKLIST (`_mutatingTools`),
+  /// which fails OPEN — every tool not listed ran freely while "planning",
+  /// including any tool added later. Two escapes actually shipped:
+  ///   • all the non-interaction `browser_*` tools were unlisted, so a
+  ///     planning agent could open tabs, navigate live pages, resize and
+  ///     **close the user's tabs**, with unrestricted network egress;
+  ///   • `interrupt_agent` / `send_message` were unlisted, so it could stop
+  ///     or steer ANOTHER session — which is not in plan mode — into doing
+  ///     the mutation instead.
   /// An allowlist makes the default refusal, so a new tool is blocked until
   /// someone deliberately decides it is safe to plan with.
+  ///
+  /// SHELL (opencode parity, 2026-09-27): `run_shell` IS allowed, mirroring
+  /// opencode's plan agent, which leaves `bash` permitted and denies only
+  /// `edit`. Read-only intent inside the shell is carried by the plan-mode
+  /// prompt (session/prompt/plan.txt parity), because a command's effect
+  /// cannot be decided from its name. Everything that MUTATES state stays
+  /// out: `file_write` / `fs_edit`, `commit`, `run_code`, `repo_sync`, the
+  /// whole `device_*` family, and every plugin/MCP tool.
   ///
   /// Deliberately EXCLUDED: every `device_*` tool (they act on other apps and
   /// capture their screens), all `plugin_*` / canonical plugin calls and MCP
@@ -17170,6 +17203,12 @@ ${await _agentsMdBlock()}
     'git_status',
     'git_log',
     'git_diff',
+    // ── inspecting the workspace with the shell (opencode parity) ────
+    // opencode's plan agent leaves `bash` ALLOWED and denies only `edit`, so
+    // the planning agent can run `git log`, `find`, `wc`, `tree`, `cat`,
+    // `grep`, `ls`, `sed -n` … to research the current directory. Read-only
+    // intent is carried by the plan-mode prompt, not by the gate.
+    'run_shell',
     // ── research ─────────────────────────────────────────────────────
     'fetch_url',
     'web_search',
@@ -17306,42 +17345,54 @@ ${await _agentsMdBlock()}
   @visibleForTesting
   bool isEchoPlaceholderForTest(String cmd) => _isEchoPlaceholder(cmd);
 
+  /// opencode parity (`packages/opencode/src/tool/plan.ts`): finishing a
+  /// plan asks ONE yes/no question — "switch to the build agent and start
+  /// implementing?" — and the plan itself is NEVER rendered inside a card.
+  /// The model writes the plan out as a normal message; the argument here is
+  /// only a short recap so the question has context.
   Future<String> _handleExitPlanMode(Map<String, dynamic> args) async {
-    final plan = args['plan'] as String? ?? '';
-    _emit('think', 'presenting plan for approval…');
-    // planBody carries the raw plan so the review card renders it without
-    // string-matching the framing prose back out of `detail`.
-    final req = ApprovalRequest(
-      tool: 'exit_plan_mode',
-      summary: 'Approve this plan?',
-      detail:
-          'The AI\'s plan:\n\n$plan\n\n'
-          'Approving runs the plan; declining asks the AI to revise it.',
-      planBody: plan,
-    );
-    pendingApproval = req;
-    notifyListeners();
-    final ok = await req.completer.future;
+    final plan = (args['plan'] as String? ?? '').trim();
+    _emit('think', 'plan complete — offering to switch to build…');
+    // Keep the recap short: the plan belongs in the message, not the card.
+    final recap = plan.length <= 240 ? plan : '${plan.substring(0, 240)}…';
+    final answers = await _askQuestions([
+      UserQuestion(
+        id: 'plan_exit',
+        question: recap.isEmpty
+            ? 'Plan complete. Would you like to switch to the build agent '
+                  'and start implementing?'
+            : 'Plan complete. Would you like to switch to the build agent '
+                  'and start implementing?\n\n$recap',
+        header: 'Build agent',
+        options: const [
+          QuestionOption(
+            label: 'Yes',
+            description: 'Switch to the build agent and start implementing',
+          ),
+          QuestionOption(
+            label: 'No',
+            description: 'Stay in plan mode and keep refining the plan',
+          ),
+        ],
+      ),
+    ]);
+    final answer = answers?['plan_exit']?.trim().toLowerCase() ?? '';
+    final approved = answer.startsWith('yes');
     final sessionId = _runSession?.id ?? AppState.I.activeSession?.id;
     if (sessionId != null) {
       await SessionLedger.I.append(sessionId, 'approval', {
         'tool': 'exit_plan_mode',
-        'ok': ok,
+        'ok': approved,
       });
     }
-    if (!ok) {
+    if (!approved) {
       planMode = true; // stay in plan mode
-      final note = req.note?.trim();
-      if (note != null && note.isNotEmpty) {
-        return 'The user did not approve the plan and left this feedback:\n'
-            '$note\n\n'
-            'Discuss it or revise the plan, then call exit_plan_mode again.';
-      }
-      return 'The user rejected the plan. Revise it and call exit_plan_mode again.';
+      return 'The user did not approve — they chose to keep planning. '
+          'Refine the plan and call exit_plan_mode again when it is ready.';
     }
     planMode = false;
     _emit('done', 'plan approved ✓ — executing');
-    return 'Plan approved ✓ — now execute it.';
+    return 'Plan approved ✓ — switch to the build agent and execute the plan.';
   }
 
   // ── GOALS (the goal coordinator goal-round equivalent) ──
