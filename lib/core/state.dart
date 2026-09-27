@@ -1060,6 +1060,20 @@ class ChatSession {
   /// sandbox workspace. Persisted with the session.
   String? workspaceFolder;
 
+  /// Whether [workspaceFolder] was chosen FOR THIS CHAT (composer picker or
+  /// Studio bind) rather than carried over from the user's last selection.
+  ///
+  /// The distinction exists because of a real report: a brand-new chat
+  /// inherited the previous Studio folder, and the system prompt then told the
+  /// model "the user pinned this chat to the folder above". The model duly
+  /// announced a repo and location the owner had never selected in that chat —
+  /// a binding stated as fact that nobody had actually set up. Inheritance is
+  /// intentional (spec §5.2: a restart must not force a fresh selection); the
+  /// LIE about who chose it was not. Persisted with the session; absent/false
+  /// for sessions written before this flag existed, which makes the prompt
+  /// under-claim rather than over-claim.
+  bool workspaceFolderPinned;
+
   /// Per-session Studio repo (owner/name).  Each session can work on a
   /// different repo; new sessions start with the global default (the last
   /// connected repo).  Persisted with the session.
@@ -1178,6 +1192,7 @@ class ChatSession {
     this.mode = 'auto',
     this.presetId = 'standard',
     this.workspaceFolder,
+    this.workspaceFolderPinned = false,
     this.compactedSummary,
     this.systemPromptSnapshot,
     this.goal,
@@ -1221,6 +1236,7 @@ class ChatSession {
     mode: AppState.sanitizeColdStartMode(j['mode'] as String? ?? 'auto'),
     presetId: j['presetId'] as String? ?? 'standard',
     workspaceFolder: j['workspaceFolder'] as String?,
+    workspaceFolderPinned: j['workspaceFolderPinned'] as bool? ?? false,
     compactedSummary: j['compactedSummary'] as String?,
     systemPromptSnapshot: j['systemPromptSnapshot'] as String?,
     compactedAtCount: (j['compactedAtCount'] as num?)?.toInt() ?? 0,
@@ -1284,6 +1300,7 @@ class ChatSession {
     if (presetId != 'standard') 'presetId': presetId,
     if (workspaceFolder != null && workspaceFolder!.isNotEmpty)
       'workspaceFolder': workspaceFolder,
+    if (workspaceFolderPinned) 'workspaceFolderPinned': true,
     if (compactedSummary != null) 'compactedSummary': compactedSummary,
     if (systemPromptSnapshot != null)
       'systemPromptSnapshot': systemPromptSnapshot,
@@ -4768,6 +4785,7 @@ class AppState extends ChangeNotifier {
       // the same project; without a pinned folder they get their own
       // sandbox workspace (sandboxId defaults to the child id).
       workspaceFolder: parent.workspaceFolder,
+      workspaceFolderPinned: parent.workspaceFolderPinned,
       repo: parent.repo,
       // Children share the parent's `(repo, branch)` binding so their edits
       // land on the same ref, not the default branch.
@@ -4918,8 +4936,14 @@ class AppState extends ChangeNotifier {
     final normalized = (path == null || path.trim().isEmpty)
         ? null
         : path.trim();
-    if (s.workspaceFolder == normalized) return;
+    if (s.workspaceFolder == normalized &&
+        s.workspaceFolderPinned == (normalized != null)) {
+      return;
+    }
     s.workspaceFolder = normalized;
+    // A picker (or a Studio bind) choosing a folder is what makes it THIS
+    // chat's folder; clearing it drops the claim back to "no pinned folder".
+    s.workspaceFolderPinned = normalized != null;
     lastWorkspaceFolder = normalized;
     unawaited(_persistLastSelection());
     _markSessionDirty(s.id);
@@ -4945,6 +4969,9 @@ class AppState extends ChangeNotifier {
     s.repo = lastRepoFull;
     s.branch = lastBranch;
     s.workspaceFolder = _resolvedLastWorkspaceFolder();
+    // Carried over from the last selection (spec §5.2) — deliberately NOT
+    // pinned. `workspaceFolderPinned` stays false so the prompt can say so.
+    s.workspaceFolderPinned = false;
     sessions.insert(0, s);
     activeSessionId = s.id;
     onSessionSwitched?.call(s.id);
@@ -4981,6 +5008,7 @@ class AppState extends ChangeNotifier {
       mode: src.mode,
       presetId: src.presetId,
       workspaceFolder: src.workspaceFolder,
+      workspaceFolderPinned: src.workspaceFolderPinned,
       messages: [
         for (var i = 0; i < end; i++)
           Message.fromJson(src.messages[i].toJson()),

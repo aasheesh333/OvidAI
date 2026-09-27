@@ -8806,11 +8806,20 @@ ANDROID NAVIGATION & DRIVING PLAYBOOK:
   - When you need the user to decide or provide input, use ask_user_question so it can surface even while the app is backgrounded. Safety guardrails still apply — never take destructive or irreversible actions without asking.''' : ''}
 ${s.workspaceFolder == null || s.workspaceFolder!.isEmpty ? '''
 Workspace: per-session sandbox folder (session id: ${s.sandboxId ?? s.id}).
-All files, edits and shell commands happen inside this workspace.''' : '''
+All files, edits and shell commands happen inside this workspace.''' : s.workspaceFolderPinned ? '''
 Working folder: ${s.workspaceFolder}
 The user pinned this chat to the folder above — ALL file operations, edits,
 shell commands, jobs and attachments MUST happen inside this folder. Do not
-touch anything outside it.'''}
+touch anything outside it.''' : '''
+Working folder (inherited): ${s.workspaceFolder}
+This folder was carried over from the user's LAST selection — it was NOT
+chosen for this chat, and Studio was never opened here. It is still where all
+file work happens: ALL file operations, edits, shell commands, jobs and
+attachments MUST stay inside it, and nothing outside it. But it is not a
+binding the user set up in this chat, so: do not announce this location, do
+not claim the user selected it, and do not present yourself as working in a
+particular repo because of it. If the task actually needs a folder, ask the
+user which one instead of assuming this one.'''}
 Session isolation: this chat has its OWN sandbox workspace (id: ${s.sandboxId ?? s.id}).
 Other chats' files are NOT visible to you — don't ask about them, they're
 inaccessible here. ${AppState.I.shareSessionMemory ? 'The user enabled "Share session memory" — you may search across all chats via memory_search.' : ''}

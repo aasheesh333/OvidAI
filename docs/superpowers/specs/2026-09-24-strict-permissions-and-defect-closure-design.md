@@ -1416,3 +1416,107 @@ Verification after Phases 1 + 6 + the two partials: `dart analyze lib test`
 BUILD SUCCESSFUL (checked after Phase 1).
 
 Test count at baseline: to be recorded in Phase 0.
+
+### Full human gestures + overlay redesign — 2026-09-25 (`67b6129`)
+
+Owner reports, each traced to a cause rather than patched around.
+
+**Control mode could not produce half of human input.** Only `tap`, `swipe`,
+`long_press` and node-scroll existed. A double-click was impossible *in
+principle*: two `device_tap` calls are two separate `dispatchGesture`
+invocations, so they reach the platform as unrelated touches and no double-tap
+timeout ever sees them as one gesture. Added `device_double_tap` (2–4 taps as ONE
+`GestureDescription` with timed strokes), `device_drag` (dwell at the origin,
+then move — what actually picks up icons, sliders and reorder rows; `continueStroke`
+on API 26+, two timed strokes below), `device_pinch` and `device_two_finger_swipe`
+(two parallel strokes).
+
+**The agent could not see the keyboard.** `readScreen` walked exactly one root and
+`findTargetRootNode()` filters to `TYPE_APPLICATION`. The soft keyboard is a
+separate `TYPE_INPUT_METHOD` window owned by another process, so every key, the
+candidate bar and the action-key label ("Search" vs "Enter" vs "Go") were
+invisible and coordinate taps into it were guesses. The IME window is walked too,
+budget-capped at `IME_NODE_BUDGET = 80` **after** the app tree so a keyboard
+cannot crowd out the screen being driven; `softCap` replaces `MAX_NODES` inside
+`visit()`. Ovid's own overlay is skipped by package.
+
+**Control mode was slow, and mostly not because of the model.** Every action first
+ran a full `device.readRaw()` purely to learn the foreground package for the
+sensitive-target guard — and on an animated screen the node cache is dirtied by
+every `TYPE_WINDOW_CONTENT_CHANGED`, so that "verification" was a 300-node binder
+walk on the main thread ahead of each tap, serialized against the action itself
+(both `@Synchronized`). A `deviceForegroundPackage` probe now reads one node's
+package. **The guard keeps its full strength**: the bridge falls back to the whole
+read whenever the probe does not answer in *its own shape* (`Map` **with** a
+`package` key), because a missing optimisation must never silently become a
+missing security check — an unrelated native payload read as "no foreground app"
+would have disabled the guard outright. Separately `device_read`'s spill cap went
+6000 → 24000: a 300-node dump is 15–60 KB, so the old cap handed the model the
+head and tail and dropped the middle it had not seen yet.
+
+**Overlay redesigned.** The old surface was a permanently expanded dark pill
+movable only by a 2×3-dot handle, and raw touch coordinates went straight into
+layout params — drag past an edge and the window parked where no finger could
+reach it again. Now a 48dp white circle draggable from anywhere on itself,
+clamped inside real display bounds on every MOVE, on expand and on
+`onConfigurationChanged`; tap expands a simple white box (cross, text field, mic,
+green send disabled while blank); long-press is the hard stop. Buttons stay at
+**44dp** — the minimum this repo already treats as an invariant; the first pass
+used 40dp and the pin caught it.
+
+**Edge glow for run state.** Two thin gradient strips top/bottom, ~40% opacity at
+the edge fading to nothing, `FLAG_NOT_TOUCHABLE` so they can never eat a gesture
+meant for the app underneath: green `0xFF34C759` running, amber `0xFFFFB020`
+permission waiting, red `0xFFFF453A` error, grey idle. Driven from the
+`set pendingApproval` setter rather than from each prompt site, so a new prompt
+path cannot forget it — an unanswered approval glowing green looks exactly like a
+run still making progress. Errors recolour only while a run is live.
+
+**Browser got real gestures.** `browser_click` is `element.click()`: no
+coordinates, no button phases, `detail` always 1. Added `browser_double_click`
+(incr `detail` + `dblclick`), `browser_tap_at` (pointer + touch + mouse phases,
+for canvas/map surfaces with no selectable element), `browser_long_press` (press,
+await *real* elapsed time, release in a second evaluation — faking the duration in
+one synchronous script fires down and up with nothing between them, and elapsed
+time is exactly what the handler measures) and `browser_swipe` (interpolated touch
+frames). All four denied in read-only mode.
+
+**Sign-in.** `isExternalSignInUrl` covered Google only and its banner claimed
+"your session cookie is kept here", which is false — an external sign-in does not
+populate the WebView's own cookie jar. Now provider-aware across Google,
+Microsoft, Apple, Facebook, LinkedIn and X, matched on exact host or dot boundary
+(`accounts.google.com.evil.example` must not match), and the copy says plainly the
+session will not carry back.
+
+**Pins that had to move, and why (never silently deleted):** the see-through
+colour pin `0xB31A1A1A` (superseded — occlusion is now bounded by *size*, a 48dp
+circle hides less than a permanently open translucent bar) and the tool-schema
+budget 8600 → **8900**, measured 8808 with the eight added tools named.
+
+Suite: **2538 pass / 4 skipped**, analyze 0 issues, Kotlin compiles.
+
+### Working-folder provenance — 2026-09-25 (uncommitted at time of writing)
+
+Owner report: a brand-new chat (Studio never opened) announced "I am Ovid
+working in `<repo>` at `<location>`", stated as fact. Root cause was NOT the
+inheritance itself — that is deliberate and tested (spec §5.2, pinned by
+`last_selection_test.dart`: a restart must not force a fresh selection). The
+defect was the prompt lying about *provenance*: `newSession()` copies
+`lastRepoFull` + `_resolvedLastWorkspaceFolder()` into every new chat, and the
+system prompt then told the model "the user pinned this chat to the folder
+above" about a folder nobody picked in that chat.
+
+Fix: a persisted `ChatSession.workspaceFolderPinned` flag (default false,
+including for legacy sessions — the prompt then under-claims rather than
+over-claims). `setSessionWorkspaceFolder` sets/clears it; `newSession()` leaves
+it false; subagent-child and fork copies carry it with the folder. The prompt is
+now three-way: sandbox ("Workspace: per-session sandbox folder"), genuinely
+pinned ("The user pinned this chat…", unchanged), and inherited ("Working
+folder (inherited): … it was NOT chosen for this chat, and Studio was never
+opened here") with explicit do-not-announce / do-not-claim / do-not-present-as-
+repo instructions, and "ask the user which one instead of assuming this one" if
+the task needs a folder.
+
+Tests: `test/workspace_folder_provenance_test.dart` (8) — inherited ⇒ not
+pinned, pin/clear flips the flag, JSON round-trip plus legacy default, fork
+provenance, and source-contract pins on the three-way prompt wording.
