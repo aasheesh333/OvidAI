@@ -100,9 +100,18 @@ class ChatTranscript extends StatelessWidget {
           },
         );
         return MediaQuery(
-          data: MediaQuery.of(
-            context,
-          ).copyWith(textScaler: TextScaler.linear(AppState.I.chatFontScale)),
+          // A11Y (U2): COMPOSE the OS text scale with the in-app chat size
+          // instead of replacing it. This previously assigned
+          // `TextScaler.linear(AppState.I.chatFontScale)` outright, so a
+          // user who set Android font size to 200% saw no change at all in
+          // the transcript. Multiplying the resolved OS factor keeps the
+          // default case (OS scale 1.0) behaviourally identical.
+          data: MediaQuery.of(context).copyWith(
+            textScaler: TextScaler.linear(
+              MediaQuery.textScalerOf(context).scale(1) *
+                  AppState.I.chatFontScale,
+            ),
+          ),
           child: Center(
             child: ConstrainedBox(
               constraints: BoxConstraints(maxWidth: layout.contentWidth),

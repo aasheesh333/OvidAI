@@ -14,6 +14,37 @@ import '../core/theme.dart';
 import 'chat_screen.dart';
 import 'sidebar.dart';
 
+/// Shown when the debounced session write has failed, i.e. chat history is
+/// no longer being persisted. Deliberately non-dismissible: the condition
+/// clears on its own as soon as a write succeeds again.
+class _PersistWarningBanner extends StatelessWidget {
+  const _PersistWarningBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Aether.danger.withValues(alpha: 0.16),
+      child: const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          children: [
+            Icon(Icons.warning_amber_rounded,
+                size: 16, color: Aether.danger),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                "Chat history isn't being saved — free up storage and "
+                "restart Ovid to protect this conversation.",
+                style: TextStyle(fontSize: 12, height: 1.35),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// Chat-first shell, DeepSeek-web style. The chat IS the app; everything
 /// else (Studio, Browser, Plugins, Settings) lives behind icons/drawer.
 ///
@@ -30,6 +61,13 @@ class OvidShell extends StatefulWidget {
 }
 
 class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
+  /// DURABILITY WARNING (2026-09-27): [AppState.lastSessionPersistFailed]
+  /// was written on a failed session write but never read by anything, so
+  /// chat history could silently stop being saved. This polls the flag and
+  /// surfaces a persistent banner instead of failing invisibly.
+  Timer? _persistWarnTimer;
+  bool _persistWarned = false;
+
   @override
   void initState() {
     super.initState();
@@ -51,6 +89,14 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => unawaited(AppState.I.maybeStartBackgroundRuntimeInstall()),
     );
+    // Durability watchdog: a few seconds is enough for the debounced
+    // session write to land, so a genuine failure shows up promptly.
+    _persistWarnTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      final failed = AppState.I.lastSessionPersistFailed;
+      if (failed != _persistWarned && mounted) {
+        setState(() => _persistWarned = failed);
+      }
+    });
   }
 
   void _onFirebaseReady() {
@@ -61,6 +107,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _persistWarnTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     FirebaseService.I.removeListener(_onFirebaseReady);
     super.dispose();
@@ -164,15 +211,22 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
               backgroundColor: Aether.surface,
               child: SessionsSidebar(),
             ),
-      body: wide
-          ? Row(
-              children: [
-                const SessionsSidebar(isDrawer: false),
-                const VerticalDivider(width: 1),
-                Expanded(child: chat),
-              ],
-            )
-          : chat,
+      body: Column(
+        children: [
+          if (_persistWarned) const _PersistWarningBanner(),
+          Expanded(
+            child: wide
+                ? Row(
+                    children: [
+                      const SessionsSidebar(isDrawer: false),
+                      const VerticalDivider(width: 1),
+                      Expanded(child: chat),
+                    ],
+                  )
+                : chat,
+          ),
+        ],
+      ),
     );
   }
 

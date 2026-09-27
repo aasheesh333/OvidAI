@@ -5088,7 +5088,12 @@ class AppState extends ChangeNotifier {
   }
 
   void renameSession(String id, String title) {
-    sessions.firstWhere((s) => s.id == id).title = title;
+    // A rename can arrive for a session that was deleted in the same
+    // frame (search results, ledger replay, queued rename). The previous
+    // `sessions.firstWhere(...)` had no orElse and threw StateError.
+    final s = sessionById(id);
+    if (s == null) return;
+    s.title = title;
     _markSessionDirty(id);
     notifyListeners();
     persistSessions();

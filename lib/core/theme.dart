@@ -18,8 +18,12 @@ class Aether {
   static const _surfaceD = Color(0xFF232324);
   static const _surfaceAltD = Color(0xFF2C2C2E);
   static const _surfaceRaisedD = Color(0xFF353638);
-  static const _hairlineD = Color(0xFF232324);
-  static const _hairlineStrongD = Color(0xFF313134);
+  // VISIBILITY (2026-09-27): _hairlineD was byte-identical to _surfaceD
+  // (both 0xFF232324), so every `Border.all(color: Aether.hairline)` on a
+  // card drew at 1.00:1 contrast — no visible edge at all on 82 call sites.
+  // Raised to a step that reads on surface AND surfaceRaised.
+  static const _hairlineD = Color(0xFF3A3A40);
+  static const _hairlineStrongD = Color(0xFF4A4A54);
   static const _textD = Color(0xFFF9FAFB);
   static const _textMutedD = Color(0xFFADB2B8);
   static const _textFaintD = Color(0xFF81858C);
