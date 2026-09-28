@@ -216,8 +216,18 @@ void main() {
     test('the same call is no longer plan-refused once planMode is off',
         () async {
       s.planMode = false;
-      final out = await call('run_shell', {'command': 'true'});
-      expect(out, isNot(contains('PLAN MODE ACTIVE')));
+      // `commit` rather than `run_shell`: in `auto` mode a shell command
+      // auto-approves and REALLY EXECUTES, so it is not a safe probe for
+      // "the gate opened". `commit` is refused by the plan gate but its handler
+      // returns "no pending changes" before it can push anything (nothing in
+      // this file stages a change), so the probe is hermetic.
+      final out = await call('commit', {'message': 'm'});
+      expect(
+        out,
+        'no pending changes',
+        reason: 'with plan mode off the gate must let the tool reach its '
+            'handler — and the handler must not touch the repo',
+      );
     });
   });
 }

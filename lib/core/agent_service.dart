@@ -28,6 +28,7 @@ import 'session_search.dart';
 import 'session_browser_profiles.dart';
 import 'session_lifecycle_service.dart';
 import 'presets.dart';
+import 'plan_mode.dart';
 import 'hook_service.dart';
 import 'plugin_manifest.dart';
 import 'native_plugin.dart';
@@ -601,7 +602,6 @@ class AgentRun {
   final List<int> queueIds = [];
   int nextQueueId = 0;
   ApprovalRequest? pendingApproval;
-  bool planMode = false;
 
   /// Snapshot of Control mode at run start (PR23/Q1 pattern): the
   /// return-to-Ovid at run end is owed to Control work even if the user
@@ -651,6 +651,12 @@ class AgentRun {
   /// it — a mid-run picker switch changes the NEXT run (a new queued
   /// message), never the in-flight one.
   String? modelSnapshot;
+
+  /// G3: a preset may pin a sampling temperature for its runs (the plan preset
+  /// can plan "cold" without touching the user's chat settings). Null = let the
+  /// provider default decide. Snapshotted at run start like [modelSnapshot],
+  /// for the same reason: a mid-run change must not affect the in-flight run.
+  double? temperatureSnapshot;
 
   /// Per-run session stats — steps, turns, timing, token breakdown.
   int steps = 0;
@@ -1076,27 +1082,76 @@ class AgentService extends ChangeNotifier {
   @visibleForTesting
   static void resetApprovalUiCountForTest() => _approvalUiCount = 0;
 
-  /// Plan mode, PERSISTED per session (the plan mode coordinator parity): the run bucket reads
-  /// through to the session's `planMode` field, so `/plan` survives
-  /// restarts and session switches, and the composer chip reads it.
+  /// Plan mode, PERSISTED per session (the plan mode coordinator parity): the
+  /// session's `planMode` field is the ONE source of truth, so `/plan` survives
+  /// restarts and session switches, and the composer chip reads it. G1: the old
+  /// per-run `AgentRun.planMode` shadow field is gone — it had five writers and
+  /// zero readers, and a second copy of the policy that nothing consults is
+  /// exactly how the two used to disagree.
   bool get planMode =>
       (_runSession ?? AppState.I.activeSession)?.planMode ?? false;
+
+  /// True while a plan-mode transition is waiting for the next turn boundary
+  /// (G2). The composer chip renders it, so a queued change is never silent.
+  bool get planModePending =>
+      (_runSession ?? AppState.I.activeSession)?.planModePending != null;
+
   set planMode(bool v) {
     final s = _runSession ?? AppState.I.activeSession;
-    if (s != null) {
-      final wasPlan = s.planMode;
-      s.planMode = v;
-      // Every plan-mode exit releases the read-only mode the plan policy
-      // introduced (approval of exit_plan_mode, `/plan off`, the composer
-      // Plan chip). An independent `/permission read-only` session has
-      // planMode=false and never reaches this path.
-      if (!v && wasPlan) _releasePlanOwnedMode(s);
-      AppState.I.persistSessions();
+    if (s == null) {
+      AppState.I.refresh();
+      return;
     }
-    // Keep the run bucket in step for reads outside a session context.
-    _runResolved.planMode = v;
+    // ── Turn-boundary queue (G2, dsh `queued` parity) ────────────────────
+    // A transition requested while a turn is OPEN must not re-gate the turn
+    // already in flight: the policy a turn started under is the policy it
+    // finishes under. dsh returns `queued` here and applies the change at the
+    // next accepted in-turn pre-step; opencode gets the same property for free
+    // by switching agents between turns. Ours lands at the turn boundary in
+    // `_runTaskBody`, or as the run unwinds if it stops first.
+    if (busyFor(s.id) && s.planMode != v) {
+      if (s.planModePending == v) return; // already queued — don't restamp
+      s.planModePending = v;
+      AppState.I.persistSessions();
+      AppState.I.refresh();
+      return;
+    }
+    _applyPlanModeNow(s, v);
     AppState.I.refresh();
   }
+
+  /// Applies a plan-mode transition to [s] IMMEDIATELY (no queue) and keeps the
+  /// read-only coupling in step. An immediate apply also clears any queued
+  /// transition, so the queue and the live value can never disagree.
+  void _applyPlanModeNow(ChatSession s, bool v) {
+    final wasPlan = s.planMode;
+    s.planMode = v;
+    s.planModePending = null;
+    // Every plan-mode exit releases the read-only mode the plan policy
+    // introduced (approval of exit_plan_mode, `/plan off`, the composer Plan
+    // chip). An independent `/permission read-only` session has planMode=false
+    // and never reaches this path.
+    if (!v && wasPlan) _releasePlanOwnedMode(s);
+    AppState.I.persistSessions();
+  }
+
+  /// The turn boundary (G2): land a transition the user requested while the
+  /// previous turn was still open.
+  void _applyPendingPlanMode(ChatSession s) {
+    final pending = s.planModePending;
+    if (pending == null) return;
+    _applyPlanModeNow(s, pending);
+    _emit(
+      'think',
+      pending
+          ? 'plan mode is ON — read-only research phase'
+          : 'plan mode is OFF — execution tools unlocked',
+    );
+  }
+
+  /// Test seam (G2): run the turn-boundary application without a live turn.
+  @visibleForTesting
+  void applyPendingPlanModeForTest(ChatSession s) => _applyPendingPlanMode(s);
 
   /// Restores the access mode the `plan` preset overrode when it entered
   /// plan mode. When no pre-mode was recorded the plan-owned read-only is
@@ -4222,10 +4277,20 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     // enforcement gate must agree, and any plan-owned read-only is released
     // as part of that exit.
     final s = _runSession ?? AppState.I.activeSession;
-    if (s != null && s.planMode) {
+    // FIX 4 (e): a pending entry must be cancelled even when plan mode is not
+    // live yet. The old guard was `s.planMode` alone, so a session with
+    // `planMode == false && planModePending == true` (a `/plan` queued while a
+    // turn was open) survived the mode pick and flipped plan mode ON at the
+    // next boundary — overriding the mode the user had just chosen, with
+    // `planPreMode` unrecorded. `planModePending` is cleared in BOTH states.
+    if (s != null && (s.planMode || s.planModePending != null)) {
+      // A direct mode pick is an explicit reconfiguration of the enforcement
+      // mode ITSELF, so it clears plan mode immediately rather than queueing to
+      // the turn boundary (G2): the user is changing the policy, not waiting
+      // for the next turn.
       s.planMode = false;
+      s.planModePending = null;
       _releasePlanOwnedMode(s);
-      _runResolved.planMode = false;
     }
     mode = m; // writes to active session (or detached child)
     events.add(AgentEvent('think', 'access mode → ${m.label}'));
@@ -4261,12 +4326,14 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
       if (s.mode != AgentMode.safe.name && s.planPreMode == null) {
         s.planPreMode = s.mode;
       }
-      s.planMode = true;
+      // Through the setter: immediate when idle, queued when a turn is open
+      // (G2). The setter also owns the plan-owned read-only release below.
+      planMode = true;
       if (s.mode != AgentMode.safe.name) s.mode = AgentMode.safe.name;
     } else {
-      final wasPlan = s.planMode;
-      s.planMode = false;
-      if (wasPlan) _releasePlanOwnedMode(s);
+      // The setter releases plan-owned read-only on a real exit and is a no-op
+      // when the session was not planning.
+      planMode = false;
     }
     if (wasControl && s.mode != AgentMode.control.name) {
       // Leaving Control via presets must not strand the overlay either.
@@ -5073,11 +5140,29 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             final name = fn is Map ? fn['name'] as String? : null;
             return name != null && PresetRegistry.allows(preset, name);
           }).toList();
+    // ── Plan-mode roster projection (G4) ──
+    // Plan mode used to be a dispatch gate only: the model was still OFFERED
+    // every tool, called the refused ones, and spent tokens being told no. The
+    // roster and the gate now read the SAME policy object (G5-resolved), so the
+    // model is never shown a tool the gate would refuse and the two enforcement
+    // points cannot drift apart. `exit_plan_mode` stays in the roster because
+    // it is on the allowlist.
+    final planGated = planMode
+        ? gated.where((t) {
+            final fn = t['function'];
+            final name = fn is Map ? fn['name'] as String? : null;
+            return name != null &&
+                PlanModePolicy.allows(
+                  name,
+                  policy: PresetRegistry.planPolicyFor(preset),
+                );
+          }).toList()
+        : gated;
     // Request-time schema compactor: shrink only the PROSE (description
     // fields). Names, parameter names, types, enums, required and defaults
     // are never touched, so every tool stays fully callable and every
     // feature keeps working — the payload just carries less redundant text.
-    return gated.map(_compactTool).toList();
+    return planGated.map(_compactTool).toList();
   }
 
   /// Budgets for the request-time tool-schema compactor (characters).
@@ -7757,13 +7842,29 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     return requested > cap ? cap : requested;
   }
 
+  /// FIX 3 (g): the model a run is ACTUALLY billed and budgeted under — the
+  /// run's snapshotted preset pin when there is one, else the session's model.
+  /// Before this, the request body already used the pin (both `_callLlm`
+  /// builders read `modelSnapshot`) while cost accounting, the Usage entry and
+  /// every context-window decision still used `s.model` — so a pin to a cheap
+  /// fast model was priced as the chat model and measured against the chat
+  /// model's window (compaction fired late for a small pin, early for a large
+  /// one). The snapshot is null outside a live run, so a session with no run
+  /// (the UI's `contextUsageFraction`) keeps the old session-model behaviour.
+  static String effectiveModelForSession(ChatSession s) {
+    final r = AgentService.I._runs[s.id];
+    return r?.modelSnapshot ?? s.model;
+  }
+
   /// Context window in effect for this session — the user's Settings override
   /// wins; otherwise the window the provider itself published for the exact
   /// model id, then the keyword table (1M default for unknown models).
+  /// FIX 3 (g): measured against the run's EFFECTIVE model, so a preset pin
+  /// budgets against the window the request will really be sent to.
   static int contextWindowForSession(ChatSession s) {
     final o = AppState.I.contextWindowOverride;
     if (o > 0) return o;
-    return contextWindowFor(s.model, s.providerId);
+    return contextWindowFor(effectiveModelForSession(s), s.providerId);
   }
 
   /// default policy: compact when the measured request envelope reaches
@@ -8532,7 +8633,28 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     }
     // PR23/Q1: snapshot the model at run start — every LLM call of this
     // run uses it; a mid-run picker switch only affects the next run.
-    bucket.modelSnapshot = s.model;
+    // G3: the session's PRESET may pin a model and/or a sampling temperature
+    // for its runs, so a planning run can research on a cheap fast model and a
+    // cold temperature without touching the user's chat model. Snapshotted here
+    // for the same run-scoped reason as the model itself.
+    final runPreset = PresetRegistry.byId(s.presetId);
+    bucket.modelSnapshot = runPreset.model ?? s.model;
+    // FIX 3 (g): the bucket IS the snapshot the accessors read, but at this
+    // instant `_runResolved` may not yet resolve to it (a background run on a
+    // non-active session), so register it under its own key too — the same
+    // `_runFor(s.id)` bucket `effectiveModelForSession` looks up.
+    _runs[s.id] = bucket;
+    bucket.temperatureSnapshot = runPreset.temperature;
+    if (runPreset.model != null || runPreset.temperature != null) {
+      _emitToRun(
+        bucket,
+        'think',
+        'preset "${runPreset.id}" run settings — '
+            '${runPreset.model ?? s.model}'
+            '${runPreset.temperature == null ? '' : ' · temp ${runPreset.temperature}'}',
+        sessionId: s.id,
+      );
+    }
     // Snapshot Control mode too: the run-end return to Ovid is owed to
     // Control work even if the mode flips mid-run.
     bucket.controlRun = s.mode == AgentMode.control.name;
@@ -8713,9 +8835,6 @@ can drive there yourself with the device_* tools):
     // Warm the hook transcript path (session ledger JSONL) so
     // `transcript_path` is present in hook payloads fired during the run.
     _warmTranscriptPath(s.id);
-    // Plan mode is persisted on the session — seed the run bucket from it
-    // so gate checks inside the run see the user's last /plan state.
-    ctx.run.planMode = s.planMode;
     _runStart = DateTime.now();
     lastError = null;
     todoNudgeSent = false;
@@ -8763,7 +8882,17 @@ can drive there yourself with the device_* tools):
       }
     }
 
-    final sys =
+    // FIX 2 (c): the plan briefing must land in the SAME turn as the roster.
+    // The roster (`_tools`) is read per request inside `_callLlm`, but this
+    // system prompt was assembled ONCE before the turn loop — so a plan-mode
+    // transition landing at the turn boundary sent the NEW roster with the OLD
+    // (plan-less) briefing. The plan section is spliced in as a TOKEN and
+    // re-derived at every turn boundary from the live `planMode`, with no
+    // heuristics: the token becomes exactly `PlanModePolicy.promptSection` when
+    // planning and the empty string when not, reproducing the old `sys`
+    // byte-for-byte in both states (so provider prefix caching still hits).
+    const planSectionToken = '<<<PLAN_MODE_SECTION>>>';
+    final sysTemplate =
         '''
 You are Ovid's on-device coding & browsing agent running INSIDE a Flutter app.
 Environment: Android device with a native Linux sandbox (python3/node/git via apt),
@@ -8786,23 +8915,7 @@ job_start,
 job_kill, catalog mutations, plugin/MCP installs, browser typing/clicking.
 Do not attempt them — instead explain what needs to change and ask the user
 to switch to General or Studio mode.''' : ''}
-${planMode ? '''
-PLAN MODE — READ-ONLY RESEARCH PHASE (opencode plan-agent parity):
-You are the PLAN agent. Your job is to RESEARCH and PROPOSE, not to change
-anything. Investigate the current directory thoroughly before you propose:
-read files, glob and grep, inspect git history and diffs, and run read-only
-shell commands (ls, cat, find, wc, tree, git log/diff/status, `sed -n`).
-CRITICAL: you are in the READ-ONLY phase. Do NOT use shell commands that
-modify anything — no redirects into files (`>`, `>>`), no `tee`, `sed -i`,
-`mv`, `rm`, `mkdir`, `touch`, no `git add/commit/checkout`, no installs.
-Do not use file_write, fs_edit, commit, or any device_* tool. If something
-looks like it needs a change, write the change down instead of making it.
-The plan is NOT a card and NOT a tool argument: write it out as a normal
-message — a numbered list of concrete steps naming the exact files and
-commands involved — and only THEN call exit_plan_mode, which asks the user
-one yes/no question: switch to the build agent and start implementing?
-Keep the plan tight and grounded in what you actually read.
-''' : ''}
+$planSectionToken
 ${mode == AgentMode.control ? '''
 CONTROL MODE: the user has granted device control. You ARE expected to operate
 the device and other apps on the user's behalf — this is the point of the mode.
@@ -8934,6 +9047,14 @@ ${AppState.I.replyLanguageHint().isEmpty ? '' : '${AppState.I.replyLanguageHint(
 ${await _agentsMdBlock()}
 ''';
 
+    // FIX 2 (c): re-derive `sys` from the template. Idempotent and exact — the
+    // only substitution is the plan token, so a second call (or a call with the
+    // plan state unchanged) yields the identical string.
+    String buildSys() => sysTemplate.replaceAll(
+      planSectionToken,
+      planMode ? PlanModePolicy.promptSection : '',
+    );
+
     // ── Volatile context (prefix-cache friendly) ──
     // Time, active goal, reminders and the live todo checklist change often.
     // Keeping them OUT of the system prompt leaves the (large) system+tools
@@ -8951,6 +9072,9 @@ ${await _agentsMdBlock()}
     // inspect exactly what the model was told (context visibility parity).
     // The volatile context rides as a separate trailing message for prefix
     // caching, but the snapshot shows the model's complete instruction set.
+    // FIX 2 (c): bind the per-request prompt from the template. `var` so the
+    // turn boundary can re-derive it once a queued transition has landed.
+    var sys = buildSys();
     s.systemPromptSnapshot = volatileCtx.trim().isEmpty
         ? sys
         : '$sys\n\n$volatileCtx';
@@ -8978,6 +9102,30 @@ ${await _agentsMdBlock()}
           break;
         }
         _resetLiveBuffers();
+        // G2 turn boundary: a plan-mode transition the user requested while the
+        // previous turn was open lands HERE, so a turn always finishes under
+        // the policy it started with.
+        _applyPendingPlanMode(s);
+        // FIX 2 (c): `_applyPendingPlanMode` may have just flipped `planMode`,
+        // and `_tools` is read per request inside `_callLlm` — so the request
+        // must carry the re-derived briefing or this turn would pair the NEW
+        // roster with the OLD one. `_callLlm` sends `msgs`, and the system
+        // prompt is embedded there, so swap the exact stale string for the
+        // fresh one in place (index-agnostic: hook notes insert at index 0, so
+        // the system row is not reliably `msgs[0]`). `sysTemplate` and
+        // `planSectionToken` are in scope from the enclosing body. A no-op when
+        // no transition landed (`newSys == sys`).
+        final newSys = buildSys();
+        if (newSys != sys) {
+          final sysIdx = msgs.indexWhere(
+            (m) => m['role'] == 'system' && m['content'] == sys,
+          );
+          if (sysIdx >= 0) msgs[sysIdx] = {'role': 'system', 'content': newSys};
+          sys = newSys;
+          s.systemPromptSnapshot = volatileCtx.trim().isEmpty
+              ? sys
+              : '$sys\n\n$volatileCtx';
+        }
         // Ledger (PR19): one turn_start barrier per model request — the
         // checkpoint BEFORE the LLM call is what recovery reasons about.
         unawaited(SessionLedger.I.append(s.id, 'turn_start', {'turn': turn}));
@@ -9170,7 +9318,7 @@ ${await _agentsMdBlock()}
               time: DateTime.now(),
               providerId: p.id,
               providerName: p.name,
-              model: _baseModelOf(s.model),
+              model: _baseModelOf(effectiveModelForSession(s)),
               promptTokens: pt,
               completionTokens: ct,
               totalTokens: (u?['total_tokens'] as num?)?.toInt() ?? pt + ct,
@@ -9189,7 +9337,11 @@ ${await _agentsMdBlock()}
               _runResolved.llmMs - _runResolved.analyticsLlmMsRecorded;
           final stepDelta =
               _runResolved.steps - _runResolved.analyticsStepsRecorded;
-          final cost = estimatedCostForModel(_baseModelOf(s.model), pt, ct);
+          final cost = estimatedCostForModel(
+            _baseModelOf(effectiveModelForSession(s)),
+            pt,
+            ct,
+          );
           s.recordAnalytics(
             inputTokens: pt,
             outputTokens: ct,
@@ -9569,6 +9721,25 @@ ${await _agentsMdBlock()}
       // clear could erase a fresh stop request on the promoted run.
       final ownsRun = ctx.ownedRunId != null && activeRunId == ctx.ownedRunId;
       if (ownsRun) activeRunId = null;
+      // G2: a transition queued during the LAST turn must not be stranded by
+      // the run ending — land it as the run unwinds. The second arm is the
+      // STOP path: `_cancelBucket` already nulled `activeRunId`, so this run no
+      // longer owns the bucket and the `ownsRun` guard alone would skip the
+      // landing forever (the flag then sat in prefs until the user happened to
+      // send another message, a turn late). When a Stop instead promoted a
+      // queued CONTINUATION, `activeRunId` is the NEW run's id and `busyFor` is
+      // true — that run lands the transition at its own turn boundary, so we
+      // must not touch it here.
+      if (ownsRun || !busyFor(s.id)) {
+        _applyPendingPlanMode(s);
+        // FIX 2 (c): a Stop that lands a transition here never reaches another
+        // turn boundary, so re-derive `sys` and refresh the snapshot — else the
+        // transcript would record a briefing the run had already outgrown.
+        sys = buildSys();
+        s.systemPromptSnapshot = volatileCtx.trim().isEmpty
+            ? sys
+            : '$sys\n\n$volatileCtx';
+      }
       // Capture BEFORE the reset below: a user-cancelled run must not yank
       // the user back to Ovid (they stopped to take over themselves).
       final userStopped = ctx.run.cancelRequested;
@@ -10369,6 +10540,9 @@ ${await _agentsMdBlock()}
       if (effort != null && !dropReasoningEffort) {
         body['reasoning_effort'] = effort;
       }
+      // G3: a preset may pin a sampling temperature for its runs.
+      final presetTemp = _runResolved.temperatureSnapshot;
+      if (presetTemp != null) body['temperature'] = presetTemp;
       // User-set output cap (Settings → Context & output); 0 = let the
       // provider default decide — never a synthetic default injected.
       final maxOut = AppState.I.maxOutputTokens;
@@ -10934,6 +11108,12 @@ ${await _agentsMdBlock()}
       if (toolList.isNotEmpty) body['tools'] = toolList;
       if (effort == 'high') {
         body['thinking'] = {'type': 'enabled', 'budget_tokens': 4096};
+      }
+      // G3: a preset-pinned temperature. Skipped when extended thinking is on —
+      // the Anthropic API rejects `temperature` alongside a thinking budget.
+      final presetTemp = _runResolved.temperatureSnapshot;
+      if (presetTemp != null && effort != 'high') {
+        body['temperature'] = presetTemp;
       }
 
       final bodyBytes = utf8.encode(jsonEncode(body));
@@ -17159,93 +17339,23 @@ ${await _agentsMdBlock()}
 
   // ── WAVE 2 HANDLERS — plan mode, background jobs, session events ────
 
-  /// Plan mode is the RESEARCH phase (opencode `plan` agent parity):
-  /// explore, read and inspect the workspace, then write the plan and offer
-  /// to build it.
-  ///
-  /// SECURITY (2026-09-24): this replaced a BLOCKLIST (`_mutatingTools`),
-  /// which fails OPEN — every tool not listed ran freely while "planning",
-  /// including any tool added later. Two escapes actually shipped:
-  ///   • all the non-interaction `browser_*` tools were unlisted, so a
-  ///     planning agent could open tabs, navigate live pages, resize and
-  ///     **close the user's tabs**, with unrestricted network egress;
-  ///   • `interrupt_agent` / `send_message` were unlisted, so it could stop
-  ///     or steer ANOTHER session — which is not in plan mode — into doing
-  ///     the mutation instead.
-  /// An allowlist makes the default refusal, so a new tool is blocked until
-  /// someone deliberately decides it is safe to plan with.
-  ///
-  /// SHELL (opencode parity, 2026-09-27): `run_shell` IS allowed, mirroring
-  /// opencode's plan agent, which leaves `bash` permitted and denies only
-  /// `edit`. Read-only intent inside the shell is carried by the plan-mode
-  /// prompt (session/prompt/plan.txt parity), because a command's effect
-  /// cannot be decided from its name. Everything that MUTATES state stays
-  /// out: `file_write` / `fs_edit`, `commit`, `run_code`, `repo_sync`, the
-  /// whole `device_*` family, and every plugin/MCP tool.
-  ///
-  /// Deliberately EXCLUDED: every `device_*` tool (they act on other apps and
-  /// capture their screens), all `plugin_*` / canonical plugin calls and MCP
-  /// tools (arbitrary third-party code whose effect cannot be known here),
-  /// `preview` / `generate_image` (they write files), and the native
-  /// content tools that can send (`sms`, `phone`, `contacts`, `calendar`).
-  static const _planModeAllowedTools = {
-    // ── reading the workspace ────────────────────────────────────────
-    'file_read',
-    'fs_view',
-    'fs_glob',
-    'fs_grep',
-    'view',
-    'read_attachment',
-    'read_image',
-    // ── reading repo state (GitHub API + local git) ──────────────────
-    'repo_read',
-    'repo_tree',
-    'git_status',
-    'git_log',
-    'git_diff',
-    // ── inspecting the workspace with the shell (opencode parity) ────
-    // opencode's plan agent leaves `bash` ALLOWED and denies only `edit`, so
-    // the planning agent can run `git log`, `find`, `wc`, `tree`, `cat`,
-    // `grep`, `ls`, `sed -n` … to research the current directory. Read-only
-    // intent is carried by the plan-mode prompt, not by the gate.
-    'run_shell',
-    // ── research ─────────────────────────────────────────────────────
-    'fetch_url',
-    'web_search',
-    'memory_search',
-    'session_search',
-    // ── reading the browser WITHOUT driving it ───────────────────────
-    'browser_read',
-    'browser_list_tabs',
-    'browser_find',
-    'browser_wait_for',
-    'browser_snapshot',
-    'browser_outline',
-    // ── reading background state ─────────────────────────────────────
-    'job_list',
-    'job_output',
-    'get_goal',
-    'schedule_list',
-    'catalog_get_provider',
-    'catalog_list_mcp',
-    'catalog_list_models',
-    'catalog_list_plugins',
-    'catalog_list_providers',
-    // ── planning itself ──────────────────────────────────────────────
-    // todo_write is the plan artifact: session-local UI state that never
-    // touches disk, repo or network (same reasoning as Read-Only mode).
-    'todo_write',
-    'ask_user_question',
-    'exit_plan_mode',
-    'list_agents',
-    'report',
-    'skill',
-  };
+  /// G7: the allowlist now lives in [PlanModePolicy] — ONE definition, shared
+  /// by the dispatch gate, the roster projection and the prompt briefing, so
+  /// they cannot drift apart. Kept as a named alias for the test seam and for
+  /// the gate's readability. See the module for the full rationale, including
+  /// the opencode-parity decision to allow `run_shell`.
+  static const Set<String> _planModeAllowedTools = PlanModePolicy.allowedTools;
 
-  /// True when [name] may run while planning. Anything unlisted — including
+  /// True when [name] may run while planning under the ACTIVE preset's plan
+  /// policy (G5: a custom preset may author its own; otherwise the built-in
+  /// [PlanModePolicy.allowedTools] applies). Anything unlisted — including
   /// plugin/MCP contributions and any tool added later — is refused.
-  bool _isPlanModeAllowedTool(String name) =>
-      _planModeAllowedTools.contains(name);
+  bool _isPlanModeAllowedTool(String name) => PlanModePolicy.allows(
+    name,
+    policy: PresetRegistry.planPolicyFor(
+      PresetRegistry.byId(_runSession?.presetId ?? 'standard'),
+    ),
+  );
 
   /// Test seam for the plan-mode allowlist.
   @visibleForTesting
@@ -17385,12 +17495,19 @@ ${await _agentsMdBlock()}
         'ok': approved,
       });
     }
+    final planSession = _runSession ?? AppState.I.activeSession;
     if (!approved) {
-      planMode = true; // stay in plan mode
+      // Stay in plan mode. Applied immediately: the user answered a question
+      // about THIS tool result, not about a future turn.
+      if (planSession != null) _applyPlanModeNow(planSession, true);
       return 'The user did not approve — they chose to keep planning. '
           'Refine the plan and call exit_plan_mode again when it is ready.';
     }
-    planMode = false;
+    // Approval is an explicit user decision tied to THIS tool result: the model
+    // is about to start building, so the gate must open NOW rather than at the
+    // next turn boundary. Queueing here (G2) would lock the approved plan out
+    // of the very tools it just earned.
+    if (planSession != null) _applyPlanModeNow(planSession, false);
     _emit('done', 'plan approved ✓ — executing');
     return 'Plan approved ✓ — switch to the build agent and execute the plan.';
   }
@@ -18787,9 +18904,12 @@ ${await _agentsMdBlock()}
       persona: persona,
       outputSchemaHint: outputHint,
     );
-    // Plan mode is inherited so a child cannot execute mutations while the
-    // parent is still planning.
-    _runFor(child.id).planMode = planMode;
+    // G1: plan mode is NOT inherited through the run bucket. The old line here
+    // claimed to make a child read-only "while the parent is still planning",
+    // but nothing ever read that field — and the plan gate refuses
+    // `dispatch_agent` outright, so a child can never be created from a
+    // planning session in the first place. Enforced where it can actually be
+    // enforced: the gate.
 
     final id = _nextSubagentId();
     final sub = SubagentInfo(
@@ -18882,7 +19002,6 @@ ${await _agentsMdBlock()}
       persona: '',
       outputSchemaHint: outputHint,
     );
-    _runFor(child.id).planMode = planMode;
     final id = _nextSubagentId();
     final sub = SubagentInfo(
       id: id,

@@ -10,6 +10,7 @@ import '../core/agent_service.dart';
 import '../core/app_info.dart';
 import '../core/firebase_service.dart';
 import '../core/model_limits.dart';
+import '../core/plan_mode.dart';
 import '../core/presets.dart';
 import '../core/skills.dart';
 import '../core/session_browser_profiles.dart';
@@ -1602,6 +1603,11 @@ class _PresetsScreen extends StatelessWidget {
         allowedTools: List.of(preset.allowedTools),
         deniedTools: List.of(preset.deniedTools),
         persona: preset.persona,
+        // G3/G5: a duplicate must carry the run pins and the plan policy,
+        // otherwise "Duplicate as custom" silently drops half the preset.
+        model: preset.model,
+        temperature: preset.temperature,
+        planAllowedTools: List.of(preset.planAllowedTools),
       );
       await AppState.I.saveCustomPreset(newPreset);
     }
@@ -1757,6 +1763,20 @@ class _PresetTileState extends State<_PresetTile> {
                       : 'Denied tools: ${p.deniedTools.join(", ")}',
                   style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
                 ),
+                if (p.model != null ||
+                    p.temperature != null ||
+                    p.planAllowedTools.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    [
+                      if (p.model != null) 'model: ${p.model}',
+                      if (p.temperature != null) 'temp: ${p.temperature}',
+                      if (p.planAllowedTools.isNotEmpty)
+                        'plan tools: ${p.planAllowedTools.length}',
+                    ].join(' · '),
+                    style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                  ),
+                ],
               ],
             ),
             trailing: Row(
@@ -1829,6 +1849,145 @@ class _PresetTileState extends State<_PresetTile> {
                         final updated = p.copyWith(deniedTools: currentDenied);
                         widget.onUpdate?.call(updated);
                       },
+                    ),
+                ],
+              ),
+            ),
+            // ── G5: the plan-mode allowlist (custom presets only) ──────────
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+              child: Text(
+                'Plan-mode allowlist (checked = allowed while planning). '
+                'None checked = the built-in plan policy.',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  color: Aether.textMuted,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  for (final tool in PlanModePolicy.catalogue)
+                    FilterChip(
+                      // A `*` marks a tool Read-Only still refuses even when
+                      // the plan policy lists it (the plan preset forces
+                      // Read-Only) — labelled, not silently implied.
+                      label: Text(
+                        PlanModePolicy.readOnlyBlocked.contains(tool)
+                            ? '$tool*'
+                            : tool,
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                      selected: p.planAllowedTools.contains(tool),
+                      selectedColor: Aether.warnLight.withValues(alpha: 0.2),
+                      checkmarkColor: Aether.warnLight,
+                      onSelected: (selected) {
+                        final current = List<String>.from(p.planAllowedTools);
+                        if (selected) {
+                          if (!current.contains(tool)) current.add(tool);
+                        } else {
+                          current.remove(tool);
+                        }
+                        widget.onUpdate?.call(
+                          p.copyWith(planAllowedTools: current),
+                        );
+                      },
+                    ),
+                ],
+              ),
+            ),
+            // Footnote for the `*` suffix above. A labelling fix only — the
+            // chip's selection logic and the saved value are untouched.
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+              child: Text(
+                '* Read-Only mode refuses this outright — and the plan '
+                'preset forces Read-Only — so ticking it only widens the plan '
+                'policy; Read-Only still blocks it. (`run_shell` carries no '
+                'marker: Read-Only runs its read-only commands.)',
+                style: TextStyle(fontSize: 10.5, color: Aether.textMuted),
+              ),
+            ),
+            // ── G3: model + temperature pins for this preset's runs ───────
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+              child: Text(
+                "Model pin (this preset's runs):",
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  color: Aether.textMuted,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  ChoiceChip(
+                    label: const Text(
+                      'Session model',
+                      style: TextStyle(fontSize: 11),
+                    ),
+                    selected: p.model == null,
+                    onSelected: (_) =>
+                        widget.onUpdate?.call(p.copyWith(clearModel: true)),
+                  ),
+                  for (final m in {
+                    for (final prov in AppState.I.providers) ...prov.models,
+                  })
+                    ChoiceChip(
+                      label: Text(m, style: const TextStyle(fontSize: 11)),
+                      selected: p.model == m,
+                      onSelected: (_) =>
+                          widget.onUpdate?.call(p.copyWith(model: m)),
+                    ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+              child: Text(
+                "Temperature (this preset's runs):",
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  color: Aether.textMuted,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  ChoiceChip(
+                    label: const Text(
+                      'Provider default',
+                      style: TextStyle(fontSize: 11),
+                    ),
+                    selected: p.temperature == null,
+                    onSelected: (_) => widget.onUpdate?.call(
+                      p.copyWith(clearTemperature: true),
+                    ),
+                  ),
+                  for (final t in const [0.0, 0.2, 0.5, 1.0])
+                    ChoiceChip(
+                      label: Text(
+                        t.toStringAsFixed(1),
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                      selected: p.temperature == t,
+                      onSelected: (_) =>
+                          widget.onUpdate?.call(p.copyWith(temperature: t)),
                     ),
                 ],
               ),

@@ -6515,8 +6515,9 @@ block</pre>
       expect(PresetRegistry.allows(code, 'generate_image'), isFalse);
       expect(PresetRegistry.allows(code, 'run_shell'), isTrue);
 
-      // Plan preset (new): the read-only planning policy. Its roster is
-      // unrestricted because the plan/read-only mode gate enforces it.
+      // Plan preset (new): the read-only planning policy. Its preset roster is
+      // unrestricted; G4 restricts the ROSTER to the plan policy while plan mode
+      // is on (so the model is not offered tools the gate would refuse).
       final plan = PresetRegistry.byId('plan');
       expect(plan.id, 'plan');
       expect(PresetRegistry.all.map((p) => p.id), contains('plan'));

@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import 'plan_mode.dart';
+
 /// One named agent preset (the tool gate agent-presets parity): a tool-roster
 /// composition plus a persona preamble. A session joins a preset; the
 /// tool gate in AgentService consults the roster on every run so the
@@ -21,6 +23,23 @@ class AgentPreset {
   /// Extra persona preamble injected above the base system prompt.
   final String persona;
 
+  /// G3: optional model pin for this preset's runs. When set, the run uses
+  /// this model instead of the session's, so the `plan` preset can research on
+  /// a cheap fast model without changing the user's chat model. Null = use the
+  /// session's model (the previous behaviour).
+  final String? model;
+
+  /// G3: optional sampling temperature for this preset's runs. Null = let the
+  /// provider default decide (never a synthetic default injected). Skipped on
+  /// Anthropic runs that enable a thinking budget, which rejects it.
+  final double? temperature;
+
+  /// G5: the preset's OWN plan-mode allowlist. When non-empty it REPLACES the
+  /// built-in [PlanModePolicy.allowedTools] while this preset is planning, so
+  /// the plan policy becomes user-authorable through the existing custom
+  /// preset plumbing instead of a hardcoded set. Empty = built-in policy.
+  final List<String> planAllowedTools;
+
   const AgentPreset({
     required this.id,
     required this.label,
@@ -28,6 +47,9 @@ class AgentPreset {
     this.allowedTools = const [],
     this.deniedTools = const [],
     this.persona = '',
+    this.model,
+    this.temperature,
+    this.planAllowedTools = const [],
   });
 
   factory AgentPreset.fromJson(Map<String, dynamic> json) {
@@ -38,6 +60,15 @@ class AgentPreset {
       allowedTools: (json['allowedTools'] as List?)?.map((e) => e.toString()).toList() ?? const [],
       deniedTools: (json['deniedTools'] as List?)?.map((e) => e.toString()).toList() ?? const [],
       persona: json['persona'] as String? ?? '',
+      model: (json['model'] as String? ?? '').trim().isEmpty
+          ? null
+          : (json['model'] as String).trim(),
+      temperature: (json['temperature'] as num?)?.toDouble(),
+      planAllowedTools:
+          (json['planAllowedTools'] as List?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
     );
   }
 
@@ -48,6 +79,9 @@ class AgentPreset {
     'allowedTools': allowedTools,
     'deniedTools': deniedTools,
     'persona': persona,
+    if (model != null) 'model': model,
+    if (temperature != null) 'temperature': temperature,
+    if (planAllowedTools.isNotEmpty) 'planAllowedTools': planAllowedTools,
   };
 
   AgentPreset copyWith({
@@ -57,6 +91,11 @@ class AgentPreset {
     List<String>? allowedTools,
     List<String>? deniedTools,
     String? persona,
+    String? model,
+    double? temperature,
+    List<String>? planAllowedTools,
+    bool clearModel = false,
+    bool clearTemperature = false,
   }) {
     return AgentPreset(
       id: id ?? this.id,
@@ -65,6 +104,11 @@ class AgentPreset {
       allowedTools: allowedTools ?? this.allowedTools,
       deniedTools: deniedTools ?? this.deniedTools,
       persona: persona ?? this.persona,
+      model: clearModel ? null : (model ?? this.model),
+      temperature: clearTemperature
+          ? null
+          : (temperature ?? this.temperature),
+      planAllowedTools: planAllowedTools ?? this.planAllowedTools,
     );
   }
 }
@@ -147,9 +191,12 @@ class PresetRegistry {
   );
 
   /// Plan preset: the research-first planning policy (opencode `plan`
-  /// agent parity). Selecting it turns on plan mode and applies the
-  /// Read-Only tool gate; the roster itself is unrestricted because the
-  /// mode gate is what enforces read-only.
+  /// agent parity). Selecting it turns on plan mode (and the Read-Only
+  /// coupling). G4: the dispatch gate and the model-visible roster now read
+  /// the SAME policy object — while plan mode is on, `AgentService._tools`
+  /// withholds everything [PlanModePolicy] refuses, so the model is never
+  /// offered a tool the gate would reject. G5: set [planAllowedTools] on a
+  /// custom preset to author your own plan policy.
   static const plan = AgentPreset(
     id: 'plan',
     label: 'Plan',
@@ -213,13 +260,21 @@ class PresetRegistry {
   }
 
   /// Orchestration + session bookkeeping stay available in every preset:
-  /// they are the harness itself, not a capability being gated.
-  static const _alwaysAllowed = [
-    'dispatch_agent',
-    'report',
-    'update_goal',
-    'get_goal',
-    'create_goal',
-    'memory_save',
-  ];
+  /// they are the harness itself, not a capability being gated. G7: the set
+  /// now has exactly ONE definition — [PlanModePolicy.harnessTools] — so the
+  /// preset roster and the plan-mode roster can never drift apart.
+  static const Set<String> _alwaysAllowed = PlanModePolicy.harnessTools;
+
+  /// Test seam (G7): the harness set, which now has exactly one definition.
+  @visibleForTesting
+  static Set<String> get harnessToolsForTest => _alwaysAllowed;
+
+  /// G5: the plan-mode allowlist in force for [preset]. A preset that declares
+  /// its own `planAllowedTools` replaces the built-in policy; otherwise
+  /// [PlanModePolicy.allowedTools] applies. ONE resolution point, shared by the
+  /// dispatch gate and the roster projection.
+  static Set<String> planPolicyFor(AgentPreset preset) =>
+      preset.planAllowedTools.isEmpty
+      ? PlanModePolicy.allowedTools
+      : preset.planAllowedTools.toSet();
 }

@@ -10,6 +10,10 @@
 # Large tool-output dumps and throwaway analysis scripts.
 .spill/
 .scratch/
+# Audit scratch: pre-patch file backups, anchored patch scripts, downloaded
+# upstream reference sources. Never part of a commit.
+.audit/
+.oc/
 .atom/
 .build/
 .buildlog/

@@ -156,7 +156,8 @@ class CommandService {
       AgentCommand(
         name: 'plan',
         hint: '[message|off]',
-        description: 'Enter plan mode; /plan off exits',
+        description:
+            'Enter plan mode (research-first, read-only); /plan off exits',
         handler: (args) async {
           final agent = AgentService.I;
           if (args.trim().toLowerCase() == 'off') {
@@ -169,7 +170,17 @@ class CommandService {
                     'plan and call exit_plan_mode to offer switching to the '
                     'build agent.'
               : args.trim();
-          return CommandResult(prompt: msg, feedback: 'Plan mode on.');
+          // G6: attachments the user already staged in the composer ride along
+          // with this prompt — the command must not be a way to lose them. The
+          // count is surfaced so the user can see they were kept.
+          final staged = agent.pendingAttachments.length;
+          return CommandResult(
+            prompt: msg,
+            feedback: staged == 0
+                ? 'Plan mode on.'
+                : 'Plan mode on — $staged attachment'
+                      '${staged == 1 ? '' : 's'} will be included.',
+          );
         },
       ),
     );

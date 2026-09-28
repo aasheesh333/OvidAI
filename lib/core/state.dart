@@ -1147,6 +1147,11 @@ class ChatSession {
   /// session switch keeps the amber planning state.
   bool planMode;
 
+  /// G2: a plan-mode transition the user requested while a turn was OPEN,
+  /// waiting for the next turn boundary (dsh's `queued` state). Null = nothing
+  /// queued. Persisted so a restart mid-turn does not lose the intent.
+  bool? planModePending;
+
   /// The access mode the `plan` preset overrode when it entered plan mode.
   /// Recorded when the plan preset introduces safe read-only (the session
   /// was not already `safe`), regardless of entry order. Every plan exit
@@ -1197,6 +1202,7 @@ class ChatSession {
     this.systemPromptSnapshot,
     this.goal,
     this.planMode = false,
+    this.planModePending,
     this.planPreMode,
     this.compactedAtCount = 0,
     this.parentId,
@@ -1261,6 +1267,7 @@ class ChatSession {
         ? null
         : Map<String, dynamic>.from(j['goal'] as Map),
     planMode: j['planMode'] as bool? ?? false,
+    planModePending: j['planModePending'] as bool?,
     planPreMode: j['planPreMode'] as String?,
     messages:
         (j['messages'] as List?)
@@ -1319,6 +1326,7 @@ class ChatSession {
     if (grants.isNotEmpty) 'grants': grants.map((g) => g.toJson()).toList(),
     if (goal != null) 'goal': goal,
     if (planMode) 'planMode': planMode,
+    if (planModePending != null) 'planModePending': planModePending,
     if (planPreMode != null) 'planPreMode': planPreMode,
     'schedules': schedules,
     'todos': todos,
@@ -3792,6 +3800,7 @@ class AppState extends ChangeNotifier {
       session.compactedSummary,
       session.compactedAtCount,
       session.planMode,
+      session.planModePending,
       session.planPreMode,
       session.sandboxId,
       session.goal?.toString(),
@@ -7598,13 +7607,21 @@ class AppState extends ChangeNotifier {
       if (list is List) {
         PresetRegistry.clearCustom();
         for (final item in list) {
-          if (item is Map<String, dynamic>) {
-            PresetRegistry.saveCustom(AgentPreset.fromJson(item));
-          } else if (item is Map) {
-            PresetRegistry.saveCustom(
-              AgentPreset.fromJson(item.cast<String, dynamic>()),
-            );
-          }
+          // PER-ENTRY guard, deliberately INSIDE the outer try: `fromJson`
+          // casts fields (`json['model'] as String`, `json['temperature'] as
+          // num?`), so ONE wrong-typed field used to throw out of the whole
+          // load — the tail never loaded and the next _persistCustomPresets
+          // wrote only the loaded prefix, permanently deleting every later
+          // custom preset. A corrupt entry is now skipped; the rest survive.
+          try {
+            if (item is Map<String, dynamic>) {
+              PresetRegistry.saveCustom(AgentPreset.fromJson(item));
+            } else if (item is Map) {
+              PresetRegistry.saveCustom(
+                AgentPreset.fromJson(item.cast<String, dynamic>()),
+              );
+            }
+          } catch (_) {}
         }
       }
     } catch (_) {}

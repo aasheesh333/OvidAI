@@ -173,89 +173,19 @@ dsh: optional package, and *"the agent loop does not depend on it."* Ovid: gate,
 
 The requirement changed: plan mode must be a **research agent over the current
 directory**, and the plan must **not** be presented inside a question/approval
-card. Implemented as follows.
+card.
 
 ### 6.1 What changed
 
 | Area | Before | After |
 |---|---|---|
-| Plan delivery | The plan rode in the `exit_plan_mode` tool argument and was rendered in a dedicated `_PlanReviewCard` (markdown, 260 px scroll, Approve / Decline / Chat-about-it) | The plan is a **normal assistant message**. The tool argument is only a short recap. `_PlanReviewCard` is deleted; `exit_plan_mode` now routes through the existing `_QuestionsCard` as **one yes/no question** |
+| Plan delivery | The plan rode in the `exit_plan_mode` tool argument and was rendered in a dedicated `_PlanReviewCard` (markdown, 260 px scroll, Approve / Decline / Chat-about-it) | The plan is a **normal assistant message**. The tool argument is only a short recap. `_PlanReviewCard` is deleted; `exit_plan_mode` routes through the existing `_QuestionsCard` as **one yes/no question** |
 | Exit question | "Approve this plan?" (approve/deny an artefact) | `"Plan complete. Would you like to switch to the build agent and start implementing?"` — Yes / No, i.e. opencode's `plan_exit` wording |
-| Shell in plan mode | `run_shell` **refused** by the allowlist | `run_shell` **allowed**, matching opencode (`bash` is `"*": "allow"`; only `edit` is denied) |
-| Read-only enforcement | Gate only (tool-name based) | Gate **plus** a plan-mode system-prompt section — the `session/prompt/plan.txt` equivalent. A shell command's effect cannot be decided from its name, so the instruction carries the rule |
-| Plan-mode prompt | None (only the `plan` preset persona, applied only when the preset was selected) | A `planMode`-gated system-prompt block, so `/plan`, the preset and any other entry point all get the same read-only briefing |
-
-### 6.2 Gap status after this change
-
-| Gap | Status |
-|---|---|
-| **G8** — allowlist maintenance burden | **Improved.** Shell research now matches opencode, so the practical pressure to widen the allowlist drops. The allowlist remains default-deny |
-| **G4** — preset and plan mode are two half-mechanisms | **Partially closed.** Both now inject the same research-first policy and the preset no longer describes a different exit flow |
-| **G6** — no attachments on `/plan` | Open |
-| **G1** — `AgentRun.planMode` write-only | Open (`:604` written 5×, read 0×) |
-| **G2** — no turn-boundary queue | Open |
-| **G3** — no per-preset model/temperature | Open |
-| **G5** — policy not user-authorable | Open |
-| **G7** — not modular | Open |
-
-### 6.3 Accepted trade-off (explicit user decision)
-
-Allowing `run_shell` in plan mode **weakens** the hard default-deny allowlist:
-the gate can no longer stop a planning agent from running a mutating command.
-This is deliberate — it is exactly what opencode does, and the enforcement is
-prompt guidance in both. Everything that mutates state *by tool identity*
-(`file_write`, `fs_edit`, `commit`, `run_code`, `repo_sync`, `git_push`,
-`job_start`, `preview`, every `device_*`, every plugin/MCP tool) stays refused
-by the gate. The regression risk is therefore: a planning agent that ignores
-its instructions can mutate the workspace through the shell. Users who want
-the old hard guarantee should not enter plan mode.
-
-### 6.4 Tests touched
-
-- `test/plan_mode_allowlist_test.dart` — `run_shell` moved from the refused
-  list to a new "shell is usable for research" test; the mutating tools are
-  now asserted one by one so a leak names itself.
-- `test/composer_modes_test.dart` (×2), `test/chat_dsh_parity_test.dart`,
-  `test/core_regression_test.dart` — `exit_plan_mode` is now a *questions*
-  request, so the answer (`answers['plan_exit'] = 'Yes'`) must be recorded
-  before `approve(true)`, which is exactly what the real card does.
-
-*Verification: static only — exact-match patch assertions plus a
-delimiter-balance diff against the pre-patch files. `flutter analyze` /
-`flutter test` were not run locally (no aarch64 host SDK); CI is the verifier.*
-
----
-
-## 6. Implementation (2026-09-27) — research-agent plan mode
-
-Requirement: plan mode should behave like opencode's **Plan agent** — research
-the current directory — and the plan must **not** be presented inside an
-approval/question card.
-
-### 6.1 What changed
-
-| Area | Before | After |
-|---|---|---|
-| Plan delivery | The plan rode in the `exit_plan_mode` argument and was rendered in a dedicated `_PlanReviewCard` (markdown, 260 px scroll, Chat-about-it / Decline / Approve) | The plan is a **normal assistant message**. The argument is only a short recap. `_PlanReviewCard` is deleted; `exit_plan_mode` routes through the existing `_QuestionsCard` as **one yes/no question** |
-| Exit question | "Approve this plan?" | "Plan complete. Would you like to switch to the build agent and start implementing?" — Yes / No, i.e. opencode's `plan_exit` wording |
 | Shell in plan mode | `run_shell` **refused** by the allowlist | `run_shell` **allowed** — opencode's plan agent leaves `bash` at `"*": "allow"` and denies only `edit` |
 | Read-only enforcement | Gate only (tool-name based) | Gate **plus** a plan-mode system-prompt section — the `session/prompt/plan.txt` equivalent, because a shell command's effect cannot be decided from its name |
 | Plan-mode briefing | None (only the `plan` preset persona, which applied only when that preset was selected) | A `planMode`-gated prompt block, so the plan command, the preset and any other entry point all get the same read-only briefing |
 
-### 6.2 Gap status after this change
-
-| Gap | Status |
-|---|---|
-| **G8** allowlist maintenance burden | **Improved.** Shell research now matches opencode, so the pressure to keep widening the allowlist drops. It stays default-deny |
-| **G4** preset + plan mode as two half-mechanisms | **Partially closed.** Both now inject the same research-first policy, and the preset no longer describes a different exit flow |
-| **G6** plan-command attachments | Open |
-| **G1** `AgentRun.planMode` write-only | Open (`:604` written 5x, read 0x) |
-| **G2** no turn-boundary queue | Open |
-| **G3** no per-preset model/temperature | Open |
-| **G5** policy not user-authorable | Open |
-| **G7** not modular | Open |
-
-### 6.3 Accepted trade-off (explicit user decision)
+### 6.2 Accepted trade-off (explicit user decision)
 
 Allowing `run_shell` in plan mode **weakens** the hard default-deny allowlist:
 the gate can no longer stop a planning agent from running a mutating command.
@@ -267,16 +197,167 @@ by the gate. Residual risk: a planning agent that ignores its instructions can
 mutate the workspace through the shell. A user who wants the old hard
 guarantee should not enter plan mode.
 
-### 6.4 Tests touched
+Note: plan mode also forces `mode = safe` (via the `plan` preset), and
+`_maybeApprove` prompts for `run_shell` in `safe` mode — so shell research in a
+plan session still asks per command unless the user taps *Always allow*.
 
-- `test/plan_mode_allowlist_test.dart` — `run_shell` moved from the refused
-  list to a new "shell is usable for research" test; the mutating tools are
-  asserted one by one so a leak names itself.
-- `test/composer_modes_test.dart` (x2), `test/chat_dsh_parity_test.dart`,
-  `test/core_regression_test.dart` — `exit_plan_mode` is now a *questions*
-  request, so the answer (`answers['plan_exit'] = 'Yes'`) is recorded before
-  `approve(true)`, which is exactly what the real card does.
+---
 
-*Verification: static only — exact-match patch assertions plus a
-delimiter-balance diff against the pre-patch files. `flutter analyze` and
-`flutter test` were not run locally (no aarch64 host SDK); CI is the verifier.*
+## 7. Closure — 2026-09-27 (G1–G7)
+
+§6 shipped the research-agent flow. §7 closes the gaps §5 ranked, in the order
+§5 recommended (G1+G2 first, because they are the same state problem).
+
+> **Audited 2026-09-28.** Every row below was re-checked against the working
+> tree, and three claims in the first draft of this section did not survive:
+> G2's Stop landing (the `finally` guard skipped it, so the flag sat in prefs
+> until the next message), the G2 briefing splice (missing entirely — the roster
+> is read per request, the briefing was assembled once), and G4's "exact
+> projection" (the plan filter runs *after* the preset filter, and `catalogue`
+> is a superset of `allowedTools` by design). The Read-Only interaction was
+> missing too. Each row now names the mechanism **and** the guard or ordering
+> that carries it; §7.3 lists what is still true after the fix.
+
+### 7.1 What changed, gap by gap
+
+| Gap | Fix |
+|---|---|
+| **G1** — `AgentRun.planMode` write-only (5 writers, 0 readers) | **Field deleted**, with its run-start seeding and the two subagent-inheritance writes. The session's `planMode` is the one source of truth. The inheritance line claimed a child could not mutate "while the parent is still planning", but nothing read it — and the plan gate refuses `dispatch_agent` outright (it is a harness tool, and the gate consults `PlanModePolicy.allows`, which does not exempt the harness set), so a child can never be spawned from a planning session anyway. Enforced where it can be enforced: the gate |
+| **G2** — no turn-boundary queue | A plan-mode transition requested while a turn is **open** is **queued** on the session (`ChatSession.planModePending`, persisted) and landed at the **turn boundary**: `_runTaskBody`'s turn loop calls `_applyPendingPlanMode(s)` at the top of every turn, so a turn always finishes under the policy it started with (dsh's `queued`). The **unwind** path is the run's `finally`, and its guard is the whole story: `if (ownsRun || !busyFor(s.id)) { _applyPendingPlanMode(s); … }`. The second arm is the **Stop** path — `_cancelBucket` has already nulled `activeRunId`, so this run no longer owns the bucket and an `ownsRun`-only guard skipped the landing entirely, stranding the flag in prefs until the user happened to send another message (a turn late). When a Stop instead **promoted a queued continuation**, `activeRunId` is the NEW run's id and `busyFor` is true, so the new run lands the transition at its own turn boundary instead. `exit_plan_mode` **approval** applies immediately (`_applyPlanModeNow`) — an explicit user decision tied to that tool result, and the model is about to build; queueing it would lock the approved plan out of the tools it just earned. A direct access-mode pick also applies immediately. The composer chip renders `Plan…` / `Plan off…` while a transition is queued, from the persisted field, so a queued change is never silent |
+| **G2 (second half — the briefing)** | The plan BRIEFING rides in the system prompt, and the system prompt is assembled **once**, before the turn loop — while the tool roster (`_tools`) is read **per request** inside `_callLlm`. So a transition landing at the boundary sent the NEW roster with the OLD briefing. Fixed with a token splice: the template carries `const planSectionToken = '<<<PLAN_MODE_SECTION>>>'` and `String buildSys() => sysTemplate.replaceAll(planSectionToken, planMode ? PlanModePolicy.promptSection : '');` re-derives the prompt from the live flag. The boundary re-derives and swaps the stale system row **in place** (index-agnostic: hook notes insert at index 0, so the system row is not reliably `msgs[0]`) and refreshes `s.systemPromptSnapshot`; the `finally` re-derives it a second time for the Stop landing, because — the code's own words — "else the transcript would record a briefing the run had already outgrown". The splice is exact in both states (the token becomes the section, or the empty string), so provider prefix caching still hits |
+| **G3** — planning could not use a different model or sampling params | `AgentPreset.model` and `AgentPreset.temperature` (both nullable, persisted). Snapshotted per run at run start into `AgentRun.modelSnapshot` / `temperatureSnapshot` (`bucket.modelSnapshot = runPreset.model ?? s.model;`) — the same run-scoped seam the model already used — and sent as `temperature` in both request builders, **skipped on Anthropic runs with a thinking budget** (the API rejects the pair). `null` means "let the provider decide": no synthetic default is ever injected. A preset that pins either emits one `think` line naming the settings. The effective model is **not just the request body**: `AgentService.effectiveModelForSession(s)` (`r?.modelSnapshot ?? s.model`) is what the **context-window / compaction budget** reads (`contextWindowForSession` → `_maybeCompactLocked`, `_forceCompactLocked`, `contextUsageFraction`, the analytics `contextLimit`) and what the **usage and cost record** is written under (`UsageEntry.model`, `estimatedCostForModel`). Before that, a pin to a cheap fast model was priced as the chat model and measured against the chat model's window — compaction fired late for a small pin and early for a large one. An empty or whitespace pin is ignored: `AgentPreset.fromJson` collapses a blank `model` to `null` with a `.trim()` guard, and the Settings picker only offers ids already in `provider.models`, so a blank pin cannot be authored. (The guard is at **decode**; the run-start assignment itself is unconditional.) Residual: see §7.3 |
+| **G4** — the `plan` preset and plan mode were two half-mechanisms | The dispatch gate **and** the model-visible roster read the **same resolved policy object**, `PresetRegistry.planPolicyFor(preset)`. While plan mode is on, `_tools` withholds everything the gate would refuse, so the model is never offered (or billed for) a tool it cannot use, and `exit_plan_mode` stays advertised because it is on the allowlist. The old `rosterAllows` kept *harness* tools visible regardless — `dispatch_agent` was therefore offered while being refused. That drift is gone: the roster filter is `PlanModePolicy.allows(name, policy: …)`, which does not exempt the harness set. **Two qualifiers, though, before calling it an "exact projection".** (1) The plan filter runs **after** the preset filter, so a preset's `planAllowedTools` can only SUBTRACT from that preset's roster. The code, in order, is `final gated = preset.allowedTools.isEmpty && preset.deniedTools.isEmpty ? tools : tools.where((t) { … return name != null && PresetRegistry.allows(preset, name); }).toList();` and then `final planGated = planMode ? gated.where((t) { … return name != null && PlanModePolicy.allows(name, policy: PresetRegistry.planPolicyFor(preset)); }).toList() : gated;`. A plan allowlist therefore cannot re-add a tool the preset's `deniedTools` (or its `allowedTools` allowlist) removed. (2) `PlanModePolicy.catalogue` is a deliberate **superset** of `allowedTools` — five entries (`commit`, `file_write`, `fs_edit`, `repo_sync`, `run_code`) are on it precisely so a user can author a **wider** custom policy — so a catalogue entry is not a promise that the gate allows it |
+| **G5** — policy not user-authorable | `AgentPreset.planAllowedTools`: a custom preset may carry its **own** plan allowlist, which **replaces** the built-in one while that preset is planning (a replacement, not an additive escape from default-deny). Resolved in exactly one place, `PresetRegistry.planPolicyFor`, shared by the gate and the roster. Edited in Settings → Agent Presets → duplicate a preset (the picker block renders for custom presets only), with chips drawn from `PlanModePolicy.catalogue` |
+| **G6** — no attachments when entering plan mode | Attachments staged in the composer already rode along (the `/plan` prompt goes through `_sendPrompt` → `runTask`, which stamps and consumes them). What was missing was visibility and a guarantee: the command now reports *"Plan mode on — N attachments will be included"*, and a test pins that `/plan` does not clear them |
+| **G7** — not modular | New `lib/core/plan_mode.dart` holds `PlanModePolicy`: the allowlist, the harness set, the briefing text, the resolution helper (`allows(name, {policy})`) and the settings catalogue (+ `readOnlyBlocked`). `agent_service.dart` and `presets.dart` import it; the service's allowlist is now a named alias for the module's set, and the prompt interpolates `PlanModePolicy.promptSection` through `buildSys()`. One definition, four consumers (gate, roster, briefing, the Settings picker) |
+| **Read-Only × the plan policy** (missing from the first draft) | The `plan` preset forces `mode = safe`, so every plan run is also a Read-Only run and hits `AgentService._readOnlyBlock` **after** the plan gate. `PlanModePolicy.readOnlyBlocked` = `{commit, file_write, fs_edit, run_code}` names the catalogue entries that gate refuses outright, and the picker renders them with a `*` + footnote. Detail and residual: §7.2 |
+
+### 7.2 The Read-Only interaction (added 2026-09-28)
+
+`PlanModePolicy.readOnlyBlocked` exists because the plan policy is
+user-authorable and may be widened past what planning needs, while
+`_readOnlyBlock` is an independent hard gate: the `plan` preset forces
+`mode = safe`, so ticking one of these in a custom plan allowlist would
+advertise a tool to the model and then have dispatch reject it — exactly the
+roster/gate drift this module exists to remove.
+
+- **Which four, and why.** Of the 43 `catalogue` names, exactly `commit`,
+  `file_write` and `run_code` appear in `_readOnlyBlock`'s unconditional
+  `case` list. `fs_edit` is refused for every use the picker advertises: the
+  gate lets only its `view` subcommand through, and the catalogue entry IS the
+  editing use. The remaining catalogue entries either fall through the switch
+  (`default: return null`) or are decided by argument (`run_shell`,
+  `browser_cookies`).
+- **How it is surfaced.** The Settings picker renders `'$tool*'` for a
+  `readOnlyBlocked` name and prints the footnote: *"Read-Only mode refuses this
+  outright — and the plan preset forces Read-Only — so ticking it only widens
+  the plan policy; Read-Only still blocks it. (`run_shell` carries no marker:
+  Read-Only runs its read-only commands.)"* — a labelling fix: the chip's
+  selection logic and the saved value are untouched.
+- **Why `run_shell` carries no marker.** `_readOnlyBlock` runs
+  `_isReadOnlyCommand` and refuses only the mutating commands, so ticking it in
+  a custom plan policy genuinely takes effect; marking it would be a lie in the
+  other direction. (In `safe` mode `_maybeApprove` still asks per command
+  unless auto-run-safe covers a read-only command or the user taps *Always
+  allow*.)
+- **Residual.** `repo_sync` is the one mutating catalogue entry that is neither
+  on the built-in plan allowlist **nor** refused by `_readOnlyBlock` (it is not
+  in that switch, so it falls to `default: return null`). It carries no `*`
+  because the marker mirrors the Read-Only gate, not the plan gate — so a
+  custom plan policy that ticks it gets no warning. And there is **no approval
+  prompt to fall back on**: `repo_sync`'s handler does not call
+  `_maybeApprove` — unlike `file_write`, `commit`, `git_clone`/`git_push`/
+  `git_pull`, `fs_edit` (create/str_replace/insert), `run_shell` and
+  `browser_open`/`browser_navigate`/`browser_new_tab` — so a Read-Only
+  session that dispatches it performs a network fetch plus workspace writes
+  with no user prompt. The repo tools are registered on the `githubSync`
+  toggle alone, with no access-mode gate (unlike `device_*`, which the
+  roster omits outside Control mode).
+
+### 7.3 Residuals — what is still true after §7
+
+- **G2.** No functional residual. The post-Stop landing is designed to be a
+  no-op when the Stop promoted a continuation (`busyFor` is true, the promoted
+  run lands it at its own boundary), so the transition is never lost — it lands
+  one turn later, in the run that is actually streaming.
+- **G3.** `AgentRun.modelSnapshot` is what the **request body, the context
+  budget and the usage/cost record** read, but the hook payloads still pass
+  `model: s.model` (the session's chat model) at every hook site
+  (`user_prompt_submit`, `pre_request`, `stop`, `pre_tool`,
+  `permission_request`, `notification`, `pre_compact`/`post_compact`), and
+  `HookService` writes that value into the payload JSON as `'model': ?model`
+  (also exported as `PLUGIN_MODEL`). The `session_search` index likewise stores
+  `model: s.model`. A plugin that reports "the model" for a planning run
+  therefore sees the chat model, not the pin.
+- **G4.** (a) The ordering asymmetry in §7.1 is real and by design: a plan
+  allowlist subtracts, it cannot re-add. (b) `catalogue` ⊃ `allowedTools` is
+  deliberate. (c) `PlanModePolicy.rosterTools` and
+  `PlanModePolicy.rosterAllows` are now **unused in production** — their only
+  references are the module itself and a comment in the test — and they still
+  encode the old "harness tools are always visible" rule. Re-wiring the roster
+  through `rosterAllows` would restore the drift the G4 fix removed.
+- **G5.** A custom policy is a **replacement**: a user who authors one gets no
+  built-in entries at all (the chips start unchecked), so the `*` footnote is
+  the only warning that Read-Only still refuses four of them.
+- **G8.** Acknowledged, not closed — see the status table below.
+
+### 7.4 Gap status after §7
+
+| Gap | Status |
+|---|---|
+| G1 | **Closed** (field removed; one source of truth) |
+| G2 | **Closed** (turn-boundary queue, unwind landing under `ownsRun || !busyFor`, UI projection, briefing re-derived with the roster) |
+| G3 | **Closed for the request, the budget and the billing** (per-preset model + temperature, run-snapshotted). Residual: hook payloads and the session-search index still name the session's chat model (§7.3) |
+| G4 | **Closed, with two qualifiers** — the roster withholds everything the gate refuses and the harness-tool drift is gone, but the plan filter runs after the preset filter and `catalogue` is a deliberate superset (§7.1) |
+| G5 | **Closed** (per-preset plan allowlist, one resolution point) |
+| G6 | **Closed** (verified + surfaced + tested) |
+| G7 | **Closed** (`lib/core/plan_mode.dart`) |
+| G8 | **Acknowledged, not closed.** The allowlist still needs maintenance as tools are added. Default-deny means a new tool is refused until someone deliberately allows it — which is the safe direction. The catalogue in `plan_mode.dart` is now the one place to look |
+
+### 7.5 Tests
+
+- **New** `test/plan_mode_policy_test.dart` — one group per gap: G1 (no
+  `run.planMode =` / `_runFor(child.id).planMode` / `_runResolved.planMode`
+  anywhere in the source, plus the session field is authoritative), G2 (queue vs
+  immediate, the boundary landing, approval opens the gate now, the pending flag
+  round-trips), G3 (pin round-trip, `0.0` survives as a real value, the run
+  snapshot exists), G4 (the roster hides every gate-refused tool while planning
+  and restores it after), G5 (a custom policy replaces the built-in one and is
+  still a replacement), G6 (staged attachments survive), G7 (the service
+  allowlist *is* the module set; the preset harness set *is* the module set; the
+  briefing splice is pinned at all three halves — the token literal, its use in
+  the template and the `buildSys()` swap; the `readOnlyBlocked` label matches
+  the Read-Only gate it mirrors).
+- **What the suite does *not* pin** (read, not run — see below): the G4
+  ordering (§7.1) and the G3 decode-time `.trim()` guard are stated in this
+  document and verified by inspection, but no test asserts either. The
+  `rosterTools` / `rosterAllows` leftovers are not flagged by any test either.
+- **Audited (2026-09-28)** — the suite is hermetic and every assertion is
+  falsifiable. `setUp` pins `SessionLedger.rootOverrideForTest` to a scratch
+  temp dir (no repo writes, no path_provider channel) and `tearDown` releases
+  the process-global run bucket / run-session override / staged attachments /
+  custom presets. No test dispatches a mutating tool: a gate that wrongly let
+  one through would really write into the repo, so "allowed" is asserted
+  through the roster projection and `PlanModePolicy` instead. Fixed in the same
+  pass: G7's briefing check asserted a `${planMode ? … }` interpolation literal
+  that appears nowhere in `agent_service.dart` (the source splices the section
+  through the `<<<PLAN_MODE_SECTION>>>` token and a plain-Dart ternary in
+  `buildSys()`), so it could never pass; G4 now asserts the policy before the
+  roster so its loop cannot pass vacuously for a feature-gated tool; and the
+  "the gate is open once planMode is off" probe in the allowlist suite was
+  not hermetic — in `auto` mode `run_shell` auto-approves and really
+  EXECUTES, so it now probes `commit`, whose handler returns "no pending
+  changes" before it can push.
+- **Updated** `test/plan_mode_allowlist_test.dart` (the probe swap above;
+  its other `run_shell`/mutating assertions still hold against the module
+  set) and `test/core_regression_test.dart` (the plan-preset comment now
+  describes the G4 roster projection).
+
+*Verification: static only. Every claim in §7 was re-checked against the working
+tree by grep and by set comparison over `plan_mode.dart`'s declarations
+(`catalogue` vs `allowedTools`, `catalogue` vs `_readOnlyBlock`'s unconditional
+`case` list, the `finally` guard, the `buildSys()` splice, the
+`effectiveModelForSession` call sites), and each row above is written so it can
+be re-checked by one grep or one set comparison. `flutter analyze` and
+`flutter test` were not run locally (no Dart/Flutter SDK on this host); CI is
+the verifier.*

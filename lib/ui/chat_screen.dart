@@ -6932,7 +6932,11 @@ class _PlanChip extends StatelessWidget {
       builder: (_, _) {
         final s = AppState.I.activeSession;
         final on = s?.planMode ?? false;
-        if (!on) return const SizedBox.shrink();
+        final pending = s?.planModePending;
+        // G2: a transition queued for the next turn boundary is still visible —
+        // the chip shows the target state with a trailing ellipsis instead of
+        // silently ignoring the tap.
+        if (!on && pending == null) return const SizedBox.shrink();
         return GestureDetector(
           onTap: () {
             AgentService.I.planMode = false;
@@ -6952,7 +6956,9 @@ class _PlanChip extends StatelessWidget {
                 Icon(Icons.architecture, size: 14, color: Aether.warnLight),
                 const SizedBox(width: 6),
                 Text(
-                  'Plan',
+                  pending == null
+                      ? 'Plan'
+                      : (pending ? 'Plan…' : 'Plan off…'),
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
