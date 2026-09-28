@@ -115,7 +115,7 @@ class PlanModePolicy {
   /// planning. Used by the roster projection in `AgentService._tools`, so a
   /// planning model is not billed for (and cannot be tempted by) tools the
   /// gate would refuse anyway.
-  static const Set<String> rosterTools = {
+  static final Set<String> rosterTools = {
     ...allowedTools,
     ...harnessTools,
   };
