@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -112,6 +113,19 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _agent.removeListener(_onAgentChanged);
     _url.dispose();
     super.dispose();
+  }
+
+  /// Reload the active tab exactly like the refresh button does: a
+  /// local preview reloads its file, anything else reloads the page.
+  void _reloadActiveTab() {
+    final t = _activeTab;
+    final lp = t?.localPreviewPath;
+    if (t != null && lp != null) {
+      t.controller?.loadFile(lp);
+    } else {
+      t?.controller?.reload();
+    }
+    setState(() {});
   }
 
   void _nav(String url) {
@@ -383,7 +397,33 @@ class _BrowserScreenState extends State<BrowserScreen> {
             // Google sign-in cannot complete inside an embedded WebView, so say
             // so and offer the real browser instead of leaving the user staring
             // at "this browser or app may not be secure".
-            if (tab != null) _ExternalSignInNotice(url: tab.url),
+            if (tab != null)
+              _ExternalSignInNotice(
+                url: tab.url,
+                onReload: () => _reloadActiveTab(),
+              ),
+            // Held popups (window.open / target=_blank clicks captured
+            // for the agent): without this chip such a click looked
+            // like a dead UI. Desktop browsers show a blocked-popup
+            // bar; this is the same thing, with Open / Dismiss.
+            if (tab != null)
+              _PopupNotice(
+                tab: tab,
+                onOpen: () {
+                  final opened = _agent.openBrowserPopup(tab);
+                  if (opened == null) {
+                    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'That popup link is empty or not a web '
+                          'address - nothing to open.',
+                        ),
+                      ),
+                    );
+                  }
+                },
+                onDismiss: () => _agent.dismissBrowserPopups(tab),
+              ),
             // Progress bar
             if (tab?.loading ?? false)
               LinearProgressIndicator(
@@ -583,7 +623,7 @@ class _AgentDot extends StatelessWidget {
 /// So name the provider, say plainly why it will not work here, and offer the
 /// real browser. GitHub already does the equivalent thing by using the device
 /// flow with `LaunchMode.externalApplication`.
-const Map<String, String> _externalSignInHosts = {
+const Map<String, String> _alwaysExternalSignInHosts = {
   'accounts.google.com': 'Google',
   'accounts.youtube.com': 'Google',
   'login.microsoftonline.com': 'Microsoft',
@@ -591,6 +631,14 @@ const Map<String, String> _externalSignInHosts = {
   'login.microsoft.com': 'Microsoft',
   'appleid.apple.com': 'Apple',
   'id.apple.com': 'Apple',
+};
+
+/// General-purpose origins that are a sign-in surface ONLY on their auth
+/// paths. Listing bare `facebook.com` / `x.com` / `linkedin.com` /
+/// `twitter.com` as always-sign-in fired the "provider blocks embedded
+/// sign-in" banner over ordinary timelines, profiles and posts — a false
+/// warning on pages that load perfectly well in a WebView.
+const Map<String, String> _pathGatedSignInHosts = {
   'facebook.com': 'Facebook',
   'm.facebook.com': 'Facebook',
   'www.facebook.com': 'Facebook',
@@ -599,6 +647,24 @@ const Map<String, String> _externalSignInHosts = {
   'x.com': 'X',
   'twitter.com': 'X',
 };
+
+/// Path/query markers that make a gated host a real sign-in surface.
+const List<String> _signInPathMarkers = [
+  '/login',
+  'login.php',
+  '/signin',
+  '/sign-in',
+  '/sign_in',
+  '/signup',
+  '/register',
+  '/oauth',
+  '/authorize',
+  '/sso',
+  '/cas/login',
+  '/account/login',
+  'dialog/oauth',
+  'checkpoint',
+];
 
 /// The provider name when [url] is a sign-in page that will not complete inside
 /// an embedded WebView, else null.
@@ -612,21 +678,43 @@ String? externalSignInProvider(String url) {
   if (u == null) return null;
   final h = u.host.toLowerCase();
   if (h.isEmpty) return null;
-  final direct = _externalSignInHosts[h];
+  final always = _hostProvider(h, _alwaysExternalSignInHosts);
+  if (always != null) return always;
+  final gated = _hostProvider(h, _pathGatedSignInHosts);
+  if (gated == null) return null;
+  return _isSignInSurface(u) ? gated : null;
+}
+
+String? _hostProvider(String host, Map<String, String> table) {
+  final direct = table[host];
   if (direct != null) return direct;
-  for (final entry in _externalSignInHosts.entries) {
-    if (h.endsWith('.${entry.key}')) return entry.value;
+  for (final entry in table.entries) {
+    if (host.endsWith('.${entry.key}')) return entry.value;
   }
   return null;
+}
+
+bool _isSignInSurface(Uri u) {
+  final haystack = '${u.path}?${u.query}'.toLowerCase();
+  for (final marker in _signInPathMarkers) {
+    if (haystack.contains(marker)) return true;
+  }
+  return false;
 }
 
 @visibleForTesting
 bool isExternalSignInUrl(String url) => externalSignInProvider(url) != null;
 
 class _ExternalSignInNotice extends StatelessWidget {
-  const _ExternalSignInNotice({required this.url});
+  const _ExternalSignInNotice({required this.url, this.onReload});
 
   final String url;
+
+  /// Reloads this tab after the user finished signing in in the real
+  /// browser. Some providers complete the SSO step in this profile's
+  /// cookie jar too, so one reload tap is worth trying before
+  /// abandoning the tab.
+  final VoidCallback? onReload;
 
   @override
   Widget build(BuildContext context) {
@@ -644,17 +732,111 @@ class _ExternalSignInNotice extends StatelessWidget {
       ),
       actions: [
         TextButton(
+          key: const ValueKey('external-signin-open'),
           onPressed: () async {
+            final messenger = ScaffoldMessenger.maybeOf(context);
+            var launched = false;
             try {
-              await launchUrl(
+              launched = await launchUrl(
                 Uri.parse(url),
                 mode: LaunchMode.externalApplication,
               );
-            } catch (_) {}
+            } catch (_) {
+              launched = false;
+            }
+            if (launched) return;
+            // The user pressed a button and nothing happened. `launchUrl`
+            // returns false (no handler) or throws (malformed/blocked) and
+            // the old `catch (_) {}` swallowed both — so say plainly that it
+            // failed and hand over the URL instead.
+            await Clipboard.setData(ClipboardData(text: url));
+            messenger?.showSnackBar(
+              SnackBar(
+                content: const Text(
+                  'Could not open your browser — the link is copied. '
+                  'Paste it into Chrome to finish signing in.',
+                ),
+                action: SnackBarAction(
+                  label: 'Copy link',
+                  onPressed: () =>
+                      Clipboard.setData(ClipboardData(text: url)),
+                ),
+              ),
+            );
           },
           child: const Text('Open in browser'),
         ),
+        TextButton(
+          key: const ValueKey('external-signin-reload'),
+          onPressed: onReload,
+          child: const Text('Reload - I signed in'),
+        ),
       ],
+    );
+  }
+}
+
+/// Held popups for the active tab, surfaced like a desktop browser's blocked
+/// popup bar: names what was held and offers Open / Dismiss. The JS bridge in
+/// AgentService captures `window.open` and `target="_blank"` clicks for the
+/// agent; this chip is how the USER sees the same events instead of staring
+/// at a tap that did nothing.
+class _PopupNotice extends StatelessWidget {
+  const _PopupNotice({
+    required this.tab,
+    required this.onOpen,
+    required this.onDismiss,
+  });
+
+  final BrowserTab tab;
+  final VoidCallback onOpen;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final pending = tab.popupRequests;
+    if (pending.isEmpty) return const SizedBox.shrink();
+    final last = pending.last;
+    final host = Uri.tryParse(last)?.host ?? last;
+    final label = pending.length == 1
+        ? 'Popup held: $host'
+        : '${pending.length} popups held - newest: $host';
+    return Container(
+      key: const ValueKey('popup-notice'),
+      color: Aether.surfaceAlt,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+      child: Row(
+        children: [
+          const Icon(Icons.block_outlined, size: 14, color: Aether.textMuted),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 11.5, color: Aether.textMuted),
+            ),
+          ),
+          TextButton(
+            key: const ValueKey('popup-open'),
+            style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+            ),
+            onPressed: onOpen,
+            child: const Text('Open'),
+          ),
+          TextButton(
+            key: const ValueKey('popup-dismiss'),
+            style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+            ),
+            onPressed: onDismiss,
+            child: const Text('Dismiss'),
+          ),
+        ],
+      ),
     );
   }
 }

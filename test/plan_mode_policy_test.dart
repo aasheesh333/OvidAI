@@ -474,9 +474,38 @@ void main() {
       );
       expect(agentSrc, contains(r'$planSectionToken'));
       expect(agentSrc, contains('sysTemplate.replaceAll('));
-      expect(agentSrc, contains('planMode ? PlanModePolicy.promptSection'));
+      // The briefing is BUILT, not interpolated: it needs the real working
+      // directory (a plan agent that never learns its jail boundary plans
+      // paths it cannot reach) and the access mode (so the scope wording can
+      // state that Full Access does not widen it). Both are resolved per run,
+      // so `promptSectionFor` is the one site that fills the placeholders.
+      expect(
+        agentSrc,
+        contains('PlanModePolicy.promptSectionFor('),
+        reason: 'the briefing must be root- and mode-aware',
+      );
+      expect(
+        agentSrc,
+        contains('root = await planModeRoot();'),
+        reason: 'the jail root is resolved, not guessed',
+      );
+      // A root lookup failure must fall back to the generic wording rather
+      // than block planning — pinned because it is the difference between a
+      // plan agent that cannot read anything and one that still works.
+      expect(agentSrc, contains('root = null;'));
       // And the briefing really is the module's text, not a second copy.
       expect(PlanModePolicy.promptSection, contains('READ-ONLY'));
+      // The placeholders exist precisely so they can NEVER survive into a
+      // prompt: a literal {PLAN_ROOT} would be repeated back to the user as
+      // if it were a real directory.
+      expect(
+        PlanModePolicy.promptSectionFor(root: '/w', modeName: 'auto'),
+        isNot(contains(PlanModePolicy.rootPlaceholder)),
+      );
+      expect(
+        PlanModePolicy.promptSectionFor(root: null, modeName: 'studio'),
+        isNot(contains(PlanModePolicy.scopePlaceholder)),
+      );
     });
 
     test('the policy module owns the settings catalogue', () {

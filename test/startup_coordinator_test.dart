@@ -474,6 +474,107 @@ void main() {
     },
   );
 
+  test(
+    'a verdict landing after the deadline replaces the stale timeout row',
+    () {
+      fakeAsync((async) {
+        final late = Completer<StartupItemStatus>();
+        final emitted = <StartupItemStatus>[];
+        final coordinator = StartupCoordinator.forTest(
+          deadline: const Duration(seconds: 120),
+          statusSink: (status, _) => emitted.add(status),
+        );
+        coordinator.start([
+          FakeStartupTask(
+            'sandbox.selfHeal',
+            kind: StartupItemKind.sandbox,
+            label: 'Maintain local sandbox',
+            timeout: const Duration(seconds: 30),
+            run: () => late.future,
+          ),
+        ]);
+
+        async.flushMicrotasks();
+        async.elapse(const Duration(seconds: 30));
+        async.flushMicrotasks();
+        expect(
+          _status(coordinator, 'sandbox.selfHeal').state,
+          StartupItemState.degraded,
+        );
+        expect(_status(coordinator, 'sandbox.selfHeal').timedOut, isTrue);
+        // The abandoned work is still live, so Retry must read as busy
+        // instead of accepting a tap the coordinator silently drops.
+        expect(coordinator.isItemRunning('sandbox.selfHeal'), isTrue);
+
+        // The job finishes 15s later. `.timeout()` abandoned the future but
+        // not the work — the truth has to win over the stale warning.
+        async.elapse(const Duration(seconds: 15));
+        late.complete(
+          StartupItemStatus.ready(
+            'sandbox.selfHeal',
+            StartupItemKind.sandbox,
+            'Maintain local sandbox',
+          ),
+        );
+        async.flushMicrotasks();
+
+        final reconciled = _status(coordinator, 'sandbox.selfHeal');
+        expect(reconciled.state, StartupItemState.ready);
+        expect(reconciled.timedOut, isFalse);
+        expect(coordinator.isItemRunning('sandbox.selfHeal'), isFalse);
+        // The durable sink must see the correction too, so a failure
+        // cooldown memo armed by the timeout gets cleared.
+        expect(emitted.last.state, StartupItemState.ready);
+      });
+    },
+  );
+
+  test('a late verdict never clobbers a newer attempt', () {
+    fakeAsync((async) {
+      final first = Completer<StartupItemStatus>();
+      var runs = 0;
+      final coordinator = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      coordinator.start([
+        FakeStartupTask(
+          'slow',
+          kind: StartupItemKind.sandbox,
+          label: 'Slow',
+          timeout: const Duration(seconds: 30),
+          run: () {
+            runs++;
+            if (runs == 1) return first.future;
+            return Future.value(
+              StartupItemStatus.failed(
+                'slow',
+                StartupItemKind.sandbox,
+                'Slow',
+                reason: 'real failure on attempt 2',
+              ),
+            );
+          },
+        ),
+      ]);
+
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 30));
+      async.flushMicrotasks();
+      expect(_status(coordinator, 'slow').state, StartupItemState.degraded);
+
+      // Attempt 1 finally reports ready AFTER attempt 2 already ran and
+      // failed. The newer verdict must survive.
+      first.complete(
+        StartupItemStatus.ready('slow', StartupItemKind.sandbox, 'Slow'),
+      );
+      async.flushMicrotasks();
+      coordinator.retry('slow');
+      async.flushMicrotasks();
+      expect(_status(coordinator, 'slow').state, StartupItemState.failed);
+      expect(_status(coordinator, 'slow').attempt, 2);
+    });
+  });
+
   test('a second start does not duplicate an unresolved invocation', () {
     fakeAsync((async) {
       var runs = 0;

@@ -1865,10 +1865,17 @@ class AppState extends ChangeNotifier {
     // Manual Retry clears it too (coordinator onBeforeRetry), so a tap
     // always runs for real.
     if (status.id == 'marketplace.refresh' || status.id == 'sandbox.selfHeal') {
-      if (status.state == StartupItemState.failed ||
-          status.state == StartupItemState.degraded) {
+      // A coordinator deadline ABANDONED the work; it is not proof the work
+      // failed. Arming the cooldown on `timedOut` made one slow boot hide
+      // sandbox maintenance for the next 12 hours ("Skipped — maintenance
+      // failed recently") while the job itself usually completed seconds
+      // later — and `_reconcileLateResult` then had a memo to undo.
+      final abandoned = status.timedOut;
+      if (!abandoned &&
+          (status.state == StartupItemState.failed ||
+              status.state == StartupItemState.degraded)) {
         unawaited(_writeStartupFailureMemo(status.id, DateTime.now()));
-      } else if (status.state == StartupItemState.ready) {
+      } else if (!abandoned && status.state == StartupItemState.ready) {
         unawaited(_clearStartupFailureMemo(status.id));
       }
     }
@@ -2519,6 +2526,7 @@ class AppState extends ChangeNotifier {
             _runStartupStage('sandbox.selfHeal', _startSandboxMaintenance),
         runtimesVerified: SandboxService.I.runtimesVerified,
         runtimesRequested: () => SandboxService.I.runtimesRequested,
+        installInProgress: () => SandboxService.I.installInFlight,
         installCoreRuntimes: verifyRuntimesForStartupSelfHeal,
         enforceQuota: _enforceSandboxQuota,
         lastFailedAt: sandboxMemo,
@@ -2810,13 +2818,26 @@ class AppState extends ChangeNotifier {
   /// [SandboxMaintenanceTask] runtimesRequested gate already reports those
   /// as ready without burning the boot budget.
   Future<bool> verifyRuntimesForStartupSelfHeal() async {
-    if (SandboxService.I.installInFlight) {
-      while (SandboxService.I.installInFlight) {
-        await Future.delayed(const Duration(seconds: 2));
-      }
+    // BOUNDED wait. An install (Studio first-open, Health repair) is a
+    // multi-minute network job, while this task's whole budget is 30s
+    // (see `sandbox.selfHeal` in buildReadinessTasks). An unbounded
+    // `while (installInFlight) delay(2s)` therefore ALWAYS lost the race,
+    // the coordinator's `.timeout()` fired, and the row was pinned to
+    // "Degraded — Timed out after 30s" even though maintenance later
+    // succeeded. Wait only as long as the budget can actually absorb, then
+    // report the verified truth rather than spinning into a timeout.
+    final deadline = DateTime.now().add(_installWaitBudget);
+    while (SandboxService.I.installInFlight && DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(seconds: 2));
     }
     return SandboxService.I.runtimesVerified();
   }
+
+  /// How long [verifyRuntimesForStartupSelfHeal] may wait for an in-flight
+  /// install before it stops and reports what it knows. Kept inside the 30s
+  /// `sandbox.selfHeal` boot budget so the task returns a real verdict
+  /// instead of being abandoned by the coordinator deadline.
+  static const Duration _installWaitBudget = Duration(seconds: 20);
 
   Future<void> _enforceSandboxQuota() => SandboxService.I.enforceWorkspaceQuota(
     activeSandboxIds: sessions

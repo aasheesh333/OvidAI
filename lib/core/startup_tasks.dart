@@ -364,8 +364,10 @@ class SandboxMaintenanceTask implements StartupTask {
     this.cooldown = const Duration(hours: 12),
     DateTime Function()? now,
     bool Function()? runtimesRequested,
+    bool Function()? installInProgress,
   }) : now = now ?? DateTime.now,
-       runtimesRequested = runtimesRequested ?? (() => true);
+       runtimesRequested = runtimesRequested ?? (() => true),
+       installInProgress = installInProgress ?? (() => false);
 
   @override
   final String id;
@@ -386,6 +388,13 @@ class SandboxMaintenanceTask implements StartupTask {
   /// `() => true` to preserve the historical eager-install behavior for
   /// callers that don't opt into deferred runtimes.
   final bool Function() runtimesRequested;
+
+  /// True while a full sandbox install owns the dpkg lock (Studio
+  /// first-open, Health repair). Self-heal cannot run then, and waiting it
+  /// out blows the 30s boot budget — so the task reports the informational
+  /// `skipped` state ("install in progress") instead of a false Degraded.
+  /// The install's own progress UI is the real signal.
+  final bool Function() installInProgress;
 
   /// Same cooldown contract as [MarketplaceRefreshTask]: a recent failure
   /// skips instead of timing out again every launch; manual Retry bypasses
@@ -417,6 +426,14 @@ class SandboxMaintenanceTask implements StartupTask {
         kind,
         label,
         reason: 'Sandbox is not installed on this device',
+      );
+    }
+    if (installInProgress()) {
+      return StartupItemStatus.skipped(
+        id,
+        kind,
+        label,
+        reason: 'Sandbox install in progress — self-heal deferred',
       );
     }
     try {

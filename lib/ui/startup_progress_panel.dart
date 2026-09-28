@@ -84,6 +84,7 @@ class StartupProgressPanel extends StatefulWidget {
     this.coordinator,
     this.onOpenPlugins,
     this.onInstallSandbox,
+    this.sandboxInstalled = false,
   });
 
   /// Coordinator to observe. Defaults to the process singleton in
@@ -98,6 +99,13 @@ class StartupProgressPanel extends StatefulWidget {
   /// installed): the host is expected to open Studio setup. Null hides the
   /// button (tests, embeds without Studio).
   final VoidCallback? onInstallSandbox;
+
+  /// Whether the native sandbox already exists on this device. `Install` on
+  /// the sandbox row means "the sandbox is missing, go set it up"; offering
+  /// it beside a Degraded-but-installed row reads as "reinstall now" and
+  /// invites the user to nuke a working sandbox. Defaults to false so a host
+  /// that never reports the flag keeps the historical actionable behaviour.
+  final bool sandboxInstalled;
 
   @override
   State<StartupProgressPanel> createState() => _StartupProgressPanelState();
@@ -244,12 +252,19 @@ class _StartupProgressPanelState extends State<StartupProgressPanel> {
                       ? () => widget.onOpenPlugins?.call(item.ownerId)
                       : null,
                   // Sandbox-not-installed is actionable (not just
-                  // retryable): one tap opens Studio setup.
+                  // retryable): one tap opens Studio setup. Once the sandbox
+                  // exists the row must not offer Install — a Degraded
+                  // installed sandbox needs Retry/Repair, not a reinstall.
                   onInstallSandbox:
                       item.id == 'sandbox.selfHeal' &&
+                          !widget.sandboxInstalled &&
                           widget.onInstallSandbox != null
                       ? widget.onInstallSandbox
                       : null,
+                  // A live (possibly deadline-abandoned) invocation makes
+                  // Retry/Disable no-ops in the coordinator, so say so
+                  // instead of accepting a tap that silently does nothing.
+                  busy: _coordinator.isItemRunning(item.id),
                 ),
           ],
         );
@@ -266,6 +281,7 @@ class _StartupItemRow extends StatelessWidget {
     this.onDisable,
     this.onOpenPlugins,
     this.onInstallSandbox,
+    this.busy = false,
   });
 
   final StartupItemStatus item;
@@ -273,6 +289,12 @@ class _StartupItemRow extends StatelessWidget {
   final VoidCallback? onDisable;
   final VoidCallback? onOpenPlugins;
   final VoidCallback? onInstallSandbox;
+
+  /// True while the coordinator still has a live invocation for this item
+  /// (including one its own deadline abandoned). Retry/Disable are no-ops in
+  /// that window, so the row shows a disabled `Working…` rather than a
+  /// button that appears broken.
+  final bool busy;
 
   @override
   Widget build(BuildContext context) {
@@ -355,7 +377,7 @@ class _StartupItemRow extends StatelessWidget {
                       if (showRetry)
                         TextButton(
                           key: ValueKey('startup-retry-${item.id}'),
-                          onPressed: onRetry,
+                          onPressed: busy ? null : onRetry,
                           style: TextButton.styleFrom(
                             visualDensity: VisualDensity.compact,
                             padding: const EdgeInsets.symmetric(
@@ -363,9 +385,9 @@ class _StartupItemRow extends StatelessWidget {
                             ),
                             minimumSize: const Size(0, 30),
                           ),
-                          child: const Text(
-                            'Retry',
-                            style: TextStyle(fontSize: 11.5),
+                          child: Text(
+                            busy ? 'Working…' : 'Retry',
+                            style: const TextStyle(fontSize: 11.5),
                           ),
                         ),
                       if (onDisable != null)

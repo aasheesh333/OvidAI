@@ -1618,4 +1618,150 @@ void main() {
       expect(find.text('One slow thing'), findsNothing);
     });
   });
+
+  group('sandbox row honesty (owner screenshots, 2026-09-28)', () {
+    Future<void> pumpWith({
+      required WidgetTester tester,
+      required StartupCoordinator c,
+      bool sandboxInstalled = false,
+      VoidCallback? onInstallSandbox,
+    }) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: StartupProgressPanel(
+                coordinator: c,
+                sandboxInstalled: sandboxInstalled,
+                onInstallSandbox: onInstallSandbox,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('startup-panel-toggle')));
+      await tester.pump();
+    }
+
+    testWidgets(
+      'an installed-but-degraded sandbox offers no Install',
+      (tester) async {
+        // The screenshot showed `Install | Retry` on a sandbox that was
+        // already installed and merely Degraded — an invitation to nuke a
+        // working install.
+        var installed = false;
+        final c = StartupCoordinator.forTest(
+          deadline: const Duration(seconds: 120),
+        );
+        unawaited(
+          c.start([
+            _Task(
+              'sandbox.selfHeal',
+              kind: StartupItemKind.sandbox,
+              label: 'Maintain local sandbox',
+              run: () async => StartupItemStatus.degraded(
+                'sandbox.selfHeal',
+                StartupItemKind.sandbox,
+                'Maintain local sandbox',
+                reason: 'Core runtimes could not be verified',
+              ),
+            ),
+          ]),
+        );
+        await pumpWith(
+          tester: tester,
+          c: c,
+          sandboxInstalled: true,
+          onInstallSandbox: () => installed = true,
+        );
+
+        expect(find.text('Install'), findsNothing);
+        expect(find.text('Retry'), findsOneWidget);
+        expect(installed, isFalse);
+      },
+    );
+
+    testWidgets('a genuinely missing sandbox still offers Install', (
+      tester,
+    ) async {
+      final c = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      unawaited(
+        c.start([
+          _Task(
+            'sandbox.selfHeal',
+            kind: StartupItemKind.sandbox,
+            label: 'Maintain local sandbox',
+            run: () async => StartupItemStatus.skipped(
+              'sandbox.selfHeal',
+              StartupItemKind.sandbox,
+              'Maintain local sandbox',
+              reason: 'Sandbox is not installed on this device',
+            ),
+          ),
+          _Task(
+            'other.failing',
+            kind: StartupItemKind.localState,
+            label: 'Other thing',
+            run: () async => StartupItemStatus.failed(
+              'other.failing',
+              StartupItemKind.localState,
+              'Other thing',
+              reason: 'boom',
+            ),
+          ),
+        ]),
+      );
+      await pumpWith(tester: tester, c: c, onInstallSandbox: () {});
+
+      expect(find.text('Install'), findsOneWidget);
+    });
+
+    testWidgets('Retry reads Working… while the invocation is still live', (
+      tester,
+    ) async {
+      // `retry()` no-ops while an invocation (even a deadline-abandoned one)
+      // is live, so the button must not look tappable.
+      final gate = Completer<StartupItemStatus>();
+      final c = StartupCoordinator.forTest(
+        deadline: const Duration(seconds: 120),
+      );
+      unawaited(
+        c.start([
+          _Task(
+            'sandbox.selfHeal',
+            kind: StartupItemKind.sandbox,
+            label: 'Maintain local sandbox',
+            timeout: const Duration(milliseconds: 50),
+            run: () => gate.future,
+          ),
+        ]),
+      );
+      await pumpWith(tester: tester, c: c);
+      await tester.pump(const Duration(milliseconds: 60));
+      await tester.pump();
+
+      expect(c.isItemRunning('sandbox.selfHeal'), isTrue);
+      expect(find.text('Working…'), findsOneWidget);
+      final retry = tester.widget<TextButton>(
+        find.byKey(const ValueKey('startup-retry-sandbox.selfHeal')),
+      );
+      expect(retry.onPressed, isNull);
+
+      gate.complete(
+        _ready(
+          'sandbox.selfHeal',
+          StartupItemKind.sandbox,
+          'Maintain local sandbox',
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(c.isItemRunning('sandbox.selfHeal'), isFalse);
+    });
+  });
 }

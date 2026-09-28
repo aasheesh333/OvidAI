@@ -212,6 +212,61 @@ void main() {
     });
   });
 
+  group('plan mode shell is read-only and never raises a card (owner request)', () {
+    // Owner (2026-09-28): "plan mode me agent koi bhi permission naa puchhe,
+    // no delete, no danger shell run — jese opencode me plan mode agent hota
+    // hai". Two properties, both asserted here:
+    //   1. a mutating command is REFUSED at the gate (it never executes);
+    //   2. refusing it produces NO approval card — plan mode asks nothing.
+    test('mutating commands are refused without prompting', () async {
+      for (final cmd in const [
+        'rm -rf build',
+        'git commit -m "x"',
+        'echo hi > notes.txt',
+        'npm install',
+        'find . -name "*.log" -delete',
+        'mv lib/a.dart lib/b.dart',
+        'curl -o /tmp/x https://example.com',
+      ]) {
+        final out = await call('run_shell', {'command': cmd});
+        expect(out, contains('PLAN MODE'), reason: '$cmd must be refused');
+        expect(
+          out,
+          contains('READ-ONLY'),
+          reason: '$cmd refusal must say why, not just "no"',
+        );
+        expect(
+          AgentService.I.pendingApproval,
+          isNull,
+          reason: 'plan mode must never raise an approval card for $cmd',
+        );
+      }
+    });
+
+    test('the refusal also holds in Studio mode (no Read-Only backstop)', () async {
+      // `/plan` can be switched on while the session is Studio, where
+      // `_readOnlyBlock` does not fire at all. Before the plan-mode shell gate
+      // this exact command was merely PROMPTED there — the hole the owner hit.
+      s.mode = 'studio';
+      try {
+        final out = await call('run_shell', {'command': 'rm -rf build'});
+        expect(out, contains('PLAN MODE'));
+        expect(AgentService.I.pendingApproval, isNull);
+      } finally {
+        s.mode = 'auto';
+      }
+    });
+
+    test('job_start cannot be used to smuggle a mutating command in', () async {
+      // job_start is not on the plan allowlist, so the allowlist gate answers
+      // first; assert the refusal either way so re-adding it to the allowlist
+      // still lands on the read-only shell gate.
+      final out = await call('job_start', {'command': 'rm -rf build'});
+      expect(out, contains('PLAN MODE'));
+      expect(AgentService.I.pendingApproval, isNull);
+    });
+  });
+
   group('leaving plan mode unlocks execution', () {
     test('the same call is no longer plan-refused once planMode is off',
         () async {

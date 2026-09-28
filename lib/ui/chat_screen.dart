@@ -1352,6 +1352,7 @@ class _ChatScreenState extends State<ChatScreen>
                             focusCanonicalId: canonicalId,
                           ),
                           onInstallSandbox: () => openStudio(context),
+                          sandboxInstalled: AppState.I.sandboxInstalled,
                         ),
                       ),
                     ),

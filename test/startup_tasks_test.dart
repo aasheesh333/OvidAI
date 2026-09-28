@@ -835,6 +835,30 @@ void main() {
       expect(status.state, StartupItemState.skipped);
     });
 
+    test('an install in flight is skipped, not degraded', () async {
+      // A Studio first-open install is multi-minute while this task's whole
+      // budget is 30s. Waiting it out always lost the race and pinned the
+      // row to "Degraded — Timed out after 30s"; the honest state is an
+      // informational skip (benign-terminal, bar clears).
+      var maintained = false;
+      var quotaRan = false;
+      final status = await SandboxMaintenanceTask(
+        id: 'sandbox.selfHeal',
+        label: 'Maintain local sandbox',
+        timeout: const Duration(seconds: 30),
+        isInstalled: () => true,
+        installInProgress: () => true,
+        startMaintenance: () async => maintained = true,
+        runtimesVerified: () async => true,
+        installCoreRuntimes: () async => true,
+        enforceQuota: () async => quotaRan = true,
+      ).run();
+      expect(maintained, isFalse);
+      expect(quotaRan, isFalse);
+      expect(status.state, StartupItemState.skipped);
+      expect(status.reason, contains('install in progress'));
+    });
+
     test('a permanent ABI failure is unsupported', () async {
       final status = await task(
         installed: true,

@@ -2279,6 +2279,64 @@ class AgentService extends ChangeNotifier {
   /// stay inside the in-app browser WebView using its clean Chrome mobile user agent.
   static bool googleAuthNeedsExternalBrowser(Uri uri) => false;
 
+  /// Extensions that mean "this navigation is a file download, not a page".
+  ///
+  /// Extension-based on purpose: `Content-Disposition` is invisible to
+  /// `onNavigationRequest`, and sniffing a MIME type would cost a HEAD request
+  /// on every single navigation.
+  static const Set<String> _downloadExtensions = {
+    'zip', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar', 'tar', 'zst',
+    'pdf', 'epub', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods',
+    'csv', 'tsv',
+    'mp3', 'm4a', 'wav', 'ogg', 'flac', 'aac',
+    'mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v',
+    'apk', 'aab', 'dmg', 'exe', 'msi', 'iso', 'img',
+    'deb', 'rpm', 'jar', 'whl',
+  };
+
+  /// Whether [uri] points at a downloadable file rather than a web page.
+  ///
+  /// The WebView has no DownloadListener, so without this check tapping a
+  /// release asset rendered binary garbage inline (or did nothing at all) and
+  /// the user had no way to actually get the file.
+  static bool looksLikeDownloadUrl(Uri uri) {
+    if (uri.scheme != 'http' && uri.scheme != 'https') return false;
+    final segments = uri.pathSegments;
+    if (segments.isEmpty) return false;
+    final last = segments.last;
+    final dot = last.lastIndexOf('.');
+    if (dot < 0 || dot == last.length - 1) return false;
+    return _downloadExtensions.contains(last.substring(dot + 1).toLowerCase());
+  }
+
+  /// Opens [uri] outside the app (system browser → DownloadManager, or the
+  /// app that owns the scheme). Returns false when nothing could handle it, so
+  /// callers can SAY SO instead of silently swallowing the tap — the old
+  /// `catch (_) {}` pattern left users staring at a page that never moved.
+  static Future<bool> handOffExternally(Uri uri) async {
+    try {
+      return await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Maps a WebView permission resource type to the Android permission that
+  /// must be held before it can be granted. `null` means "never grant".
+  ///
+  /// Deliberately an if-chain rather than a switch: this enum grows across
+  /// webview_flutter versions and a non-exhaustive switch would break the
+  /// build on every bump. Unknown values are refused, which is the safe
+  /// default for a permission.
+  @visibleForTesting
+  static Permission? androidPermissionForWebViewType(Object type) {
+    if (type == WebViewPermissionResourceType.camera) return Permission.camera;
+    if (type == WebViewPermissionResourceType.microphone) {
+      return Permission.microphone;
+    }
+    return null;
+  }
+
   /// Per-session browser bucket: tab list + active index.
   final Map<String, List<BrowserTab>> _sessionBrowsers = {};
   final Map<String, int> _sessionActiveTab = {};
@@ -2580,6 +2638,37 @@ class AgentService extends ChangeNotifier {
   void newBrowserTab([String url = _defaultBrowserUrl]) {
     _newTabInternal(url);
     _persistBrowserTabs();
+    notifyListeners();
+  }
+
+  /// User-facing (Browser panel popup chip): open one held popup in a new
+  /// tab — the same safe path [_onPagePopup] used when a user gesture fired
+  /// it, so the http/https and host-grant rules hold either way. Returns the
+  /// URL opened, or null when it was empty/refused (the chip hides the queue
+  /// entry only on success, so a refused popup stays visible and auditable).
+  String? openBrowserPopup(BrowserTab tab, [String? url]) {
+    final raw = (url ??
+            (tab.popupRequests.isEmpty ? null : tab.popupRequests.last) ??
+            '')
+        .trim();
+    final uri = Uri.tryParse(raw);
+    final scheme = (uri?.scheme ?? '').toLowerCase();
+    if (uri == null || scheme != 'http' && scheme != 'https') {
+      _emit('browser', 'popup not opened — empty or non-http URL');
+      return null;
+    }
+    tab.popupRequests.remove(raw);
+    newBrowserTab(raw);
+    notifyListeners();
+    return raw;
+  }
+
+  /// User-facing (Browser panel popup chip): drop this tab's held popups.
+  void dismissBrowserPopups(BrowserTab tab) {
+    if (tab.popupRequests.isEmpty) return;
+    final n = tab.popupRequests.length;
+    tab.popupRequests.clear();
+    _emit('browser', 'dismissed $n held popup(s)');
     notifyListeners();
   }
 
@@ -3187,6 +3276,82 @@ class AgentService extends ChangeNotifier {
     BrowserTab tab,
   ) => tab.consoleLog;
 
+  /// Page → app popup bridge (fed by the `OvidPopup` channel wired in
+  /// [controllerForTab]).
+  ///
+  /// WHY THIS EXISTS. webview_flutter exposes no `onCreateWindow`, so a page's
+  /// `window.open(...)` and every `<a target="_blank">` were dropped silently:
+  /// OAuth consent popups, "open in a new window" links, share/print sheets —
+  /// the user tapped and nothing happened, with nothing logged to explain it.
+  /// The injected shim now forwards both to here.
+  ///
+  /// POLICY — real-browser semantics instead of blanket auto-open:
+  ///   • http(s) only. A popup is a navigation nobody typed, so `javascript:`
+  ///     and `data:` URLs are refused (they would be a script channel into a
+  ///     fresh tab).
+  ///   • a popup the USER really triggered (transient activation, or an anchor
+  ///     click) opens a real tab — but only while the agent is not driving. A
+  ///     mid-run tab switch would move `_activeTab` out from under the agent's
+  ///     next `browser_*` call.
+  ///   • everything else is recorded as blocked and surfaced in the Browser
+  ///     panel chip, exactly like a desktop popup blocker.
+  void _onPagePopup(BrowserTab tab, String raw) {
+    var url = raw.trim();
+    var gesture = false;
+    var target = '';
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        url = ((decoded['url'] as String?) ?? '').trim();
+        gesture = decoded['gesture'] == true;
+        target = (decoded['target'] as String?) ?? '';
+      }
+    } catch (_) {
+      // Not JSON — the whole payload is the URL (older shim shape).
+    }
+    if (url.isEmpty || url == 'about:blank') return;
+    final scheme = (Uri.tryParse(url)?.scheme ?? '').toLowerCase();
+    if (scheme != 'http' && scheme != 'https') {
+      _recordPopup(tab, url, warn: 'popup refused — non-http scheme "$scheme"');
+      notifyListeners();
+      return;
+    }
+    _recordPopup(tab, url);
+    final userDriven = !busy && !browserBusy;
+    if (gesture && userDriven) {
+      newBrowserTab(url);
+      _emit(
+        'browser',
+        'popup opened in a new tab'
+        '${target.isEmpty ? '' : ' ($target)'}: $url',
+      );
+    } else {
+      _emit(
+        'browser',
+        gesture
+            ? 'popup recorded, not opened (agent is driving): $url'
+            : 'popup blocked (no user gesture): $url',
+      );
+    }
+    notifyListeners();
+  }
+
+  /// Appends [url] to the tab's popup list — the same list `browser_popups`
+  /// reads and the Browser panel chip counts — with a hard cap, so a page in a
+  /// `window.open` loop cannot grow it without bound.
+  void _recordPopup(BrowserTab tab, String url, {String? warn}) {
+    tab.popupRequests.add(url);
+    if (tab.popupRequests.length > 40) {
+      tab.popupRequests.removeRange(0, tab.popupRequests.length - 40);
+    }
+    if (warn != null) {
+      tab.consoleLog.add((at: DateTime.now(), kind: 'warn', text: warn));
+      if (tab.consoleLog.length > 200) {
+        tab.consoleLog.removeRange(0, tab.consoleLog.length - 200);
+      }
+    }
+  }
+
   /// Agent-facing: get (creating if needed) the controller for a tab.
   WebViewController controllerForTab(BrowserTab tab) {
     // Record the physical viewport baseline once (browser_resize derives
@@ -3215,6 +3380,13 @@ class AgentService extends ChangeNotifier {
             bucket.removeRange(0, bucket.length - 200);
           }
         },
+      )
+      // Popup bridge: webview_flutter has no `onCreateWindow`, so without this
+      // channel a page's `window.open` / `target="_blank"` click disappears.
+      // The shim below forwards every attempt to [_onPagePopup].
+      ..addJavaScriptChannel(
+        'OvidPopup',
+        onMessageReceived: (msg) => _onPagePopup(tab, msg.message),
       )
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -3325,8 +3497,51 @@ window.__ovidDialog = null;
 window.alert = (m) => { window.__ovidDialog = {kind:'alert', message:String(m)}; };
 window.confirm = (m) => { window.__ovidDialog = {kind:'confirm', message:String(m), answered:false}; return false; };
 window.prompt = (m, d) => { window.__ovidDialog = {kind:'prompt', message:String(m), defaultValue:String(d ?? ''), answered:false}; return null; };
-const _open = window.open;
-window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window.__ovidPopups.push(String(u)); return null; };
+// Popup bridge (app side: _onPagePopup). Record every window.open AND forward
+// it, so a real tab can open instead of the click evaporating. Returning null
+// is deliberate: opening a genuine window here would dodge the host-grant gate
+// that browser_popups applies.
+window.open = (u, t, f) => {
+  const url = String(u || '');
+  try {
+    window.__ovidPopups = window.__ovidPopups || [];
+    window.__ovidPopups.push(url);
+    if (window.__ovidPopups.length > 40) window.__ovidPopups.shift();
+  } catch (e) {}
+  try {
+    if (window.OvidPopup) window.OvidPopup.postMessage(JSON.stringify({
+      url: url, target: String(t || ''), features: String(f || ''),
+      gesture: !!(navigator.userActivation && navigator.userActivation.isActive),
+      source: 'window.open'
+    }));
+  } catch (e) {}
+  return null;
+};
+// <a target="_blank"> never reaches window.open, and this WebView has no
+// onCreateWindow — so those taps used to do nothing at all. Capture-phase
+// listener routes them through the same bridge as a genuine user gesture.
+if (!window.__ovidBlankHooked) {
+  window.__ovidBlankHooked = true;
+  document.addEventListener('click', (ev) => {
+    try {
+      const a = (ev.target && ev.target.closest)
+        ? ev.target.closest('a[target], area[target]') : null;
+      if (!a) return;
+      const tgt = String(a.getAttribute('target') || '').toLowerCase();
+      if (tgt !== '_blank' && tgt !== '_new') return;
+      const href = String(a.href || '');
+      if (!/^https?:/i.test(href)) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      window.__ovidPopups = window.__ovidPopups || [];
+      window.__ovidPopups.push(href);
+      if (window.__ovidPopups.length > 40) window.__ovidPopups.shift();
+      if (window.OvidPopup) window.OvidPopup.postMessage(JSON.stringify({
+        url: href, target: tgt, features: '', gesture: true, source: 'anchor'
+      }));
+    } catch (e) {}
+  }, true);
+}
 ''');
              } catch (_) {}
 
@@ -3373,6 +3588,29 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
             final url = request.url;
             final uri = Uri.tryParse(url);
             if (uri == null) return NavigationDecision.navigate;
+            // File downloads: this WebView has no DownloadListener, so a
+            // release asset / PDF / APK link used to render binary garbage
+            // inline or do nothing at all. Hand main-frame downloads to the
+            // platform browser (which routes to DownloadManager) and stay put.
+            if (request.isForMainFrame && looksLikeDownloadUrl(uri)) {
+              final segments = uri.pathSegments;
+              final name = segments.isEmpty ? url : segments.last;
+              final handed = await handOffExternally(uri);
+              if (!handed) {
+                // Never swallow a failed handoff: copy the URL so the user can
+                // paste it into a browser that will download it.
+                try {
+                  await Clipboard.setData(ClipboardData(text: url));
+                } catch (_) {}
+              }
+              _emit(
+                'browser',
+                handed
+                    ? 'download handed to the system browser: $name'
+                    : 'download could not be opened ($name) — link copied',
+              );
+              return NavigationDecision.prevent;
+            }
             if (googleAuthNeedsExternalBrowser(uri)) {
               // Google sign-in inside the embedded WebView always fails —
               // hand it to the system browser and stay on the current page.
@@ -3480,6 +3718,47 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
         );
       } catch (error) {
         _emit('err', 'file chooser registration failed: $error');
+      }
+      // Camera / microphone prompts. With no handler installed the WebView's
+      // permission request never resolves, so WebRTC pages and camera-based 2FA
+      // hang forever with no error surfaced anywhere. Grant only what Ovid
+      // itself already holds — a web page must never widen the app's reach —
+      // and only raise the OS dialog when the user is the one browsing (never
+      // mid-agent-run, where a modal would stall the run).
+      try {
+        await platformController.setOnPlatformPermissionRequest((
+          request,
+        ) async {
+          final wanted = request.types;
+          final names = wanted.map((t) => t.name).join(', ');
+          var allGranted = wanted.isNotEmpty;
+          for (final type in wanted) {
+            final permission = androidPermissionForWebViewType(type);
+            if (permission == null) {
+              // DRM / protected media id, or a type this build does not know:
+              // refused, not guessed at.
+              allGranted = false;
+              continue;
+            }
+            var status = await permission.status;
+            if (!status.isGranted && !busy && !browserBusy) {
+              status = await permission.request();
+            }
+            if (!status.isGranted) allGranted = false;
+          }
+          if (allGranted) {
+            await request.grant();
+          } else {
+            await request.deny();
+          }
+          _emit(
+            'browser',
+            '${allGranted ? 'granted' : 'denied'} page permission '
+            '(${request.origin}): $names',
+          );
+        });
+      } catch (error) {
+        _emit('err', 'page permission handler failed: $error');
       }
     }
     if (!tab.loadedOnce) {
@@ -3839,6 +4118,71 @@ window.open = (u) => { window.__ovidPopups = window.__ovidPopups || []; window._
     }
     final sid = s?.sandboxId ?? s?.id ?? 'default';
     return SandboxService.I.workDirFor(sid);
+  }
+
+  /// The directory this session works in, resolved per access mode — Studio's
+  /// bound repo clone (wherever the user cloned it) over the session workspace.
+  ///
+  /// Returns '' for Full Access, which is unconfinable BY DESIGN; callers must
+  /// treat empty as "no jail" rather than as a jail rooted at "".
+  ///
+  /// Single source of truth on purpose: the strict permission model and the
+  /// plan-mode jail both ask this, so they cannot drift apart about what
+  /// "inside the workspace" means.
+  Future<String> sessionWorkspaceRoot() async {
+    final rs = _runSession;
+    final sid = rs?.id ?? AppState.I.activeSession?.id;
+    final m = mode;
+    final workDir = await _sessionWorkDir();
+    if (m == AgentMode.studio) {
+      // Studio bound workspace — the GlobalRepoRegistry is the authority for
+      // "the repo the user selected / cloned", never a guess from the session.
+      try {
+        final registry = await GlobalRepoRegistry.instance();
+        return registry.boundWorkspaceFor(rs?.sandboxId ?? rs?.id ?? '') ??
+            workDir.path;
+      } catch (_) {
+        return workDir.path;
+      }
+    }
+    if (m == AgentMode.drive) return '';
+    // One authoritative root per mode. Control is jailed to the session
+    // directory like General and Read-Only; it used to be exempt, which let a
+    // Control session touch anything on the device with no prompt.
+    return permissionWorkspaceRoot(
+      modeName: m.name,
+      sessionWorkDir: workDir.path,
+      sessionId: sid,
+    );
+  }
+
+  /// The directory PLAN mode is jailed to, in EVERY access mode.
+  ///
+  /// Owner rule (2026-09-28): "plan mode sirf current dir me hi kaam kare not
+  /// outside of current directory — kisi bhi mode me hone per bhi". So Full
+  /// Access does NOT widen the plan jail the way it widens normal file access:
+  /// planning is research inside one folder — Studio's selected repo (or the
+  /// directory the user cloned into), every other mode's session-isolated
+  /// workspace. Falls back to the session workspace when a mode reports no
+  /// jail at all, so plan mode always has a boundary.
+  /// Test seam: force the plan-mode working directory.
+  ///
+  /// [planModeRoot] resolves through path_provider and the repo registry, and
+  /// neither is mocked in the unit suite — without this seam the resolver
+  /// throws, every gate falls back to "no jail", and the jail tests would pass
+  /// while proving nothing. Null (the default in the app) means "resolve it".
+  @visibleForTesting
+  static String? planModeRootForTest;
+
+  Future<String> planModeRoot() async {
+    final forced = planModeRootForTest;
+    if (forced != null && forced.trim().isNotEmpty) {
+      return normalizeGrantPath(forced.trim());
+    }
+    final root = await sessionWorkspaceRoot();
+    if (root.isNotEmpty) return _canonicalFsPath(root);
+    final workDir = await _sessionWorkDir();
+    return _canonicalFsPath(workDir.path);
   }
 
   /// Run a git argv in the session work dir through the sandbox git
@@ -9050,9 +9394,27 @@ ${await _agentsMdBlock()}
     // FIX 2 (c): re-derive `sys` from the template. Idempotent and exact — the
     // only substitution is the plan token, so a second call (or a call with the
     // plan state unchanged) yields the identical string.
+    //
+    // The plan briefing carries the REAL working directory. It is resolved here
+    // (this builder is async) rather than guessed, and a resolver failure falls
+    // back to the generic wording — a planning agent must never be blocked by a
+    // path lookup.
+    String planBriefing = '';
+    if (planMode) {
+      String? root;
+      try {
+        root = await planModeRoot();
+      } catch (_) {
+        root = null;
+      }
+      planBriefing = PlanModePolicy.promptSectionFor(
+        root: root,
+        modeName: mode.name,
+      );
+    }
     String buildSys() => sysTemplate.replaceAll(
       planSectionToken,
-      planMode ? PlanModePolicy.promptSection : '',
+      planBriefing,
     );
 
     // ── Volatile context (prefix-cache friendly) ──
@@ -11476,8 +11838,9 @@ ${await _agentsMdBlock()}
     // every mutating tool is refused. This is an allowlist, not a blocklist:
     // an unlisted tool — including plugin/MCP contributions and anything
     // added later — is refused by default. Read-only intent INSIDE the shell
-    // is carried by the plan-mode prompt (session/prompt/plan.txt parity),
-    // because a shell command's effect cannot be decided from its name.
+    // is enforced by [_planModeShellBlock] below (not left to the prompt):
+    // `run_shell` is allowlisted so the plan agent can inspect the repo, but
+    // only commands [isReadOnlyCommand] accepts actually run.
     if (planMode && !_isPlanModeAllowedTool(name)) {
       return 'PLAN MODE ACTIVE: "$name" is a mutating tool. Plan mode is the '
           'research phase — read, search and inspect with the allowlisted '
@@ -11485,6 +11848,19 @@ ${await _agentsMdBlock()}
           'commands, git_log, …), write the plan out as a message, then call '
           'exit_plan_mode. Execution tools unlock once the user approves.';
     }
+    // ── Plan mode: path tools stay inside the working directory ──
+    // Reading is allowed while planning, but not reading ANYWHERE: the owner's
+    // rule is one directory, in every access mode. Enforced here so a plan
+    // agent cannot wander into another session's workspace or the device
+    // storage — and enforced without a card, like every other plan-mode refusal.
+    final planPathBlock = await _planModePathBlock(name, args);
+    if (planPathBlock != null) return planPathBlock;
+    // ── Plan mode: shell must be READ-ONLY, and never prompts ──
+    // Runs before the Read-Only gate because that gate only fires in
+    // read-only mode; `/plan` can be switched on under ANY preset, Studio
+    // included, where nothing else would stop `rm -rf build`.
+    final planShellBlock = await _planModeGate(name, args);
+    if (planShellBlock != null) return planShellBlock;
     // ── Read-Only mode hard gate (the read-only gate plan-mode-style block) ──
     // In Read-Only mode the agent is RESTRICTED, not merely asked: writes,
     // edits, commits and non-read-only shell commands are refused at the
@@ -14526,28 +14902,12 @@ ${await _agentsMdBlock()}
     final rs = _runSession;
     final sid = rs?.id ?? AppState.I.activeSession?.id;
     final m = mode;
-    final workDir = await _sessionWorkDir();
-    // Studio bound workspace — same GlobalRepoRegistry authority as the
-    // single-path form; never weakened here.
-    var root = workDir.path;
-    if (m == AgentMode.studio) {
-      try {
-        final registry = await GlobalRepoRegistry.instance();
-        root =
-            registry.boundWorkspaceFor(rs?.sandboxId ?? rs?.id ?? '') ??
-            workDir.path;
-      } catch (_) {
-        root = workDir.path;
-      }
-    } else if (m != AgentMode.drive) {
-      // One authoritative root per mode. Control is jailed to the session
-      // directory like General and Read-Only; it used to be exempt here, which
-      // let a Control session touch anything on the device with no prompt.
-      root = permissionWorkspaceRoot(
-        modeName: m.name,
-        sessionWorkDir: workDir.path,
-        sessionId: sid,
-      );
+    // One resolver for "the workspace of this session" — the plan jail uses
+    // the same authority, so the two can never disagree.
+    var root = m == AgentMode.drive ? '' : await sessionWorkspaceRoot();
+    if (root.isEmpty) {
+      // Full Access has no jail by design (see permissionWorkspaceRoot).
+      root = (await _sessionWorkDir()).path;
     }
     final canonicalRoot = await _canonicalFsPath(root);
     final resolved = <String, String>{};
@@ -14566,6 +14926,18 @@ ${await _agentsMdBlock()}
       }
     }
     if (outside.isEmpty) return resolved;
+    // Plan mode asks NOTHING (owner rule: "plan mode me agent koi bhi
+    // permission naa puchhe"). A path outside the workspace is refused here
+    // rather than raising a card: the plan agent reads inside the workspace,
+    // and the build phase after exit_plan_mode is where asking belongs.
+    if (planMode) {
+      _emit(
+        'think',
+        'plan mode: refused $tool on ${outside.length} path(s) outside the '
+        'workspace — no permission prompt while planning',
+      );
+      return null;
+    }
     // Safe (read-only) still prompts: the user explicitly approves each
     // outside path — the old silent hard refusal is gone.
     final unique = outside.toSet().toList()..sort();
@@ -14732,6 +15104,13 @@ ${await _agentsMdBlock()}
     if (_grantStoreFor(sid).isHostGranted(sid, host, mode: m.name)) {
       return true;
     }
+    // Plan mode asks NOTHING: an ungranted host is refused instead of raising a
+    // card. Research happens inside the workspace; reaching a new host belongs
+    // to the build phase (or to a mode where asking the user is acceptable).
+    if (planMode) {
+      _emit('think', 'plan mode: refused network access to $host — no prompt');
+      return false;
+    }
     return _askUser(
       'grant:host:$host',
       'Network access: $host',
@@ -14830,6 +15209,31 @@ ${await _agentsMdBlock()}
         });
       }
       return ok;
+    }
+
+    // ── Plan mode asks NOTHING ──────────────────────────────────────────────
+    // Owner rule: "plan mode me agent koi bhi permission naa puchhe — no
+    // delete, no danger shell run". An approval card IS a question, so plan
+    // mode never shows one:
+    //   • a destructive command is refused outright here (defense in depth —
+    //     the dispatch gate already blocks mutating shell, but _maybeApprove is
+    //     also reached from git/device/clone paths);
+    //   • everything else is approved silently, because in plan mode only
+    //     allowlisted read-only tools get this far.
+    if (planMode) {
+      if ((tool == 'run_shell' || tool == 'job_start' || tool == 'run_code') &&
+          (_isDestructiveCommand(summary) || _isDestructiveCommand(detail))) {
+        _emit('think', 'plan mode: refused destructive $tool without asking');
+        if (sessionId != null) {
+          await SessionLedger.I.append(sessionId, 'approval', {
+            'tool': tool,
+            'ok': false,
+            'deniedBy': 'plan-mode',
+          });
+        }
+        return false;
+      }
+      return true;
     }
 
     // Destructive commands always confirm — no mode skips this gate,
@@ -17356,6 +17760,223 @@ ${await _agentsMdBlock()}
       PresetRegistry.byId(_runSession?.presetId ?? 'standard'),
     ),
   );
+
+  /// Absolute paths in [cmd] that escape [root] — the plan-mode workspace jail.
+  ///
+  /// Pure and deliberately conservative: it looks at absolute path-looking
+  /// tokens only, so relative paths (`lib/foo.dart`, `./x`) resolve against the
+  /// root and pass, while `/data/user/0/other-session/…`, `/sdcard/…` and
+  /// `../..` escapes are caught. System paths that are legitimately readable
+  /// (`/proc`, `/sys`, `/dev`, `/system`, `/bin`, `/usr`, `/etc`, `/opt`) are
+  /// exempt — the jail is about the USER's files, not about blocking `uname -a`
+  /// or `/bin/ls`. `/tmp` is NOT exempt: this app's scratch dir is the sandbox
+  /// prefix's own tmp (an absolute path under the app data dir), so exempting
+  /// `/tmp` would only have widened the jail for nothing. `$VAR`-rooted paths
+  /// are not expanded (unknowable here); they are caught by the sandbox's own
+  /// root jail at execution time. Relative `../` climbs ARE caught — see
+  /// [_jailPathCandidates] — and so is Android's `/data/user/0` ↔ `/data/data`
+  /// alias, which would otherwise make the jail refuse its own documented root.
+  @visibleForTesting
+  static Set<String> shellPathsOutsideRoot(String cmd, String root) {
+    final out = <String>{};
+    if (root.isEmpty) return out;
+    final jail = normalizeGrantPath(root);
+    final prefixes = _jailPrefixes(jail);
+    for (final raw in _jailPathCandidates(cmd)) {
+      // Strip a leading `NAME=` / `--flag=` so the path inside it is judged on
+      // its own. Only when the part before `=` holds no `/` — otherwise the
+      // token IS a path that merely contains `=` (`/data/x=y`) and stripping it
+      // would turn an absolute path into a relative one, failing open.
+      final eq = raw.indexOf('=');
+      final tok = (eq > 0 && !raw.substring(0, eq).contains('/'))
+          ? raw.substring(eq + 1)
+          : raw;
+      if (tok.length < 2) continue;
+      final abs = tok.startsWith('/')
+          ? normalizeGrantPath(tok)
+          : normalizeGrantPath(tok, base: jail);
+      if (_jailExemptSystemRoots.any(abs.startsWith)) continue;
+      if (prefixes.any((p) => abs == p || abs.startsWith('$p/'))) continue;
+      out.add(tok);
+    }
+    return out;
+  }
+
+  /// The jail root plus Android's other spelling of the same directory.
+  ///
+  /// `/data/user/0/<pkg>` is a symlink to `/data/data/<pkg>`. [planModeRoot]
+  /// canonicalises, so the jail ends up in one spelling while the system prompt
+  /// and the user's own commands often use the other. Both must count as
+  /// inside — otherwise the jail refuses the very working directory it was
+  /// handed, which reads as a broken gate instead of a working one.
+  static List<String> _jailPrefixes(String jail) {
+    const a = '/data/user/0/';
+    const b = '/data/data/';
+    if (jail.startsWith(a)) return [jail, '$b${jail.substring(a.length)}'];
+    if (jail.startsWith(b)) return [jail, '$a${jail.substring(b.length)}'];
+    return [jail];
+  }
+
+  /// Path-looking candidates in [cmd]: the quote-aware absolute tokens
+  /// [extractShellPathTokens] already finds, PLUS relative tokens that climb
+  /// with `..`. Those are invisible to an absolute-path scan, yet they are the
+  /// one way a plan agent leaves the working directory without ever naming it.
+  static Iterable<String> _jailPathCandidates(String cmd) sync* {
+    yield* extractShellPathTokens(cmd);
+    for (final chunk in cmd.split(RegExp(r'''[\s;|&()<>]+'''))) {
+      final tok = chunk.replaceAll('"', '').replaceAll("'", '');
+      if (tok.length < 2 || tok.startsWith('/')) continue; // already yielded
+      // A relative climb, or an assignment/flag that carries an absolute path
+      // (`TMPDIR=/sdcard/x`, `--out=/data/other/y`). Neither is visible to an
+      // absolute-token scan, and an assignment is the easiest way to smuggle an
+      // outside path into a command that otherwise looks relative.
+      if (tok == '..' || tok.startsWith('../') || tok.contains('/../')) {
+        yield tok;
+      } else if (tok.contains('=/')) {
+        yield tok;
+      }
+    }
+  }
+
+  /// Read-only system paths the plan jail never flags — inspecting the device
+  /// (`uname`, `/proc/cpuinfo`, `/system/bin/sh --version`) is research, not a
+  /// workspace escape. Kept explicit so widening it is a deliberate act.
+  static const List<String> _jailExemptSystemRoots = [
+    '/proc',
+    '/sys',
+    '/dev',
+    '/system',
+    '/vendor',
+    '/bin',
+    '/sbin',
+    '/usr',
+    '/etc',
+    '/opt',
+    '/lib',
+    '/lib64',
+    '/run',
+    '/dev/null',
+  ];
+
+  /// The plan-mode refusal for a workspace escape. Names the boundary and the
+  /// offending path(s) so the model corrects course instead of retrying blind.
+  String _planModeJailRefusal(
+    String name,
+    String root,
+    Iterable<String> outside,
+  ) {
+    final list = outside.toList();
+    final tail = root.length > 60 ? '…${root.substring(root.length - 57)}' : root;
+    return 'PLAN MODE: "$name" stays inside the working directory while '
+        'planning, and these path(s) are outside it:\n'
+        '  ${list.join('\n  ')}\n'
+        'Working directory: $tail\n'
+        'This jail holds in EVERY access mode (Full Access and Studio '
+        'included) and plan mode shows no permission card, so it cannot be '
+        'granted mid-plan. Re-run the command with a path inside the working '
+        'directory. If the file you need genuinely lives outside it, put that '
+        'in the plan as a step for the user to approve — then call '
+        'exit_plan_mode.';
+  }
+
+  /// Path arguments of the read-only tools, keyed by tool. Mutating tools are
+  /// absent on purpose — the plan allowlist already refuses those outright, so
+  /// their paths are never reached.
+  static const Map<String, List<String>> _planPathArgNames = {
+    'file_read': ['path'],
+    'read_image': ['path'],
+    'fs_glob': ['path', 'pattern'],
+    'fs_grep': ['path', 'include'],
+  };
+
+  /// Plan-mode gate for path-taking read tools: refuse anything that resolves
+  /// outside the working directory. Returns null when the call is fine.
+  Future<String?> _planModePathBlock(
+    String name,
+    Map<String, dynamic> args,
+  ) async {
+    if (!planMode) return null;
+    final keys = _planPathArgNames[name];
+    if (keys == null) return null;
+    String root;
+    try {
+      root = await planModeRoot();
+    } catch (_) {
+      // Same fallback the shell gate uses: a root lookup failure must NOT
+      // become a hard failure of every plan-mode read. No jail, not a brick.
+      return null;
+    }
+    if (root.isEmpty) return null;
+    final outside = <String>{};
+    for (final key in keys) {
+      final raw = args[key];
+      if (raw is! String) continue;
+      final tok = raw.trim();
+      if (tok.isEmpty) continue;
+      // Only absolute paths and `..` climbs can leave the jail; a plain
+      // relative path resolves against the working directory by definition.
+      final escaping = tok.startsWith('/') || tok.split('/').contains('..');
+      if (!escaping) continue;
+      outside.addAll(shellPathsOutsideRoot(tok, root));
+    }
+    if (outside.isEmpty) return null;
+    return _planModeJailRefusal(name, root, outside);
+  }
+
+  /// Plan-mode dispatch gate: workspace jail + read-only shell.
+  ///
+  /// Async only because resolving the jail root touches the repo registry and
+  /// the filesystem (symlink canonicalisation), which must not be guessed at.
+  Future<String?> _planModeGate(String name, Map<String, dynamic> args) async {
+    if (!planMode) return null;
+    String? root;
+    try {
+      root = await planModeRoot();
+    } catch (_) {
+      root = null; // never let a resolver failure block planning entirely
+    }
+    return _planModeShellBlock(name, args, jailRoot: root);
+  }
+
+  /// Plan-mode shell gate: `run_shell` stays on the plan allowlist because a
+  /// planning agent must be able to LOOK at the repo, but only through
+  /// read-only commands — and without ever raising a permission card.
+  ///
+  /// WHY A GATE AND NOT JUST PROMPT TEXT. `/plan` can be switched on in ANY
+  /// permission preset, including Studio, where `_readOnlyBlock` does not fire
+  /// at all. Before this gate the only thing standing between a planning agent
+  /// and `rm -rf build` was a sentence in the system prompt (and, in auto
+  /// mode, an approval card the owner explicitly does not want to see while
+  /// planning). Now the same [isReadOnlyCommand] classifier that Read-Only
+  /// mode uses decides: reads run silently, anything that can mutate is
+  /// refused with the reason and the way forward.
+  String? _planModeShellBlock(
+    String name,
+    Map<String, dynamic> args, {
+    String? jailRoot,
+  }) {
+    if (!planMode) return null;
+    if (name != 'run_shell' && name != 'job_start') return null;
+    final cmd = ((args['command'] as String?) ?? '').trim();
+    if (cmd.isEmpty) return null; // the tool itself reports a missing command
+    // The workspace jail is checked FIRST: an escape is a boundary violation,
+    // and saying "read-only only" about it would be the wrong reason.
+    final outside = jailRoot == null
+        ? null
+        : shellPathsOutsideRoot(cmd, jailRoot);
+    if (outside != null && outside.isNotEmpty) {
+      return _planModeJailRefusal(name, jailRoot, outside);
+    }
+    if (isReadOnlyCommand(cmd)) return null;
+    return 'PLAN MODE: "$name" runs READ-ONLY commands while planning '
+        '(ls, cat, head, grep, find without -delete/-exec, git status/log/diff, '
+        'wc, du …). This one can change or destroy something, so it was '
+        'refused:\n  $cmd\n'
+        'Plan mode never shows a permission card by design — investigate '
+        'read-only, write the change into your plan as a message, then call '
+        'exit_plan_mode. The command becomes available the moment the user '
+        'approves the build phase.';
+  }
 
   /// Test seam for the plan-mode allowlist.
   @visibleForTesting

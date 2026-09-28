@@ -313,6 +313,10 @@ class SandboxService {
       'LANG': 'C.UTF-8',
       if (p != null) 'LD_LIBRARY_PATH': '$p/lib',
       if (p != null) 'TMPDIR': '$p/tmp',
+      // proot ignores TMPDIR: it reads PROOT_TMP_DIR for its glue rootfs.
+      // Without it every exec dies with "can't create temporary directory:
+      // Permission denied" — Android's /tmp is not writable for the app.
+      if (p != null) 'PROOT_TMP_DIR': '$p/tmp',
     };
   }
 
@@ -3289,6 +3293,11 @@ command -v proot >/dev/null || {
   apt install -y proot 2>&1 | tail -2 || exit 20
 }
 command -v proot >/dev/null || { echo "no proot"; exit 20; }
+# proot builds its glue rootfs in a temp dir. Android has no writable /tmp and
+# proot reads PROOT_TMP_DIR only — it does NOT honour TMPDIR — so without this
+# every probe dies with "can't create temporary directory: Permission denied".
+export PROOT_TMP_DIR="\$PREFIX/tmp"
+mkdir -p "\$PROOT_TMP_DIR"
 UARCH="$ubuntuArch"
 PIN="$pin"
 [ -n "\$PIN" ] || { echo "unsupported arch \$UARCH"; exit 20; }
@@ -3311,9 +3320,44 @@ fi
 echo "\$EXPECT" | (cd "\$PREFIX/var/cache" && sha256sum -c -) || { echo "SHA256 mismatch"; exit 22; }
 rm -rf "\$PREFIX/ubuntu"
 mkdir -p "\$PREFIX/ubuntu"
-tar xzf "\$DEST" -C "\$PREFIX/ubuntu" || exit 23
+# Android's app-data filesystem refuses link(), and the Ubuntu rootfs ships hard
+# links (perl), so a plain `tar xzf` dies part-way with "Cannot hard link …
+# Permission denied" and leaves HALF a rootfs that still passes an
+# `etc/os-release` existence check. Extract, and on any tar error redo the pass
+# with Python, materialising hard links as copies.
+if ! tar xzf "\$DEST" -C "\$PREFIX/ubuntu" 2>"\$PREFIX/var/cache/rootfs-tar.log"; then
+  echo "[proot] tar hit errors (hard links) — retrying with copy fallback"
+  tail -3 "\$PREFIX/var/cache/rootfs-tar.log"
+  if command -v python3 >/dev/null; then
+    python3 -c '
+import os, shutil, sys, tarfile
+src, dst = sys.argv[1], sys.argv[2]
+with tarfile.open(src, "r:*") as t:
+    for m in t:
+        out = os.path.join(dst, m.name)
+        if not os.path.realpath(out).startswith(os.path.realpath(dst)):
+            continue
+        try:
+            if m.islnk():
+                tgt = os.path.join(dst, m.linkname)
+                if os.path.exists(tgt):
+                    os.makedirs(os.path.dirname(out) or dst, exist_ok=True)
+                    shutil.copyfile(tgt, out)
+                    continue
+            t.extract(m, dst)
+        except (OSError, tarfile.TarError):
+            pass
+' "\$DEST" "\$PREFIX/ubuntu" || exit 23
+  fi
+  # Whatever the extractor, the userland has to be genuinely usable.
+  [ -x "\$PREFIX/ubuntu/bin/sh" ] || exit 23
+  [ -x "\$PREFIX/ubuntu/usr/bin/apt-get" ] || exit 23
+fi
 printf "nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n" > "\$PREFIX/ubuntu/etc/resolv.conf"
-proot -R "\$PREFIX/ubuntu" true || exit 24
+# /bin/true, not `true`: proot inherits OUR PATH (Termux/system bins), which
+# has no /usr/bin inside the guest, so a bare `true` resolves to "not found"
+# and the smoke probe fails even on a perfect rootfs.
+proot -R "\$PREFIX/ubuntu" /bin/true || exit 24
 rm -f "\$DEST"
 echo PROVISIONED
 ''';

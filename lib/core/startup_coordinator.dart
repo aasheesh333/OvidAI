@@ -42,6 +42,7 @@ class StartupItemStatus {
     this.attempt = 0,
     this.ownerId,
     this.canDisable = false,
+    this.timedOut = false,
   }) : updatedAt = updatedAt ?? DateTime.now();
 
   factory StartupItemStatus.queued(
@@ -148,6 +149,7 @@ class StartupItemStatus {
     int attempt = 1,
     String? ownerId,
     bool canDisable = false,
+    bool timedOut = false,
   }) => StartupItemStatus(
     id: id,
     kind: kind,
@@ -157,6 +159,7 @@ class StartupItemStatus {
     attempt: attempt,
     ownerId: ownerId,
     canDisable: canDisable,
+    timedOut: timedOut,
   );
 
   factory StartupItemStatus.failed(
@@ -229,6 +232,13 @@ class StartupItemStatus {
   /// callback. The dashboard uses this instead of the item kind so aggregate
   /// rows (for example a boot-level `plugin.activate`) never offer Disable.
   final bool canDisable;
+
+  /// True when this terminal status came from the coordinator's own
+  /// per-item deadline rather than from the task's verdict. The work was
+  /// ABANDONED, not proven broken: it may still be running and may still
+  /// succeed (see [_reconcileLateResult]). Producers must not treat it as a
+  /// durable failure — notably it must not arm a failure cooldown memo.
+  final bool timedOut;
 }
 
 class StartupSnapshot {
@@ -539,6 +549,7 @@ class StartupCoordinator extends ChangeNotifier {
         task.label,
         reason: 'Timed out after ${_formatDuration(task.timeout)}',
         attempt: attempt,
+        timedOut: true,
       );
     } catch (error) {
       return StartupItemStatus.failed(
@@ -552,11 +563,20 @@ class StartupCoordinator extends ChangeNotifier {
   }
 
   Future<StartupItemStatus> _invoke(StartupTask task, {required int attempt}) {
+    final runToken = _runToken;
     _markInvocationStarted(task.id);
     final invocation = Future<StartupItemStatus>.sync(task.run);
     unawaited(
       invocation.then<void>(
-        (_) => _markInvocationSettled(task.id),
+        (lateResult) {
+          _markInvocationSettled(task.id);
+          _reconcileLateResult(
+            task,
+            attempt: attempt,
+            runToken: runToken,
+            result: lateResult,
+          );
+        },
         onError: (Object _, StackTrace _) {
           _markInvocationSettled(task.id);
         },
@@ -564,6 +584,40 @@ class StartupCoordinator extends ChangeNotifier {
     );
     return _runOne(task, attempt: attempt, invocation: invocation);
   }
+
+  /// Adopt a verdict that arrived AFTER this item's own deadline already
+  /// wrote `Degraded — Timed out after Ns`.
+  ///
+  /// `Future.timeout()` abandons the future without cancelling the work, so
+  /// a slow task usually finishes moments later with the truth. Discarding it
+  /// pinned the row to a stale warning — for `sandbox.selfHeal` that warning
+  /// also armed a 12h cooldown memo, so every later launch reported the
+  /// sandbox as broken while it was in fact healthy.
+  ///
+  /// Deliberately conservative: only a still-current timeout row from the
+  /// SAME attempt is replaced. A newer attempt's verdict, a user-disabled
+  /// row, and a row with a retry already in flight are never touched.
+  void _reconcileLateResult(
+    StartupTask task, {
+    required int attempt,
+    required int runToken,
+    required StartupItemStatus result,
+  }) {
+    if (runToken != _runToken) return;
+    if (_runningItemIds.contains(task.id)) return;
+    if (!result.state.isTerminal) return;
+    final index = _items.indexWhere((item) => item.id == task.id);
+    if (index == -1) return;
+    final current = _items[index];
+    if (!current.timedOut || current.attempt != attempt) return;
+    _replace(result);
+  }
+
+  /// True while [itemId]'s backing invocation is still live — including one
+  /// its deadline already abandoned. The dashboard uses this so Retry reads
+  /// as busy instead of accepting a tap the coordinator silently drops
+  /// (`retry()`/`disable()` both no-op on a live invocation).
+  bool isItemRunning(String itemId) => _runningItemIds.contains(itemId);
 
   void _markInvocationStarted(String itemId) {
     if (_runningItemIds.isEmpty) {
@@ -616,6 +670,7 @@ class StartupCoordinator extends ChangeNotifier {
       attempt: status.attempt,
       ownerId: ownerId,
       canDisable: canDisable,
+      timedOut: status.timedOut,
     );
   }
 

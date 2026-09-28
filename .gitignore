@@ -75,3 +75,11 @@ android/build/
 # keys, and nothing here is a source of truth (the vetted numbers live in
 # lib/core/model_limits.dart instead).
 .prov/
+
+# local scratch + user-attached screenshots (never committed)
+Screenshot_*.jpg
+.bak*
+.proot_probe*.sh
+.setup_flutter.sh
+.tool_*.py
+.otmpfile_*.py

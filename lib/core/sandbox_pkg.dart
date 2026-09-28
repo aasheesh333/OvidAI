@@ -226,6 +226,34 @@ case "$cmd" in
     done
     tail -4 "$_dlog" 2>/dev/null
     echo "[ovid-pkg] extracted $(echo $targets | wc -w) package(s)"
+    # Termux .deb payloads are rooted at /data/data/com.termux/files/usr, so
+    # `dpkg-deb -x … $PREFIX` lands every file under
+    # $PREFIX/data/data/com.termux/files/usr/… — off PATH, off the linker
+    # search path, and invisible to every readiness probe that checks
+    # `$PREFIX/bin/<tool>`. The install then "succeeded" while the binary did
+    # not exist where anything looks for it: that is how proot (Flutter),
+    # openjdk (Kotlin) and clang installs passed and still failed. Relocate
+    # the payload into $PREFIX now, merging into directories that already
+    # exist from the bootstrap.
+    _tp="$PREFIX/data/data/com.termux/files/usr"
+    if [ -d "$_tp" ]; then
+      _moved=0
+      for _e in "$_tp"/*; do
+        [ -e "$_e" ] || continue
+        _b="$(basename "$_e")"
+        if [ -d "$_e" ] && [ -d "$PREFIX/$_b" ]; then
+          cp -a "$_e/." "$PREFIX/$_b/" && rm -rf "$_e" && _moved=$((_moved+1))
+        elif mv "$_e" "$PREFIX/$_b"; then
+          _moved=$((_moved+1))
+        elif cp -a "$_e" "$PREFIX/" && rm -rf "$_e"; then
+          _moved=$((_moved+1))
+        else
+          echo "[ovid-pkg] could not relocate $_b (left in place)" >&2
+        fi
+      done
+      rmdir -p "$_tp" 2>/dev/null
+      [ "$_moved" -gt 0 ] && echo "[ovid-pkg] relocated $_moved path(s) into \$PREFIX"
+    fi
     [ -n "$missing" ] && { echo "[ovid-pkg] not available:$missing" >&2; exit 1; }
     ;;
   upgrade|full-upgrade)

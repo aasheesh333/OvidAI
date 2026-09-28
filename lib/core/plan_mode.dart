@@ -141,7 +141,14 @@ class PlanModePolicy {
   static const String promptSection = '''
 PLAN MODE — READ-ONLY RESEARCH PHASE (opencode plan-agent parity):
 You are the PLAN agent. Your job is to RESEARCH and PROPOSE, not to change
-anything. Investigate the current directory thoroughly before you propose:
+anything.
+WORKING DIRECTORY: {PLAN_ROOT}
+{PLAN_SCOPE}Paths outside it are refused outright — no card, no retry — in
+EVERY access mode, Full Access and Studio included. Use relative paths inside
+the working directory for all research. If the answer genuinely lives outside
+it, write that into the plan as a step for the user to approve instead of
+reaching for the path.
+Investigate the working directory thoroughly before you propose:
 read files, glob and grep, inspect git history and diffs, and run read-only
 shell commands (ls, cat, find, wc, tree, git log/diff/status, `sed -n`).
 CRITICAL: you are in the READ-ONLY phase. Do NOT use shell commands that
@@ -154,7 +161,45 @@ message — a numbered list of concrete steps naming the exact files and
 commands involved — and only THEN call exit_plan_mode, which asks the user
 one yes/no question: switch to the build agent and start implementing?
 Keep the plan tight and grounded in what you actually read.
+You are NEVER asked for a permission while planning: read-only shell commands
+run silently, and every mutating call is refused outright with the reason —
+so do not "try it and see" (a denied write/delete/install costs a turn and
+changes nothing). If a step needs a change, write the change down.
 ''';
+
+  /// The placeholder in [promptSection] that carries the session's working
+  /// directory.
+  static const String rootPlaceholder = '{PLAN_ROOT}';
+
+  /// Placeholder for the mode-specific sentence about where that directory
+  /// comes from, so the briefing explains its own boundary.
+  static const String scopePlaceholder = '{PLAN_SCOPE}';
+
+  /// [promptSection] with the working directory and its provenance filled in.
+  ///
+  /// Both placeholders are ALWAYS resolved: a literal `{PLAN_ROOT}` in a system
+  /// prompt is worse than no path at all, because the model would repeat it
+  /// back to the user as if it were a real directory.
+  static String promptSectionFor({String? root, required String modeName}) {
+    final r = (root ?? '').trim();
+    final scope = switch (modeName) {
+      'studio' =>
+        'This is the repo folder selected for this session (or where you '
+            'cloned to) — the whole repo is in scope, nothing outside it is.\n',
+      'drive' =>
+        'Full Access does NOT widen plan mode: research stays inside this one '
+            'directory until the user approves the build phase.\n',
+      _ =>
+        'This is the session-isolated workspace for this chat — other '
+            'sessions\' folders are not yours to read.\n',
+    };
+    final dir = r.isEmpty
+        ? 'this session\'s workspace (run `pwd` to resolve it)'
+        : r;
+    return promptSection
+        .replaceAll(rootPlaceholder, dir)
+        .replaceAll(scopePlaceholder, scope);
+  }
 
   /// The tools offered in the preset editor's plan-allowlist picker (G5):
   /// the built-in policy plus the mutating tools a user may deliberately
