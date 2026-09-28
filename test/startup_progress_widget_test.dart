@@ -1745,6 +1745,16 @@ void main() {
       await tester.pump(const Duration(milliseconds: 60));
       await tester.pump();
 
+      // The 50ms deadline made the item terminal, and an all-terminal snapshot
+      // AUTO-COLLAPSES the panel — a deliberate, separately-tested behaviour
+      // ("a stale expansion never sticks", and the 120s-deadline test above
+      // depends on it). Re-expand to reach the row, the same idiom every other
+      // post-terminal test in this file uses. The point of this test survives
+      // the re-expand: the invocation is STILL live, so the row must read
+      // `Working…` and refuse the tap that `retry()` would silently drop.
+      await tester.tap(find.byKey(const ValueKey('startup-panel-toggle')));
+      await tester.pump();
+
       expect(c.isItemRunning('sandbox.selfHeal'), isTrue);
       expect(find.text('Working…'), findsOneWidget);
       final retry = tester.widget<TextButton>(
