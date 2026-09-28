@@ -495,9 +495,10 @@ void main() {
       const gateRefusesAlways = {'commit', 'file_write', 'run_code'};
       // Scoped to the gate's own body — the `fs_edit` case is where the
       // unconditional-refusal list ends and the argument-dependent cases begin.
+      final roStart = agentSrc.indexOf('String? _readOnlyBlock(');
       final roGate = agentSrc.substring(
-        agentSrc.indexOf('String? _readOnlyBlock('),
-        agentSrc.indexOf("case 'fs_edit':"),
+        roStart,
+        agentSrc.indexOf("case 'fs_edit':", roStart),
       );
       for (final t in gateRefusesAlways) {
         expect(

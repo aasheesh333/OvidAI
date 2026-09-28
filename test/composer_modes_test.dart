@@ -88,7 +88,7 @@ void main() {
         await AgentService.I.dispatchForTest('run_shell', {
           'command': 'touch /tmp/x',
         }),
-        contains('PLAN MODE ACTIVE'),
+        contains('READ-ONLY MODE'),
       );
     });
 
