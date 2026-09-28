@@ -374,7 +374,12 @@ class _StartupItemRow extends StatelessWidget {
                             style: TextStyle(fontSize: 11.5),
                           ),
                         ),
-                      if (showRetry)
+                      // `busy` renders the row even when the state is not
+                      // normally retryable: a deadline-abandoned invocation is
+                      // still live, so Retry/Disable are no-ops and the row must
+                      // SAY so (disabled `Working…`) rather than hide the only
+                      // affordance that explains why nothing responds.
+                      if (showRetry || busy)
                         TextButton(
                           key: ValueKey('startup-retry-${item.id}'),
                           onPressed: busy ? null : onRetry,

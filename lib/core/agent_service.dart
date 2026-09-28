@@ -11855,14 +11855,26 @@ ${await _agentsMdBlock()}
     // rule is one directory, in every access mode. Enforced here so a plan
     // agent cannot wander into another session's workspace or the device
     // storage — and enforced without a card, like every other plan-mode refusal.
-    final planPathBlock = await _planModePathBlock(name, args);
-    if (planPathBlock != null) return planPathBlock;
-    // ── Plan mode: shell must be READ-ONLY, and never prompts ──
-    // Runs before the Read-Only gate because that gate only fires in
-    // read-only mode; `/plan` can be switched on under ANY preset, Studio
-    // included, where nothing else would stop `rm -rf build`.
-    final planShellBlock = await _planModeGate(name, args);
-    if (planShellBlock != null) return planShellBlock;
+    // The `planMode` test is SYNC, and keeping it sync is load-bearing: both
+    // gates below are async, so an unconditional `await` inserts microtask
+    // turns ahead of EVERY tool — including the device_* tools, whose
+    // cancellation contract depends on capturing the device generation before
+    // anything else can bump it. `stopRequested()` calls `cancelDeviceActions()`
+    // as a side effect, so a dispatched `device_tap` that reaches the native
+    // call one turn late captures the ALREADY-bumped generation and reports a
+    // superseded gesture as success. Outside plan mode both gates can only ever
+    // return null, so skipping the await costs nothing and restores the
+    // original dispatch timing.
+    if (planMode) {
+      final planPathBlock = await _planModePathBlock(name, args);
+      if (planPathBlock != null) return planPathBlock;
+      // ── Plan mode: shell must be READ-ONLY, and never prompts ──
+      // Runs before the Read-Only gate because that gate only fires in
+      // read-only mode; `/plan` can be switched on under ANY preset, Studio
+      // included, where nothing else would stop `rm -rf build`.
+      final planShellBlock = await _planModeGate(name, args);
+      if (planShellBlock != null) return planShellBlock;
+    }
     // ── Read-Only mode hard gate (the read-only gate plan-mode-style block) ──
     // In Read-Only mode the agent is RESTRICTED, not merely asked: writes,
     // edits, commits and non-read-only shell commands are refused at the
@@ -17961,11 +17973,29 @@ ${await _agentsMdBlock()}
     if (name != 'run_shell' && name != 'job_start') return null;
     final cmd = ((args['command'] as String?) ?? '').trim();
     if (cmd.isEmpty) return null; // the tool itself reports a missing command
-    // The workspace jail is checked FIRST: an escape is a boundary violation,
-    // and saying "read-only only" about it would be the wrong reason.
-    // Hoisted to a local so the null-check promotes it: the refusal helper
-    // takes a non-nullable root, and testing `outside` cannot promote
-    // `jailRoot`.
+    // READ-ONLY FIRST, JAIL SECOND — the ordering is load-bearing.
+    //
+    // A command that can MUTATE is refused for the more fundamental reason:
+    // plan mode changes nothing, wherever the path happens to point. Answering
+    // `touch /tmp/x` with "that path is outside the working directory" states
+    // the wrong reason, and it also drops the `READ-ONLY MODE` wording the
+    // Read-Only contract is pinned to (composer_modes_test asserts it for a
+    // `/preset plan` session, plan_mode_allowlist_test asserts PLAN MODE +
+    // READ-ONLY together for every mutating command). The jail below is what
+    // catches the commands that ARE allowed — reads — reaching outside.
+    if (!isReadOnlyCommand(cmd)) {
+      return 'PLAN MODE — READ-ONLY MODE: "$name" runs READ-ONLY commands while '
+          'planning (ls, cat, head, grep, find without -delete/-exec, '
+          'git status/log/diff, wc, du …). This one can change or destroy '
+          'something, so it was refused:\n  $cmd\n'
+          'Plan mode never shows a permission card by design — investigate '
+          'read-only, write the change into your plan as a message, then call '
+          'exit_plan_mode. The command becomes available the moment the user '
+          'approves the build phase.';
+    }
+    // Read-only, so the only thing left to police is WHERE it reads. Hoisted to
+    // a local so the null-check promotes it: the refusal helper takes a
+    // non-nullable root, and testing `outside` cannot promote `jailRoot`.
     final root = jailRoot;
     if (root != null) {
       final outside = shellPathsOutsideRoot(cmd, root);
@@ -17973,15 +18003,7 @@ ${await _agentsMdBlock()}
         return _planModeJailRefusal(name, root, outside);
       }
     }
-    if (isReadOnlyCommand(cmd)) return null;
-    return 'PLAN MODE: "$name" runs READ-ONLY commands while planning '
-        '(ls, cat, head, grep, find without -delete/-exec, git status/log/diff, '
-        'wc, du …). This one can change or destroy something, so it was '
-        'refused:\n  $cmd\n'
-        'Plan mode never shows a permission card by design — investigate '
-        'read-only, write the change into your plan as a message, then call '
-        'exit_plan_mode. The command becomes available the moment the user '
-        'approves the build phase.';
+    return null;
   }
 
   /// Test seam for the plan-mode allowlist.

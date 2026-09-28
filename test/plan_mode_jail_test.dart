@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -274,6 +276,72 @@ void main() {
         await call('file_read', {'path': 'lib/main.dart'}),
         isNot(contains('PLAN MODE')),
       );
+    });
+
+    test('the jail gates sit behind a SYNC planMode test — device timing pin',
+        () {
+      // Regression pin for the CI failure at 36732d6.
+      //
+      // Both gates are `async`. Awaiting them unconditionally put two
+      // microtask turns ahead of EVERY dispatched tool, and the device_*
+      // cancellation contract is timing-sensitive: `_invokeGuarded` captures
+      // `_deviceGeneration` at entry, while `stopRequested()` bumps it through
+      // `cancelDeviceActions()` as a SIDE EFFECT of merely being asked. A
+      // dispatched `device_tap` that reached the native call one turn late
+      // therefore captured the already-bumped generation, saw no change, and
+      // reported a superseded gesture as `tapped node 1`.
+      //
+      // device_overlay_actions_parity_test catches the behaviour; this names
+      // the cause so a well-meaning "simplify the guard" refactor cannot
+      // quietly re-break cancellation. Outside plan mode both gates can only
+      // return null, so the guard costs nothing.
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(
+        src,
+        contains(
+          'if (planMode) {\n'
+          '      final planPathBlock = await _planModePathBlock(name, args);',
+        ),
+        reason: 'the path jail must be reached only through a sync planMode test',
+      );
+      expect(
+        src,
+        contains(
+          '      final planShellBlock = await _planModeGate(name, args);',
+        ),
+        reason: 'the shell gate must be inside the same sync guard',
+      );
+      expect(
+        src,
+        isNot(contains('\n    final planPathBlock = await')),
+        reason: 'an unconditional await here delays every tool dispatch',
+      );
+      expect(
+        src,
+        isNot(contains('\n    final planShellBlock = await')),
+        reason: 'an unconditional await here delays every tool dispatch',
+      );
+    });
+
+    test('a mutating command is refused as READ-ONLY, not as a jail escape',
+        () {
+      // The other half of the same CI failure: the jail used to be checked
+      // FIRST, so `touch /tmp/x` was answered with "that path is outside the
+      // working directory". Wrong reason — plan mode mutates nothing anywhere
+      // — and it dropped the `READ-ONLY MODE` wording the Read-Only contract
+      // is pinned to. Reads that escape must still get the jail message.
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      final body = src.substring(
+        src.indexOf('String? _planModeShellBlock('),
+        src.indexOf('/// Test seam for the plan-mode allowlist.'),
+      );
+      expect(
+        body.indexOf('if (!isReadOnlyCommand(cmd))'),
+        lessThan(body.indexOf('final root = jailRoot;')),
+        reason: 'read-only verdict must be decided before the jail is consulted',
+      );
+      expect(body, contains('READ-ONLY MODE'));
+      expect(body, contains('_planModeJailRefusal(name, root, outside)'));
     });
   });
 
