@@ -807,14 +807,14 @@ class _PopupNotice extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
       child: Row(
         children: [
-          const Icon(Icons.block_outlined, size: 14, color: Aether.textMuted),
+          Icon(Icons.block_outlined, size: 14, color: Aether.textMuted),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11.5, color: Aether.textMuted),
+              style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
             ),
           ),
           TextButton(

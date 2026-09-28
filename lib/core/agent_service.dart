@@ -3592,7 +3592,7 @@ if (!window.__ovidBlankHooked) {
             // release asset / PDF / APK link used to render binary garbage
             // inline or do nothing at all. Hand main-frame downloads to the
             // platform browser (which routes to DownloadManager) and stay put.
-            if (request.isForMainFrame && looksLikeDownloadUrl(uri)) {
+            if (request.isMainFrame && looksLikeDownloadUrl(uri)) {
               final segments = uri.pathSegments;
               final name = segments.isEmpty ? url : segments.last;
               final handed = await handOffExternally(uri);
@@ -3726,7 +3726,7 @@ if (!window.__ovidBlankHooked) {
       // and only raise the OS dialog when the user is the one browsing (never
       // mid-agent-run, where a modal would stall the run).
       try {
-        await platformController.setOnPlatformPermissionRequest((
+        unawaited(platformController.setOnPlatformPermissionRequest((
           request,
         ) async {
           final wanted = request.types;
@@ -3754,9 +3754,11 @@ if (!window.__ovidBlankHooked) {
           _emit(
             'browser',
             '${allGranted ? 'granted' : 'denied'} page permission '
-            '(${request.origin}): $names',
+            '(${Uri.tryParse(tab.url)?.host ?? tab.url}): $names',
           );
-        });
+        }).catchError((Object error) {
+          _emit('err', 'page permission handler failed: $error');
+        }));
       } catch (error) {
         _emit('err', 'page permission handler failed: $error');
       }
@@ -17961,11 +17963,15 @@ ${await _agentsMdBlock()}
     if (cmd.isEmpty) return null; // the tool itself reports a missing command
     // The workspace jail is checked FIRST: an escape is a boundary violation,
     // and saying "read-only only" about it would be the wrong reason.
-    final outside = jailRoot == null
-        ? null
-        : shellPathsOutsideRoot(cmd, jailRoot);
-    if (outside != null && outside.isNotEmpty) {
-      return _planModeJailRefusal(name, jailRoot, outside);
+    // Hoisted to a local so the null-check promotes it: the refusal helper
+    // takes a non-nullable root, and testing `outside` cannot promote
+    // `jailRoot`.
+    final root = jailRoot;
+    if (root != null) {
+      final outside = shellPathsOutsideRoot(cmd, root);
+      if (outside.isNotEmpty) {
+        return _planModeJailRefusal(name, root, outside);
+      }
     }
     if (isReadOnlyCommand(cmd)) return null;
     return 'PLAN MODE: "$name" runs READ-ONLY commands while planning '
