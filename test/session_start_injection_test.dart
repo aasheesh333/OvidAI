@@ -180,4 +180,64 @@ void main() {
       isFalse,
     );
   });
+
+  test(
+    'a UserPromptSubmit hook additionalContext is injected into the request',
+    () async {
+      // Claude Code parity (audit 2026-09-25): a UserPromptSubmit hook's
+      // additionalContext must reach the model, not be discarded.
+      final s = makeSession();
+      final m = NormalizedPluginManifest(
+        id: 'acme/ups',
+        name: 'ups',
+        version: '1.0.0',
+        format: PluginFormat.claudeCode,
+        rootPath: '/plugin',
+        hooks: [
+          PluginHook(
+            pluginId: 'acme/ups',
+            event: 'user_prompt_submit',
+            ordinal: 0,
+            type: 'command',
+            payload: 'run',
+            timeoutS: 5,
+          ),
+        ],
+      );
+      PluginContributionRegistry.I.register(
+        m,
+        activation: PluginActivation.sessionActive,
+        immediateSessionId: 'ctx-1',
+      );
+      addTearDown(() => PluginContributionRegistry.I.unregisterPlugin(m.id));
+
+      HookService.I.executorForTest = (cmd, env) async => jsonEncode({
+        'hookSpecificOutput': {
+          'hookEventName': 'UserPromptSubmit',
+          'additionalContext': 'PROJECT RULE: prefer tabs over spaces.',
+        },
+      });
+
+      List<Map<String, dynamic>>? captured;
+      AgentService.llmOnceForTest = (p, msgs, session, includeTools) async {
+        captured = List<Map<String, dynamic>>.from(msgs);
+        return {'role': 'assistant', 'content': 'ok', 'finish_reason': 'stop'};
+      };
+
+      await AgentService.I
+          .runTask('hi', sessionId: s.id)
+          .timeout(const Duration(seconds: 20));
+
+      expect(captured, isNotNull);
+      expect(
+        captured!.any(
+          (m) =>
+              m['role'] == 'system' &&
+              (m['content'] as String).contains('prefer tabs over spaces'),
+        ),
+        isTrue,
+        reason: 'UserPromptSubmit additionalContext must be a system message',
+      );
+    },
+  );
 }

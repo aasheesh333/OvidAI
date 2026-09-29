@@ -1578,6 +1578,11 @@ class AgentService extends ChangeNotifier {
   @visibleForTesting
   bool get overlayLiveForTest => _overlayLive;
 
+  /// Per-session context produced by a `user_prompt_submit` hook for the
+  /// CURRENT prompt (Claude Code additionalContext parity). Overwritten at each
+  /// run entry, injected ahead of every turn's request while the run lasts.
+  final Map<String, String> _userPromptContext = {};
+
   String _overlayState = overlayStateIdle;
 
   @visibleForTesting
@@ -9332,10 +9337,15 @@ if (!window.__ovidBlankHooked) {
 
     // Task 8 (spec §8.1): user_prompt_submit — ONCE per user prompt, at
     // run entry (canonical replacement for the per-turn on_turn_start).
-    // Observe-only, fire-and-forget.
+    // Claude Code parity (audit 2026-09-25): a UserPromptSubmit hook's
+    // `hookSpecificOutput.additionalContext` (or plain stdout) is INJECTED
+    // into the prompt, not discarded. We await it so the context is ready
+    // before the first LLM call, and extract it the same way session_start
+    // context is extracted. (Blocking via exit 2 is still observe-only here.)
+    _userPromptContext.remove(s.id);
     if (HookService.I.hasHookListeners('user_prompt_submit', sessionId: s.id)) {
-      unawaited(
-        HookService.I.fire(
+      try {
+        final res = await HookService.I.fireDetailed(
           'user_prompt_submit',
           s.id,
           payload: {
@@ -9343,8 +9353,12 @@ if (!window.__ovidBlankHooked) {
             'transcript_path': _transcriptPathFor(s.id),
           },
           model: s.model,
-        ),
-      );
+        );
+        final ctx = HookService.extractHookContext(res.output);
+        if (ctx.isNotEmpty) _userPromptContext[s.id] = ctx;
+      } catch (e) {
+        Diag.swallow('agent_service.user_prompt_submit', e);
+      }
     }
 
     // Parallel-session safety: the ENTIRE run body runs inside a Zone
@@ -9947,6 +9961,15 @@ ${await _agentsMdBlock()}
         // `obra/superpowers`). The hook ran once at session start; its
         // extracted context is standing for the session and rides at the
         // front of every request, before per-request hook notes.
+        // UserPromptSubmit hook context (audit 2026-09-25): stands for this
+        // prompt's run, injected ahead of the request like session context.
+        final promptCtx = _userPromptContext[s.id];
+        if (promptCtx != null && promptCtx.isNotEmpty) {
+          msgs.insert(0, {
+            'role': 'system',
+            'content': '[user_prompt_submit hook]\n$promptCtx',
+          });
+        }
         final sessionCtx = HookService.I.sessionContextFor(s.id);
         if (sessionCtx.isNotEmpty) {
           msgs.insert(0, {'role': 'system', 'content': sessionCtx});
