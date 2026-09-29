@@ -420,7 +420,7 @@ git commit -m "fix(state): surface session-persist failure with a retry banner"
 
 ## Progress tracker
 
-- [ ] Phase 1 — Correctness debt
+- [x] Phase 1 — Correctness debt
 - [ ] Phase 0 — Real-device verification
 - [ ] Phase 2 — God-class refactor
 - [ ] Phase 3 — Phone-coding ergonomics

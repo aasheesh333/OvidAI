@@ -2319,6 +2319,12 @@ class AppState extends ChangeNotifier {
   /// write clears it.
   bool lastSessionPersistFailed = false;
 
+  /// Test seam: force the next `_writeSessionsNow` to throw so the failure
+  /// path (flag + cache invalidation + notifyListeners) can be exercised.
+  /// One-shot — it clears itself as it fires so the following write succeeds.
+  @visibleForTesting
+  bool failNextSessionWriteForTest = false;
+
   /// Trailing debounce window for coalescing session writes. Defaults to zero
   /// (microtask) so tests leave no wall-clock Timer pending; production opts in
   /// via [enableSessionPersistDebounce] from `main`.
@@ -3967,6 +3973,10 @@ class AppState extends ChangeNotifier {
 
   Future<bool> _writeSessionsNow() async {
     try {
+      if (failNextSessionWriteForTest) {
+        failNextSessionWriteForTest = false;
+        throw StateError('forced session-write failure (test)');
+      }
       final prefs = await SharedPreferences.getInstance();
       await _loadDeferredSessionSnapshot();
       final dirtySnapshot = Set<String>.of(_dirtySessionIds);

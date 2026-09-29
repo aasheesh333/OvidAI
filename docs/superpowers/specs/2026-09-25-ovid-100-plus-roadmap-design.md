@@ -128,7 +128,7 @@ Phase 4 gets it into people's hands.
 | Phase | Status | Notes |
 |---|---|---|
 | 0 — Real-device verification | not started | trust foundation |
-| 1 — Correctness debt | not started | |
+| 1 — Correctness debt | **done** | Diag seam; 331 catches routed; 34 firstWhere guarded; persist-failure flag + regression test. Guard-rail tests keep regressions out. |
 | 2 — God-class refactor | not started | behaviour-preserving |
 | 3 — Phone-coding ergonomics | not started | |
 | 5 — Moat features | not started | |
