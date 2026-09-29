@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
+import 'diag.dart';
 
 /// ── Secure plugin source resolver (spec §4.2) ─────────────────────────
 ///
@@ -247,7 +248,7 @@ class ResolvedPluginSource {
     _discarded = true;
     try {
       if (stagingDir.existsSync()) stagingDir.deleteSync(recursive: true);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('plugin_source_resolver', e); }
   }
 }
 
@@ -340,7 +341,7 @@ class PluginSourceResolver {
     } catch (_) {
       try {
         if (staging.existsSync()) staging.deleteSync(recursive: true);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('plugin_source_resolver', e); }
       rethrow;
     }
   }
@@ -1016,7 +1017,7 @@ class PluginSourceResolver {
       } finally {
         try {
           await sink.close();
-        } catch (_) {}
+        } catch (e) { Diag.swallow('plugin_source_resolver', e); }
         if (!ok) _deleteQuietly(target);
       }
     } finally {
@@ -1083,7 +1084,7 @@ class PluginSourceResolver {
   static void _deleteQuietly(FileSystemEntity e) {
     try {
       if (e.existsSync()) e.deleteSync(recursive: true);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('plugin_source_resolver', e); }
   }
 }
 

@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/native_plugins/rest_engine.dart';
+import '../diag.dart';
 
 /// Deploy & infra integrations batch (NP4 Task 6, spec §4.4): declarative
 /// [RestServiceDescriptor]s for Vercel MCP, Vercel Deploy, Railway MCP,
@@ -1027,7 +1028,7 @@ class ZapierCapability extends _InfraCapability {
       try {
         final decoded = jsonDecode(p);
         if (decoded is Map) return Map<String, dynamic>.from(decoded);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('rest_descriptors_infra', e); }
     }
     return {'payload': p};
   }

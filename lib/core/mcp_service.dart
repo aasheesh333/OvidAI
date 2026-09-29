@@ -15,6 +15,7 @@ import 'secure_store.dart';
 import 'plugin_manifest.dart';
 import 'plugin_registry.dart';
 import 'state.dart';
+import 'diag.dart';
 
 /// OAuth access token for one MCP server (item 6). Stored per-server in
 /// secure storage via [McpService.storeMcpOAuthToken] — never in the
@@ -304,7 +305,7 @@ class _SseMcpChannel {
     if (_ownsClient) {
       try {
         _client.close();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('mcp_service', e); }
     }
   }
 }
@@ -764,10 +765,10 @@ class McpService {
     _cancelReconnect(key);
     try {
       rs.nativeHandler?.dispose();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('mcp_service', e); }
     try {
       rs.process?.kill();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('mcp_service', e); }
   }
 
   static Duration _remainingUntil(DateTime deadline) {
@@ -946,7 +947,7 @@ class McpService {
         key: _oauthConfigKey(serverKey),
         value: jsonEncode(config.toJson()),
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('mcp_service', e); }
   }
 
   /// In-memory OAuth config, or null when none was registered.
@@ -985,7 +986,7 @@ class McpService {
         key: _oauthTokenKey(serverKey),
         value: jsonEncode(token.toJson()),
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('mcp_service', e); }
   }
 
   /// The stored OAuth token for [serverKey], or null when none / unreadable.
@@ -1014,7 +1015,7 @@ class McpService {
     if (oauthSecureStorageDisabledForTest) return;
     try {
       await ovidSecureStorage().delete(key: _oauthTokenKey(serverKey));
-    } catch (_) {}
+    } catch (e) { Diag.swallow('mcp_service', e); }
   }
 
   /// Build the browser authorize URL for the OAuth flow (step 1 of the
@@ -1257,7 +1258,7 @@ class McpService {
       rs.sseChannel = null;
       try {
         await channel?.close();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('mcp_service', e); }
       return 'connect failed: $e';
     }
   }
@@ -1472,7 +1473,7 @@ class McpService {
       try {
         await file.parent.create(recursive: true);
         await legacy.copy(file.path);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('mcp_service', e); }
     }
     return file;
   }
@@ -1576,7 +1577,7 @@ class McpService {
       if (identical(_running[key], rs)) _running.remove(key);
       try {
         await rs.nativeHandler?.dispose();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('mcp_service', e); }
       return 'connect failed: $e';
     }
   }
@@ -1910,7 +1911,7 @@ class McpService {
       if (aborted()) {
         try {
           proc.kill();
-        } catch (_) {}
+        } catch (e) { Diag.swallow('mcp_service', e); }
         return 'connect aborted';
       }
 
@@ -1957,7 +1958,7 @@ class McpService {
       if (identical(_running[key], rs)) _running.remove(key);
       try {
         rs.process?.kill();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('mcp_service', e); }
       return 'connect failed: $e';
     }
   }
@@ -1978,7 +1979,7 @@ class McpService {
             json['method'] == 'notifications/tools/list_changed') {
           unawaited(_rediscoverTools(key));
         }
-      } catch (_) {}
+      } catch (e) { Diag.swallow('mcp_service', e); }
     });
   }
 
@@ -2091,14 +2092,14 @@ class McpService {
       try {
         final merged = await _listToolsHttp(rs);
         if (merged != null) rs.tools = merged;
-      } catch (_) {}
+      } catch (e) { Diag.swallow('mcp_service', e); }
       return;
     }
     if (rs.server.transport == 'sse') {
       try {
         final merged = await _listToolsSse(rs);
         if (merged != null) rs.tools = merged;
-      } catch (_) {}
+      } catch (e) { Diag.swallow('mcp_service', e); }
       return;
     }
     final res = rs.server.transport == 'native'
@@ -2148,13 +2149,13 @@ class McpService {
         : null;
     try {
       await rs.nativeHandler?.dispose();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('mcp_service', e); }
     try {
       rs.process?.kill();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('mcp_service', e); }
     try {
       await rs.sseChannel?.close();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('mcp_service', e); }
     rs.sseChannel = null;
     if (sessionDelete != null) await sessionDelete;
   }
@@ -2335,7 +2336,7 @@ class McpService {
       proc.stdin.writeln(
         jsonEncode({'jsonrpc': '2.0', 'method': method, 'params': params}),
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('mcp_service', e); }
   }
 
   /// PR41: Streamable-HTTP JSON-RPC notification — a POST that carries no
@@ -2448,7 +2449,7 @@ class McpService {
         } else if (res.body.trim().isNotEmpty) {
           try {
             j = jsonDecode(res.body) as Map<String, dynamic>;
-          } catch (_) {}
+          } catch (e) { Diag.swallow('mcp_service', e); }
         }
         return (res, j);
       }
@@ -2571,7 +2572,7 @@ class McpService {
       try {
         final decoded = jsonDecode(payload) as Map<String, dynamic>;
         if (decoded['id']?.toString() == id.toString()) return decoded;
-      } catch (_) {}
+      } catch (e) { Diag.swallow('mcp_service', e); }
     }
     return null;
   }

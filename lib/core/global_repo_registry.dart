@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
+import 'diag.dart';
 
 /// Runs `git clone -b BRANCH https://github.com/OWNER/REPO.git DEST`.
 /// Injectable so tests can simulate a clone without network/git.
@@ -231,7 +232,7 @@ class GlobalRepoRegistry {
     } finally {
       try {
         if (tmp.existsSync()) tmp.deleteSync();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('global_repo_registry', e); }
     }
   }
 
@@ -376,7 +377,7 @@ class GlobalRepoRegistry {
       // Never leave a broken half-clone behind, and never index it.
       try {
         if (destDir.existsSync()) await destDir.delete(recursive: true);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('global_repo_registry', e); }
       rethrow;
     }
     _repoPaths[key] = dest;

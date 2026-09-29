@@ -6,6 +6,7 @@ import 'plugin_manifest.dart';
 import 'plugin_permissions.dart';
 import 'skills.dart';
 import 'state.dart' show shellSplitArgs;
+import 'diag.dart';
 
 /// ── Plugin compatibility adapters ───────────────────────────────────────
 /// Adapt a [CC] plugin tree, a Codex plugin tree, or a bare MCP config
@@ -115,7 +116,7 @@ List<File> _filesUnder(Directory dir, bool Function(File) test) {
         try {
           final real = e.resolveSymbolicLinksSync();
           if (real.startsWith('$root/')) out.add(e);
-        } catch (_) {}
+        } catch (e) { Diag.swallow('plugin_adapters', e); }
       }
     }
   }
@@ -1040,7 +1041,7 @@ class GenericMcpAdapter {
     try {
       final d = jsonDecode(raw);
       if (d is Map) decoded = d.cast<String, dynamic>();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('plugin_adapters', e); }
     final servers =
         decoded['mcpServers'] ?? decoded['mcp_servers'] ?? decoded['servers'];
     if (servers is Map) rawByName = servers.cast<String, dynamic>();

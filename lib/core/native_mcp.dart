@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 import 'github_service.dart';
 import 'mcp_service.dart';
+import 'diag.dart';
 
 /// Interface for in-process pure-Dart MCP handlers.
 abstract class NativeMcpHandler {
@@ -39,7 +40,7 @@ class NativeGitHubMcpHandler implements NativeMcpHandler {
     try {
       final t = GitHubService.I.token;
       if (t != null && t.trim().isNotEmpty) return t.trim();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('native_mcp', e); }
     return null;
   }
 
@@ -1086,7 +1087,7 @@ class NativeMemoryMcpHandler implements NativeMcpHandler {
             _relations.add(_MemoryRelation.fromJson(item));
           }
         }
-      } catch (_) {}
+      } catch (e) { Diag.swallow('native_mcp', e); }
     }
   }
 
@@ -1099,7 +1100,7 @@ class NativeMemoryMcpHandler implements NativeMcpHandler {
         'relations': _relations.map((r) => r.toJson()).toList(),
       };
       await storageFile!.writeAsString(jsonEncode(json));
-    } catch (_) {}
+    } catch (e) { Diag.swallow('native_mcp', e); }
   }
 
   @override

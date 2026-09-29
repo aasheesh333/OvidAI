@@ -12,6 +12,7 @@ import 'plugin_registry.dart';
 import 'sandbox_service.dart';
 import 'session_ledger.dart';
 import 'state.dart';
+import 'diag.dart';
 
 /// Evaluates a prompt-type hook with the agent's model. The AgentService
 /// worker wires this: `HookService.I.promptHookEvaluator = (prompt, ctx) =>
@@ -340,7 +341,7 @@ class HookService extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       enabled = prefs.getBool('ovid_hooks_enabled') ?? true;
-    } catch (_) {}
+    } catch (e) { Diag.swallow('hook_service', e); }
   }
 
   Future<void> setEnabled(bool v) async {
@@ -349,7 +350,7 @@ class HookService extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('ovid_hooks_enabled', v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('hook_service', e); }
   }
 
   /// Test seam: replace the executor (no sandbox in unit tests).
@@ -803,9 +804,9 @@ class HookService extends ChangeNotifier {
       } catch (_) {
         try {
           await sink.close();
-        } catch (_) {}
+        } catch (e) { Diag.swallow('hook_service', e); }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('hook_service', e); }
   }
 
   /// Delete the session env file (session_end cleanup).
@@ -815,7 +816,7 @@ class HookService extends ChangeNotifier {
       if (path.isEmpty) return;
       final f = File(path);
       if (f.existsSync()) f.deleteSync();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('hook_service', e); }
   }
 
   Future<Map<String, String>> _envFor({
@@ -1033,7 +1034,7 @@ class HookService extends ChangeNotifier {
       // the sandbox's live-process registry — spawn registers it).
       try {
         proc.kill(ProcessSignal.sigkill);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('hook_service', e); }
       rethrow;
     }
     final out = await stdoutFuture;
@@ -1153,7 +1154,7 @@ class HookService extends ChangeNotifier {
               'prompt-type hook skipped: no PromptHookEvaluator wired '
               '(fail-open)',
         });
-      } catch (_) {}
+      } catch (e) { Diag.swallow('hook_service', e); }
       return null;
     }
     fired++;
@@ -1162,7 +1163,7 @@ class HookService extends ChangeNotifier {
         ...Map<String, dynamic>.from(record),
         'promptChars': hook.payload.length,
       });
-    } catch (_) {}
+    } catch (e) { Diag.swallow('hook_service', e); }
     final prompt = _buildPromptHookPrompt(
       hook: hook,
       canonical: canonical,
@@ -1188,7 +1189,7 @@ class HookService extends ChangeNotifier {
           'error': e.toString(),
           'warning': 'prompt-hook evaluation failed (fail-open)',
         });
-      } catch (_) {}
+      } catch (e) { Diag.swallow('hook_service', e); }
       return null;
     }
     final verdict = parsePromptHookDecision(response ?? '');
@@ -1200,7 +1201,7 @@ class HookService extends ChangeNotifier {
           'ok': true,
           'decision': 'unparseable — fail-open',
         });
-      } catch (_) {}
+      } catch (e) { Diag.swallow('hook_service', e); }
       return null;
     }
     _recordSuccess(pluginId, sessionId);
@@ -1211,7 +1212,7 @@ class HookService extends ChangeNotifier {
         'decision': verdict.decision,
         if (verdict.reason != null) 'reason': verdict.reason,
       });
-    } catch (_) {}
+    } catch (e) { Diag.swallow('hook_service', e); }
     return verdict;
   }
 
@@ -1306,7 +1307,7 @@ class HookService extends ChangeNotifier {
             'ok': false,
             'reason': 'prompt-type hook has no shell runtime — skipped',
           });
-        } catch (_) {}
+        } catch (e) { Diag.swallow('hook_service', e); }
         continue;
       }
       if (hook.type != 'command') continue;
@@ -1336,7 +1337,7 @@ class HookService extends ChangeNotifier {
               ? {...Map<String, dynamic>.from(record), 'async': true}
               : Map<String, dynamic>.from(record),
         );
-      } catch (_) {}
+      } catch (e) { Diag.swallow('hook_service', e); }
       // `async: true` hooks are fire-and-forget per the Claude Code
       // contract: launch without awaiting so they never block the session.
       // Their output is NOT collected into session context (it may arrive
@@ -1363,7 +1364,7 @@ class HookService extends ChangeNotifier {
                     'warning': 'async hook failed (fail-open) — output ignored',
                     'stdout': cleanHookJson(out),
                   });
-                } catch (_) {}
+                } catch (e) { Diag.swallow('hook_service', e); }
               })
               .catchError((Object _) {
                 _recordFailure(pluginId, sessionId);
@@ -1384,7 +1385,7 @@ class HookService extends ChangeNotifier {
               'warning': 'hook failed (fail-open) — output ignored',
               'stdout': cleanHookJson(out),
             });
-          } catch (_) {}
+          } catch (e) { Diag.swallow('hook_service', e); }
           continue;
         }
         _recordSuccess(pluginId, sessionId);
@@ -1414,7 +1415,7 @@ class HookService extends ChangeNotifier {
             if (contract.systemMessage != null)
               'systemMessage': contract.systemMessage,
           });
-        } catch (_) {}
+        } catch (e) { Diag.swallow('hook_service', e); }
         // `continue:false` halts further hooks for this event (item 9).
         if (!contract.continueHooks) {
           halted = true;
@@ -1430,7 +1431,7 @@ class HookService extends ChangeNotifier {
             'error': e.toString(),
             'warning': 'hook failed (fail-open) — run continues',
           });
-        } catch (_) {}
+        } catch (e) { Diag.swallow('hook_service', e); }
       }
     }
     final joined = collected.join('\n');
@@ -1889,7 +1890,7 @@ class HookService extends ChangeNotifier {
               'decision': 'deny',
               'reason': reason,
             });
-          } catch (_) {}
+          } catch (e) { Diag.swallow('hook_service', e); }
           return HookGateResult.deny(
             displayName,
             reason,
@@ -1923,7 +1924,7 @@ class HookService extends ChangeNotifier {
           'hook/invoked',
           Map<String, dynamic>.from(record),
         );
-      } catch (_) {}
+      } catch (e) { Diag.swallow('hook_service', e); }
       try {
         final (code, out) = await _exec(
           hook,
@@ -1969,7 +1970,7 @@ class HookService extends ChangeNotifier {
               if (contract.updatedInput != null)
                 'updatedInput': contract.updatedInput,
             });
-          } catch (_) {}
+          } catch (e) { Diag.swallow('hook_service', e); }
           return asks
               ? HookGateResult.ask(
                   displayName,
@@ -1993,7 +1994,7 @@ class HookService extends ChangeNotifier {
               'updatedInput': contract.updatedInput,
             if (!contract.continueHooks) 'halted': true,
           });
-        } catch (_) {}
+        } catch (e) { Diag.swallow('hook_service', e); }
         if (!contract.continueHooks) break;
       } catch (e) {
         // Exec error/timeout/missing sandbox — fail-open, but count
@@ -2007,7 +2008,7 @@ class HookService extends ChangeNotifier {
             'error': e.toString(),
             'reason': 'gate fails open on error',
           });
-        } catch (_) {}
+        } catch (e) { Diag.swallow('hook_service', e); }
       }
     }
     return HookGateResult.allow(updatedInput: updatedInput);

@@ -6,6 +6,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'agent_service.dart';
 import 'state.dart';
+import 'diag.dart';
 
 /// Foreground-service notification manager (the agent keep-alive "always-on assistant"
 /// parity): while an agent run is active, an ongoing low-importance
@@ -187,7 +188,7 @@ class AgentNotificationService {
       if (st.isDenied || st.isPermanentlyDenied) {
         await Permission.notification.request();
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_notification_service', e); }
   }
 
   /// Start/update the foreground notification. Debounced + content-hashed

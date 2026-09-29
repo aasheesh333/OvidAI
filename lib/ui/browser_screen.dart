@@ -747,7 +747,7 @@ class _ExternalSignInNotice extends StatelessWidget {
             if (launched) return;
             // The user pressed a button and nothing happened. `launchUrl`
             // returns false (no handler) or throws (malformed/blocked) and
-            // the old `catch (_) {}` swallowed both — so say plainly that it
+            // the old empty catch swallowed both — so say plainly that it
             // failed and hand over the URL instead.
             await Clipboard.setData(ClipboardData(text: url));
             messenger?.showSnackBar(

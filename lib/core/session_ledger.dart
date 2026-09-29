@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
+import 'diag.dart';
 
 /// Append-only session event ledger (PR19, session-persistence parity).
 ///
@@ -205,7 +206,7 @@ class SessionLedger {
         // one descriptor pointing at an unlinked inode for the rest of the
         // process's life.
         await (await pending).close();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('session_ledger', e); }
     }
     _seqs.remove(sessionId);
     _replayCache.remove(sessionId);
@@ -213,7 +214,7 @@ class SessionLedger {
     try {
       final f = await _fileFor(sessionId);
       f.deleteSync();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('session_ledger', e); }
   }
 
   /// Flush a session's sink (checkpoint durability barrier).
@@ -222,7 +223,7 @@ class SessionLedger {
     if (pending == null) return;
     try {
       await (await pending).flush();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('session_ledger', e); }
   }
 }
 

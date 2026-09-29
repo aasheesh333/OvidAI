@@ -6,6 +6,7 @@ import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'diag.dart';
 
 /// Firebase bootstrap + auth + consent-gated telemetry.
 ///
@@ -133,7 +134,7 @@ class FirebaseService extends ChangeNotifier {
       await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(
         _consentGiven,
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('firebase_service', e); }
   }
 
   bool _crashHandlersAttached = false;
@@ -225,7 +226,7 @@ class FirebaseService extends ChangeNotifier {
     if (!_available || !_consentGiven) return;
     try {
       await FirebaseAnalytics.instance.logEvent(name: name, parameters: params);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('firebase_service', e); }
   }
 
   @override

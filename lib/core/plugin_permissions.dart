@@ -16,6 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'plugin_manifest.dart';
 import 'secure_store.dart';
+import 'diag.dart';
 
 /// Preferences key for the persisted grant map (plugin id → grant JSON).
 /// Deliberately separate from `ovid_plugin_state_v1` — grants own their
@@ -479,7 +480,7 @@ class PluginPermissionStore {
         final map = _readMap(prefs);
         map[grant.pluginId] = jsonEncode(grant.toJson());
         await prefs.setString(kPluginGrantsPrefKey, jsonEncode(map));
-      } catch (_) {}
+      } catch (e) { Diag.swallow('plugin_permissions', e); }
     });
   }
 
@@ -495,7 +496,7 @@ class PluginPermissionStore {
         final map = _readMap(prefs);
         map.remove(pluginId);
         await prefs.setString(kPluginGrantsPrefKey, jsonEncode(map));
-      } catch (_) {}
+      } catch (e) { Diag.swallow('plugin_permissions', e); }
       try {
         final owned = await _secureStorage.readAll();
         final prefix = '$_kPluginSecretPrefix$pluginId/';
@@ -504,7 +505,7 @@ class PluginPermissionStore {
             await _secureStorage.delete(key: key);
           }
         }
-      } catch (_) {}
+      } catch (e) { Diag.swallow('plugin_permissions', e); }
     });
   }
 

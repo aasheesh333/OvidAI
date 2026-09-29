@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'plugin_manifest.dart';
 import 'plugin_registry.dart';
+import 'diag.dart';
 
 /// ── Skills system ────────────────────────────────────────────────────────
 /// A skill is a markdown instruction bundle the agent can load on demand.
@@ -463,7 +464,7 @@ class SkillService {
           if (s != null) target.add(s);
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('skills', e); }
   }
 
   Future<Skill?> _parse(

@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'state.dart';
+import 'diag.dart';
 
 typedef ScreenshotCopy =
     Future<String> Function(
@@ -253,7 +254,7 @@ class DeviceControlService {
         if (state == staleState) staleBindingDetected = true;
         return state!;
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('device_control_service', e); }
     return 'disabled';
   }
 
@@ -273,7 +274,7 @@ class DeviceControlService {
       if (state == 'bound' || state == 'connecting' || state == 'disabled') {
         return state!;
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('device_control_service', e); }
     return 'connecting';
   }
 
@@ -318,7 +319,7 @@ class DeviceControlService {
         if (await serviceState() != 'connecting') return;
         attempt++;
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('device_control_service', e); }
   }
 
   @visibleForTesting
@@ -644,7 +645,7 @@ class DeviceControlService {
           FileSystemEntityType.notFound) {
         await file.delete();
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('device_control_service', e); }
   }
 
   @visibleForTesting

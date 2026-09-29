@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/native_plugins/prompt_framework.dart';
 import 'package:ovid_ai/core/native_plugins/rest_engine.dart';
+import '../diag.dart';
 
 /// AI, media & productivity integrations batch (NP4 Task 7, spec §4.5):
 /// declarative [RestServiceDescriptor]s and capabilities for:
@@ -442,7 +443,7 @@ class DalleCapability extends _AiMediaCapability {
               return 'Image URL: ${first['url']}';
             }
           }
-        } catch (_) {}
+        } catch (e) { Diag.swallow('rest_descriptors_aimedia', e); }
         return resp.body;
       }
       return 'HTTP ${resp.statusCode}\n${resp.body}';

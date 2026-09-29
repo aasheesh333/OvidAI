@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import 'diag.dart';
 
 /// RepoCache — clones the user's connected GitHub repo into app storage
 /// (Git Trees API, recursive) so the agent can vibe-code the WHOLE project:
@@ -355,7 +356,7 @@ class RepoCache extends ChangeNotifier {
       if (res.statusCode == 200) {
         return (jsonDecode(res.body))['sha'] as String?;
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('repo_cache', e); }
     return null;
   }
 

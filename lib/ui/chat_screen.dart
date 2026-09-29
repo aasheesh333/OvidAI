@@ -31,6 +31,7 @@ import '../core/skills.dart';
 import '../core/startup_coordinator.dart';
 import 'plugins_screen.dart';
 import 'startup_progress_panel.dart';
+import '../core/diag.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
@@ -3361,7 +3362,7 @@ class _ColorPaletteView extends StatelessWidget {
       var raw = hex.replaceAll('#', '');
       if (raw.length == 3) raw = raw.split('').map((c) => '$c$c').join();
       color = Color(int.parse('FF$raw', radix: 16));
-    } catch (_) {}
+    } catch (e) { Diag.swallow('chat_screen', e); }
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
@@ -6884,7 +6885,7 @@ class _StudioFolderChip extends StatelessWidget {
       probe.writeAsStringSync('ok');
       probe.deleteSync();
       writable = true;
-    } catch (_) {}
+    } catch (e) { Diag.swallow('chat_screen', e); }
 
     if (!writable) {
       final granted = await AgentService.I.requestAllFilesAccess();
@@ -6894,7 +6895,7 @@ class _StudioFolderChip extends StatelessWidget {
           probe.writeAsStringSync('ok');
           probe.deleteSync();
           writable = true;
-        } catch (_) {}
+        } catch (e) { Diag.swallow('chat_screen', e); }
       }
     }
 
@@ -7111,11 +7112,11 @@ Future<void> _enableControlMode(BuildContext context) async {
     bool exempt = true;
     try {
       exempt = (await DeviceControlService.I.backgroundHealth()).batteryExempt;
-    } catch (_) {}
+    } catch (e) { Diag.swallow('chat_screen', e); }
     if (!exempt) {
       try {
         await AgentService.I.requestBatteryExemption();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('chat_screen', e); }
     }
   }
   // Control mode survives the background only through the persistent
@@ -7153,7 +7154,7 @@ Future<void> _enableControlMode(BuildContext context) async {
   var enabled = false;
   try {
     enabled = await DeviceControlService.I.isEnabled();
-  } catch (_) {}
+  } catch (e) { Diag.swallow('chat_screen', e); }
   if (enabled) return;
   try {
     await DeviceControlService.I.openAccessibilitySettings();
@@ -7254,7 +7255,7 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
         _batteryExempt = health.batteryExempt;
         _manufacturer = health.manufacturer;
       });
-    } catch (_) {}
+    } catch (e) { Diag.swallow('chat_screen', e); }
   }
 
   Future<void> _retry() async {
@@ -7360,7 +7361,7 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
                   onPressed: () async {
                     try {
                       await AgentService.I.requestBatteryExemption();
-                    } catch (_) {}
+                    } catch (e) { Diag.swallow('chat_screen', e); }
                     await _refreshHealth();
                   },
                   child: const Text('Fix'),

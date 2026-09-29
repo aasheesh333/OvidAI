@@ -42,6 +42,7 @@ import 'skills.dart';
 import 'commands.dart';
 import 'device_control_service.dart';
 import 'model_limits.dart';
+import 'diag.dart';
 
 /// A persistent browser tab — owns its WebView controller lazily so the
 /// page state survives across BrowserScreen open/close cycles.
@@ -365,9 +366,9 @@ void pruneSpillDir(Directory spillDir) {
     for (final old in files.sublist(maxSpillFilesPerWorkspace)) {
       try {
         old.deleteSync();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     }
-  } catch (_) {}
+  } catch (e) { Diag.swallow('agent_service', e); }
 }
 
 Future<String> spillToolOutput(
@@ -923,7 +924,7 @@ class AgentService extends ChangeNotifier {
     final roots = <String>[];
     try {
       roots.add((await _sessionWorkDir()).path);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     final sid = _runSession?.id ?? AppState.I.activeSession?.id;
     if (sid != null && sid.isNotEmpty) {
       try {
@@ -931,7 +932,7 @@ class AgentService extends ChangeNotifier {
           if (g.isDeny || g.kind != PermissionGrant.kindPath) continue;
           if (g.value.isNotEmpty) roots.add(g.value);
         }
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     }
     // Plan mode NARROWS this set, never widens it (2026-09-29).
     //
@@ -1296,7 +1297,7 @@ class AgentService extends ChangeNotifier {
     j.killed = true;
     try {
       j.process?.kill();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     notifyListeners();
   }
 
@@ -1402,7 +1403,7 @@ class AgentService extends ChangeNotifier {
           sub.interrupted = true;
           try {
             AppState.I.setAgentState(sub.sessionId, 'stopped');
-          } catch (_) {}
+          } catch (e) { Diag.swallow('agent_service', e); }
           final childRun = _runs[sub.sessionId];
           if (childRun != null) _cancelBucket(childRun);
           if (roots.add(sub.sessionId)) grew = true;
@@ -1434,7 +1435,7 @@ class AgentService extends ChangeNotifier {
         sub.interrupted = true;
         try {
           AppState.I.setAgentState(sub.sessionId, 'stopped');
-        } catch (_) {}
+        } catch (e) { Diag.swallow('agent_service', e); }
       }
     }
     final withQueue = <String>[];
@@ -1475,7 +1476,7 @@ class AgentService extends ChangeNotifier {
     // Buckets outside the map (rare) + processes no run claims.
     try {
       SandboxService.I.killAllProcesses();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     // PR46: any live PTY shells must die too — they're long-lived by
     // design, which makes them a panic-stop leak without this.
     unawaited(PtyPool.I.discardAll());
@@ -1559,7 +1560,7 @@ class AgentService extends ChangeNotifier {
     if (_appForegrounded) return;
     try {
       await _overlayChannel.invokeMethod(deviceOverlayShowMethod);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     await setOverlayLive(_overlayLive);
     await setOverlayState(_overlayState);
   }
@@ -1569,7 +1570,7 @@ class AgentService extends ChangeNotifier {
   Future<void> hideDeviceOverlay() async {
     try {
       await _overlayChannel.invokeMethod(deviceOverlayHideMethod);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
   }
 
   bool _overlayLive = false;
@@ -1594,7 +1595,7 @@ class AgentService extends ChangeNotifier {
       await _overlayChannel.invokeMethod(deviceOverlayStateMethod, {
         'state': state,
       });
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
   }
 
   /// Mark the overlay live (run active) or idle. The native side shows a
@@ -1606,7 +1607,7 @@ class AgentService extends ChangeNotifier {
       await _overlayChannel.invokeMethod(deviceOverlayLiveMethod, {
         'live': live,
       });
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
   }
 
   bool _appForegrounded = true;
@@ -1710,7 +1711,7 @@ class AgentService extends ChangeNotifier {
         await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
           'listening': false,
         });
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
       return;
     }
     // Explicit mic permission first: the overlay only exists while the
@@ -1741,20 +1742,20 @@ class AgentService extends ChangeNotifier {
           await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
             'listening': false,
           });
-        } catch (_) {}
+        } catch (e) { Diag.swallow('agent_service', e); }
         await handleDeviceOverlayText(t);
         try {
           await _overlayChannel.invokeMethod(deviceOverlaySetTextMethod, {
             'text': '',
           });
-        } catch (_) {}
+        } catch (e) { Diag.swallow('agent_service', e); }
         return;
       }
       try {
         await _overlayChannel.invokeMethod(deviceOverlaySetTextMethod, {
           'text': text,
         });
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     });
     if (!started) {
       await _overlayMicError('Could not start dictation — try again.');
@@ -1764,7 +1765,7 @@ class AgentService extends ChangeNotifier {
       await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
         'listening': started,
       });
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
   }
 
   /// Overlay mic failure feedback: reset the mic button and explain why in
@@ -1775,12 +1776,12 @@ class AgentService extends ChangeNotifier {
       await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
         'listening': false,
       });
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     try {
       await _overlayChannel.invokeMethod(deviceOverlaySetTextMethod, {
         'text': message,
       });
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
   }
 
   /// Resolve the running session represented by foreground-notification
@@ -1841,7 +1842,7 @@ class AgentService extends ChangeNotifier {
         _kActiveRunsCheckpointKey,
         jsonEncode(_persistedRunCheckpoints),
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     unawaited(
       SessionLedger.I.append(sessionId, 'checkpoint', {
         'runId': runId,
@@ -1863,7 +1864,7 @@ class AgentService extends ChangeNotifier {
           jsonEncode(_persistedRunCheckpoints),
         );
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     unawaited(
       SessionLedger.I.append(sessionId, 'checkpoint', {'state': 'idle'}),
     );
@@ -1884,7 +1885,7 @@ class AgentService extends ChangeNotifier {
           }
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
   }
 
   void _cancelBucket(AgentRun r) {
@@ -1912,11 +1913,11 @@ class AgentService extends ChangeNotifier {
     try {
       r.activeClient?.close(force: true);
       r.activeClient = null;
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     try {
       r.activeRequest?.abort();
       r.activeRequest = null;
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     // A pending approval / question is a hard block: the tool awaits its
     // completer. Without resolving it here, Stop left the run parked
     // forever with activeRunId set (composer stuck on Stop).
@@ -1925,7 +1926,7 @@ class AgentService extends ChangeNotifier {
       r.pendingApproval = null;
       try {
         pending.completer.complete(false);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     }
     // PR32: INSTANT stop — a running build/install (bash/npm/apt) used
     // to keep the run parked until its full 10-minute timeout. Kill
@@ -1941,16 +1942,16 @@ class AgentService extends ChangeNotifier {
     if (runKey.isNotEmpty) {
       try {
         SandboxService.I.killRunProcesses(runKey);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
       try {
         PtyPool.I.discardFor(runKey);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     }
     for (final j in r.jobs.values.toList()) {
       try {
         j.killed = true;
         j.process?.kill(ProcessSignal.sigkill);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     }
     _emitToRun(
       r,
@@ -1971,20 +1972,20 @@ class AgentService extends ChangeNotifier {
     r.cancelRequested = true;
     try {
       r.activeRequest?.abort();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     if (r.pendingApproval != null) {
       try {
         r.pendingApproval!.completer.complete(false);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     }
     try {
       SandboxService.I.killRunProcesses(sessionId);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     for (final job in r.jobs.values) {
       if (!job.finished) {
         try {
           job.process?.kill(ProcessSignal.sigkill);
-        } catch (_) {}
+        } catch (e) { Diag.swallow('agent_service', e); }
       }
     }
     notifyListeners();
@@ -2349,7 +2350,7 @@ class AgentService extends ChangeNotifier {
   /// Opens [uri] outside the app (system browser → DownloadManager, or the
   /// app that owns the scheme). Returns false when nothing could handle it, so
   /// callers can SAY SO instead of silently swallowing the tap — the old
-  /// `catch (_) {}` pattern left users staring at a page that never moved.
+  /// `catch (e) { Diag.swallow('agent_service', e); }` pattern left users staring at a page that never moved.
   static Future<bool> handOffExternally(Uri uri) async {
     try {
       return await launchUrl(uri, mode: LaunchMode.externalApplication);
@@ -2437,7 +2438,7 @@ class AgentService extends ChangeNotifier {
         await _restoreSessionTabsIfNeeded(key);
         if (browserTabs.isNotEmpty) return;
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     try {
       // Legacy upgrades only: fall back to the global copy when no
       // per-session record exists anywhere yet.
@@ -2560,7 +2561,7 @@ class AgentService extends ChangeNotifier {
               );
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     if (tabs.isEmpty) {
       // A brand-new session starts with a FRESH home-page tab (google.com),
       // never a blank page — its own cookie jar (profile), so logins from
@@ -2629,7 +2630,7 @@ class AgentService extends ChangeNotifier {
         await prefs.setStringList('$_kBrowserSessionPrefix$key', urls);
         await prefs.setInt('$_kBrowserActiveTab$key', activeTabIndex);
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
   }
 
   /// Test seam: persist the current browser tabs exactly as a page-finished
@@ -2667,7 +2668,7 @@ class AgentService extends ChangeNotifier {
       await prefs.remove('$_kBrowserSessionV2Prefix$sessionId');
       await prefs.remove('$_kBrowserSessionPrefix$sessionId');
       await prefs.remove('$_kBrowserActiveTab$sessionId');
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     await SessionBrowserProfiles.I.forgetOrigins(sessionId: sessionId);
   }
 
@@ -2907,7 +2908,7 @@ class AgentService extends ChangeNotifier {
       for (final e in work.listSync(recursive: true, followLinks: false)) {
         if (e is File && e.path.endsWith('/$name')) return e.path;
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     return null;
   }
 
@@ -2955,7 +2956,7 @@ class AgentService extends ChangeNotifier {
           final dest = File('${prevDir.path}/$name');
           dest.parent.createSync(recursive: true);
           e.copySync(dest.path);
-        } catch (_) {}
+        } catch (e) { Diag.swallow('agent_service', e); }
       }
       return '${prevDir.path}/${hostIndexHtml.split('/').last}';
     } catch (_) {
@@ -2996,7 +2997,7 @@ class AgentService extends ChangeNotifier {
     if (platform is AndroidWebViewController) {
       try {
         return platform.webViewIdentifier;
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     }
     return null;
   }
@@ -3209,7 +3210,7 @@ class AgentService extends ChangeNotifier {
           desktopVerifyScriptForTest(),
         );
         measured = parseDesktopProbeForTest(after).clientWidth;
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     }
     final confirmed = repaired && measured >= expected - 40;
     tab.consoleLog.add((
@@ -3240,7 +3241,7 @@ class AgentService extends ChangeNotifier {
     if (c == null) return;
     try {
       await c.runJavaScript(browserZoomScriptForTest(tab.userZoom));
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
   }
 
   /// Apply an already-validated user zoom to [tab]: clamped setter
@@ -3691,7 +3692,7 @@ class AgentService extends ChangeNotifier {
         BrowserTab.devW = (sz.width / dpr).round();
         BrowserTab.devH = (sz.height / dpr).round();
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     // NOTE: file access for local previews is handled by the platform
     // impl — webview_flutter_android's loadFile() sets
     // settings.setAllowFileAccess(true) itself.
@@ -3881,7 +3882,7 @@ if (!window.__ovidBlankHooked) {
   }, true);
 }
 ''');
-             } catch (_) {}
+             } catch (e) { Diag.swallow('agent_service', e); }
 
             tab.networkLog.add((
               at: DateTime.now(),
@@ -3903,7 +3904,7 @@ if (!window.__ovidBlankHooked) {
   window.addEventListener('error', (e) => { try { OvidConsole.postMessage('error: ' + String(e.message).slice(0,500)); } catch(_){} });
 })();
 ''');
-            } catch (_) {}
+            } catch (e) { Diag.swallow('agent_service', e); }
              // navigator.geolocation bridge (2026-09-29): webview_flutter_android
              // delivers NO geolocation prompt — its PermissionRequestConstants
              // cover only audio/video/MIDI/protected-media, because Android
@@ -3925,7 +3926,7 @@ if (!window.__ovidBlankHooked) {
              // hanging again.
              try {
                tab.controller?.runJavaScript(geolocationShimJs);
-             } catch (_) {}
+             } catch (e) { Diag.swallow('agent_service', e); }
           },
           onWebResourceError: (_) {
             tab.loading = false;
@@ -3961,7 +3962,7 @@ if (!window.__ovidBlankHooked) {
                 // paste it into a browser that will download it.
                 try {
                   await Clipboard.setData(ClipboardData(text: url));
-                } catch (_) {}
+                } catch (e) { Diag.swallow('agent_service', e); }
               }
               _emit(
                 'browser',
@@ -3976,7 +3977,7 @@ if (!window.__ovidBlankHooked) {
               // hand it to the system browser and stay on the current page.
               try {
                 await launchUrl(uri, mode: LaunchMode.externalApplication);
-              } catch (_) {}
+              } catch (e) { Diag.swallow('agent_service', e); }
               _emit(
                 'shell',
                 'Google sign-in opened in the system browser — complete it '
@@ -4026,7 +4027,7 @@ if (!window.__ovidBlankHooked) {
               }
               try {
                 await launchUrl(uri, mode: LaunchMode.externalApplication);
-              } catch (_) {}
+              } catch (e) { Diag.swallow('agent_service', e); }
               return NavigationDecision.prevent;
             }
             return NavigationDecision.navigate;
@@ -4407,7 +4408,7 @@ if (!window.__ovidBlankHooked) {
       if (f.existsSync()) {
         _studio.syncedMtime[path] = f.lastModifiedSync().millisecondsSinceEpoch;
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
   }
 
   /// Live file follow (P9): after shell commands, check every open tab's
@@ -4435,7 +4436,7 @@ if (!window.__ovidBlankHooked) {
           changed = true;
           _emit('file', 'live-reloaded $path (changed on disk)');
         }
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     }
     if (changed) notifyListeners();
   }
@@ -4686,7 +4687,7 @@ if (!window.__ovidBlankHooked) {
               .join(', ');
           blocks.add('── referenced directory "$rel" ──\n$listing');
         }
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     }
     if (blocks.isEmpty) return text;
     return '$text\n\n[expanded references]\n${blocks.join('\n\n')}';
@@ -4761,7 +4762,7 @@ if (!window.__ovidBlankHooked) {
           return File(safe).readAsStringSync();
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     return null;
   }
 
@@ -4785,7 +4786,7 @@ if (!window.__ovidBlankHooked) {
       if (m == null) return;
       m.toolDetail = buildEditDiff(path, before, after);
       AppState.I.refresh();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
   }
 
   /// diff-card parity (PR25): build a compact unified-style diff for
@@ -4873,7 +4874,7 @@ if (!window.__ovidBlankHooked) {
         length: f.lengthSync(),
         modified: f.lastModifiedSync(),
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
   }
 
   /// null = fresh (no prior observation to go stale); true = matches;
@@ -5432,7 +5433,7 @@ if (!window.__ovidBlankHooked) {
         onlyPluginId: pluginId,
       );
       await refreshSkills(sessionId: sessionId);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
   }
 
   /// Names of the skill/command contributions a legacy plugin row actually
@@ -8490,7 +8491,7 @@ if (!window.__ovidBlankHooked) {
       if (target != null && queued.contains('@')) {
         try {
           modelText = await expandReferences(queued, target);
-        } catch (_) {}
+        } catch (e) { Diag.swallow('agent_service', e); }
       }
       msgs.add({'role': 'user', 'content': modelText});
     }
@@ -9436,7 +9437,7 @@ if (!window.__ovidBlankHooked) {
       try {
         final f = File('$dir/AGENTS.md');
         if (f.existsSync()) return f.readAsStringSync();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
       return null;
     }
 
@@ -9449,7 +9450,7 @@ if (!window.__ovidBlankHooked) {
     if (text == null) {
       try {
         text ??= readRoot((await _sessionWorkDir()).path);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     }
     text ??= RepoCache.I.read('AGENTS.md');
     if (text == null || text.trim().isEmpty) return '';
@@ -10747,7 +10748,7 @@ ${await _agentsMdBlock()}
             '${(await getApplicationDocumentsDirectory()).path}/session-ledgers';
         final safe = sessionId.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
         _transcriptPathCache[sessionId] = '$base/$safe.jsonl';
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     }());
   }
 
@@ -12642,7 +12643,7 @@ ${await _agentsMdBlock()}
         if (ctl != null) {
           try {
             title = await ctl.getTitle();
-          } catch (_) {}
+          } catch (e) { Diag.swallow('agent_service', e); }
         }
         return 'Navigated to $url\nTitle: ${title ?? tab.title ?? "unknown"}';
 
@@ -13752,7 +13753,7 @@ ${await _agentsMdBlock()}
             return 'element not visible: $sel — scroll (browser_scroll) or '
                 'wait (browser_wait_for) first, then click';
           }
-        } catch (_) {}
+        } catch (e) { Diag.swallow('agent_service', e); }
         await Future.delayed(
           Duration(milliseconds: 150 + DateTime.now().millisecond % 250),
         );
@@ -13990,7 +13991,7 @@ ${await _agentsMdBlock()}
               found = true;
               break;
             }
-          } catch (_) {}
+          } catch (e) { Diag.swallow('agent_service', e); }
           await Future.delayed(const Duration(milliseconds: 300));
         }
         final targetDesc = (sel != null && sel.trim().isNotEmpty)
@@ -15129,7 +15130,7 @@ ${await _agentsMdBlock()}
     for (final pat in _destructivePatterns) {
       try {
         if (RegExp(pat, dotAll: true).hasMatch(cmd)) return true;
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
     }
     return false;
   }
@@ -16633,7 +16634,7 @@ ${await _agentsMdBlock()}
       );
       final raw = r.toString();
       if (action == 'read') return 'dialog: $raw';
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     final d = tab.pendingDialog;
     if (d == null) return 'no pending dialog';
     if (action == 'dismiss' || action == 'accept') {
@@ -16741,7 +16742,7 @@ ${await _agentsMdBlock()}
     } catch (e) {
       try {
         await sink.close();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
       if (f.existsSync()) f.deleteSync();
       return 'download failed: $e';
     }
@@ -16915,7 +16916,7 @@ ${await _agentsMdBlock()}
     } catch (e) {
       try {
         await tab.controller!.runJavaScript('window.__ovidUploadBuf = null;');
-      } catch (_) {}
+      } catch (e) { Diag.swallow('agent_service', e); }
       return 'upload failed: $e';
     }
   }
@@ -17705,7 +17706,7 @@ ${await _agentsMdBlock()}
           // see; the cache original is redundant the moment it lands.
           try {
             if (await copied.exists()) await source.delete();
-          } catch (_) {}
+          } catch (e) { Diag.swallow('agent_service', e); }
           _recordProduced(copied.path, bytes.length);
           _emit('shell', 'device_screenshot: ${copied.path}');
           if (!_stageVisionImage(
@@ -17861,7 +17862,7 @@ ${await _agentsMdBlock()}
         var mtime = 0;
         try {
           mtime = entity.lastModifiedSync().millisecondsSinceEpoch;
-        } catch (_) {}
+        } catch (e) { Diag.swallow('agent_service', e); }
         hits.add((rel: rel, mtime: mtime));
         if (hits.length >= cap) break;
       }
@@ -18223,7 +18224,7 @@ ${await _agentsMdBlock()}
       await _overlayChannel.invokeMethod(deviceOverlaySetPromptMethod, {
         'prompt': prompt,
       });
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
   }
 
   /// Test seam: drive ask_user_question's handler directly (no LLM).
@@ -18958,7 +18959,7 @@ ${await _agentsMdBlock()}
     try {
       final docs = await getApplicationDocumentsDirectory();
       roots.add('${docs.path}/skills');
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     try {
       final pinned = session.workspaceFolder;
       final work =
@@ -18986,7 +18987,7 @@ ${await _agentsMdBlock()}
         '${work.path}/.codex/prompts',
         '${work.path}/.codex/agents',
       ]);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     final mounts = <PluginCatalogMount>[];
     for (final runtime in await PluginRuntimeManager.I.activeRuntimes()) {
       if (!PluginContributionRegistry.I.isPluginActiveForSession(
@@ -19014,14 +19015,14 @@ ${await _agentsMdBlock()}
     try {
       final docs = await getApplicationDocumentsDirectory();
       SkillService.I.addRoot('${docs.path}/skills');
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     try {
       final work = await _sessionWorkDir();
       SkillService.I.addRoot('${work.path}/.dsh/skills');
       SkillService.I.addRoot('${work.path}/.agents/skills');
       SkillService.I.addRoot('${work.path}/agents');
       SkillService.I.addRoot('${work.path}/.agents');
-    } catch (_) {}
+    } catch (e) { Diag.swallow('agent_service', e); }
     if (AppState.I.legacyPluginExecutionAllowed ||
         _runSessionOverrideForTest != null) {
       for (final p in AppState.I.plugins) {
@@ -19037,7 +19038,7 @@ ${await _agentsMdBlock()}
           SkillService.I.addRoot('${dir.path}/commands');
           SkillService.I.addRoot('${dir.path}/skills');
           SkillService.I.addRoot('${dir.path}/agents');
-        } catch (_) {}
+        } catch (e) { Diag.swallow('agent_service', e); }
       }
     }
     await SkillService.I.reload();
@@ -20289,7 +20290,7 @@ ${await _agentsMdBlock()}
       if (jsonMatch != null) {
         try {
           report = jsonDecode(jsonMatch.group(0)!) as Map<String, dynamic>;
-        } catch (_) {}
+        } catch (e) { Diag.swallow('agent_service', e); }
       }
       final status =
           (report?['status'] as String? ??

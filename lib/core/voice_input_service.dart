@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart';
+import 'diag.dart';
 
 /// P5 (2026-09-13): on-device speech-to-text for the composer and the
 /// control overlay. Wraps `speech_to_text` behind a small, testable seam so
@@ -151,7 +152,7 @@ class VoiceInputService {
     }
     try {
       await _plugin.stop();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('voice_input_service', e); }
     _listening = false;
   }
 
@@ -164,7 +165,7 @@ class VoiceInputService {
     }
     try {
       await _plugin.cancel();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('voice_input_service', e); }
     _listening = false;
   }
 }

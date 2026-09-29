@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'diag.dart';
 import 'grant_store.dart';
 import 'dart:convert';
 import 'dart:io';
@@ -191,7 +192,7 @@ class SandboxService {
     try {
       final f = File(path);
       if (f.existsSync()) f.deleteSync();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   /// Git auth env: host-scoped `store` helper + no interactive prompt (a hung
@@ -351,7 +352,7 @@ class SandboxService {
       if (abi.contains('arm64')) return 'arm64';
       if (abi.contains('x86_64')) return 'x86_64';
       if (abi.contains('arm')) return 'arm';
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     return 'arm64';
   }
 
@@ -379,7 +380,7 @@ class SandboxService {
       final reg = await GlobalRepoRegistry.instance();
       final path = reg.boundWorkspaceFor(sessionSandboxId);
       if (path != null) return Directory(path);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     return null;
   }
 
@@ -409,7 +410,7 @@ class SandboxService {
     // honor session→repo bindings without awaiting.
     try {
       await GlobalRepoRegistry.instance();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   /// Delete a session's workspace (session deleted → files go too).
@@ -420,12 +421,12 @@ class SandboxService {
       await (await GlobalRepoRegistry.instance()).unbindSession(
         sessionSandboxId,
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     try {
       final root = await _ensureFilesRoot();
       final d = Directory('${root.path}/workspaces/ws_$sessionSandboxId');
       if (d.existsSync()) await d.delete(recursive: true);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   /// Storage-quota housekeeping (storage-quota parity):
@@ -455,7 +456,7 @@ class SandboxService {
         if (!activeSandboxIds.contains(id)) {
           try {
             await d.delete(recursive: true);
-          } catch (_) {}
+          } catch (e) { Diag.swallow('sandbox_service', e); }
         }
       }
 
@@ -472,10 +473,10 @@ class SandboxService {
             if (e is File) {
               try {
                 size += e.lengthSync();
-              } catch (_) {}
+              } catch (e) { Diag.swallow('sandbox_service', e); }
             }
           }
-        } catch (_) {}
+        } catch (e) { Diag.swallow('sandbox_service', e); }
         total += size;
         byAccess.add((d, stat.accessed, size));
       }
@@ -490,9 +491,9 @@ class SandboxService {
         try {
           await d.delete(recursive: true);
           total -= size;
-        } catch (_) {}
+        } catch (e) { Diag.swallow('sandbox_service', e); }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   // ── Files root ─────────────────────────────────────────────────────
@@ -573,7 +574,7 @@ class SandboxService {
       if (prefix == null) return;
       if (!Directory('${prefix.path}/bin').existsSync()) return;
       await _selfHealSandbox(prefix);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   // ═════════════════════════════════════════════════════════════════
@@ -727,7 +728,7 @@ class SandboxService {
             : target;
         link.createSync(dest);
         linked++;
-      } catch (_) {}
+      } catch (e) { Diag.swallow('sandbox_service', e); }
     }
     onPhase(4, 1.0, 'linked ............ $linked aliases ✓');
 
@@ -755,7 +756,7 @@ class SandboxService {
     try {
       final usr = Link('${prefix.path}/usr');
       if (!usr.existsSync()) usr.createSync('.');
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
 
     // ── Write OUR profile (defense-in-depth) ──
     // Termux's bash has its prefix COMPILED IN, so `bash -l` sources
@@ -1011,7 +1012,7 @@ class SandboxService {
             'corepack enable 2>&1; corepack prepare pnpm@latest --activate 2>&1',
           ]).timeout(const Duration(minutes: 2));
           pnpmNote = await binRuns('pnpm') ? 'pnpm ✓' : 'pnpm ✗';
-        } catch (_) {}
+        } catch (e) { Diag.swallow('sandbox_service', e); }
         onPhase(7, 0.7, 'node ................ ✓ node · npm · npx · $pnpmNote');
       } else {
         onPhase(7, 0.7, 'node ................ ⚠ node ok but npm/npx missing');
@@ -1077,7 +1078,7 @@ class SandboxService {
       final (_, ep) = await execChecked(['bash', '-c', 'git --exec-path 2>&1'])
           .timeout(const Duration(seconds: 30));
       execPath = ep.trim();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     final prefixPath = _prefix!.path;
     if (execPath == null || execPath.isEmpty) {
       onPhase(8, 1.0, 'git exec-path .....  ⚠ not reported');
@@ -1210,14 +1211,14 @@ export PIP_CACHE_DIR="\$HOME/.cache/pip"
 ''';
     try {
       File('${etc.path}/profile').writeAsStringSync(profile);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     try {
       File('${etc.path}/bash.bashrc').writeAsStringSync(profile);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     // Also drop a ~/.bashrc so interactive `bash -i` picks it up.
     try {
       File('$p/home/.bashrc').writeAsStringSync(profile);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   /// Delete leftover node-vXX dirs that older builds dropped into HOME.
@@ -1232,10 +1233,10 @@ export PIP_CACHE_DIR="\$HOME/.cache/pip"
             name == 'node') {
           try {
             e.deleteSync(recursive: true);
-          } catch (_) {}
+          } catch (e) { Diag.swallow('sandbox_service', e); }
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   /// Rewrite a script's Termux-prefix shebang line to [prefix]. Returns the
@@ -1274,7 +1275,7 @@ export PIP_CACHE_DIR="\$HOME/.cache/pip"
       final txt = f.readAsStringSync();
       final fixed = rewriteTermuxShebang(txt, prefix.path);
       if (fixed != null) f.writeAsStringSync(fixed);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   void _rewritePrefixInConfigs(Directory prefix) {
@@ -1298,7 +1299,7 @@ export PIP_CACHE_DIR="\$HOME/.cache/pip"
         if (txt.contains(termux)) {
           entity.writeAsStringSync(txt.replaceAll(termux, ours));
         }
-      } catch (_) {}
+      } catch (e) { Diag.swallow('sandbox_service', e); }
     }
   }
 
@@ -1387,9 +1388,9 @@ Acquire::https::CAInfo "$p/etc/tls/cert.pem";
           if (f.existsSync() && f.lengthSync() > 0) continue;
           f.writeAsBytesSync(e.value, flush: true);
           written++;
-        } catch (_) {}
+        } catch (e) { Diag.swallow('sandbox_service', e); }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     return written;
   }
 
@@ -1404,10 +1405,10 @@ Acquire::https::CAInfo "$p/etc/tls/cert.pem";
         try {
           final data = await rootBundle.load('assets/termux-keyring/$name');
           bundled[name] = data.buffer.asUint8List();
-        } catch (_) {}
+        } catch (e) { Diag.swallow('sandbox_service', e); }
       }
       if (bundled.isNotEmpty) seedAptKeyring(trusted, bundled);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   void _writeAptConfig(Directory prefix) {
@@ -1416,11 +1417,11 @@ Acquire::https::CAInfo "$p/etc/tls/cert.pem";
     try {
       final etc = Directory('$p/etc/apt')..createSync(recursive: true);
       File('${etc.path}/ovid-apt.conf').writeAsStringSync(conf);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     // Point the default apt.conf at ours too (some apt builds read Dir::Etc::main).
     try {
       File('$p/etc/apt/apt.conf').writeAsStringSync(conf);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     // apt needs the Termux signing keys to verify packages. They ship under
     // share/termux-keyring/*.gpg — link them into trusted.gpg.d so apt's
     // GPGV verification succeeds (otherwise every install is rejected).
@@ -1439,19 +1440,19 @@ Acquire::https::CAInfo "$p/etc/tls/cert.pem";
               } catch (_) {
                 try {
                   File(k.path).copySync(dest);
-                } catch (_) {}
+                } catch (e) { Diag.swallow('sandbox_service', e); }
               }
             }
           }
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     // dpkg needs an admindir + a status file to consider packages installed.
     try {
       Directory('$p/var/lib/dpkg').createSync(recursive: true);
       final status = File('$p/var/lib/dpkg/status');
       if (!status.existsSync()) status.writeAsStringSync('');
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     _ensureSourcesList(prefix);
     _ensureCaBundle(prefix);
     _ensureTlsConfig(prefix);
@@ -1482,7 +1483,7 @@ system_default = system_default_sect
 CipherString = DEFAULT@SECLEVEL=1
 MinProtocol = TLSv1.2
 ''');
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   /// pip.conf — keep pip's index/cache/config inside the sandbox HOME.
@@ -1505,7 +1506,7 @@ update-notifier=false
 fund=false
 audit=false
 ''');
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   /// Known-good Termux main-repo mirrors, tried in order.  A dead or stale
@@ -1890,7 +1891,7 @@ audit=false
         '# Ovid sandbox apt mirror (auto-managed)\n'
         'deb $mirror stable main\n',
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   void _ensureSourcesList(Directory prefix) =>
@@ -1965,7 +1966,7 @@ audit=false
       if (out.length > 4096) {
         cert.writeAsStringSync(out.toString());
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   Future<void> _chmodTree(Directory root, List<String> subdirs) async {
@@ -1997,7 +1998,7 @@ audit=false
       try {
         final result = await Process.run(bin, [...baseArgs, path]);
         if (result.exitCode == 0) return true;
-      } catch (_) {}
+      } catch (e) { Diag.swallow('sandbox_service', e); }
     }
     return false;
   }
@@ -2009,7 +2010,7 @@ audit=false
       // Fallback: some devices lack /system/bin/chmod — try toybox.
       try {
         await Process.run('toybox', ['chmod', mode.toRadixString(8), path]);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('sandbox_service', e); }
     }
   }
 
@@ -2019,7 +2020,7 @@ audit=false
         'getNativeLibraryDir',
       );
       if (v != null && v.isNotEmpty) return v;
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     return null;
   }
 
@@ -2038,17 +2039,17 @@ audit=false
     try {
       final v = await _nativeChannel.invokeMethod<String>('getProcessAbi');
       if (v != null && v.isNotEmpty) abi = v;
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     try {
       final v = await _nativeChannel.invokeMethod<int>('getSdkInt');
       if (v != null) sdkInt = v;
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     if (Platform.isAndroid) {
       // The probe spawns a shell — only worth it when actually installing.
       try {
         final v = await _nativeChannel.invokeMethod<bool>('isDataExecAllowed');
         if (v != null) dataExecAllowed = v;
-      } catch (_) {}
+      } catch (e) { Diag.swallow('sandbox_service', e); }
     }
     return (abi: abi, sdkInt: sdkInt, dataExecAllowed: dataExecAllowed);
   }
@@ -2085,7 +2086,7 @@ audit=false
     } on PlatformException catch (e) {
       // MISSING carries "process ABI X has no payload (APK has: …)".
       _payloadReadError = e.message;
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     // Fallback: already-extracted copy (older builds / tests).
     try {
       final libDir = await _nativeLibraryDir;
@@ -2095,7 +2096,7 @@ audit=false
           return (bytes: await f.readAsBytes(), abi: 'unknown');
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     return null;
   }
 
@@ -2112,7 +2113,7 @@ audit=false
       Directory('$p/tmp').createSync(recursive: true);
       Directory('$p/home/.npm').createSync(recursive: true);
       Directory('$p/home/.cache/pip').createSync(recursive: true);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     final env = <String, String>{
       'PREFIX': p,
       'TERMUX__PREFIX': p,
@@ -2196,7 +2197,7 @@ audit=false
           return;
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
   }
 
   /// Plugin-runtime environment overrides (spec §6, additive helper).
@@ -2218,7 +2219,7 @@ audit=false
       Directory('$runtimeRoot/cache/pip').createSync(recursive: true);
       Directory('$runtimeRoot/storage/home').createSync(recursive: true);
       Directory('$runtimeRoot/bin').createSync(recursive: true);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     final prefix = I._prefix?.path;
     return {
       'HOME': '$runtimeRoot/storage/home',
@@ -2268,7 +2269,7 @@ audit=false
       try {
         final usr = Link('$p/usr');
         if (!usr.existsSync()) usr.createSync('.');
-      } catch (_) {}
+      } catch (e) { Diag.swallow('sandbox_service', e); }
 
       // 2. Core so-version links (self-heal only what physically exists
       //    as the versioned file — we never invent libraries).
@@ -2289,7 +2290,7 @@ audit=false
           }
           link.parent.createSync(recursive: true);
           link.createSync(e.value); // relative, like SYMLINKS.txt
-        } catch (_) {}
+        } catch (e) { Diag.swallow('sandbox_service', e); }
       }
 
       // 3. Shebangs + exec bits — same treatment as a fresh install.
@@ -2416,7 +2417,7 @@ audit=false
     for (final p in List.of(procs)) {
       try {
         p.kill(ProcessSignal.sigkill);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('sandbox_service', e); }
       _liveProcesses.remove(p);
       for (final bucket in _runProcesses.values) {
         bucket.remove(p);
@@ -2444,7 +2445,7 @@ audit=false
       for (final p in List.of(procs)) {
         try {
           p.kill(ProcessSignal.sigkill);
-        } catch (_) {}
+        } catch (e) { Diag.swallow('sandbox_service', e); }
         _liveProcesses.remove(p);
       }
     }
@@ -2466,7 +2467,7 @@ audit=false
     for (final p in List.of(_liveProcesses)) {
       try {
         p.kill(ProcessSignal.sigkill);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('sandbox_service', e); }
     }
     _liveProcesses.clear();
     _runProcesses.clear();
@@ -2646,7 +2647,7 @@ audit=false
             return 'DENIED by sandbox policy: command matches denied pattern';
           }
         }
-      } catch (_) {}
+      } catch (e) { Diag.swallow('sandbox_service', e); }
     }
 
     // Secret material is never readable by a spawned command. The git
@@ -2968,7 +2969,7 @@ audit=false
         _runtimeEnsured[kind] = true;
         return true;
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     onLine?.call(
       '[runtime] installing ${kind == 'node' ? 'nodejs + npm + pnpm' : 'python + pip + uv'}…',
     );
@@ -2987,7 +2988,7 @@ audit=false
             '-c',
             'corepack enable 2>&1; corepack prepare pnpm@latest --activate 2>&1',
           ]).timeout(const Duration(minutes: 2));
-        } catch (_) {}
+        } catch (e) { Diag.swallow('sandbox_service', e); }
       }
       final (vCode, _) = await execChecked(['bash', '-c', 'command -v $bin'])
           .timeout(const Duration(seconds: 10));
@@ -3034,7 +3035,7 @@ audit=false
         _compilerEnsured = true;
         return true;
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     onLine?.call('[compiler] installing clang (~60 MB, one-time)…');
     try {
       await _aptChecked('update 2>&1', timeout: const Duration(minutes: 3));
@@ -3133,7 +3134,7 @@ audit=false
         _jdkEnsured = true;
         return true;
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     onLine?.call('[jdk] installing openjdk-17 (one-time, large)…');
     try {
       await _aptChecked('update 2>&1', timeout: const Duration(minutes: 3));
@@ -3179,7 +3180,7 @@ audit=false
         _kotlinEnsured = true;
         return true;
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     if (!await ensureJdk(onLine: onLine)) {
       onLine?.call('[kotlin] needs a JDK first — JDK install failed.');
       return false;
@@ -3261,7 +3262,7 @@ echo INSTALLED
         _prootEnsured = true;
         return true;
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     onLine?.call('[proot] provisioning Ubuntu userland (one-time)…');
     try {
       final ok = await _installProotUbuntu(onLine);
@@ -3481,7 +3482,7 @@ echo PROVISIONED
         _flutterEnsured = true;
         return true;
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     onLine?.call(
       '[flutter] installing Flutter $flutterVersion inside proot Ubuntu '
       '(~1.5 GB download, ~4 GB installed, one-time)…',
@@ -3639,7 +3640,7 @@ echo INSTALLED
           if (t.startsWith('MISS ')) result[t.substring(5)] = false;
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     return result;
   }
 
@@ -3780,7 +3781,7 @@ echo INSTALLED
       try {
         provisioned = File('${prefix.path}/ubuntu/etc/os-release').existsSync();
         prootBinary = File('${prefix.path}/bin/proot').existsSync();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('sandbox_service', e); }
     }
     return (
       provisioned: provisioned,
@@ -3811,7 +3812,7 @@ echo INSTALLED
       final files = await _ensureFilesRoot();
       final prefix = Directory('${files.path}/sandbox');
       if (prefix.existsSync()) prefix.deleteSync(recursive: true);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_service', e); }
     _prefix = null;
     _installed = false;
     _checked = false;

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'diag.dart';
 
 /// F1 (the sandbox persistent-PTY parity): one long-lived bash process per session
 /// inside the sandbox. `run_shell` with `persistent: true` goes through
@@ -149,7 +150,7 @@ class PtyShell {
       _dead = true;
       try {
         _proc.kill(ProcessSignal.sigkill);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('pty_service', e); }
       return 'PTY command timed out (${timeoutSeconds}s)';
     }
   }
@@ -160,11 +161,11 @@ class PtyShell {
       await _sub.cancel();
       await _subErr.cancel();
       _proc.kill(ProcessSignal.sigkill);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('pty_service', e); }
     if (!_outCtrl.isClosed) {
       try {
         await _outCtrl.close();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('pty_service', e); }
     }
   }
 }

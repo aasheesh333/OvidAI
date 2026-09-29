@@ -47,6 +47,7 @@ import 'native_plugins/rest_descriptors_dev.dart';
 import 'native_plugins/rest_descriptors_infra.dart';
 import 'native_plugins/sandbox_utilities.dart';
 import 'native_plugins/web_and_db_utilities.dart';
+import 'diag.dart';
 
 const kDeniedControlDomains = <String>[
   'paypal.com',
@@ -509,7 +510,7 @@ class PluginItem {
         if (h is Map) {
           try {
             out.add(PluginHook.fromJson(h.cast<String, dynamic>()));
-          } catch (_) {}
+          } catch (e) { Diag.swallow('state', e); }
         }
       }
       return out;
@@ -1944,7 +1945,7 @@ class AppState extends ChangeNotifier {
       // catalog; runtime rows invalidate their scoped snapshot.
       try {
         await onRefreshSkills?.call(p.runtimeId);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
       refresh();
     }
   }
@@ -2061,10 +2062,10 @@ class AppState extends ChangeNotifier {
         await _enqueueProbe(
           () => recordTruthfulPluginStatus(result.manifest!.id, revive: true),
         );
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
       try {
         await onRefreshSkills?.call(result.manifest!.id);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
       refresh();
     }
     return result;
@@ -2086,7 +2087,7 @@ class AppState extends ChangeNotifier {
       // record, grant + owned secrets) before the legacy surfaces below.
       try {
         await PluginRuntimeManager.I.uninstall(runtimeId);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
     }
     await persistPluginState();
 
@@ -2116,7 +2117,7 @@ class AppState extends ChangeNotifier {
       s.connected = false;
       try {
         await McpService.I.disconnect(s.canonicalId);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
       mcpServers.remove(s);
       await Future.wait([
         deleteMcpEnv(s.canonicalId),
@@ -2131,7 +2132,7 @@ class AppState extends ChangeNotifier {
 
     try {
       await onRefreshSkills?.call(runtimeId);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
 
     refresh();
   }
@@ -2145,7 +2146,7 @@ class AppState extends ChangeNotifier {
       // contributions and persist the disabled activation.
       try {
         await PluginRuntimeManager.I.disable(plugin.runtimeId!);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
     }
     await persistPluginState();
 
@@ -2168,7 +2169,7 @@ class AppState extends ChangeNotifier {
       s.connected = false;
       try {
         await McpService.I.disconnect(s.canonicalId);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
     }
 
     if (owned.isNotEmpty) {
@@ -2177,7 +2178,7 @@ class AppState extends ChangeNotifier {
 
     try {
       await onRefreshSkills?.call(runtimeId);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
 
     refresh();
   }
@@ -2200,7 +2201,7 @@ class AppState extends ChangeNotifier {
       // (applying any promotion that came due while disabled).
       try {
         await PluginRuntimeManager.I.enable(plugin.runtimeId!);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
       final current = plugins
           .where((row) => row.runtimeId == plugin.runtimeId)
           .firstOrNull;
@@ -2211,7 +2212,7 @@ class AppState extends ChangeNotifier {
     await persistPluginState();
     try {
       await onRefreshSkills?.call(runtimeId);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
     refresh();
   }
 
@@ -2221,7 +2222,7 @@ class AppState extends ChangeNotifier {
     final activation = await PluginRuntimeManager.I.retry(runtimeId);
     try {
       await onRefreshSkills?.call(runtimeId);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
     refresh();
     return activation;
   }
@@ -2376,7 +2377,7 @@ class AppState extends ChangeNotifier {
         // The exactly-once `session_start` must observe the persisted session,
         // so bypass the debounce rather than waiting on a coalesced window.
         await flushSessionPersistence();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
       await SessionLifecycleService.I.sessionStarted(session, reason: reason);
     }();
     _trackSessionLifecycle(future);
@@ -2439,7 +2440,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(startupFailureMemoKey(id), at.toIso8601String());
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> _clearStartupFailureMemo(String id) async {
@@ -2447,7 +2448,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove(startupFailureMemoKey(id));
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<List<StartupTask>> _buildReadinessTasks() async {
@@ -2723,7 +2724,7 @@ class AppState extends ChangeNotifier {
       if (next.length != current.length) {
         await prefs.setStringList(_kMcpConnectedIntent, next);
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
     final server = _mcpServerByCanonicalId(canonicalId);
     if (server != null) server.connected = false;
     serviceStatus.remove('mcp:$canonicalId');
@@ -3149,7 +3150,7 @@ class AppState extends ChangeNotifier {
         chatFontScaleMin,
         chatFontScaleMax,
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// Last model the user picked — carried into new sessions (Ovid-style
@@ -3233,7 +3234,7 @@ class AppState extends ChangeNotifier {
           lastWorkspaceFolder = folder;
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> _persistLastSelection() async {
@@ -3258,7 +3259,7 @@ class AppState extends ChangeNotifier {
       } else {
         await prefs.remove(_kLastWorkspace);
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> _loadRecentModels(SharedPreferences prefs) async {
@@ -3273,7 +3274,7 @@ class AppState extends ChangeNotifier {
             raw = content;
           }
         }
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
       raw ??= prefs.getString(_kRecentModels);
       if (raw == null || raw.isEmpty) return;
       final decoded = jsonDecode(raw);
@@ -3316,7 +3317,7 @@ class AppState extends ChangeNotifier {
           }
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> persistRecentModels() => _persistRecentModels();
@@ -3340,7 +3341,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_kRecentModels, jsonStr);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
     try {
       final file = await _recentModelsJsonFile();
       if (file != null) {
@@ -3349,7 +3350,7 @@ class AppState extends ChangeNotifier {
         }
         await file.writeAsString(jsonStr);
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// Record a `(providerId, model)` selection as most-recent (newest first,
@@ -3446,7 +3447,7 @@ class AppState extends ChangeNotifier {
       try {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString(_kProviders, encoded);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
     });
     await _providerWrite;
   }
@@ -3676,7 +3677,7 @@ class AppState extends ChangeNotifier {
               _scheduleSessionDeletion(id, sandboxId);
             }
           }
-        } catch (_) {}
+        } catch (e) { Diag.swallow('state', e); }
       }
     }
   }
@@ -3976,7 +3977,7 @@ class AppState extends ChangeNotifier {
       // write order produces a fingerprint mismatch and a safe fallback.
       try {
         await _writeSessionBootstrapFromSession(prefs, active, activeRaw);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
       await prefs.setStringList(_kSessions, encoded);
       if (activeSessionId != null) {
         await prefs.setString(_kActive, activeSessionId!);
@@ -4170,16 +4171,16 @@ class AppState extends ChangeNotifier {
       // disagreeing about the same fact.
       try {
         await GitHubService.I.signOut();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
       try {
         await _secureStorage.deleteAll();
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
       _ensureActiveSession();
       notifyListeners();
       await persistSessions();
       await persistProviderState();
       await persistPluginState();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   int navIndex = 0; // 0 Chat, 1 Studio, 2 Browser, 3 Plugins, 4 Settings
@@ -4205,7 +4206,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kStudioFirstOpenDone, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// Loads the persisted first-open flag. Called during first-frame init;
@@ -4214,7 +4215,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       studioFirstOpenDone = prefs.getBool(_kStudioFirstOpenDone) ?? false;
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> setSandboxSkipped(bool v) async {
@@ -4227,7 +4228,7 @@ class AppState extends ChangeNotifier {
       } else {
         await prefs.remove(_kSandboxSkipped);
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// Share memory across sessions (persisted, default OFF).
@@ -4277,7 +4278,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kShareStudioOnRestart, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
     if (v) unawaited(SessionDataSharing.I.shareStudioOnRestart());
   }
 
@@ -4287,7 +4288,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kShareBrowserOnRestart, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
     if (v) unawaited(SessionDataSharing.I.shareBrowserOnRestart());
   }
 
@@ -4368,7 +4369,7 @@ class AppState extends ChangeNotifier {
     try {
       final p = await SharedPreferences.getInstance();
       await p.setString(_kSendWhileBusy, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// Conversation display for completed turns: `compact` (default) folds the
@@ -4384,7 +4385,7 @@ class AppState extends ChangeNotifier {
     try {
       final p = await SharedPreferences.getInstance();
       await p.setString(_kConversationDisplay, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   static const _kNotificationsPref = 'ovid_notifications_enabled';
@@ -4401,7 +4402,7 @@ class AppState extends ChangeNotifier {
     try {
       final p = await SharedPreferences.getInstance();
       await p.setBool(_kNotificationsPref, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
     if (!v) {
       AgentNotificationService.I.agentIdle();
     }
@@ -4424,7 +4425,7 @@ class AppState extends ChangeNotifier {
     try {
       final p = await SharedPreferences.getInstance();
       await p.setBool(_kKeepAlivePref, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// Whether the user has accepted the Control-mode disclosure. Once true,
@@ -4443,7 +4444,7 @@ class AppState extends ChangeNotifier {
     try {
       final p = await SharedPreferences.getInstance();
       await p.setBool(_kControlDisclosure, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// Battery-exemption prompt shown once on first Control-mode enable, so
@@ -4457,7 +4458,7 @@ class AppState extends ChangeNotifier {
     try {
       final p = await SharedPreferences.getInstance();
       await p.setBool(_kControlBatteryPrompt, true);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   // ── Locale preference (the locale coordinator client-locale parity: zh/en reply language) ──
@@ -4472,7 +4473,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_kLocale, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// System-prompt line for the locale pref (empty = default English).
@@ -4500,7 +4501,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_kWelcome, welcomeVersion);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   // ── Chat font scale (pinch-to-zoom on the message list) ──
@@ -4520,7 +4521,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setDouble(_kChatFontScale, chatFontScale);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// Toggle and persist. The app shell listens and rebuilds the whole
@@ -4532,7 +4533,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kTheme, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> setShareSessionMemory(bool v) async {
@@ -4541,7 +4542,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kShareMemory, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> setMemoryEnabled(bool v) async {
@@ -4550,7 +4551,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kMemoryEnabled, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> setShowReasoning(bool v) async {
@@ -4559,7 +4560,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kShowReasoning, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> setWorkflowEnabled(bool v) async {
@@ -4568,7 +4569,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kWorkflowEnabled, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> setBrowserDesktopMode(bool v) async {
@@ -4577,7 +4578,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kBrowserDesktopMode, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> setGithubSync(bool v) async {
@@ -4586,7 +4587,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kGithubSync, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> setAutoRunSafeCommands(bool v) async {
@@ -4595,7 +4596,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kAutoRunSafe, v);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> _persistGlobalPermissionGrants() async {
@@ -4605,7 +4606,7 @@ class AppState extends ChangeNotifier {
         _kPermissionGrants,
         jsonEncode(globalPermissionGrants.map((g) => g.toJson()).toList()),
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// Adds a global "always allow" grant (applies to every session).
@@ -4680,7 +4681,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt(_kContextWindowOverride, tokens);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> setMaxOutputTokens(int tokens) async {
@@ -4689,7 +4690,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt(_kMaxOutputTokens, tokens);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> setResponseTimeout(int sec) async {
@@ -4698,7 +4699,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt(_kResponseTimeout, sec);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   final List<ProviderConfig> providers = [];
@@ -4741,7 +4742,7 @@ class AppState extends ChangeNotifier {
         _kMemories,
         jsonEncode(memories.map((e) => e.toJson()).toList()),
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> _loadMemories() async {
@@ -4755,7 +4756,7 @@ class AppState extends ChangeNotifier {
         ..addAll(
           list.map((e) => MemoryItem.fromJson(e as Map<String, dynamic>)),
         );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   ChatSession? get activeSession =>
@@ -5073,7 +5074,7 @@ class AppState extends ChangeNotifier {
     unawaited(() async {
       try {
         await SandboxService.I.workDirFor(sessionId);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('state', e); }
     }());
   }
 
@@ -5421,7 +5422,7 @@ class AppState extends ChangeNotifier {
     // Clean up the stored API key.
     try {
       await _secureStorage.delete(key: '$_providerKeyPrefix${p.id}');
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
     // Clear the model from any session using it.
     for (final s in sessions) {
       if (s.providerId == p.id) {
@@ -5483,7 +5484,7 @@ class AppState extends ChangeNotifier {
             }
           }).whereType<UsageEntry>(),
         );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> _persistUsage() async {
@@ -5497,7 +5498,7 @@ class AppState extends ChangeNotifier {
         _kUsage,
         recent.map((e) => jsonEncode(e.toJson())).toList(),
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   void appendUsage(UsageEntry e) {
@@ -5727,7 +5728,7 @@ class AppState extends ChangeNotifier {
       if (s.connected) {
         try {
           await McpService.I.disconnect(s.canonicalId);
-        } catch (_) {}
+        } catch (e) { Diag.swallow('state', e); }
       }
       mcpServers.remove(s);
     }
@@ -5742,7 +5743,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(_kMarketplaces, marketplaces);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   static const _kMarketplaceMerged = 'ovid_marketplace_merged_v1';
@@ -5801,7 +5802,7 @@ class AppState extends ChangeNotifier {
         }
       }
       refresh();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   static PluginItem _mergeRuntimeDisplayMetadata(
@@ -5862,7 +5863,7 @@ class AppState extends ChangeNotifier {
         await prefs.setStringList(_kMarketplaces, live);
       }
       refresh();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// Merge every registered marketplace catalog that has not been merged yet
@@ -6369,7 +6370,7 @@ class AppState extends ChangeNotifier {
     try {
       final dir = await pluginCacheDirFor(source);
       if (dir.existsSync()) dir.deleteSync(recursive: true);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// Task 3: read the plugin's `hooks/hooks.json` from its installed content
@@ -6894,7 +6895,7 @@ class AppState extends ChangeNotifier {
         ),
         ownerId: canonicalId,
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> _recordMcpReady(McpServer s) => _recordMcpStatus(
@@ -6958,7 +6959,7 @@ class AppState extends ChangeNotifier {
         return;
       }
       await _recordMcpFailed(s, detail);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   void toggleMcpServer(McpServer s) {
@@ -7042,7 +7043,7 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(_kMcpConnectedIntent, merged.toList());
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// WS2: seed/prune the persisted MCP connected-intent against the
@@ -7099,7 +7100,7 @@ class AppState extends ChangeNotifier {
         return !pluginActive(owner);
       });
       await prefs.setStringList(_kMcpConnectedIntent, intent.toList());
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// Reconnect both MCP servers and enabled plugins on app launch / resume.
@@ -7332,7 +7333,7 @@ class AppState extends ChangeNotifier {
           )
           .toList();
       await prefs.setStringList(_kCustomMcpServers, customs);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> _recordRemovedBuiltinSeed(String canonicalId) async {
@@ -7341,7 +7342,7 @@ class AppState extends ChangeNotifier {
       final list = (prefs.getStringList(_kRemovedBuiltinSeeds) ?? []).toSet();
       list.add(canonicalId);
       await prefs.setStringList(_kRemovedBuiltinSeeds, list.toList());
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> _applyRemovedBuiltinSeeds() async {
@@ -7354,7 +7355,7 @@ class AppState extends ChangeNotifier {
         (s) =>
             !s.custom && (set.contains(s.canonicalId) || set.contains(s.name)),
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   @visibleForTesting
@@ -7416,7 +7417,7 @@ class AppState extends ChangeNotifier {
         );
       }
       refresh();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   /// Public persist hook — the Plugins UI and agent tools call this after
@@ -7525,7 +7526,7 @@ class AppState extends ChangeNotifier {
       }
       plugins.insertAll(0, loaded);
       refresh();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> _persistPluginState({bool reportFailure = false}) async {
@@ -7622,7 +7623,7 @@ class AppState extends ChangeNotifier {
       }
       if (healed) await persistPluginState();
       refresh();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   // ── Custom Presets ──────────────────────────────────────────────────
@@ -7631,7 +7632,7 @@ class AppState extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       final list = PresetRegistry.customPresets.map((p) => p.toJson()).toList();
       await prefs.setString(_kCustomPresets, jsonEncode(list));
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> _loadCustomPresets() async {
@@ -7657,10 +7658,10 @@ class AppState extends ChangeNotifier {
                 AgentPreset.fromJson(item.cast<String, dynamic>()),
               );
             }
-          } catch (_) {}
+          } catch (e) { Diag.swallow('state', e); }
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<void> saveCustomPreset(AgentPreset preset) async {
@@ -7695,7 +7696,7 @@ class AppState extends ChangeNotifier {
         key: '$_kMcpEnvPrefix$serverName',
         value: jsonEncode(env),
       );
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<Map<String, String>> getMcpEnv(String serverName) async {
@@ -7713,7 +7714,7 @@ class AppState extends ChangeNotifier {
   Future<void> deleteMcpEnv(String serverName) async {
     try {
       await _secureStorage.delete(key: '$_kMcpEnvPrefix$serverName');
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   // ── MCP server HTTP auth headers (secure storage) ───────────────────
@@ -7732,7 +7733,7 @@ class AppState extends ChangeNotifier {
           value: jsonEncode(headers),
         );
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   Future<Map<String, String>> getMcpHeaders(String serverName) async {
@@ -7752,7 +7753,7 @@ class AppState extends ChangeNotifier {
   Future<void> deleteMcpHeaders(String serverName) async {
     try {
       await _secureStorage.delete(key: '$_kMcpHeadersPrefix$serverName');
-    } catch (_) {}
+    } catch (e) { Diag.swallow('state', e); }
   }
 
   // ── Per-session repo selection (Studio) ─────────────────────────────

@@ -30,6 +30,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'plugin_manifest.dart';
 import 'sandbox_service.dart';
+import 'diag.dart';
 
 /// Outcome of one dependency (and of the install as a whole).
 enum PluginDependencyStatus { ok, failed, degraded }
@@ -469,7 +470,7 @@ class PluginDependencyService {
           if (t.startsWith('MISS ')) result[t.substring(5)] = false;
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('plugin_dependency_service', e); }
     return result;
   }
 
@@ -482,7 +483,7 @@ class PluginDependencyService {
     try {
       final rt = await _runtimeRootFor(pluginId, version);
       if (rt.existsSync()) await rt.delete(recursive: true);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('plugin_dependency_service', e); }
   }
 
   // ── output parsing ──────────────────────────────────────────────

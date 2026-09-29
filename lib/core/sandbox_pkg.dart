@@ -11,6 +11,7 @@
 library;
 
 import 'dart:io';
+import 'diag.dart';
 
 /// Write `$PREFIX/bin/ovid-pkg`, `$PREFIX/bin/apt`, `bin/apt-get`,
 /// `bin/pkg`, plus `$PREFIX/bin/npm` and `$PREFIX/bin/npx`. All shell
@@ -44,7 +45,7 @@ class OvidPkgInstaller {
       final f = File(path);
       f.parent.createSync(recursive: true);
       f.writeAsStringSync(content, flush: true);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_pkg', e); }
   }
 
   static void _write(String path, String content) {
@@ -57,9 +58,9 @@ class OvidPkgInstaller {
       } catch (_) {
         try {
           Process.runSync('/system/bin/chmod', ['0755', path]);
-        } catch (_) {}
+        } catch (e) { Diag.swallow('sandbox_pkg', e); }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('sandbox_pkg', e); }
   }
 
   static String _pkgWrapper(String p, String tool) => """#!$p/bin/sh

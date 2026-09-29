@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'diag.dart';
 
 /// Deterministic, filesystem/provider-safe browser profile names.
 ///
@@ -272,7 +273,7 @@ class SessionBrowserProfiles extends ChangeNotifier {
             }) ??
             false;
         if (ok) purged++;
-      } catch (_) {}
+      } catch (e) { Diag.swallow('session_browser_profiles', e); }
     }
     // Keep only the names that are still held by a live WebView.
     final still = <String>[];
@@ -306,21 +307,21 @@ class SessionBrowserProfiles extends ChangeNotifier {
         list.removeAt(0);
       }
       await _writePendingDeletes(list);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('session_browser_profiles', e); }
   }
 
   Future<void> _forgetPendingDelete(String name) async {
     try {
       final list = await _pendingDeletes();
       if (list.remove(name)) await _writePendingDeletes(list);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('session_browser_profiles', e); }
   }
 
   Future<void> _writePendingDeletes(List<String> names) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(_kPendingDeletes, names);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('session_browser_profiles', e); }
   }
 
   /// Copy the cookies of every profile in [profiles] into every other one.
@@ -438,7 +439,7 @@ class SessionBrowserProfiles extends ChangeNotifier {
         list.removeAt(0);
       }
       await prefs.setStringList(key, list);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('session_browser_profiles', e); }
   }
 
   /// Forget one session's visit record (or every session's, with no id).
@@ -454,7 +455,7 @@ class SessionBrowserProfiles extends ChangeNotifier {
           await prefs.remove(key);
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('session_browser_profiles', e); }
   }
 
   // ── Restart sharing ───────────────────────────────────────────────────

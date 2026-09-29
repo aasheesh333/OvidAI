@@ -22,6 +22,7 @@ import 'permissions_screen.dart';
 import 'providers_screen.dart';
 import 'plugins_screen.dart';
 import 'usage_screen.dart';
+import '../core/diag.dart';
 
 /// Settings hub — DeepSeek/kimi-k3 web style. Providers & Plugins are
 /// dedicated screens behind rows; everything else grouped below.
@@ -487,12 +488,12 @@ Future<int> dirBytes(Directory dir) async {
         if (e is File) {
           try {
             bytes += await e.length();
-          } catch (_) {}
+          } catch (e) { Diag.swallow('settings_screen', e); }
         } else if (e is Directory) {
           stack.add(e);
         }
       }
-    } catch (_) {}
+    } catch (e) { Diag.swallow('settings_screen', e); }
   }
   return bytes;
 }
@@ -507,9 +508,9 @@ Future<int> clearDirContents(Directory dir) async {
     await for (final e in dir.list(followLinks: false)) {
       try {
         await e.delete(recursive: true);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('settings_screen', e); }
     }
-  } catch (_) {}
+  } catch (e) { Diag.swallow('settings_screen', e); }
   return freed;
 }
 
@@ -1379,7 +1380,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
     try {
       final f = File(s.path);
       if (f.existsSync()) await f.delete();
-    } catch (_) {}
+    } catch (e) { Diag.swallow('settings_screen', e); }
     await _reload();
   }
 

@@ -50,6 +50,7 @@ import 'hook_service.dart';
 import 'mcp_service.dart';
 import 'startup_coordinator.dart';
 import 'state.dart';
+import 'diag.dart';
 
 /// Preferences key for the persisted install map (plugin id → entry
 /// JSON). Deliberately separate from `ovid_plugin_state_v1` (catalog
@@ -257,7 +258,7 @@ class PluginRuntimeStatusStore {
           // A single damaged inner record never blocks the rest.
         }
       });
-    } catch (_) {}
+    } catch (e) { Diag.swallow('plugin_runtime', e); }
   }
 
   PluginRuntimeStatus? statusFor(String canonicalId) => _statuses[canonicalId];
@@ -846,7 +847,7 @@ class PluginRuntimeManager extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt(kPluginBootEpochPrefKey, value);
-    } catch (_) {}
+    } catch (e) { Diag.swallow('plugin_runtime', e); }
   }
 
   /// The activation record persisted for [pluginId], or null.
@@ -889,7 +890,7 @@ class PluginRuntimeManager extends ChangeNotifier {
           final row = PluginItem.fromJson(rowJson.cast<String, dynamic>());
           final id = item.key.toString();
           if (row.runtimeId == id) rows[id] = row;
-        } catch (_) {}
+        } catch (e) { Diag.swallow('plugin_runtime', e); }
       }
       return rows;
     } catch (_) {
@@ -1787,17 +1788,17 @@ class PluginRuntimeManager extends ChangeNotifier {
         if (hadPrior) {
           try {
             backup.renameSync(contentDir.path);
-          } catch (_) {}
+          } catch (e) { Diag.swallow('plugin_runtime', e); }
         }
         try {
           if (pending.existsSync()) pending.deleteSync(recursive: true);
-        } catch (_) {}
+        } catch (e) { Diag.swallow('plugin_runtime', e); }
         rethrow;
       }
       if (hadPrior) {
         try {
           if (backup.existsSync()) backup.deleteSync(recursive: true);
-        } catch (_) {}
+        } catch (e) { Diag.swallow('plugin_runtime', e); }
       }
     } catch (e) {
       PluginContributionRegistry.I.unregisterPlugin(manifest.id);
@@ -1897,7 +1898,7 @@ class PluginRuntimeManager extends ChangeNotifier {
       try {
         final d = Directory(previous.contentDir);
         if (d.existsSync()) d.deleteSync(recursive: true);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('plugin_runtime', e); }
       await deps.removeVersion(manifest.id, previous.version);
     }
 
@@ -2341,7 +2342,7 @@ class PluginRuntimeManager extends ChangeNotifier {
       try {
         final d = Directory(entry.contentDir);
         if (d.existsSync()) d.deleteSync(recursive: true);
-      } catch (_) {}
+      } catch (e) { Diag.swallow('plugin_runtime', e); }
       await _deps().removeVersion(pluginId, entry.version);
     }
     await PluginPermissionStore().revoke(pluginId);
