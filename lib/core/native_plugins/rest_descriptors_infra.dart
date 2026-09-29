@@ -703,7 +703,8 @@ abstract class _InfraCapability implements NativePluginCapability {
 class VercelMcpCapability extends _InfraCapability {
   VercelMcpCapability({super.client})
       : super(
-          infraDescriptors.firstWhere((d) => d.pluginName == 'Vercel MCP'),
+          infraDescriptors.firstWhere((d) => d.pluginName == 'Vercel MCP',
+              orElse: () => throw StateError('native descriptor missing: Vercel MCP')),
         );
 
   @override
@@ -727,7 +728,8 @@ class VercelMcpCapability extends _InfraCapability {
 class VercelDeployCapability extends _InfraCapability {
   VercelDeployCapability({super.client})
       : super(
-          infraDescriptors.firstWhere((d) => d.pluginName == 'Vercel Deploy'),
+          infraDescriptors.firstWhere((d) => d.pluginName == 'Vercel Deploy',
+              orElse: () => throw StateError('native descriptor missing: Vercel Deploy')),
         );
 
   @override
@@ -765,7 +767,8 @@ class VercelDeployCapability extends _InfraCapability {
 class RailwayCapability extends _InfraCapability {
   RailwayCapability({super.client})
       : super(
-          infraDescriptors.firstWhere((d) => d.pluginName == 'Railway MCP'),
+          infraDescriptors.firstWhere((d) => d.pluginName == 'Railway MCP',
+              orElse: () => throw StateError('native descriptor missing: Railway MCP')),
         );
 
   @override
@@ -803,7 +806,8 @@ class RailwayCapability extends _InfraCapability {
 class HerokuCapability extends _InfraCapability {
   HerokuCapability({super.client})
       : super(
-          infraDescriptors.firstWhere((d) => d.pluginName == 'Heroku MCP'),
+          infraDescriptors.firstWhere((d) => d.pluginName == 'Heroku MCP',
+              orElse: () => throw StateError('native descriptor missing: Heroku MCP')),
         );
 
   @override
@@ -822,7 +826,8 @@ class HerokuCapability extends _InfraCapability {
 class CloudflareCapability extends _InfraCapability {
   CloudflareCapability({super.client})
       : super(
-          infraDescriptors.firstWhere((d) => d.pluginName == 'Cloudflare MCP'),
+          infraDescriptors.firstWhere((d) => d.pluginName == 'Cloudflare MCP',
+              orElse: () => throw StateError('native descriptor missing: Cloudflare MCP')),
         );
 
   @override
@@ -847,7 +852,8 @@ class CloudflareCapability extends _InfraCapability {
 class DockerCapability extends _InfraCapability {
   DockerCapability({super.client})
       : super(
-          infraDescriptors.firstWhere((d) => d.pluginName == 'Docker MCP'),
+          infraDescriptors.firstWhere((d) => d.pluginName == 'Docker MCP',
+              orElse: () => throw StateError('native descriptor missing: Docker MCP')),
         );
 
   @override
@@ -901,7 +907,8 @@ class DockerCapability extends _InfraCapability {
 class KubernetesCapability extends _InfraCapability {
   KubernetesCapability({super.client})
       : super(
-          infraDescriptors.firstWhere((d) => d.pluginName == 'Kubernetes MCP'),
+          infraDescriptors.firstWhere((d) => d.pluginName == 'Kubernetes MCP',
+              orElse: () => throw StateError('native descriptor missing: Kubernetes MCP')),
         );
 
   @override
@@ -950,7 +957,8 @@ class KubernetesCapability extends _InfraCapability {
 class TerraformCapability extends _InfraCapability {
   TerraformCapability({super.client})
       : super(
-          infraDescriptors.firstWhere((d) => d.pluginName == 'Terraform MCP'),
+          infraDescriptors.firstWhere((d) => d.pluginName == 'Terraform MCP',
+              orElse: () => throw StateError('native descriptor missing: Terraform MCP')),
         );
 
   @override
@@ -986,7 +994,8 @@ class TerraformCapability extends _InfraCapability {
 class ZapierCapability extends _InfraCapability {
   ZapierCapability({super.client})
       : super(
-          infraDescriptors.firstWhere((d) => d.pluginName == 'Zapier MCP'),
+          infraDescriptors.firstWhere((d) => d.pluginName == 'Zapier MCP',
+              orElse: () => throw StateError('native descriptor missing: Zapier MCP')),
         );
 
   @override
@@ -1037,7 +1046,8 @@ class ZapierCapability extends _InfraCapability {
 class MakeCapability extends _InfraCapability {
   MakeCapability({super.client})
       : super(
-          infraDescriptors.firstWhere((d) => d.pluginName == 'Make.com MCP'),
+          infraDescriptors.firstWhere((d) => d.pluginName == 'Make.com MCP',
+              orElse: () => throw StateError('native descriptor missing: Make.com MCP')),
         );
 
   @override
@@ -1104,7 +1114,8 @@ void registerInfra() {
   registry.register(RailwayCapability());
   registry.register(HerokuCapability());
   registry.register(RestApiCapability(
-    infraDescriptors.firstWhere((d) => d.pluginName == 'DigitalOcean MCP'),
+    infraDescriptors.firstWhere((d) => d.pluginName == 'DigitalOcean MCP',
+              orElse: () => throw StateError('native descriptor missing: DigitalOcean MCP')),
   ));
   registry.register(CloudflareCapability());
   registry.register(DockerCapability());

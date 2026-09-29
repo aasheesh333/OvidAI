@@ -650,7 +650,8 @@ abstract class _HostRoutedCapability extends RestApiCapability {
         ).callTool(toolName, args);
       }
       final label = configFields
-          .firstWhere((field) => field.key == 'host')
+          .firstWhere((field) => field.key == 'host',
+              orElse: () => NativePluginConfigField(key: 'host', label: 'host'))
           .label;
       return 'Configure $label first: open the Configure sheet for '
           '"$pluginName" and save "host".';
@@ -667,7 +668,8 @@ abstract class _HostRoutedCapability extends RestApiCapability {
 class GitLabCapability extends _HostRoutedCapability {
   GitLabCapability({super.client})
       : super(
-          devDescriptors.firstWhere((d) => d.pluginName == 'GitLab MCP'),
+          devDescriptors.firstWhere((d) => d.pluginName == 'GitLab MCP',
+              orElse: () => throw StateError('native descriptor missing: GitLab MCP')),
           baseSuffix: '/api/v4',
           requireHost: false,
         );
@@ -678,7 +680,8 @@ class GitLabCapability extends _HostRoutedCapability {
 class JiraCapability extends _HostRoutedCapability {
   JiraCapability({super.client})
       : super(
-          devDescriptors.firstWhere((d) => d.pluginName == 'Jira MCP'),
+          devDescriptors.firstWhere((d) => d.pluginName == 'Jira MCP',
+              orElse: () => throw StateError('native descriptor missing: Jira MCP')),
           baseSuffix: '',
           requireHost: true,
         );
@@ -690,7 +693,8 @@ class BitbucketCapability extends RestApiCapability {
   BitbucketCapability({super.client})
       : _client = client,
         super(
-          devDescriptors.firstWhere((d) => d.pluginName == 'Bitbucket MCP'),
+          devDescriptors.firstWhere((d) => d.pluginName == 'Bitbucket MCP',
+              orElse: () => throw StateError('native descriptor missing: Bitbucket MCP')),
         );
 
   final http.Client? _client;
@@ -733,7 +737,8 @@ class BitbucketCapability extends RestApiCapability {
 class TrelloCapability extends RestApiCapability {
   TrelloCapability({super.client})
       : super(
-          devDescriptors.firstWhere((d) => d.pluginName == 'Trello MCP'),
+          devDescriptors.firstWhere((d) => d.pluginName == 'Trello MCP',
+              orElse: () => throw StateError('native descriptor missing: Trello MCP')),
         );
 
   @override
@@ -745,7 +750,8 @@ class TrelloCapability extends RestApiCapability {
     final key = (stored['api_key'] ?? '').trim();
     if (key.isEmpty) {
       final label = configFields
-          .firstWhere((field) => field.key == 'api_key')
+          .firstWhere((field) => field.key == 'api_key',
+              orElse: () => NativePluginConfigField(key: 'api_key', label: 'api_key'))
           .label;
       return 'Configure $label first: open the Configure sheet for '
           '"$pluginName" and save "api_key".';

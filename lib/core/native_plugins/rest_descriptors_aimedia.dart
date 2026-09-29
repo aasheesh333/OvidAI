@@ -399,7 +399,8 @@ class DalleCapability extends _AiMediaCapability {
   DalleCapability({super.client})
       : super(
           aiMediaDescriptors
-              .firstWhere((d) => d.pluginName == 'OpenAI DALL·E MCP'),
+              .firstWhere((d) => d.pluginName == 'OpenAI DALL·E MCP',
+              orElse: () => throw StateError('native descriptor missing: OpenAI DALL·E MCP')),
         );
 
   @override
@@ -464,7 +465,8 @@ class ElevenLabsCapability extends _AiMediaCapability {
   ElevenLabsCapability({super.client})
       : super(
           aiMediaDescriptors
-              .firstWhere((d) => d.pluginName == 'ElevenLabs MCP'),
+              .firstWhere((d) => d.pluginName == 'ElevenLabs MCP',
+              orElse: () => throw StateError('native descriptor missing: ElevenLabs MCP')),
         );
 
   static const int maxInputChars = 2000;
@@ -549,7 +551,8 @@ class NotionSyncCapability extends _AiMediaCapability {
   NotionSyncCapability({super.client})
       : super(
           aiMediaDescriptors
-              .firstWhere((d) => d.pluginName == 'Notion Sync'),
+              .firstWhere((d) => d.pluginName == 'Notion Sync',
+              orElse: () => throw StateError('native descriptor missing: Notion Sync')),
         );
 
   @override
@@ -675,7 +678,8 @@ class GoogleDriveCapability extends _AiMediaCapability {
   GoogleDriveCapability({super.client})
       : super(
           aiMediaDescriptors
-              .firstWhere((d) => d.pluginName == 'Google Drive MCP'),
+              .firstWhere((d) => d.pluginName == 'Google Drive MCP',
+              orElse: () => throw StateError('native descriptor missing: Google Drive MCP')),
         );
 
   @override
@@ -793,7 +797,8 @@ class StripeCapability extends _AiMediaCapability {
   StripeCapability({super.client})
       : super(
           aiMediaDescriptors
-              .firstWhere((d) => d.pluginName == 'Stripe MCP'),
+              .firstWhere((d) => d.pluginName == 'Stripe MCP',
+              orElse: () => throw StateError('native descriptor missing: Stripe MCP')),
         );
 
   @override
@@ -836,7 +841,8 @@ class YouTubeSummarizerCapability extends _AiMediaCapability {
   YouTubeSummarizerCapability({super.client})
       : super(
           aiMediaDescriptors
-              .firstWhere((d) => d.pluginName == 'YouTube Summarizer'),
+              .firstWhere((d) => d.pluginName == 'YouTube Summarizer',
+              orElse: () => throw StateError('native descriptor missing: YouTube Summarizer')),
         );
 
   @override

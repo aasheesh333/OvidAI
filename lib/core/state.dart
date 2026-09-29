@@ -6699,8 +6699,11 @@ class AppState extends ChangeNotifier {
         final pname = _marketplaceString(p['name']);
         if (pname == null || pname.isEmpty) continue;
         if (plugins.any((e) => e.runtimeId == null && e.name == pname)) {
+          // Guarded by the any() check above; orElse names the invariant
+          // rather than throwing a context-free StateError if it ever breaks.
           final existing = plugins.firstWhere(
             (e) => e.runtimeId == null && e.name == pname,
+            orElse: () => throw StateError('marketplace merge: $pname vanished'),
           );
           if (existing.source == null && p['source'] != null) {
             existing.source = _githubPluginSource(

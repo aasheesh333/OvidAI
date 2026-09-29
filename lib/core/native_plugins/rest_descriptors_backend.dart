@@ -1103,7 +1103,8 @@ class _HeaderClient extends http.BaseClient {
 class FirebaseCapability extends _BackendCapability {
   FirebaseCapability({super.client})
       : super(
-          backendDescriptors.firstWhere((d) => d.pluginName == 'Firebase MCP'),
+          backendDescriptors.firstWhere((d) => d.pluginName == 'Firebase MCP',
+              orElse: () => throw StateError('native descriptor missing: Firebase MCP')),
         );
 
   @override
@@ -1155,7 +1156,8 @@ class FirebaseCapability extends _BackendCapability {
 class SupabaseCapability extends _BackendCapability {
   SupabaseCapability({super.client})
       : super(
-          backendDescriptors.firstWhere((d) => d.pluginName == 'Supabase MCP'),
+          backendDescriptors.firstWhere((d) => d.pluginName == 'Supabase MCP',
+              orElse: () => throw StateError('native descriptor missing: Supabase MCP')),
         );
 
   @override
@@ -1195,7 +1197,8 @@ class SupabaseCapability extends _BackendCapability {
       }
       if (expanded.isNotEmpty) {
         final current = descriptor.tools
-            .firstWhere((tool) => tool.name == toolName)
+            .firstWhere((tool) => tool.name == toolName,
+                orElse: () => throw StateError('unknown tool: $toolName'))
             .queryArgs;
         descriptor = _withTool(
           descriptor,
@@ -1220,7 +1223,8 @@ class SupabaseCapability extends _BackendCapability {
 class AirtableCapability extends _BackendCapability {
   AirtableCapability({super.client})
       : super(
-          backendDescriptors.firstWhere((d) => d.pluginName == 'Airtable MCP'),
+          backendDescriptors.firstWhere((d) => d.pluginName == 'Airtable MCP',
+              orElse: () => throw StateError('native descriptor missing: Airtable MCP')),
         );
 
   @override
@@ -1244,7 +1248,8 @@ class AirtableCapability extends _BackendCapability {
 class AppwriteCapability extends _BackendCapability {
   AppwriteCapability({super.client})
       : super(
-          backendDescriptors.firstWhere((d) => d.pluginName == 'Appwrite MCP'),
+          backendDescriptors.firstWhere((d) => d.pluginName == 'Appwrite MCP',
+              orElse: () => throw StateError('native descriptor missing: Appwrite MCP')),
         );
 
   @override
@@ -1268,8 +1273,8 @@ class AppwriteCapability extends _BackendCapability {
 class PocketBaseCapability extends _BackendCapability {
   PocketBaseCapability({super.client})
       : super(
-          backendDescriptors.firstWhere(
-              (d) => d.pluginName == 'PocketBase MCP'),
+          backendDescriptors.firstWhere((d) => d.pluginName == 'PocketBase MCP',
+              orElse: () => throw StateError('native descriptor missing: PocketBase MCP')),
         );
 
   @override
@@ -1294,8 +1299,8 @@ class PocketBaseCapability extends _BackendCapability {
 class VectorDbCapability extends _BackendCapability {
   VectorDbCapability({super.client})
       : super(
-          backendDescriptors.firstWhere(
-              (d) => d.pluginName == 'Vector DB MCP'),
+          backendDescriptors.firstWhere((d) => d.pluginName == 'Vector DB MCP',
+              orElse: () => throw StateError('native descriptor missing: Vector DB MCP')),
         );
 
   @override
@@ -1349,7 +1354,8 @@ class VectorDbCapability extends _BackendCapability {
 class MongoDbCapability extends _BackendCapability {
   MongoDbCapability({super.client})
       : super(
-          backendDescriptors.firstWhere((d) => d.pluginName == 'MongoDB MCP'),
+          backendDescriptors.firstWhere((d) => d.pluginName == 'MongoDB MCP',
+              orElse: () => throw StateError('native descriptor missing: MongoDB MCP')),
         );
 
   @override
@@ -1393,7 +1399,8 @@ class MongoDbCapability extends _BackendCapability {
 class S3Capability extends _BackendCapability {
   S3Capability({super.client})
       : super(
-          backendDescriptors.firstWhere((d) => d.pluginName == 'S3 MCP'),
+          backendDescriptors.firstWhere((d) => d.pluginName == 'S3 MCP',
+              orElse: () => throw StateError('native descriptor missing: S3 MCP')),
         );
 
   @override
@@ -1677,7 +1684,8 @@ String _trimOutput(String text) {
 class RedisCapability extends _BackendCapability {
   RedisCapability()
       : super(
-          backendDescriptors.firstWhere((d) => d.pluginName == 'Redis MCP'),
+          backendDescriptors.firstWhere((d) => d.pluginName == 'Redis MCP',
+              orElse: () => throw StateError('native descriptor missing: Redis MCP')),
         );
 
   @override
@@ -1781,7 +1789,8 @@ class RedisCapability extends _BackendCapability {
 class ObsidianCapability extends _BackendCapability {
   ObsidianCapability()
       : super(
-          backendDescriptors.firstWhere((d) => d.pluginName == 'Obsidian MCP'),
+          backendDescriptors.firstWhere((d) => d.pluginName == 'Obsidian MCP',
+              orElse: () => throw StateError('native descriptor missing: Obsidian MCP')),
         );
 
   @override
