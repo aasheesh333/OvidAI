@@ -52,7 +52,13 @@ class GeoFixTest {
 
     @Test
     fun aSingleFixIsPickedWhateverItsValue() {
+        // Epoch 0 is a real timestamp, not "missing" — it must still beat
+        // Long.MIN_VALUE rather than be mistaken for an absent provider.
         assertEquals(0, GeoFix.newestIndex(listOf(0L)))
-        assertEquals(0, GeoFix.newestIndex(listOf(null, 1L)))
+        // Nulls are SKIPPED, not counted as a slot: the only fix here sits at
+        // index 1, so index 1 is what comes back. (Caught by porting the
+        // algorithm to JS and running these cases — CI never executes Kotlin
+        // tests, so a wrong expectation here would have rotted silently.)
+        assertEquals(1, GeoFix.newestIndex(listOf(null, 1L)))
     }
 }
