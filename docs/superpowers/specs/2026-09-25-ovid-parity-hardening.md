@@ -62,13 +62,13 @@ no "100% bug-free" claim — we close concrete, cited defects with tests.
   Add a declarative settings-field renderer first (lightest safe path).
 
 ## Tracker
-| WS | Status |
-|---|---|
-| 1 Security | in progress |
-| 2 CC hooks/commands | pending |
-| 3 CC agents→subagents | pending |
-| 4 Android inbuilt | pending |
-| 5 Browser | pending |
-| 6 Workspace sep | pending |
-| 7 Control mode | pending |
-| 8 Plugin UI | pending |
+| WS | Status | Commits (CI-verified) |
+|---|---|---|
+| 1 Security | **done** | Control→drive escalation fixed; SSRF numeric-IP hardening (`4eef501`) |
+| 2 CC hooks/commands | **mostly done** | matcher anchoring, plugin.json string/array pointers, command sub-dir namespacing (`f989d0f`), UserPromptSubmit additionalContext injection (`1419c22`). Remaining: UserPromptSubmit/SubagentStop exit-2 blocking, `permissionDecision:"allow"` bypass — deferred (run-loop/approval rewiring). |
+| 3 CC agents→subagents | pending | plugin `agents/*.md` still injected as prompt text, not dispatched with their own model/tools. |
+| 4 Android inbuilt | **core done** | Playwright + Puppeteer seeds removed (browser binaries can't run on Android); Postgres copy honest (`781bc0a`). Remaining: Docker/Obsidian/Redis localhost defaults; MCP Hub/Voice Input install-to-nothing; Sandbox Runtime `installed:true`. |
+| 5 Browser | **core done** | browser_open reads rendered tab (fixes double-fetch + redirect SSRF); hover blocked in read-only (`4d70bb2`). Remaining: in-page navigation host re-gating. |
+| 6 Workspace sep | pending | guard the agent from Ovid's own tree; structured request-working-folder tool. |
+| 7 Control mode | pending | gesture completion callback + serialization; delta-read package guard. |
+| 8 Plugin UI | pending | declarative settings-field rendering. |
