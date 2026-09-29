@@ -3449,8 +3449,14 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         expect(confirmed?.popup, 'controlDisclosure');
         expect(session.mode, 'auto');
         agent.mode = AgentMode.control;
-        expect(agent.childModeForTest(), AgentMode.drive);
-        expect(agent.childModeForTest(modeName: 'control'), AgentMode.drive);
+        // A Control child drops the device capability but must NOT gain
+        // unconfined filesystem/network access: it downgrades to General
+        // (jailed + prompted), never to Full Access. Mapping Control -> drive
+        // was a privilege escalation (audit 2026-09-25).
+        expect(agent.childModeForTest(), AgentMode.auto);
+        expect(agent.childModeForTest(modeName: 'control'), AgentMode.auto);
+        // And it is never the unconfined Full Access mode.
+        expect(agent.childModeForTest(), isNot(AgentMode.drive));
 
         final dispatchTool = agent.toolsForTest().firstWhere(
           (tool) => (tool['function'] as Map)['name'] == 'dispatch_agent',

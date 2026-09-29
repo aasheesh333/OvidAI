@@ -22,6 +22,14 @@ void main() {
         '100.100.100.200',
         'fe80::1',
         'FE80::1',
+        // Numeric-encoding bypasses of 169.254.169.254 (audit 2026-09-25):
+        // curl/inet_aton accept all of these for the same address.
+        '2852039166', // single decimal
+        '0xA9FEA9FE', // dotless hex
+        '0xa9fea9fe',
+        '169.254.169.254',
+        '0251.0376.0251.0376', // dotted octal
+        '169.254.0.255', // /16 general
       ]) {
         expect(
           AgentService.isMetadataOrLinkLocalHost(h),
@@ -33,7 +41,11 @@ void main() {
 
     test('ordinary and loopback hosts are NOT blocked', () {
       for (final h in ['example.com', 'api.github.com', '127.0.0.1', 'localhost',
-        '192.168.1.50', '10.0.0.3']) {
+        '192.168.1.50', '10.0.0.3',
+        // Numeric IPs that are NOT metadata must still go through the normal
+        // grant prompt, not a hard block.
+        '8.8.8.8', '3232235826', // 192.168.100.50 packed
+        ]) {
         expect(
           AgentService.isMetadataOrLinkLocalHost(h),
           isFalse,

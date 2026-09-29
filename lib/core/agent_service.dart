@@ -15566,7 +15566,58 @@ ${await _agentsMdBlock()}
           lower.contains('169.254.') ||
           lower.contains('a9fe:a9fe'); // 169.254.169.254 in hex
     }
+    // NUMERIC-ENCODING BYPASS (audit 2026-09-25): a bare `169.254.169.254`
+    // string is caught above, but `curl` / most resolvers also accept the same
+    // address written as a single decimal (2852039166), dotless hex
+    // (0xA9FEA9FE), octal, or mixed dotted forms. Decode any all-numeric host
+    // to a 32-bit IPv4 and re-check the link-local /16 and the Alibaba host, so
+    // the metadata block cannot be walked around with an alternate encoding.
+    final ip = _decodeNumericIpv4(h);
+    if (ip != null) {
+      if ((ip & 0xFFFF0000) == 0xA9FE0000) return true; // 169.254.0.0/16
+      if (ip == 0x646464C8) return true; // 100.100.100.200
+    }
     return false;
+  }
+
+  /// Decode an all-numeric IPv4 host to its 32-bit value, accepting the
+  /// encodings `inet_aton`/`curl` accept: dotted (2–4 parts, each decimal,
+  /// `0x` hex, or `0` octal) and a single packed number. Returns null for
+  /// anything containing a letter that is not part of a `0x` hex run (i.e. real
+  /// hostnames), so it only ever tightens the numeric-IP path.
+  static int? _decodeNumericIpv4(String host) {
+    final parts = host.split('.');
+    if (parts.length > 4) return null;
+    int? parsePart(String p) {
+      if (p.isEmpty) return null;
+      final s = p.toLowerCase();
+      try {
+        if (s.startsWith('0x')) return int.parse(s.substring(2), radix: 16);
+        if (s.length > 1 && s.startsWith('0')) {
+          return int.parse(s.substring(1), radix: 8);
+        }
+        return int.parse(s, radix: 10);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    if (parts.length == 1) {
+      final v = parsePart(parts[0]);
+      if (v == null || v < 0 || v > 0xFFFFFFFF) return null;
+      return v;
+    }
+    // Dotted a.b.c.d (and short forms a.b / a.b.c). The last part absorbs the
+    // remaining bytes, mirroring inet_aton, but for our /16 test the common
+    // 4-part form is what matters; be strict and only accept full 4-part here.
+    if (parts.length != 4) return null;
+    var ip = 0;
+    for (final p in parts) {
+      final v = parsePart(p);
+      if (v == null || v < 0 || v > 255) return null;
+      ip = (ip << 8) | v;
+    }
+    return ip;
   }
 
   Future<bool> _checkHostGrant(String rawHost, {required String tool}) async {
@@ -19929,7 +19980,16 @@ ${await _agentsMdBlock()}
         }
       }
     }
-    return childMode == AgentMode.control ? AgentMode.drive : childMode;
+    // A subagent never drives the device (device_* is blocked for children
+    // regardless), so a Control child drops the device capability. It must
+    // drop DOWN to General, NOT across to Full Access: Control is
+    // workspace-jailed and prompts for outside paths, while `drive` is
+    // unconfined and unprompted by design. Mapping Control -> drive was a
+    // privilege ESCALATION — a jailed Control parent would spawn a child with
+    // unconfined filesystem and network access. General (auto) keeps the same
+    // jailed-and-prompted posture the Control parent already had, minus device
+    // control. (Audit 2026-09-25.)
+    return childMode == AgentMode.control ? AgentMode.auto : childMode;
   }
 
   /// Canonical child-start announcement shared by `dispatch_agent` and
