@@ -117,9 +117,13 @@ void main() {
       expect(js, contains('"lat":1.5'));
     });
 
-    test('a </script>-shaped value cannot terminate the script context', () {
-      // The reason comes from the device (a provider name, an error string), so
-      // it is not ours to sanitise — but it must not be able to close the script.
+    test('a </script>-shaped value is left inert (defence in depth)', () {
+      // NOT the HTML hazard this test's old name implied: the script goes out via
+      // runJavaScript, which evaluates JS directly, so no parser can be tricked
+      // into closing a context. The escape is still worth pinning — `message`
+      // comes from the device (a provider name, an error string) so it is not
+      // ours to sanitise, and the same text also lands in console logs and the
+      // transcript, where staying inert still matters.
       final js = AgentService.geoReplyJs(1, const {
         'ok': false,
         'code': 2,

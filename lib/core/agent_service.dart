@@ -3632,10 +3632,17 @@ class AgentService extends ChangeNotifier {
 
   /// Builds the `window.__ovidGeoReply(id, payload)` script for [payload].
   ///
-  /// jsonEncode output is a valid JS expression, so the one real hazard is a
-  /// value containing `</script>`-shaped text terminating an inline script
-  /// context early — hence the `<` escape. Split out so that rule is pinned by a
-  /// test rather than living inside an untestable channel callback.
+  /// jsonEncode output is already a valid JS expression, and this goes out via
+  /// `runJavaScript` — which evaluates JS directly, so no HTML parser ever sees
+  /// it and a `</script>`-shaped value CANNOT terminate anything here. The `<`
+  /// escape is therefore defence in depth rather than the fix for that: the
+  /// `message` field comes off the device (a provider name, an error string), so
+  /// it is not ours to sanitise, and the same text also reaches console logs and
+  /// the transcript — keeping it inert costs nothing and stays correct if this
+  /// payload is ever inlined into a document.
+  ///
+  /// Split out so the rule is pinned by a test rather than living inside an
+  /// untestable channel callback.
   @visibleForTesting
   static String geoReplyJs(int id, Map<String, Object?> payload) {
     final json = jsonEncode(payload).replaceAll('<', r'\u003c');
