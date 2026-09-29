@@ -3581,7 +3581,11 @@ class AgentService extends ChangeNotifier {
     if (id < 0) return;
 
     final host = Uri.tryParse(tab.url)?.host ?? tab.url;
-    final Map<String, Object?> payload;
+    // Deliberately NOT `final`: every path assigns exactly once, but the catch
+    // below can run *after* the try already assigned (e.g. the native call
+    // throws), and a `final` local forbids that — `assignment_to_final_local`.
+    // Still definitely-assigned by the time it is read below.
+    Map<String, Object?> payload;
     try {
       const permission = Permission.locationWhenInUse;
       var status = await permission.status;
