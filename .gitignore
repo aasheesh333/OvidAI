@@ -78,6 +78,8 @@ android/build/
 
 # local scratch + user-attached screenshots (never committed)
 Screenshot_*.jpg
+# Captures written by the device_screenshot tool during live testing.
+device-screenshots/
 .bak*
 .proot_probe*.sh
 .setup_flutter.sh

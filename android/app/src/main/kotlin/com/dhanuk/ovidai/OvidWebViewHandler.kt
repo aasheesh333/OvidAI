@@ -343,6 +343,23 @@ class OvidWebViewHandler(
         maxEdge: Int,
         result: MethodChannel.Result
     ) {
+        // A DETACHED WebView has no composited pixels at all. Its platform view
+        // is mounted only while the Browser panel is open (BrowserScreen's
+        // IndexedStack), but the controller deliberately outlives that route —
+        // so with the panel closed this still reports the STALE layout size
+        // checked below. PixelCopy would then copy whatever Flutter is drawing
+        // over that rect and report a blank frame as a SUCCESSFUL capture,
+        // which the model would read as an empty page. Refuse honestly instead.
+        if (!webView.isAttachedToWindow || !webView.isShown) {
+            result.success(
+                mapOf(
+                    "captured" to false,
+                    "reason" to
+                        "tab is not on screen (open the Browser panel first)"
+                )
+            )
+            return
+        }
         val sourceW = webView.width
         val sourceH = webView.height
         if (sourceW <= 0 || sourceH <= 0) {

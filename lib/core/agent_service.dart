@@ -6868,7 +6868,11 @@ if (!window.__ovidBlankHooked) {
             'how you visually verify layout, a rendered chart, or whether a '
             'login/redirect actually happened. Text-based tools '
             '(browser_read, browser_outline) are cheaper — reach for this '
-            'when the answer is visual.',
+            'when the answer is visual. Requires the Browser panel to be on '
+            'screen: the tab is only composited while it is open, so with the '
+            'panel closed this fails with "tab is not on screen" instead of '
+            'returning a blank image — ask the user to open the panel, then '
+            'retry.',
         'parameters': {
           'type': 'object',
           'properties': {

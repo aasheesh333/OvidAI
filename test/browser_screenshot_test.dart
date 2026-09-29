@@ -225,6 +225,22 @@ void main() {
       expect(await shot(), contains('no attached webview'));
     });
 
+    test('a tab that is not on screen is reported, never faked', () async {
+      // The tab's platform view is mounted only while the Browser panel is
+      // open, so a closed panel has no pixels to copy. A blank PNG reported as
+      // success is the worst outcome: the model would read an empty page into
+      // the conversation and reason from it.
+      mockCapture({
+        'captured': false,
+        'reason': 'tab is not on screen (open the Browser panel first)',
+      });
+
+      final out = await shot();
+      expect(out, contains('tab is not on screen'));
+      expect(out, contains('Browser panel'));
+      expect(staged(), isEmpty, reason: 'nothing was captured to attach');
+    });
+
     test('a missing captured flag is a failure, not a silent success',
         () async {
       mockCapture({'base64': png});
