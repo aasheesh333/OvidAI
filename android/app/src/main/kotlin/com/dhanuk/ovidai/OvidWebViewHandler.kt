@@ -1,6 +1,13 @@
 package com.dhanuk.ovidai
 
 import android.app.Activity
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.util.Base64
+import android.view.PixelCopy
 import android.webkit.WebSettings
 import android.webkit.WebView
 import androidx.webkit.ScriptHandler
@@ -13,7 +20,9 @@ import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugins.webviewflutter.WebViewFlutterAndroidExternalApi
+import java.io.ByteArrayOutputStream
 import java.util.WeakHashMap
+import kotlin.math.roundToInt
 
 /**
  * Handles WebView configuration requests across the ovid/webview method channel.
@@ -239,6 +248,26 @@ class OvidWebViewHandler(
                 }
             }
 
+            // ── Pixel capture (browser_screenshot) ──────────────────────────
+            // webview_flutter exposes NO screenshot API, so the agent could
+            // read a page's text and outline but never actually SEE it: layout,
+            // visual login state, "did that click change the screen" were all
+            // unverifiable from Dart. PixelCopy reads the WebView's own surface
+            // — the same pixels the user is looking at.
+            "capturePixels" -> {
+                val identifier = call.argument<Number>("webViewIdentifier")?.toLong()
+                val maxEdge = (call.argument<Number>("maxEdge")?.toInt()
+                    ?: DEFAULT_CAPTURE_EDGE).coerceIn(64, MAX_CAPTURE_EDGE)
+                val webView = resolveWebView(identifier)
+                if (webView == null) {
+                    result.success(
+                        mapOf("captured" to false, "reason" to "no attached webview")
+                    )
+                    return
+                }
+                onUi { captureWebView(webView, maxEdge, result) }
+            }
+
             else -> result.notImplemented()
         }
     }
@@ -263,6 +292,100 @@ class OvidWebViewHandler(
         if (identifier == null) return null
         val engine = flutterEngine ?: return null
         return WebViewFlutterAndroidExternalApi.getWebView(engine, identifier)
+    }
+
+    private companion object {
+        /** Long-edge cap for a capture when the caller does not send one. */
+        const val DEFAULT_CAPTURE_EDGE = 1280
+
+        /** Hard ceiling, so a caller cannot ask for a multi-megapixel bitmap. */
+        const val MAX_CAPTURE_EDGE = 4096
+    }
+
+    /**
+     * Capture [webView] into a downscaled PNG and reply with base64 + geometry.
+     *
+     * Replies EXACTLY once on every path. A MethodChannel.Result that is never
+     * answered leaks the Dart-side future — the tool would hang until its whole
+     * budget expired — and one answered twice throws. The guard is load-bearing
+     * because [PixelCopy] is asynchronous: its listener and the surrounding
+     * try/catch can both fire.
+     */
+    private fun captureWebView(
+        webView: WebView,
+        maxEdge: Int,
+        result: MethodChannel.Result
+    ) {
+        val sourceW = webView.width
+        val sourceH = webView.height
+        if (sourceW <= 0 || sourceH <= 0) {
+            // Never laid out (tab not rendered, or backgrounded). An honest
+            // failure beats a 0x0 bitmap or a silent hang.
+            result.success(
+                mapOf("captured" to false, "reason" to "webview not laid out")
+            )
+            return
+        }
+        val size = WebViewCapture.scaledSize(sourceW, sourceH, maxEdge)
+        var bitmap: Bitmap? = null
+        var answered = false
+        fun reply(payload: String?, reason: String) {
+            if (answered) return
+            answered = true
+            bitmap?.recycle()
+            bitmap = null
+            result.success(
+                if (payload != null) {
+                    mapOf(
+                        "captured" to true,
+                        "base64" to payload,
+                        "width" to size.first,
+                        "height" to size.second,
+                        "sourceWidth" to sourceW,
+                        "sourceHeight" to sourceH
+                    )
+                } else {
+                    mapOf("captured" to false, "reason" to reason)
+                }
+            )
+        }
+        try {
+            val target = Bitmap.createBitmap(
+                size.first,
+                size.second,
+                Bitmap.Config.ARGB_8888
+            )
+            bitmap = target
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // The View-source overload is API 26+ and minSdk is 23.
+                PixelCopy.request(
+                    webView,
+                    target,
+                    { copyResult ->
+                        if (copyResult == PixelCopy.SUCCESS) {
+                            reply(
+                                WebViewCapture.encodePng(target),
+                                "png encoding failed"
+                            )
+                        } else {
+                            reply(null, "PixelCopy failed with code $copyResult")
+                        }
+                    },
+                    Handler(Looper.getMainLooper())
+                )
+            } else {
+                // Pre-26 fallback. A hardware-accelerated WebView frequently
+                // draws blank through draw(Canvas); encodePng returning a real
+                // bitmap is still the truthful best effort on those devices.
+                webView.draw(Canvas(target))
+                reply(WebViewCapture.encodePng(target), "png encoding failed")
+            }
+        } catch (error: Throwable) {
+            reply(
+                null,
+                "capture threw ${error.javaClass.simpleName}: ${error.message}"
+            )
+        }
     }
 
     private fun applySettings(settings: WebSettings, desktop: Boolean) {
@@ -625,4 +748,42 @@ private fun desktopFeatureShim(width: Int, height: Int): String = """
   } catch (e) {}
 })();
 """
+
+
+/**
+ * Pure capture helpers, split out of [OvidWebViewHandler] so the downscale
+ * geometry is unit-testable on the JVM — no device, Activity or real WebView.
+ */
+internal object WebViewCapture {
+    /**
+     * Downscale ([w], [h]) so the LONG edge is at most [maxEdge], preserving the
+     * aspect ratio and never UPSCALING. Degenerate input collapses to 1x1 rather
+     * than throwing, because [Bitmap.createBitmap] rejects a zero dimension.
+     *
+     * The downscale is not cosmetic: a 1440x3200 device shot is several MB of
+     * base64 for a model that only needs to read the layout, and a vision part
+     * rides along in the request envelope on every following turn.
+     */
+    fun scaledSize(w: Int, h: Int, maxEdge: Int): Pair<Int, Int> {
+        if (w <= 0 || h <= 0) return Pair(1, 1)
+        val long = w.coerceAtLeast(h)
+        val edge = if (maxEdge > 0) maxEdge else long
+        if (long <= edge) return Pair(w, h)
+        val ratio = edge.toDouble() / long.toDouble()
+        val scaledW = (w * ratio).roundToInt().coerceAtLeast(1)
+        val scaledH = (h * ratio).roundToInt().coerceAtLeast(1)
+        return Pair(scaledW, scaledH)
+    }
+
+    /** PNG-encode [bitmap] as unwrapped base64, or null when encoding fails. */
+    fun encodePng(bitmap: Bitmap): String? {
+        return try {
+            val out = ByteArrayOutputStream()
+            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) return null
+            Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+}
 

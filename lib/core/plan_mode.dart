@@ -78,6 +78,13 @@ class PlanModePolicy {
     'browser_wait_for',
     'browser_snapshot',
     'browser_outline',
+    // Screenshot is in the READ group, and that is deliberate: it captures
+    // pixels and stages them as a vision message — nothing is written to disk
+    // and no page state changes (unlike browser_click/type, which DRIVE the
+    // page and are correctly excluded). Planning without it means a plan can
+    // never be grounded in what a page actually LOOKS like, which is exactly
+    // the research the plan agent is for.
+    'browser_screenshot',
     // ── reading background state ─────────────────────────────────────
     'job_list',
     'job_output',
@@ -210,6 +217,7 @@ changes nothing). If a step needs a change, write the change down.
     'browser_list_tabs',
     'browser_outline',
     'browser_read',
+    'browser_screenshot',
     'browser_snapshot',
     'browser_wait_for',
     'catalog_get_provider',

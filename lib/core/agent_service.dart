@@ -912,7 +912,9 @@ class AgentService extends ChangeNotifier {
       name == 'run_shell' || name == 'run_code' || name == 'job_start';
 
   /// Roots the sandbox may reach for this dispatch: the session workspace plus
-  /// every path grant that applies in this session and mode.
+  /// every path grant that applies in this session and mode — intersected with
+  /// the plan-mode jail while planning, so the target jail and the plan gate
+  /// enforce the same boundary.
   ///
   /// Passing the granted paths in is what keeps the target jail from breaking
   /// the approval flow: without them an approved outside path would be
@@ -931,8 +933,43 @@ class AgentService extends ChangeNotifier {
         }
       } catch (_) {}
     }
+    // Plan mode NARROWS this set, never widens it (2026-09-29).
+    //
+    // The two jail layers were rooted differently: `_planModeShellBlock`
+    // polices the LITERAL path tokens of a command against `planModeRoot()`,
+    // while the sandbox target jail — the layer that catches `..` climbs and
+    // `$VAR` forms the token scan never sees — was rooted here, at the session
+    // workspace plus every path grant approved earlier in this session+mode.
+    // Whenever they disagreed the WIDER set decided those invisible escapes, so
+    // a directory approved while building stayed reachable from a `$HOME`-style
+    // form while planning. Intersecting makes both layers enforce ONE boundary,
+    // which is the owner's rule: plan mode works only inside the current
+    // directory, in every access mode, Full Access and Studio included.
+    if (planMode) {
+      try {
+        final jail = await planModeRoot();
+        if (jail.isNotEmpty) {
+          final narrowed = <String>{jail};
+          narrowed.addAll(
+            roots.where((r) => SandboxService.isPathContained(jail, r)),
+          );
+          // The jail root is always reachable: planning is DEFINED as working
+          // inside it, and an empty intersection just means the session
+          // workspace lives somewhere other than the bound repo folder.
+          return narrowed.toList();
+        }
+      } catch (_) {
+        // A resolver failure must not brick planning — fall through to the
+        // unnarrowed roots, matching the gates' own never-block-on-lookup rule.
+      }
+    }
     return roots;
   }
+
+  /// Test seam for [_sandboxAllowedRoots] — the roots the sandbox target jail
+  /// will honour for the next shell-like dispatch.
+  @visibleForTesting
+  Future<List<String>> sandboxAllowedRootsForTest() => _sandboxAllowedRoots();
 
   /// Monotonic id for scoping one tool invocation's processes.
   int _toolCallSeq = 0;
@@ -6491,10 +6528,36 @@ if (!window.__ovidBlankHooked) {
       'function': {
         'name': 'browser_outline',
         'description':
-            'Visual outline capture (webview_flutter has no pixel '
-            'screenshot API): returns the page\'s interactive skeleton — '
-            'headings, links, buttons, inputs with their labels.',
+            'Cheap TEXT skeleton of the page — headings, links, buttons, '
+            'inputs with their labels. Use browser_screenshot when you need '
+            'to actually SEE the page (layout, visual login state).',
         'parameters': {'type': 'object', 'properties': {}},
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'browser_screenshot',
+        'description':
+            'Real pixel capture of the active browser tab — the same pixels '
+            'the user is looking at (native PixelCopy, downscaled PNG). '
+            'Attached to the next model request as image data, so this is '
+            'how you visually verify layout, a rendered chart, or whether a '
+            'login/redirect actually happened. Text-based tools '
+            '(browser_read, browser_outline) are cheaper — reach for this '
+            'when the answer is visual.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'maxEdge': {
+              'type': 'integer',
+              'description':
+                  'Optional long-edge cap in px (default 1280, max 4096). '
+                  'Lower it for a smaller payload; raise it only when you '
+                  'need fine detail such as small text in a dense table.',
+            },
+          },
+        },
       },
     },
     // ── Core agent tools ──
@@ -14122,6 +14185,77 @@ ${await _agentsMdBlock()}
           return 'outline failed: $e';
         }
 
+      case 'browser_screenshot':
+        // Real pixels, via the native capture channel. webview_flutter itself
+        // has NO screenshot API, so until this the agent could read a page's
+        // text and outline but never see it — layout, a rendered chart, or
+        // "did that click actually log me in" were all unverifiable.
+        //
+        // Deliberately DISK-FREE: the PNG goes straight into the pending
+        // vision message. Writing it to the workspace first would make this a
+        // mutating tool (and thus unusable while planning) for no benefit —
+        // read_image already proves the vision path needs only bytes.
+        final tab = _activeTab;
+        // NO `controllerForTab(tab)` here, unlike the JS-based tools: a freshly
+        // constructed controller has no attached native WebView, so it could
+        // never yield an identifier — only a tab the panel has already bound
+        // can be captured. Forcing one would just turn "not laid out" into a
+        // wasted allocation (and throw in unit tests, where no webview
+        // platform is registered).
+        final maxEdge = (args['maxEdge'] as num?)?.toInt();
+        final Object? res;
+        try {
+          res = await _webviewChannel.invokeMapMethod<String, dynamic>(
+            'capturePixels',
+            <String, dynamic>{
+              'tabId': tab.id,
+              'webViewIdentifier': webViewIdentifierFor(tab),
+              if (maxEdge != null && maxEdge > 0) 'maxEdge': maxEdge,
+            },
+          );
+        } catch (e) {
+          return 'screenshot failed: $e';
+        }
+        final map = res is Map ? Map<String, dynamic>.from(res) : null;
+        if (map == null || map['captured'] != true) {
+          // Honest native narration: "not laid out" means the tab was never
+          // rendered (bind it / open the panel); "no attached webview" means
+          // the identifier did not resolve. Neither is a Dart-side bug, so
+          // say which one it was instead of a generic failure.
+          final reason = map?['reason']?.toString() ?? 'capture unavailable';
+          _emit('err', 'screenshot: $reason');
+          return 'screenshot failed: $reason';
+        }
+        final List<int> bytes;
+        try {
+          bytes = base64Decode(map['base64']?.toString() ?? '');
+        } catch (e) {
+          return 'screenshot failed: malformed base64 ($e)';
+        }
+        if (bytes.isEmpty) return 'screenshot failed: empty capture';
+        final w = map['width'];
+        final h = map['height'];
+        final label = 'browser screenshot of ${tab.url}';
+        _emit('page', 'screenshot ${w ?? '?'}x${h ?? '?'}');
+        final staged = _stageVisionImage(
+          path: label,
+          bytes: bytes,
+          extension: 'png',
+          reason: 'browser_screenshot',
+        );
+        if (!staged) {
+          // Mirror read_image: never pretend the model saw something.
+          return 'SCREENSHOT captured (${bytes.length} bytes, ${w ?? '?'}x'
+              '${h ?? '?'}) but the current model is not marked '
+              'vision-capable, so it was NOT attached. Switch to a vision '
+              'model, or enable "Supports images" for this model in '
+              'Settings → Providers. Use browser_read / browser_outline / '
+              'browser_snapshot for text instead.';
+        }
+        return 'SCREENSHOT ${w ?? '?'}x${h ?? '?'} (${bytes.length} bytes) '
+            'attached to the next model request as image data. '
+            'Read it and describe what you actually see.';
+
       case 'browser_snapshot':
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
@@ -15864,6 +15998,7 @@ ${await _agentsMdBlock()}
     'browser_find' => 'Find text',
     'browser_cookies' => 'Cookies',
     'browser_outline' => 'Page outline',
+    'browser_screenshot' => 'Screenshot',
     'generate_image' => 'Generate image',
     'read_attachment' => 'Read attachment',
     'preview' => 'Preview',
