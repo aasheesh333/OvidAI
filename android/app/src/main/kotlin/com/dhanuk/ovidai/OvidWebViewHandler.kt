@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Base64
 import android.view.PixelCopy
+import android.view.View
 import android.webkit.WebSettings
 import android.webkit.WebView
 import androidx.webkit.ScriptHandler
@@ -376,34 +377,85 @@ class OvidWebViewHandler(
             )
         }
         try {
-            val target = Bitmap.createBitmap(
-                size.first,
-                size.second,
-                Bitmap.Config.ARGB_8888
-            )
-            bitmap = target
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                // The View-source overload is API 26+ and minSdk is 23.
+            // NOTE: PixelCopy has NO public View-source overload. The only
+            // overloads are Surface, SurfaceView, Window and Request -- so the
+            // View-source call that used to live here could never compile, at
+            // any compileSdk. A WebView's pixels are still
+            // reachable through the Window overload (API 24+): copy the whole
+            // window, then crop the WebView's own on-screen rect out of it.
+            //
+            // `draw(Canvas)` is NOT an equivalent substitute: an accelerated
+            // WebView renders through the compositor, so a software draw comes
+            // back blank while still looking like a successful capture.
+            val win = activity?.window
+            val winW = webView.rootView.width
+            val winH = webView.rootView.height
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
+                win != null && winW > 0 && winH > 0
+            ) {
+                val loc = IntArray(2)
+                webView.getLocationInWindow(loc)
+                val rect = WebViewCapture.cropRect(
+                    loc[0],
+                    loc[1],
+                    webView.width,
+                    webView.height,
+                    winW,
+                    winH
+                )
+                if (rect == null) {
+                    // Scrolled fully out of the window: report it rather than
+                    // returning some other region's pixels as this tab.
+                    reply(null, "webview is outside the window")
+                    return
+                }
+                val full = Bitmap.createBitmap(winW, winH, Bitmap.Config.ARGB_8888)
+                bitmap = full
                 PixelCopy.request(
-                    webView,
-                    target,
+                    win,
+                    full,
                     { copyResult ->
-                        if (copyResult == PixelCopy.SUCCESS) {
-                            reply(
-                                WebViewCapture.encodePng(target),
-                                "png encoding failed"
-                            )
-                        } else {
+                        if (copyResult != PixelCopy.SUCCESS) {
                             reply(null, "PixelCopy failed with code $copyResult")
+                        } else {
+                            val cropped = WebViewCapture.cropAndScale(
+                                full,
+                                rect,
+                                size.first,
+                                size.second
+                            )
+                            if (cropped == null) {
+                                reply(null, "window crop rejected")
+                            } else {
+                                val png = WebViewCapture.encodePng(cropped)
+                                // `cropped` may BE `full` (createBitmap returns
+                                // the source when the rect covers all of it), in
+                                // which case reply()'s recycle is the only one.
+                                if (cropped !== full) cropped.recycle()
+                                reply(png, "png encoding failed")
+                            }
                         }
                     },
                     Handler(Looper.getMainLooper())
                 )
             } else {
-                // Pre-26 fallback. A hardware-accelerated WebView frequently
-                // draws blank through draw(Canvas); encodePng returning a real
-                // bitmap is still the truthful best effort on those devices.
-                webView.draw(Canvas(target))
+                // API 23, or no window attached (headless engine / unit test):
+                // a software draw is all that is left. Force the software layer
+                // first, then restore it immediately so the on-screen tab is not
+                // left re-rendering in software.
+                val target = Bitmap.createBitmap(
+                    size.first,
+                    size.second,
+                    Bitmap.Config.ARGB_8888
+                )
+                bitmap = target
+                val previousLayer = webView.layerType
+                webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+                try {
+                    webView.draw(Canvas(target))
+                } finally {
+                    webView.setLayerType(previousLayer, null)
+                }
                 reply(WebViewCapture.encodePng(target), "png encoding failed")
             }
         } catch (error: Throwable) {
@@ -824,6 +876,64 @@ internal object WebViewCapture {
         } catch (_: Throwable) {
             null
         }
+    }
+
+    /**
+     * Clamp a [w]x[h] crop at ([x],[y]) inside a [winW]x[winH] window.
+     *
+     * Returns `[x, y, w, h]`, or null when the rect misses the window entirely.
+     *
+     * Split out from the capture because [Bitmap] does not exist on a plain JVM,
+     * and this is the part that can be WRONG: an unclamped rect makes
+     * [Bitmap.createBitmap] throw, and a zero-width one yields a 0-pixel bitmap
+     * that would be reported as a successful capture.
+     */
+    fun cropRect(
+        x: Int,
+        y: Int,
+        w: Int,
+        h: Int,
+        winW: Int,
+        winH: Int
+    ): IntArray? {
+        if (winW <= 0 || winH <= 0 || w <= 0 || h <= 0) return null
+        if (x >= winW || y >= winH) return null
+        if (x + w <= 0 || y + h <= 0) return null
+        val cx = x.coerceAtLeast(0)
+        val cy = y.coerceAtLeast(0)
+        val cw = (x + w).coerceAtMost(winW) - cx
+        val ch = (y + h).coerceAtMost(winH) - cy
+        if (cw <= 0 || ch <= 0) return null
+        return intArrayOf(cx, cy, cw, ch)
+    }
+
+    /**
+     * Crop `[rect] = [x, y, w, h]` out of [full] and scale it to
+     * ([outW],[outH]). Returns null when the platform refuses the request.
+     *
+     * Note [Bitmap.createBitmap] may return [full] ITSELF when the crop covers
+     * the whole bitmap, so [full] is never recycled here.
+     */
+    fun cropAndScale(full: Bitmap, rect: IntArray, outW: Int, outH: Int): Bitmap? {
+        val crop = try {
+            Bitmap.createBitmap(full, rect[0], rect[1], rect[2], rect[3])
+        } catch (_: Throwable) {
+            return null
+        }
+        if (crop.width == outW && crop.height == outH) return crop
+        val scaled = try {
+            Bitmap.createScaledBitmap(
+                crop,
+                outW.coerceAtLeast(1),
+                outH.coerceAtLeast(1),
+                true
+            )
+        } catch (_: Throwable) {
+            if (crop !== full) crop.recycle()
+            return null
+        }
+        if (scaled !== crop && crop !== full) crop.recycle()
+        return scaled
     }
 }
 
