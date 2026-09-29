@@ -12586,28 +12586,37 @@ ${await _agentsMdBlock()}
           _emit('page', 'loading $url');
           // Give the webview time to load before reading text.
           await Future.delayed(const Duration(seconds: 2));
-          final r = await HttpShim.get(
-            Uri.parse(url),
-            headers: {'User-Agent': 'OvidAgent/1.0'},
-          );
-          var body = utf8.decode(r.bytes, allowMalformed: true);
-          body = body
-              .replaceAll(
-                RegExp(r'<script[\s\S]*?</script>', multiLine: true),
-                '',
-              )
-              .replaceAll(
-                RegExp(r'<style[\s\S]*?</style>', multiLine: true),
-                '',
-              )
-              .replaceAll(RegExp(r'<[^>]+>'), ' ')
-              .replaceAll(RegExp(r'\s{2,}'), '\n')
-              .trim();
+          // CORRECTNESS + SSRF FIX (audit 2026-09-25): read the text from the
+          // RENDERED tab (the WebView we just navigated, which carries this
+          // session's cookies and ran the page's JS), NOT a second
+          // HttpShim.get. The old second fetch (a) used no session profile, so
+          // authenticated or JS-rendered pages returned different content than
+          // the tab actually showed, and (b) followed redirects to hosts that
+          // were never re-gated — a redirect-based SSRF/gating hole. Reading
+          // the live DOM closes both.
+          String body;
+          try {
+            tab.controller ??= controllerForTab(tab);
+            final result = await tab.controller!.runJavaScriptReturningResult(
+              'document.body.innerText.substring(0,5000)',
+            );
+            final raw = result.toString();
+            body = (raw.startsWith('"') && raw.endsWith('"'))
+                ? jsonDecode(raw) as String
+                : raw;
+          } catch (_) {
+            // A page that blocks script evaluation (rare) yields no text
+            // rather than falling back to an ungated off-session fetch.
+            body = '';
+          }
           browserUrl = url;
-          browserPageText = (await spillToolOutput(name, body, cap: 5000));
+          browserPageText = await spillToolOutput(name, body, cap: 5000);
           notifyListeners();
-          _emit('page', '${r.status} · ${body.length} chars');
-          return browserPageText!;
+          _emit('page', '${body.length} chars');
+          return body.isEmpty
+              ? 'Loaded $url (no readable text extracted from the rendered '
+                    'page; try browser_read or browser_outline).'
+              : browserPageText!;
         } catch (e) {
           return 'fetch failed: $e';
         } finally {
@@ -15934,6 +15943,7 @@ ${await _agentsMdBlock()}
       case 'browser_swipe':
       case 'browser_select':
       case 'browser_desktop':
+      case 'browser_hover':
       case 'device_read':
       case 'device_tap':
       case 'device_type':

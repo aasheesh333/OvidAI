@@ -179,6 +179,20 @@ void main() {
       );
       s.planMode = false;
     });
+
+    test('read-only blocks browser_hover (real pointer events)', () async {
+      // Audit 2026-09-25: hover dispatches pointerover/mousemove and can
+      // trigger menus / JS side effects, so it must be blocked in Read-Only
+      // just like click/type — not fall through the deny-list as "reading".
+      final s = newSession('wave-ro-hover', mode: 'safe');
+      AgentService.setRunSessionForTest(s.id);
+      expect(
+        await AgentService.I.dispatchForTest('browser_hover', {
+          'selector': '#menu',
+        }),
+        contains('READ-ONLY MODE'),
+      );
+    });
   });
 
   group('wave: userZoom clamp (existing setter)', () {
