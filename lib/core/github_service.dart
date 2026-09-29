@@ -226,7 +226,26 @@ class GitHubService extends ChangeNotifier {
   /// of a full app kill. An explicit retry should always get a fresh window.
   Future<void> retryRestoreFromUi() async {
     _restoreRetryIndex = 0;
-    await retryRestoreIfNotLoggedIn();
+    // Bracket the restore with `_isInitializing` so `_handleInitialAuth`'s
+    // existing guard DEFERS instead of latching a signed-out prompt. Studio's
+    // initState fires this AND a post-frame `_handleInitialAuth()`, and the
+    // secure-storage read is async (up to ~300ms of retries) — so without this
+    // the post-frame call observed "signed out, not initializing, not failed"
+    // and opened the non-dismissible login sheet OVER a token that was about to
+    // restore. That is the exact wedge this method exists to prevent, and it
+    // left the user with no recovery but killing the app.
+    //
+    // Assigned synchronously (this runs from initState, during build) but
+    // deliberately WITHOUT notifying here: a synchronous notify could make a
+    // listener call setState mid-build. The flag is cleared in `finally`, so a
+    // completed restore never leaves the login UI gated.
+    _isInitializing = true;
+    try {
+      await retryRestoreIfNotLoggedIn();
+    } finally {
+      _isInitializing = false;
+      notifyListeners();
+    }
   }
 
   Future<void> retryRestoreIfNotLoggedIn() async {

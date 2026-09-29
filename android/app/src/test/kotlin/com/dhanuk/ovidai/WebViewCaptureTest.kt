@@ -49,7 +49,7 @@ class WebViewCaptureTest {
 
     @Test
     fun `the long edge lands exactly on the cap`() {
-        for (val pair in listOf(
+        for (pair in listOf(
             Triple(1440, 3200, 1280),
             Triple(2560, 1440, 1024),
             Triple(3000, 1000, 900),

@@ -262,7 +262,8 @@ class OvidWebViewHandler(
             "capturePixels" -> {
                 val identifier = call.argument<Number>("webViewIdentifier")?.toLong()
                 val maxEdge = (call.argument<Number>("maxEdge")?.toInt()
-                    ?: DEFAULT_CAPTURE_EDGE).coerceIn(64, MAX_CAPTURE_EDGE)
+                    ?: WebViewCapture.DEFAULT_CAPTURE_EDGE)
+                    .coerceIn(64, WebViewCapture.MAX_CAPTURE_EDGE)
                 val webView = resolveWebView(identifier)
                 if (webView == null) {
                     result.success(
@@ -325,14 +326,6 @@ class OvidWebViewHandler(
         if (identifier == null) return null
         val engine = flutterEngine ?: return null
         return WebViewFlutterAndroidExternalApi.getWebView(engine, identifier)
-    }
-
-    private companion object {
-        /** Long-edge cap for a capture when the caller does not send one. */
-        const val DEFAULT_CAPTURE_EDGE = 1280
-
-        /** Hard ceiling, so a caller cannot ask for a multi-megapixel bitmap. */
-        const val MAX_CAPTURE_EDGE = 4096
     }
 
     /**
@@ -788,6 +781,20 @@ private fun desktopFeatureShim(width: Int, height: Int): String = """
  * geometry is unit-testable on the JVM — no device, Activity or real WebView.
  */
 internal object WebViewCapture {
+    /**
+     * Long-edge cap for a capture when the caller does not send one.
+     *
+     * Lives here rather than as a class-level static on [OvidWebViewHandler]:
+     * this file deliberately keeps NO such statics (per-tab browser state is
+     * addressed by `webViewIdentifier`, never by process-global mutable fields),
+     * and the capture geometry belongs with the capture helpers where the JVM
+     * unit tests can reach it.
+     */
+    const val DEFAULT_CAPTURE_EDGE = 1280
+
+    /** Hard ceiling, so a caller cannot ask for a multi-megapixel bitmap. */
+    const val MAX_CAPTURE_EDGE = 4096
+
     /**
      * Downscale ([w], [h]) so the LONG edge is at most [maxEdge], preserving the
      * aspect ratio and never UPSCALING. Degenerate input collapses to 1x1 rather

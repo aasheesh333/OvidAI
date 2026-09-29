@@ -268,7 +268,13 @@ void main() {
 
     test('still accepts stdio and http transports', () {
       expect(
-        app.addCustomMcpServer(name: 'settings-stdio', command: 'npx'),
+        app.addCustomMcpServer(
+          name: 'settings-stdio',
+          command: 'npx',
+          // A package arg is required: a bare `npx` can never connect, and the
+          // add path now refuses to create such a dead row.
+          args: const ['-y', '@scope/mcp-server'],
+        ),
         isNull,
       );
       expect(

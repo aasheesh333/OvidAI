@@ -122,6 +122,15 @@ class _StudioScreenState extends State<StudioScreen> {
       // initialization has finished; otherwise that transient state consumes
       // the one prompt and a later signed-out settle never re-prompts.
       if (github.isInitializing) return;
+      // ...and only settle once the profile has actually LOADED. A restored
+      // token is assigned before its profile fetch, so a fetch that fails
+      // leaves `isLoggedIn` true while `login` is still null. Latching on that
+      // unconfirmed state consumes the one-shot, and if the token then turns
+      // out to be dead (a confirmed 401 signs out later) the signed-out settle
+      // could never re-prompt — Studio would sit showing a connected account it
+      // cannot use. The profile retry (_scheduleProfileRetry) notifies once the
+      // profile loads, and the latch happens then.
+      if (github.login == null) return;
       _handledInitialAuth = true;
       // Re-sync when the cache is empty OR belongs to another session — the
       // singleton RepoCache would otherwise show session A's working copy to

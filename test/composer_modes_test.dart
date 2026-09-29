@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -17,6 +18,15 @@ void main() {
 
   setUp(() {
     SharedPreferences.setMockInitialValues({});
+    // StudioScreen.initState kicks a UI restore. With NO mock installed the
+    // secure-storage read THROWS, which (after its retries) marks the restore
+    // failed and arms a restore-retry Timer — a pending timer at teardown. An
+    // empty mock makes that read a clean miss instead.
+    FlutterSecureStorage.setMockInitialValues({});
+    // The two StudioScreen tests mount with no login, so the REAL
+    // (non-dismissible) GitHub sheet would cover the AppBar and absorb the tap
+    // on "Working folder". Sibling Studio tests stub this the same way.
+    studioLoginPromptOverrideForTest = (_) {};
     AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
     final app = AppState.createForTest();
@@ -31,6 +41,7 @@ void main() {
 
   tearDown(() {
     studioFolderPickOverrideForTest = null;
+    studioLoginPromptOverrideForTest = null;
     AgentService.setRunSessionForTest('');
     AgentService.I.debugPauseScheduleTimerForTest(false);
     AgentNotificationService.I.resetForTest();

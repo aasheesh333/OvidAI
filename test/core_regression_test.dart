@@ -11926,7 +11926,14 @@ You are an expert security auditor reviewing code for vulnerabilities.
     );
 
     test('reconnect lookup by name not identity', () {
-      app.addCustomMcpServer(name: 'byname', command: 'npx');
+      // Package arg required: a bare `npx` is now rejected at add time as a
+      // row that could never connect, which would leave mcpServers empty and
+      // make the firstWhere below throw "Bad state: No element".
+      app.addCustomMcpServer(
+        name: 'byname',
+        command: 'npx',
+        args: const ['-y', '@scope/mcp-server'],
+      );
       final a = app.mcpServers.firstWhere((s) => s.name == 'byname');
       // Simulate a reload: a fresh object with the same name replaces the
       // original identity.
@@ -20106,7 +20113,11 @@ cwd = 'tools'
     );
 
     test('legacy custom persistence migrates to an unowned server', () async {
-      app.addCustomMcpServer(name: 'legacy-ownerless', command: 'npx');
+      app.addCustomMcpServer(
+        name: 'legacy-ownerless',
+        command: 'npx',
+        args: const ['-y', '@scope/mcp-server'],
+      );
       await app.reloadCustomMcpServersForTest();
       final server = app.mcpServers.firstWhere(
         (s) => s.name == 'legacy-ownerless',
@@ -20314,7 +20325,11 @@ cwd = 'tools'
         // A user-added server with no envHint and no requiredEnvNames must
         // NOT be blocked by the credential gate (it fails later on the
         // absent sandbox, the pre-existing honest behavior).
-        a.addCustomMcpServer(name: 'p10-bare', command: 'npx');
+        a.addCustomMcpServer(
+          name: 'p10-bare',
+          command: 'npx',
+          args: const ['-y', '@scope/mcp-server'],
+        );
         final bare = a.mcpServers.firstWhere((s) => s.name == 'p10-bare');
         expect(bare.envHint, isNull);
         final res = await McpService.I.connect(bare);

@@ -53,6 +53,13 @@ void main() {
     app.sessions.insert(0, session);
     app.activeSessionId = session.id;
     AgentService.setRunSessionForTest(session.id);
+    // The pending-vision buffer lives on the run-resolved state and is drained
+    // only when a real request is assembled (_appendPendingVisionMessages).
+    // Tests that assert on the NATIVE CALL alone — tab identity, maxEdge
+    // forwarding, nothing-written-to-disk — still stage a vision part on a
+    // successful capture and never read it back, so without this drain the last
+    // one leaks into the next test's `expect(staged(), isEmpty)`.
+    AgentService.I.appendPendingVisionMessagesForTest(<Map<String, dynamic>>[]);
   });
 
   tearDown(() {

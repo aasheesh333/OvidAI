@@ -7,12 +7,17 @@ import 'package:ovid_ai/core/state.dart';
 /// guaranteed a first-enable timeout. Missing runtimes surface as a
 /// distinct needsRuntime outcome with an install action, never a timeout.
 void main() {
-  McpServer stdio(String command) => McpServer(
+  // `args` exists because a bare package launcher (npx/uvx/bunx) with no
+  // package is structurally invalid — unsupportedTransportReason rejects it
+  // before any runtime or handshake gate can run. A fixture that needs to
+  // reach a LATER gate must therefore carry a package arg.
+  McpServer stdio(String command, {List<String> args = const []}) => McpServer(
     name: 'test-stdio',
     author: 'test',
     description: 'test',
     category: 'Custom',
     command: command,
+    args: args,
     custom: true,
   );
 
@@ -74,7 +79,10 @@ void main() {
       () async {
     McpService.missingRuntimeOverrideForTest = (_) async => 'node';
     final outcome = await McpService.I.connectOutcome(
-      stdio('npx'),
+      // Structurally VALID npx row (has a package arg) — this test asserts the
+      // RUNTIME gate fires first, so the fixture must clear the structural
+      // gate rather than be rejected by it as `unsupported`.
+      stdio('npx', args: const ['-y', '@scope/mcp-server']),
       handshakeBudget: const Duration(seconds: 30),
     );
     expect(outcome.kind, McpConnectOutcomeKind.needsRuntime);
