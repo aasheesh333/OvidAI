@@ -175,6 +175,28 @@ class _Build {
 }
 
 /// Parse markdown contributions (commands/agents) from [dir].
+/// The Claude-Code-namespaced name for a command/agent markdown [file] under
+/// its scan-root [dir]: the sub-directory path joined with the leaf name, so
+/// `commands/git/commit.md` → `git/commit` (later slugged to `git-commit`).
+/// The leaf is the explicit frontmatter `name` when present, else the file
+/// basename. Files directly in [dir] keep just their leaf name.
+String _namespacedComponentName(Directory dir, File file, dynamic skill) {
+  final dirPath = dir.absolute.path.replaceAll(RegExp(r'/+$'), '');
+  final filePath = file.absolute.path;
+  var relToDir = filePath.startsWith('$dirPath/')
+      ? filePath.substring(dirPath.length + 1)
+      : _basename(filePath);
+  // Drop the filename; keep the sub-directory segments as the namespace.
+  final slashIdx = relToDir.lastIndexOf('/');
+  final subdirs = slashIdx >= 0 ? relToDir.substring(0, slashIdx) : '';
+  final hasExplicitName =
+      (skill.frontmatter as Map)['name']?.toString().trim().isNotEmpty ?? false;
+  final leaf = hasExplicitName
+      ? skill.name as String
+      : _basename(filePath).replaceAll(RegExp(r'\.md$'), '');
+  return subdirs.isEmpty ? leaf : '$subdirs/$leaf';
+}
+
 Future<void> _addMarkdown(
   _Build b,
   Directory dir, {
@@ -184,7 +206,14 @@ Future<void> _addMarkdown(
     final skill = await SkillService.I.parseContributionFile(file);
     if (skill == null) continue;
     final rel = _relative(b.root, file.path);
-    final name = _slug(skill.name);
+    // NAMESPACE BY SUBDIRECTORY (audit 2026-09-25): Claude Code names a
+    // command by its path under commands/, so `commands/git/commit.md` is
+    // `git:commit` — distinct from `commands/svn/commit.md`. The old code used
+    // only the leaf name, so both collapsed to `commit` and the second was
+    // silently dropped by canonical-id dedupe. Prefix the leaf with its
+    // sub-path (joined, then slugged to `git-commit`) so siblings never
+    // collide. An explicit frontmatter `name` still names the leaf.
+    final name = _slug(_namespacedComponentName(dir, file, skill));
     if (name.isEmpty) continue;
     final frontmatter = <String, dynamic>{...skill.frontmatter};
     final unknownFields = _unknownFrontmatter(skill.frontmatter);
@@ -754,6 +783,30 @@ Future<void> _addClaudeInlineComponents(
     return dir;
   }
 
+  // Resolve a sanitized FILE pointer inside the plugin tree (no `..`, no
+  // absolute escape). Claude Code's `plugin.json` `hooks`/`mcpServers` string
+  // values are file paths, not directories (audit 2026-09-25).
+  File? safeComponentFile(String pointer) {
+    final cleaned = pointer
+        .trim()
+        .replaceAll(RegExp(r'^\.?/'), '')
+        .replaceAll(RegExp(r'/+$'), '');
+    if (cleaned.isEmpty) return null;
+    if (cleaned.split('/').contains('..')) return null;
+    final f = File('${root.path}/$cleaned');
+    return f.existsSync() ? f : null;
+  }
+
+  // Iterate a component pointer that Claude Code allows to be a string OR an
+  // array of strings (custom directories). A Map is not a directory pointer.
+  Iterable<String> pointerList(Object? decl) {
+    if (decl is String && decl.trim().isNotEmpty) return [decl];
+    if (decl is List) {
+      return decl.whereType<String>().where((s) => s.trim().isNotEmpty);
+    }
+    return const [];
+  }
+
   // Inline hooks: {"hooks": {"PreToolUse": [...]}} — the same event-map
   // shape `_addHooks` expects from hooks.json. `_addHooks` preserves
   // hook-level unknown fields such as `"if"` predicates.
@@ -765,11 +818,17 @@ Future<void> _addClaudeInlineComponents(
       '.claude-plugin/plugin.json#hooks',
     );
   } else if (hooksDecl is String && hooksDecl.trim().isNotEmpty) {
-    final dir = safeComponentDir(
-      hooksDecl,
-      Directory('${root.path}/hooks'),
-    );
-    final f = dir == null ? null : File('${dir.path}/hooks.json');
+    // Claude Code: `"hooks": "path/to/file.json"` is a FILE pointer. Resolve
+    // it as a file first (the correct spec behaviour); fall back to the old
+    // "directory containing hooks.json" interpretation for tolerance.
+    final f = safeComponentFile(hooksDecl) ??
+        (() {
+          final dir = safeComponentDir(
+            hooksDecl,
+            Directory('${root.path}/hooks'),
+          );
+          return dir == null ? null : File('${dir.path}/hooks.json');
+        })();
     if (f != null && f.existsSync()) {
       _addHooks(
         b,
@@ -806,32 +865,40 @@ Future<void> _addClaudeInlineComponents(
       '.claude-plugin/plugin.json#mcpServers',
       rawByName: mcpDecl.cast<String, dynamic>(),
     );
+  } else if (mcpDecl is String && mcpDecl.trim().isNotEmpty) {
+    // Claude Code allows `"mcpServers": "./.mcp.json"` (a file pointer).
+    final f = safeComponentFile(mcpDecl);
+    if (f != null) {
+      try {
+        final raw = _readJsonMap(f);
+        final servers =
+            raw['mcpServers'] ?? raw['mcp_servers'] ?? raw['servers'];
+        _addMcp(
+          b,
+          parseMcpConfig(f.readAsStringSync()),
+          '.claude-plugin/plugin.json#mcpServers→${mcpDecl.trim()}',
+          rawByName:
+              servers is Map ? servers.cast<String, dynamic>() : const {},
+        );
+      } catch (_) {
+        // Malformed pointed-at config: skip, don't fail the whole install.
+      }
+    }
   }
 
   // Custom component directories (additive with the default scans in
-  // [ClaudePluginAdapter.inspect]).
-  final commandsDecl = j['commands'];
-  if (commandsDecl is String && commandsDecl.trim().isNotEmpty) {
-    final dir = safeComponentDir(
-      commandsDecl,
-      Directory('${root.path}/commands'),
-    );
+  // [ClaudePluginAdapter.inspect]). Claude Code allows a string OR an array
+  // of directory pointers for each.
+  for (final pointer in pointerList(j['commands'])) {
+    final dir = safeComponentDir(pointer, Directory('${root.path}/commands'));
     if (dir != null) await _addMarkdown(b, dir, asAgent: false);
   }
-  final skillsDecl = j['skills'];
-  if (skillsDecl is String && skillsDecl.trim().isNotEmpty) {
-    final dir = safeComponentDir(
-      skillsDecl,
-      Directory('${root.path}/skills'),
-    );
+  for (final pointer in pointerList(j['skills'])) {
+    final dir = safeComponentDir(pointer, Directory('${root.path}/skills'));
     if (dir != null) await _addSkills(b, dir);
   }
-  final agentsDecl = j['agents'];
-  if (agentsDecl is String && agentsDecl.trim().isNotEmpty) {
-    final dir = safeComponentDir(
-      agentsDecl,
-      Directory('${root.path}/agents'),
-    );
+  for (final pointer in pointerList(j['agents'])) {
+    final dir = safeComponentDir(pointer, Directory('${root.path}/agents'));
     if (dir != null) await _addMarkdown(b, dir, asAgent: true);
   }
 }

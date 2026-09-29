@@ -494,6 +494,14 @@ class HookService extends ChangeNotifier {
   /// `compact`). Matching every event against `payload['tool']` silently
   /// dropped every SessionStart hook (e.g. `superpowers` declares
   /// `startup|clear|compact`). `*` and empty mean "all".
+  @visibleForTesting
+  static bool matcherAppliesForTest(
+    String canonicalEvent,
+    String? matcher,
+    Map<String, dynamic> payload,
+  ) =>
+      _matcherApplies(canonicalEvent, matcher, payload);
+
   static bool _matcherApplies(
     String canonicalEvent,
     String? matcher,
@@ -502,10 +510,14 @@ class HookService extends ChangeNotifier {
     if (matcher == null || matcher.isEmpty || matcher == '*') return true;
     if (!isSafeMatcher(matcher)) return false;
     final subject = _matcherSubject(canonicalEvent, payload);
-    // Anchor the whole-string alternatives so `startup` does not match
-    // `startupx`, but still allow a plain substring for tool names.
+    // FULL-STRING match (audit 2026-09-25): a Claude Code matcher like `Edit`
+    // must match the tool `Edit` only, NOT `MultiEdit`/`NotebookEdit`. The old
+    // unanchored `hasMatch` did a substring match, so `Edit` fired on every
+    // *Edit* tool and `startup` would fire on `startupx`. Anchor the whole
+    // pattern; alternations (`Edit|Write`) and patterns (`Notebook.*`) still
+    // work because the anchor wraps the entire user matcher.
     try {
-      return RegExp(matcher).hasMatch(subject);
+      return RegExp('^(?:$matcher)\$').hasMatch(subject);
     } catch (_) {
       return false; // malformed matcher → skip (fail-open)
     }
