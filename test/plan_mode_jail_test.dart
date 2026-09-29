@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/plan_mode.dart';
+import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/state.dart';
 
 /// Plan-mode WORKSPACE JAIL (2026-09-28).
@@ -402,6 +403,103 @@ void main() {
       final n = PlanModePolicy.promptSectionFor(root: null, modeName: 'studio');
       expect(n, isNot(contains(PlanModePolicy.rootPlaceholder)));
       expect(n, contains('pwd'));
+    });
+  });
+
+  group('plan jail: the SANDBOX target jail is rooted at the same directory', () {
+    // The gap this closes (2026-09-29). The two jail layers were rooted
+    // DIFFERENTLY: `_planModePathBlock` polices the LITERAL path tokens of a
+    // command against planModeRoot(), while SandboxService.checkPolicy — the
+    // layer that catches `..` climbs and `$VAR` forms the token scan never
+    // sees — was rooted in _sandboxAllowedRoots(): the session workspace plus
+    // every path grant approved earlier in this session+mode. Whenever they
+    // disagreed the WIDER set decided those invisible escapes, so a directory
+    // approved while BUILDING stayed reachable from a plan turn. Planning must
+    // not widen with prior approvals, exactly as it must not widen with the
+    // access mode.
+    late ChatSession s;
+
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+      AppState.resetTestInstance();
+      final app = AppState.createForTest();
+      app.seenWelcomeVersion = AppState.welcomeVersion;
+      AgentService.I.debugPauseScheduleTimerForTest(true);
+      s = ChatSession(id: 'plan-roots', title: 'J', model: 'm', mode: 'auto')
+        ..planMode = true;
+      app.sessions.insert(0, s);
+      app.activeSessionId = s.id;
+      AgentService.setRunSessionForTest(s.id);
+      AgentService.planModeRootForTest = jail;
+    });
+
+    tearDown(() {
+      s.planMode = false;
+      AgentService.planModeRootForTest = null;
+      AgentService.setRunSessionForTest('');
+      AgentService.I.debugPauseScheduleTimerForTest(false);
+      AppState.resetTestInstance();
+    });
+
+    test('while planning every sandbox root is the jail or inside it', () async {
+      final roots = await AgentService.I.sandboxAllowedRootsForTest();
+      expect(
+        roots,
+        contains(jail),
+        reason: 'planning must still be able to read its own directory — an '
+            'empty root set would brick the plan turn',
+      );
+      for (final r in roots) {
+        expect(
+          r == jail || SandboxService.isPathContained(jail, r),
+          isTrue,
+          reason: 'sandbox root escapes the plan jail: $r',
+        );
+      }
+      expect(
+        roots,
+        isNot(contains(sibling)),
+        reason: 'a sibling session workspace must not be reachable while '
+            'planning inside this one',
+      );
+    });
+
+    test('outside plan mode the jail is NOT forced into the roots', () async {
+      // The narrowing has to be plan-scoped, not a new global default: build
+      // mode keeps the session workspace + approved grants, and force-adding
+      // the jail there would WIDEN the sandbox with a directory unrelated to
+      // the running session.
+      s.planMode = false;
+      final roots = await AgentService.I.sandboxAllowedRootsForTest();
+      expect(roots, isNot(contains(jail)));
+    });
+
+    test('a resolver failure must never brick planning — source pin', () {
+      // Same discipline as the other plan gates: if the jail cannot be
+      // resolved, fall back to the UNNARROWED roots rather than deny every
+      // command. A plan turn that can read nothing cannot produce a plan.
+      final src = File('lib/core/agent_service.dart').readAsStringSync();
+      final fn = src.indexOf('Future<List<String>> _sandboxAllowedRoots()');
+      final narrow = src.indexOf('Plan mode NARROWS this set, never widens it');
+      final seam = src.indexOf('sandboxAllowedRootsForTest');
+      expect(fn, greaterThan(-1));
+      expect(
+        narrow,
+        greaterThan(fn),
+        reason: 'the narrowing must live inside _sandboxAllowedRoots',
+      );
+      expect(
+        narrow,
+        lessThan(seam),
+        reason: 'the narrowing must precede the test seam',
+      );
+      expect(
+        src,
+        contains('SandboxService.isPathContained(jail, r)'),
+        reason: 'the intersection must use the canonical containment helper, '
+            'not a startsWith that would let /sessions/s-10 match s-1',
+      );
+      expect(src, contains('must not brick planning'));
     });
   });
 }

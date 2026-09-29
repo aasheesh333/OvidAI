@@ -161,4 +161,35 @@ void main() {
       expect(check('cat /sys/kernel/ostype'), isNull);
     });
   });
+
+  group('a narrowed root set (plan mode) overrides earlier approvals', () {
+    // The consuming half of the 2026-09-29 fix. While planning,
+    // AgentService._sandboxAllowedRoots intersects its roots with the plan
+    // jail, and THIS layer decides what those roots permit. A path the user
+    // approved during a build turn must therefore not stay reachable from a
+    // plan turn — the two forms below (`$VAR`, absolute outside) are exactly
+    // the ones the agent-layer token scan never sees.
+    test('an approved outside path is denied when only the jail is a root', () {
+      final cmd = 'cat ${outside.path}/secret.txt';
+      expect(
+        check(cmd, zoneRoots: [root.path, outside.path]),
+        isNull,
+        reason: 'build mode: the approval is honoured, so planning can still '
+            'read files it was granted',
+      );
+      final d = check(cmd, zoneRoots: [root.path]);
+      expect(d, isNotNull, reason: 'plan mode: the approval is dropped');
+      expect(d, contains('target escapes allowed roots'));
+    });
+
+    test('a \$HOME form is denied with the jail as the only root', () {
+      expect(check(r'cat $HOME/.ssh/id_rsa', zoneRoots: [root.path]), isNotNull);
+    });
+
+    test('narrowing never denies the jail itself', () {
+      // The one thing plan mode MUST still be able to do: read its own folder.
+      expect(check('cat ${root.path}/notes.txt', zoneRoots: [root.path]), isNull);
+      expect(check('ls -la', zoneRoots: [root.path]), isNull);
+    });
+  });
 }

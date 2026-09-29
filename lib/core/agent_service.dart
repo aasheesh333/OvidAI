@@ -3389,6 +3389,286 @@ class AgentService extends ChangeNotifier {
     }
   }
 
+  /// Document shim for `navigator.geolocation`, injected on every page finish.
+  ///
+  /// WHY IT EXISTS. webview_flutter_android surfaces no geolocation prompt: its
+  /// `PermissionRequestConstants` are audio capture, MIDI sysex, video capture
+  /// and protected media only, because Android delivers location through
+  /// `WebChromeClient.onGeolocationPermissionsShowPrompt` — and installing our
+  /// own WebChromeClient would replace the plugin's file chooser, JS dialogs and
+  /// console bridge. With no shim a page that asks for its position waits
+  /// FOREVER: no success callback, no error callback, no timeout. Location-gated
+  /// logins just looked broken, and `browser_console` had nothing to show.
+  ///
+  /// Every request is routed through the `OvidGeolocation` channel and ALWAYS
+  /// settles, using the W3C codes pages branch on: 1 PERMISSION_DENIED,
+  /// 2 POSITION_UNAVAILABLE, 3 TIMEOUT. A raw string rather than a Dart
+  /// triple-quote with interpolation so the JS stays readable and testable as
+  /// data ([AgentService.geolocationShimJs] is asserted on directly).
+  @visibleForTesting
+  static const String geolocationShimJs = r'''
+(function () {
+  if (window.__ovidGeoInstalled) return;
+  window.__ovidGeoInstalled = true;
+  var seq = 1;
+  var pending = {};
+
+  function geoError(code, message) {
+    var e = { code: code, message: message };
+    e.PERMISSION_DENIED = 1;
+    e.POSITION_UNAVAILABLE = 2;
+    e.TIMEOUT = 3;
+    return e;
+  }
+
+  // Dart answers a request here: window.__ovidGeoReply(id, payload).
+  window.__ovidGeoReply = function (id, payload) {
+    var entry = pending[id];
+    if (!entry) return;
+    if (entry.timer) { clearTimeout(entry.timer); entry.timer = null; }
+    if (!entry.watch) delete pending[id];
+    try {
+      if (payload && payload.ok) {
+        var pos = {
+          coords: {
+            latitude: payload.lat,
+            longitude: payload.lon,
+            accuracy: (typeof payload.accuracy === 'number' ? payload.accuracy : 0),
+            altitude: null,
+            altitudeAccuracy: null,
+            heading: null,
+            speed: null
+          },
+          // The native side reports how old its CACHED fix is, so the timestamp
+          // is when the device knew this position — not "now". A page checking
+          // staleness gets a truthful number instead of a fresh-looking lie.
+          timestamp: Date.now() - (payload.ageMs || 0)
+        };
+        if (entry.success) entry.success(pos);
+      } else if (entry.error) {
+        entry.error(geoError(
+          (payload && payload.code) || 2,
+          (payload && payload.message) || 'Position unavailable'
+        ));
+      }
+    } catch (e) {}
+  };
+
+  function ask(watch, success, error, options) {
+    if (typeof success !== 'function') success = null;
+    if (typeof error !== 'function') error = null;
+    if (!window.OvidGeolocation || !window.OvidGeolocation.postMessage) {
+      // No bridge on this host: answer at once rather than hang.
+      if (error) error(geoError(2, 'Geolocation unavailable in this browser'));
+      return 0;
+    }
+    var id = seq++;
+    pending[id] = { success: success, error: error, watch: !!watch, timer: null };
+    var timeout = (options && typeof options.timeout === 'number' && options.timeout > 0)
+      ? options.timeout : 0;
+    if (timeout > 0) {
+      pending[id].timer = setTimeout(function () {
+        var entry = pending[id];
+        if (!entry) return;
+        if (entry.watch) { entry.timer = null; } else { delete pending[id]; }
+        if (entry.error) entry.error(geoError(3, 'Timed out waiting for a position'));
+      }, timeout);
+    }
+    try {
+      window.OvidGeolocation.postMessage(JSON.stringify({ id: id, watch: !!watch }));
+    } catch (e) {
+      var dead = pending[id];
+      if (dead && dead.timer) clearTimeout(dead.timer);
+      delete pending[id];
+      if (error) error(geoError(2, 'Geolocation bridge failed'));
+      return 0;
+    }
+    return watch ? id : 0;
+  }
+
+  var geo = {
+    getCurrentPosition: function (s, e, o) { ask(false, s, e, o); },
+    // There is no update stream (cached fixes only), so a watch settles once
+    // with the current position and stays registered until clearWatch. It never
+    // fabricates movement — a page tracking a delivery would rather see one
+    // honest reading than invented ones.
+    watchPosition: function (s, e, o) { return ask(true, s, e, o); },
+    clearWatch: function (id) {
+      var entry = pending[id];
+      if (!entry) return;
+      if (entry.timer) clearTimeout(entry.timer);
+      delete pending[id];
+    }
+  };
+  try {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition = geo.getCurrentPosition;
+      navigator.geolocation.watchPosition = geo.watchPosition;
+      navigator.geolocation.clearWatch = geo.clearWatch;
+    } else {
+      Object.defineProperty(navigator, 'geolocation', { value: geo, configurable: true });
+    }
+  } catch (e) {}
+})();
+''';
+
+  /// Maps a native `locationFix` reply to the payload [geolocationShimJs]
+  /// consumes.
+  ///
+  /// Split out from the channel round-trip because the interesting failure here
+  /// is not "no fix" but the WRONG code: a page told POSITION_UNAVAILABLE (2)
+  /// retries forever, while PERMISSION_DENIED (1) makes it stop and show its own
+  /// fallback. Codes follow the W3C Geolocation API.
+  @visibleForTesting
+  static Map<String, Object?> geoPayloadFromFix(
+    Map<String, Object?> fix, {
+    bool denied = false,
+  }) {
+    if (denied) {
+      return const {
+        'ok': false,
+        'code': 1,
+        'message': 'Location permission not granted to Ovid',
+      };
+    }
+    if (fix['available'] != true) {
+      return {
+        'ok': false,
+        'code': 2,
+        'message': (fix['reason'] ?? 'position unavailable').toString(),
+      };
+    }
+    final lat = (fix['lat'] as num?)?.toDouble();
+    final lon = (fix['lon'] as num?)?.toDouble();
+    if (lat == null || lon == null) {
+      // `available: true` with no coordinates would be a native-side bug;
+      // report it as unavailable rather than sending NaN to the page.
+      return const {
+        'ok': false,
+        'code': 2,
+        'message': 'malformed position from the device',
+      };
+    }
+    return {
+      'ok': true,
+      'lat': lat,
+      'lon': lon,
+      'accuracy': (fix['accuracy'] as num?)?.toDouble() ?? 0,
+      'ageMs': (fix['ageMs'] as num?)?.toInt() ?? 0,
+    };
+  }
+
+  /// Answers one `navigator.geolocation` request forwarded by
+  /// [geolocationShimJs].
+  ///
+  /// [raw] is `{id, watch}`; the reply goes back as
+  /// `window.__ovidGeoReply(id, …)` evaluated on the SAME tab, because a
+  /// JavaScriptChannel message has no return path.
+  ///
+  /// Permission rule mirrors the camera/mic handler in [controllerForTab]:
+  /// a page gets only what Ovid itself already holds, and the OS dialog is
+  /// raised only while the USER is browsing. Mid-agent-run a modal would stall
+  /// the run, so the page gets an honest PERMISSION_DENIED — the same answer a
+  /// real browser gives when the user says no.
+  Future<void> _onGeoRequest(BrowserTab tab, String raw) async {
+    var id = -1;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) id = (decoded['id'] as num?)?.toInt() ?? -1;
+    } catch (_) {
+      // Not a shim payload (or malformed): there is nothing to answer.
+    }
+    if (id < 0) return;
+
+    final host = Uri.tryParse(tab.url)?.host ?? tab.url;
+    final Map<String, Object?> payload;
+    try {
+      const permission = Permission.locationWhenInUse;
+      var status = await permission.status;
+      if (!status.isGranted && !busy && !browserBusy) {
+        status = await permission.request();
+      }
+      if (!status.isGranted) {
+        payload = geoPayloadFromFix(const {}, denied: true);
+      } else {
+        final fix = await _webviewChannel.invokeMapMethod<String, dynamic>(
+          'locationFix',
+          <String, dynamic>{
+            'tabId': tab.id,
+            'webViewIdentifier': webViewIdentifierFor(tab),
+          },
+        );
+        payload = geoPayloadFromFix(fix ?? const {});
+      }
+    } catch (e) {
+      payload = <String, Object?>{
+        'ok': false,
+        'code': 2,
+        'message': 'location bridge failed: $e',
+      };
+    }
+
+    // Surfaced the way every other page-permission decision is: the Browser
+    // timeline AND the tab console, so `browser_console` can explain why a
+    // location-gated login bailed instead of the agent guessing.
+    final ok = payload['ok'] == true;
+    final line = ok
+        ? 'geolocation shared with $host '
+              '(${(payload['lat'] as num).toDouble().toStringAsFixed(4)},'
+              '${(payload['lon'] as num).toDouble().toStringAsFixed(4)})'
+        : 'geolocation refused for $host: ${payload['message']}';
+    _emit('browser', line);
+    tab.consoleLog.add((
+      at: DateTime.now(),
+      kind: ok ? 'page' : 'warn',
+      text: line,
+    ));
+    if (tab.consoleLog.length > 200) {
+      tab.consoleLog.removeRange(0, tab.consoleLog.length - 200);
+    }
+    await _geoReply(tab, id, payload);
+    notifyListeners();
+  }
+
+  /// Builds the `window.__ovidGeoReply(id, payload)` script for [payload].
+  ///
+  /// jsonEncode output is a valid JS expression, so the one real hazard is a
+  /// value containing `</script>`-shaped text terminating an inline script
+  /// context early — hence the `<` escape. Split out so that rule is pinned by a
+  /// test rather than living inside an untestable channel callback.
+  @visibleForTesting
+  static String geoReplyJs(int id, Map<String, Object?> payload) {
+    final json = jsonEncode(payload).replaceAll('<', r'\u003c');
+    return 'window.__ovidGeoReply && window.__ovidGeoReply($id, $json);';
+  }
+
+  /// Sends [payload] back to [geolocationShimJs] as `window.__ovidGeoReply(id,…)`.
+  ///
+  /// Failures land in the tab console rather than being thrown: this runs inside
+  /// a channel callback, where an exception would surface as an opaque async
+  /// error instead of something `browser_console` can show.
+  Future<void> _geoReply(
+    BrowserTab tab,
+    int id,
+    Map<String, Object?> payload,
+  ) async {
+    final controller = tab.controller;
+    if (controller == null) return; // Tab torn down while the fix was in flight.
+    try {
+      await controller.runJavaScript(geoReplyJs(id, payload));
+    } catch (e) {
+      tab.consoleLog.add((
+        at: DateTime.now(),
+        kind: 'warn',
+        text: 'geolocation reply failed: $e',
+      ));
+      if (tab.consoleLog.length > 200) {
+        tab.consoleLog.removeRange(0, tab.consoleLog.length - 200);
+      }
+    }
+  }
+
+
   /// Agent-facing: get (creating if needed) the controller for a tab.
   WebViewController controllerForTab(BrowserTab tab) {
     // Record the physical viewport baseline once (browser_resize derives
@@ -3424,6 +3704,16 @@ class AgentService extends ChangeNotifier {
       ..addJavaScriptChannel(
         'OvidPopup',
         onMessageReceived: (msg) => _onPagePopup(tab, msg.message),
+      )
+      // Geolocation bridge: webview_flutter_android delivers no geolocation
+      // prompt at all (its permission request covers only audio/video/MIDI/
+      // protected media), so `navigator.geolocation` used to hang a page
+      // forever. The per-document shim routes requests here instead. Registered
+      // with the controller — not per page — so, like the console and popup
+      // channels, it survives navigation. See [_onGeoRequest].
+      ..addJavaScriptChannel(
+        'OvidGeolocation',
+        onMessageReceived: (msg) => unawaited(_onGeoRequest(tab, msg.message)),
       )
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -3603,6 +3893,28 @@ if (!window.__ovidBlankHooked) {
 })();
 ''');
             } catch (_) {}
+             // navigator.geolocation bridge (2026-09-29): webview_flutter_android
+             // delivers NO geolocation prompt — its PermissionRequestConstants
+             // cover only audio/video/MIDI/protected-media, because Android
+             // routes location through
+             // WebChromeClient.onGeolocationPermissionsShowPrompt, and this app
+             // must not install its own WebChromeClient (the plugin's file
+             // chooser, JS dialogs and console bridge all hang off it). So a page
+             // asking for its position never got an answer at all: no success, no
+             // error, no timeout — just a hang. Location-gated logins looked
+             // broken and browser_console had nothing to show.
+             //
+             // The shim answers every request via the OvidGeolocation channel
+             // (app side: _onGeoRequest → native `locationFix`) and ALWAYS
+             // settles: an explicit W3C error when the permission or the fix is
+             // missing, and the page's own `timeout` honoured, so a lost bridge
+             // reply cannot reintroduce the hang being fixed here. Per document,
+             // like the dialog shim above — a fresh document has a fresh
+             // `navigator`, so a one-time install would leave the next navigation
+             // hanging again.
+             try {
+               tab.controller?.runJavaScript(geolocationShimJs);
+             } catch (_) {}
           },
           onWebResourceError: (_) {
             tab.loading = false;

@@ -1,8 +1,13 @@
 package com.dhanuk.ovidai
 
+import android.Manifest
 import android.app.Activity
+import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.location.Location
+import android.location.LocationManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -266,6 +271,34 @@ class OvidWebViewHandler(
                     return
                 }
                 onUi { captureWebView(webView, maxEdge, result) }
+            }
+
+            // navigator.geolocation bridge (2026-09-29).
+            //
+            // webview_flutter_android exposes NO geolocation prompt: its
+            // PermissionRequestConstants cover only AUDIO_CAPTURE, MIDI_SYSEX,
+            // VIDEO_CAPTURE and PROTECTED_MEDIA_ID, because Android routes
+            // location through
+            // WebChromeClient.onGeolocationPermissionsShowPrompt — and this app
+            // must NOT install its own WebChromeClient (the plugin's file
+            // chooser, JS dialogs and console bridge all hang off it). So a page
+            // asking for its position never got an answer at all: no error
+            // callback, no timeout, just a hang. Location-gated logins looked
+            // broken and browser_console had nothing to show.
+            //
+            // This is the POSITION SOURCE for the Dart-side shim. It reads a
+            // cached fix only — never requestLocationUpdates, so serving a web
+            // page cannot switch on a radio or drain the battery.
+            "locationFix" -> {
+                val identifier = call.argument<Number>("webViewIdentifier")?.toLong()
+                val ctx: Context? = resolveWebView(identifier)?.context ?: activity
+                if (ctx == null) {
+                    result.success(
+                        mapOf("available" to false, "reason" to "no context")
+                    )
+                    return
+                }
+                onUi { result.success(GeoFix.read(ctx)) }
             }
 
             else -> result.notImplemented()
@@ -784,6 +817,90 @@ internal object WebViewCapture {
         } catch (_: Throwable) {
             null
         }
+    }
+}
+
+/**
+ * Cached device position for the browser's `navigator.geolocation` shim.
+ *
+ * Last-known ONLY, by design: [LocationManager.getLastKnownLocation] hands back
+ * what the system already has, so serving a web page can never switch on GPS or
+ * hold a radio awake. Permission is re-checked here as well as in Dart — Dart
+ * owns the user-facing dialog, but a web page must never widen what Ovid itself
+ * was granted, and this layer is the one JS cannot reach around.
+ *
+ * `Context.checkSelfPermission` is API 23+, which is this module's minSdk, so no
+ * androidx.core dependency is pulled in just for this.
+ */
+internal object GeoFix {
+    /** Providers asked for a cached fix, best-effort, in preference order. */
+    private val providers = listOf(
+        LocationManager.GPS_PROVIDER,
+        LocationManager.NETWORK_PROVIDER,
+        LocationManager.PASSIVE_PROVIDER
+    )
+
+    fun read(context: Context): Map<String, Any?> {
+        val app = context.applicationContext
+        val fine = app.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+        val coarse = app.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+        if (fine != PackageManager.PERMISSION_GRANTED &&
+            coarse != PackageManager.PERMISSION_GRANTED
+        ) {
+            return mapOf("available" to false, "reason" to "permission")
+        }
+        val lm = try {
+            app.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        } catch (_: Throwable) {
+            null
+        }
+        if (lm == null) {
+            return mapOf("available" to false, "reason" to "no location service")
+        }
+        val fixes = providers.map { provider ->
+            try {
+                lm.getLastKnownLocation(provider)
+            } catch (_: Throwable) {
+                // A provider can be missing (no SIM, no Google Play services) or
+                // switched off; survivable while another one still answers.
+                null
+            }
+        }
+        val idx = newestIndex(fixes.map { it?.time })
+        val fix = if (idx < 0) null else fixes[idx]
+        if (fix == null) return mapOf("available" to false, "reason" to "no fix")
+        return mapOf(
+            "available" to true,
+            "lat" to fix.latitude,
+            "lon" to fix.longitude,
+            "accuracy" to fix.accuracy.toDouble(),
+            // Clamped: a device clock behind the fix timestamp (or a provider
+            // stamping in the future) would otherwise report a negative age, and
+            // the page shim subtracts this from Date.now().
+            "ageMs" to (System.currentTimeMillis() - fix.time).coerceAtLeast(0L)
+        )
+    }
+
+    /**
+     * Index of the newest entry in [times] (epoch millis, null = that provider
+     * had no fix), or -1 when none is usable.
+     *
+     * Split out because [read] needs a Context and a LocationManager, neither of
+     * which exists on a unit-test JVM — and this is the part worth pinning:
+     * picking the OLDEST fix would silently serve a stale position to a login
+     * flow that is checking "is this device where the user says it is".
+     */
+    fun newestIndex(times: List<Long?>): Int {
+        var best = -1
+        var bestTime = Long.MIN_VALUE
+        for (i in times.indices) {
+            val t = times[i] ?: continue
+            if (t > bestTime) {
+                bestTime = t
+                best = i
+            }
+        }
+        return best
     }
 }
 
