@@ -13146,7 +13146,11 @@ Find security defects.''');
         expect(manifest.format, PluginFormat.claudeCode);
         expect(
           manifest.commands.single.canonicalId,
-          'plugin:acme-labs/reviewer-pro/command:deep-review',
+          // Namespaced by sub-directory (audit 2026-09-25): the command lives
+          // at commands/review/deep.md, so its name carries the `review`
+          // namespace — this is what stops commands/review/deep.md and
+          // commands/other/deep.md from colliding.
+          'plugin:acme-labs/reviewer-pro/command:review-deep-review',
         );
         expect(
           manifest.commands.single.unknownFields['x-command-field'],
@@ -13162,7 +13166,9 @@ Find security defects.''');
         );
         expect(
           manifest.agents.single.canonicalId,
-          'plugin:acme-labs/reviewer-pro/agent:security-reviewer',
+          // Namespaced by sub-directory (audit 2026-09-25): agents/reviewer/
+          // security.md carries the `reviewer` namespace.
+          'plugin:acme-labs/reviewer-pro/agent:reviewer-security-reviewer',
         );
         expect(manifest.hooks.map((hook) => hook.event), [
           'pre_tool',
@@ -20181,9 +20187,10 @@ cwd = 'tools'
           'GitHub': '@modelcontextprotocol/server-github',
           'Fetch': 'mcp-server-fetch',
           'Memory': '@modelcontextprotocol/server-memory',
-          'Puppeteer': '@modelcontextprotocol/server-puppeteer',
           'Postgres': '@modelcontextprotocol/server-postgres',
-          'Playwright': '@playwright/mcp',
+          // Puppeteer + Playwright were REMOVED from the seed (audit
+          // 2026-09-25): both need a browser binary that cannot run on
+          // Android, so seeding them only produced installs that never work.
         };
         final seeds = a.mcpServers.where((s) => !s.custom).toList();
         for (final s in seeds) {
@@ -20227,9 +20234,10 @@ cwd = 'tools'
       () async {
         final a = await freshSeededApp();
         addTearDown(() => AppState.resetTestInstance());
-        // GitHub/Puppeteer/Postgres packages still resolve but are
-        // deprecated upstream — the seed description must say so.
-        for (final name in ['GitHub', 'Puppeteer', 'Postgres']) {
+        // GitHub/Postgres packages still resolve but are deprecated upstream —
+        // the seed description must say so. (Puppeteer/Playwright were removed:
+        // browser binaries can't run on Android — audit 2026-09-25.)
+        for (final name in ['GitHub', 'Postgres']) {
           final s = a.mcpServers.firstWhere((s) => s.name == name);
           expect(
             s.description.toLowerCase(),

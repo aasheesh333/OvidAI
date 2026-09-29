@@ -8737,39 +8737,26 @@ class AppState extends ChangeNotifier {
         args: const [],
         transport: 'native',
       ),
-      McpServer(
-        name: 'Puppeteer',
-        author: 'modelcontextprotocol',
-        description:
-            'Headless browser automation — click, scroll, screenshot, scrape. '
-            '(Pinned @modelcontextprotocol/server-puppeteer is deprecated '
-            'upstream in favor of Playwright; kept because it still '
-            'installs and works.)',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@modelcontextprotocol/server-puppeteer'],
-      ),
+      // ANDROID VIABILITY (audit 2026-09-25): Puppeteer and Playwright MCP were
+      // REMOVED from the seed. Both need a full browser binary (headless
+      // Chromium / Playwright browsers) downloaded and launched — that does not
+      // run on Android even with Node.js in the sandbox, so seeding them only
+      // produced installs that can never work. Ovid's own in-app Browser panel
+      // (browser_* tools: navigate, click, tap, type, screenshot, swipe) covers
+      // the same "drive a page" need natively and IS supported on device.
       McpServer(
         name: 'Postgres',
         author: 'modelcontextprotocol',
         description:
             'Read-only schema inspection and safe queries on your database. '
-            '(Pinned @modelcontextprotocol/server-postgres is deprecated '
-            'upstream; kept because it still installs and works. A '
-            'DATABASE_URL is required.)',
+            'Requires the on-device sandbox with Node.js (install it from the '
+            'Sandbox card) and a DATABASE_URL; without the runtime the server '
+            'shows "Needs runtime" rather than a fake success. Note: the pinned '
+            '@modelcontextprotocol/server-postgres is deprecated upstream.',
         category: 'Official',
         command: 'npx',
         args: ['-y', '@modelcontextprotocol/server-postgres'],
         envHint: 'DATABASE_URL',
-      ),
-      McpServer(
-        name: 'Playwright',
-        author: 'playwright',
-        description:
-            'Modern browser automation with smart waiting — faster than Puppeteer.',
-        category: 'Official',
-        command: 'npx',
-        args: ['-y', '@playwright/mcp'],
       ),
     ]);
 

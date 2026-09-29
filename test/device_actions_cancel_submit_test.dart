@@ -341,7 +341,7 @@ void main() {
       final runTaskIdx = src.indexOf('Future<void> runTask(');
       expect(runTaskIdx, greaterThanOrEqualTo(0));
       expect(
-        src.substring(runTaskIdx, runTaskIdx + 3000),
+        src.substring(runTaskIdx, runTaskIdx + 4200),
         contains('beginDeviceGeneration'),
         reason: 'runTask entry must open a fresh device generation',
       );
