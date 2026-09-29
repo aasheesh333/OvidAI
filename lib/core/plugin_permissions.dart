@@ -26,11 +26,53 @@ const String kPluginGrantsPrefKey = 'ovid_plugin_grants_v1';
 /// (`ovid_plugin_secret_<plugin-id>/…` — owner-scoped, spec §5.1).
 const String _kPluginSecretPrefix = 'ovid_plugin_secret_';
 
+/// Digest schema version, folded into the hashed projection. Bump ONLY when
+/// the projection itself changes shape — and when you do, keep the previous
+/// algorithm reachable as a legacy alias in
+/// [PluginPermissionStore.migrateLegacyGrant] so existing approvals carry
+/// forward instead of silently invalidating every installed plugin.
+const int kManifestDigestSchemaVersion = 2;
+
+/// Manifest JSON keys excluded from the digest projection. Both are
+/// NON-ENFORCING and parser-version volatile:
+///
+///  - `unknownFields`: unrecognized SOURCE fields preserved verbatim, and
+///    carried at every nesting level (commands/skills/agents/hooks/
+///    mcpServers each keep their own). Nothing interprets them by
+///    definition, so they cannot change what a grant permits — but any
+///    adapter or normalization tweak reshuffles them.
+///  - `compatibility`: advisory findings emitted by the current parser
+///    (`hasRequiredIssues` gates inspection separately).
+///
+/// Hashing either meant an app update that touched normalization re-digested
+/// EVERY installed plugin. Because grants are keyed by digest
+/// ([PluginPermissionStore.load]), the miss cascaded: plugin disabled with
+/// `migrationRequired` → owned MCP servers failed with "Owning plugin is not
+/// active" → hooks skipped → tool roster emptied. One representation change
+/// silently switched off four subsystems at once.
+const Set<String> _kDigestExcludedKeys = {'unknownFields', 'compatibility'};
+
+/// Recursively drops [_kDigestExcludedKeys] from every map in [node].
+Object? _digestProjection(Object? node) {
+  if (node is Map) {
+    return <String, dynamic>{
+      for (final e in node.entries)
+        if (!_kDigestExcludedKeys.contains(e.key.toString()))
+          e.key.toString(): _digestProjection(e.value),
+    };
+  }
+  if (node is List) return node.map(_digestProjection).toList();
+  return node;
+}
+
 /// Computes the single canonical manifest digest (spec §5.1 binding
 /// ledger: "canonical/sorted-key JSON sha256 digest, defined once"):
-/// the manifest's JSON is re-serialized with every map's keys sorted
-/// (recursively) and every set-like collection emitted as a sorted list,
-/// then hashed with SHA-256 and prefixed `sha256:` (the
+/// the manifest's JSON is reduced to its ENFORCING projection
+/// ([_digestProjection] drops the non-enforcing, parser-volatile
+/// `unknownFields`/`compatibility` buckets), stamped with
+/// [kManifestDigestSchemaVersion], re-serialized with every map's keys
+/// sorted (recursively) and every set-like collection emitted as a sorted
+/// list, then hashed with SHA-256 and prefixed `sha256:` (the
 /// [PluginPermissionGrant.manifestDigest] wire format).
 ///
 /// LOCATION-INDEPENDENT (fix round 1): `rootPath` — the absolute
@@ -41,6 +83,18 @@ const String _kPluginSecretPrefix = 'ovid_plugin_secret_';
 /// it currently lives, so a grant saved before an atomic staging→install
 /// rename stays effective afterwards.
 String pluginManifestDigest(NormalizedPluginManifest manifest) {
+  final json =
+      _digestProjection(manifest.toJson()..remove('rootPath'))!
+          as Map<String, dynamic>;
+  json['digestSchemaVersion'] = kManifestDigestSchemaVersion;
+  return 'sha256:${sha256.convert(utf8.encode(_canonicalJson(json))).toString()}';
+}
+
+/// The v1 digest algorithm: the FULL manifest JSON minus `rootPath`, with no
+/// schema version and no key exclusions. Retained solely as the migration key
+/// for [PluginPermissionStore.migrateLegacyGrant] — it identifies "this exact
+/// content was approved under the old scheme". Never use it for a new grant.
+String legacyPluginManifestDigest(NormalizedPluginManifest manifest) {
   final json = manifest.toJson()..remove('rootPath');
   return 'sha256:${sha256.convert(utf8.encode(_canonicalJson(json))).toString()}';
 }
@@ -309,13 +363,88 @@ class PluginPermissionStore {
     }
   }
 
+  /// The stored record for [pluginId] REGARDLESS of digest. Used by
+  /// [migrateLegacyGrant] and by callers that must tell "never approved"
+  /// apart from "approved an older revision of this plugin" — a distinction
+  /// the digest-keyed [load] deliberately collapses to null.
+  Future<PluginPermissionGrant?> loadAny(String pluginId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final entry = _readMap(prefs)[pluginId];
+      if (entry == null) return null;
+      return PluginPermissionGrant.fromJson(
+        jsonDecode(entry) as Map<String, dynamic>,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// One-time re-key of a v1 grant onto the current digest scheme.
+  ///
+  /// Fires ONLY when every one of these holds:
+  ///  1. no grant exists for [manifest]'s current digest yet;
+  ///  2. the stored record's digest equals [legacyPluginManifestDigest] of
+  ///     THIS manifest — i.e. byte-identical content that was approved under
+  ///     the old algorithm;
+  ///  3. the stored approval still covers everything the manifest requests
+  ///     (capabilities AND environment variable names).
+  ///
+  /// Condition 2 is what keeps this safe: a manifest whose content actually
+  /// changed produces a different v1 digest too, so it still stops and
+  /// demands re-approval. This carries identical plugin CONTENT across a
+  /// digest-REPRESENTATION change; it can never widen a grant. Without it,
+  /// bumping [kManifestDigestSchemaVersion] (or any normalization tweak
+  /// under the old scheme) silently disabled every installed plugin and,
+  /// through `_ownerActive`/hook gating, its MCP servers, hooks and tool
+  /// roster with it.
+  ///
+  /// Returns the effective grant (existing, migrated, or null).
+  Future<PluginPermissionGrant?> migrateLegacyGrant({
+    required String pluginId,
+    required NormalizedPluginManifest manifest,
+  }) async {
+    final current = pluginManifestDigest(manifest);
+    final existing = await load(pluginId, current);
+    if (existing != null) return existing;
+
+    final stored = await loadAny(pluginId);
+    if (stored == null || stored.pluginId != pluginId) return null;
+    if (stored.manifestDigest != legacyPluginManifestDigest(manifest)) {
+      return null;
+    }
+
+    final requested = manifest.requestedCapabilities.isNotEmpty
+        ? manifest.requestedCapabilities
+        : inferRequestedCapabilities(manifest);
+    if (!stored.capabilities.containsAll(requested)) return null;
+    final environmentNames = <String>{...manifest.environmentReadNames};
+    for (final server in manifest.mcpServers) {
+      environmentNames.addAll(server.envNames);
+    }
+    if (!stored.environmentReadNames.containsAll(environmentNames)) return null;
+
+    final migrated = PluginPermissionGrant(
+      pluginId: stored.pluginId,
+      manifestDigest: current,
+      capabilities: stored.capabilities,
+      environmentReadNames: stored.environmentReadNames,
+      // Preserve the original approval time — a re-key is not a re-approval,
+      // and stamping now would misreport how long this grant has been live.
+      approvedAt: stored.approvedAt,
+    );
+    await save(migrated);
+    return migrated;
+  }
+
   /// The grant effective for [manifest] right now: the stored record for
   /// this plugin if and only if its digest matches (unchanged manifest →
-  /// stored grant reused; changed manifest → re-approval required).
+  /// stored grant reused; changed manifest → re-approval required), after
+  /// any pending v1 re-key.
   Future<PluginPermissionGrant?> effectiveGrant({
     required String pluginId,
     required NormalizedPluginManifest manifest,
-  }) => load(pluginId, pluginManifestDigest(manifest));
+  }) => migrateLegacyGrant(pluginId: pluginId, manifest: manifest);
 
   /// Runtime activation requires a complete approval, not merely a stored
   /// row for the current digest. Raw [load] remains intentionally permissive
@@ -325,7 +454,10 @@ class PluginPermissionStore {
     required NormalizedPluginManifest manifest,
   }) async {
     if (pluginId != manifest.id) return null;
-    final grant = await load(pluginId, pluginManifestDigest(manifest));
+    final grant = await migrateLegacyGrant(
+      pluginId: pluginId,
+      manifest: manifest,
+    );
     if (grant == null || grant.pluginId != pluginId) return null;
     final requested = manifest.requestedCapabilities.isNotEmpty
         ? manifest.requestedCapabilities

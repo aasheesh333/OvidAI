@@ -212,4 +212,52 @@ void main() {
       );
     });
   });
+
+  group('a skipped startup restore cannot wedge the UI', () {
+    test('isInitializing defaults to false, not true', () {
+      final src = File('lib/core/github_service.dart').readAsStringSync();
+      expect(src, contains('bool _isInitializing = false;'));
+      expect(src, isNot(contains('bool _isInitializing = true;')));
+    });
+
+    test('the UI restore path leaves the login screen ungated', () async {
+      // `github.initialize` runs from exactly one place, and the coordinator
+      // marks a still-queued non-localState task `skipped` once the readiness
+      // deadline passes. `retryRestoreIfNotLoggedIn` — the path Studio
+      // actually calls — restores the token WITHOUT touching
+      // `_isInitializing`, so the old `true` default stayed true for the
+      // whole process and `_handleInitialAuth` early-returned forever: a
+      // valid stored token rendered as an unrecoverable "unknown" login state
+      // with no fix but killing the app.
+      expect(
+        gh.isInitializing,
+        isFalse,
+        reason: 'nothing has started a restore yet',
+      );
+
+      await gh.retryRestoreIfNotLoggedIn();
+
+      expect(gh.isLoggedIn, isTrue, reason: 'the stored token must come back');
+      expect(
+        gh.isInitializing,
+        isFalse,
+        reason: 'a completed restore must never gate the login UI',
+      );
+    });
+
+    test('github.initialize stays out of the hoisted localState group', () {
+      // localState tasks are ordered FIRST and awaited sequentially. This one
+      // can hit the network on a 20s timeout, so hoisting it would let a slow
+      // GitHub restore eat the readiness budget ahead of plugin.activate and
+      // session.restore — a worse failure than the skip it would prevent.
+      // Skips are already covered lazily by retryRestoreFromUi().
+      final src = File('lib/core/state.dart').readAsStringSync();
+      final id = src.indexOf("id: 'github.initialize'");
+      expect(id, greaterThan(-1));
+      final kindAt = src.indexOf('kind: StartupItemKind.', id);
+      expect(kindAt, greaterThan(id));
+      final kindLine = src.substring(kindAt, src.indexOf('\n', kindAt));
+      expect(kindLine, isNot(contains('localState')));
+    });
+  });
 }

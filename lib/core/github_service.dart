@@ -73,7 +73,22 @@ class GitHubService extends ChangeNotifier {
   Map<String, dynamic>? _user;
   int _authGeneration = 0;
   Future<void> _tokenWrite = Future<void>.value();
-  bool _isInitializing = true;
+  /// False until [initialize] actually starts, which sets it true and clears
+  /// it in its own `finally`.
+  ///
+  /// It used to DEFAULT to true, on the assumption that `initialize` always
+  /// runs at startup. But `github.initialize` is a non-`localState` task, and
+  /// StartupCoordinator marks a still-queued one `skipped` once the readiness
+  /// deadline passes — so nothing ever cleared the flag. That wedged GitHub
+  /// login for the whole process, and not just by hiding state:
+  /// `_handleInitialAuth` early-returns while `isInitializing`, and
+  /// `retryRestoreFromUi()` (fired from Studio's initState) restores the token
+  /// WITHOUT touching this flag. So even a fully successful background
+  /// restore left the screen gated off, with no recovery but killing the app.
+  ///
+  /// "Not initializing yet" is the honest initial state: the worst case is a
+  /// brief logged-out flash before the restore lands, never a lockout.
+  bool _isInitializing = false;
   Timer? _profileRetryTimer;
 
   /// Delay before retrying a profile fetch that failed transiently. Exposed so

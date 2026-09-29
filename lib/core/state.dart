@@ -2492,6 +2492,21 @@ class AppState extends ChangeNotifier {
       ),
       _startupTask(
         id: 'github.initialize',
+        // Deliberately `marketplace`, NOT `localState`. The kind decides two
+        // things in StartupCoordinator.start(): `localState` tasks are hoisted
+        // into a first group that runs sequentially BEFORE `plugin.activate`
+        // and `session.restore`, and only `localState` degrades at the
+        // deadline instead of being marked `skipped`. This task reads a token
+        // back out of secure storage and then may hit the network on a 20s
+        // timeout — hoisting it would let a slow GitHub restore eat the whole
+        // readiness budget ahead of plugin activation and session restore,
+        // which is a worse failure than the skip it would prevent.
+        //
+        // The skip itself needs no extra recovery: `StudioScreen.initState`
+        // already calls `GitHubService.retryRestoreFromUi()`, which restores
+        // the stored token independently of this task. What made a skip fatal
+        // was `GitHubService._isInitializing` defaulting to true and never
+        // clearing — see the note on that field.
         kind: StartupItemKind.marketplace,
         label: 'Restore GitHub connection',
         timeout: const Duration(seconds: 20),

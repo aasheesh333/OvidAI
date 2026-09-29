@@ -11247,8 +11247,21 @@ ${await _agentsMdBlock()}
     }
     _ensureLiveMsg(s);
     _liveReasoning.write(tok);
-    _liveMsg!.content = _liveReasoning.toString();
-    _liveMsg!.thinking = true;
+    // The live bubble has ONE content field, shared by the reasoning card and
+    // the answer text (`_ReasoningCard` renders `m.content` exactly like
+    // `_text` does). Overwriting it with reasoning after an answer had
+    // already started therefore HID the answer and flipped the bubble back
+    // to "Thinking…" — the reply visibly flickering or vanishing mid-stream
+    // whenever a provider interleaves reasoning after content tokens.
+    // So once answer text exists, stop claiming the field: the reasoning
+    // still accumulates in _liveReasoning for `_finalizeLive`, and `thinking`
+    // tracks the ANSWER buffer so the card never asserts "Thinking…" over a
+    // reply that is already on screen.
+    final hasAnswer = _liveContent.isNotEmpty;
+    if (!hasAnswer) {
+      _liveMsg!.content = _liveReasoning.toString();
+    }
+    _liveMsg!.thinking = !hasAnswer;
     _refreshStreamThrottled();
   }
 

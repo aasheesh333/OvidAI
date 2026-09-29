@@ -304,6 +304,92 @@ void main() {
     });
   });
 
+  group('an unrunnable stdio row is rejected with a reason', () {
+    McpServer stdio({
+      String command = 'npx',
+      List<String> args = const [],
+    }) => McpServer(
+      name: 'dead-row',
+      author: 't',
+      description: 'stdio probe',
+      category: 'Custom',
+      command: command,
+      args: args,
+      custom: true,
+      transport: 'stdio',
+    );
+
+    test('a package launcher with no package cannot run', () {
+      // Custom rows that declare no transport DEFAULT to 'stdio', so a
+      // half-entered or badly imported server persisted as `stdio · npx` with
+      // no package. It cleared the transport gate, spawned a bare `npx` that
+      // printed its usage and exited, and surfaced as an opaque "disconnected"
+      // row with nothing telling the user what was actually wrong.
+      final reason = McpService.I.unsupportedTransportReason(stdio());
+      expect(reason, isNotNull);
+      expect(reason, contains('package argument'));
+    });
+
+    test('flags alone are not a package', () {
+      expect(
+        McpService.I.unsupportedTransportReason(stdio(args: const ['-y'])),
+        isNotNull,
+      );
+    });
+
+    test('an empty command is rejected too', () {
+      final reason = McpService.I.unsupportedTransportReason(
+        stdio(command: '', args: const ['server.js']),
+      );
+      expect(reason, isNotNull);
+      expect(reason, contains('no command'));
+    });
+
+    test('a complete launcher row still passes', () {
+      expect(
+        McpService.I.unsupportedTransportReason(
+          stdio(args: const ['-y', '@modelcontextprotocol/server-postgres']),
+        ),
+        isNull,
+      );
+    });
+
+    test('an absolute-path launcher is judged on its basename', () {
+      expect(
+        McpService.I.unsupportedTransportReason(
+          stdio(command: '/usr/local/bin/npx'),
+        ),
+        isNotNull,
+      );
+    });
+
+    test('non-launcher commands are left alone', () {
+      // node/python/sh take scripts and modules in forms this cannot judge —
+      // they must never be rejected by a launcher heuristic.
+      expect(
+        McpService.I.unsupportedTransportReason(
+          stdio(command: 'node', args: const ['server.js']),
+        ),
+        isNull,
+      );
+    });
+
+    test('native rows with no command are unaffected', () {
+      // The built-in Filesystem/GitHub/Fetch/Memory rows legitimately declare
+      // `command: ''` — they execute in-process instead of spawning.
+      final native = McpServer(
+        name: 'GitHub',
+        author: 'modelcontextprotocol',
+        description: 'native github',
+        category: 'Official',
+        command: '',
+        args: const [],
+        transport: 'native',
+      );
+      expect(McpService.I.unsupportedTransportReason(native), isNull);
+    });
+  });
+
   group('legacy SSE transport (item 6)', () {
     McpServer sseServer() => McpServer(
       name: 'sse-probe',

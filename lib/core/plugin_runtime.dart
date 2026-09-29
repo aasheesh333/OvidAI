@@ -67,6 +67,8 @@ const String _kPluginRowsV2MigratedPrefKey = 'ovid_plugin_rows_v2_migrated';
 
 const String _kPluginReapprovalReason =
     'Re-approve this plugin before it can run';
+const String _kPluginUpdatedReapprovalReason =
+    'This plugin was updated — approve the changes before it can run';
 const String _kLegacyReapprovalReason =
     'Re-approve this legacy plugin before it can run';
 const String _kMissingContentReason = 'Installed content is missing';
@@ -1039,6 +1041,30 @@ class PluginRuntimeManager extends ChangeNotifier {
         null;
   }
 
+  /// Why this install has no usable grant, or null when it has one.
+  ///
+  /// Separates "never approved" from "an earlier revision was approved", so
+  /// the Plugins screen states what actually happened. Before this, both
+  /// cases reported the same generic re-approval line — which is how a
+  /// digest-representation change across an app update ended up telling every
+  /// user to re-approve plugins whose CONTENT had not changed at all. The
+  /// substantive fix is [PluginPermissionStore.migrateLegacyGrant], which
+  /// re-keys those grants automatically; this only makes the residue honest.
+  Future<String?> _grantReapprovalReason(
+    String pluginId,
+    PluginInstallEntry entry,
+  ) async {
+    if (await _hasEffectiveGrant(pluginId, entry)) return null;
+    if (pluginId != entry.activation.pluginId ||
+        pluginId != entry.manifest.id) {
+      return _kPluginReapprovalReason;
+    }
+    final stored = await PluginPermissionStore().loadAny(pluginId);
+    return stored == null
+        ? _kPluginReapprovalReason
+        : _kPluginUpdatedReapprovalReason;
+  }
+
   Future<bool> _isContainedEntry(
     String pluginId,
     PluginInstallEntry entry,
@@ -1178,7 +1204,11 @@ class PluginRuntimeManager extends ChangeNotifier {
         stored: storedRows[id],
         catalog: _catalogRowFor(id),
       );
-      if (!Directory(entry.contentDir).existsSync()) {
+      final contentMissing = !Directory(entry.contentDir).existsSync();
+      final grantReason = contentMissing
+          ? null
+          : await _grantReapprovalReason(id, entry);
+      if (contentMissing) {
         await _failMissingContent(id, entries, entry, projection: row);
         entry = entries[id]!;
         statuses.add(
@@ -1189,7 +1219,7 @@ class PluginRuntimeManager extends ChangeNotifier {
             reason: _kMissingContentReason,
           ),
         );
-      } else if (!await _hasEffectiveGrant(id, entry)) {
+      } else if (grantReason != null) {
         await _deactivateRuntime(
           id,
           entries,
@@ -1203,13 +1233,13 @@ class PluginRuntimeManager extends ChangeNotifier {
           ..immediateSessionId = null
           ..promoteOnNextBoot = false
           ..migrationRequired = true
-          ..runtimeReason = _kPluginReapprovalReason;
+          ..runtimeReason = grantReason;
         statuses.add(
           StartupItemStatus.migrationRequired(
             id,
             StartupItemKind.plugin,
             row.name,
-            reason: _kPluginReapprovalReason,
+            reason: grantReason,
           ),
         );
       } else {

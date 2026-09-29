@@ -335,6 +335,12 @@ class _SseMcpChannel {
 ///     reconnection with exponential backoff — `ovid-mcp-client` parity
 ///     (500ms → 30s, giving up after 10 consecutive failures). A
 ///     user-initiated `disconnect()` never triggers this.
+/// Launchers whose ONLY purpose is to fetch and run a package, so an empty
+/// (or flag-only) argument list is definitively unrunnable rather than merely
+/// unusual. Kept deliberately narrow — `node`, `python`, `sh` and friends take
+/// scripts/modules/flags in forms this cannot judge, and must not be rejected.
+const Set<String> _kPackageLauncherCommands = {'npx', 'uvx', 'bunx'};
+
 class McpService {
   McpService._();
   static final McpService I = McpService._();
@@ -584,8 +590,9 @@ class McpService {
   /// Returns a human-readable status string for the UI.
   Future<String> connect(McpServer server) async {
     final key = _key(server);
-    if (!_ownerActive(server)) {
-      return '"${server.name}" not active: owning plugin is not active';
+    final ownerReason = _ownerInactiveReason(server);
+    if (ownerReason != null) {
+      return '"${server.name}" not active: $ownerReason';
     }
     final existing = _running[key];
     if (existing != null) {
@@ -644,10 +651,11 @@ class McpService {
     _RunningServer? reserved;
 
     Future<McpConnectOutcome> runAttempt() async {
-      if (!_ownerActive(server)) {
-        return const McpConnectOutcome(
+      final ownerReason = _ownerInactiveReason(server);
+      if (ownerReason != null) {
+        return McpConnectOutcome(
           McpConnectOutcomeKind.failed,
-          'Owning plugin is not active',
+          'Owning plugin is not active: $ownerReason',
         );
       }
       final existing = _running[key];
@@ -767,14 +775,38 @@ class McpService {
     return left.isNegative ? Duration.zero : left;
   }
 
-  static bool _ownerActive(McpServer server) {
+  /// Why the owning plugin stops [server] from connecting, or null when it
+  /// does not.
+  ///
+  /// Replaces a bare "Owning plugin is not active", which left a disconnected
+  /// row with nothing actionable — and this is the message a user actually
+  /// sees after the plugin-grant cascade disables an owner. Each state needs
+  /// a different action: `pendingGlobal` is spec §7's "enabled, activates on
+  /// restart" (the Plugins badge reads "Restart to enable everywhere"),
+  /// `disabled` usually means re-approval, `failed` means look at the plugin
+  /// row, and null-activation means it is not registered at all.
+  static String? _ownerInactiveReason(McpServer server) {
     final owner = server.ownerPluginId;
-    if (owner == null) return true;
-    final activation = PluginContributionRegistry.I.activationFor(owner);
-    return activation == PluginActivation.sessionActive ||
-        activation == PluginActivation.globalActive ||
-        activation == PluginActivation.degraded;
+    if (owner == null) return null;
+    switch (PluginContributionRegistry.I.activationFor(owner)) {
+      case PluginActivation.sessionActive:
+      case PluginActivation.globalActive:
+      case PluginActivation.degraded:
+        return null;
+      case PluginActivation.pendingGlobal:
+        return 'owning plugin "$owner" is enabled but activates on restart — '
+            'restart the app to connect';
+      case PluginActivation.disabled:
+        return 'owning plugin "$owner" is disabled';
+      case PluginActivation.failed:
+        return 'owning plugin "$owner" failed to activate';
+      case null:
+        return 'owning plugin "$owner" is not registered';
+    }
   }
+
+  static bool _ownerActive(McpServer server) =>
+      _ownerInactiveReason(server) == null;
 
   /// Side-effect-free credential probe used by health checks: returns the
   /// declared env/header names that have no stored value. Never dials or
@@ -844,6 +876,32 @@ class McpService {
         server.transport != 'sse' &&
         server.transport != 'native') {
       return 'Unsupported transport "${server.transport}"';
+    }
+    // A stdio row that can never run. Custom rows that declare no transport
+    // fall back to 'stdio' (see the Plugins add/import sheet), so a
+    // half-entered server — or one imported with its args dropped — persists
+    // as `stdio · npx` with NO package. That row then spawned a bare `npx`,
+    // which printed its usage and exited, and surfaced as an opaque handshake
+    // failure on an entry that looked merely "disconnected". Reject it here,
+    // where the reason actually reaches the UI, instead of burning the
+    // handshake budget spawning a process that cannot work.
+    if (server.transport == 'stdio') {
+      final command = server.command.trim();
+      if (command.isEmpty) {
+        return 'stdio server has no command — set one or remove this entry';
+      }
+      // Basename, so an absolute path like /usr/local/bin/npx still matches.
+      final launcher = command
+          .split(RegExp(r'[\\/\s]+'))
+          .last
+          .toLowerCase();
+      final hasPackageArg = server.args.any(
+        (a) => a.trim().isNotEmpty && !a.trim().startsWith('-'),
+      );
+      if (_kPackageLauncherCommands.contains(launcher) && !hasPackageArg) {
+        return '"$command" needs a package argument '
+            '(e.g. -y @scope/mcp-server) — this entry has none';
+      }
     }
     return null;
   }
