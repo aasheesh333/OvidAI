@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -10,7 +11,6 @@ import '../core/github_service.dart';
 import '../core/global_repo_registry.dart';
 import '../core/agent_service.dart';
 import '../core/repo_cache.dart';
-import '../core/studio_terminal.dart';
 import '../core/sandbox_service.dart';
 import 'github_login_sheet.dart';
 // Note: sandbox_setup.dart imports this file (for StudioScreen) — the
@@ -18,6 +18,18 @@ import 'github_login_sheet.dart';
 // through the canonical openStudio() entry point. Dart resolves the
 // cycle; both files only reference each other's classes inside methods.
 import 'sandbox_setup.dart';
+import 'studio_editor.dart';
+import 'studio_errors.dart';
+import 'studio_file_tree.dart';
+import 'studio_layout.dart';
+import 'studio_terminal_tabs.dart';
+
+// Studio's panes live in their own libraries; re-exported so callers (and the
+// existing widget tests) keep reaching them through this one import.
+export 'studio_editor.dart' show StudioEditor, StudioEditorTabs;
+export 'studio_file_tree.dart' show StudioFileTree;
+export 'studio_terminal_tabs.dart'
+    show StudioTerminalTabs, studioPtySpawnerOverrideForTest;
 
 /// Test seam: overrides the device directory picker for the Studio
 /// working-folder affordance so host widget tests can drive "change folder"
@@ -31,12 +43,6 @@ String? studioFolderPickOverrideForTest;
 @visibleForTesting
 void Function(BuildContext context)? studioLoginPromptOverrideForTest;
 
-/// Test seam: replaces the sandbox spawner for the Studio terminal so host
-/// widget tests can drive a real host shell without a native sandbox.
-/// Production is null (commands run through [SandboxService.spawn]).
-@visibleForTesting
-Future<Process> Function()? studioPtySpawnerOverrideForTest;
-
 /// Test seam: overrides the branch list for the Studio branch picker so host
 /// widget tests can drive "change branch" without a real GitHub request.
 /// Production is null (the real [GitHubService.listBranches]).
@@ -49,6 +55,14 @@ studioListBranchesOverrideForTest;
 @visibleForTesting
 Future<void> Function()? studioRepoSyncOverrideForTest;
 
+/// Test seam: same as [studioRepoSyncOverrideForTest] but receives the
+/// progress sink, so a test can assert that Studio surfaces [RepoCache.sync]'s
+/// `onLine` callback instead of dropping it. The plain override wins when both
+/// are set, which keeps every existing test working untouched.
+@visibleForTesting
+Future<void> Function(void Function(String line) onLine)?
+studioRepoSyncProgressOverrideForTest;
+
 /// Branch to bind when a repo is picked: the repo's `default_branch`, else
 /// `main`. Prevents carrying the previous repo's branch onto the new repo.
 @visibleForTesting
@@ -57,10 +71,45 @@ String branchForPickedRepo(Map<String, dynamic>? repo) {
   return (branch == null || branch.isEmpty) ? 'main' : branch;
 }
 
+/// Placeholder for a repository payload that carries no usable name.
+const String studioUnnamedRepoLabel = '(unnamed repository)';
+
+/// The `owner/repo` identity of a GitHub repo payload, or null when the
+/// payload has none.
+///
+/// The picker used to render `full_name` with a `name` fallback — which shows
+/// the literal string "null" for a nameless repo — and then its `onTap` cast
+/// `full_name` to a non-null String anyway, contradicting its own guard and
+/// crashing on tap (2026-09-30 audit). One function now decides, and a null
+/// result means "listed, not pickable".
+String? repoFullNameOf(Map<String, dynamic> repo) {
+  final full = repo['full_name'];
+  if (full is String && full.trim().isNotEmpty) return full.trim();
+  final owner = repo['owner'];
+  final name = repo['name'];
+  if (owner is Map &&
+      owner['login'] is String &&
+      name is String &&
+      name.trim().isNotEmpty) {
+    return '${owner['login']}/${name.trim()}';
+  }
+  if (name is String && name.trim().isNotEmpty) return name.trim();
+  return null;
+}
+
 /// Studio — coding harness (DeepSeek-web style): file explorer bound to the
 /// user's connected GitHub repo, real editable editor with per-session
-/// buffers, agent-visible tabs, and a live Ubuntu sandbox terminal. The
-/// user never sees OS/infra details — only "Sandbox ● ready".
+/// buffers, agent-visible tabs, and a live Ubuntu sandbox terminal.
+///
+/// The user never sees OS or infra details. Connection state is a labelled,
+/// differently-shaped badge in the app bar (signed in / checking / signed
+/// out); repo plumbing failures are translated by [StudioFailure] into one
+/// human sentence, with the raw text demoted to a secondary line.
+///
+/// The layout is breakpoint-driven ([StudioMetrics]): below 840dp the file
+/// tree stops being docked, below 600dp it becomes an overlay and the app bar
+/// folds secondary actions into a menu, and on a short viewport the terminal
+/// collapses rather than squeezing the editor below a usable height.
 class StudioScreen extends StatefulWidget {
   /// Set when Studio is opened by the Studio first-open install flow
   /// (openStudio → SandboxSetupScreen(studioFirstOpen: true) → here).
@@ -74,13 +123,38 @@ class StudioScreen extends StatefulWidget {
 }
 
 class _StudioScreenState extends State<StudioScreen> {
-  bool _showFiles = true;
+  /// User's explicit choice for the tree. Null means "use the breakpoint
+  /// default", so rotating a phone to tablet width re-docks the tree instead
+  /// of fighting the user's last decision on the old geometry.
+  bool? _showFilesOverride;
   bool _syncing = false;
   bool _handledInitialAuth = false;
+
+  /// Human message for a failed sync; [_syncErrorDetail] keeps the raw text.
   String? _syncError;
+  String? _syncErrorDetail;
   String? _cloneStatus;
 
+  /// Live sync progress: a human line plus the parsed 0..1 fraction.
+  String? _syncProgress;
+  double? _syncFraction;
+
+  /// User drags. Null means "use the breakpoint default"; every read goes
+  /// back through [StudioMetrics.clampTreeWidth] / [clampTerminalHeight] so a
+  /// stale drag value can never starve the editor after a rotation.
+  double? _treeWidthOverride;
+  double? _terminalHeightOverride;
+  bool? _terminalCollapsedOverride;
+
+  /// The repo bar and the app bar read `AgentService.sessionRepoFull` /
+  /// `sessionBranch`, which resolve through [AppState]. Without subscribing,
+  /// an external repo, branch or session change left the bar showing the
+  /// previous binding until something else happened to rebuild the screen.
+  late final Listenable _sessionSignals =
+      Listenable.merge([AppState.I, GitHubService.I]);
+
   String? get _repo => AgentService.I.sessionRepoFull;
+  String get _branch => AgentService.I.sessionBranch;
 
   @override
   void initState() {
@@ -152,34 +226,66 @@ class _StudioScreenState extends State<StudioScreen> {
     (studioLoginPromptOverrideForTest ?? showGithubLoginSheet)(context);
   }
 
+  /// The one sync path. Production wires [RepoCache.sync]'s `onLine` progress
+  /// callback, which Studio used to drop — a serial fetch of up to 400 files
+  /// could run for minutes behind an 11px spinner.
+  Future<void> _runSync() {
+    final legacy = studioRepoSyncOverrideForTest;
+    if (legacy != null) return legacy();
+    final progress = studioRepoSyncProgressOverrideForTest;
+    if (progress != null) return progress(_onSyncLine);
+    return RepoCache.I.sync(onLine: _onSyncLine);
+  }
+
+  void _onSyncLine(String line) {
+    if (!mounted) return;
+    final counts = parseSyncCounts(line);
+    setState(() {
+      _syncFraction = parseSyncFraction(line);
+      _syncProgress = counts == null
+          ? 'Syncing…'
+          : 'Syncing files · ${counts.done} / ${counts.total}';
+    });
+  }
+
   Future<void> _autoSync() async {
-    if (_repo == null || _syncing) return;
+    final repo = _repo;
+    if (repo == null || _syncing) return;
     setState(() {
       _syncing = true;
       _syncError = null;
+      _syncErrorDetail = null;
+      _syncProgress = 'Syncing…';
+      _syncFraction = null;
     });
-    String? error;
+    StudioFailure? failure;
     try {
       RepoCache.I.bind(
-        _repo!,
+        repo,
         GitHubService.I.token!,
         branch: AgentService.I.sessionBranch,
         sessionId: AppState.I.activeSession?.id,
       );
-      final sync = studioRepoSyncOverrideForTest ?? (() => RepoCache.I.sync());
-      await sync();
+      await _runSync();
     } catch (e) {
-      error = '$e';
+      failure = StudioFailure.of(e);
     }
     if (!mounted) return;
-    if (error != null) {
+    setState(() {
+      _syncing = false;
+      _syncProgress = null;
+      _syncFraction = null;
+    });
+    if (failure != null) {
       // A missing branch/ref must surface, not be swallowed — and the previous
       // repo's files must not linger under the new binding.
       RepoCache.I.clearWorkingCopy();
-      setState(() => _syncError = error);
-      _toast('Repo sync failed: $error');
+      setState(() {
+        _syncError = failure!.message;
+        _syncErrorDetail = failure.detail;
+      });
+      showStudioToast(context, failure.message, error: true);
     }
-    setState(() => _syncing = false);
   }
 
   /// After a repo+branch is picked, ask where this chat's working copy
@@ -221,80 +327,37 @@ class _StudioScreenState extends State<StudioScreen> {
     // inside repo A's folder while the repo bar and the API view showed B.
     final existing = s.workspaceFolder;
     final bound = reg.boundWorkspaceFor(sid);
-    final current = bound ?? (existing != null && existing.isNotEmpty
-        ? existing
-        : null);
+    final current = bound ??
+        (existing != null && existing.isNotEmpty ? existing : null);
     if (current != null && _folderMatchesRepo(current, repo, branch)) {
       return;
     }
-    final choice = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: Aether.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (sheetCtx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const SizedBox(height: 14),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 18),
-              child: Text(
-                'Where should "$repo" live?',
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
-            const SizedBox(height: 4),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
-              child: Text(
-                'The agent runs shell commands and writes files inside this '
-                'working copy for this chat.',
-                style: TextStyle(fontSize: 12, color: Aether.textMuted),
-              ),
-            ),
-            ListTile(
-              dense: true,
-              leading: Icon(
-                Icons.inventory_2_outlined,
-                size: 19,
-                color: Aether.accent,
-              ),
-              title: const Text(
-                'Session clone',
-                style: TextStyle(fontSize: 13.5),
-              ),
-              subtitle: Text(
-                'Clone once into Ovid storage — reused by future sessions',
-                style: TextStyle(fontSize: 11, color: Aether.textFaint),
-              ),
-              onTap: () => Navigator.pop(sheetCtx, 'session'),
-            ),
-            ListTile(
-              dense: true,
-              leading: Icon(
-                Icons.folder_open_outlined,
-                size: 19,
-                color: Aether.textMuted,
-              ),
-              title: const Text(
-                'Local folder clone',
-                style: TextStyle(fontSize: 13.5),
-              ),
-              subtitle: Text(
-                'Pick a device folder; the repo is cloned into a subfolder',
-                style: TextStyle(fontSize: 11, color: Aether.textFaint),
-              ),
-              onTap: () => Navigator.pop(sheetCtx, 'local'),
-            ),
-            const SizedBox(height: 10),
-          ],
-        ),
+    final choice = await showStudioSheet<String>(
+      context,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          StudioSheetHeader(
+            title: 'Where should "$repo" live?',
+            subtitle: 'The agent runs shell commands and writes files inside '
+                'this working copy for this chat.',
+          ),
+          StudioSheetTile(
+            icon: Icons.inventory_2_outlined,
+            iconColor: Aether.accent,
+            title: 'Session clone',
+            subtitle: 'Clone once into Ovid storage — reused by future sessions',
+            onTap: () => Navigator.pop(context, 'session'),
+          ),
+          StudioSheetTile(
+            icon: Icons.folder_open_outlined,
+            title: 'Local folder clone',
+            subtitle: 'Pick a device folder; the repo is cloned into a subfolder',
+            onTap: () => Navigator.pop(context, 'local'),
+          ),
+          const SizedBox(height: 10),
+        ],
       ),
     );
     if (!mounted || choice == null) return;
@@ -436,7 +499,7 @@ class _StudioScreenState extends State<StudioScreen> {
       AppState.I.setSessionWorkspaceFolder(path);
       _toast('Working copy: ${path.split('/').last}');
     } catch (e) {
-      _toast('Clone failed: $e');
+      _fail(e, 'Clone failed');
     } finally {
       if (mounted) setState(() => _cloneStatus = null);
     }
@@ -451,34 +514,10 @@ class _StudioScreenState extends State<StudioScreen> {
     String repo,
     String branch,
   ) async {
-    String? dir;
-    try {
-      dir =
-          studioFolderPickOverrideForTest ??
-          await FilePicker.platform.getDirectoryPath(
-            dialogTitle: 'Pick a folder to clone $repo into',
-          );
-    } catch (_) {
-      dir = null;
-    }
+    final dir = await _pickWritableFolder(
+      dialogTitle: 'Pick a folder to clone $repo into',
+    );
     if (!mounted || dir == null) return;
-    if (!Directory(dir).existsSync()) {
-      _toast('That folder is not accessible.');
-      return;
-    }
-    var writable = _probeWritable(dir);
-    if (!writable) {
-      final granted = await AgentService.I.requestAllFilesAccess();
-      if (granted) writable = _probeWritable(dir);
-    }
-    if (!mounted) return;
-    if (!writable) {
-      _toast(
-        'That folder is read-only for Ovid — grant All Files Access or pick '
-        'another folder.',
-      );
-      return;
-    }
     final dest = '$dir/${GlobalRepoRegistry.folderNameFor(repo, branch)}';
     setState(() => _cloneStatus = 'Cloning $repo@$branch …');
     try {
@@ -489,7 +528,7 @@ class _StudioScreenState extends State<StudioScreen> {
       AppState.I.setSessionWorkspaceFolder(dest);
       _toast('Working copy: ${dest.split('/').last}');
     } catch (e) {
-      _toast('Clone failed: $e');
+      _fail(e, 'Clone failed');
     } finally {
       if (mounted) setState(() => _cloneStatus = null);
     }
@@ -503,64 +542,29 @@ class _StudioScreenState extends State<StudioScreen> {
     if (!mounted || s == null) return;
     final current = s.workspaceFolder;
     final hasFolder = current != null && current.isNotEmpty;
-    final choice = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: Aether.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (sheetCtx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const SizedBox(height: 14),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 18),
-              child: Text(
-                'Working folder',
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
-              ),
-            ),
-            const SizedBox(height: 4),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
-              child: Text(
-                hasFolder ? current : 'Session sandbox (no pinned folder)',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-              ),
-            ),
-            ListTile(
-              dense: true,
-              leading: Icon(
-                Icons.drive_file_move_outline,
-                size: 19,
-                color: Aether.accent,
-              ),
-              title: const Text(
-                'Change folder',
-                style: TextStyle(fontSize: 13.5),
-              ),
-              onTap: () => Navigator.pop(sheetCtx, 'pick'),
-            ),
-            ListTile(
-              dense: true,
-              leading: Icon(
-                Icons.inventory_2_outlined,
-                size: 19,
-                color: Aether.textMuted,
-              ),
-              title: const Text(
-                'Use session sandbox',
-                style: TextStyle(fontSize: 13.5),
-              ),
-              onTap: () => Navigator.pop(sheetCtx, 'sandbox'),
-            ),
-            const SizedBox(height: 10),
-          ],
-        ),
+    final choice = await showStudioSheet<String>(
+      context,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          StudioSheetHeader(
+            title: 'Working folder',
+            subtitle: hasFolder ? current : 'Session sandbox (no pinned folder)',
+          ),
+          StudioSheetTile(
+            icon: Icons.drive_file_move_outline,
+            iconColor: Aether.accent,
+            title: 'Change folder',
+            onTap: () => Navigator.pop(context, 'pick'),
+          ),
+          StudioSheetTile(
+            icon: Icons.inventory_2_outlined,
+            title: 'Use session sandbox',
+            onTap: () => Navigator.pop(context, 'sandbox'),
+          ),
+          const SizedBox(height: 10),
+        ],
       ),
     );
     if (!mounted || choice == null) return;
@@ -572,38 +576,49 @@ class _StudioScreenState extends State<StudioScreen> {
     await _pickAndPinFolder(dialogTitle: 'Pick working folder');
   }
 
-  /// Picks a directory (device picker, or the test override) and pins it as
-  /// the active session's working folder after a writability probe.
+  /// Picks a directory and pins it as the active session's working folder.
   Future<void> _pickAndPinFolder({required String dialogTitle}) async {
+    final path = await _pickWritableFolder(dialogTitle: dialogTitle);
+    if (!mounted || path == null) return;
+    AppState.I.setSessionWorkspaceFolder(path);
+    _toast('Working folder: ${path.split('/').last}');
+  }
+
+  /// The one folder-pick path: device picker (or the test seam), existence
+  /// check, writability probe, and the All-Files-Access retry with its
+  /// explanatory toast. This was copy-pasted verbatim into
+  /// `_cloneIntoPickedFolder` and `_pickAndPinFolder`.
+  ///
+  /// Returns null when the user cancelled or the folder is unusable — in the
+  /// unusable case the reason has already been toasted.
+  Future<String?> _pickWritableFolder({required String dialogTitle}) async {
     String? path;
     try {
-      path =
-          studioFolderPickOverrideForTest ??
+      path = studioFolderPickOverrideForTest ??
           await FilePicker.platform.getDirectoryPath(dialogTitle: dialogTitle);
-    } catch (_) {
-      path = null;
+    } catch (e) {
+      if (mounted) _fail(e, null);
+      return null;
     }
-    if (!mounted || path == null) return;
-    final dir = Directory(path);
-    if (!dir.existsSync()) {
+    if (!mounted || path == null) return null;
+    if (!Directory(path).existsSync()) {
       _toast('That folder is not accessible.');
-      return;
+      return null;
     }
     var writable = _probeWritable(path);
     if (!writable) {
       final granted = await AgentService.I.requestAllFilesAccess();
       if (granted) writable = _probeWritable(path);
     }
-    if (!mounted) return;
+    if (!mounted) return null;
     if (!writable) {
       _toast(
         'That folder is read-only for Ovid — grant All Files Access or pick '
         'another folder.',
       );
-      return;
+      return null;
     }
-    AppState.I.setSessionWorkspaceFolder(path);
-    _toast('Working folder: ${path.split('/').last}');
+    return path;
   }
 
   bool _probeWritable(String path) {
@@ -619,8 +634,19 @@ class _StudioScreenState extends State<StudioScreen> {
 
   void _toast(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    showStudioToast(context, msg);
+  }
+
+  /// One error path: a human headline for the user, the raw text only as a
+  /// secondary line. [prefix] is prepended when the action needs naming.
+  void _fail(Object error, String? prefix) {
+    if (!mounted) return;
+    final f = StudioFailure.of(error);
+    showStudioToast(
+      context,
+      prefix == null ? f.message : '$prefix. ${f.message}',
+      detail: f.detail,
+      error: true,
     );
   }
 
@@ -632,72 +658,32 @@ class _StudioScreenState extends State<StudioScreen> {
     try {
       final repos = await GitHubService.I.listRepos();
       if (!mounted) return;
-      final picked = await showModalBottomSheet<String>(
-        context: context,
-        backgroundColor: Aether.surface,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        builder: (_) => SafeArea(
-          child: ListView(
-            shrinkWrap: true,
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            children: [
-              const Padding(
-                padding: EdgeInsets.all(14),
-                child: Text(
-                  'Your repositories',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
-                ),
-              ),
-              for (final r in repos)
-                ListTile(
-                  dense: true,
-                  leading: Icon(
-                    Icons.bookmark_border,
-                    size: 18,
-                    color: Aether.textMuted,
-                  ),
-                  title: Text(
-                    r['full_name'] ?? '${r['name']}',
-                    style: const TextStyle(fontSize: 13.5),
-                  ),
-                  subtitle: Text(
-                    '${r['language'] ?? '—'} · ⭐ ${r['stargazers_count'] ?? 0}',
-                    style: TextStyle(fontSize: 11, color: Aether.textFaint),
-                  ),
-                  onTap: () => Navigator.pop(context, r['full_name'] as String),
-                ),
-            ],
-          ),
-        ),
+      final picked = await showStudioSheet<String>(
+        context,
+        child: StudioRepoSheet(repos: repos),
       );
-      if (picked != null) {
-        final pickedRepo = repos.firstWhere(
-          (r) => r['full_name'] == picked,
-          orElse: () => const <String, dynamic>{},
-        );
-        AgentService.I.sessionRepoFull = picked;
-        // A new repo starts on its own default branch — never the previous
-        // repo's branch, whose ref may not exist (tree fetch would 404).
-        // Honour the branch the user chose for THIS repo before, instead of
-        // resetting to the repository default on every re-pick.
-        final reg2 = await GlobalRepoRegistry.instance();
-        AgentService.I.sessionBranch =
-            reg2.branchFor(picked) ?? branchForPickedRepo(pickedRepo);
-        await reg2.rememberBranch(picked, AgentService.I.sessionBranch);
-        await _autoSync();
-        // Freshly picked repo+branch → offer a real working copy: a
-        // clone-once session clone, or a clone into a picked device folder.
-        // A new session picking an already-cloned repo+branch hits the
-        // registry and reuses the SAME folder (no re-clone).
-        await _offerCloneTarget(picked, AgentService.I.sessionBranch);
-      }
+      if (picked == null) return;
+      final pickedRepo = repos.firstWhere(
+        (r) => repoFullNameOf(r) == picked,
+        orElse: () => const <String, dynamic>{},
+      );
+      AgentService.I.sessionRepoFull = picked;
+      // A new repo starts on its own default branch — never the previous
+      // repo's branch, whose ref may not exist (tree fetch would 404).
+      // Honour the branch the user chose for THIS repo before, instead of
+      // resetting to the repository default on every re-pick.
+      final reg2 = await GlobalRepoRegistry.instance();
+      AgentService.I.sessionBranch =
+          reg2.branchFor(picked) ?? branchForPickedRepo(pickedRepo);
+      await reg2.rememberBranch(picked, AgentService.I.sessionBranch);
+      await _autoSync();
+      // Freshly picked repo+branch → offer a real working copy: a
+      // clone-once session clone, or a clone into a picked device folder.
+      // A new session picking an already-cloned repo+branch hits the
+      // registry and reuses the SAME folder (no re-clone).
+      await _offerCloneTarget(picked, AgentService.I.sessionBranch);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Repo list failed: $e')));
-      }
+      _fail(e, null);
     }
   }
 
@@ -714,40 +700,9 @@ class _StudioScreenState extends State<StudioScreen> {
       final branches = await lister(parts[0], parts[1]);
       if (!mounted) return;
       final current = AgentService.I.sessionBranch;
-      final picked = await showModalBottomSheet<String>(
-        context: context,
-        backgroundColor: Aether.surface,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        builder: (_) => SafeArea(
-          child: ListView(
-            shrinkWrap: true,
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            children: [
-              const Padding(
-                padding: EdgeInsets.all(14),
-                child: Text(
-                  'Branches',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
-                ),
-              ),
-              for (final b in branches)
-                ListTile(
-                  dense: true,
-                  leading: Icon(
-                    b == current
-                        ? Icons.radio_button_checked
-                        : Icons.call_split,
-                    size: 18,
-                    color: b == current ? Aether.accent : Aether.textMuted,
-                  ),
-                  title: Text(b, style: const TextStyle(fontSize: 13.5)),
-                  onTap: () => Navigator.pop(context, b),
-                ),
-            ],
-          ),
-        ),
+      final picked = await showStudioSheet<String>(
+        context,
+        child: StudioBranchSheet(branches: branches, current: current),
       );
       if (picked != null && picked != current) {
         AgentService.I.sessionBranch = picked;
@@ -755,186 +710,308 @@ class _StudioScreenState extends State<StudioScreen> {
         await _rebindCloneToBranch(repo, picked);
       }
     } catch (e) {
-      _toast('Branch list failed: $e');
+      _fail(e, 'Branch list failed');
+    }
+  }
+
+  void _toggleFiles() => setState(() {
+        _showFilesOverride = !(_showFilesOverride ?? _treeDefaultFor(context));
+      });
+
+  bool _treeDefaultFor(BuildContext context) =>
+      MediaQuery.sizeOf(context).width >= StudioMetrics.wideBreakpoint;
+
+  void _onOverflowAction(String action) {
+    switch (action) {
+      case 'folder':
+        _manageWorkspaceFolder();
+      case 'sync':
+        _autoSync();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Aether.bg,
-      appBar: AppBar(
-        leading: const BackButton(),
-        title: const Text('Studio'),
-        actions: [
-          // Working-folder control: the only place to change/clear a pinned
-          // folder (the chat chip just opens Studio).
-          IconButton(
-            tooltip: 'Working folder',
-            visualDensity: VisualDensity.compact,
-            icon: Icon(
-              Icons.drive_file_move_outline,
-              size: 19,
-              color: Aether.textMuted,
+    return AnimatedBuilder(
+      animation: _sessionSignals,
+      builder: (context, _) {
+        final repo = _repo;
+        final compactActions =
+            MediaQuery.sizeOf(context).width < StudioMetrics.mediumBreakpoint;
+        // On a compact width the tree is an overlay, so Android's back gesture
+        // must dismiss it before it leaves the screen.
+        final treeOverlayOpen = compactActions && (_showFilesOverride ?? false);
+        return PopScope(
+          canPop: !treeOverlayOpen,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop && treeOverlayOpen) {
+              setState(() => _showFilesOverride = false);
+            }
+          },
+          child: Scaffold(
+          backgroundColor: Aether.bg,
+          appBar: _appBar(repo, compactActions),
+          body: SafeArea(
+            child: Column(
+              children: [
+                // Graceful degradation: the sandbox may be missing here when
+                // the user skipped the first-open install or the prefix was
+                // wiped afterwards. Terminal commands already fail with a
+                // friendly "open Studio" error; this banner makes the fix one
+                // tap.
+                AnimatedBuilder(
+                  animation: AppState.I,
+                  builder: (context, _) {
+                    if (AppState.I.sandboxInstalled ||
+                        AppState.I.sandboxSkipped) {
+                      return const SizedBox.shrink();
+                    }
+                    return _SandboxMissingBanner(
+                      onInstall: () => openStudio(context),
+                    );
+                  },
+                ),
+                _RepoBar(
+                  repo: repo,
+                  branch: _branch,
+                  onPick: _pickRepo,
+                  onPickBranch: _pickBranch,
+                  syncing: _syncing,
+                ),
+                if (_syncError != null)
+                  _SyncErrorBanner(
+                    message: _syncError!,
+                    detail: _syncErrorDetail,
+                    onRetry: _syncing ? null : _autoSync,
+                    onDismiss: () => setState(() {
+                      _syncError = null;
+                      _syncErrorDetail = null;
+                    }),
+                  ),
+                if (_cloneStatus != null) _StatusBanner(_cloneStatus!),
+                if (_syncing)
+                  _SyncProgressBanner(
+                    label: _syncProgress ?? 'Syncing…',
+                    fraction: _syncFraction,
+                  ),
+                Expanded(child: LayoutBuilder(builder: _workspace)),
+              ],
             ),
+          ),
+          ),
+        );
+      },
+    );
+  }
+
+  PreferredSizeWidget _appBar(String? repo, bool compactActions) {
+    final showFiles = _showFilesOverride ?? _treeDefaultFor(context);
+    return AppBar(
+      leading: const BackButton(),
+      titleSpacing: 0,
+      title: Semantics(
+        header: true,
+        child: const Text(
+          'Studio',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(fontSize: 17),
+        ),
+      ),
+      actions: [
+        // Working-folder control: the only place to change/clear a pinned
+        // folder (the chat chip just opens Studio). Folded into the overflow
+        // menu below 600dp so back + title + account never collide.
+        StudioIconButton(
+          icon: showFiles ? Icons.folder_open : Icons.folder_outlined,
+          tooltip: 'Toggle files',
+          onPressed: _toggleFiles,
+        ),
+        if (!compactActions)
+          StudioIconButton(
+            icon: Icons.drive_file_move_outline,
+            tooltip: 'Working folder',
             onPressed: _manageWorkspaceFolder,
           ),
-          IconButton(
-            tooltip: 'Toggle files',
-            visualDensity: VisualDensity.compact,
-            icon: Icon(
-              _showFiles ? Icons.folder_open : Icons.folder_outlined,
-              size: 19,
-              color: Aether.textMuted,
-            ),
-            onPressed: () => setState(() => _showFiles = !_showFiles),
+        // Sync button — pull latest repo into workspace (real).
+        if (!compactActions && repo != null)
+          StudioIconButton(
+            icon: Icons.sync_rounded,
+            tooltip: 'Sync repo',
+            iconSize: 18,
+            color: Aether.accent,
+            onPressed: _syncing ? null : _autoSync,
           ),
-          // Sync button — pull latest repo into workspace (real).
-          if (_repo != null)
-            IconButton(
-              tooltip: 'Sync repo',
-              visualDensity: VisualDensity.compact,
-              icon: _syncing
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 1.5,
-                        color: Aether.accent,
-                      ),
-                    )
-                  : Icon(Icons.sync_rounded, size: 18, color: Aether.textMuted),
-              onPressed: _syncing ? null : _autoSync,
-            ),
-          // ── GitHub account chip + sign out ──
-          const _AccountChip(),
-          Padding(
-            padding: const EdgeInsets.only(right: 14, left: 4),
-            child: AnimatedBuilder(
-              animation: Listenable.merge([AppState.I, GitHubService.I]),
-              builder: (context, _) {
-                final gh = GitHubService.I;
-                final loggedIn = gh.isLoggedIn;
-                // A storage read that FAILED, or a restore still in flight, is
-                // not a sign-out — the token is on disk and a retry may recover
-                // it seconds later. Showing red here told the user they had been
-                // logged out when the app merely could not read the key yet,
-                // which is exactly the "Studio keeps logging me out" report.
-                final unknown = !loggedIn && (gh.restoreFailed || gh.isInitializing);
-                return Tooltip(
-                  message: loggedIn
-                      ? 'Signed in to GitHub'
-                      : unknown
-                      ? 'Checking your GitHub sign-in…'
-                      : 'Not signed in to GitHub',
-                  child: Container(
-                    width: 9,
-                    height: 9,
-                    decoration: BoxDecoration(
-                      color: loggedIn
-                          ? Aether.successLight
-                          : unknown
-                          ? Aether.warnLight
-                          : Aether.dangerC,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-        ],
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            // Graceful degradation: the sandbox may be missing here when the
-            // user skipped the first-open install or the prefix was wiped
-            // afterwards. Terminal commands already fail with a friendly
-            // "open Studio" error; this banner makes the fix one tap.
-            AnimatedBuilder(
-              animation: AppState.I,
-              builder: (context, _) {
-                if (AppState.I.sandboxInstalled ||
-                    AppState.I.sandboxSkipped) {
-                  return const SizedBox.shrink();
-                }
-                return _SandboxMissingBanner(
-                  onInstall: () => openStudio(context),
-                );
-              },
-            ),
-            _RepoBar(
-              repo: _repo ?? 'Connect a repo',
-              branch: AgentService.I.sessionBranch,
-              onPick: _pickRepo,
-              onPickBranch: _pickBranch,
-              syncing: _syncing,
-            ),
-            if (_syncError != null)
-              Container(
-                width: double.infinity,
-                color: Aether.warnLight.withValues(alpha: 0.12),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
-                child: Text(
-                  'Sync failed: $_syncError',
-                  style: TextStyle(fontSize: 11.5, color: Aether.warnLight),
+        if (compactActions)
+          PopupMenuButton<String>(
+            tooltip: 'More Studio actions',
+            onSelected: _onOverflowAction,
+            position: PopupMenuPosition.under,
+            itemBuilder: (_) => [
+              const PopupMenuItem(
+                value: 'folder',
+                child: _OverflowRow(
+                  icon: Icons.drive_file_move_outline,
+                  label: 'Working folder',
                 ),
               ),
-            if (_cloneStatus != null)
-              Container(
-                width: double.infinity,
-                color: Aether.accent.withValues(alpha: 0.12),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
+              if (repo != null)
+                PopupMenuItem(
+                  value: 'sync',
+                  enabled: !_syncing,
+                  child: _OverflowRow(
+                    icon: Icons.sync_rounded,
+                    label: _syncing ? 'Syncing…' : 'Sync repo',
+                  ),
                 ),
-                child: Row(
+            ],
+            child: SizedBox(
+              width: kStudioTapTarget,
+              height: kStudioTapTarget,
+              child: Center(
+                child: Icon(
+                  Icons.more_vert,
+                  size: 20,
+                  color: Aether.textMuted,
+                ),
+              ),
+            ),
+          ),
+        // ── GitHub account chip + sign out ──
+        _AccountChip(compact: compactActions),
+        const _AuthBadge(),
+        const SizedBox(width: 4),
+      ],
+    );
+  }
+
+  /// The tree/editor/terminal split for the height that is actually left
+  /// after the app bar, repo bar and any banners.
+  Widget _workspace(BuildContext context, BoxConstraints c) {
+    final m = StudioMetrics.of(
+      c,
+      textScale: MediaQuery.textScalerOf(context).scale(1.0),
+    );
+    final showTree = _showFilesOverride ?? m.treeVisibleByDefault;
+    final dockedWidth = m.clampTreeWidth(
+      _treeWidthOverride ?? m.treeWidth,
+      regionWidth: c.maxWidth,
+    );
+    // An explicit collapse wins; otherwise a viewport too short for both
+    // panes collapses the terminal instead of squeezing the editor.
+    final collapsed = _terminalCollapsedOverride ?? !m.terminalFits;
+    // The collapsed bar is the terminal's header strip, whose height is
+    // `44dp * text scale` — a flat 44dp would clip it at a large OS font size.
+    final terminalHeight = collapsed
+        ? StudioMetrics.collapsedBarHeight * m.textScale
+        : m.resolveTerminalHeight(
+            _terminalHeightOverride ?? m.terminalHeight,
+            regionHeight: c.maxHeight,
+          );
+
+    final editor = Column(
+      children: const [
+        StudioEditorTabs(),
+        Expanded(child: StudioEditor()),
+      ],
+    );
+
+    final split = Row(
+      children: [
+        if (showTree && m.treeDocked) ...[
+          SizedBox(
+            key: studioTreePaneKey,
+            width: dockedWidth,
+            child: const StudioFileTree(),
+          ),
+          StudioPaneDivider(
+            key: studioTreeDividerKey,
+            onDragDelta: (d) => setState(
+              () => _treeWidthOverride = m.clampTreeWidth(
+                dockedWidth + d,
+                regionWidth: c.maxWidth,
+              ),
+            ),
+            onReset: () => setState(() => _treeWidthOverride = null),
+          ),
+        ],
+        Expanded(key: studioEditorPaneKey, child: editor),
+      ],
+    );
+
+    return Column(
+      children: [
+        Expanded(
+          child: showTree && m.treeOverlays
+              ? Stack(
                   children: [
-                    const SizedBox(
-                      width: 12,
-                      height: 12,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+                    split,
+                    Positioned.fill(
+                      child: GestureDetector(
+                        key: studioTreeScrimKey,
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => setState(() => _showFilesOverride = false),
+                        child: const ColoredBox(color: Color(0x73000000)),
+                      ),
                     ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        _cloneStatus!,
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          color: Aether.text,
+                    Positioned(
+                      left: 0,
+                      top: 0,
+                      bottom: 0,
+                      width: math.min(m.treeWidth, c.maxWidth),
+                      child: Material(
+                        elevation: 8,
+                        color: Aether.surface,
+                        child: Semantics(
+                          label: 'Files panel',
+                          container: true,
+                          child: SizedBox(
+                            key: studioTreePaneKey,
+                            child: const StudioFileTree(),
+                          ),
                         ),
                       ),
                     ),
                   ],
-                ),
-              ),
-            Expanded(
-              child: Row(
-                children: [
-                  if (_showFiles) ...[
-                    SizedBox(width: 210, child: _FileTree()),
-                    const VerticalDivider(width: 1),
-                  ],
-                  const Expanded(
-                    child: Column(
-                      children: [
-                        _Tabs(),
-                        Expanded(child: _Editor()),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const Divider(height: 1),
-            SizedBox(height: 240, child: const StudioTerminalTabs()),
-          ],
+                )
+              : split,
         ),
-      ),
+        SizedBox(
+          key: studioTerminalPaneKey,
+          height: terminalHeight,
+          child: StudioTerminalTabs(
+            collapsed: collapsed,
+            onToggleCollapse: () => setState(
+              () => _terminalCollapsedOverride = !collapsed,
+            ),
+            onResizeDrag: collapsed
+                ? null
+                : (d) => setState(
+                      () => _terminalHeightOverride = m.resolveTerminalHeight(
+                        terminalHeight - d,
+                        regionHeight: c.maxHeight,
+                      ),
+                    ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _OverflowRow extends StatelessWidget {
+  const _OverflowRow({required this.icon, required this.label});
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 17, color: Aether.textMuted),
+        const SizedBox(width: 10),
+        Text(label, style: const TextStyle(fontSize: 13.5)),
+      ],
     );
   }
 }
@@ -948,10 +1025,10 @@ class _SandboxMissingBanner extends StatelessWidget {
     return Container(
       width: double.infinity,
       color: Aether.warnLight.withValues(alpha: 0.10),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       child: Row(
         children: [
-          Icon(Icons.terminal_outlined, size: 15, color: Aether.warnLight),
+          Icon(Icons.terminal_outlined, size: 16, color: Aether.warnLight),
           const SizedBox(width: 8),
           const Expanded(
             child: Text(
@@ -959,13 +1036,17 @@ class _SandboxMissingBanner extends StatelessWidget {
               style: TextStyle(fontSize: 12),
             ),
           ),
-          TextButton(
-            style: TextButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              padding: const EdgeInsets.symmetric(horizontal: 10),
+          // 44dp target: the old compact TextButton measured ~26dp.
+          SizedBox(
+            height: kStudioTapTarget,
+            child: TextButton(
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+              ),
+              onPressed: onInstall,
+              child: const Text('Install', style: TextStyle(fontSize: 12.5)),
             ),
-            onPressed: onInstall,
-            child: const Text('Install', style: TextStyle(fontSize: 12.5)),
           ),
         ],
       ),
@@ -973,9 +1054,15 @@ class _SandboxMissingBanner extends StatelessWidget {
   }
 }
 
+/// Repo + branch binding bar.
+///
+/// Takes a nullable [repo]: the old version was handed `_repo ?? 'Connect a
+/// repo'` and then compared against that literal to decide styling and
+/// behaviour, so a repository actually named "Connect a repo" would have
+/// rendered as the disconnected state.
 class _RepoBar extends StatelessWidget {
-  final String repo;
-  final String branch;
+  final String? repo;
+  final String? branch;
   final VoidCallback onPick;
   final VoidCallback onPickBranch;
   final bool syncing;
@@ -989,915 +1076,457 @@ class _RepoBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 40,
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: Aether.surface,
-        border: Border(bottom: BorderSide(color: Aether.hairline)),
+    final connected = repo != null && repo!.isNotEmpty;
+    final scale = MediaQuery.textScalerOf(context).scale(1.0);
+    return Semantics(
+      label: connected
+          ? 'Connected to $repo, branch $branch'
+          : 'No repository connected',
+      container: true,
+      child: Container(
+        key: studioRepoBarKey,
+        constraints: BoxConstraints(minHeight: 48 * math.max(1.0, scale)),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: Aether.surface,
+          border: Border(bottom: BorderSide(color: Aether.hairline)),
+        ),
+        child: LayoutBuilder(
+          builder: (context, c) {
+            // The GITHUB tag is decoration; it is the first thing to go so the
+            // repo name and the two real controls survive a narrow viewport at
+            // a large OS text scale.
+            final roomy = c.maxWidth >= 520;
+            return Row(
+              children: [
+                Icon(Icons.hub_outlined, size: 16, color: Aether.textMuted),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    connected ? repo! : 'Connect a repo',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: connected ? Aether.text : Aether.textFaint,
+                    ),
+                  ),
+                ),
+                if (connected && roomy) ...[
+                  const SizedBox(width: 6),
+                  Tag('GITHUB', color: Aether.textMuted),
+                ],
+                if (connected && branch != null && branch!.isNotEmpty)
+                  Flexible(
+                    child: _BarButton(
+                      tooltip: 'Change branch',
+                      icon: Icons.call_split,
+                      label: branch!,
+                      onTap: onPickBranch,
+                    ),
+                  ),
+                if (syncing) ...[
+                  const SizedBox(width: 6),
+                  Semantics(
+                    liveRegion: true,
+                    label: 'Syncing',
+                    child: const SizedBox(
+                      width: 13,
+                      height: 13,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.5,
+                        color: Aether.accent,
+                      ),
+                    ),
+                  ),
+                ],
+                _BarButton(
+                  tooltip:
+                      connected ? 'Change repository' : 'Connect a repository',
+                  label: connected ? 'Change' : 'Connect',
+                  onTap: onPick,
+                  accent: true,
+                ),
+              ],
+            );
+          },
+        ),
       ),
-      child: Row(
-        children: [
-          Icon(Icons.hub_outlined, size: 15, color: Aether.textMuted),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              repo,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w600,
-                color: repo == 'Connect a repo'
-                    ? Aether.textFaint
-                    : Aether.text,
-              ),
-            ),
+    );
+  }
+}
+
+/// A repo-bar text button that still meets the 44dp tap-target invariant.
+class _BarButton extends StatelessWidget {
+  const _BarButton({
+    required this.label,
+    required this.onTap,
+    required this.tooltip,
+    this.icon,
+    this.accent = false,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+  final String tooltip;
+  final IconData? icon;
+  final bool accent;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = accent ? Aether.accentC : Aether.textMuted;
+    return Tooltip(
+      message: tooltip,
+      child: Semantics(
+        button: true,
+        label: tooltip,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(
+            minWidth: kStudioTapTarget,
+            minHeight: kStudioTapTarget,
           ),
-          if (repo != 'Connect a repo') Tag('GITHUB', color: Aether.textMuted),
-          if (repo != 'Connect a repo') ...[
-            const SizedBox(width: 8),
-            TextButton.icon(
-              style: TextButton.styleFrom(
-                minimumSize: Size.zero,
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-                foregroundColor: Aether.textMuted,
-              ),
-              onPressed: onPickBranch,
-              icon: const Icon(Icons.call_split, size: 13),
-              label: Text(branch, style: const TextStyle(fontSize: 12)),
-            ),
-          ],
-          if (syncing) ...[
-            const SizedBox(width: 8),
-            const SizedBox(
-              width: 11,
-              height: 11,
-              child: CircularProgressIndicator(
-                strokeWidth: 1.5,
-                color: Aether.accent,
-              ),
-            ),
-          ],
-          const SizedBox(width: 8),
-          TextButton(
+          child: TextButton.icon(
             style: TextButton.styleFrom(
-              minimumSize: Size.zero,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              foregroundColor: Aether.accent,
+              minimumSize: const Size(kStudioTapTarget, kStudioTapTarget),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              foregroundColor: color,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
             ),
-            onPressed: onPick,
-            child: Text(
-              repo == 'Connect a repo' ? 'Connect' : 'Change',
+            onPressed: onTap,
+            icon: icon == null
+                ? const SizedBox.shrink()
+                : Icon(icon, size: 14),
+            label: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 12),
             ),
           ),
-        ],
+        ),
       ),
     );
   }
 }
 
-class _FileTree extends StatelessWidget {
-  const _FileTree();
+/// Sync failure: a human sentence, with the raw text demoted to a secondary
+/// line and a retry that is a real 44dp target.
+class _SyncErrorBanner extends StatelessWidget {
+  const _SyncErrorBanner({
+    required this.message,
+    required this.detail,
+    required this.onRetry,
+    required this.onDismiss,
+  });
 
-  /// Fallback for a repo path whose content isn't pre-cached — fetch the
-  /// real file content from GitHub via the RepoCache read API (disks-first).
-  Future<void> _openUnknownFile(BuildContext context, String path) async {
-    final cached = RepoCache.I.read(path);
-    if (cached != null) {
-      AgentService.I.openStudioFile(path, cached);
-      return;
-    }
-    try {
-      final content = await RepoCache.I.fetchFile(path);
-      AgentService.I.openStudioFile(path, content ?? '');
-    } catch (_) {
-      AgentService.I.openStudioFile(path, '');
-    }
-  }
+  final String message;
+  final String? detail;
+  final VoidCallback? onRetry;
+  final VoidCallback onDismiss;
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: Listenable.merge([RepoCache.I, AgentService.I]),
-      builder: (_, _) {
-        final cache = RepoCache.I;
-        final paths = cache.treePaths;
-        return Container(
-          color: Aether.surface,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: EdgeInsets.fromLTRB(12, 10, 12, 8),
-                child: Text(
-                  'FILES',
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.4,
-                    color: Aether.textFaint,
-                  ),
-                ),
-              ),
-              Expanded(
-                child: paths.isEmpty
-                    ? Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(14),
-                          child: Text(
-                            'Connect a repo —\nfiles appear here live.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 11.5,
-                              height: 1.6,
-                              color: Aether.textFaint,
-                            ),
-                          ),
-                        ),
-                      )
-                    : ListView.builder(
-                        padding: EdgeInsets.zero,
-                        itemCount: paths.length,
-                        itemBuilder: (_, i) {
-                          final p = paths[i];
-                          final depth = '/'.allMatches(p).length;
-                          final isDir =
-                              i + 1 < paths.length &&
-                              paths[i + 1].startsWith('$p/');
-                          final active = AgentService.I.activeFilePath == p;
-                          return InkWell(
-                            onTap: () {
-                              final cached = cache.files[p];
-                              if (!isDir && cached != null) {
-                                AgentService.I.openStudioFile(p, cached);
-                              } else if (!isDir) {
-                                // File exists only as a repo tree path —
-                                // pull its real content from the workspace.
-                                _openUnknownFile(context, p);
-                              }
-                            },
-                            child: Container(
-                              color: active
-                                  ? Aether.accentSoft
-                                  : Colors.transparent,
-                              padding: EdgeInsets.fromLTRB(
-                                10.0 + depth * 14,
-                                6,
-                                8,
-                                6,
-                              ),
-                              child: Row(
-                                children: [
-                                  Icon(
-                                    isDir
-                                        ? Icons.folder_outlined
-                                        : Icons.description_outlined,
-                                    size: 13,
-                                    color: isDir
-                                        ? Aether.textMuted
-                                        : Aether.textFaint,
-                                  ),
-                                  const SizedBox(width: 6),
-                                  Expanded(
-                                    child: Text(
-                                      p.split('/').last,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        fontFamily: Aether.mono,
-                                        color: active
-                                            ? Aether.accent
-                                            : isDir
-                                            ? Aether.text
-                                            : Aether.textMuted,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 9,
-                ),
-                decoration: BoxDecoration(
-                  border: Border(top: BorderSide(color: Aether.hairline)),
-                ),
-                child: Row(
+    return Semantics(
+      liveRegion: true,
+      label: 'Sync failed. $message',
+      container: true,
+      child: Container(
+        width: double.infinity,
+        color: Aether.warnLight.withValues(alpha: 0.12),
+        padding: const EdgeInsets.only(left: 12, right: 2, top: 2, bottom: 2),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Icon(Icons.cloud_off_outlined, size: 16, color: Aether.warnLight),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(
-                      cache.isReady
-                          ? Icons.cloud_done_outlined
-                          : Icons.cloud_off_outlined,
-                      size: 13,
-                      color: cache.isReady
-                          ? Aether.successLight
-                          : Aether.textFaint,
-                    ),
-                    const SizedBox(width: 7),
-                    Expanded(
-                      child: Text(
-                        cache.isReady
-                            ? 'Synced · ${cache.files.length} files'
-                            : 'Not connected',
-                        style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                    Text(
+                      message,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: Aether.warnLight,
                       ),
                     ),
+                    if (detail != null && detail!.isNotEmpty)
+                      Text(
+                        detail!,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: kStudioMinFontSize,
+                          color: Aether.textFaint,
+                        ),
+                      ),
                   ],
                 ),
               ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _Tabs extends StatelessWidget {
-  const _Tabs();
-
-  Future<void> _askNewFile(BuildContext context) async {
-    final ctrl = TextEditingController();
-    final ok = await showDialog<String>(
-      context: context,
-      builder: (d) => AlertDialog(
-        title: const Text('New file', style: TextStyle(fontSize: 15)),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          style: const TextStyle(fontFamily: Aether.mono, fontSize: 13),
-          decoration: const InputDecoration(
-            hintText: 'path/to/file.dart',
-            isDense: true,
-          ),
-          onSubmitted: (v) => Navigator.pop(d, v.trim()),
+            ),
+            StudioIconButton(
+              icon: Icons.refresh,
+              tooltip: 'Retry sync',
+              iconSize: 18,
+              onPressed: onRetry,
+            ),
+            StudioIconButton(
+              icon: Icons.close,
+              tooltip: 'Dismiss',
+              iconSize: 16,
+              onPressed: onDismiss,
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(d),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(d, ctrl.text.trim()),
-            child: const Text('Create'),
-          ),
-        ],
       ),
     );
-    if (ok == null || ok.isEmpty) return;
-    AgentService.I.newStudioFile(ok);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: AgentService.I,
-      builder: (_, _) {
-        final tabs = AgentService.I.studioOpenFiles;
-        final active = AgentService.I.activeFilePath;
-        return Container(
-          height: 38,
-          color: Aether.surface,
-          child: Row(
-            children: [
-              Expanded(
-                child: tabs.isEmpty
-                    ? Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 12),
-                        child: Text(
-                          'No open files — tap a file in the tree or +',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Aether.textFaint,
-                          ),
-                        ),
-                      )
-                    : ListView.builder(
-                        scrollDirection: Axis.horizontal,
-                        itemCount: tabs.length,
-                        itemBuilder: (_, i) {
-                          final p = tabs[i];
-                          final sel = p == active;
-                          return GestureDetector(
-                            onTap: () => AgentService.I.selectStudioFile(p),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                              ),
-                              decoration: BoxDecoration(
-                                border: Border(
-                                  right: BorderSide(color: Aether.hairline),
-                                  top: BorderSide(
-                                    color: sel
-                                        ? Aether.accent
-                                        : Colors.transparent,
-                                    width: 2,
-                                  ),
-                                ),
-                                color: sel ? Aether.bg : Aether.surface,
-                              ),
-                              child: Row(
-                                children: [
-                                  Icon(
-                                    Icons.description_outlined,
-                                    size: 13,
-                                    color: sel ? Aether.text : Aether.textFaint,
-                                  ),
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    p.split('/').last,
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      fontFamily: Aether.mono,
-                                      color: sel
-                                          ? Aether.text
-                                          : Aether.textMuted,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  GestureDetector(
-                                    onTap: () =>
-                                        AgentService.I.closeStudioFile(p),
-                                    child: Padding(
-                                      padding: EdgeInsets.all(4),
-                                      child: Icon(
-                                        Icons.close,
-                                        size: 12,
-                                        color: Aether.textFaint,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-              ),
-              IconButton(
-                tooltip: 'New file',
-                visualDensity: VisualDensity.compact,
-                icon: Icon(Icons.add, size: 16, color: Aether.textMuted),
-                onPressed: () => _askNewFile(context),
-              ),
-            ],
-          ),
-        );
-      },
-    );
   }
 }
 
-class _Editor extends StatefulWidget {
-  const _Editor();
+/// Live sync progress. Replaces "an 11px spinner for several minutes".
+class _SyncProgressBanner extends StatelessWidget {
+  const _SyncProgressBanner({required this.label, required this.fraction});
 
-  @override
-  State<_Editor> createState() => _EditorState();
-}
-
-class _EditorState extends State<_Editor> {
-  final _ctrl = TextEditingController();
-  String? _boundPath;
-  bool _dirty = false;
-
-  void _bind(String path, String content) {
-    // Reposition caret: only rewrite the text when the underlying buffer
-    // actually changed (agent file_write or a fresh open), not per keystroke.
-    if (_boundPath == path && _ctrl.text == content) return;
-    if (_boundPath != path) _dirty = false;
-    _boundPath = path;
-    _ctrl.value = TextEditingValue(
-      text: content,
-      selection: TextSelection.collapsed(offset: content.length),
-    );
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
+  final String label;
+  final double? fraction;
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: AgentService.I,
-      builder: (_, _) {
-        final a = AgentService.I;
-        final path = a.activeFilePath;
-        if (path == null) {
-          return Container(
-            color: Aether.bg,
-            child: Center(
-              child: Padding(
-                padding: EdgeInsets.all(24),
-                child: Text(
-                  'Ovid Studio\n\n• Pick a file from the tree, or + to create one\n'
-                  '• Ask the AI in chat to read/edit files — they open here as tabs\n'
-                  '• Terminal below runs inside the native Linux sandbox',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    height: 1.7,
-                    color: Aether.textFaint,
-                  ),
-                ),
-              ),
-            ),
-          );
-        }
-        final content = a.fileBuffer[path] ?? RepoCache.I.read(path) ?? '';
-        _bind(path, content);
-        return Column(
+    return Semantics(
+      liveRegion: true,
+      label: label,
+      container: true,
+      child: Container(
+        width: double.infinity,
+        color: Aether.accent.withValues(alpha: 0.10),
+        child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Active file path header (real path, real repo name)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-              color: Aether.surfaceAlt,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 7, 12, 7),
               child: Row(
                 children: [
-                  Icon(
-                    _dirty ? Icons.circle : Icons.edit_note,
-                    size: 12,
-                    color: _dirty ? Aether.warnLight : Aether.accent,
+                  const SizedBox(
+                    width: 13,
+                    height: 13,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 1.5,
+                      color: Aether.accent,
+                    ),
                   ),
-                  const SizedBox(width: 6),
+                  const SizedBox(width: 9),
                   Expanded(
                     child: Text(
-                      path,
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 12, color: Aether.text),
+                    ),
+                  ),
+                  if (fraction != null)
+                    Text(
+                      '${(fraction! * 100).round()}%',
                       style: TextStyle(
+                        fontSize: 12,
                         fontFamily: Aether.mono,
-                        fontSize: 10.5,
+                        fontFamilyFallback: kStudioMonoFallback,
                         color: Aether.textMuted,
                       ),
                     ),
-                  ),
-                  if (_dirty)
-                    GestureDetector(
-                      onTap: _save,
-                      child: Text(
-                        'Save',
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w600,
-                          color: Aether.accent,
-                        ),
-                      ),
-                    ),
-                  if (a.sessionRepoFull != null) ...[
-                    const SizedBox(width: 10),
-                    Text(
-                      a.sessionRepoFull!,
-                      style: TextStyle(
-                        fontFamily: Aether.mono,
-                        fontSize: 10,
-                        color: Aether.textFaint,
-                      ),
-                    ),
-                  ],
                 ],
               ),
             ),
+            LinearProgressIndicator(
+              value: fraction,
+              minHeight: 2,
+              backgroundColor: Colors.transparent,
+              color: Aether.accent,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusBanner extends StatelessWidget {
+  const _StatusBanner(this.label);
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      liveRegion: true,
+      label: label,
+      container: true,
+      child: Container(
+        width: double.infinity,
+        color: Aether.accent.withValues(alpha: 0.12),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        child: Row(
+          children: [
+            const SizedBox(
+              width: 13,
+              height: 13,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 9),
             Expanded(
-              child: TextField(
-                controller: _ctrl,
-                maxLines: null,
-                expands: true,
-                keyboardType: TextInputType.multiline,
-                style: TextStyle(
-                  fontFamily: Aether.mono,
-                  fontSize: 12.5,
-                  height: 1.55,
-                  color: Aether.text,
-                ),
-                decoration: InputDecoration(
-                  contentPadding: EdgeInsets.all(12),
-                  isDense: true,
-                  filled: true,
-                  fillColor: Aether.bg,
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                ),
-                onChanged: (v) {
-                  final a2 = AgentService.I;
-                  a2.fileBuffer[_boundPath!] = v;
-                  setState(() => _dirty = true);
-                },
+              child: Text(
+                label,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: Aether.text),
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// GitHub connection state.
+///
+/// This used to be a bare 9×9px colour-only dot: green/amber/red with no
+/// shape, no text and no semantics, so it was invisible to a screen reader
+/// and unreadable for anyone with a colour vision deficiency. Each state now
+/// has its own silhouette, a semantics label and a tooltip.
+class _AuthBadge extends StatelessWidget {
+  const _AuthBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: GitHubService.I,
+      builder: (context, _) {
+        final gh = GitHubService.I;
+        final loggedIn = gh.isLoggedIn;
+        // A storage read that FAILED, or a restore still in flight, is
+        // not a sign-out — the token is on disk and a retry may recover
+        // it seconds later. Showing red here told the user they had been
+        // logged out when the app merely could not read the key yet,
+        // which is exactly the "Studio keeps logging me out" report.
+        final unknown =
+            !loggedIn && (gh.restoreFailed || gh.isInitializing);
+
+        final IconData icon;
+        final Color color;
+        final String label;
+        if (loggedIn) {
+          icon = Icons.check_circle;
+          color = Aether.successLight;
+          label = 'Signed in to GitHub';
+        } else if (unknown) {
+          icon = Icons.hourglass_top;
+          color = Aether.warnLight;
+          label = 'Checking your GitHub sign-in…';
+        } else {
+          icon = Icons.cancel;
+          color = Aether.dangerC;
+          label = 'Not signed in to GitHub';
+        }
+
+        return Semantics(
+          liveRegion: true,
+          label: label,
+          child: Tooltip(
+            message: label,
+            child: SizedBox(
+              width: 30,
+              height: kStudioTapTarget,
+              child: Center(child: Icon(icon, size: 16, color: color)),
+            ),
+          ),
         );
       },
     );
   }
-
-  void _save() {
-    final p = _boundPath;
-    if (p == null) return;
-    RepoCache.I.write(p, _ctrl.text);
-    AgentService.I.refreshNow();
-    setState(() => _dirty = false);
-  }
 }
 
-// ── Multi-terminal (P8) — N independent persistent shells ─────────────
-// Each terminal keeps its own scrollback + busy state and its own
-// persistent pipe shell (StudioShellSession), so `cd`/exports survive
-// across commands. Tabs at the top with add/close icons (VS Code style).
-// Shells are owner-scoped in PtyPool so agent Stop never kills them.
-class StudioTerminalTabs extends StatefulWidget {
-  const StudioTerminalTabs({super.key});
-  @override
-  State<StudioTerminalTabs> createState() => _StudioTerminalTabsState();
-}
+/// The repository picker sheet. Public so the null-tolerance of the payload
+/// can be tested without a network round-trip.
+class StudioRepoSheet extends StatelessWidget {
+  const StudioRepoSheet({required this.repos, super.key});
 
-class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
-  final List<_TerminalSession> _terms = [];
-  int _active = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _addTerminal();
-  }
-
-  void _addTerminal() {
-    setState(() {
-      _terms.add(_TerminalSession());
-      _active = _terms.length - 1;
-    });
-  }
-
-  void _closeTerminal(int i) {
-    final t = _terms[i];
-    t.dispose();
-    setState(() {
-      _terms.removeAt(i);
-      if (_terms.isEmpty) {
-        _terms.add(_TerminalSession());
-        _active = 0;
-      } else if (_active >= _terms.length) {
-        _active = _terms.length - 1;
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    for (final t in _terms) {
-      t.dispose();
-    }
-    super.dispose();
-  }
+  final List<Map<String, dynamic>> repos;
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    return ListView(
+      shrinkWrap: true,
+      padding: const EdgeInsets.symmetric(vertical: 8),
       children: [
-        // Terminal tab strip.
-        Container(
-          height: 30,
-          color: Aether.surface,
-          child: Row(
-            children: [
-              const SizedBox(width: 8),
-              Icon(Icons.terminal, size: 12, color: Aether.textMuted),
-              const SizedBox(width: 6),
-              Text(
-                'TERMINALS',
-                style: TextStyle(
-                  fontSize: 9.5,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.8,
-                  color: Aether.textFaint,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: ListView.builder(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: _terms.length,
-                  itemBuilder: (_, i) {
-                    final t = _terms[i];
-                    final sel = i == _active;
-                    return GestureDetector(
-                      onTap: () => setState(() => _active = i),
-                      child: AnimatedBuilder(
-                        animation: t.shell,
-                        builder: (_, _) {
-                          final busy = t.shell.busy;
-                          return Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 9),
-                            margin: const EdgeInsets.fromLTRB(0, 4, 6, 4),
-                            decoration: BoxDecoration(
-                              color: sel
-                                  ? Aether.surfaceAlt
-                                  : Colors.transparent,
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(
-                                color: sel
-                                    ? Aether.hairline
-                                    : Colors.transparent,
-                              ),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  busy ? Icons.sync : Icons.chevron_right,
-                                  size: 11,
-                                  color: busy
-                                      ? Aether.accent
-                                      : sel
-                                      ? Aether.textMuted
-                                      : Aether.textFaint,
-                                ),
-                                const SizedBox(width: 4),
-                                Text(
-                                  'bash ${i + 1}',
-                                  style: TextStyle(
-                                    fontFamily: Aether.mono,
-                                    fontSize: 10,
-                                    color: sel ? Aether.text : Aether.textFaint,
-                                  ),
-                                ),
-                                const SizedBox(width: 5),
-                                GestureDetector(
-                                  onTap: () => _closeTerminal(i),
-                                  child: Icon(
-                                    Icons.close,
-                                    size: 11,
-                                    color: Aether.textFaint,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-                    );
-                  },
-                ),
-              ),
-              // New terminal button.
-              IconButton(
-                tooltip: 'New terminal',
-                visualDensity: VisualDensity.compact,
-                icon: Icon(Icons.add, size: 15, color: Aether.textMuted),
-                onPressed: _addTerminal,
-              ),
-            ],
-          ),
-        ),
-        const Divider(height: 1),
-        Expanded(
-          child: _terms.isEmpty
-              ? const SizedBox.shrink()
-              : _TerminalPane(term: _terms[_active]),
-        ),
+        const StudioSheetHeader(title: 'Your repositories'),
+        for (final r in repos) _RepoTile(repo: r),
+        const SizedBox(height: 10),
       ],
     );
   }
 }
 
-/// One terminal's mutable UI state. Each tab owns a stable [tabId] and the
-/// persistent shell it is bound to (created lazily on first command).
-class _TerminalSession {
-  _TerminalSession() {
-    tabId = 'tab-${_seq++}';
-    shell = StudioShellSession(tabId: tabId);
-  }
-  static int _seq = 0;
-  late final String tabId;
-  late final StudioShellSession shell;
-  final input = TextEditingController();
-  final scroll = ScrollController();
-
-  void dispose() {
-    shell.dispose();
-    input.dispose();
-    scroll.dispose();
-  }
-}
-
-/// The active terminal's pane (scrollback + input).
-class _TerminalPane extends StatefulWidget {
-  final _TerminalSession term;
-  const _TerminalPane({required this.term});
-  @override
-  State<_TerminalPane> createState() => _TerminalPaneState();
-}
-
-class _TerminalPaneState extends State<_TerminalPane> {
-  @override
-  void initState() {
-    super.initState();
-    widget.term.shell.addListener(_onShellChanged);
-  }
-
-  @override
-  void didUpdateWidget(_TerminalPane oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.term, widget.term)) {
-      oldWidget.term.shell.removeListener(_onShellChanged);
-      widget.term.shell.addListener(_onShellChanged);
-    }
-  }
-
-  @override
-  void dispose() {
-    widget.term.shell.removeListener(_onShellChanged);
-    super.dispose();
-  }
-
-  void _onShellChanged() => _scrollToBottom(widget.term);
-
-  void _scrollToBottom(_TerminalSession t) {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!t.scroll.hasClients) return;
-      final pos = t.scroll.position;
-      // Follow-mode: only auto-scroll when the user is already near the
-      // bottom — scrolling up to read earlier output must not be yanked
-      // back down by every new line of command output.
-      if (pos.maxScrollExtent - pos.pixels > 48) return;
-      t.scroll.jumpTo(pos.maxScrollExtent);
-    });
-  }
-
-  Future<void> _run(String cmd) async {
-    final t = widget.term;
-    final shell = t.shell;
-    final c = cmd.trim();
-    if (c.isEmpty || shell.busy) return;
-    t.input.clear();
-    shell.begin(c);
-    _scrollToBottom(t);
-
-    final sessionId = AppState.I.activeSession?.sandboxId ?? 'default';
-    // Persistent per-tab shell: state (`cd`, exports) survives commands and
-    // output streams in as it happens. Falls back to the one-shot exec when
-    // the sandbox is unavailable.
-    final override = studioPtySpawnerOverrideForTest;
-    try {
-      final spawner =
-          override ??
-          () async {
-            final workDir = await SandboxService.I.workDirFor(sessionId);
-            return SandboxService.I.spawn(['bash'], hostWorkDir: workDir);
-          };
-      if (await shell.runPersistent(c, sid: sessionId, spawner: spawner)) {
-        return;
-      }
-    } catch (_) {
-      // Fall through to the one-shot exec fallback.
-    }
-
-    try {
-      final workDir = await SandboxService.I.workDirFor(sessionId);
-      final out = await SandboxService.I.exec(
-        ['bash', '-c', c],
-        hostWorkDir: workDir,
-        onLine: shell.addOutput,
-      );
-      if (out.trim().isEmpty) shell.addOutput('(no output)');
-    } catch (e) {
-      shell.addOutput('⚠ $e');
-    } finally {
-      shell.finish();
-    }
-  }
+class _RepoTile extends StatelessWidget {
+  const _RepoTile({required this.repo});
+  final Map<String, dynamic> repo;
 
   @override
   Widget build(BuildContext context) {
-    final t = widget.term;
-    return AnimatedBuilder(
-      animation: t.shell,
-      builder: (_, _) {
-        final s = t.shell;
-        return Column(
-          children: [
-            Expanded(
-              child: ListView.builder(
-                controller: t.scroll,
-                padding: const EdgeInsets.all(12),
-                itemCount: s.history.length + (s.busy ? 1 : 0),
-                itemBuilder: (_, i) {
-                  if (i == s.history.length) {
-                    return const Padding(
-                      padding: EdgeInsets.only(top: 2),
-                      child: SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 1.5,
-                          color: Aether.accent,
-                        ),
-                      ),
-                    );
-                  }
-                  final l = s.history[i];
-                  return SelectableText(
-                    l,
-                    style: TextStyle(
-                      fontFamily: Aether.mono,
-                      fontSize: 11.5,
-                      height: 1.6,
-                      color: l.startsWith('\$')
-                          ? Aether.accent
-                          : l.startsWith('⚠')
-                          ? Aether.danger
-                          : l.endsWith('✓') || l.startsWith('✓')
-                          ? Aether.successLight
-                          : Aether.textMuted,
-                    ),
-                  );
-                },
-              ),
-            ),
-            // Real command input — runs natively in the sandbox.
-            Container(
-              padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-              decoration: BoxDecoration(
-                border: Border(top: BorderSide(color: Aether.hairline)),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: t.input,
-                      style: const TextStyle(
-                        fontFamily: Aether.mono,
-                        fontSize: 12.5,
-                      ),
-                      decoration: InputDecoration(
-                        isDense: true,
-                        hintText: 'bash \$ …',
-                        hintStyle: TextStyle(
-                          fontFamily: Aether.mono,
-                          color: Aether.textFaint,
-                        ),
-                        border: InputBorder.none,
-                        enabledBorder: InputBorder.none,
-                        focusedBorder: InputBorder.none,
-                        prefixIcon: const Icon(
-                          Icons.chevron_right,
-                          size: 16,
-                          color: Aether.accent,
-                        ),
-                        // While a command runs the suffix is a Stop button —
-                        // a hung command must never wedge the terminal.
-                        suffixIcon: s.busy
-                            ? IconButton(
-                                tooltip: 'Stop command',
-                                visualDensity: VisualDensity.compact,
-                                icon: const Icon(
-                                  Icons.stop_circle_outlined,
-                                  size: 16,
-                                  color: Aether.danger,
-                                ),
-                                onPressed: () => setState(s.cancel),
-                              )
-                            : null,
-                      ),
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: _run,
-                      enabled: !s.busy,
-                    ),
-                  ),
-                  // Clear scrollback for THIS terminal.
-                  if (s.history.isNotEmpty)
-                    IconButton(
-                      tooltip: 'Clear',
-                      visualDensity: VisualDensity.compact,
-                      icon: Icon(
-                        Icons.delete_outline,
-                        size: 14,
-                        color: Aether.textFaint,
-                      ),
-                      onPressed: () => setState(s.history.clear),
-                    ),
-                ],
-              ),
-            ),
-          ],
-        );
-      },
+    final full = repoFullNameOf(repo);
+    return StudioSheetTile(
+      icon: Icons.bookmark_border,
+      // A payload with no usable name is listed but not pickable — it used to
+      // render as the literal string "null" and crash on tap.
+      title: full ?? studioUnnamedRepoLabel,
+      subtitle:
+          '${repo['language'] ?? '—'} · ⭐ ${repo['stargazers_count'] ?? 0}',
+      onTap: full == null ? null : () => Navigator.pop(context, full),
+    );
+  }
+}
+
+/// The branch picker sheet.
+class StudioBranchSheet extends StatelessWidget {
+  const StudioBranchSheet({
+    required this.branches,
+    required this.current,
+    super.key,
+  });
+
+  final List<String> branches;
+  final String current;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      shrinkWrap: true,
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [
+        const StudioSheetHeader(title: 'Branches'),
+        for (final b in branches)
+          StudioSheetTile(
+            icon: b == current ? Icons.radio_button_checked : Icons.call_split,
+            iconColor: b == current ? Aether.accent : Aether.textMuted,
+            title: b,
+            selected: b == current,
+            onTap: () => Navigator.pop(context, b),
+          ),
+        const SizedBox(height: 10),
+      ],
     );
   }
 }
 
 /// ── GitHub account chip with avatar, login name, and sign-out menu ──
 class _AccountChip extends StatelessWidget {
-  const _AccountChip();
+  const _AccountChip({required this.compact});
+
+  /// Below 600dp the chip drops its login text and chevron: the app bar has
+  /// back + title + tree toggle + overflow + auth badge to fit as well.
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -1914,46 +1543,7 @@ class _AccountChip extends StatelessWidget {
           position: PopupMenuPosition.under,
           onSelected: (v) {
             if (v == 'signout') {
-              showDialog(
-                context: context,
-                builder: (d) => AlertDialog(
-                  title: const Text(
-                    'Sign out of GitHub?',
-                    style: TextStyle(fontSize: 15),
-                  ),
-                  content: const Text(
-                    'The repo connection will be cleared. Your GitHub access token is removed from this device only.',
-                    style: TextStyle(fontSize: 12.5),
-                  ),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(d),
-                      child: const Text('Cancel'),
-                    ),
-                    TextButton(
-                      onPressed: () async {
-                        Navigator.pop(d);
-                        try {
-                          await gh.signOut();
-                        } catch (_) {
-                          if (!context.mounted) return;
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text(
-                                'Signed out, but the saved token could not be removed.',
-                              ),
-                            ),
-                          );
-                        }
-                      },
-                      child: const Text(
-                        'Sign out',
-                        style: TextStyle(color: Aether.danger),
-                      ),
-                    ),
-                  ],
-                ),
-              );
+              _confirmSignOut(context, gh);
             }
           },
           itemBuilder: (_) => [
@@ -1977,7 +1567,7 @@ class _AccountChip extends StatelessWidget {
                         Text(
                           '@${gh.login ?? ''}',
                           style: TextStyle(
-                            fontSize: 10.5,
+                            fontSize: kStudioMinFontSize,
                             color: Aether.textFaint,
                           ),
                         ),
@@ -1992,7 +1582,7 @@ class _AccountChip extends StatelessWidget {
               value: 'signout',
               child: Row(
                 children: [
-                  Icon(Icons.logout, size: 15, color: Aether.danger),
+                  Icon(Icons.logout, size: 16, color: Aether.danger),
                   SizedBox(width: 8),
                   Text(
                     'Sign out',
@@ -2002,23 +1592,89 @@ class _AccountChip extends StatelessWidget {
               ),
             ),
           ],
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 6),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _Avatar(url: gh.avatarUrl, size: 20),
-                const SizedBox(width: 6),
-                Text(
-                  gh.login ?? '',
-                  style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
+          child: Semantics(
+            button: true,
+            label: 'GitHub account ${gh.login ?? ''}',
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                minWidth: kStudioTapTarget,
+                minHeight: kStudioTapTarget,
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _Avatar(url: gh.avatarUrl, size: 20),
+                    if (!compact) ...[
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          gh.login ?? '',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Aether.textMuted,
+                          ),
+                        ),
+                      ),
+                      Icon(
+                        Icons.expand_more,
+                        size: 15,
+                        color: Aether.textFaint,
+                      ),
+                    ],
+                  ],
                 ),
-                Icon(Icons.expand_more, size: 14, color: Aether.textFaint),
-              ],
+              ),
             ),
           ),
         );
       },
+    );
+  }
+
+  void _confirmSignOut(BuildContext context, GitHubService gh) {
+    showDialog(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text(
+          'Sign out of GitHub?',
+          style: TextStyle(fontSize: 15),
+        ),
+        content: const Text(
+          'The repo connection will be cleared. Your GitHub access token is '
+          'removed from this device only.',
+          style: TextStyle(fontSize: 12.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(d);
+              try {
+                await gh.signOut();
+              } catch (e) {
+                if (!context.mounted) return;
+                showStudioToast(
+                  context,
+                  'Signed out, but the saved token could not be removed.',
+                  detail: StudioFailure.of(e).detail,
+                  error: true,
+                );
+              }
+            },
+            child: const Text(
+              'Sign out',
+              style: TextStyle(color: Aether.danger),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

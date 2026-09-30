@@ -38,7 +38,6 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
   _State _state = _State.idle;
   String _userCode = '';
   String _verifyUri = '';
-  int _attempt = 0;
   String? _error;
   Timer? _expiryTimer;
   DateTime? _expiresAt;
@@ -60,7 +59,6 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
   Future<void> _start() async {
     setState(() => _state = _State.starting);
     _cancelled = false;
-    _attempt = 0;
     _error = null;
     _expiryTimer?.cancel();
     try {
@@ -90,9 +88,6 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
         intervalSec: authorization.interval.inSeconds,
         maxWait: authorization.expiresIn,
         isCancelled: () => _cancelled,
-        onAttempt: (attempt) {
-          if (mounted) setState(() => _attempt = attempt);
-        },
       );
       if (!mounted || _cancelled) return;
       _expiryTimer?.cancel();
@@ -288,8 +283,8 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
           ),
           const SizedBox(width: 10),
           Text(
-            'Waiting · $_remaining remaining · poll #$_attempt',
-            style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+            'Waiting · $_remaining remaining',
+            style: TextStyle(fontSize: 12, color: Aether.textFaint),
           ),
         ],
       ),
@@ -405,38 +400,47 @@ class _CopyChipState extends State<_CopyChip> {
   bool copied = false;
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      borderRadius: BorderRadius.circular(7),
-      onTap: () async {
-        await Clipboard.setData(ClipboardData(text: widget.text));
-        setState(() => copied = true);
-        Future.delayed(const Duration(seconds: 2), () {
-          if (mounted) setState(() => copied = false);
-        });
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(
-          color: Aether.surfaceRaised,
-          borderRadius: BorderRadius.circular(7),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              copied ? Icons.check : Icons.copy_outlined,
-              size: 13,
-              color: copied ? Aether.successLight : Aether.textFaint,
-            ),
-            const SizedBox(width: 5),
-            Text(
-              copied ? 'Copied' : 'Copy',
-              style: TextStyle(
-                fontSize: 10.5,
+    // 44dp minimum target (the repo-wide touch invariant): the chip used to
+    // measure ~24dp, which is a mis-tap magnet next to the code it copies.
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 44),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(7),
+        onTap: () async {
+          await Clipboard.setData(ClipboardData(text: widget.text));
+          setState(() => copied = true);
+          Future.delayed(const Duration(seconds: 2), () {
+            if (mounted) setState(() => copied = false);
+          });
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: Aether.surfaceRaised,
+            borderRadius: BorderRadius.circular(7),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                copied ? Icons.check : Icons.copy_outlined,
+                size: 13,
                 color: copied ? Aether.successLight : Aether.textFaint,
               ),
-            ),
-          ],
+              const SizedBox(width: 5),
+              Semantics(
+                button: true,
+                label: copied ? 'Code copied' : 'Copy code',
+                child: Text(
+                  copied ? 'Copied' : 'Copy',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: copied ? Aether.successLight : Aether.textFaint,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

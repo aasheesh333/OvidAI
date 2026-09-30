@@ -1,0 +1,373 @@
+import 'package:flutter/material.dart';
+
+import '../core/agent_service.dart';
+import '../core/repo_cache.dart';
+import '../core/theme.dart';
+import 'studio_errors.dart';
+import 'studio_layout.dart';
+
+// ── Studio file tree ────────────────────────────────────────────────────────
+// Extracted from studio_screen.dart and rewritten (2026-09-30 audit).
+//
+// Two bugs lived in the old tree:
+//  * directories were guessed as "the next sorted path starts with `p/`", so
+//    a directory whose children were all dropped by RepoCache's skip-list
+//    rendered as a *file*, and tapping it opened an empty editor buffer that
+//    was indistinguishable from a genuinely empty file;
+//  * `_openUnknownFile` swallowed every fetch failure into `openStudioFile(p,
+//    '')`, which is exactly that indistinguishable blank buffer.
+//
+// Directories are now derived from the path set itself (a node is a directory
+// iff some path lives under it), and an unreachable file becomes a visible,
+// labelled error row that retries on tap.
+
+/// One row of the tree.
+class StudioTreeNode {
+  const StudioTreeNode({
+    required this.path,
+    required this.name,
+    required this.isDirectory,
+    required this.depth,
+  });
+
+  /// Full repository path, normalised (no leading `/`, no empty segments).
+  final String path;
+
+  /// Leaf name shown in the row.
+  final String name;
+
+  final bool isDirectory;
+
+  /// Indent level; 0 is the repository root.
+  final int depth;
+
+  @override
+  String toString() => 'StudioTreeNode($path, dir=$isDirectory, d=$depth)';
+}
+
+List<String> _segments(String path) =>
+    path.split('/').where((s) => s.isNotEmpty).toList();
+
+String _leaf(String path) => path.substring(path.lastIndexOf('/') + 1);
+
+/// Builds the flattened, depth-annotated row list for [paths], revealing the
+/// children of every directory in [expandedDirs].
+///
+/// Pure so the directory rules are pinned without a widget pump. Rows come out
+/// in display order: within a level, directories first, then case-insensitive
+/// by name.
+List<StudioTreeNode> buildStudioTree(
+  Iterable<String> paths,
+  Set<String> expandedDirs,
+) {
+  final dirs = <String>{};
+  final files = <String>{};
+  for (final raw in paths) {
+    final segs = _segments(raw);
+    if (segs.isEmpty) continue;
+    for (var i = 1; i < segs.length; i++) {
+      dirs.add(segs.sublist(0, i).join('/'));
+    }
+    files.add(segs.join('/'));
+  }
+  // A path that is also somebody's directory prefix is a directory. Git cannot
+  // produce that, but an agent-created buffer can, and picking "file" there
+  // would hide the subtree.
+  files.removeWhere(dirs.contains);
+
+  final isDir = <String, bool>{
+    for (final d in dirs) d: true,
+    for (final f in files) f: false,
+  };
+
+  final byParent = <String, List<String>>{};
+  for (final p in isDir.keys) {
+    final i = p.lastIndexOf('/');
+    (byParent[i < 0 ? '' : p.substring(0, i)] ??= <String>[]).add(p);
+  }
+  int compare(String a, String b) {
+    final ad = isDir[a]!, bd = isDir[b]!;
+    if (ad != bd) return ad ? -1 : 1;
+    final byName = _leaf(a).toLowerCase().compareTo(_leaf(b).toLowerCase());
+    return byName != 0 ? byName : a.compareTo(b);
+  }
+
+  for (final siblings in byParent.values) {
+    siblings.sort(compare);
+  }
+
+  final out = <StudioTreeNode>[];
+  void walk(String parent, int depth) {
+    for (final p in byParent[parent] ?? const <String>[]) {
+      final directory = isDir[p]!;
+      out.add(StudioTreeNode(
+        path: p,
+        name: _leaf(p),
+        isDirectory: directory,
+        depth: depth,
+      ));
+      if (directory && expandedDirs.contains(p)) walk(p, depth + 1);
+    }
+  }
+
+  walk('', 0);
+  return out;
+}
+
+/// The repository file explorer bound to [RepoCache].
+class StudioFileTree extends StatefulWidget {
+  const StudioFileTree({super.key});
+
+  @override
+  State<StudioFileTree> createState() => _StudioFileTreeState();
+}
+
+class _StudioFileTreeState extends State<StudioFileTree> {
+  final Set<String> _expanded = <String>{};
+  final Set<String> _failed = <String>{};
+  final Set<String> _loading = <String>{};
+
+  /// Opens a file, or toggles a directory.
+  ///
+  /// A miss in the in-memory working copy falls back to a real fetch. Only a
+  /// `null` result — never an exception — means "unavailable"; an empty string
+  /// is a real, empty file and opens normally.
+  Future<void> _activate(StudioTreeNode node) async {
+    if (node.isDirectory) {
+      setState(() {
+        if (!_expanded.remove(node.path)) _expanded.add(node.path);
+      });
+      return;
+    }
+    final cache = RepoCache.I;
+    final cached = cache.read(node.path);
+    if (cached != null) {
+      if (_failed.contains(node.path)) setState(() => _failed.remove(node.path));
+      AgentService.I.openStudioFile(node.path, cached);
+      return;
+    }
+    setState(() {
+      _loading.add(node.path);
+      _failed.remove(node.path);
+    });
+    String? content;
+    Object? error;
+    try {
+      content = await cache.fetchFile(node.path);
+    } catch (e) {
+      error = e;
+    }
+    if (!mounted) return;
+    setState(() => _loading.remove(node.path));
+    if (content == null) {
+      setState(() => _failed.add(node.path));
+      final failure = error == null
+          ? const StudioFailure(
+              'That file could not be loaded from the repository.',
+              '',
+            )
+          : StudioFailure.of(error);
+      showStudioToast(
+        context,
+        'Could not open ${node.name}',
+        detail: failure.detail.isEmpty ? failure.message : failure.detail,
+        error: true,
+      );
+      return;
+    }
+    AgentService.I.openStudioFile(node.path, content);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([RepoCache.I, AgentService.I]),
+      builder: (context, _) {
+        final cache = RepoCache.I;
+        // Union of the tree and the live working copy: an agent-written file
+        // that was never in the git tree still has to be reachable.
+        final paths = <String>{...cache.treePaths, ...cache.files.keys};
+        final nodes = buildStudioTree(paths, _expanded);
+        final active = AgentService.I.activeFilePath;
+
+        return Container(
+          color: Aether.surface,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const _TreeHeader(),
+              Expanded(
+                child: nodes.isEmpty
+                    ? const _TreeEmpty()
+                    : ListView.builder(
+                        padding: EdgeInsets.zero,
+                        itemCount: nodes.length,
+                        itemBuilder: (_, i) => _row(nodes[i], active, cache),
+                      ),
+              ),
+              _TreeFooter(ready: cache.isReady, count: cache.files.length),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _row(StudioTreeNode node, String? active, RepoCache cache) {
+    final selected = !node.isDirectory && active == node.path;
+    final failed = _failed.contains(node.path);
+    final loading = _loading.contains(node.path);
+    final indent = 8.0 + node.depth * 14.0;
+
+    final IconData icon;
+    final Color iconColor;
+    if (loading) {
+      icon = Icons.hourglass_top_rounded;
+      iconColor = Aether.accent;
+    } else if (failed) {
+      icon = Icons.error_outline;
+      iconColor = Aether.dangerC;
+    } else if (node.isDirectory) {
+      icon =
+          _expanded.contains(node.path) ? Icons.folder_open_outlined : Icons.folder_outlined;
+      iconColor = Aether.textMuted;
+    } else {
+      icon = Icons.description_outlined;
+      iconColor = selected ? Aether.accent : Aether.textFaint;
+    }
+
+    final label = failed
+        ? '${node.name}, could not be loaded — tap to retry'
+        : node.isDirectory
+            ? '${node.name}, folder, '
+                '${_expanded.contains(node.path) ? 'expanded' : 'collapsed'}'
+            : '${node.name}, file${selected ? ', open' : ''}';
+
+    return StudioTapTarget(
+      onTap: () => _activate(node),
+      label: label,
+      selected: selected,
+      minWidth: 0,
+      child: Container(
+        color: selected ? Aether.accentSoft : Colors.transparent,
+        padding: EdgeInsets.only(left: indent, right: 8),
+        alignment: Alignment.centerLeft,
+        child: Row(
+          children: [
+            Icon(icon, size: 15, color: iconColor),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                node.name,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontFamily: Aether.mono,
+                  fontFamilyFallback: kStudioMonoFallback,
+                  color: selected
+                      ? Aether.accent
+                      : failed
+                          ? Aether.dangerC
+                          : node.isDirectory
+                              ? Aether.text
+                              : Aether.textMuted,
+                ),
+              ),
+            ),
+            if (node.isDirectory)
+              Icon(
+                _expanded.contains(node.path)
+                    ? Icons.expand_more
+                    : Icons.chevron_right,
+                size: 15,
+                color: Aether.textFaint,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TreeHeader extends StatelessWidget {
+  const _TreeHeader();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+      child: Semantics(
+        header: true,
+        child: Text(
+          'FILES',
+          style: TextStyle(
+            fontSize: kStudioMinFontSize,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.2,
+            color: Aether.textFaint,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TreeEmpty extends StatelessWidget {
+  const _TreeEmpty();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Text(
+          'Connect a repo —\nfiles appear here live.',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 12.5,
+            height: 1.6,
+            color: Aether.textFaint,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TreeFooter extends StatelessWidget {
+  const _TreeFooter({required this.ready, required this.count});
+
+  final bool ready;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = ready ? 'Synced · $count files' : 'Not connected';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: Aether.hairline)),
+      ),
+      child: Semantics(
+        liveRegion: true,
+        label: text,
+        child: Row(
+          children: [
+            Icon(
+              ready ? Icons.cloud_done_outlined : Icons.cloud_off_outlined,
+              size: 15,
+              color: ready ? Aether.successLight : Aether.textFaint,
+            ),
+            const SizedBox(width: 7),
+            Expanded(
+              child: Text(
+                text,
+                style: TextStyle(fontSize: 12, color: Aether.textMuted),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
