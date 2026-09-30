@@ -227,16 +227,44 @@ void main() {
       expect(RepoCache.I.files['README.md'], 'hello');
     });
 
-    test('commitAll reads the SHA and commits on the bound branch', () async {
-      Uri? shaUrl;
-      Map<String, dynamic>? putBody;
+    // Audit 2026-09-25 §4: commitAll now creates ONE atomic commit via the
+    // Git Data API (blobs → tree → commit → ref update) instead of one
+    // contents PUT per file. The branch-threading assertion moved from the
+    // PUT body / `?ref=` query to the ref endpoints' paths; the slash in a
+    // branch name stays a path separator because git refs are hierarchical.
+    test('commitAll creates one atomic commit on the bound branch', () async {
+      Uri? refUrl;
+      Uri? patchUrl;
+      Map<String, dynamic>? commitBody;
       final client = MockClient((request) async {
-        if (request.method == 'GET') {
-          shaUrl = request.url;
-          return http.Response(jsonEncode({'sha': 'old-sha'}), 200);
+        final p = request.url.path;
+        if (request.method == 'GET' && p.contains('/git/ref/')) {
+          refUrl = request.url;
+          return http.Response(
+            jsonEncode({
+              'object': {'type': 'commit', 'sha': 'base-commit'},
+            }),
+            200,
+          );
         }
-        putBody = jsonDecode(request.body) as Map<String, dynamic>;
-        return http.Response('{}', 200);
+        if (request.method == 'GET' && p.contains('/git/trees/')) {
+          return http.Response(jsonEncode({'tree': []}), 200);
+        }
+        if (p.endsWith('/git/blobs')) {
+          return http.Response(jsonEncode({'sha': 'blob-sha'}), 201);
+        }
+        if (request.method == 'POST' && p.endsWith('/git/trees')) {
+          return http.Response(jsonEncode({'sha': 'tree-sha'}), 201);
+        }
+        if (p.endsWith('/git/commits')) {
+          commitBody = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response(jsonEncode({'sha': 'commit-sha'}), 201);
+        }
+        if (request.method == 'PATCH') {
+          patchUrl = request.url;
+          return http.Response('{}', 200);
+        }
+        return http.Response('unexpected ${request.method} $p', 404);
       });
 
       RepoCache.I.bind(
@@ -250,8 +278,11 @@ void main() {
       final pushed = await RepoCache.I.commitAll('Update README', client: client);
 
       expect(pushed, 1);
-      expect(shaUrl!.queryParameters['ref'], 'feature/x');
-      expect(putBody!['branch'], 'feature/x');
+      expect(RepoCache.I.hasPending, isFalse);
+      expect(refUrl!.path, '/repos/owner/repo/git/ref/heads/feature/x');
+      expect(patchUrl!.path, '/repos/owner/repo/git/refs/heads/feature/x');
+      expect(commitBody!['parents'], ['base-commit']);
+      expect(RepoCache.I.lastCommit?.mode, CommitMode.atomic);
     });
 
     test('sync URL-encodes a branch containing a slash', () async {
