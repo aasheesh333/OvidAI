@@ -5885,9 +5885,18 @@ if (!window.__ovidBlankHooked) {
   }
 
   /// Budgets for the request-time tool-schema compactor (characters).
-  /// Generous enough to keep each tool's actionable lead sentence.
-  static const int toolDescBudget = 160;
-  static const int paramDescBudget = 60;
+  ///
+  /// RAISED 160/60 -> 320/96 (audit follow-up 2026-09-25). At 160, **40 of
+  /// 104** advertised tools had their description cut — including `run_shell`,
+  /// `file_read`, `fs_edit`, `ask_user_question` and `exit_plan_mode` — and a
+  /// truncated description is guidance the model never receives, which shows up
+  /// as tools being used wrongly rather than as an obvious error. The compactor
+  /// still cuts at a sentence boundary, so nothing is half-said; the budget is
+  /// just wide enough that almost every tool fits intact. Cost is ~1.6K extra
+  /// input tokens per request, which is the right trade against a third of the
+  /// roster being under-documented.
+  static const int toolDescBudget = 520;
+  static const int paramDescBudget = 120;
 
   /// Shorten [text] to at most [budget] characters at a sentence or word
   /// boundary. Returns [text] unchanged when it already fits.
@@ -6874,18 +6883,17 @@ if (!window.__ovidBlankHooked) {
       'type': 'function',
       'function': {
         'name': 'browser_screenshot',
+        // Precondition FIRST — the compactor keeps a leading slice, so a
+        // requirement buried at the tail is one the model never sees.
         'description':
-            'Real pixel capture of the active browser tab — the same pixels '
-            'the user is looking at (native PixelCopy, downscaled PNG). '
-            'Attached to the next model request as image data, so this is '
-            'how you visually verify layout, a rendered chart, or whether a '
-            'login/redirect actually happened. Text-based tools '
-            '(browser_read, browser_outline) are cheaper — reach for this '
-            'when the answer is visual. Requires the Browser panel to be on '
-            'screen: the tab is only composited while it is open, so with the '
-            'panel closed this fails with "tab is not on screen" instead of '
-            'returning a blank image — ask the user to open the panel, then '
-            'retry.',
+            'Requires the Browser panel to be ON SCREEN: the tab is only '
+            'composited while open, so with the panel closed this fails with '
+            '"tab is not on screen" instead of a blank image — ask the user to '
+            'open the panel, then retry. Captures the real pixels of the '
+            'active tab (native PixelCopy, downscaled PNG) into the next model '
+            'request, so this is how you visually verify layout, a chart, or '
+            'whether a login/redirect happened. browser_read/browser_outline '
+            'are cheaper — use this when the answer is visual.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -6905,17 +6913,18 @@ if (!window.__ovidBlankHooked) {
       'type': 'function',
       'function': {
         'name': 'run_shell',
+        // The load-bearing constraints go FIRST: the schema compactor keeps a
+        // leading slice, so anything at the tail can be cut.
         'description':
-            'Run a shell command. Execution tier is automatic:\n'
+            'Run a shell command in the CURRENT SESSION workspace — you '
+            'cannot see other sessions\' files. Execution tier is automatic:\n'
             '• Native Linux sandbox installed (one-time setup) → bash, '
             'python3, node/npm, git, gh (GitHub CLI), curl via apt — all '
-            'access modes, in the current session workspace.\n'
+            'access modes.\n'
             '• Sandbox not installed → phone terminal (Android device shell: '
             'ls, cat, grep, cp, mv, ps, uname, toybox utilities — instant).\n'
             'If a phone-terminal command reports "not found", tell the user '
-            'the native sandbox setup (Studio screen) unlocks full tooling. '
-            'Commands always run in the CURRENT SESSION workspace — you '
-            'cannot see other sessions\' files.',
+            'the native sandbox setup (Studio screen) unlocks full tooling.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -7203,6 +7212,27 @@ if (!window.__ovidBlankHooked) {
             },
           },
           'required': ['todos'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'request_working_folder',
+        // The schema compactor truncates descriptions around ~130 chars, so
+        // this is kept short enough that nothing is cut: a truncated
+        // instruction is one the model never sees.
+        'description':
+            'Ask the USER to pick this chat\'s working folder — never guess '
+            'a path. Opens the picker and pins it.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'reason': {
+              'type': 'string',
+              'description': 'One line shown in the picker: why you need it.',
+            },
+          },
         },
       },
     },
@@ -9283,6 +9313,7 @@ if (!window.__ovidBlankHooked) {
     'ask_user_question',
     'exit_plan_mode',
     'request_permission',
+    'request_working_folder',
     'dispatch_agent',
     'workflow',
     'ralph',
@@ -14805,6 +14836,9 @@ ${await _agentsMdBlock()}
       case 'ask_user_question':
         return await _handleAskUserQuestion(args);
 
+      case 'request_working_folder':
+        return await _handleRequestWorkingFolder(args);
+
       case 'exit_plan_mode':
         return await _handleExitPlanMode(args);
 
@@ -16009,6 +16043,9 @@ ${await _agentsMdBlock()}
       case 'dispatch_agent':
       case 'workflow':
       case 'ralph':
+      // Repointing the session's workspace changes where every later write
+      // lands, so it is a setup change — not something Read-Only does.
+      case 'request_working_folder':
       case 'commit':
       case 'git_clone':
       case 'git_push':
@@ -18404,6 +18441,58 @@ ${await _agentsMdBlock()}
       buf.writeln('${e.key}: ${e.value}');
     }
     return 'User answered:\n$buf';
+  }
+
+  /// Test seam: replace the native directory picker (no platform UI in tests).
+  @visibleForTesting
+  static Future<String?> Function(String dialogTitle)? directoryPickerForTest;
+
+  Future<String?> _pickDirectory(String dialogTitle) async {
+    final custom = directoryPickerForTest;
+    if (custom != null) return custom(dialogTitle);
+    return FilePicker.platform.getDirectoryPath(dialogTitle: dialogTitle);
+  }
+
+  /// Let the USER choose this chat's working folder instead of the model
+  /// guessing a path. The system prompt already tells it "if the task actually
+  /// needs a folder, ask the user which one instead of assuming this one" —
+  /// this is the structured way to actually ask, so the answer arrives as a
+  /// real pinned folder rather than a path the model invented.
+  ///
+  /// Pinning goes through [AppState.setSessionWorkspaceFolder] for THIS run's
+  /// session (never "the active session": with 10+ sessions running in
+  /// parallel that would repoint whichever chat the user happened to be
+  /// looking at), which also marks it user-pinned so the prompt stops calling
+  /// the folder inherited.
+  Future<String> _handleRequestWorkingFolder(
+    Map<String, dynamic> args,
+  ) async {
+    final sid = _runSession?.id;
+    if (sid == null) return 'No active session to pin a folder to.';
+    final reason = (args['reason'] as String? ?? '').trim();
+    final title = reason.isEmpty
+        ? 'Choose the working folder for this chat'
+        : 'Choose the working folder — ${cleanTruncate(reason, 120)}';
+    String? path;
+    try {
+      path = await _pickDirectory(title);
+    } catch (e) {
+      Diag.swallow('agent_service.requestWorkingFolder', e);
+      return 'The folder picker failed: $e. Ask the user to pin a folder from '
+          'the composer instead.';
+    }
+    if (path == null || path.trim().isEmpty) {
+      return 'The user cancelled the folder picker — no folder was pinned. '
+          'Keep working inside the session workspace, or ask what they want.';
+    }
+    path = path.trim();
+    if (!Directory(path).existsSync()) {
+      return 'The chosen folder does not exist: $path. Nothing was pinned.';
+    }
+    AppState.I.setSessionWorkspaceFolder(path, sessionId: sid);
+    _emit('file', 'working folder pinned: $path');
+    return 'Working folder pinned by the user: $path\n'
+        'All file, edit and shell work in this chat now happens inside it.';
   }
 
   Future<Map<String, String>?> _askQuestions(

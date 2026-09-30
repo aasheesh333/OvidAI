@@ -192,7 +192,43 @@ void main() {
     // element.click(), so dblclick handlers, context menus, canvas hit-testing
     // and touch scrollers were unreachable). Descriptions kept terse; ceiling
     // raised to 8900.
+    //
+    // Measured 2026-09-25: 8975 (~+167). Intentional — adds
+    // `request_working_folder`, the structured way for the agent to let the
+    // USER pick this chat's working folder instead of guessing a path (the
+    // prompt already says "ask which one instead of assuming"; this makes the
+    // ask real). One tool, no schema growth elsewhere; ceiling raised to 9100.
+    //
+    // Measured 2026-09-25: 10560 (~+1585). Intentional and worth the tokens —
+    // the schema compactor's description budget was 160 chars, which silently
+    // CUT 40 of 104 advertised tool descriptions (including run_shell,
+    // file_read, fs_edit, ask_user_question and exit_plan_mode). A truncated
+    // description is guidance the model never receives, so tools get used
+    // wrongly instead of failing loudly. Budget raised to 520/120, and the two
+    // still-long descriptions (run_shell, browser_screenshot) had their
+    // load-bearing constraint front-loaded, so NOTHING is truncated now —
+    // pinned by the next test. Ceiling raised to 10800.
     expect(tools.length, greaterThan(80));
-    expect(approxTokens, lessThan(8900));
+    expect(approxTokens, lessThan(10800));
+  });
+
+  test('no advertised tool description is truncated', () {
+    final tools = AgentService.I.toolsForTest();
+    // The compactor marks a cut with a trailing ellipsis. Each one is a tool
+    // whose documentation the model does not fully see — the failure mode is
+    // silent misuse, not a loud error, so it is pinned explicitly.
+    final cut = <String>[];
+    for (final t in tools) {
+      final fn = t['function'];
+      if (fn is! Map) continue;
+      final d = (fn['description'] ?? '').toString();
+      if (d.endsWith('…')) cut.add('${fn['name']}');
+    }
+    expect(
+      cut,
+      isEmpty,
+      reason: 'these tool descriptions are cut off — front-load the '
+          'load-bearing sentence or raise toolDescBudget:\n${cut.join('\n')}',
+    );
   });
 }
