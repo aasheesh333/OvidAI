@@ -513,6 +513,97 @@ class PluginMcpServer {
   }
 }
 
+/// A declarative settings field contributed by a plugin manifest (audit
+/// 2026-09-25: the contribution surface was entirely non-visual — plugins
+/// could not even declare a settings form, and the native
+/// `NativePluginConfigField` model was never rendered anywhere).
+///
+/// Data-only by design: mirrors the native plugin config-field shape
+/// (key, label, secret, hint) so ONE declarative model serves both native
+/// and installed plugins. The host UI renders fields into a schema-driven
+/// form (`lib/ui/plugin_settings_panel.dart`) — no WebView, no JS, no
+/// plugin-supplied code ever executes.
+///
+/// Secret hygiene (spec §5.1): this record is the DECLARATION — a key, its
+/// label, and whether its value is secret. Values never appear here or
+/// anywhere in the manifest JSON; they are entered by the user and stored
+/// by `NativePluginConfigStore` (secret → FlutterSecureStorage, otherwise
+/// prefs). Adapters drop inline value keys (`default`/`defaultValue`/
+/// `value`) on secret fields, and [fromJson] re-drops them so persisted or
+/// hand-edited JSON can never reintroduce a secret VALUE.
+class PluginSettingsField {
+  /// Owning plugin's canonical id (`publisher/name`).
+  final String pluginId;
+
+  /// Storage + form key (namespaced per plugin by `NativePluginConfigStore`).
+  final String key;
+
+  /// Human-readable label; empty means the UI falls back to [key] so every
+  /// rendered field keeps an accessible label.
+  final String label;
+
+  /// True → the value is masked in the form and persisted in secure storage.
+  final bool secret;
+
+  /// Optional helper text rendered with the field.
+  final String? hint;
+
+  /// Unrecognized source fields, preserved verbatim — EXCEPT inline value
+  /// keys on secret fields ([kSecretFieldValueKeys]), which are dropped.
+  final Map<String, dynamic> unknownFields;
+
+  const PluginSettingsField({
+    required this.pluginId,
+    required this.key,
+    this.label = '',
+    this.secret = false,
+    this.hint,
+    this.unknownFields = const {},
+  });
+
+  /// Registry id (spec §4.4 scheme extended to the settings contribution):
+  /// `plugin:<plugin-id>/setting:<key>`.
+  String get canonicalId => 'plugin:$pluginId/setting:$key';
+
+  Map<String, dynamic> toJson() => {
+    'pluginId': pluginId,
+    'key': key,
+    'label': label,
+    'secret': secret,
+    'hint': hint,
+    'unknownFields': unknownFields,
+  };
+
+  factory PluginSettingsField.fromJson(Map<String, dynamic> j) {
+    final secret = j['secret'] as bool? ?? false;
+    final unknown = _asMap(j['unknownFields']);
+    // Round-trip safety (spec §5.1): even persisted/hand-edited JSON must
+    // never reintroduce an inline secret VALUE — mirror the adapter's drop
+    // on read.
+    final scrubbed = secret
+        ? {
+            for (final e in unknown.entries)
+              if (!kSecretFieldValueKeys.contains(e.key)) e.key: e.value,
+          }
+        : unknown;
+    final hint = j['hint'];
+    return PluginSettingsField(
+      pluginId: j['pluginId'] as String? ?? '',
+      key: j['key'] as String? ?? '',
+      label: j['label'] as String? ?? '',
+      secret: secret,
+      hint: hint is String && hint.isNotEmpty ? hint : null,
+      unknownFields: _asMap(scrubbed),
+    );
+  }
+}
+
+/// Keys that would carry an inline VALUE on a secret settings field. A
+/// secret value never belongs in manifest metadata (spec §5.1) — adapters
+/// drop these with a visible optional finding, and
+/// [PluginSettingsField.fromJson] re-drops them on read.
+const Set<String> kSecretFieldValueKeys = {'default', 'defaultValue', 'value'};
+
 /// One declared dependency (spec §6). A failed REQUIRED dependency means
 /// `failed` (no partial activation); a failed optional dependency means
 /// `degraded` with only the affected contribution disabled.
@@ -604,6 +695,11 @@ class NormalizedPluginManifest {
   final List<PluginAgent> agents;
   final List<PluginHook> hooks;
   final List<PluginMcpServer> mcpServers;
+
+  /// Declarative settings fields the plugin declares (audit 2026-09-25) —
+  /// data-only UI contribution rendered by the host into a schema-driven
+  /// form. Empty for every format/source that declares none.
+  final List<PluginSettingsField> settingsFields;
   final PluginDependencies dependencies;
 
   /// Whether the plugin becomes active without an explicit user enable:
@@ -642,6 +738,7 @@ class NormalizedPluginManifest {
     this.agents = const [],
     this.hooks = const [],
     this.mcpServers = const [],
+    this.settingsFields = const [],
     this.dependencies = const PluginDependencies(),
     this.enabledByDefault = true,
     this.requestedCapabilities = const {},
@@ -677,6 +774,14 @@ class NormalizedPluginManifest {
     'agents': agents.map((a) => a.toJson()).toList(),
     'hooks': hooks.map((h) => h.toJson()).toList(),
     'mcpServers': mcpServers.map((s) => s.toJson()).toList(),
+    // Emitted ONLY when non-empty (audit 2026-09-25): the §5.1 grant digest
+    // hashes this JSON, so an always-present (usually empty) key would
+    // re-digest EVERY installed plugin on app update and trigger the
+    // migrationRequired cascade (see test/plugin_digest_stability_test.dart).
+    // A manifest that DECLARES fields is new content — the changed digest
+    // re-entering the approval path is the intended §5.1 gate.
+    if (settingsFields.isNotEmpty)
+      'settingsFields': settingsFields.map((f) => f.toJson()).toList(),
     'dependencies': dependencies.toJson(),
     'enabledByDefault': enabledByDefault,
     'requestedCapabilities': requestedCapabilities.map((c) => c.name).toList(),
@@ -710,6 +815,10 @@ class NormalizedPluginManifest {
         ),
         mcpServers: List<PluginMcpServer>.unmodifiable(
           _asMapList(j['mcpServers']).map(PluginMcpServer.fromJson),
+        ),
+        // Absent (pre-fields persisted manifests) means no declared fields.
+        settingsFields: List<PluginSettingsField>.unmodifiable(
+          _asMapList(j['settingsFields']).map(PluginSettingsField.fromJson),
         ),
         dependencies: PluginDependencies.fromJson(_asMap(j['dependencies'])),
         // Absent (pre-flag persisted manifests) means default-enabled —

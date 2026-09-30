@@ -313,6 +313,31 @@ class PluginContributionRegistry {
     return List.unmodifiable(out);
   }
 
+  /// Declarative settings fields visible to [sessionId] — the settings-side
+  /// mirror of [toolsForSession] under the SAME §7 session-visibility rules
+  /// (audit 2026-09-25: plugins contribute a data-only settings UI).
+  /// Metadata only: rendering lives in the host UI
+  /// (`lib/ui/plugin_settings_panel.dart`) and VALUES never pass through
+  /// this registry — they are stored by `NativePluginConfigStore`
+  /// (secret → secure storage, else prefs).
+  List<PluginSettingsField> settingsFieldsForSession(String sessionId) {
+    final out = <PluginSettingsField>[];
+    for (final reg in _registrations.values) {
+      if (!_visible(reg, sessionId)) continue;
+      out.addAll(reg.manifest.settingsFields);
+    }
+    return List.unmodifiable(out);
+  }
+
+  /// Every settings field declared by [pluginId] whatever its activation —
+  /// mirrors [toolContributionsForPlugin] for the settings surface (the
+  /// plugin detail screen reports what a plugin declares honestly).
+  List<PluginSettingsField> settingsFieldsForPlugin(String pluginId) {
+    final reg = _registrations[pluginId];
+    if (reg == null) return const [];
+    return List.unmodifiable(reg.manifest.settingsFields);
+  }
+
   /// A source-local MCP name is an alias only while exactly one visible
   /// plugin contributes it. Canonical ids remain available regardless of
   /// collisions.

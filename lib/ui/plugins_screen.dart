@@ -20,6 +20,7 @@ import '../core/state.dart';
 import 'github_login_sheet.dart';
 import 'plugin_install_progress.dart';
 import 'plugin_permission_sheet.dart';
+import 'plugin_settings_panel.dart';
 import 'sandbox_setup.dart';
 import 'startup_progress_panel.dart';
 
@@ -1441,6 +1442,15 @@ class PluginDetailScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = AppState.I;
+    // Declarative plugin settings UI (audit 2026-09-25): the settings
+    // fields an installed plugin's normalized manifest declares. Data-only
+    // — [PluginSettingsPanel] renders them; values route through
+    // NativePluginConfigStore (secrets → secure storage, never prefs/logs).
+    final settingsFields = plugin.installed && plugin.runtimeId != null
+        ? PluginContributionRegistry.I.settingsFieldsForPlugin(
+            plugin.runtimeId!,
+          )
+        : const <PluginSettingsField>[];
     return Scaffold(
       backgroundColor: Aether.bg,
       appBar: AppBar(
@@ -1863,6 +1873,23 @@ class PluginDetailScreen extends StatelessWidget {
               style: TextStyle(fontSize: 13.5, height: 1.6, color: Aether.text),
             ),
           ),
+          // ── Declarative settings form (audit 2026-09-25): rendered ONLY
+          // from manifest-declared data — no WebView, no JS, no plugin code.
+          if (settingsFields.isNotEmpty) ...[
+            const SectionHeader(
+              'Settings',
+              subtitle:
+                  'Declared by the plugin manifest — secrets stay in '
+                  'secure storage on this device',
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+              child: PluginSettingsPanel(
+                pluginName: plugin.runtimeId!,
+                fields: configFieldsForSettings(settingsFields),
+              ),
+            ),
+          ],
           // ── Task 11 (spec §11): the diagnostics sections. Runtime
           // rows (runtimeId set) render the full production surface;
           // legacy flag-flip rows keep the minimal sections only.

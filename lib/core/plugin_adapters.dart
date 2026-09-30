@@ -155,6 +155,7 @@ class _Build {
   final agents = <PluginAgent>[];
   final hooks = <PluginHook>[];
   final mcpServers = <PluginMcpServer>[];
+  final settingsFields = <PluginSettingsField>[];
   final dependencies = <PluginDependency>[];
   final issues = <CompatibilityIssue>[];
   final unknown = <String, dynamic>{};
@@ -506,6 +507,124 @@ void _addMcp(
   }
 }
 
+/// Declarative settings-field declarations (audit 2026-09-25): the plugin
+/// manifest spellings accepted for a list of `{key, label, secret, hint}`
+/// field objects. All three merge in declaration order; a duplicate key
+/// never overwrites the earlier field (mirrors the §4.4 collision rule) and
+/// is reported as an optional finding.
+const List<String> kSettingsFieldSpellings = [
+  'configFields',
+  'settings',
+  'settingsFields',
+];
+
+/// Field-object keys consumed by [PluginSettingsField]; everything else is
+/// preserved verbatim in the field's `unknownFields`.
+const Set<String> _kKnownSettingsFieldKeys = {'key', 'label', 'secret', 'hint'};
+
+/// Parse declarative settings fields out of a `plugin.json`-shaped manifest
+/// map. Data-only contribution: fields become [PluginSettingsField] records
+/// the host UI renders — never executable content. Unrecognized shapes are
+/// preserved in `unknownFields` exactly like any other unknown source
+/// field, with an optional (degrading, non-fatal) finding.
+void _addSettingsFields(_Build b, Map<String, dynamic> j) {
+  final seen = <String>{};
+  for (final spelling in kSettingsFieldSpellings) {
+    if (!j.containsKey(spelling)) continue;
+    final raw = j[spelling];
+    if (raw is! List) {
+      // Unrecognized shape: preserve verbatim (unknown-fields contract).
+      b.unknown[spelling] = raw;
+      b.issues.add(
+        CompatibilityIssue(
+          severity: CompatibilitySeverity.optional,
+          message:
+              'Settings declaration "$spelling" must be a list of field '
+              'objects and was ignored.',
+          fields: [spelling],
+        ),
+      );
+      continue;
+    }
+    for (var i = 0; i < raw.length; i++) {
+      final entry = raw[i];
+      final where = '$spelling[$i]';
+      if (entry is! Map) {
+        b.issues.add(
+          CompatibilityIssue(
+            severity: CompatibilitySeverity.optional,
+            message: 'Settings field $where is not a field object and was skipped.',
+            fields: [where],
+          ),
+        );
+        continue;
+      }
+      final map = entry.cast<String, dynamic>();
+      final key = map['key']?.toString().trim() ?? '';
+      if (key.isEmpty) {
+        b.issues.add(
+          CompatibilityIssue(
+            severity: CompatibilitySeverity.optional,
+            message: 'Settings field $where declares no key and was skipped.',
+            fields: [where],
+          ),
+        );
+        continue;
+      }
+      if (!seen.add(key)) {
+        b.issues.add(
+          CompatibilityIssue(
+            severity: CompatibilitySeverity.optional,
+            message:
+                'Duplicate settings field key "$key" at $where — the first '
+                'declaration wins.',
+            fields: [where],
+          ),
+        );
+        continue;
+      }
+      // `secret` accepts a boolean or the string "true" — anything else
+      // stays non-secret (the declared shape is the native config-field
+      // model's boolean).
+      final secretRaw = map['secret'];
+      final secret = secretRaw is bool
+          ? secretRaw
+          : secretRaw is String && secretRaw.trim().toLowerCase() == 'true';
+      final hint = map['hint'];
+      final unknown = <String, dynamic>{};
+      for (final e in map.entries) {
+        if (_kKnownSettingsFieldKeys.contains(e.key)) continue;
+        if (secret && kSecretFieldValueKeys.contains(e.key)) {
+          // Spec §5.1: an inline VALUE for a secret field would persist the
+          // secret into plugin metadata (ordinary prefs). Drop it, visibly.
+          b.issues.add(
+            CompatibilityIssue(
+              severity: CompatibilitySeverity.optional,
+              message:
+                  'Settings field "$key" declared an inline value '
+                  '("${e.key}"); secret values are entered by the user and '
+                  'stored in secure storage — the declaration was dropped.',
+              fields: [where],
+            ),
+          );
+          continue;
+        }
+        unknown[e.key] = e.value;
+      }
+      b.settingsFields.add(
+        PluginSettingsField(
+          pluginId: b.pluginId,
+          key: key,
+          label: map['label']?.toString() ?? '',
+          secret: secret,
+          hint: hint is String && hint.trim().isNotEmpty ? hint : null,
+          unknownFields: Map.unmodifiable(unknown),
+        ),
+      );
+    }
+  }
+}
+
 /// npm + Python dependency manifests (spec §6).
 void _addDependencies(_Build b) {
   final pkg = File('${b.root.path}/package.json');
@@ -633,6 +752,7 @@ NormalizedPluginManifest _finish(
       agents: List.unmodifiable(b.agents),
       hooks: List.unmodifiable(b.hooks),
       mcpServers: List.unmodifiable(b.mcpServers),
+      settingsFields: List.unmodifiable(b.settingsFields),
       dependencies: PluginDependencies(
         packages: List.unmodifiable(b.dependencies),
       ),
@@ -668,6 +788,10 @@ const _knownClaudeManifestKeys = {
   'commands',
   'skills',
   'agents',
+  // Declarative settings fields (audit 2026-09-25) — consumed by
+  // [_addSettingsFields]; an unrecognized SHAPE is re-preserved verbatim in
+  // `unknownFields` there, so the unknown-fields contract still holds.
+  ...kSettingsFieldSpellings,
 };
 
 /// Reads a manifest-declared default-enable opt-out: only an explicit
@@ -704,6 +828,9 @@ class ClaudePluginAdapter {
     _requirePublisherIdentity(b, '.claude-plugin/plugin.json:author');
     // Manifest-declared default-enable opt-out (see [_readEnabledByDefault]).
     b.enabledByDefault = _readEnabledByDefault(j);
+    // Declarative settings fields (audit 2026-09-25): `configFields` /
+    // `settings` / `settingsFields` lists of {key, label, secret, hint}.
+    _addSettingsFields(b, j);
 
     await _addMarkdown(b, Directory('${root.path}/commands'), asAgent: false);
     await _addSkills(b, Directory('${root.path}/skills'));
