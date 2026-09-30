@@ -388,7 +388,17 @@ void main() {
         isNot(contains('your session cookie is kept here')),
         reason: 'an external sign-in does not populate the WebView cookie jar',
       );
-      expect(src, contains('separate cookie jar'));
+      // STRENGTHENED 2026-09-29: the copy no longer merely mentions a separate
+      // jar — it states outright that the sign-in cannot be brought back and
+      // that reloading will not log you in, because Android gives an app no
+      // access to another browser's cookies. The old "separate cookie jar"
+      // wording still left the door open to hoping a reload would work (and a
+      // Reload button invited exactly that), which is why the owner's
+      // open-browser → sign in → reload flow always ended logged out.
+      expect(src, contains('cannot be brought back into this tab'));
+      expect(src, contains('reloading here will not log you in'));
+      expect(src, isNot(contains('Reload - I signed in')));
+      expect(src, isNot(contains('worth trying')));
     });
   });
 
