@@ -298,6 +298,15 @@ class HookService extends ChangeNotifier {
   /// the run loop reads this to prepend it. Bounded so a hostile hook cannot
   /// blow up the prompt.
   static const int maxSessionContextChars = 8192;
+
+  /// Observe events where a COMMAND hook exiting 2 is a blocking decision
+  /// rather than a failure (Claude Code semantics): `user_prompt_submit`
+  /// blocks the prompt, `subagent_end` blocks the stop and sends the child
+  /// back to work. Everywhere else exit 2 fails open.
+  static const Set<String> kExit2BlockingEvents = {
+    'user_prompt_submit',
+    'subagent_end',
+  };
   final Map<String, String> _sessionContexts = {};
 
   /// The `session_start` context a hook produced for [sessionId], or ''.
@@ -1408,11 +1417,13 @@ class HookService extends ChangeNotifier {
       try {
         final (code, out) = await _exec(hook, env, cwd, stdinPayload: stdinJson);
         if (code != 0) {
-          // CLAUDE CODE PARITY (audit 2026-09-25): on `user_prompt_submit`,
-          // exit code 2 BLOCKS the prompt and surfaces stderr to the user — it
-          // is a decision, not a failure. On every other observe event exit 2
-          // stays fail-open, because a broken hook must never brick a run.
-          if (code == 2 && canonical == 'user_prompt_submit') {
+          // CLAUDE CODE PARITY (audit 2026-09-25): on the two events Claude
+          // Code lets a command hook block — `user_prompt_submit` (block the
+          // prompt) and `subagent_end` (block the stop, keep working) — exit 2
+          // is a DECISION, not a failure, and its stderr is the reason. On
+          // every other observe event exit 2 stays fail-open, because a broken
+          // hook must never brick a run.
+          if (code == 2 && kExit2BlockingEvents.contains(canonical)) {
             blockedReason = out.trim().isEmpty
                 ? 'plugin $pluginId blocked this prompt'
                 : cleanHookJson(out.trim());

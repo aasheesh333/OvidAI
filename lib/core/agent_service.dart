@@ -20575,6 +20575,46 @@ ${await _agentsMdBlock()}
   /// Run a subagent's session as a REAL run: its transcript, tool cards and
   /// streaming all land in the child session, so the user can open it and
   /// see exactly what happened.
+  /// How many times a SubagentStop hook may block a child's stop. Claude Code
+  /// lets exit 2 send the subagent back to work; without a bound a hook that
+  /// always blocks would spin the child forever.
+  static const int _maxSubagentStopBlocks = 3;
+
+  /// Fire `subagent_end` as a BLOCKING check at the child's natural stop point.
+  /// Returns the hook's stderr when it exits 2 (Claude Code: block the stop and
+  /// keep working), else null. Fail-open on any error — a broken hook must
+  /// never wedge a settled child.
+  Future<String?> _subagentStopBlockReason(
+    ChatSession child,
+    SubagentInfo sub,
+  ) async {
+    if (!HookService.I.hasHookListeners(
+      'subagent_end',
+      sessionId: child.id,
+    )) {
+      return null;
+    }
+    try {
+      final res = await HookService.I.fireDetailed(
+        'subagent_end',
+        child.id,
+        payload: {
+          'subagentId': sub.id,
+          'parentSessionId': sub.parentSessionId,
+          'state': sub.state,
+          'interrupted': sub.interrupted,
+          'result': cleanTruncate(sub.result, 400),
+          'transcript_path': _transcriptPathFor(child.id),
+        },
+        model: child.model,
+      );
+      return res.blockedReason;
+    } catch (e) {
+      Diag.swallow('agent_service.subagentStopHook', e);
+      return null;
+    }
+  }
+
   Future<void> _runSubagentSession(
     SubagentInfo sub,
     String firstPrompt, {
@@ -20625,8 +20665,10 @@ ${await _agentsMdBlock()}
         AppState.I.refresh();
       });
     }
+    var endHookFired = false;
     try {
       var next = firstPrompt;
+      var stopBlocks = 0;
       while (true) {
         child.messages.add(Message(role: 'user', content: next));
         AppState.I.refresh();
@@ -20636,7 +20678,21 @@ ${await _agentsMdBlock()}
         await runTask(next, sessionId: child.id, freshTurn: false);
         sub.result = _lastAssistantText(child);
         if (sub.interrupted) break;
-        if (sub.messages.isEmpty) break;
+        if (sub.messages.isEmpty) {
+          // CLAUDE CODE PARITY (audit 2026-09-25): a SubagentStop hook that
+          // exits 2 BLOCKS the stop — the child keeps working with the hook's
+          // stderr as its next instruction. Bounded so a hook that always
+          // blocks cannot spin forever.
+          endHookFired = true;
+          final block = await _subagentStopBlockReason(child, sub);
+          if (block != null && stopBlocks < _maxSubagentStopBlocks) {
+            stopBlocks++;
+            endHookFired = false;
+            next = block;
+            continue;
+          }
+          break;
+        }
         next = sub.messages.removeAt(0);
       }
       sub
@@ -20657,7 +20713,10 @@ ${await _agentsMdBlock()}
       mirror?.cancel();
       // Task 8 (spec §8.1): subagent_end — observe hook at settlement
       // (finished, interrupted, or failed — one fire per settled child).
-      if (HookService.I.hasHookListeners('subagent_end', sessionId: child.id)) {
+      // Skipped when the stop-point gate already fired it, so a natural stop
+      // never double-fires the same event.
+      if (!endHookFired &&
+          HookService.I.hasHookListeners('subagent_end', sessionId: child.id)) {
         unawaited(
           HookService.I.fire(
             'subagent_end',
