@@ -89,8 +89,18 @@ object OvidBrowserProfiles {
     }
 
     /**
-     * Cookie managers for [profileNames], skipping names the provider does not
-     * know. Never contains the default profile unless it was named explicitly.
+     * Cookie managers for [profileNames], CREATING any profile that does not
+     * exist yet. Never contains the default profile unless it was named
+     * explicitly.
+     *
+     * getOrCreateProfile, NOT getProfile (2026-09-30 owner bug): a session
+     * that never opened a browser tab has no profile on disk, and the old
+     * `getProfile(name) ?: continue` skipped it — so the exact reported flow
+     * ("logged into a platform in chat X, restarted, chats Y/Z still logged
+     * out") found fewer than two managers and copied NOTHING while the Dart
+     * side reported success. Creating the jar here is safe: the restart merge
+     * runs at startup before any WebView binds a profile, and pending deletes
+     * (profiles of DELETED sessions) are purged before this ever runs.
      */
     private fun cookieManagers(profileNames: List<String>): List<CookieManager> {
         if (!supported()) return emptyList()
@@ -101,8 +111,9 @@ object OvidBrowserProfiles {
         }
         val out = ArrayList<CookieManager>(profileNames.size)
         for (name in profileNames) {
+            if (name.isBlank()) continue
             try {
-                val profile: Profile = store.getProfile(name) ?: continue
+                val profile: Profile = store.getOrCreateProfile(name)
                 out.add(profile.cookieManager)
             } catch (t: Throwable) {
                 // UnsupportedOperationException on providers without the API.
@@ -112,15 +123,24 @@ object OvidBrowserProfiles {
     }
 
     /**
-     * Copy the cookie jar of every profile in [profileNames] into every other
+     * Share the logins of every profile in [profileNames] with every other
      * one, restricted to [urls] (the origins the user actually browsed — the
      * platform offers no way to enumerate a jar, so origins must be supplied).
      *
-     * The first non-blank cookie header found for an origin wins and is written
-     * to the remaining profiles. `CookieManager.setCookie` replaces by
-     * name+domain+path, so re-running this is idempotent and never duplicates.
+     * UNION merge, own-value-wins (2026-09-30): each jar KEEPS its own value
+     * for every cookie name it already holds and only RECEIVES the names it
+     * lacks (first donor in list order wins when several jars hold the same
+     * name with different values — an unavoidable ambiguity, one jar cannot
+     * hold two values for one name). The previous first-header-wins replay
+     * overwrote a session's own same-name login with an older session's,
+     * violating "session X keeps ALL of its own data".
      *
-     * @return number of (profile, origin) writes performed.
+     * The decision rule mirrors the Dart spec `CookieMerge.missingPairs`
+     * (lib/core/session_browser_profiles.dart), which is what the unit tests
+     * pin; `CookieManager.setCookie` replaces by name+domain+path, so
+     * re-running this writes nothing and stays idempotent.
+     *
+     * @return number of (profile, cookie) writes performed.
      */
     fun shareCookies(profileNames: List<String>, urls: List<String>): Int {
         if (urls.isEmpty()) return 0
@@ -129,21 +149,44 @@ object OvidBrowserProfiles {
         var writes = 0
         for (url in urls) {
             if (url.isBlank()) continue
-            val header = firstCookieHeader(managers, url) ?: continue
-            val pairs = cookiePairs(header)
-            if (pairs.isEmpty()) continue
+            // Read every jar's OWN header for this origin first.
+            val ownHeaders = ArrayList<String?>(managers.size)
+            val union = LinkedHashMap<String, String>() // name -> winning pair
             for (manager in managers) {
-                try {
-                    if (manager.getCookie(url) == header) continue
-                    // setCookie takes exactly ONE cookie per call, so a merged
-                    // header has to be replayed pair by pair.
-                    for (pair in pairs) {
+                val header = try {
+                    manager.getCookie(url)
+                } catch (t: Throwable) {
+                    null
+                }
+                ownHeaders.add(header)
+                for (pair in cookiePairs(header)) {
+                    val name = pair.substringBefore('=').trim()
+                    if (name.isEmpty() || union.containsKey(name)) continue
+                    union[name] = pair
+                }
+            }
+            if (union.isEmpty()) continue
+            for ((index, manager) in managers.withIndex()) {
+                val ownNames = cookiePairs(ownHeaders[index])
+                    .map { it.substringBefore('=').trim() }
+                    .toSet()
+                var wroteHere = false
+                for ((name, pair) in union) {
+                    if (ownNames.contains(name)) continue
+                    try {
+                        // setCookie takes exactly ONE cookie per call.
                         manager.setCookie(url, pair)
                         writes++
+                        wroteHere = true
+                    } catch (t: Throwable) {
+                        // Ignore a single write failure; the rest still sync.
                     }
-                    manager.flush()
-                } catch (t: Throwable) {
-                    // Ignore a single profile failure; the rest still sync.
+                }
+                if (wroteHere) {
+                    try {
+                        manager.flush()
+                    } catch (t: Throwable) {
+                    }
                 }
             }
         }
@@ -207,16 +250,5 @@ object OvidBrowserProfiles {
         return header.split(';')
             .map { it.trim() }
             .filter { it.isNotEmpty() && it.contains('=') }
-    }
-
-    private fun firstCookieHeader(managers: List<CookieManager>, url: String): String? {
-        for (manager in managers) {
-            try {
-                val cookie = manager.getCookie(url)
-                if (!cookie.isNullOrBlank()) return cookie
-            } catch (t: Throwable) {
-            }
-        }
-        return null
     }
 }

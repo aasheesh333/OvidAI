@@ -3126,7 +3126,7 @@ class AppState extends ChangeNotifier {
       maxOutputTokens = prefs.getInt(_kMaxOutputTokens) ?? 0;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
       shareStudioOnRestart = prefs.getBool(_kShareStudioOnRestart) ?? true;
-      shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? false;
+      shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? true;
       lightTheme = prefs.getBool(_kTheme) ?? false;
       memoryEnabled = prefs.getBool(_kMemoryEnabled) ?? true;
       showReasoning = prefs.getBool(_kShowReasoning) ?? true;
@@ -4172,7 +4172,9 @@ class AppState extends ChangeNotifier {
       autoRunSafeCommands = true;
       shareSessionMemory = false;
       shareStudioOnRestart = true;
-      shareBrowserOnRestart = false;
+      // deleteAllData resets in-memory state to the persisted DEFAULTS (prefs
+      // were just wiped, so the next load falls through to `?? true`).
+      shareBrowserOnRestart = true;
       lastSelectedModel = '';
       lastSelectedProviderId = null;
       // Clear the in-memory GitHub login as well: deleteAll() wipes the token
@@ -4271,16 +4273,26 @@ class AppState extends ChangeNotifier {
   /// (persisted, default ON).
   ///
   /// Each session browses in its own WebView profile, so a Google login in
-  /// one chat is invisible from another while the app runs.
+  /// one chat is invisible from another while the app runs. Once per launch
+  /// (the `session.shareOnRestart` startup task) the accumulated logins are
+  /// merged into every session — cookies only, never tabs or visit history.
   ///
-  /// SECURITY (2026-09-24): this used to default ON, which meant every launch
-  /// merged every remembered origin's cookies into EVERY session profile —
-  /// directly contradicting the per-session isolation the WebView profiles
-  /// exist to provide. A prompt-injected agent in chat B could then act on any
-  /// site the user had ever logged into in chat A, under a different model,
-  /// provider and plugin set. It is now opt-in.
+  /// OWNER DECISION (2026-09-30): defaults ON. History: the 2026-09-24 note
+  /// below flipped this to opt-in for prompt-injection safety, but the
+  /// Settings rows that could opt in were removed afterwards ("Issue 6"), so
+  /// `setShareBrowserOnRestart` had no caller left and the restart merge was
+  /// dead in production — the owner's "log in in chat X, restart, chat Y is
+  /// still logged out" report. The requested contract is explicit: after a
+  /// restart the LOGINS are shared across ALL sessions; tabs, history and
+  /// every other per-session data stay per session.
+  ///
+  /// SECURITY (2026-09-24, kept for the record — the trade-off is real and
+  /// was accepted by the owner): with the merge ON, a prompt-injected agent
+  /// in chat B can act on sites the user logged into in chat A, under a
+  /// different model/provider/plugin set. The opt-out seam remains:
+  /// `setShareBrowserOnRestart(false)` persists and disables the merge.
   static const _kShareBrowserOnRestart = 'ovid_share_browser_on_restart';
-  bool shareBrowserOnRestart = false;
+  bool shareBrowserOnRestart = true;
 
   Future<void> setShareStudioOnRestart(bool v) async {
     shareStudioOnRestart = v;

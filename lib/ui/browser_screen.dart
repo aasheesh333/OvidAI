@@ -115,19 +115,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
     super.dispose();
   }
 
-  /// Reload the active tab exactly like the refresh button does: a
-  /// local preview reloads its file, anything else reloads the page.
-  void _reloadActiveTab() {
-    final t = _activeTab;
-    final lp = t?.localPreviewPath;
-    if (t != null && lp != null) {
-      t.controller?.loadFile(lp);
-    } else {
-      t?.controller?.reload();
-    }
-    setState(() {});
-  }
-
   void _nav(String url) {
     var u = url.trim();
     if (u.isEmpty) return;
@@ -394,14 +381,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 ],
               ),
             ),
-            // Google sign-in cannot complete inside an embedded WebView, so say
-            // so and offer the real browser instead of leaving the user staring
-            // at "this browser or app may not be secure".
-            if (tab != null)
-              _ExternalSignInNotice(
-                url: tab.url,
-                onReload: () => _reloadActiveTab(),
-              ),
+            // Google/Microsoft/Apple sign-in cannot complete inside an
+            // embedded WebView, and a sign-in done in the REAL browser can
+            // never be imported back (Android gives apps no access to
+            // another browser's cookies). The banner says exactly that and
+            // offers only options that are real — see ExternalSignInNotice.
+            if (tab != null) ExternalSignInNotice(url: tab.url),
             // Held popups (window.open / target=_blank clicks captured
             // for the agent): without this chip such a click looked
             // like a dead UI. Desktop browsers show a blocked-popup
@@ -601,28 +586,27 @@ class _AgentDot extends StatelessWidget {
 }
 
 
-/// Hosts whose sign-in flow refuses to run inside an embedded WebView.
-///
-/// Google is the one users actually hit. Stripping the `; wv` token from the
-/// User-Agent (which [BrowserTab.mobileUserAgent] already does) is not enough:
-/// Android WebView also sends `X-Requested-With: <package>` on every request and
-/// there is no supported way to remove it, so Google still identifies the
-/// embedded browser and answers "this browser or app may not be secure". Rather
-/// than let that look like an Ovid bug, name the cause and offer the escape
-/// hatch — the same reason GitHub's device flow opens externally.
 /// Identity providers that refuse to sign a user in from an embedded WebView.
 ///
-/// These are not Ovid bugs and cannot be fixed by spoofing harder. Each of them
-/// detects the embedded browser through signals the app does not control —
-/// Android WebView sends `X-Requested-With: <package>` on every request and
-/// there is no supported way to remove it — and then answers "this browser or
-/// app may not be secure", "disallowed_useragent", or a blank redirect loop.
-/// Stripping the `; wv` token from the User-Agent (which
-/// [BrowserTab.mobileUserAgent] already does) is necessary but not sufficient.
+/// Google is the one users actually hit. These are not Ovid bugs and cannot be
+/// fixed by spoofing harder: each provider detects the embedded browser
+/// through signals the app does not control — Android WebView sends
+/// `X-Requested-With: <package>` on every request and there is no supported
+/// way to remove it — and then answers "this browser or app may not be
+/// secure", "disallowed_useragent", or a blank redirect loop. Stripping the
+/// `; wv` token from the User-Agent (which [BrowserTab.mobileUserAgent]
+/// already does) is necessary but not sufficient.
 ///
 /// So name the provider, say plainly why it will not work here, and offer the
 /// real browser. GitHub already does the equivalent thing by using the device
 /// flow with `LaunchMode.externalApplication`.
+///
+/// WHAT THE NOTICE MUST NEVER PROMISE (2026-09-30 owner bug): that signing in
+/// externally and then reloading this tab logs it in. Android sandboxes each
+/// app's cookie store — there is NO API, public or private, for reading
+/// Chrome's cookies into this app's WebView jars — so an external sign-in can
+/// never be imported back. The old reload button ("I signed in") implied
+/// exactly that and sent users into a guaranteed dead end.
 const Map<String, String> _alwaysExternalSignInHosts = {
   'accounts.google.com': 'Google',
   'accounts.youtube.com': 'Google',
@@ -705,73 +689,131 @@ bool _isSignInSurface(Uri u) {
 @visibleForTesting
 bool isExternalSignInUrl(String url) => externalSignInProvider(url) != null;
 
-class _ExternalSignInNotice extends StatelessWidget {
-  const _ExternalSignInNotice({required this.url, this.onReload});
+/// True when [url]'s provider NEVER completes sign-in inside an embedded
+/// WebView (Google/Microsoft/Apple). Path-gated social hosts are false: their
+/// sign-in forms often DO work in-tab, and the notice must not tell the user
+/// trying is pointless there.
+@visibleForTesting
+bool isAlwaysExternalSignInUrl(String url) {
+  final u = Uri.tryParse(url);
+  if (u == null) return false;
+  final h = u.host.toLowerCase();
+  return h.isNotEmpty && _hostProvider(h, _alwaysExternalSignInHosts) != null;
+}
+
+/// The banner body for [url], or null when no notice applies.
+///
+/// Split out from the widget so tests can pin the honesty contract on the
+/// exact copy: an external sign-in can NEVER be imported back into this tab
+/// (Android gives apps no access to another browser's cookies — a reload will
+/// not pick it up), and every option the text offers must be a real one.
+@visibleForTesting
+String? externalSignInNoticeText(String url) {
+  final provider = externalSignInProvider(url);
+  if (provider == null) return null;
+  if (isAlwaysExternalSignInUrl(url)) {
+    return '$provider refuses sign-in inside an embedded browser — this is '
+        'the provider\'s own rule, not an Ovid setting. The sign-in also '
+        'cannot be brought back into this tab: Android never lets an app '
+        'read another browser\'s cookies, so after signing in over there, '
+        'reloading here will not log you in. What does work: continue in '
+        'your real browser (Open in browser), or, if the site offers an app '
+        'password, API key, or device-code sign-in, use that in this tab.';
+  }
+  return '$provider may refuse sign-in inside an embedded browser. You can '
+      'still try the form in this tab — if it completes here, the login is '
+      'real and stays in this session. If it refuses: the sign-in cannot be '
+      'brought back into this tab — Android never lets an app read another '
+      'browser\'s cookies, so reloading here after signing in over there '
+      'will not log you in. Continue in your real browser instead, or use '
+      'an app password, API key, or device-code sign-in here if the site '
+      'offers one.';
+}
+
+/// The external-sign-in banner for [url]; renders nothing when the URL is
+/// not a blocked sign-in surface.
+///
+/// Public with @visibleForTesting because the copy and the action set are
+/// pinned by test/browser_external_signin_test.dart; production use is
+/// [BrowserScreen] in this same file.
+@visibleForTesting
+class ExternalSignInNotice extends StatelessWidget {
+  const ExternalSignInNotice({super.key, required this.url});
 
   final String url;
 
-  /// Reloads this tab after the user finished signing in in the real
-  /// browser. Some providers complete the SSO step in this profile's
-  /// cookie jar too, so one reload tap is worth trying before
-  /// abandoning the tab.
-  final VoidCallback? onReload;
-
   @override
   Widget build(BuildContext context) {
-    final provider = externalSignInProvider(url);
-    if (provider == null) return const SizedBox.shrink();
+    final text = externalSignInNoticeText(url);
+    if (text == null) return const SizedBox.shrink();
     return MaterialBanner(
       backgroundColor: Aether.surfaceAlt,
       leading: const Icon(Icons.gpp_maybe_outlined),
       content: Text(
-        '$provider blocks sign-in inside an embedded browser — this is the '
-        'provider\'s own rule, not an Ovid setting. Open it in your real '
-        'browser to finish. This tab keeps a separate cookie jar, so the '
-        'sign-in will not carry back into it automatically.',
+        text,
         style: const TextStyle(fontSize: 12.5, height: 1.4),
       ),
       actions: [
         TextButton(
           key: const ValueKey('external-signin-open'),
+          onPressed: () => _openInRealBrowser(context),
+          child: const Text('Open in browser'),
+        ),
+        // First-class fallback for a broken/missing browser handler — the
+        // user is never left without a way to move the URL over.
+        TextButton(
+          key: const ValueKey('external-signin-copy'),
           onPressed: () async {
             final messenger = ScaffoldMessenger.maybeOf(context);
-            var launched = false;
-            try {
-              launched = await launchUrl(
-                Uri.parse(url),
-                mode: LaunchMode.externalApplication,
-              );
-            } catch (_) {
-              launched = false;
-            }
-            if (launched) return;
-            // The user pressed a button and nothing happened. `launchUrl`
-            // returns false (no handler) or throws (malformed/blocked) and
-            // the old empty catch swallowed both — so say plainly that it
-            // failed and hand over the URL instead.
             await Clipboard.setData(ClipboardData(text: url));
             messenger?.showSnackBar(
-              SnackBar(
-                content: const Text(
-                  'Could not open your browser — the link is copied. '
-                  'Paste it into Chrome to finish signing in.',
-                ),
-                action: SnackBarAction(
-                  label: 'Copy link',
-                  onPressed: () =>
-                      Clipboard.setData(ClipboardData(text: url)),
+              const SnackBar(
+                content: Text(
+                  'Link copied — paste it into your browser to finish '
+                  'signing in.',
                 ),
               ),
             );
           },
-          child: const Text('Open in browser'),
-        ),
-        TextButton(
-          key: const ValueKey('external-signin-reload'),
-          onPressed: onReload,
-          child: const Text('Reload - I signed in'),
+          child: const Text('Copy link'),
         ),
       ],
+    );
+  }
+
+  /// Open [url] in the user's REAL browser (LaunchMode.externalApplication
+  /// hands it to the default browser app, e.g. Chrome, with the user's own
+  /// profile — the sign-in can complete there). What CANNOT happen on
+  /// Android is the return trip: no app can read Chrome's cookies, so the
+  /// login stays in the browser. The banner text says so plainly.
+  Future<void> _openInRealBrowser(BuildContext context) async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    var launched = false;
+    try {
+      launched = await launchUrl(
+        Uri.parse(url),
+        mode: LaunchMode.externalApplication,
+      );
+    } catch (_) {
+      launched = false;
+    }
+    if (launched) return;
+    // The user pressed a button and nothing happened. `launchUrl`
+    // returns false (no handler) or throws (malformed/blocked) and
+    // the old empty catch swallowed both — so say plainly that it
+    // failed and hand over the URL instead.
+    await Clipboard.setData(ClipboardData(text: url));
+    messenger?.showSnackBar(
+      SnackBar(
+        content: const Text(
+          'Could not open your browser — the link is copied. '
+          'Paste it into Chrome to finish signing in.',
+        ),
+        action: SnackBarAction(
+          label: 'Copy link',
+          onPressed: () => Clipboard.setData(ClipboardData(text: url)),
+        ),
+      ),
     );
   }
 }

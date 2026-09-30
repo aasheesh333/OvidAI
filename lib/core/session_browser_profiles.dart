@@ -85,6 +85,40 @@ class CookieMerge {
     return out.join('; ');
   }
 
+  /// The pairs from [donors] that a jar holding [own] does NOT already have,
+  /// matched by cookie NAME. First donor wins when several hold the same name
+  /// with different values.
+  ///
+  /// This is the SPEC the native restart merge implements (see
+  /// `OvidBrowserProfiles.shareCookies` in
+  /// android/app/src/main/kotlin/com/dhanuk/ovidai/OvidBrowserProfiles.kt):
+  /// every session keeps its OWN value for every cookie it already holds and
+  /// only receives the names it lacks — a merge can add a login to a session
+  /// but can never clobber one ("session X keeps ALL of its own data"). The
+  /// native side mirrors this rule pair-for-pair; the tests in
+  /// test/session_browser_profiles_test.dart pin both.
+  static List<String> missingPairs({
+    String? own,
+    required Iterable<String?> donors,
+  }) {
+    final union = <String, String>{}; // cookie name -> winning pair
+    for (final header in donors) {
+      for (final pair in pairs(header)) {
+        final name = pair.substring(0, pair.indexOf('=')).trim();
+        if (name.isEmpty) continue;
+        union.putIfAbsent(name, () => pair);
+      }
+    }
+    final ownNames = <String>{
+      for (final pair in pairs(own))
+        pair.substring(0, pair.indexOf('=')).trim(),
+    };
+    return [
+      for (final entry in union.entries)
+        if (!ownNames.contains(entry.key)) entry.value,
+    ];
+  }
+
   /// `scheme://host[:port]/` for a browsed [url], or null when it is not a web
   /// origin. Only scheme+host(+port) is kept — never a path or query, which
   /// could carry session-specific data. The port matters: `localhost:8080` and
@@ -125,6 +159,14 @@ class BrowserShareReport {
 
   String get message {
     if (!applied) return reason.isEmpty ? 'Nothing to share.' : reason;
+    if (copied == 0) {
+      // A real pass that wrote nothing: every jar already agreed on every
+      // remembered origin (the second restart in a row, or no logins yet).
+      // Saying "shared ... 0 writes" read like a broken merge, so name the
+      // outcome instead.
+      return 'Logins already in sync across $profiles sessions '
+          '($urls sites checked, nothing to copy).';
+    }
     return 'Shared logins across $profiles sessions '
         '($urls sites, $copied writes).';
   }
@@ -325,8 +367,12 @@ class SessionBrowserProfiles extends ChangeNotifier {
   }
 
   /// Copy the cookies of every profile in [profiles] into every other one.
-  /// Returns the number of writes performed.
-  Future<int> shareCookies({
+  ///
+  /// Returns the number of writes performed, or NULL when the platform call
+  /// failed / answered with a malformed payload — the caller must not report
+  /// a share that never happened (the old `catch → 0` made a dead WebView
+  /// provider indistinguishable from "nothing to copy").
+  Future<int?> shareCookies({
     required List<String> profiles,
     required List<String> urls,
   }) async {
@@ -337,10 +383,10 @@ class SessionBrowserProfiles extends ChangeNotifier {
         {'profiles': profiles, 'urls': urls},
       );
       final copied = result?['copied'];
-      return copied is int ? copied : 0;
+      return copied is int ? copied : null;
     } catch (error) {
       debugPrint('shareProfileCookies failed: $error');
-      return 0;
+      return null;
     }
   }
 
@@ -488,11 +534,26 @@ class SessionBrowserProfiles extends ChangeNotifier {
     }
     final profiles = ids.map(BrowserProfileId.forSession).toList();
     final copied = await shareCookies(profiles: profiles, urls: urls);
-    return BrowserShareReport(
+    if (copied == null) {
+      // The platform side failed — report it as a failure. The old code
+      // folded this into `copied: 0` and still claimed `applied: true`
+      // ("Shared logins across N sessions ... 0 writes"), which is exactly
+      // the fake success this repo refuses to ship.
+      return const BrowserShareReport.nothing(
+        'Login sharing failed on the WebView side — nothing was merged '
+        'this launch.',
+      );
+    }
+    final report = BrowserShareReport(
       applied: true,
       profiles: profiles.length,
       urls: urls.length,
       copied: copied,
     );
+    // Verifiability: the report has no Settings surface (the sharing rows
+    // were removed), so the startup log is where a bug report can confirm
+    // whether the merge ran and what it did.
+    debugPrint('browser shareOnRestart: ${report.message}');
+    return report;
   }
 }

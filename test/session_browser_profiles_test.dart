@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ovid_ai/core/session_browser_profiles.dart';
+import 'package:ovid_ai/core/session_data_sharing.dart';
 import 'package:ovid_ai/core/state.dart';
 
 /// Per-session browser identity + restart-sharing contract.
@@ -461,18 +462,23 @@ void main() {
         ),
         isTrue,
       );
-      // SECURITY (2026-09-24): the cross-session cookie merge defaults OFF.
-      // Merging every remembered origin's cookies into every session profile
-      // on each launch contradicted the per-session isolation the WebView
-      // profiles exist to provide, and let a prompt-injected agent in one chat
-      // act on sites the user logged into in a different chat.
+      // OWNER DECISION (2026-09-30): the cross-session cookie merge defaults
+      // ON. It was flipped OFF on 2026-09-24 as an opt-in security posture,
+      // but the Settings rows that could opt in were removed later (Issue 6,
+      // pinned below) — leaving `setShareBrowserOnRestart` with no caller and
+      // the restart login-share dead in production: log into anything in chat
+      // X, restart, and chats Y/Z were still logged out. The owner's contract
+      // is explicit: after a restart the LOGINS are shared across all
+      // sessions; tabs, history and everything else stay per session. The
+      // opt-out seam remains (setShareBrowserOnRestart(false) + pref) for the
+      // prompt-injection concern the 2026-09-24 note raised.
       expect(
         stateSrc.contains(
-          'shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? false',
+          'shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? true',
         ),
         isTrue,
       );
-      expect(AppState.createForTest().shareBrowserOnRestart, isFalse);
+      expect(AppState.createForTest().shareBrowserOnRestart, isTrue);
     });
 
     test('the restart merge runs as a startup task', () {
@@ -489,6 +495,222 @@ void main() {
       expect(settingsSrc.contains('Share Studio repo on restart'), isFalse);
       expect(settingsSrc.contains('Share session data now'), isFalse);
       expect(settingsSrc.contains('_SessionDataSharingTile'), isFalse);
+    });
+
+    test('the login-share task is ordered after session restore', () {
+      // StartupCoordinator runs localState tasks first (local.hydrate loads
+      // the sessions), then the rest IN LIST ORDER — so the merge must sit
+      // after session.restore in _buildReadinessTasks, or it would read an
+      // empty session list and report "only one session exists". Search
+      // INSIDE the list builder: the class's constructor definition appears
+      // earlier in the file and would satisfy a naive indexOf.
+      final listStart = stateSrc.indexOf(
+        'Future<List<StartupTask>> _buildReadinessTasks()',
+      );
+      expect(listStart, greaterThan(-1));
+      final restoreAt = stateSrc.indexOf(
+        '_SessionRestoreStartupTask(this)',
+        listStart,
+      );
+      final shareAt = stateSrc.indexOf(
+        "id: 'session.shareOnRestart'",
+        listStart,
+      );
+      expect(restoreAt, greaterThan(-1));
+      expect(shareAt, greaterThan(-1));
+      expect(shareAt, greaterThan(restoreAt));
+    });
+  });
+
+  group('CookieMerge union spec (mirrored by the native merge)', () {
+    test("a session keeps its OWN value; only missing names are added", () {
+      // The owner contract: "session X must keep ALL of its own data" — the
+      // merge may never clobber a login the session already has, even when
+      // another session holds a different value for the same cookie name.
+      expect(
+        CookieMerge.missingPairs(
+          own: 'SID=mine; HSID=x',
+          donors: ['SID=theirs', 'SID=other; OSID=o'],
+        ),
+        ['OSID=o'],
+      );
+    });
+
+    test('an empty jar receives the union, first donor wins per name', () {
+      expect(
+        CookieMerge.missingPairs(own: null, donors: ['a=1; b=2', 'a=9; c=3']),
+        ['a=1', 'b=2', 'c=3'],
+      );
+    });
+
+    test('a jar that already holds every name writes nothing (idempotent)', () {
+      expect(
+        CookieMerge.missingPairs(own: 'a=1; b=2', donors: ['a=1; b=2']),
+        isEmpty,
+      );
+    });
+
+    test('blank donors and nameless pairs are ignored', () {
+      expect(
+        CookieMerge.missingPairs(own: 'a=1', donors: [null, '', '=v', 'a=2']),
+        isEmpty,
+      );
+    });
+  });
+
+  group('restart login-share contract', () {
+    const channel = MethodChannel('ovid/webview');
+    late List<MethodCall> calls;
+    late Object? Function(MethodCall) responder;
+
+    void mock() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        return responder(call);
+      });
+    }
+
+    AppState seedApp(List<String> ids) {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      AppState.resetTestInstance();
+      final app = AppState.createForTest();
+      app.sessions.clear();
+      for (final id in ids) {
+        app.sessions.add(ChatSession(id: id, title: 'Chat $id', model: 'm'));
+      }
+      return app;
+    }
+
+    setUp(() async {
+      calls = <MethodCall>[];
+      responder = (call) {
+        switch (call.method) {
+          case 'profilesSupported':
+            return true;
+          case 'shareProfileCookies':
+            return <String, Object>{'copied': 7};
+        }
+        return <String, Object>{};
+      };
+      mock();
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+      AppState.resetTestInstance();
+    });
+
+    test(
+      'every current session profile is handed to the platform — including '
+      'sessions that never opened a browser tab',
+      () async {
+        seedApp(['s1', 's2', 's3']);
+        // Only s1 ever browsed/logged in — the owner's exact scenario. s2 and
+        // s3 have NO jar on the device yet; the native side must still create
+        // and fill them (pinned by the Kotlin source-contract group below).
+        await SessionBrowserProfiles.I.rememberOrigin(
+          'https://accounts.google.com/signin?x=1',
+          sessionId: 's1',
+        );
+        await SessionBrowserProfiles.I.probe(refresh: true);
+
+        final report = await SessionBrowserProfiles.I.shareOnRestart(
+          sessionIds: ['s1', 's2', 's3'],
+        );
+
+        final share = calls.where((c) => c.method == 'shareProfileCookies');
+        expect(share, hasLength(1));
+        final args = Map<String, Object?>.from(share.single.arguments as Map);
+        expect(args['profiles'], ['ovid_s_s1', 'ovid_s_s2', 'ovid_s_s3']);
+        expect(args['urls'], ['https://accounts.google.com/']);
+        // ONLY profiles+urls cross the boundary — never tabs or history.
+        expect(args.keys.toSet(), {'profiles', 'urls'});
+        expect(report.applied, isTrue);
+        expect(report.profiles, 3);
+        expect(report.urls, 1);
+        expect(report.copied, 7);
+      },
+    );
+
+    test('a platform failure is reported honestly, never as a share', () async {
+      seedApp(['s1', 's2']);
+      await SessionBrowserProfiles.I.rememberOrigin(
+        'https://github.com',
+        sessionId: 's1',
+      );
+      responder = (call) {
+        if (call.method == 'profilesSupported') return true;
+        throw PlatformException(code: 'boom', message: 'provider died');
+      };
+      await SessionBrowserProfiles.I.probe(refresh: true);
+
+      final report = await SessionBrowserProfiles.I.shareOnRestart(
+        sessionIds: ['s1', 's2'],
+      );
+      expect(report.applied, isFalse);
+      expect(report.copied, 0);
+      expect(report.reason, contains('failed'));
+    });
+
+    test('the merge runs ONCE per launch, even when invoked again', () async {
+      final app = seedApp(['s1', 's2']);
+      expect(app.shareBrowserOnRestart, isTrue);
+      await SessionBrowserProfiles.I.rememberOrigin(
+        'https://github.com',
+        sessionId: 's1',
+      );
+      await SessionBrowserProfiles.I.probe(refresh: true);
+
+      final first = await SessionDataSharing.I.shareBrowserOnRestart();
+      final second = await SessionDataSharing.I.shareBrowserOnRestart();
+
+      expect(
+        calls.where((c) => c.method == 'shareProfileCookies'),
+        hasLength(1),
+        reason: 'the once-per-launch guard must swallow the second call',
+      );
+      expect(first.applied, isTrue);
+      expect(second.applied, isTrue);
+    });
+  });
+
+  group('native merge (Kotlin source contract)', () {
+    late String kotlinSrc;
+
+    setUpAll(() {
+      kotlinSrc = File(
+        'android/app/src/main/kotlin/com/dhanuk/ovidai/OvidBrowserProfiles.kt',
+      ).readAsStringSync();
+    });
+
+    test('a session that never browsed still RECEIVES logins', () {
+      // The 2026-09-30 owner bug, native half: cookieManagers() used
+      // `store.getProfile(name) ?: continue`, so sessions without a jar on
+      // disk were skipped — the common case (login in chat X, chats Y/Z never
+      // browsed) left managers.size < 2 and shareCookies copied NOTHING while
+      // Dart reported success. getOrCreateProfile gives every current session
+      // a jar to receive into.
+      final start = kotlinSrc.indexOf('private fun cookieManagers');
+      expect(start, greaterThan(-1));
+      final body = kotlinSrc.substring(start, start + 1500);
+      expect(body.contains('getOrCreateProfile'), isTrue);
+      expect(body.contains('getProfile(name) ?: continue'), isFalse);
+    });
+
+    test('the native merge never overwrites a session\'s own cookies', () {
+      // First-donor-wins replay (`firstCookieHeader` + setCookie over every
+      // other jar) clobbered a session's OWN same-name login — violating
+      // "session X keeps all of its own data". The union merge keeps each
+      // jar's own values and only adds names it lacks, mirroring the tested
+      // CookieMerge.missingPairs spec above.
+      expect(kotlinSrc.contains('firstCookieHeader'), isFalse);
+      final start = kotlinSrc.indexOf('fun shareCookies');
+      expect(start, greaterThan(-1));
+      final endAt = kotlinSrc.indexOf('fun clearCookies');
+      final body = kotlinSrc.substring(start, endAt);
+      expect(body.contains('ownNames'), isTrue);
     });
   });
 }
