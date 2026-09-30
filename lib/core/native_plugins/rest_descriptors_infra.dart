@@ -372,13 +372,18 @@ const List<RestServiceDescriptor> infraDescriptors = [
   ),
   RestServiceDescriptor(
     pluginName: 'Docker MCP',
-    baseUrl: 'http://localhost:2375',
+    // Audit 2026-09-25: no localhost default — an Android device runs no
+    // local Docker daemon, so the capability requires an explicitly
+    // configured REMOTE `docker_host` (same shape as Kubernetes' required
+    // `api_server`).
+    baseUrl: '',
     auth: RestAuthKind.none,
     extraConfig: [
       NativePluginConfigField(
         key: 'docker_host',
         label: 'Docker host',
-        hint: 'tcp://localhost:2375',
+        hint: 'Required — a REMOTE daemon reachable from this device, '
+            'e.g. tcp://192.168.1.10:2375.',
       ),
       NativePluginConfigField(
         key: 'api_version',
@@ -389,7 +394,8 @@ const List<RestServiceDescriptor> infraDescriptors = [
     tools: [
       RestToolDef(
         name: 'list_containers',
-        description: 'List containers from local/remote Docker daemon',
+        description: 'List containers from the configured remote Docker '
+            'daemon (no local daemon exists on Android)',
         method: 'GET',
         path: '/{api_version}/containers/json',
         queryArgs: ['all'],
@@ -402,14 +408,14 @@ const List<RestServiceDescriptor> infraDescriptors = [
       ),
       RestToolDef(
         name: 'list_images',
-        description: 'List images from local/remote Docker daemon',
+        description: 'List images from the configured remote Docker daemon',
         method: 'GET',
         path: '/{api_version}/images/json',
         inputSchema: {'type': 'object', 'properties': {}},
       ),
       RestToolDef(
         name: 'inspect_container',
-        description: 'Inspect container on Docker daemon',
+        description: 'Inspect a container on the remote Docker daemon',
         method: 'GET',
         path: '/{api_version}/containers/{id}/json',
         required: ['id'],
@@ -434,7 +440,9 @@ const List<RestServiceDescriptor> infraDescriptors = [
       NativePluginConfigField(
         key: 'api_server',
         label: 'Kubernetes API server',
-        hint: 'https://kubernetes:6443',
+        // Audit 2026-09-25: the in-cluster DNS name `kubernetes` never
+        // resolves from a phone — show a reachable remote example instead.
+        hint: 'https://192.168.1.100:6443',
       ),
       NativePluginConfigField(
         key: 'namespace',
@@ -849,6 +857,23 @@ class CloudflareCapability extends _InfraCapability {
   }
 }
 
+/// True when a bare URL [host] (bracketed IPv6 tolerated) points at this
+/// device itself: `localhost`, `::1`, or anything in 127.0.0.0/8. Audit
+/// 2026-09-25: on Android no daemon or server can ever sit behind these —
+/// capabilities refuse loopback targets BEFORE dialing so the user gets an
+/// actionable "configure a remote host" instead of a generic connection
+/// error. (Local per-file copy — the descriptor files share no private
+/// helpers, same convention as the duplicated [_HeaderClient].)
+bool _isLoopbackTarget(String host) {
+  var bare = host.trim().toLowerCase();
+  if (bare.startsWith('[') && bare.endsWith(']')) {
+    bare = bare.substring(1, bare.length - 1);
+  }
+  return bare == 'localhost' ||
+      bare == '::1' ||
+      RegExp(r'^127(\.\d{1,3}){3}$').hasMatch(bare);
+}
+
 class DockerCapability extends _InfraCapability {
   DockerCapability({super.client})
       : super(
@@ -865,16 +890,34 @@ class DockerCapability extends _InfraCapability {
       return 'Unix-socket daemons are unsupported on this platform — configure a tcp:// host.';
     }
 
-    String baseUrl = 'http://localhost:2375';
-    if (configuredHost != null && configuredHost.isNotEmpty) {
-      if (configuredHost.startsWith('tcp://')) {
-        baseUrl = 'http://${configuredHost.substring(6)}';
-      } else if (configuredHost.startsWith('http://') ||
-          configuredHost.startsWith('https://')) {
-        baseUrl = configuredHost;
-      } else {
-        baseUrl = 'http://$configuredHost';
-      }
+    // Audit 2026-09-25: this Android device runs no local Docker daemon —
+    // the old localhost:2375 default looked installable but could never
+    // succeed, so an explicit REMOTE daemon is required (fail-closed with
+    // actionable guidance, never a fake "unreachable daemon" guess).
+    if (configuredHost == null || configuredHost.isEmpty) {
+      return 'No Docker daemon runs on this Android device — a REMOTE daemon is '
+          'required. ${missingConfigError('Docker host', 'docker_host')} '
+          'Example: tcp://192.168.1.10:2375 (the daemon must expose its TCP API).';
+    }
+
+    String baseUrl;
+    if (configuredHost.startsWith('tcp://')) {
+      baseUrl = 'http://${configuredHost.substring(6)}';
+    } else if (configuredHost.startsWith('http://') ||
+        configuredHost.startsWith('https://')) {
+      baseUrl = configuredHost;
+    } else {
+      baseUrl = 'http://$configuredHost';
+    }
+
+    // Audit 2026-09-25: a loopback docker_host points at the phone itself,
+    // which runs no daemon — refuse honestly instead of dialing.
+    final hostOnly = Uri.tryParse(baseUrl)?.host ?? '';
+    if (_isLoopbackTarget(hostOnly)) {
+      return 'Docker host "$configuredHost" points at this Android device, which runs '
+          'no Docker daemon — a REMOTE daemon is required. Save a reachable '
+          '"docker_host" (e.g. tcp://192.168.1.10:2375) via catalog_configure_plugin '
+          'or Settings -> Plugins -> Docker MCP.';
     }
 
     final cleanArgs = Map<String, dynamic>.from(args);
@@ -896,8 +939,9 @@ class DockerCapability extends _InfraCapability {
       return await cap.callTool(toolName, cleanArgs);
     } catch (e) {
       if (e is http.ClientException || e.toString().contains('Connection refused')) {
-        final hostOnly = Uri.tryParse(baseUrl)?.host ?? 'localhost';
-        return 'Docker daemon is unreachable on $hostOnly: ensure daemon is running and listening on TCP.';
+        final shownHost = hostOnly.isNotEmpty ? hostOnly : configuredHost;
+        return 'Docker daemon is unreachable on $shownHost: ensure the REMOTE daemon '
+            'is running and its TCP API is reachable from this device.';
       }
       rethrow;
     }

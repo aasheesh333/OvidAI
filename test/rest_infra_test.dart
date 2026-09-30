@@ -264,6 +264,32 @@ void main() {
         descriptionOf('Docker MCP', 'list_containers'),
         contains('daemon'),
       );
+      // Audit 2026-09-25: the roster the LLM sees must promise only what
+      // can work on-device — a REMOTE daemon, never a local one.
+      expect(
+        descriptionOf('Docker MCP', 'list_containers'),
+        contains('remote'),
+      );
+    });
+
+    test('advertised endpoints are reachable from a device (audit 2026-09-25)', () {
+      final byName = {for (final d in infraDescriptors) d.pluginName: d};
+      // Docker: no localhost default base, no localhost example in the
+      // docker_host hint — both would point at a daemon that cannot exist
+      // on an Android device.
+      final docker = byName['Docker MCP']!;
+      expect(docker.baseUrl, isNot(contains('localhost')));
+      final dockerHost = docker.extraConfig
+          .firstWhere((f) => f.key == 'docker_host',
+              orElse: () => throw StateError('docker_host field missing'));
+      expect(dockerHost.hint ?? '', isNot(contains('localhost')));
+      // Kubernetes: the in-cluster DNS name `kubernetes` never resolves
+      // from a phone — the api_server hint must show a reachable example.
+      final k8s = byName['Kubernetes MCP']!;
+      final apiServer = k8s.extraConfig
+          .firstWhere((f) => f.key == 'api_server',
+              orElse: () => throw StateError('api_server field missing'));
+      expect(apiServer.hint ?? '', isNot(contains('kubernetes:6443')));
     });
   });
 
@@ -848,7 +874,12 @@ void main() {
   });
 
   group('Docker MCP', () {
-    test('list_containers defaults all to true against the daemon', () async {
+    // Audit 2026-09-25: no Docker daemon can run on an Android device, so
+    // every request-side test pins an explicit REMOTE daemon host — the
+    // old localhost:2375 default could never succeed out of the box.
+    const remote = {'docker_host': 'tcp://203.0.113.7:2375'};
+
+    test('list_containers defaults all to true against the remote daemon', () async {
       http.Request? seen;
       final cap = await capFor(
         'Docker MCP',
@@ -856,14 +887,15 @@ void main() {
           seen = request;
           return http.Response('[]', 200);
         },
+        values: remote,
       );
       await cap.callTool('list_containers', {});
       expect(seen!.method, 'GET');
-      expect(seen!.url.host, 'localhost');
+      expect(seen!.url.host, '203.0.113.7');
       expect(seen!.url.port, 2375);
       expect(seen!.url.path, '/v1.43/containers/json');
       expect(seen!.url.queryParameters['all'], 'true');
-      // No auth material is attached for a local daemon.
+      // No auth material is attached for an unauthenticated TCP daemon.
       expect(seen!.headers['Authorization'], isNull);
     });
 
@@ -875,6 +907,7 @@ void main() {
           seen = request;
           return http.Response('[]', 200);
         },
+        values: remote,
       );
       await cap.callTool('list_containers', {'all': false});
       expect(seen!.url.queryParameters['all'], 'false');
@@ -888,6 +921,7 @@ void main() {
           seen = request;
           return http.Response('[]', 200);
         },
+        values: remote,
       );
       await cap.callTool('list_images', {});
       expect(seen!.url.path, '/v1.43/images/json');
@@ -901,6 +935,7 @@ void main() {
           seen = request;
           return http.Response('{}', 200);
         },
+        values: remote,
       );
       await cap.callTool('inspect_container', {'id': 'abc123'});
       expect(seen!.url.path, '/v1.43/containers/abc123/json');
@@ -921,16 +956,56 @@ void main() {
       expect(seen!.url.port, 2376);
     });
 
-    test('connection-refused answers honestly instead of throwing', () async {
+    test('unset docker_host refuses honestly — no daemon runs on-device', () async {
+      var called = false;
+      final cap = await capFor(
+        'Docker MCP',
+        (request) async {
+          called = true;
+          return http.Response('[]', 200);
+        },
+      );
+      final out = await cap.callTool('list_containers', {});
+      expect(called, isFalse);
+      expect(out, contains('REMOTE'));
+      expect(out, contains('docker_host'));
+      expect(out, contains('Docker MCP'));
+    });
+
+    test('loopback docker_host values refuse before any connection', () async {
+      for (final host in [
+        'tcp://localhost:2375',
+        'http://127.0.0.1:2375',
+        'localhost',
+        'tcp://[::1]:2375',
+      ]) {
+        var called = false;
+        final cap = await capFor(
+          'Docker MCP',
+          (request) async {
+            called = true;
+            return http.Response('[]', 200);
+          },
+          values: {'docker_host': host},
+        );
+        final out = await cap.callTool('list_containers', {});
+        expect(called, isFalse, reason: host);
+        expect(out, contains('REMOTE'), reason: host);
+        expect(out, contains('docker_host'), reason: host);
+      }
+    });
+
+    test('connection-refused on a remote daemon answers honestly', () async {
       final cap = await capFor(
         'Docker MCP',
         (request) async {
           throw http.ClientException('Connection refused', request.url);
         },
+        values: const {'docker_host': 'tcp://198.51.100.9:2375'},
       );
       final out = await cap.callTool('list_containers', {});
       expect(out, contains('unreachable'));
-      expect(out, contains('localhost'));
+      expect(out, contains('198.51.100.9'));
     });
 
     test('unix-socket daemons answer honestly as unsupported', () async {

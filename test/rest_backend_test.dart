@@ -1288,12 +1288,24 @@ void main() {
   });
 
   group('Redis MCP', () {
+    // Audit 2026-09-25: loopback hosts are refused before any dial (no
+    // Redis server can run on an Android device), so the RESP round-trip
+    // tests configure a REMOTE-looking hostname and route the real socket
+    // to the loopback fake through the injected [RespSocketFactory].
+    RedisCapability loopbackDialedRedis() => RedisCapability(
+          socketFactory: (host, port) => Socket.connect(
+            InternetAddress.loopbackIPv4,
+            port,
+            timeout: const Duration(seconds: 5),
+          ),
+        );
+
     test('get/set round-trip with byte-exact RESP frames', () async {
       final fake = await _FakeRedis.bind();
       addTearDown(fake.close);
-      final cap = RedisCapability();
+      final cap = loopbackDialedRedis();
       await cap.configure({
-        'host': '127.0.0.1',
+        'host': 'redis.example.test',
         'port': '${fake.port}',
       });
 
@@ -1318,9 +1330,9 @@ void main() {
     test('set with EX sends the expiry frame', () async {
       final fake = await _FakeRedis.bind();
       addTearDown(fake.close);
-      final cap = RedisCapability();
+      final cap = loopbackDialedRedis();
       await cap.configure({
-        'host': '127.0.0.1',
+        'host': 'redis.example.test',
         'port': '${fake.port}',
       });
       await cap.callTool('set', {
@@ -1338,9 +1350,9 @@ void main() {
         () async {
       final fake = await _FakeRedis.bind();
       addTearDown(fake.close);
-      final cap = RedisCapability();
+      final cap = loopbackDialedRedis();
       await cap.configure({
-        'host': '127.0.0.1',
+        'host': 'redis.example.test',
         'port': '${fake.port}',
         'password': 'pw-secret',
       });
@@ -1376,16 +1388,64 @@ void main() {
       final probe = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
       final port = probe.port;
       await probe.close();
-      final cap = RedisCapability();
+      final cap = loopbackDialedRedis();
       await cap.configure({
-        'host': '127.0.0.1',
+        'host': 'redis.example.test',
         'port': '$port',
         'password': 'pw-secret',
       });
       final out = await cap.callTool('get', {'key': 'k'});
       expect(out, contains('unreachable'));
-      expect(out, contains('127.0.0.1:$port'));
+      expect(out, contains('redis.example.test:$port'));
       expect(out.contains('pw-secret'), isFalse);
+    });
+
+    test('unset host refuses honestly — no Redis server runs on-device',
+        () async {
+      var dialed = false;
+      final cap = RedisCapability(socketFactory: (host, port) async {
+        dialed = true;
+        throw StateError('must not dial: $host:$port');
+      });
+      final out = await cap.callTool('get', {'key': 'k'});
+      expect(dialed, isFalse);
+      expect(out, contains('REMOTE'));
+      expect(out, contains('"host"'));
+      expect(out, contains('Redis MCP'));
+    });
+
+    test('loopback hosts refuse honestly instead of a raw socket error',
+        () async {
+      for (final host in [
+        'localhost',
+        '127.0.0.1',
+        '127.0.0.2', // the whole 127.0.0.0/8 block is loopback
+        '::1',
+        '[::1]',
+      ]) {
+        var dialed = false;
+        final cap = RedisCapability(socketFactory: (h, p) async {
+          dialed = true;
+          throw StateError('must not dial: $h:$p');
+        });
+        await cap.configure({'host': host, 'port': '6379'});
+        final out = await cap.callTool('get', {'key': 'k'});
+        expect(dialed, isFalse, reason: host);
+        expect(out, contains('REMOTE'), reason: host);
+        expect(out, isNot(contains('SocketException')), reason: host);
+      }
+    });
+
+    test('descriptor stops advertising a localhost fallback (audit 2026-09-25)',
+        () {
+      final redis = backendDescriptors
+          .firstWhere((d) => d.pluginName == 'Redis MCP',
+              orElse: () => throw StateError('Redis MCP descriptor missing'));
+      final hostField = redis.extraConfig.firstWhere(
+        (f) => f.key == 'host',
+        orElse: () => throw StateError('host field missing'),
+      );
+      expect(hostField.hint ?? '', isNot(contains('localhost')));
     });
   });
 
@@ -1457,6 +1517,128 @@ void main() {
       });
       final out = await cap.callTool('list_notes', {});
       expect(out, contains('Configure Obsidian vault root first'));
+    });
+
+    // Audit 2026-09-25: Android scoped storage — a vault root must sit in
+    // storage the app can actually reach. The gate logic is pure
+    // ([obsidianVaultAccessError]); the capability tests inject the probe.
+
+    test('vault gate: non-Android hosts keep arbitrary paths', () {
+      const access = ObsidianVaultAccess(enforceScopedStorage: false);
+      expect(obsidianVaultAccessError('/anywhere/at/all', access), isNull);
+    });
+
+    test('vault gate: Android allows app storage and refuses the rest', () {
+      const access = ObsidianVaultAccess(
+        enforceScopedStorage: true,
+        appRoots: ['/data/user/0/app/files'],
+      );
+      expect(obsidianVaultAccessError('/data/user/0/app/files', access), isNull);
+      expect(
+        obsidianVaultAccessError('/data/user/0/app/files/vault', access),
+        isNull,
+      );
+      expect(
+        obsidianVaultAccessError('/data/user/0/app/files/vault/../notes', access),
+        isNull,
+      );
+      // A sibling whose name merely starts with an allowed root is NOT
+      // inside it (prefix-boundary bug catcher).
+      expect(
+        obsidianVaultAccessError('/data/user/0/app/filesX/vault', access),
+        isNotNull,
+      );
+      // `..` must be normalized before the containment check.
+      expect(
+        obsidianVaultAccessError('/data/user/0/app/files/../../other', access),
+        isNotNull,
+      );
+      final desktop = obsidianVaultAccessError('/home/user/Vault', access);
+      expect(desktop, isNotNull);
+      expect(desktop, contains('Android'));
+      expect(desktop, contains('vault_root'));
+      final shared = obsidianVaultAccessError(
+        '/storage/emulated/0/Documents/Obsidian',
+        access,
+      );
+      expect(shared, isNotNull);
+      expect(shared, contains('All Files Access'));
+    });
+
+    test('vault gate: All Files Access opens shared storage only', () {
+      const access = ObsidianVaultAccess(
+        enforceScopedStorage: true,
+        appRoots: ['/data/user/0/app/files'],
+        allFilesAccess: true,
+      );
+      expect(
+        obsidianVaultAccessError('/storage/emulated/0/Documents/Obsidian', access),
+        isNull,
+      );
+      expect(obsidianVaultAccessError('/sdcard/Notes', access), isNull);
+      expect(obsidianVaultAccessError('/home/user/Vault', access), isNotNull);
+      expect(
+        obsidianVaultAccessError('/data/user/0/other.app/files', access),
+        isNotNull,
+      );
+    });
+
+    test('Android vault outside app-accessible storage is refused, not read',
+        () async {
+      final outside =
+          await Directory.systemTemp.createTemp('obsidian_outside_');
+      addTearDown(() async {
+        if (await outside.exists()) await outside.delete(recursive: true);
+      });
+      await File('${outside.path}/secret.md').writeAsString('private note');
+      final allowed =
+          await Directory.systemTemp.createTemp('obsidian_allowed_');
+      addTearDown(() async {
+        if (await allowed.exists()) await allowed.delete(recursive: true);
+      });
+      final cap = ObsidianCapability(
+        accessProbe: () async => ObsidianVaultAccess(
+          enforceScopedStorage: true,
+          appRoots: [allowed.path],
+        ),
+      );
+      await cap.configure({'vault_root': outside.path});
+      final out = await cap.callTool('list_notes', {});
+      expect(out, contains('Android'));
+      expect(out, contains('vault_root'));
+      expect(out, isNot(contains('secret.md')));
+    });
+
+    test('Android vault inside app-accessible storage keeps working', () async {
+      final cap = ObsidianCapability(
+        accessProbe: () async => ObsidianVaultAccess(
+          enforceScopedStorage: true,
+          appRoots: [vault.path],
+        ),
+      );
+      await cap.configure({'vault_root': vault.path});
+      await cap.callTool('write_note', {'path': 'ok.md', 'text': 'hello'});
+      expect(await cap.callTool('read_note', {'path': 'ok.md'}), 'hello');
+    });
+
+    test('shared-storage vault gate opens only with All Files Access', () async {
+      ObsidianCapability capWith(bool allFiles) => ObsidianCapability(
+            accessProbe: () async => ObsidianVaultAccess(
+              enforceScopedStorage: true,
+              appRoots: [vault.path],
+              allFilesAccess: allFiles,
+            ),
+          );
+      const sharedVault = '/storage/emulated/0/Documents/Obsidian';
+      final denied = capWith(false);
+      await denied.configure({'vault_root': sharedVault});
+      expect(await denied.callTool('list_notes', {}), contains('All Files Access'));
+      final granted = capWith(true);
+      await granted.configure({'vault_root': sharedVault});
+      // The gate opened; on the host the (nonexistent) directory then
+      // answers with the ordinary vault error — never the grant message.
+      final out = await granted.callTool('list_notes', {});
+      expect(out, isNot(contains('All Files Access')));
     });
   });
 

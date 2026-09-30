@@ -6,6 +6,8 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/native_plugins/rest_engine.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 /// Backend & data integrations batch (NP4 Task 5, spec §4.3): declarative
 /// [RestServiceDescriptor]s for Firebase, Supabase, Airtable, Appwrite,
@@ -51,10 +53,15 @@ import 'package:ovid_ai/core/native_plugins/rest_engine.dart';
 ///   engine has no signing hook). Object keys keep literal slashes;
 ///   `presign_get` is pure signing (no network).
 /// * [RedisCapability]: RESP execution over [RespClient] (one connection
-///   per call, closed in `finally`). Unreachable servers return an honest
+///   per call, closed in `finally`). Audit 2026-09-25: `host` must be a
+///   REMOTE server — loopback targets can never exist on an Android device
+///   and are refused before any dial. Unreachable servers return an honest
 ///   message instead of throwing.
 /// * [ObsidianCapability]: file execution over [VaultFiles] against the
-///   configured `vault_root` (root escapes stay [ArgumentError]).
+///   configured `vault_root` (root escapes stay [ArgumentError]). Audit
+///   2026-09-25: on Android the root must sit in app-accessible storage
+///   ([obsidianVaultAccessError]); anything else is refused with honest,
+///   actionable guidance instead of failing obscurely mid-I/O.
 const List<RestServiceDescriptor> backendDescriptors = [
   RestServiceDescriptor(
     pluginName: 'Firebase MCP',
@@ -701,7 +708,9 @@ const List<RestServiceDescriptor> backendDescriptors = [
       NativePluginConfigField(
         key: 'host',
         label: 'Redis host',
-        hint: 'Defaults to localhost when empty.',
+        // Audit 2026-09-25: no localhost fallback — this device runs no
+        // Redis server, so the host must be configured and REMOTE.
+        hint: 'Required — a REMOTE Redis host reachable from this device.',
       ),
       NativePluginConfigField(
         key: 'port',
@@ -818,7 +827,9 @@ const List<RestServiceDescriptor> backendDescriptors = [
       NativePluginConfigField(
         key: 'vault_root',
         label: 'Obsidian vault root',
-        hint: 'The vault directory path (notes stay inside it).',
+        hint: 'Absolute path of the vault directory (notes stay inside it). '
+            'On Android it must sit inside app-accessible storage — the app '
+            'workspace, or shared storage with All Files Access granted.',
       ),
     ],
     tools: [
@@ -1677,24 +1688,59 @@ String _trimOutput(String text) {
       'narrower query to see the middle…]\n\n$tail';
 }
 
+/// True when a bare [host] (bracketed IPv6 tolerated) points at this
+/// device itself: `localhost`, `::1`, or anything in 127.0.0.0/8. Audit
+/// 2026-09-25: on Android no daemon or server can ever sit behind these —
+/// capabilities refuse loopback targets BEFORE dialing so the user gets an
+/// actionable "configure a remote host" instead of a raw socket error.
+/// (Local per-file copy — the descriptor files share no private helpers,
+/// same convention as the duplicated [_HeaderClient].)
+bool _isLoopbackTarget(String host) {
+  var bare = host.trim().toLowerCase();
+  if (bare.startsWith('[') && bare.endsWith(']')) {
+    bare = bare.substring(1, bare.length - 1);
+  }
+  return bare == 'localhost' ||
+      bare == '::1' ||
+      RegExp(r'^127(\.\d{1,3}){3}$').hasMatch(bare);
+}
+
 /// Redis MCP: RESP execution over [RespClient] (one connection per call,
-/// closed in `finally`). No credentials are required — `host`/`port` fall
-/// back to localhost/6379 and `password` is optional; unreachable servers
-/// answer with an honest message instead of throwing.
+/// closed in `finally`). Audit 2026-09-25: `host` is REQUIRED and must be
+/// a REMOTE server — this Android device runs no local Redis, so the old
+/// localhost:6379 fallback could never succeed and is refused before any
+/// dial. `port` still defaults to 6379 and `password` stays optional;
+/// unreachable servers answer with an honest message instead of throwing.
+///
+/// [socketFactory] forwards to [RespClient] (production dials the real
+/// host; tests route a remote-looking hostname to a loopback fake).
 class RedisCapability extends _BackendCapability {
-  RedisCapability()
-      : super(
+  RedisCapability({RespSocketFactory? socketFactory})
+      : _socketOverride = socketFactory,
+        super(
           backendDescriptors.firstWhere((d) => d.pluginName == 'Redis MCP',
               orElse: () => throw StateError('native descriptor missing: Redis MCP')),
         );
+
+  final RespSocketFactory? _socketOverride;
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
     _toolDef(toolName);
     final timeoutSeconds = RestApiCapability.resolveTimeoutSeconds(args);
     final stored = await _stored();
-    final rawHost = (stored['host'] ?? '').trim();
-    final host = rawHost.isEmpty ? 'localhost' : rawHost;
+    final host = (stored['host'] ?? '').trim();
+    // Audit 2026-09-25: fail closed with actionable guidance — never dial
+    // a loopback target that cannot exist on-device.
+    if (host.isEmpty) {
+      return 'No Redis server runs on this Android device — a REMOTE host is '
+          'required. ${_missingConfig('host')}';
+    }
+    if (_isLoopbackTarget(host)) {
+      return 'Redis host "$host" points at this Android device, which runs no Redis '
+          'server — a REMOTE host is required. Update "host" (and "port") via the '
+          'Configure sheet for "Redis MCP", e.g. redis.example.com.';
+    }
     final port = _redisPort(stored['port']);
     final password = (stored['password'] ?? '').trim();
     final command = _redisCommand(toolName, args);
@@ -1702,14 +1748,16 @@ class RedisCapability extends _BackendCapability {
       host: host,
       port: port,
       password: password.isEmpty ? null : password,
+      socketFactory: _socketOverride,
       timeout: Duration(seconds: timeoutSeconds),
     );
     try {
       return _formatReply(await client.command(command));
     } on SocketException catch (e) {
       final detail = e.message.isEmpty ? e.toString() : e.message;
-      return 'Redis at $host:$port is unreachable ($detail). Start the '
-          'server or update "host"/"port" via Configure.';
+      return 'Redis at $host:$port is unreachable ($detail). Ensure the REMOTE '
+          'server is running and reachable from this device, or update '
+          '"host"/"port" via Configure.';
     } on TimeoutException {
       return 'Redis command "$toolName" timed out after $timeoutSeconds '
           'seconds.';
@@ -1783,15 +1831,145 @@ class RedisCapability extends _BackendCapability {
   }
 }
 
+/// The storage facts the Obsidian vault gate checks (audit 2026-09-25):
+/// whether Android scoped-storage rules apply at all, which app-private
+/// roots always exist, and whether the user granted All Files Access
+/// (`MANAGE_EXTERNAL_STORAGE` — the same grant the composer's folder
+/// picker needs for user-pinned folders on shared storage).
+class ObsidianVaultAccess {
+  const ObsidianVaultAccess({
+    required this.enforceScopedStorage,
+    this.appRoots = const [],
+    this.allFilesAccess = false,
+  });
+
+  /// True on Android — the only platform where scoped storage applies.
+  final bool enforceScopedStorage;
+
+  /// Absolute paths of always-reachable app-private directories (internal
+  /// documents/support, the external files dir — the sandbox lives under
+  /// the support dir, so it is covered too).
+  final List<String> appRoots;
+
+  /// Whether All Files Access is granted, which opens the shared-storage
+  /// volumes (`/storage/…`, `/sdcard/…`, `/mnt/media_rw/…`).
+  final bool allFilesAccess;
+}
+
+/// Injectable storage probe: production reads the real platform, storage
+/// directories, and permission; tests exercise the Android gate hermetically.
+typedef ObsidianVaultAccessProbe = Future<ObsidianVaultAccess> Function();
+
+/// Shared-storage volume prefixes (Android).
+const List<String> _sharedStorageRoots = ['/storage', '/sdcard', '/mnt/media_rw'];
+
+/// Production probe: no enforcement off-Android (the desktop/test filesystem
+/// is open); on Android collects the app-private roots via `path_provider`
+/// and the All Files Access grant via `permission_handler`. A provider that
+/// fails contributes nothing — an empty allowlist fails CLOSED.
+Future<ObsidianVaultAccess> defaultObsidianVaultAccess() async {
+  if (!Platform.isAndroid) {
+    return const ObsidianVaultAccess(enforceScopedStorage: false);
+  }
+  final roots = <String>[];
+  try {
+    roots.add((await getApplicationDocumentsDirectory()).path);
+  } catch (_) {
+    // No path_provider answer — keep the allowlist honest (fail closed).
+  }
+  try {
+    roots.add((await getApplicationSupportDirectory()).path);
+  } catch (_) {
+    // Same as above.
+  }
+  try {
+    final external = await getExternalStorageDirectory();
+    if (external != null) roots.add(external.path);
+  } catch (_) {
+    // Same as above.
+  }
+  var allFiles = false;
+  try {
+    allFiles = (await Permission.manageExternalStorage.status).isGranted;
+  } catch (_) {
+    // No permission answer — assume NOT granted (fail closed).
+  }
+  return ObsidianVaultAccess(
+    enforceScopedStorage: true,
+    appRoots: roots,
+    allFilesAccess: allFiles,
+  );
+}
+
+/// Pure scoped-storage gate for a configured Obsidian `vault_root` (audit
+/// 2026-09-25). Returns `null` when the vault is reachable; otherwise an
+/// honest, actionable refusal — reading an arbitrary desktop-style path is
+/// impossible under Android scoped storage, and pretending otherwise fails
+/// obscurely mid-I/O (or silently "succeeds" in a corner the user cannot
+/// see). POSIX paths only: enforcement happens on Android, which is POSIX.
+String? obsidianVaultAccessError(
+  String vaultRoot,
+  ObsidianVaultAccess access,
+) {
+  if (!access.enforceScopedStorage) return null;
+  final root = _absolutePosix(vaultRoot);
+  for (final allowed in access.appRoots) {
+    if (_pathWithin(root, _absolutePosix(allowed))) return null;
+  }
+  final onSharedStorage =
+      _sharedStorageRoots.any((prefix) => _pathWithin(root, prefix));
+  if (onSharedStorage && access.allFilesAccess) return null;
+  if (onSharedStorage) {
+    return 'Obsidian vault "$vaultRoot" sits on shared storage, which Android only '
+        'exposes with All Files Access. Grant it in Settings -> Permissions, or set '
+        '"vault_root" to a folder inside the app\'s own storage via the Configure '
+        'sheet for "Obsidian MCP".';
+  }
+  return 'Obsidian vault "$vaultRoot" is not reachable on Android: scoped storage '
+      'blocks desktop-style filesystem paths. Set "vault_root" to a folder this app '
+      'can access — inside its own storage, or shared storage (/storage/…, '
+      '/sdcard/…) with All Files Access granted — via the Configure sheet for '
+      '"Obsidian MCP".';
+}
+
+/// Absolute, `.`/`..`-normalized POSIX path for [raw] (mirrors what
+/// [VaultFiles] resolves against, minus the platform separator).
+String _absolutePosix(String raw) {
+  final absolute = Directory(raw).absolute.path;
+  final parts = <String>[];
+  for (final segment in absolute.split('/')) {
+    if (segment.isEmpty || segment == '.') continue;
+    if (segment == '..') {
+      if (parts.isNotEmpty) parts.removeLast();
+      continue;
+    }
+    parts.add(segment);
+  }
+  return '/${parts.join('/')}';
+}
+
+/// True when [child] equals [parent] or sits inside it (segment boundary,
+/// so `/data/filesX` is NOT within `/data/files`).
+bool _pathWithin(String child, String parent) {
+  final base = parent == '/' ? '' : parent;
+  return child == parent || child.startsWith('$base/');
+}
+
 /// Obsidian MCP: vault file execution over [VaultFiles] against the
 /// configured `vault_root`. Root escapes and missing notes stay
-/// [ArgumentError] (thrown, like the engine's unknown-tool errors).
+/// [ArgumentError] (thrown, like the engine's unknown-tool errors). Audit
+/// 2026-09-25: on Android the root must also pass the scoped-storage gate
+/// ([obsidianVaultAccessError]) — an unreachable vault is refused with
+/// actionable guidance BEFORE any file I/O.
 class ObsidianCapability extends _BackendCapability {
-  ObsidianCapability()
-      : super(
+  ObsidianCapability({ObsidianVaultAccessProbe? accessProbe})
+      : _accessProbe = accessProbe ?? defaultObsidianVaultAccess,
+        super(
           backendDescriptors.firstWhere((d) => d.pluginName == 'Obsidian MCP',
               orElse: () => throw StateError('native descriptor missing: Obsidian MCP')),
         );
+
+  final ObsidianVaultAccessProbe _accessProbe;
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -1799,6 +1977,8 @@ class ObsidianCapability extends _BackendCapability {
     final stored = await _stored();
     final root = (stored['vault_root'] ?? '').trim();
     if (root.isEmpty) return _missingConfig('vault_root');
+    final accessError = obsidianVaultAccessError(root, await _accessProbe());
+    if (accessError != null) return accessError;
     final files = VaultFiles(root);
     try {
       switch (toolName) {
