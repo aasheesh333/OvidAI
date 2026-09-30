@@ -785,6 +785,12 @@ class AgentService extends ChangeNotifier {
             sessionId,
             payload: {
               'deleted': true,
+              // Claude Code's SessionEnd matchers key on `reason`
+              // (clear | logout | prompt_input_exit | other). Deleting a chat
+              // discards the conversation, which is CC's `clear`; without a
+              // reason the subject resolved to '' and every SessionEnd matcher
+              // was permanently dead (audit 2026-09-29).
+              'reason': 'clear',
               'transcript_path': _transcriptPathFor(sessionId),
             },
           ),
@@ -9002,6 +9008,10 @@ if (!window.__ovidBlankHooked) {
             'from': from,
             'cutoff': cutoff,
             'forced': forced,
+            // Claude Code matchers for PreCompact are `manual` | `auto`, and
+            // `trigger` is the field buildHookStdinJson documents — without it
+            // the matcher subject was empty and such hooks never fired.
+            'trigger': forced ? 'manual' : 'auto',
             'transcript_path': _transcriptPathFor(s.id),
           },
           model: s.model,
@@ -9045,6 +9055,7 @@ if (!window.__ovidBlankHooked) {
             'cutoff': cutoff,
             'folded': shadowed,
             'forced': forced,
+            'trigger': forced ? 'manual' : 'auto',
             'transcript_path': _transcriptPathFor(s.id),
           },
           model: s.model,
@@ -14744,10 +14755,27 @@ ${await _agentsMdBlock()}
             branch: sessionBranch,
             sessionId: _currentRunKey(),
           );
-          await RepoCache.I.sync(onLine: (l) => _emit('shellOut', l));
+          final report = await RepoCache.I.sync(
+            onLine: (l) => _emit('shellOut', l),
+          );
           notifyListeners();
-          return 'repo synced · ${RepoCache.I.files.length} files ready in '
-              'workspace. call repo_tree to explore.';
+          // HONEST SYNC RESULT (audit 2026-09-25): "N files ready in workspace"
+          // was FALSE whenever the Trees API reported a truncated tree, the
+          // 400-file cap bit, or per-file fetches failed — and every one of
+          // those used to be swallowed. The model then reasoned confidently
+          // about a repo it had only partly seen ("this file doesn't exist").
+          // Report the real shape and say explicitly that absence proves
+          // nothing on a partial copy.
+          final n = RepoCache.I.files.length;
+          if (report.partial) {
+            return 'repo synced with GAPS · $n files in workspace — '
+                '${report.summary}\n'
+                'This copy is PARTIAL, so a file you cannot see may still '
+                'exist upstream: never conclude that something is absent. '
+                'Call repo_tree to see what did arrive.';
+          }
+          return 'repo synced · $n files ready in workspace. '
+              'call repo_tree to explore.';
         } catch (e) {
           return 'sync failed: $e';
         }
@@ -14901,10 +14929,30 @@ ${await _agentsMdBlock()}
         _emit('file', 'committing ${RepoCache.I.dirtyCount} files…');
         try {
           final n = await RepoCache.I.commitAll(message);
-          _emit('file', 'pushed ✓ $n files');
+          // HONEST COMMIT RESULT (audit 2026-09-25): commitAll now creates ONE
+          // atomic commit via the Git Data API, but falls back to the old
+          // per-file contents-API path if that fails — which means N separate
+          // commits on the branch. Reporting "committed N files ✓" for the
+          // fallback hides that the history was spammed, so say which happened.
+          final info = RepoCache.I.lastCommit;
+          final perFile = info?.mode == CommitMode.perFile;
+          _emit(
+            'file',
+            perFile ? 'pushed ✓ $n files (as $n commits)' : 'pushed ✓ $n files',
+          );
           notifyListeners();
-          return 'committed $n files ✓';
+          if (perFile) {
+            return 'committed $n files ✓ — but NOTE: the atomic commit failed, '
+                'so this fell back to $n SEPARATE commits on '
+                '${info?.branch ?? sessionBranch}. The content '
+                'is pushed; the history is not one clean commit.';
+          }
+          final sha = info?.commitSha;
+          return 'committed $n files ✓ as a single atomic commit'
+              '${sha == null || sha.isEmpty ? '' : ' (${sha.substring(0, sha.length.clamp(0, 7))})'}.';
         } catch (e) {
+          // commitAll throws (never returns success) on a partial push, and the
+          // message already names how many files landed before the failure.
           return 'commit failed: $e';
         }
 

@@ -2120,6 +2120,12 @@ class _PluginDiagnostics extends StatelessWidget {
                 warn: true,
               ),
         const SectionHeader('Hooks'),
+        // WHY THE HOOKS ARE NOT FIRING (audit 2026-09-29). Four causes all
+        // look identical from the outside — a screen install awaiting restart,
+        // a session-scoped install, a missing sandbox, a tripped breaker — and
+        // every one of them used to be silent. Say which it is.
+        if (HookService.I.hookBlockerFor(runtimeId) case final blocker?)
+          _DiagRow('Hooks not running: $blocker', warn: true),
         if (hooks.isEmpty)
           const _DiagRow('No hooks declared.')
         else

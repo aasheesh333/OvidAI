@@ -360,6 +360,7 @@ class HookService extends ChangeNotifier {
     userStopChecker = null;
     _consecutiveFails.clear();
     _tripped.clear();
+    _hookBlockers.clear();
     _firingEvents.clear();
     fired = 0;
     failed = 0;
@@ -439,6 +440,7 @@ class HookService extends ChangeNotifier {
 
   void _recordSuccess(String pluginId, String sessionId) {
     _consecutiveFails.remove('$pluginId|$sessionId');
+    _clearBlocker(pluginId);
   }
 
   void _recordFailure(String pluginId, String sessionId) {
@@ -447,10 +449,44 @@ class HookService extends ChangeNotifier {
     if (n >= breakerThreshold) {
       _tripped.add(key);
       _consecutiveFails.remove(key);
+      _noteBlocker(
+        pluginId,
+        'disabled for this session after $n consecutive failures '
+            '(circuit breaker) — re-enable the plugin to retry',
+      );
     } else {
       _consecutiveFails[key] = n;
     }
   }
+
+  // ── Why hooks did not run ────────────────────────────────────────────
+  /// Per-plugin reason its declared hooks are currently NOT running.
+  ///
+  /// Every skip path used to be completely silent: a plugin installed from the
+  /// Plugins screen is `pendingGlobal` (spec §7 — deliberately not injected
+  /// into running sessions), a legacy row is fail-closed until re-approved,
+  /// hook execution hard-requires the Studio sandbox, and three failures trip
+  /// the circuit breaker. All four produce exactly the same user-visible
+  /// symptom — "the hook never fires" — with no evidence anywhere except
+  /// ledger rows no screen renders (audit 2026-09-29). This makes the reason
+  /// observable so the Plugins screen can say it.
+  final Map<String, String> _hookBlockers = {};
+
+  /// Diagnostic snapshot: pluginId → why its hooks are blocked. Empty when
+  /// nothing is blocked. Cleared per plugin as soon as one of its hooks runs.
+  Map<String, String> get hookBlockers => Map.unmodifiable(_hookBlockers);
+
+  /// Test/diagnostic seam for a single plugin.
+  String? hookBlockerFor(String pluginId) => _hookBlockers[pluginId];
+
+  void _noteBlocker(String pluginId, String reason) {
+    if (_hookBlockers[pluginId] == reason) return;
+    _hookBlockers[pluginId] = reason;
+    // Observable in logs too — this is the "silent skip" the audit flagged.
+    Diag.swallow('hook_service.blocked', '$pluginId: $reason');
+  }
+
+  void _clearBlocker(String pluginId) => _hookBlockers.remove(pluginId);
 
   // ── Hook resolution ──────────────────────────────────────────────────
 
@@ -539,6 +575,9 @@ class HookService extends ChangeNotifier {
     if (matcher == null || matcher.isEmpty || matcher == '*') return true;
     if (!isSafeMatcher(matcher)) return false;
     final subject = _matcherSubject(canonicalEvent, payload);
+    // This event has no matcher vocabulary in Claude Code, so a declared
+    // matcher must not turn the hook permanently dead.
+    if (subject == _kSubjectMatchesEverything) return true;
     // FULL-STRING match (audit 2026-09-25): a Claude Code matcher like `Edit`
     // must match the tool `Edit` only, NOT `MultiEdit`/`NotebookEdit`. The old
     // unanchored `hasMatch` did a substring match, so `Edit` fired on every
@@ -546,13 +585,44 @@ class HookService extends ChangeNotifier {
     // pattern; alternations (`Edit|Write`) and patterns (`Notebook.*`) still
     // work because the anchor wraps the entire user matcher.
     try {
-      return RegExp('^(?:$matcher)\$').hasMatch(subject);
+      if (RegExp('^(?:$matcher)\$').hasMatch(subject)) return true;
     } catch (_) {
       return false; // malformed matcher → skip (fail-open)
     }
+    // MCP SERVER PREFIX (regression fix, audit 2026-09-29). Claude Code
+    // documents `mcp__server-name` as a matcher that catches EVERY tool of that
+    // server, and Ovid dispatches those tools as `mcp__<server>__<tool>`. The
+    // anchoring above is correct for plain tool names but killed this rule:
+    // `^(?:mcp__github)$` never matches `mcp__github__create_issue`, so every
+    // MCP-scoped plugin hook silently stopped firing — with no ledger entry,
+    // because the skip happens per hook inside the resolution loop. Applied only
+    // to literal (metacharacter-free) `mcp__` branches so a real regex such as
+    // `mcp__.*` still goes through the anchored path above.
+    if (_isToolEvent(canonicalEvent) && subject.startsWith('mcp__')) {
+      for (final branch in matcher.split('|')) {
+        final b = branch.trim();
+        if (!b.startsWith('mcp__') || _hasRegexMeta(b)) continue;
+        if (subject == b || subject.startsWith('${b}__')) return true;
+      }
+    }
+    return false;
   }
 
+  /// True for the events whose matcher subject is a tool name.
+  static bool _isToolEvent(String canonicalEvent) =>
+      canonicalEvent == 'pre_tool' || canonicalEvent == 'post_tool';
+
+  static bool _hasRegexMeta(String s) =>
+      RegExp(r'[\\.\\+*?\[\](){}^$|]').hasMatch(s);
+
   /// The string a matcher runs against for [canonicalEvent].
+  ///
+  /// Claude Code only defines matcher semantics for three families: tool events
+  /// (a tool name or pattern), session start/end (the source token), and
+  /// compaction (`manual` | `auto`). Everything else has NO matcher vocabulary —
+  /// so for those events a declared matcher is IGNORED (matches all) rather than
+  /// compared against an empty subject, which is what made such hooks
+  /// permanently and silently dead.
   static String _matcherSubject(
     String canonicalEvent,
     Map<String, dynamic> payload,
@@ -561,8 +631,19 @@ class HookService extends ChangeNotifier {
       final reason = payload['reason']?.toString() ?? '';
       return _ccSessionSource(reason);
     }
-    return payload['tool']?.toString() ?? '';
+    if (canonicalEvent == 'pre_compact' || canonicalEvent == 'post_compact') {
+      return payload['trigger']?.toString() ?? '';
+    }
+    if (_isToolEvent(canonicalEvent)) {
+      return payload['tool']?.toString() ?? '';
+    }
+    // No matcher vocabulary exists for this event.
+    return _kSubjectMatchesEverything;
   }
+
+  /// Sentinel subject: the anchored regex is skipped for it, so any declared
+  /// matcher matches. Keeps "no matcher semantics" from becoming "never fires".
+  static const String _kSubjectMatchesEverything = '\u0000*';
 
   /// Map Ovid's session-start reason onto the [CC] source token a plugin's
   /// matcher expects. Ovid has no `clear`/`compact` start reasons yet, so
@@ -644,6 +725,21 @@ class HookService extends ChangeNotifier {
         pid,
         sessionId,
       )) {
+        // Worth reporting ONLY when this plugin actually declares a hook for
+        // this event — otherwise every unrelated plugin looks "blocked".
+        if (m.hooks.any((h) => h.event == canonical)) {
+          final state =
+              PluginContributionRegistry.I.activationFor(pid)?.name ??
+                  'unregistered';
+          _noteBlocker(
+            pid,
+            state == 'pendingGlobal'
+                ? 'installed, not activated yet — RESTART THE APP to activate '
+                      'it in every session (a Plugins-screen install never '
+                      'mutates an already-running session)'
+                : 'not active in this session (activation: $state)',
+          );
+        }
         continue;
       }
       for (final h in m.hooks) {
@@ -653,10 +749,17 @@ class HookService extends ChangeNotifier {
     }
     if (!AppState.I.legacyPluginExecutionAllowed) return out;
     for (final p in AppState.I.plugins) {
-      if (p.runtimeId != null ||
-          !p.installed ||
-          !p.enabled ||
-          p.migrationRequired) {
+      if (p.runtimeId != null || !p.installed || !p.enabled) continue;
+      if (p.migrationRequired) {
+        // Legacy rows are fail-closed on purpose (README: no silent
+        // auto-approval), but that must not look like a broken hook.
+        if (p.hooks.isNotEmpty) {
+          _noteBlocker(
+            'legacy:${p.name}',
+            'Migration required — legacy plugins stay fail-closed until you '
+                'run inspect → approve → install',
+          );
+        }
         continue;
       }
       // Legacy map form — one command per (event, plugin). The map may be
@@ -1030,6 +1133,15 @@ class HookService extends ChangeNotifier {
     // must not be pre-empted here -- that boundary is exactly where the hook
     // env bug slipped through.
     if (!SandboxService.sandboxReady) {
+      // The single most common real reason "hooks don't work": hook commands
+      // execute inside the Studio sandbox, which only installs on first Studio
+      // open. Record the reason instead of failing invisibly three times and
+      // then tripping the circuit breaker with nothing to show for it.
+      _noteBlocker(
+        hook.pluginId,
+        'hook commands need the on-device sandbox, which is not installed yet '
+            '— open Studio once to install it',
+      );
       throw StateError('sandbox not installed');
     }
     // Spawn (not execChecked): the hook child MUST receive the full JSON
