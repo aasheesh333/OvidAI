@@ -4822,11 +4822,15 @@ class AppState extends ChangeNotifier {
     List<String> allowedTools = const [],
     String persona = '',
     String outputSchemaHint = '',
+    String? model,
   }) {
     final child = ChatSession(
       id: 'sub-${DateTime.now().microsecondsSinceEpoch}',
       title: label.isEmpty ? 'Subagent' : label,
-      model: parent.model,
+      // A Claude Code agent may pin its own model (frontmatter `model:`); when
+      // provided and non-empty it wins, else the child inherits the parent's
+      // (audit 2026-09-25 — plugin agents run as real subagents now).
+      model: (model != null && model.trim().isNotEmpty) ? model.trim() : parent.model,
       providerId: parent.providerId,
       mode: mode,
       presetId: parent.presetId,

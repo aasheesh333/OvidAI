@@ -19637,6 +19637,30 @@ ${await _agentsMdBlock()}
         return 'Plugin contribution "${c.canonicalId}" is not mounted from '
             'its current declaration. Nothing was executed.';
       }
+      // CLAUDE CODE AGENT PARITY (audit 2026-09-25): a plugin `agents/*.md`
+      // contribution is a SUBAGENT definition — its own system prompt, its own
+      // model, its own tool allowlist, run in an isolated context. It used to
+      // be inlined into the parent as prompt text (identical to a command/
+      // skill), so its declared `model` was ignored and it shared the parent's
+      // context and tools. Now it is dispatched as a real subagent. Exception:
+      // if we are ALREADY inside a subagent (zero-nesting rule), fall back to
+      // inlining the instructions so the work still happens.
+      if (c.kind == PluginContributionKind.agent &&
+          !(_runSession?.isSubagent ?? false)) {
+        final body = await _skillContentWithFiles(mounted, rawArgs: '');
+        final input = (args['input'] ?? args['arguments'])?.toString() ?? '';
+        return _handleDispatchAgent(
+          {
+            'prompt': input.isEmpty
+                ? 'Carry out your role as defined in your instructions.'
+                : input,
+            'label': mounted.name,
+            'persona': body,
+            'allowed_tools': mounted.allowedTools.toList(),
+          },
+          modelOverride: mounted.model,
+        );
+      }
       _emit('think', 'plugin ${c.pluginId} ${c.kindLabel}: ${c.name}');
       // Same scoping + bundled-file surfacing as the `skill` tool path.
       if (mounted.allowedTools.isNotEmpty) {
@@ -20058,7 +20082,10 @@ ${await _agentsMdBlock()}
     );
   }
 
-  Future<String> _handleDispatchAgent(Map<String, dynamic> args) async {
+  Future<String> _handleDispatchAgent(
+    Map<String, dynamic> args, {
+    String? modelOverride,
+  }) async {
     final prompt = (args['prompt'] as String).trim();
     if (prompt.isEmpty) return 'prompt is required';
     final modeName = args['mode'] as String?;
@@ -20121,6 +20148,7 @@ ${await _agentsMdBlock()}
       allowedTools: allowed,
       persona: persona,
       outputSchemaHint: outputHint,
+      model: modelOverride,
     );
     // G1: plan mode is NOT inherited through the run bucket. The old line here
     // claimed to make a child read-only "while the parent is still planning",
