@@ -17481,7 +17481,20 @@ ${await _agentsMdBlock()}
     try {
       if (name == 'device_read') {
         final raw = await device.readRaw(full: args['mode'] == 'full');
-        final packageName = raw['package']?.toString();
+        var packageName = raw['package']?.toString();
+        // PACKAGE-LESS READ GUARD (audit 2026-09-25): a delta/`unchanged` read
+        // can come back without a `package` field. Keying the sensitive-target
+        // check only on that field meant `null` -> not sensitive -> the read
+        // slipped through, while the ACTION path right below fails closed on the
+        // same missing information. Ask the cheap probe (one node's package, no
+        // tree walk) and deny when nothing can confirm the foreground app.
+        if (packageName == null || packageName.trim().isEmpty) {
+          packageName = await device.foregroundPackage();
+          if (packageName == null || packageName.trim().isEmpty) {
+            return 'DENIED: Ovid could not verify the live foreground app. '
+                'Retry device_read before acting.';
+          }
+        }
         if (_isSensitiveDeviceTarget(packageName)) {
           return _sensitiveDeviceDenial(packageName);
         }
