@@ -102,4 +102,31 @@ void main() {
     final route = pluginInstallRouteForTest(row(name: 'JSON Visualizer'));
     expect(route.kind, PluginInstallKind.unsupported);
   });
+
+  group('a row that can never install shows no Install button', () {
+    // WS4 honesty (audit 2026-09-25): "MCP Server Hub" and "Voice Input" are
+    // source-less inbuilt rows with no executable backing, so Install routed to
+    // `unsupported` and tapped into "add its repo with the + button" — advice
+    // that cannot work, because they HAVE no repo. The row must not look
+    // installable in the first place.
+    test('source-less inbuilt row without backing is uninstallable', () {
+      expect(inbuiltUninstallableForTest(row(name: 'Git Workbench')), isTrue);
+      expect(inbuiltUninstallableForTest(row(name: 'MCP Server Hub')), isTrue);
+      expect(inbuiltUninstallableForTest(row(name: 'Voice Input')), isTrue);
+    });
+
+    test('a row WITH a repo stays installable (the advice is actionable)', () {
+      expect(
+        inbuiltUninstallableForTest(row(source: 'justaword', author: 'community')),
+        isFalse,
+        reason: 'its source is unparseable, but "add its repo" still applies',
+      );
+      expect(inbuiltUninstallableForTest(row(source: 'acme/widgets')), isFalse);
+    });
+
+    test('a row with real backing is not uninstallable', () {
+      NativePluginRegistry.I.register(_TestNativeCapability('JSON Visualizer'));
+      expect(inbuiltUninstallableForTest(row(name: 'JSON Visualizer')), isFalse);
+    });
+  });
 }

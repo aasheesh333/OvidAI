@@ -232,6 +232,17 @@ pluginInstallRouteForTest(PluginItem plugin) {
   return (kind: PluginInstallKind.unsupported, github: null, server: null);
 }
 
+/// True when a catalog row can NEVER be installed: it routes to `unsupported`
+/// AND names no source/marketplace repo to add. Tapping Install on such a row
+/// used to advise "add its repo with the + button" — impossible, because there
+/// is no repo. These rows must not look installable at all (WS4 honesty,
+/// audit 2026-09-25).
+@visibleForTesting
+bool inbuiltUninstallableForTest(PluginItem plugin) =>
+    plugin.source == null &&
+    plugin.marketplace == null &&
+    pluginInstallRouteForTest(plugin).kind == PluginInstallKind.unsupported;
+
 /// Durable-only status copy for an MCP server (spec §5.3, Task 3): the
 /// persisted canonical label · reason, or the neutral no-record copy.
 /// Never reads serviceStatus or connected.
@@ -1693,6 +1704,47 @@ class PluginDetailScreen extends StatelessWidget {
                         }
                       }
                     },
+                  )
+                : inbuiltUninstallableForTest(plugin)
+                // No Install button for a row nothing can install — an
+                // Install that only ever says "can't be installed" is a
+                // promise the catalog should not make. Say what it IS.
+                ? Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 13,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Aether.surfaceRaised,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          plugin.category == 'MCP'
+                              ? Icons.hub_outlined
+                              : Icons.info_outline,
+                          size: 16,
+                          color: Aether.textMuted,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            plugin.category == 'MCP'
+                                ? 'Managed in the MCP tab — add a server '
+                                      'there with the + button.'
+                                : 'Not installable — this catalog row has no '
+                                      'plugin package behind it.',
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              color: Aether.textMuted,
+                              height: 1.35,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   )
                 : FilledButton.icon(
                     style: FilledButton.styleFrom(

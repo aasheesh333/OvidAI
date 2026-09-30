@@ -7989,7 +7989,10 @@ class AppState extends ChangeNotifier {
         name: 'Sandbox Runtime',
         author: 'termux',
         description:
-            'Full Linux userland on-device: python, node, gcc — isolated and instant.',
+            'Full Linux userland on-device: python, node, gcc — isolated and '
+            'instant. Ships inside the app and provisions on first Studio '
+            'open; on devices where Android blocks executing app-private '
+            'binaries it reports Unsupported rather than pretending to work.',
         version: '3.1.0',
         category: 'Runtime',
         installed: true,
