@@ -1095,6 +1095,12 @@ class CodexPluginAdapter {
       }.contains(e.key)) {
         continue;
       }
+      // Settings-field declarations are consumed by [_addSettingsFields],
+      // which DROPS an inline secret value. Preserving them verbatim here
+      // instead would persist that secret straight into the manifest blob
+      // (and into the §5.1 grant digest) — the leak the Claude path already
+      // refuses.
+      if (kSettingsFieldSpellings.contains(e.key)) continue;
       b.unknown['manifest.${e.key}'] = e.value;
     }
     _requirePublisherIdentity(
@@ -1199,6 +1205,11 @@ class CodexPluginAdapter {
     b.enabledByDefault =
         _readEnabledByDefault(codexManifest) && tomlEnabledDefault != 'false';
 
+    // Declarative settings fields, same spelling and same secret-dropping
+    // rules as the Claude manifest (audit follow-up 2026-09-25): one
+    // declaration shape must work in every format that carries a manifest.
+    _addSettingsFields(b, codexManifest);
+
     _addDependencies(b);
     final version = scalar('version');
     final manifestVersion = codexManifest['version'];
@@ -1240,6 +1251,10 @@ class GenericMcpAdapter {
         decoded['mcpServers'] ?? decoded['mcp_servers'] ?? decoded['servers'];
     if (servers is Map) rawByName = servers.cast<String, dynamic>();
     for (final e in decoded.entries) {
+      // Settings-field declarations are consumed by [_addSettingsFields],
+      // which DROPS an inline secret value; preserving them verbatim here
+      // would persist that secret into the manifest blob.
+      if (kSettingsFieldSpellings.contains(e.key)) continue;
       if (!const {'mcpServers', 'mcp_servers', 'servers'}.contains(e.key)) {
         final value = e.value;
         b.unknown['mcp.${e.key}'] = value is Map
@@ -1247,6 +1262,9 @@ class GenericMcpAdapter {
             : value;
       }
     }
+    // A pasted/generic MCP config may declare its settings fields alongside
+    // `mcpServers` — same shape, same rules as the Claude and Codex manifests.
+    _addSettingsFields(b, decoded);
 
     // A direct `{"command": ...}` / `{"url": ...}` definition names itself
     // after the source.
