@@ -697,6 +697,13 @@ class AgentRun {
   Set<String>? activeSkillTools;
   String? activeSkillName;
 
+  /// Set for the duration of ONE tool call when its `pre_tool` hook returned
+  /// `permissionDecision:"allow"` — Claude Code semantics: the plugin has
+  /// already decided, so the ordinary user approval prompt is skipped.
+  /// Per-run (zone-resolved) so parallel sessions never share it, and always
+  /// cleared in the dispatch `finally`.
+  bool hookAllowBypass = false;
+
   /// Latest human-readable progress line for this run ("retrying in 9s…",
   /// "context compacted", "running npm test"). The event log was never
   /// rendered anywhere, so retries and backoffs were invisible; the composer
@@ -9356,6 +9363,15 @@ if (!window.__ovidBlankHooked) {
         );
         final ctx = HookService.extractHookContext(res.output);
         if (ctx.isNotEmpty) _userPromptContext[s.id] = ctx;
+        // CLAUDE CODE PARITY (audit 2026-09-25): a UserPromptSubmit hook that
+        // exits 2 BLOCKS the prompt — the run must not reach the model. The
+        // hook's stderr is the reason, so surface it verbatim instead of a
+        // generic failure.
+        if (res.blockedReason != null) {
+          lastError = 'Prompt blocked by a plugin hook: ${res.blockedReason}';
+          _emit('err', lastError!);
+          return;
+        }
       } catch (e) {
         Diag.swallow('agent_service.user_prompt_submit', e);
       }
@@ -12152,6 +12168,12 @@ ${await _agentsMdBlock()}
       if (gate.updatedInput != null) {
         args = <String, dynamic>{...args, ...gate.updatedInput!};
       }
+      // CLAUDE CODE PARITY (audit 2026-09-25): `permissionDecision:"allow"`
+      // means the plugin has already decided, so the ordinary user prompt for
+      // THIS call is skipped. Deliberately narrow — the destructive-command
+      // confirmation and plan mode's "asks nothing" rule are checked first in
+      // _maybeApprove, so a hook allow cannot widen either.
+      if (gate.bypassPermission) _runResolved.hookAllowBypass = true;
       if (gate.decision == HookDecision.deny) {
         // Reuses the existing "DENIED" prefix contract (same UI 'stopped'
         // state + ledger 'ok: false' as a user-declined approval) — a
@@ -12246,6 +12268,9 @@ ${await _agentsMdBlock()}
     } finally {
       sw.stop();
       _runResolved.toolMs += sw.elapsedMilliseconds;
+      // A hook's "allow" applies to the ONE call it gated — never leak it
+      // into the next tool call of this run.
+      _runResolved.hookAllowBypass = false;
     }
   }
 
@@ -15821,6 +15846,22 @@ ${await _agentsMdBlock()}
             'filesystem/device changes. Confirm only if you intended it.',
         allowAlways: mode == AgentMode.studio,
       );
+    }
+    // A `pre_tool` hook that returned `permissionDecision:"allow"` has already
+    // decided for this one call (Claude Code semantics), so the user is not
+    // asked again. Placed AFTER the plan-mode and destructive-command gates
+    // above, so it can never bypass either — and path/host grants go through
+    // `_askUser` directly, so the workspace jail is untouched by this.
+    if (_runResolved.hookAllowBypass) {
+      if (sessionId != null) {
+        await SessionLedger.I.append(sessionId, 'approval', {
+          'tool': tool,
+          'ok': true,
+          'allowedBy': 'hook',
+        });
+      }
+      _emit('think', 'approved by a plugin hook — no prompt shown');
+      return true;
     }
     // Subagent sessions run unattended — nobody is looking at their
     // composer, so an approval prompt there would deadlock the child.

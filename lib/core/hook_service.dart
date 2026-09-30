@@ -51,6 +51,17 @@ class HookGateResult {
   /// results too: a hook may rewrite args without blocking.
   final Map<String, dynamic>? updatedInput;
 
+  /// True when a hook returned `hookSpecificOutput.permissionDecision:
+  /// "allow"`. In Claude Code that BYPASSES the user permission prompt for
+  /// this tool call — before this flag existed Ovid treated `allow` as merely
+  /// "not deny / not ask" and still prompted the user, so a plugin that had
+  /// already decided could never actually decide (audit 2026-09-25).
+  ///
+  /// Scoped narrowly on purpose: it skips the ordinary approval prompt only.
+  /// Destructive commands still confirm, plan mode still asks nothing, and a
+  /// `permission_request` hook deny still wins — the bypass cannot widen those.
+  final bool bypassPermission;
+
   /// Backward-compat: true only for [HookDecision.allow].
   bool get allowed => decision == HookDecision.allow;
 
@@ -58,16 +69,18 @@ class HookGateResult {
   String? get deniedByPlugin =>
       decision == HookDecision.allow ? null : decidedByPlugin;
 
-  const HookGateResult.allow({this.updatedInput})
+  const HookGateResult.allow({this.updatedInput, this.bypassPermission = false})
     : decision = HookDecision.allow,
       decidedByPlugin = null,
       reason = null;
 
   const HookGateResult.deny(this.decidedByPlugin, this.reason, {this.updatedInput})
-    : decision = HookDecision.deny;
+    : decision = HookDecision.deny,
+      bypassPermission = false;
 
   const HookGateResult.ask(this.decidedByPlugin, this.reason, {this.updatedInput})
-    : decision = HookDecision.ask;
+    : decision = HookDecision.ask,
+      bypassPermission = false;
 }
 
 /// Outcome of [HookService.fireStop] — a Stop hook may veto the stop
@@ -111,11 +124,18 @@ class HookFireResult {
   /// worker decides what a prompt-block means for the run.
   final String? promptBlockReason;
 
+  /// Set when a COMMAND hook exited 2 on an event Claude Code lets block
+  /// (`user_prompt_submit`). Exit 2 means "block this and show stderr to the
+  /// user"; on every other observe event exit 2 stays fail-open. Null when
+  /// nothing blocked (audit 2026-09-25).
+  final String? blockedReason;
+
   const HookFireResult({
     required this.output,
     this.systemMessages = const [],
     this.halted = false,
     this.promptBlockReason,
+    this.blockedReason,
   });
 }
 
@@ -1282,6 +1302,7 @@ class HookService extends ChangeNotifier {
     final systemMessages = <String>[];
     var halted = false;
     String? promptBlockReason;
+    String? blockedReason;
     for (final (pluginId, hook, declaredEvent) in hooks) {
       if (!_matcherApplies(canonical, hook.matcher, payload)) continue;
       if (_tripped.contains('$pluginId|$sessionId')) continue;
@@ -1387,6 +1408,25 @@ class HookService extends ChangeNotifier {
       try {
         final (code, out) = await _exec(hook, env, cwd, stdinPayload: stdinJson);
         if (code != 0) {
+          // CLAUDE CODE PARITY (audit 2026-09-25): on `user_prompt_submit`,
+          // exit code 2 BLOCKS the prompt and surfaces stderr to the user — it
+          // is a decision, not a failure. On every other observe event exit 2
+          // stays fail-open, because a broken hook must never brick a run.
+          if (code == 2 && canonical == 'user_prompt_submit') {
+            blockedReason = out.trim().isEmpty
+                ? 'plugin $pluginId blocked this prompt'
+                : cleanHookJson(out.trim());
+            try {
+              await _ledger(sessionId, 'hook/result', {
+                ...record,
+                'ok': false,
+                'exit': code,
+                'decision': 'block',
+                'reason': blockedReason,
+              });
+            } catch (e) { Diag.swallow('hook_service', e); }
+            break;
+          }
           failed++;
           _recordFailure(pluginId, sessionId);
           try {
@@ -1458,6 +1498,7 @@ class HookService extends ChangeNotifier {
       systemMessages: systemMessages,
       halted: halted,
       promptBlockReason: promptBlockReason,
+      blockedReason: blockedReason,
     );
   }
 
@@ -1868,6 +1909,9 @@ class HookService extends ChangeNotifier {
       transcriptPath: _transcriptPathFrom(payload),
     );
     Map<String, dynamic>? updatedInput;
+    // Set when any hook returns permissionDecision:"allow" — the caller then
+    // skips the ordinary user approval prompt for this call (audit 2026-09-25).
+    var bypassPermission = false;
     for (final (pluginId, hook, declaredEvent) in hooks) {
       if (!_matcherApplies(canonical, hook.matcher, payload)) continue;
       if (_tripped.contains('$pluginId|$sessionId')) continue;
@@ -1962,6 +2006,9 @@ class HookService extends ChangeNotifier {
             permDecision == 'deny';
         final asks = !denies &&
             (decision == 'ask' || permDecision == 'ask');
+        if (!denies && !asks && permDecision == 'allow') {
+          bypassPermission = true;
+        }
         if (denies || asks) {
           failed++;
           final reason =
@@ -2023,6 +2070,9 @@ class HookService extends ChangeNotifier {
         } catch (e) { Diag.swallow('hook_service', e); }
       }
     }
-    return HookGateResult.allow(updatedInput: updatedInput);
+    return HookGateResult.allow(
+      updatedInput: updatedInput,
+      bypassPermission: bypassPermission,
+    );
   }
 }

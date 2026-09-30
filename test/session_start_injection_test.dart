@@ -240,4 +240,53 @@ void main() {
       );
     },
   );
+
+  test(
+    'a UserPromptSubmit hook that exits 2 blocks the prompt entirely',
+    () async {
+      // Claude Code parity (audit 2026-09-25): exit 2 on UserPromptSubmit is a
+      // DECISION (block + show stderr), not a hook failure to fail open on.
+      final s = makeSession();
+      final m = NormalizedPluginManifest(
+        id: 'acme/blocker',
+        name: 'blocker',
+        version: '1.0.0',
+        format: PluginFormat.claudeCode,
+        rootPath: '/plugin',
+        hooks: [
+          PluginHook(
+            pluginId: 'acme/blocker',
+            event: 'user_prompt_submit',
+            ordinal: 0,
+            type: 'command',
+            payload: 'decide',
+            timeoutS: 5,
+          ),
+        ],
+      );
+      PluginContributionRegistry.I.register(
+        m,
+        activation: PluginActivation.sessionActive,
+        immediateSessionId: 'ctx-1',
+      );
+      addTearDown(() => PluginContributionRegistry.I.unregisterPlugin(m.id));
+      addTearDown(() => HookService.I.stdinExecutorForTest = null);
+
+      HookService.I.stdinExecutorForTest =
+          (cmd, env, stdinJson) async => (2, 'no secrets in prompts');
+
+      var llmCalled = false;
+      AgentService.llmOnceForTest = (p, msgs, session, includeTools) async {
+        llmCalled = true;
+        return {'role': 'assistant', 'content': 'ok', 'finish_reason': 'stop'};
+      };
+
+      await AgentService.I
+          .runTask('hi', sessionId: s.id)
+          .timeout(const Duration(seconds: 20));
+
+      expect(llmCalled, isFalse, reason: 'a blocked prompt never reaches the model');
+      expect(AgentService.I.lastError, contains('no secrets in prompts'));
+    },
+  );
 }
