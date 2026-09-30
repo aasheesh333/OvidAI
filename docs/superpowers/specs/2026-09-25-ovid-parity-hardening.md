@@ -73,13 +73,34 @@ no "100% bug-free" claim — we close concrete, cited defects with tests.
 | 7 Control mode | **done** | gesture completion callback + bounded serialization, deadlock-safe off-main dispatch (`562b7c2`); `device_read` no longer skips the sensitive guard on a package-less payload (`c9e9e01`). |
 | 8 Plugin UI | **done** | declarative settings-field contribution + schema-driven form; secrets via secure storage (`e189411`). |
 
-## Remaining (documented follow-ups, none blocking)
-- A structured `request_working_folder` tool (opens the native picker) would
-  replace the prompt-level "ask the user which folder" instruction in WS6. The
-  separation itself is already enforced: the agent runs in a per-session sandbox
-  workspace and Ovid's own source tree is not reachable on-device.
-- Codex `.codex-plugin/plugin.json` + GenericMcpAdapter do not yet parse the new
-  declarative `configFields`/`settings` UI contribution (Claude `plugin.json`
-  does); such keys are preserved in `unknownFields`, so nothing is lost.
-- Plugin-contributed UI is declarative-only by design. A WebView/JS panel was
-  scoped out as an arbitrary-code-execution surface.
+## Follow-ups — all closed except one deliberate refusal
+
+- **`request_working_folder` tool — DONE.** The prompt-level "ask the user which
+  folder" instruction now has a real mechanism: the tool opens the native picker
+  and pins the result to the RUN session (never "the active session"), marking it
+  user-pinned. Refused in Read-Only, for subagents, and in plan mode.
+- **Codex + generic-MCP settings fields — DONE**, and fixing it exposed a real
+  leak: both adapters preserved unrecognized manifest keys verbatim, so a
+  `configFields` entry with an inline secret `default` was persisted into the
+  manifest blob and the §5.1 grant digest. Both now consume the declaration
+  through `_addSettingsFields` (which drops inline secret values) and skip those
+  keys in the unknown-fields loop.
+- **Tool-schema truncation — DONE (found while doing the above).** The compactor's
+  160-char description budget was silently cutting **40 of 104** advertised tool
+  descriptions, including `run_shell`, `file_read`, `fs_edit`,
+  `ask_user_question` and `exit_plan_mode` — guidance the model never received,
+  surfacing as silent misuse rather than an error. Budget raised to 520/120 and
+  the two still-long descriptions had their load-bearing constraint front-loaded;
+  truncation is now ZERO, pinned by a test. Measured cost: roster ~8960 → ~10560
+  tokens/request (+17%).
+
+### Deliberately NOT done: WebView/JS plugin panels
+A plugin-contributed UI panel that renders plugin-supplied HTML/JS is an
+arbitrary-code-execution surface inside an app that also holds device control
+(the accessibility service drives other apps), shell execution, stored provider
+keys and a GitHub token. One compromised plugin could exfiltrate secrets or
+drive the device. Claude Code itself has no plugin-contributed UI, so this is
+beyond parity, not a gap against it. The declarative settings-field path (WS8)
+covers the real need — configuration UI — with no code execution. If richer
+plugin UI is ever wanted, the safe route is a constrained declarative schema
+rendered by native widgets (list/form/chart), never a webview.
