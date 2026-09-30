@@ -12343,6 +12343,18 @@ ${await _agentsMdBlock()}
       final childBlock = _subagentToolBlock(runningSession, name);
       if (childBlock != null) return childBlock;
     }
+    // ── Browser: page-acting tools are gated on the page's CURRENT host ──
+    // `browser_open`/`browser_navigate` gate the host they navigate TO, but a
+    // click, a JS redirect or a `target=_blank` can move the tab somewhere
+    // else afterwards — and read/evaluate/type/click then operated on that
+    // host with no grant at all (audit 2026-09-25). Re-check the live host.
+    // The set membership test is SYNC and guards the only await here, so no
+    // other tool gains a microtask turn: the device_* cancellation contract
+    // depends on dispatch reaching the native call without extra turns.
+    if (_browserPageActingTools.contains(name)) {
+      final hostDenial = await _browserHostDenial(name);
+      if (hostDenial != null) return hostDenial;
+    }
     switch (name) {
       case 'device_read':
       case 'device_tap':
@@ -15906,6 +15918,70 @@ ${await _agentsMdBlock()}
   /// allowed in Read-Only mode, else null. Mirrors the plan-mode block:
   /// the model learns from the tool result and adapts instead of spamming
   /// approval dialogs.
+  /// Browser tools that act on the LIVE page (its DOM, pixels, cookies or
+  /// console) and therefore inherit whatever host the tab currently shows.
+  /// Navigation/tab/chrome tools are excluded: `browser_open` and
+  /// `browser_navigate` gate their own target host, and history/tab operations
+  /// do not read or mutate page content themselves.
+  static const Set<String> _browserPageActingTools = {
+    'browser_read',
+    'browser_outline',
+    'browser_snapshot',
+    'browser_find',
+    'browser_wait_for',
+    'browser_evaluate',
+    'browser_click',
+    'browser_tap_at',
+    'browser_double_click',
+    'browser_long_press',
+    'browser_swipe',
+    'browser_drag',
+    'browser_hover',
+    'browser_type',
+    'browser_fill',
+    'browser_select',
+    'browser_press_key',
+    'browser_scroll',
+    'browser_screenshot',
+    'browser_console',
+    'browser_network',
+    'browser_dialog',
+    'browser_popups',
+    'browser_cookies',
+    'browser_download',
+    'browser_upload',
+  };
+
+  /// Ask the tab where it ACTUALLY is and gate that host. Returns an
+  /// ACCESS_DENIED message when the user refuses, null when the tool may
+  /// proceed. Anything unverifiable (no tab, no controller yet, a `file://`
+  /// preview with an empty host, a probe that throws) proceeds rather than
+  /// wedging the tool — the host grant still gates every explicit navigation.
+  Future<String?> _browserHostDenial(String tool) async {
+    final tabs = browserTabs;
+    if (tabs.isEmpty) return null;
+    final tab = tabs[activeTabIndex.clamp(0, tabs.length - 1)];
+    final controller = tab.controller;
+    if (controller == null) return null;
+    String host;
+    try {
+      final raw = await controller.runJavaScriptReturningResult(
+        'location.host',
+      );
+      final s = raw.toString();
+      host = (s.startsWith('"') && s.endsWith('"'))
+          ? jsonDecode(s) as String
+          : s;
+    } catch (e) {
+      Diag.swallow('agent_service.browserHostProbe', e);
+      return null;
+    }
+    host = host.trim();
+    if (host.isEmpty) return null;
+    if (await _checkHostGrant(host, tool: tool)) return null;
+    return _accessDeniedMessage(['host $host'], noun: 'host');
+  }
+
   String? _readOnlyBlock(String name, Map<String, dynamic> args) {
     if (mode != AgentMode.safe) return null;
 
