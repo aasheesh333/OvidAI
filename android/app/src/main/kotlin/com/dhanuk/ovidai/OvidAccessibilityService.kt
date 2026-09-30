@@ -21,6 +21,8 @@ import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
@@ -47,9 +49,14 @@ import android.widget.LinearLayout
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 
 internal data class HandleAllocation(val handle: Int, val nextHandle: Int)
 
@@ -190,6 +197,13 @@ internal data class DeviceActionResult(
     val message: String = "The accessibility action was not accepted.",
     val value: Any? = true,
 )
+
+/// How a dispatched stroke actually ended, reported by the platform's
+/// `GestureResultCallback` (audit 2026-09-25). ACCEPTED-for-dispatch is NOT in
+/// this set: that is the boolean `dispatchGesture` returns synchronously, and
+/// treating it as success is exactly the bug — the agent would read the screen
+/// before the stroke landed. Only COMPLETED means the motion finished.
+internal enum class GestureOutcome { COMPLETED, CANCELLED, TIMEOUT }
 
 internal fun passwordTypingRefusal(isPassword: Boolean): DeviceActionResult? =
     if (isPassword) {
@@ -332,6 +346,13 @@ class OvidAccessibilityService : AccessibilityService() {
         private const val IME_NODE_BUDGET = 80
         private const val MAX_DEPTH = 30
 
+        /// Upper bound on waiting for a dispatched stroke to report
+        /// completion (audit 2026-09-25). Generous enough for a slow drag or
+        /// pinch on a loaded device, short enough that a callback the platform
+        /// never delivers cannot wedge the run — on expiry we report an honest
+        /// timeout instead of hanging or claiming success.
+        private const val GESTURE_TIMEOUT_MS = 3000L
+
         /// Native→Dart bridge for overlay events. Set by MainActivity, which
         /// owns the FlutterEngine: ("deviceOverlayText", text) on send,
         /// ("deviceOverlayStop", null) on X with an empty field.
@@ -342,6 +363,18 @@ class OvidAccessibilityService : AccessibilityService() {
     private val screenshotExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "ovid-device-screenshot").apply { isDaemon = true }
     }
+
+    // ── Gesture completion plumbing (audit 2026-09-25) ──────────────────────
+    // `dispatchGesture` must be invoked on the main thread, and Android also
+    // delivers its `GestureResultCallback` there. So the wait for completion
+    // can never happen on the main thread: MainActivity hands every gesture to
+    // a single-thread background executor, that thread blocks on the latch
+    // below, and the main looper stays free to run the callback that releases
+    // it. mainHandler is where we post the dispatch and where the callback
+    // lands; gestureLock serializes strokes so a second dispatch cannot overlap
+    // one still animating (which the platform would reject).
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val gestureLock = ReentrantLock()
 
     // ── Floating control overlay ────────────────────────────────────────
     // TYPE_ACCESSIBILITY_OVERLAY: creatable from an accessibility service with
@@ -1284,103 +1317,192 @@ class OvidAccessibilityService : AccessibilityService() {
         }
     }
 
-    @Synchronized
-    internal fun tap(handle: Int?, x: Float?, y: Float?): DeviceActionResult {
-        if (handle != null) {
-            val node = treeCache.nodesByHandle[handle]
-                ?: return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
-            if (!node.refresh()) {
-                return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
-            }
-            if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                return DeviceActionResult(true)
-            }
-            // Ancestor-click fallback: the tapped row is often a non-clickable
-            // container, so walk up to 3 ancestors attempting ACTION_CLICK on
-            // clickable ones.
-            var ancestor: AccessibilityNodeInfo? = try {
-                node.parent
-            } catch (_: Throwable) {
-                null
-            }
-            var level = 0
-            while (ancestor != null && level < 3) {
-                level++
-                val current = ancestor
-                var clickedName: String? = null
-                try {
-                    if (current.isClickable &&
-                        current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    ) {
-                        clickedName = current.className?.toString()?.substringAfterLast('.') ?: "node"
-                    }
-                } finally {
-                    ancestor = try {
-                        current.parent
-                    } catch (_: Throwable) {
-                        null
-                    }
-                    try {
-                        current.recycle()
-                    } catch (_: Throwable) {
-                        // The framework owns the node; keep walking.
-                    }
-                }
-                if (clickedName != null) {
-                    // Success return: the finally above already prefetched
-                    // the next ancestor into `ancestor`, which no later walk
-                    // consumes — recycle it here so one node per success
-                    // does not leak.
-                    try {
-                        ancestor?.recycle()
-                    } catch (_: Throwable) {
-                        // The framework owns the node; the click landed.
-                    }
-                    ancestor = null
-                    return DeviceActionResult(true, value = "Clicked ancestor $level ($clickedName).")
-                }
-            }
-            return if (level > 0) {
-                DeviceActionResult(false, message = "Node $handle did not accept a click action; all $level ancestor(s) refused.")
-            } else {
-                DeviceActionResult(false, message = "Node $handle did not accept a click action and has no clickable ancestor.")
-            }
+    /// Dispatch one gesture and block until the platform reports it COMPLETED,
+    /// CANCELLED, or the bounded wait expires (audit 2026-09-25).
+    ///
+    /// THREADING — read before changing. This MUST be called from a background
+    /// thread, never the platform (main) thread. `dispatchGesture` is posted to
+    /// [mainHandler] and its `GestureResultCallback` is delivered on that same
+    /// main thread; the caller here then blocks on [CountDownLatch.await]. If
+    /// this ran ON the main thread, the await would freeze the looper that has
+    /// to deliver the callback, so the latch could only ever escape via the
+    /// timeout — a self-deadlock plus an ANR. MainActivity therefore routes
+    /// every gesture through a single-thread executor, which both keeps the wait
+    /// off main and serializes gestures. [dispatch] is the primitive's actual
+    /// `service.dispatchGesture(gesture, callback, handler)` call, kept at the
+    /// call site so each gesture remains exactly one dispatch.
+    ///
+    /// @param notAcceptedMessage the honest failure text for the caller's
+    ///   gesture when the platform refuses the dispatch outright.
+    @TargetApi(Build.VERSION_CODES.N)
+    internal fun runGesture(
+        notAcceptedMessage: String,
+        dispatch: (AccessibilityService.GestureResultCallback, Handler) -> Boolean,
+    ): DeviceActionResult {
+        // Serialize: a second stroke dispatched while the previous is still
+        // animating is rejected by the platform (dispatchGesture returns false),
+        // which surfaced as a bogus "did not accept" error for a valid gesture.
+        // Wait for the in-flight one instead — bounded, so a wedged gesture can
+        // never starve the next forever.
+        var acquired = false
+        try {
+            acquired = gestureLock.tryLock(GESTURE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
         }
+        if (!acquired) {
+            return DeviceActionResult(
+                false,
+                "GESTURE_BUSY",
+                "Another gesture was still running; this one was not dispatched. Retry.",
+            )
+        }
+        try {
+            val latch = CountDownLatch(1)
+            val outcome = AtomicReference(GestureOutcome.TIMEOUT)
+            val accepted = AtomicBoolean(false)
+            val callback = object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    outcome.set(GestureOutcome.COMPLETED)
+                    latch.countDown()
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    outcome.set(GestureOutcome.CANCELLED)
+                    latch.countDown()
+                }
+            }
+            // Post the dispatch to the main thread (where it belongs) and let
+            // this background thread wait. A refused dispatch never fires the
+            // callback, so release the latch there rather than burn the timeout.
+            mainHandler.post {
+                val ok = try {
+                    dispatch(callback, mainHandler)
+                } catch (_: Throwable) {
+                    false
+                }
+                accepted.set(ok)
+                if (!ok) latch.countDown()
+            }
+            val signalled = latch.await(GESTURE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            if (!signalled) {
+                return DeviceActionResult(
+                    false,
+                    "GESTURE_TIMEOUT",
+                    "The gesture did not report completion within " +
+                        "${GESTURE_TIMEOUT_MS}ms; the screen may not have settled.",
+                )
+            }
+            if (!accepted.get()) {
+                return DeviceActionResult(false, message = notAcceptedMessage)
+            }
+            return when (outcome.get()) {
+                GestureOutcome.COMPLETED -> DeviceActionResult(true)
+                GestureOutcome.CANCELLED -> DeviceActionResult(
+                    false,
+                    message = "Android cancelled the gesture before it completed.",
+                )
+                GestureOutcome.TIMEOUT -> DeviceActionResult(
+                    false,
+                    "GESTURE_TIMEOUT",
+                    "The gesture did not report completion within " +
+                        "${GESTURE_TIMEOUT_MS}ms; the screen may not have settled.",
+                )
+            }
+        } finally {
+            gestureLock.unlock()
+        }
+    }
+
+    internal fun tap(handle: Int?, x: Float?, y: Float?): DeviceActionResult {
+        if (handle != null) return tapNode(handle)
         if (x == null || y == null || !x.isFinite() || !y.isFinite()) {
             return DeviceActionResult(false, "BAD_ARGS", "Tap requires a node handle or finite x/y coordinates.")
         }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
             return DeviceActionResult(false, "UNSUPPORTED", "Gesture taps require Android 7.0 or newer.")
         }
-        return if (Api24Actions.tap(this, x, y)) {
-            DeviceActionResult(true)
+        // Coordinate stroke: dispatched and awaited off the service monitor (see
+        // runGesture) so the completion wait can never block readScreen.
+        return Api24Actions.tap(this, x, y)
+    }
+
+    /// Node-handle tap: ACTION_CLICK on the node or the nearest clickable
+    /// ancestor. Fast and reads the shared tree cache, so it keeps the service
+    /// monitor — and is deliberately separate from the coordinate path above,
+    /// which must never hold the monitor while it blocks (audit 2026-09-25).
+    @Synchronized
+    private fun tapNode(handle: Int): DeviceActionResult {
+        val node = treeCache.nodesByHandle[handle]
+            ?: return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
+        if (!node.refresh()) {
+            return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
+        }
+        if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            return DeviceActionResult(true)
+        }
+        // Ancestor-click fallback: the tapped row is often a non-clickable
+        // container, so walk up to 3 ancestors attempting ACTION_CLICK on
+        // clickable ones.
+        var ancestor: AccessibilityNodeInfo? = try {
+            node.parent
+        } catch (_: Throwable) {
+            null
+        }
+        var level = 0
+        while (ancestor != null && level < 3) {
+            level++
+            val current = ancestor
+            var clickedName: String? = null
+            try {
+                if (current.isClickable &&
+                    current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                ) {
+                    clickedName = current.className?.toString()?.substringAfterLast('.') ?: "node"
+                }
+            } finally {
+                ancestor = try {
+                    current.parent
+                } catch (_: Throwable) {
+                    null
+                }
+                try {
+                    current.recycle()
+                } catch (_: Throwable) {
+                    // The framework owns the node; keep walking.
+                }
+            }
+            if (clickedName != null) {
+                // Success return: the finally above already prefetched
+                // the next ancestor into `ancestor`, which no later walk
+                // consumes — recycle it here so one node per success
+                // does not leak.
+                try {
+                    ancestor?.recycle()
+                } catch (_: Throwable) {
+                    // The framework owns the node; the click landed.
+                }
+                ancestor = null
+                return DeviceActionResult(true, value = "Clicked ancestor $level ($clickedName).")
+            }
+        }
+        return if (level > 0) {
+            DeviceActionResult(false, message = "Node $handle did not accept a click action; all $level ancestor(s) refused.")
         } else {
-            DeviceActionResult(false, message = "Android did not accept the tap gesture.")
+            DeviceActionResult(false, message = "Node $handle did not accept a click action and has no clickable ancestor.")
         }
     }
 
     internal fun clampLongPressDuration(durationMs: Long?): Long =
         (durationMs ?: 600L).coerceIn(200L, 3000L)
 
-    @Synchronized
     internal fun longPress(
         handle: Int?,
         x: Float?,
         y: Float?,
         durationMs: Long?,
     ): DeviceActionResult {
-        if (handle != null) {
-            val node = treeCache.nodesByHandle[handle]
-                ?: return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
-            if (!node.refresh()) {
-                return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
-            }
-            return if (node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
-                DeviceActionResult(true)
-            } else {
-                DeviceActionResult(false, message = "Node $handle did not accept a long-click action.")
-            }
-        }
+        if (handle != null) return longPressNode(handle)
         if (x == null || y == null || !x.isFinite() || !y.isFinite()) {
             return DeviceActionResult(false, "BAD_ARGS", "Long-press requires a node handle or finite x/y coordinates.")
         }
@@ -1388,10 +1510,23 @@ class OvidAccessibilityService : AccessibilityService() {
             return DeviceActionResult(false, "UNSUPPORTED", "Long-press gestures require Android 7.0 or newer.")
         }
         val duration = clampLongPressDuration(durationMs)
-        return if (Api24Actions.longPress(this, x, y, duration)) {
+        return Api24Actions.longPress(this, x, y, duration)
+    }
+
+    /// Node-handle long-press via ACTION_LONG_CLICK. Kept under the service
+    /// monitor and separate from the coordinate stroke, which blocks on
+    /// completion and must not hold it (audit 2026-09-25).
+    @Synchronized
+    private fun longPressNode(handle: Int): DeviceActionResult {
+        val node = treeCache.nodesByHandle[handle]
+            ?: return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
+        if (!node.refresh()) {
+            return DeviceActionResult(false, "INVALID_NODE", "Node handle $handle is no longer valid. Re-read the screen with device_read and retry.")
+        }
+        return if (node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
             DeviceActionResult(true)
         } else {
-            DeviceActionResult(false, message = "Android did not accept the long-press gesture.")
+            DeviceActionResult(false, message = "Node $handle did not accept a long-click action.")
         }
     }
 
@@ -1507,7 +1642,6 @@ class OvidAccessibilityService : AccessibilityService() {
         }
     }
 
-    @Synchronized
     internal fun swipe(
         fromX: Float,
         fromY: Float,
@@ -1521,11 +1655,7 @@ class OvidAccessibilityService : AccessibilityService() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
             return DeviceActionResult(false, "UNSUPPORTED", "Swipe gestures require Android 7.0 or newer.")
         }
-        return if (Api24Actions.swipe(this, fromX, fromY, toX, toY, durationMs)) {
-            DeviceActionResult(true)
-        } else {
-            DeviceActionResult(false, message = "Android did not accept the swipe gesture.")
-        }
+        return Api24Actions.swipe(this, fromX, fromY, toX, toY, durationMs)
     }
 
     /// Double / triple tap at a point, or a multi-click on a node's centre.
@@ -1533,7 +1663,6 @@ class OvidAccessibilityService : AccessibilityService() {
     /// Sent as ONE gesture with N timed strokes: two separate dispatches arrive
     /// as two unrelated touches, so `onDoubleClick` handlers, map zoom and
     /// text-selection handles all ignored them.
-    @Synchronized
     internal fun multiTap(
         x: Float,
         y: Float,
@@ -1546,17 +1675,12 @@ class OvidAccessibilityService : AccessibilityService() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
             return DeviceActionResult(false, "UNSUPPORTED", "Multi-tap gestures require Android 7.0 or newer.")
         }
-        return if (Api24Actions.multiTap(this, x, y, count, intervalMs)) {
-            DeviceActionResult(true)
-        } else {
-            DeviceActionResult(false, message = "Android did not accept the multi-tap gesture.")
-        }
+        return Api24Actions.multiTap(this, x, y, count, intervalMs)
     }
 
     /// Long-press-then-move drag: icons, selection handles, reorder rows,
     /// sliders. `holdMs` presses and holds at the origin before moving, which is
     /// what makes a drag start rather than a fling.
-    @Synchronized
     internal fun drag(
         fromX: Float,
         fromY: Float,
@@ -1571,15 +1695,10 @@ class OvidAccessibilityService : AccessibilityService() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
             return DeviceActionResult(false, "UNSUPPORTED", "Drag gestures require Android 7.0 or newer.")
         }
-        return if (Api24Actions.drag(this, fromX, fromY, toX, toY, holdMs, durationMs)) {
-            DeviceActionResult(true)
-        } else {
-            DeviceActionResult(false, message = "Android did not accept the drag gesture.")
-        }
+        return Api24Actions.drag(this, fromX, fromY, toX, toY, holdMs, durationMs)
     }
 
     /// Two-finger pinch (zoom out) or spread (zoom in) about a centre point.
-    @Synchronized
     internal fun pinch(
         centerX: Float,
         centerY: Float,
@@ -1595,17 +1714,12 @@ class OvidAccessibilityService : AccessibilityService() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
             return DeviceActionResult(false, "UNSUPPORTED", "Pinch gestures require Android 7.0 or newer.")
         }
-        return if (Api24Actions.pinch(this, centerX, centerY, fromRadius, toRadius, durationMs)) {
-            DeviceActionResult(true)
-        } else {
-            DeviceActionResult(false, message = "Android did not accept the pinch gesture.")
-        }
+        return Api24Actions.pinch(this, centerX, centerY, fromRadius, toRadius, durationMs)
     }
 
     /// Two-finger swipe in one direction — the gesture a scrollable list, web
     /// page or launcher expects where one finger means something else (back
     /// swipe, carousel page, drawer).
-    @Synchronized
     internal fun twoFingerSwipe(
         fromX: Float,
         fromY: Float,
@@ -1620,11 +1734,7 @@ class OvidAccessibilityService : AccessibilityService() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
             return DeviceActionResult(false, "UNSUPPORTED", "Two-finger swipes require Android 7.0 or newer.")
         }
-        return if (Api24Actions.twoFingerSwipe(this, fromX, fromY, toX, toY, durationMs, separation)) {
-            DeviceActionResult(true)
-        } else {
-            DeviceActionResult(false, message = "Android did not accept the two-finger swipe.")
-        }
+        return Api24Actions.twoFingerSwipe(this, fromX, fromY, toX, toY, durationMs, separation)
     }
 
     @Synchronized
@@ -1798,22 +1908,24 @@ class OvidAccessibilityService : AccessibilityService() {
 
 @TargetApi(Build.VERSION_CODES.N)
 private object Api24Actions {
-    fun tap(service: AccessibilityService, x: Float, y: Float): Boolean {
+    fun tap(service: OvidAccessibilityService, x: Float, y: Float): DeviceActionResult {
         val path = Path().apply { moveTo(x, y) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, 50))
             .build()
-        return service.dispatchGesture(gesture, null, null)
+        return service.runGesture("Android did not accept the tap gesture.") { callback, handler ->
+            service.dispatchGesture(gesture, callback, handler)
+        }
     }
 
     fun swipe(
-        service: AccessibilityService,
+        service: OvidAccessibilityService,
         fromX: Float,
         fromY: Float,
         toX: Float,
         toY: Float,
         durationMs: Long,
-    ): Boolean {
+    ): DeviceActionResult {
         val path = Path().apply {
             moveTo(fromX, fromY)
             lineTo(toX, toY)
@@ -1821,20 +1933,24 @@ private object Api24Actions {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
             .build()
-        return service.dispatchGesture(gesture, null, null)
+        return service.runGesture("Android did not accept the swipe gesture.") { callback, handler ->
+            service.dispatchGesture(gesture, callback, handler)
+        }
     }
 
     fun longPress(
-        service: AccessibilityService,
+        service: OvidAccessibilityService,
         x: Float,
         y: Float,
         durationMs: Long,
-    ): Boolean {
+    ): DeviceActionResult {
         val path = Path().apply { moveTo(x, y) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
             .build()
-        return service.dispatchGesture(gesture, null, null)
+        return service.runGesture("Android did not accept the long-press gesture.") { callback, handler ->
+            service.dispatchGesture(gesture, callback, handler)
+        }
     }
 
     /// Double / triple tap: N short strokes at the SAME point, spaced inside the
@@ -1846,12 +1962,12 @@ private object Api24Actions {
     /// maps, text-selection handles and every `onDoubleClick` handler ignored
     /// them.
     fun multiTap(
-        service: AccessibilityService,
+        service: OvidAccessibilityService,
         x: Float,
         y: Float,
         count: Int,
         intervalMs: Long,
-    ): Boolean {
+    ): DeviceActionResult {
         val times = count.coerceIn(2, 4)
         val gap = intervalMs.coerceIn(40L, 300L)
         val path = Path().apply { moveTo(x, y) }
@@ -1861,7 +1977,9 @@ private object Api24Actions {
                 GestureDescription.StrokeDescription(path, i * gap, 45L),
             )
         }
-        return service.dispatchGesture(builder.build(), null, null)
+        return service.runGesture("Android did not accept the multi-tap gesture.") { callback, handler ->
+            service.dispatchGesture(builder.build(), callback, handler)
+        }
     }
 
     /// Drag: optional hold at the origin (so long-press-then-drag works, which
@@ -1872,14 +1990,14 @@ private object Api24Actions {
     /// two parallel-timed strokes in one gesture, which is close enough for a
     /// drag and still a single touch sequence.
     fun drag(
-        service: AccessibilityService,
+        service: OvidAccessibilityService,
         fromX: Float,
         fromY: Float,
         toX: Float,
         toY: Float,
         holdMs: Long,
         durationMs: Long,
-    ): Boolean {
+    ): DeviceActionResult {
         val move = Path().apply {
             moveTo(fromX, fromY)
             lineTo(toX, toY)
@@ -1900,19 +2018,21 @@ private object Api24Actions {
         } else {
             builder.addStroke(GestureDescription.StrokeDescription(move, 0, durationMs))
         }
-        return service.dispatchGesture(builder.build(), null, null)
+        return service.runGesture("Android did not accept the drag gesture.") { callback, handler ->
+            service.dispatchGesture(builder.build(), callback, handler)
+        }
     }
 
     /// Pinch / spread: two fingers moving symmetrically about a centre. Used for
     /// map zoom, image zoom and any two-finger scaler.
     fun pinch(
-        service: AccessibilityService,
+        service: OvidAccessibilityService,
         centerX: Float,
         centerY: Float,
         fromRadius: Float,
         toRadius: Float,
         durationMs: Long,
-    ): Boolean {
+    ): DeviceActionResult {
         val a = Path().apply {
             moveTo(centerX - fromRadius, centerY)
             lineTo(centerX - toRadius, centerY)
@@ -1925,21 +2045,23 @@ private object Api24Actions {
             .addStroke(GestureDescription.StrokeDescription(a, 0, durationMs))
             .addStroke(GestureDescription.StrokeDescription(b, 0, durationMs))
             .build()
-        return service.dispatchGesture(gesture, null, null)
+        return service.runGesture("Android did not accept the pinch gesture.") { callback, handler ->
+            service.dispatchGesture(gesture, callback, handler)
+        }
     }
 
     /// Two-finger swipe in the same direction: the gesture scrollable lists,
     /// web pages and some launchers require where a one-finger swipe is taken as
     /// something else (a back swipe, a carousel page, a drawer).
     fun twoFingerSwipe(
-        service: AccessibilityService,
+        service: OvidAccessibilityService,
         fromX: Float,
         fromY: Float,
         toX: Float,
         toY: Float,
         durationMs: Long,
         separation: Float,
-    ): Boolean {
+    ): DeviceActionResult {
         val half = separation / 2f
         val a = Path().apply {
             moveTo(fromX - half, fromY)
@@ -1953,7 +2075,9 @@ private object Api24Actions {
             .addStroke(GestureDescription.StrokeDescription(a, 0, durationMs))
             .addStroke(GestureDescription.StrokeDescription(b, 0, durationMs))
             .build()
-        return service.dispatchGesture(gesture, null, null)
+        return service.runGesture("Android did not accept the two-finger swipe.") { callback, handler ->
+            service.dispatchGesture(gesture, callback, handler)
+        }
     }
 }
 

@@ -29,12 +29,25 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.URLConnection
+import java.util.concurrent.Executors
 import java.util.zip.ZipFile
 
 class MainActivity : FlutterActivity() {
     private val channelName = "ovid/native"
     private val safExportRequestCode = 7407
     private val screenCaptureRequestCode = 7408
+
+    /// Gesture actions block until the stroke reports completion (see
+    /// OvidAccessibilityService.runGesture), and that wait must NEVER run on the
+    /// platform thread: this MethodChannel handler is delivered on main, and the
+    /// GestureResultCallback that releases the wait is delivered on main too —
+    /// blocking here would freeze the looper that has to fire the callback. A
+    /// SINGLE thread also serializes gestures, so a second dispatch cannot
+    /// overlap one still animating (which Android would reject). Results are
+    /// completed back on the UI thread. (audit 2026-09-25)
+    private val gestureExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "ovid-device-gesture").apply { isDaemon = true }
+    }
 
     /// Pending screenshot result while the OS screen-capture consent dialog
     /// (pre-Android-11 MediaProjection route) is on screen. Single-flight:
@@ -320,6 +333,21 @@ class MainActivity : FlutterActivity() {
             result.success(action.value)
         } else {
             result.error(action.code, action.message, null)
+        }
+    }
+
+    /// Runs a blocking gesture [action] on [gestureExecutor] (off the platform
+    /// thread, where waiting for the completion callback is safe) and settles the
+    /// channel [result] back on the UI thread. Every coordinate gesture routes
+    /// through here so the wait never blocks main and gestures stay serialized.
+    /// (audit 2026-09-25)
+    private fun runDeviceGesture(
+        result: MethodChannel.Result,
+        action: () -> DeviceActionResult,
+    ) {
+        gestureExecutor.execute {
+            val outcome = action()
+            runOnUiThread { completeDeviceAction(result, outcome) }
         }
     }
 
@@ -758,7 +786,7 @@ class MainActivity : FlutterActivity() {
                             ?: call.argument<Number>("handle")?.toInt()
                         val x = call.argument<Number>("x")?.toFloat()
                         val y = call.argument<Number>("y")?.toFloat()
-                        completeDeviceAction(result, service.tap(handle, x, y))
+                        runDeviceGesture(result) { service.tap(handle, x, y) }
                     }
                     "deviceType" -> {
                         val service = deviceService(result) ?: return@setMethodCallHandler
@@ -787,16 +815,10 @@ class MainActivity : FlutterActivity() {
                         if (fromX == null || fromY == null || toX == null || toY == null) {
                             result.error("BAD_ARGS", "deviceSwipe requires from_x, from_y, to_x, and to_y.", null)
                         } else {
-                            completeDeviceAction(
-                                result,
-                                service.swipe(
-                                    fromX,
-                                    fromY,
-                                    toX,
-                                    toY,
-                                    call.argument<Number>("duration_ms")?.toLong() ?: 500L,
-                                ),
-                            )
+                            val durationMs = call.argument<Number>("duration_ms")?.toLong() ?: 500L
+                            runDeviceGesture(result) {
+                                service.swipe(fromX, fromY, toX, toY, durationMs)
+                            }
                         }
                     }
                     // ── Full human gesture set (2026-09-25) ────────────────
@@ -812,15 +834,11 @@ class MainActivity : FlutterActivity() {
                         if (x == null || y == null) {
                             result.error("BAD_ARGS", "deviceMultiTap requires x and y.", null)
                         } else {
-                            completeDeviceAction(
-                                result,
-                                service.multiTap(
-                                    x,
-                                    y,
-                                    (call.argument<Number>("count")?.toInt() ?: 2).coerceIn(2, 4),
-                                    call.argument<Number>("interval_ms")?.toLong() ?: 120L,
-                                ),
-                            )
+                            val count = (call.argument<Number>("count")?.toInt() ?: 2).coerceIn(2, 4)
+                            val intervalMs = call.argument<Number>("interval_ms")?.toLong() ?: 120L
+                            runDeviceGesture(result) {
+                                service.multiTap(x, y, count, intervalMs)
+                            }
                         }
                     }
                     "deviceDrag" -> {
@@ -832,17 +850,11 @@ class MainActivity : FlutterActivity() {
                         if (fromX == null || fromY == null || toX == null || toY == null) {
                             result.error("BAD_ARGS", "deviceDrag requires from_x, from_y, to_x and to_y.", null)
                         } else {
-                            completeDeviceAction(
-                                result,
-                                service.drag(
-                                    fromX,
-                                    fromY,
-                                    toX,
-                                    toY,
-                                    call.argument<Number>("hold_ms")?.toLong() ?: 250L,
-                                    call.argument<Number>("duration_ms")?.toLong() ?: 600L,
-                                ),
-                            )
+                            val holdMs = call.argument<Number>("hold_ms")?.toLong() ?: 250L
+                            val durationMs = call.argument<Number>("duration_ms")?.toLong() ?: 600L
+                            runDeviceGesture(result) {
+                                service.drag(fromX, fromY, toX, toY, holdMs, durationMs)
+                            }
                         }
                     }
                     "devicePinch" -> {
@@ -854,16 +866,10 @@ class MainActivity : FlutterActivity() {
                         if (cx == null || cy == null || from == null || to == null) {
                             result.error("BAD_ARGS", "devicePinch requires x, y, from_radius and to_radius.", null)
                         } else {
-                            completeDeviceAction(
-                                result,
-                                service.pinch(
-                                    cx,
-                                    cy,
-                                    from,
-                                    to,
-                                    call.argument<Number>("duration_ms")?.toLong() ?: 400L,
-                                ),
-                            )
+                            val durationMs = call.argument<Number>("duration_ms")?.toLong() ?: 400L
+                            runDeviceGesture(result) {
+                                service.pinch(cx, cy, from, to, durationMs)
+                            }
                         }
                     }
                     "deviceTwoFingerSwipe" -> {
@@ -875,17 +881,11 @@ class MainActivity : FlutterActivity() {
                         if (fromX == null || fromY == null || toX == null || toY == null) {
                             result.error("BAD_ARGS", "deviceTwoFingerSwipe requires from_x, from_y, to_x and to_y.", null)
                         } else {
-                            completeDeviceAction(
-                                result,
-                                service.twoFingerSwipe(
-                                    fromX,
-                                    fromY,
-                                    toX,
-                                    toY,
-                                    call.argument<Number>("duration_ms")?.toLong() ?: 500L,
-                                    call.argument<Number>("separation")?.toFloat() ?: 120f,
-                                ),
-                            )
+                            val durationMs = call.argument<Number>("duration_ms")?.toLong() ?: 500L
+                            val separation = call.argument<Number>("separation")?.toFloat() ?: 120f
+                            runDeviceGesture(result) {
+                                service.twoFingerSwipe(fromX, fromY, toX, toY, durationMs, separation)
+                            }
                         }
                     }
                     // Foreground package WITHOUT a tree walk. The per-action
@@ -915,16 +915,16 @@ class MainActivity : FlutterActivity() {
                             ?: call.argument<Number>("handle")?.toInt()
                         val x = call.argument<Number>("x")?.toFloat()
                         val y = call.argument<Number>("y")?.toFloat()
-                        completeDeviceAction(
-                            result,
+                        val durationMs = call.argument<Number>("duration_ms")?.toLong()
+                            ?: call.argument<Number>("durationMs")?.toLong()
+                        runDeviceGesture(result) {
                             service.longPress(
                                 handle = handle,
                                 x = x,
                                 y = y,
-                                durationMs = call.argument<Number>("duration_ms")?.toLong()
-                                    ?: call.argument<Number>("durationMs")?.toLong(),
-                            ),
-                        )
+                                durationMs = durationMs,
+                            )
+                        }
                     }
                     "deviceScroll" -> {
                         val service = deviceService(result) ?: return@setMethodCallHandler
@@ -1371,6 +1371,7 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         OvidAccessibilityService.overlayEventListener = null
         safExportCoordinator.cleanup()
+        gestureExecutor.shutdown()
         super.onDestroy()
     }
 }
