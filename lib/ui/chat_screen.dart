@@ -445,7 +445,7 @@ class _StatsLine extends StatelessWidget {
               ),
               const SizedBox(height: 4),
               Text(
-                '${session.title} · ${session.model}',
+                '${session.title} · ${ovidModelLabel(session.model)}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(color: Aether.textMuted, fontSize: 11),
@@ -1171,7 +1171,9 @@ class _ChatScreenState extends State<ChatScreen>
                 children: [
                   Flexible(
                     child: Text(
-                      s?.model ?? 'Select model',
+                      s?.model == null
+                          ? 'Select model'
+                          : ovidModelLabel(s!.model),
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 14),
                     ),
@@ -2427,7 +2429,10 @@ class _ModelTile extends StatelessWidget {
           size: 18,
           color: selected ? Aether.accent : Aether.textMuted,
         ),
-        title: Text(baseModel, style: const TextStyle(fontSize: 13.5)),
+        title: Text(
+          ovidModelLabel(baseModel),
+          style: const TextStyle(fontSize: 13.5),
+        ),
         subtitle: isRecent
             ? Text(
                 providerName,
@@ -2468,7 +2473,10 @@ class _ModelTile extends StatelessWidget {
           size: 18,
           color: selected ? Aether.accent : Aether.textMuted,
         ),
-        title: Text(baseModel, style: const TextStyle(fontSize: 13.5)),
+        title: Text(
+          ovidModelLabel(baseModel),
+          style: const TextStyle(fontSize: 13.5),
+        ),
         subtitle: isRecent
             ? Text(
                 effortVariant != null
@@ -3362,7 +3370,9 @@ class _ColorPaletteView extends StatelessWidget {
       var raw = hex.replaceAll('#', '');
       if (raw.length == 3) raw = raw.split('').map((c) => '$c$c').join();
       color = Color(int.parse('FF$raw', radix: 16));
-    } catch (e) { Diag.swallow('chat_screen', e); }
+    } catch (e) {
+      Diag.swallow('chat_screen', e);
+    }
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
@@ -4341,7 +4351,10 @@ class _MessageView extends StatelessWidget {
               children: [
                 Icon(icon, size: 15, color: Aether.accent),
                 const SizedBox(width: 4),
-                Text(label, style: TextStyle(fontSize: 11, color: Aether.accent)),
+                Text(
+                  label,
+                  style: TextStyle(fontSize: 11, color: Aether.accent),
+                ),
               ],
             ),
           ),
@@ -6885,7 +6898,9 @@ class _StudioFolderChip extends StatelessWidget {
       probe.writeAsStringSync('ok');
       probe.deleteSync();
       writable = true;
-    } catch (e) { Diag.swallow('chat_screen', e); }
+    } catch (e) {
+      Diag.swallow('chat_screen', e);
+    }
 
     if (!writable) {
       final granted = await AgentService.I.requestAllFilesAccess();
@@ -6895,7 +6910,9 @@ class _StudioFolderChip extends StatelessWidget {
           probe.writeAsStringSync('ok');
           probe.deleteSync();
           writable = true;
-        } catch (e) { Diag.swallow('chat_screen', e); }
+        } catch (e) {
+          Diag.swallow('chat_screen', e);
+        }
       }
     }
 
@@ -6958,9 +6975,7 @@ class _PlanChip extends StatelessWidget {
                 Icon(Icons.architecture, size: 14, color: Aether.warnLight),
                 const SizedBox(width: 6),
                 Text(
-                  pending == null
-                      ? 'Plan'
-                      : (pending ? 'Plan…' : 'Plan off…'),
+                  pending == null ? 'Plan' : (pending ? 'Plan…' : 'Plan off…'),
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
@@ -7112,11 +7127,15 @@ Future<void> _enableControlMode(BuildContext context) async {
     bool exempt = true;
     try {
       exempt = (await DeviceControlService.I.backgroundHealth()).batteryExempt;
-    } catch (e) { Diag.swallow('chat_screen', e); }
+    } catch (e) {
+      Diag.swallow('chat_screen', e);
+    }
     if (!exempt) {
       try {
         await AgentService.I.requestBatteryExemption();
-      } catch (e) { Diag.swallow('chat_screen', e); }
+      } catch (e) {
+        Diag.swallow('chat_screen', e);
+      }
     }
   }
   // Control mode survives the background only through the persistent
@@ -7154,7 +7173,9 @@ Future<void> _enableControlMode(BuildContext context) async {
   var enabled = false;
   try {
     enabled = await DeviceControlService.I.isEnabled();
-  } catch (e) { Diag.swallow('chat_screen', e); }
+  } catch (e) {
+    Diag.swallow('chat_screen', e);
+  }
   if (enabled) return;
   try {
     await DeviceControlService.I.openAccessibilitySettings();
@@ -7255,7 +7276,9 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
         _batteryExempt = health.batteryExempt;
         _manufacturer = health.manufacturer;
       });
-    } catch (e) { Diag.swallow('chat_screen', e); }
+    } catch (e) {
+      Diag.swallow('chat_screen', e);
+    }
   }
 
   Future<void> _retry() async {
@@ -7285,8 +7308,7 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
       // different message and the same Settings action — "wait, it will bind
       // on its own" is false in this state.
       final showStaleWarning =
-          _enabled == true &&
-          _serviceState == DeviceControlService.staleState;
+          _enabled == true && _serviceState == DeviceControlService.staleState;
       // OEM-killer guidance: service is up, but this ROM kills background
       // apps without the battery exemption. Pixel-class ROMs never match.
       final showHealthGuidance =
@@ -7361,7 +7383,9 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
                   onPressed: () async {
                     try {
                       await AgentService.I.requestBatteryExemption();
-                    } catch (e) { Diag.swallow('chat_screen', e); }
+                    } catch (e) {
+                      Diag.swallow('chat_screen', e);
+                    }
                     await _refreshHealth();
                   },
                   child: const Text('Fix'),

@@ -151,9 +151,9 @@ class OvidCloudService {
     if (state.lastSelectedModel.isEmpty ||
         state.lastSelectedProviderId == null) {
       final models = provider.models;
-      final auto = models.contains('ovid-auto')
-          ? 'ovid-auto'
-          : (models.isNotEmpty ? models.first : 'ovid-auto');
+      final auto = models.contains('auto')
+          ? 'auto'
+          : (models.isNotEmpty ? models.first : 'auto');
       state.setModel(AppState.ovidCloudProviderId, auto);
     }
   }

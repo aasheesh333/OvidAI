@@ -42,7 +42,7 @@ So the design has two deployment profiles, same code:
 - **Models (owner-configured):** the owner adds the models by hand in the
   LiteLLM dashboard:
   - **Auto mode (DEFAULT in Ovid):** 2–3 models, each with its own base URL +
-    key, exposed to the client only as the alias `ovid-auto`.
+    key, exposed to the client only as the alias `auto`.
   - **Manual mode:** 5–8 models, each with its own base URL + key, exposed as
     owner-named model IDs the user can pick.
   - Every real base URL/key stays server-side; the client sees only aliases.
@@ -173,7 +173,7 @@ budgets, request logs. Backed up daily, off-box.
 2. Caddy terminates TLS, forwards to LiteLLM.
 3. LiteLLM resolves key → user_id, tier, budget, rpm/tpm.
 4. Budget/limit check **before** the provider call → 429 on exceed (no spend).
-5. Route by model alias (`ovid-auto` → tier-appropriate real model).
+5. Route by model alias (`auto` → tier-appropriate real model).
 6. Provider responds; actual token cost logged to that key's spend.
 7. Dashboard reflects live spend/quota.
 
@@ -181,8 +181,8 @@ budgets, request logs. Backed up daily, off-box.
 
 - App uses Firebase **anonymous auth** → still a real UID, still App Check
   gated. The key-mint function issues an invisible, tight-budget key
-  (`ovid-auto`, cheap model, e.g. $0.50 / 30d, low rpm).
-- Model choice is **server-side** (`ovid-auto` alias). Client never names the
+  (`auto`, cheap model, e.g. $0.50 / 30d, low rpm).
+- Model choice is **server-side** (`auto` alias). Client never names the
   real model → no misuse surface.
 - Anonymous→signup migration carries usage forward by UID.
 
@@ -326,7 +326,7 @@ Health check + alert on `/health`.
 ## 12. Ovid app changes (minimal, fits existing provider abstraction)
 
 - New seeded provider "Ovid Cloud": `api_format: openai`, baseURL = gateway,
-  models = `ovid-auto` + tier models (fetched from `/v1/models`).
+  models = `auto` + tier models (fetched from `/v1/models`).
 - Auth: on first launch, call the key-mint function; store the returned
   virtual key in `flutter_secure_storage`; attach it + Firebase tokens on
   requests.

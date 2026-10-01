@@ -50,6 +50,13 @@ import 'native_plugins/sandbox_utilities.dart';
 import 'native_plugins/web_and_db_utilities.dart';
 import 'diag.dart';
 
+/// Friendly UI label for a model id. The Ovid Cloud managed alias `auto`
+/// renders as `Auto` (one clean option in the picker/chip); every other model
+/// shows exactly as named — owner-chosen names in LiteLLM appear verbatim.
+String ovidModelLabel(String model) {
+  return model.trim() == 'auto' ? 'Auto' : model;
+}
+
 const kDeniedControlDomains = <String>[
   'paypal.com',
   'wise.com',
@@ -5390,7 +5397,7 @@ class AppState extends ChangeNotifier {
   ///
   /// Models the owner adds in the LiteLLM dashboard are published by the
   /// gateway's OpenAI-compatible `/v1/models`, so this makes them appear in
-  /// Ovid without an app update. `ovid-auto` is always preserved so Auto mode
+  /// Ovid without an app update. `auto` is always preserved so Auto mode
   /// survives an empty/early fetch. Best-effort: a network/auth failure leaves
   /// the existing list untouched and returns false (never throws, never clears).
   Future<bool> refreshOvidCloudModels({http.Client? client}) async {
@@ -5421,7 +5428,7 @@ class AppState extends ChangeNotifier {
           (m is Map ? (m['id'] ?? m['name'] ?? '') : '$m').toString(),
       ].where((s) => s.isNotEmpty).toList();
       if (ids.isEmpty) return false;
-      final merged = <String>{'ovid-auto', ...ids}.toList();
+      final merged = <String>{'auto', ...ids}.toList();
       provider.models
         ..clear()
         ..addAll(merged);
@@ -8168,8 +8175,8 @@ class AppState extends ChangeNotifier {
         isFree: true,
         // Model list is fetched live from the gateway's /v1/models, so models
         // the owner adds in the LiteLLM dashboard appear here automatically.
-        // 'ovid-auto' is seeded so Auto mode works before the first fetch.
-        models: ['ovid-auto'],
+        // 'auto' is seeded so Auto mode works before the first fetch.
+        models: ['auto'],
       ),
       ProviderConfig(
         name: 'OpenAI',

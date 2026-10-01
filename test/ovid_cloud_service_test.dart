@@ -53,7 +53,7 @@ void main() {
         return http.Response(
           jsonEncode({
             'data': [
-              {'id': 'ovid-auto'},
+              {'id': 'auto'},
               {'id': 'ovid-pro-1'},
             ],
           }),

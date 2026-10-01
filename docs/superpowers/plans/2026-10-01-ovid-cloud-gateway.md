@@ -33,25 +33,25 @@
   (env ref). Example skeleton (owner fills real values):
   ```yaml
   model_list:
-    # ── Auto pool (hidden behind ovid-auto) ──
-    - model_name: ovid-auto
+    # ── Auto pool (hidden behind auto) ──
+    - model_name: auto
       litellm_params: { model: openai/<real1>, api_base: <url1>, api_key: os.environ/AUTO1_KEY }
-    - model_name: ovid-auto
+    - model_name: auto
       litellm_params: { model: openai/<real2>, api_base: <url2>, api_key: os.environ/AUTO2_KEY }
     # ── Manual models (owner-named, user-pickable) ──
     - model_name: ovid-pro-1
       litellm_params: { model: openai/<realA>, api_base: <urlA>, api_key: os.environ/MAN_A_KEY }
     # … up to 5–8 …
   router_settings:
-    routing_strategy: simple-shuffle   # ovid-auto load-balances its pool
+    routing_strategy: simple-shuffle   # auto load-balances its pool
     num_retries: 2
-    fallbacks: [{ ovid-auto: [ovid-pro-1] }]
+    fallbacks: [{ auto: [ovid-pro-1] }]
   general_settings:
     master_key: os.environ/LITELLM_MASTER_KEY
     database_url: os.environ/DATABASE_URL
   ```
-- Verify: `curl /v1/models` lists `ovid-auto` + manual IDs ONLY (no base URLs
-  leaked); a direct `ovid-auto` completion returns a response.
+- Verify: `curl /v1/models` lists `auto` + manual IDs ONLY (no base URLs
+  leaked); a direct `auto` completion returns a response.
 
 ### Task 1.3 — Caddy TLS + edge auth gate
 - Caddyfile: domain → reverse_proxy 127.0.0.1:4000; automatic HTTPS.
@@ -122,7 +122,7 @@
   `tiers/{tier}`, stores `litellmKeyId` in `users/{uid}`, returns the virtual
   key. On later calls: returns the existing key (never a new one unless
   rotated).
-- Anonymous UID → mints the `ovid-auto`, tight-budget key.
+- Anonymous UID → mints the `auto`, tight-budget key.
 - Never returns the LiteLLM master key.
 - Verify: callable test mints once, is idempotent on second call, rejects a
   missing/invalid App Check token.
@@ -150,7 +150,7 @@
   in secure storage, not in prefs/plaintext.
 
 ### Task 3.3 — Auto vs manual UX
-- Auto mode uses model `ovid-auto`; manual mode shows the owner model IDs.
+- Auto mode uses model `auto`; manual mode shows the owner model IDs.
 - Verify: switching Auto↔manual changes the model sent; Auto never exposes a
   real model name.
 
