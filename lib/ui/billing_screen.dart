@@ -51,14 +51,14 @@ const _plans = <_PlanOption>[
   _PlanOption(
     '10x',
     'Pro',
-    '₹799',
+    '₹899',
     '10× the daily limit. Resets every 24 hours.',
     '10x',
   ),
   _PlanOption(
     '20x',
     'Max',
-    '₹1499',
+    '₹1699',
     '20× the daily limit. Resets every 24 hours.',
     '20x',
   ),

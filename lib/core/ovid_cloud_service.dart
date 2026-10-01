@@ -205,6 +205,9 @@ class OvidUsage {
     required this.monthFreeSpentUsd,
     required this.monthFreeCapUsd,
     required this.requestsToday,
+    required this.budgetWindow,
+    required this.remainingPct,
+    required this.models,
   });
 
   final String tier;
@@ -216,6 +219,17 @@ class OvidUsage {
   final double monthFreeCapUsd;
   final int requestsToday;
 
+  /// '24h' for free (daily reset), '30d' for paid (monthly pool, no daily cap).
+  final String budgetWindow;
+
+  /// Shared remaining fraction (0..1) of the budget pool across all models.
+  final double remainingPct;
+
+  /// Available models with per-token pricing + their shared remaining-%.
+  final List<OvidModelUsage> models;
+
+  bool get isMonthly => budgetWindow == '30d';
+
   factory OvidUsage.fromJson(Map<String, dynamic> j) => OvidUsage(
     tier: (j['tier'] as String?) ?? 'free',
     isPaid: (j['is_paid'] as bool?) ?? false,
@@ -225,5 +239,37 @@ class OvidUsage {
     monthFreeSpentUsd: (j['month_free_spent_usd'] as num?)?.toDouble() ?? 0,
     monthFreeCapUsd: (j['month_free_cap_usd'] as num?)?.toDouble() ?? 0,
     requestsToday: (j['requests_today'] as num?)?.toInt() ?? 0,
+    budgetWindow: (j['budget_window'] as String?) ?? '24h',
+    remainingPct: (j['remaining_pct'] as num?)?.toDouble() ?? 0,
+    models: [
+      for (final m in (j['models'] as List? ?? const []))
+        if (m is Map<String, dynamic>) OvidModelUsage.fromJson(m),
+    ],
+  );
+}
+
+/// One available model: its public name, per-token price, and the shared
+/// remaining-% of the user's budget pool.
+class OvidModelUsage {
+  const OvidModelUsage({
+    required this.model,
+    required this.inputCostPerToken,
+    required this.outputCostPerToken,
+    required this.remainingPct,
+  });
+  final String model;
+  final double? inputCostPerToken;
+  final double? outputCostPerToken;
+  final double remainingPct;
+
+  /// Approx USD per 1M output tokens, for a human price hint. Null if unknown.
+  double? get per1mOutput =>
+      outputCostPerToken == null ? null : outputCostPerToken! * 1000000;
+
+  factory OvidModelUsage.fromJson(Map<String, dynamic> j) => OvidModelUsage(
+    model: (j['model'] as String?) ?? '',
+    inputCostPerToken: (j['input_cost_per_token'] as num?)?.toDouble(),
+    outputCostPerToken: (j['output_cost_per_token'] as num?)?.toDouble(),
+    remainingPct: (j['remaining_pct'] as num?)?.toDouble() ?? 0,
   );
 }

@@ -60,8 +60,8 @@ as a webhook → `/key/update`.
 |------|-------------|-----------------|---------------|-------|
 | **Free** (default) | base daily `X` | **$10 / month hard cap** | ₹0 | 24h daily; $10 monthly |
 | **5x**  | `5·X`  | — | ₹499 | 24h |
-| **10x** | `10·X` | — | ₹799 | 24h |
-| **20x** | `20·X` | — | ₹1499 | 24h |
+| **10x** | `10·X` | — | ₹899 | 24h |
+| **20x** | `20·X` | — | ₹1699 | 24h |
 
 Rules:
 - **Free tier:** a daily free limit that resets every 24h, PLUS a hard
@@ -69,7 +69,7 @@ Rules:
   free use stops until the next month (or until the user buys a plan). The
   $10/month is the owner-funded free allowance per user.
 - **Paid tiers (5x/10x/20x):** multiply the daily limit by 5/10/20, 24h reset,
-  like opencode's daily plans. Prices ₹499/₹799/₹1499 are recorded for later.
+  like opencode's daily plans. Prices ₹499/₹899/₹1699 are recorded for later.
 - **Zen-style free UX:** free-tier users see **no usage numbers at all** — the
   $10/month free allowance is never shown (opencode Zen behaviour). Usage-screen
   display rules:
@@ -225,6 +225,30 @@ budgets, request logs. Backed up daily, off-box.
   `/admin/unban`, `/admin/set-tier` — the admin can ban a uid or IP, lift a
   ban, change one user's tier, and set per-user `dailyUsd` / `monthlyCapUsd`
   overrides without touching the global tier.
+
+## 7b2. Base×multiplier budgets, caps, per-model pricing & plan-spoof defense
+
+- **Base × multiplier, per user (not shared):** admin sets ONE base daily
+  budget; each tier's budget is `base × {1,5,10,20}`, applied to each user's OWN
+  key independently (never a shared pool). Base $10 → free $10, 5x $50, 10x
+  $100, 20x $200 — each user, their own.
+- **24h cap is FREE-only.** Paid tiers (5x/10x/20x) have **no 24h wall** — they
+  draw a MONTHLY budget pool (base × multiplier × ~30); only free users reset
+  every 24h.
+- **Base is admin-editable at runtime** (Redis `config:base_daily_usd`);
+  `/admin/set-base-budget {reapply:true}` re-applies to EVERY existing user at
+  once — the thing LiteLLM "Default User Settings" cannot do (new users only).
+- **Admin console** `/admin/ui` (mint service) — reachable ONLY via SSH tunnel
+  to 127.0.0.1:8090 (Caddy never routes `/admin` publicly → internet 404).
+- **Plan-spoofing is impossible:** tier is NEVER sent by the client. `/mint` and
+  `/usage` read it server-side from Redis (`user:{uid}:tier`), changed only by
+  `/admin/set-tier` (master key) or a future payment webhook. No client tier
+  input exists to forge; a leaked key spends only its own tier budget.
+- **Per-model pricing** set in LiteLLM per deployment
+  (`input_cost_per_token` / `output_cost_per_token`); spend is metered by real
+  token cost. The usage screen shows each available model's remaining-% of the
+  user's monthly budget pool: a costly model drains the pool faster (every
+  model's remaining-% drops together); a cheap model leaves more % for all.
 
 ## 7a. Redis — the backbone for high traffic + spam (FB/IG-style)
 

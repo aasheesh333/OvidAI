@@ -790,14 +790,22 @@ class _OvidCloudUsageCardState extends State<_OvidCloudUsageCard> {
     final pct = u.dailyBudgetUsd <= 0
         ? 0.0
         : (u.dailySpentUsd / u.dailyBudgetUsd).clamp(0.0, 1.0);
+    final monthly = u.isMonthly;
+    final windowLabel = monthly ? 'this month' : 'today';
+    final resetLabel = monthly
+        ? 'no daily cap · monthly pool'
+        : 'resets every 24h';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           children: [
-            _cloudStat('Used today', '\$${u.dailySpentUsd.toStringAsFixed(2)}'),
             _cloudStat(
-              'Daily limit',
+              'Used $windowLabel',
+              '\$${u.dailySpentUsd.toStringAsFixed(2)}',
+            ),
+            _cloudStat(
+              monthly ? 'Monthly budget' : 'Daily limit',
               '\$${u.dailyBudgetUsd.toStringAsFixed(2)}',
             ),
             _cloudStat('Requests', '${u.requestsToday}'),
@@ -817,10 +825,91 @@ class _OvidCloudUsageCardState extends State<_OvidCloudUsageCard> {
         ),
         const SizedBox(height: 6),
         Text(
-          '\$${u.dailyRemainingUsd.toStringAsFixed(2)} left today \u00b7 resets every 24h',
+          '\$${u.dailyRemainingUsd.toStringAsFixed(2)} left $windowLabel \u00b7 $resetLabel',
           style: TextStyle(fontSize: 11, color: Aether.textFaint),
         ),
+        if (u.models.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          Text(
+            'AVAILABLE MODELS · remaining of your budget',
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.9,
+              color: Aether.textFaint,
+            ),
+          ),
+          const SizedBox(height: 8),
+          for (final m in u.models) _modelBar(m),
+          const SizedBox(height: 4),
+          Text(
+            'All models share one budget. A costly model drains it faster — '
+            'every model\u2019s bar drops together; a cheaper model leaves more.',
+            style: TextStyle(
+              fontSize: 10.5,
+              height: 1.4,
+              color: Aether.textFaint,
+            ),
+          ),
+        ],
       ],
+    );
+  }
+
+  Widget _modelBar(OvidModelUsage m) {
+    final pct = m.remainingPct.clamp(0.0, 1.0);
+    final price = m.per1mOutput;
+    final priceLabel = price == null
+        ? ''
+        : '\$${price.toStringAsFixed(price >= 10 ? 0 : 2)}/1M out';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  ovidModelLabel(m.model),
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontFamily: Aether.mono,
+                    color: Aether.text,
+                  ),
+                ),
+              ),
+              if (priceLabel.isNotEmpty)
+                Text(
+                  priceLabel,
+                  style: TextStyle(fontSize: 10, color: Aether.textFaint),
+                ),
+              const SizedBox(width: 8),
+              Text(
+                '${(pct * 100).round()}%',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: pct < 0.15 ? Aether.danger : Aether.accent,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(5),
+            child: LinearProgressIndicator(
+              value: pct,
+              minHeight: 5,
+              backgroundColor: Aether.surfaceAlt,
+              valueColor: AlwaysStoppedAnimation(
+                pct < 0.15 ? Aether.danger : Aether.accent,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

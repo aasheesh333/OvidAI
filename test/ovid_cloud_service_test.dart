@@ -128,6 +128,22 @@ void main() {
           'month_free_spent_usd': 0.0,
           'month_free_cap_usd': 10.0,
           'requests_today': 7,
+          'budget_window': '30d',
+          'remaining_pct': 0.832,
+          'models': [
+            {
+              'model': 'auto',
+              'input_cost_per_token': 0.0000005,
+              'output_cost_per_token': 0.0000015,
+              'remaining_pct': 0.832,
+            },
+            {
+              'model': 'ovid-opus',
+              'input_cost_per_token': 0.000015,
+              'output_cost_per_token': 0.000075,
+              'remaining_pct': 0.832,
+            },
+          ],
         }),
         200,
       );
@@ -139,6 +155,11 @@ void main() {
     expect(usage.dailySpentUsd, closeTo(0.42, 1e-9));
     expect(usage.dailyRemainingUsd, closeTo(2.08, 1e-9));
     expect(usage.requestsToday, 7);
+    expect(usage.isMonthly, isTrue);
+    expect(usage.remainingPct, closeTo(0.832, 1e-9));
+    expect(usage.models, hasLength(2));
+    expect(usage.models.first.model, 'auto');
+    expect(usage.models[1].per1mOutput, closeTo(75, 1e-6));
     client.close();
   });
 }
