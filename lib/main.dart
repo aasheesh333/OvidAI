@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'core/state.dart';
 import 'core/theme.dart';
+import 'ui/login_gate.dart';
 import 'ui/shell.dart';
 
 Future<void> main() async {
@@ -65,7 +66,7 @@ class _OvidAppState extends State<OvidApp> {
       title: 'Ovid',
       debugShowCheckedModeBanner: false,
       theme: Aether.theme(),
-      home: const OvidShell(),
+      home: const LoginGate(child: OvidShell()),
     );
   }
 }

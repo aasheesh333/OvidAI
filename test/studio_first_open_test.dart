@@ -60,9 +60,14 @@ void main() {
   group('gate removal', () {
     test('first launch goes straight to the shell — no setup gate', () {
       final src = File('lib/main.dart').readAsStringSync();
+      // No INSTALL/SETUP gate blocks first launch (the removed behaviour).
       expect(src, isNot(contains('FirstLaunchSetupGate')));
       expect(src, isNot(contains('SandboxSetupScreen')));
-      expect(src, contains('home: const OvidShell()'));
+      // The shell is still the app content. It is now wrapped by the mandatory
+      // Google-login auth gate (LoginGate), which is an AUTH gate, not a setup
+      // gate — and it lets builds without Firebase through to the shell.
+      expect(src, contains('OvidShell()'));
+      expect(src, contains('LoginGate(child: OvidShell())'));
     });
 
     test('first-frame init still loads the first-open flag', () {

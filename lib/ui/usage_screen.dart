@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../core/format.dart';
+import '../core/ovid_cloud_service.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 
@@ -107,10 +108,16 @@ class UsageScreen extends StatelessWidget {
   const UsageScreen({super.key});
 
   /// Aggregate the real usage log into per-provider summaries.
+  ///
+  /// The built-in Ovid Cloud provider is intentionally EXCLUDED here: its usage
+  /// is server-authoritative (fetched from `/usage`, shown by
+  /// [_OvidCloudUsageCard]), not computed from the device-side log. Custom and
+  /// other built-in providers (the user's own keys) stay app-side as before.
   List<ProviderUsage> _aggregate(AppState app) {
     // Pick provider metadata from the catalog for icon/color.
     final byId = <String, ProviderUsage>{};
     for (final e in app.usageLog) {
+      if (e.providerId == AppState.ovidCloudProviderId) continue;
       final p = byId.putIfAbsent(
         e.providerId,
         () => ProviderUsage(
@@ -206,7 +213,9 @@ class UsageScreen extends StatelessWidget {
           return ListView(
             padding: const EdgeInsets.only(bottom: 40),
             children: [
-              // ---- All-time summary ----
+              // ---- Ovid Cloud plan (server-authoritative; free tier is Zen) ----
+              const _OvidCloudUsageCard(),
+              // ---- All-time summary (custom + other providers, app-side) ----
               Container(
                 margin: const EdgeInsets.fromLTRB(16, 14, 16, 6),
                 padding: const EdgeInsets.all(16),
@@ -650,6 +659,190 @@ class _Row extends StatelessWidget {
                 ),
               ),
             ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Ovid Cloud plan card — server-authoritative usage.
+///
+/// Usage is fetched from the gateway's `/usage` (the source of truth), never
+/// computed on the device, so it is identical across a user's devices and
+/// cannot be faked. Free tier is Zen-style: a plain "Free plan" card with NO
+/// numbers. Paid tiers (5x/10x/20x) show today's spend, budget and requests.
+class _OvidCloudUsageCard extends StatefulWidget {
+  const _OvidCloudUsageCard();
+
+  @override
+  State<_OvidCloudUsageCard> createState() => _OvidCloudUsageCardState();
+}
+
+class _OvidCloudUsageCardState extends State<_OvidCloudUsageCard> {
+  OvidUsage? _usage;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final u = await OvidCloudService.I.fetchUsage();
+    if (!mounted) return;
+    setState(() {
+      _usage = u;
+      _loading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    final tier = _usage?.tier ?? app.ovidCloudTier;
+    final isPaid = _usage?.isPaid ?? app.ovidCloudIsPaid;
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 14, 16, 2),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Aether.accent.withValues(alpha: 0.14), Aether.surface],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.auto_awesome, size: 18, color: Aether.accent),
+              const SizedBox(width: 8),
+              Text(
+                'Ovid Cloud',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: Aether.text,
+                ),
+              ),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
+                decoration: BoxDecoration(
+                  color: isPaid ? Aether.accent : Aether.surfaceAlt,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  isPaid ? '${tier.toUpperCase()} PLAN' : 'FREE',
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.8,
+                    color: isPaid ? Colors.white : Aether.textMuted,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: SizedBox(
+                height: 16,
+                width: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            )
+          else if (!isPaid)
+            // Zen-style free tier: no numbers at all.
+            Text(
+              'You\u2019re on the free plan. Just chat \u2014 no usage to track. '
+              'Upgrade for a higher daily limit.',
+              style: TextStyle(
+                fontSize: 12.5,
+                height: 1.45,
+                color: Aether.textMuted,
+              ),
+            )
+          else
+            _paidUsage(_usage),
+        ],
+      ),
+    );
+  }
+
+  Widget _paidUsage(OvidUsage? u) {
+    if (u == null) {
+      return Text(
+        'Usage will appear here once your plan is active.',
+        style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+      );
+    }
+    final pct = u.dailyBudgetUsd <= 0
+        ? 0.0
+        : (u.dailySpentUsd / u.dailyBudgetUsd).clamp(0.0, 1.0);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            _cloudStat('Used today', '\$${u.dailySpentUsd.toStringAsFixed(2)}'),
+            _cloudStat(
+              'Daily limit',
+              '\$${u.dailyBudgetUsd.toStringAsFixed(2)}',
+            ),
+            _cloudStat('Requests', '${u.requestsToday}'),
+          ],
+        ),
+        const SizedBox(height: 12),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(6),
+          child: LinearProgressIndicator(
+            value: pct,
+            minHeight: 7,
+            backgroundColor: Aether.surfaceAlt,
+            valueColor: AlwaysStoppedAnimation(
+              pct > 0.9 ? Aether.danger : Aether.accent,
+            ),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '\$${u.dailyRemainingUsd.toStringAsFixed(2)} left today \u00b7 resets every 24h',
+          style: TextStyle(fontSize: 11, color: Aether.textFaint),
+        ),
+      ],
+    );
+  }
+
+  Widget _cloudStat(String label, String value) {
+    return Expanded(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+              fontFamily: Aether.mono,
+              color: Aether.text,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+          ),
         ],
       ),
     );

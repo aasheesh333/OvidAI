@@ -44,6 +44,9 @@ class FirebaseService extends ChangeNotifier {
   User? get user => _user;
   String? get email => _user?.email;
   String? get displayName => _user?.displayName;
+  String? get photoUrl => _user?.photoURL;
+  String? get uid => _user?.uid;
+  bool get emailVerified => _user?.emailVerified ?? false;
 
   StreamSubscription<User?>? _authSub;
   Future<void>? _initialization;
@@ -134,7 +137,9 @@ class FirebaseService extends ChangeNotifier {
       await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(
         _consentGiven,
       );
-    } catch (e) { Diag.swallow('firebase_service', e); }
+    } catch (e) {
+      Diag.swallow('firebase_service', e);
+    }
   }
 
   bool _crashHandlersAttached = false;
@@ -163,6 +168,36 @@ class FirebaseService extends ChangeNotifier {
       return e.message ?? 'Sign-in failed (${e.code}).';
     } catch (e) {
       return 'Sign-in failed: $e';
+    }
+  }
+
+  /// The current user's Firebase ID token (JWT), or null when signed out.
+  /// Used to authenticate to the Ovid Cloud mint endpoint, which verifies it
+  /// against Google's public keys. [forceRefresh] re-mints a near-expiry token.
+  Future<String?> getIdToken({bool forceRefresh = false}) async {
+    final u = _user ?? FirebaseAuth.instance.currentUser;
+    if (u == null) return null;
+    try {
+      return await u.getIdToken(forceRefresh);
+    } catch (e) {
+      debugPrint('getIdToken failed: $e');
+      return null;
+    }
+  }
+
+  /// Update the signed-in user's display name (FAANG-style editable profile).
+  /// Returns null on success, else an error message.
+  Future<String?> updateDisplayName(String name) async {
+    final u = _user ?? FirebaseAuth.instance.currentUser;
+    if (u == null) return 'Not signed in.';
+    try {
+      await u.updateDisplayName(name.trim());
+      await u.reload();
+      _user = FirebaseAuth.instance.currentUser;
+      notifyListeners();
+      return null;
+    } catch (e) {
+      return 'Could not update name: $e';
     }
   }
 
@@ -226,7 +261,9 @@ class FirebaseService extends ChangeNotifier {
     if (!_available || !_consentGiven) return;
     try {
       await FirebaseAnalytics.instance.logEvent(name: name, parameters: params);
-    } catch (e) { Diag.swallow('firebase_service', e); }
+    } catch (e) {
+      Diag.swallow('firebase_service', e);
+    }
   }
 
   @override

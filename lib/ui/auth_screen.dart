@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../core/firebase_service.dart';
+import '../core/state.dart';
 import '../core/theme.dart';
 
 /// Optional Firebase sign-in — email/password. Google sign-in is enabled in
@@ -91,41 +92,177 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
-  Widget _signedIn(FirebaseService fb) {
-    return ListView(
-      padding: const EdgeInsets.all(24),
-      children: [
-        const SizedBox(height: 24),
-        CircleAvatar(
-          radius: 34,
-          backgroundColor: Aether.surfaceRaised,
-          child: Icon(Icons.person, size: 36, color: Aether.textMuted),
+  Future<void> _editName(FirebaseService fb) async {
+    final ctrl = TextEditingController(text: fb.displayName ?? '');
+    final name = await showDialog<String>(
+      context: context,
+      builder: (d) => AlertDialog(
+        backgroundColor: Aether.surface,
+        title: const Text('Edit name', style: TextStyle(fontSize: 16)),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(hintText: 'Your name'),
+          onSubmitted: (v) => Navigator.pop(d, v.trim()),
         ),
-        const SizedBox(height: 16),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(d, ctrl.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    if (name == null || name.isEmpty) return;
+    final error = await fb.updateDisplayName(name);
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(error ?? 'Name updated.')));
+  }
+
+  Widget _signedIn(FirebaseService fb) {
+    final tier = AppState.I.ovidCloudTier;
+    final isPaid = AppState.I.ovidCloudIsPaid;
+    final photo = fb.photoUrl;
+    return ListView(
+      padding: const EdgeInsets.all(20),
+      children: [
+        const SizedBox(height: 12),
+        // ── Profile header (avatar + name + email + verified) ──
         Center(
-          child: Text(
-            fb.displayName ?? fb.email ?? 'Signed in',
-            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+          child: CircleAvatar(
+            radius: 40,
+            backgroundColor: Aether.surfaceRaised,
+            backgroundImage: (photo != null && photo.isNotEmpty)
+                ? NetworkImage(photo)
+                : null,
+            child: (photo == null || photo.isEmpty)
+                ? Icon(Icons.person, size: 42, color: Aether.textMuted)
+                : null,
+          ),
+        ),
+        const SizedBox(height: 14),
+        Center(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  fb.displayName ?? fb.email ?? 'Signed in',
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                onPressed: () => _editName(fb),
+                icon: Icon(
+                  Icons.edit_outlined,
+                  size: 18,
+                  color: Aether.textMuted,
+                ),
+                tooltip: 'Edit name',
+              ),
+            ],
           ),
         ),
         if (fb.email != null)
           Center(
-            child: Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(
-                fb.email!,
-                style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
-              ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  fb.email!,
+                  style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
+                ),
+                const SizedBox(width: 6),
+                Icon(
+                  fb.emailVerified ? Icons.verified : Icons.error_outline,
+                  size: 14,
+                  color: fb.emailVerified ? Aether.accent : Aether.warnLight,
+                ),
+              ],
             ),
           ),
-        const SizedBox(height: 8),
-        Center(
-          child: Text(
-            'Sync & backup enabled for this account.',
-            style: TextStyle(fontSize: 12, color: Aether.textMuted),
-          ),
+        const SizedBox(height: 24),
+
+        // ── Plan card ──
+        _AccountCard(
+          icon: Icons.auto_awesome,
+          children: [
+            Row(
+              children: [
+                Text(
+                  'Ovid Cloud plan',
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                    color: Aether.text,
+                  ),
+                ),
+                const Spacer(),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: isPaid ? Aether.accent : Aether.surfaceAlt,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    isPaid ? '${tier.toUpperCase()} PLAN' : 'FREE',
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.8,
+                      color: isPaid ? Colors.white : Aether.textMuted,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              isPaid
+                  ? 'Higher daily limit active. See your usage below.'
+                  : 'Free plan — just chat. Upgrade for a higher daily limit.',
+              style: TextStyle(
+                fontSize: 12,
+                color: Aether.textMuted,
+                height: 1.4,
+              ),
+            ),
+          ],
         ),
-        const SizedBox(height: 32),
+        const SizedBox(height: 10),
+
+        // ── Account details (FAANG-style, copyable UID) ──
+        _AccountCard(
+          icon: Icons.badge_outlined,
+          children: [
+            _detailRow('Account ID', fb.uid ?? '—'),
+            const SizedBox(height: 10),
+            _detailRow('Email', fb.email ?? '—'),
+            const SizedBox(height: 10),
+            _detailRow(
+              'Email status',
+              fb.emailVerified ? 'Verified' : 'Unverified',
+            ),
+          ],
+        ),
+        const SizedBox(height: 28),
+
         OutlinedButton.icon(
           style: OutlinedButton.styleFrom(
             foregroundColor: Aether.danger,
@@ -135,6 +272,31 @@ class _AuthScreenState extends State<AuthScreen> {
           onPressed: () => fb.signOut(),
           icon: const Icon(Icons.logout, size: 17),
           label: const Text('Sign out'),
+        ),
+      ],
+    );
+  }
+
+  Widget _detailRow(String label, String value) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 108,
+          child: Text(
+            label,
+            style: TextStyle(fontSize: 12, color: Aether.textFaint),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: TextStyle(
+              fontSize: 12.5,
+              fontFamily: Aether.mono,
+              color: Aether.text,
+            ),
+          ),
         ),
       ],
     );
@@ -237,6 +399,29 @@ class _AuthScreenState extends State<AuthScreen> {
           ],
         ),
       ],
+    );
+  }
+}
+
+/// A rounded card container used by the FAANG-style account screen.
+class _AccountCard extends StatelessWidget {
+  const _AccountCard({required this.icon, required this.children});
+  final IconData icon;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Aether.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: children,
+      ),
     );
   }
 }
