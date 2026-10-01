@@ -17,6 +17,7 @@ import '../core/session_browser_profiles.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'auth_screen.dart';
+import 'billing_screen.dart';
 import 'health_screen.dart';
 import 'permissions_screen.dart';
 import 'providers_screen.dart';
@@ -126,6 +127,13 @@ class SettingsScreen extends StatelessWidget {
           ),
 
           const SectionHeader('Workspace stats'),
+          _navTile(
+            context,
+            Icons.workspace_premium_outlined,
+            'Plan & Billing',
+            'Your Ovid Cloud plan · usage · upgrade',
+            const BillingScreen(),
+          ),
           _navTile(
             context,
             Icons.bar_chart_rounded,
@@ -488,12 +496,16 @@ Future<int> dirBytes(Directory dir) async {
         if (e is File) {
           try {
             bytes += await e.length();
-          } catch (e) { Diag.swallow('settings_screen', e); }
+          } catch (e) {
+            Diag.swallow('settings_screen', e);
+          }
         } else if (e is Directory) {
           stack.add(e);
         }
       }
-    } catch (e) { Diag.swallow('settings_screen', e); }
+    } catch (e) {
+      Diag.swallow('settings_screen', e);
+    }
   }
   return bytes;
 }
@@ -508,9 +520,13 @@ Future<int> clearDirContents(Directory dir) async {
     await for (final e in dir.list(followLinks: false)) {
       try {
         await e.delete(recursive: true);
-      } catch (e) { Diag.swallow('settings_screen', e); }
+      } catch (e) {
+        Diag.swallow('settings_screen', e);
+      }
     }
-  } catch (e) { Diag.swallow('settings_screen', e); }
+  } catch (e) {
+    Diag.swallow('settings_screen', e);
+  }
   return freed;
 }
 
@@ -1380,7 +1396,9 @@ class _SkillsScreenState extends State<SkillsScreen> {
     try {
       final f = File(s.path);
       if (f.existsSync()) await f.delete();
-    } catch (e) { Diag.swallow('settings_screen', e); }
+    } catch (e) {
+      Diag.swallow('settings_screen', e);
+    }
     await _reload();
   }
 

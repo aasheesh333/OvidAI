@@ -36,7 +36,10 @@ class _ProvidersScreenState extends State<ProvidersScreen> {
         builder: (_, _) {
           // NOTE: filtered list ANDAR compute hoti hai — AppState change pe
           // (add provider, fetch models, remove model) turant re-list hota hai.
+          // Ovid Cloud is the managed built-in gateway — it is NOT shown here
+          // (no key to manage, and its base URL stays hidden from the user).
           final filtered = app.providers
+              .where((p) => p.id != AppState.ovidCloudProviderId)
               .where(
                 (p) =>
                     p.name.toLowerCase().contains(_query.toLowerCase()) ||
@@ -184,8 +187,9 @@ void addProviderSheet(BuildContext context) {
                 );
                 if (!ctx.mounted) return;
                 if (error != null) {
-                  ScaffoldMessenger.of(ctx)
-                      .showSnackBar(SnackBar(content: Text(error)));
+                  ScaffoldMessenger.of(
+                    ctx,
+                  ).showSnackBar(SnackBar(content: Text(error)));
                   return;
                 }
                 Navigator.pop(ctx);
@@ -357,8 +361,9 @@ class _ProviderCardState extends State<ProviderCard> {
     if (!mounted) return;
     if (error != null) {
       _deleting = false;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error)));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error)));
     }
   }
 
@@ -833,10 +838,7 @@ class _ModelChipState extends State<_ModelChip> {
 
     // `1M/128K` — the input window and output ceiling this provider itself
     // announced (or that its API spelled out when the model was probed).
-    final limits = ModelLimits.compactLabel(
-      widget.model,
-      widget.provider.id,
-    );
+    final limits = ModelLimits.compactLabel(widget.model, widget.provider.id);
 
     return Container(
       padding: const EdgeInsets.only(left: 9, top: 4.5, bottom: 4.5),

@@ -247,12 +247,10 @@ class _AuthScreenState extends State<AuthScreen> {
         ),
         const SizedBox(height: 10),
 
-        // ── Account details (FAANG-style, copyable UID) ──
+        // ── Account details (FAANG-style) ──
         _AccountCard(
           icon: Icons.badge_outlined,
           children: [
-            _detailRow('Account ID', fb.uid ?? '—'),
-            const SizedBox(height: 10),
             _detailRow('Email', fb.email ?? '—'),
             const SizedBox(height: 10),
             _detailRow(
