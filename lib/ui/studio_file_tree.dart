@@ -150,23 +150,22 @@ class _StudioFileTreeState extends State<StudioFileTree> {
       _loading.add(node.path);
       _failed.remove(node.path);
     });
-    String? content;
-    Object? error;
-    try {
-      content = await cache.fetchFile(node.path);
-    } catch (e) {
-      error = e;
-    }
+    final result = await cache.fetchFileResult(node.path);
+    final content = result.content;
     if (!mounted) return;
     setState(() => _loading.remove(node.path));
     if (content == null) {
       setState(() => _failed.add(node.path));
-      final failure = error == null
-          ? const StudioFailure(
-              'That file could not be loaded from the repository.',
-              '',
-            )
-          : StudioFailure.of(error);
+      final failure = switch (result.failure) {
+        FetchFailure.noToken => const StudioFailure('Sign in to GitHub before opening this file.', ''),
+        FetchFailure.unauthorized => const StudioFailure('GitHub rejected the saved login. Sign in again and retry.', ''),
+        FetchFailure.forbidden => const StudioFailure('You do not have permission to read this repository file.', ''),
+        FetchFailure.notFound => const StudioFailure('GitHub could not find this file on the selected branch.', ''),
+        FetchFailure.timeout => const StudioFailure('GitHub took too long to return this file. Retry when online.', ''),
+        FetchFailure.server => const StudioFailure('GitHub is temporarily unavailable. Retry in a moment.', ''),
+        FetchFailure.network => const StudioFailure('The file could not be reached. Check the network and retry.', ''),
+        _ => const StudioFailure('That file could not be loaded from the repository.', ''),
+      };
       showStudioToast(
         context,
         'Could not open ${node.name}',

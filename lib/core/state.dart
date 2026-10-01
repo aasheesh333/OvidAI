@@ -6421,6 +6421,10 @@ class AppState extends ChangeNotifier {
         ..addAll(collected.hooks);
       plugin.hookMatchers = Map<String, String>.from(plugin.hookMatchers)
         ..addAll(collected.matchers);
+      plugin.pluginHooks = [
+        ...plugin.pluginHooks,
+        ..._collectOrderedHookDefs(j['hooks'], plugin.name),
+      ];
       if (collected.hooks.isNotEmpty) {
         await _persistPluginState();
         refresh();
@@ -6461,6 +6465,23 @@ class AppState extends ChangeNotifier {
         } else if (v is Map) {
           cmd = v['command'] as String?;
           matcher = v['matcher'] as String?;
+        } else if (v is List) {
+          for (final group in v) {
+            if (group is! Map) continue;
+            final entries = group['hooks'];
+            final list = entries is List ? entries : [group];
+            for (final entry in list) {
+              final command = entry is Map
+                  ? entry['command'] as String?
+                  : entry is String
+                      ? entry
+                      : null;
+              if (command != null && command.trim().isNotEmpty) {
+                cmd ??= command;
+                matcher ??= group['matcher'] as String?;
+              }
+            }
+          }
         }
         if (cmd == null || cmd.trim().isEmpty) return;
         hooks[ev] = cmd.trim();
@@ -6483,6 +6504,39 @@ class AppState extends ChangeNotifier {
       }
     }
     return (hooks: hooks, matchers: matchers);
+  }
+
+  List<PluginHook> _collectOrderedHookDefs(dynamic raw, String pluginId) {
+    if (raw is! Map) return const [];
+    final out = <PluginHook>[];
+    for (final entry in raw.entries) {
+      final canonical = canonicalHookEvent(entry.key.toString().trim());
+      if (canonical == null) continue;
+      final groups = entry.value is List ? entry.value as List : [entry.value];
+      for (final group in groups) {
+        if (group is String) {
+          if (group.trim().isNotEmpty) {
+            out.add(PluginHook(pluginId: 'legacy:$pluginId', event: canonical,
+                ordinal: out.length, payload: group.trim()));
+          }
+          continue;
+        }
+        if (group is! Map) continue;
+        final matcher = (group['matcher'] as String?)?.trim();
+        final hooks = group['hooks'];
+        final entries = hooks is List ? hooks : [group];
+        for (final hook in entries) {
+          final command = hook is Map
+              ? hook['command'] as String?
+              : hook is String ? hook : null;
+          if (command == null || command.trim().isEmpty) continue;
+          out.add(PluginHook(pluginId: 'legacy:$pluginId', event: canonical,
+              ordinal: out.length, payload: command.trim(),
+              matcher: matcher?.isEmpty == true ? null : matcher));
+        }
+      }
+    }
+    return out;
   }
 
   /// Merge a parsed marketplace JSON document into the catalog. Accepts

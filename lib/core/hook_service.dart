@@ -776,20 +776,26 @@ class HookService extends ChangeNotifier {
         declared = key;
         break;
       }
-      if (cmd == null) continue;
-      out.add((
-        'legacy:${p.name}',
-        PluginHook(
-          pluginId: 'legacy:${p.name}',
-          event: canonical,
-          ordinal: 0,
-          type: 'command',
-          payload: cmd,
-          matcher: matcher,
-          timeoutS: defaultTimeoutS,
-        ),
-        declared,
-      ));
+      final ordered = p.pluginHooks.where((h) => h.event == canonical).toList();
+      if (ordered.isNotEmpty) {
+        for (final hook in ordered) {
+          out.add(('legacy:${p.name}', hook, declared));
+        }
+      } else if (cmd != null) {
+        out.add((
+          'legacy:${p.name}',
+          PluginHook(
+            pluginId: 'legacy:${p.name}',
+            event: canonical,
+            ordinal: 0,
+            type: 'command',
+            payload: cmd,
+            matcher: matcher,
+            timeoutS: defaultTimeoutS,
+          ),
+          declared,
+        ));
+      }
     }
     return out;
   }

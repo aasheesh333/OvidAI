@@ -434,14 +434,14 @@ class _StudioEditorState extends State<StudioEditor> {
   }
 
   // ── save / undo ─────────────────────────────────────────────────────────
-  void _save() {
+  Future<void> _save() async {
     final path = _boundPath;
     final ctrl = _buffers[path];
     if (path == null || ctrl == null) return;
-    RepoCache.I.write(path, ctrl.text);
-    AgentService.I.refreshNow();
+    await AgentService.I.saveStudioFile(path, ctrl.text);
+    if (!mounted) return;
     setState(() => _dirty = false);
-    showStudioToast(context, 'Saved ${path.split('/').last} to the working copy');
+    showStudioToast(context, 'Saved ${path.split('/').last} to the workspace');
   }
 
   // ── layout ──────────────────────────────────────────────────────────────

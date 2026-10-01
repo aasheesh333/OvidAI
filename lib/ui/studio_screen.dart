@@ -128,6 +128,7 @@ class _StudioScreenState extends State<StudioScreen> {
   /// of fighting the user's last decision on the old geometry.
   bool? _showFilesOverride;
   bool _syncing = false;
+  bool _committing = false;
   bool _handledInitialAuth = false;
 
   /// Human message for a failed sync; [_syncErrorDetail] keeps the raw text.
@@ -151,7 +152,7 @@ class _StudioScreenState extends State<StudioScreen> {
   /// an external repo, branch or session change left the bar showing the
   /// previous binding until something else happened to rebuild the screen.
   late final Listenable _sessionSignals =
-      Listenable.merge([AppState.I, GitHubService.I]);
+      Listenable.merge([AppState.I, GitHubService.I, RepoCache.I]);
 
   String? get _repo => AgentService.I.sessionRepoFull;
   String get _branch => AgentService.I.sessionBranch;
@@ -727,6 +728,30 @@ class _StudioScreenState extends State<StudioScreen> {
         _manageWorkspaceFolder();
       case 'sync':
         _autoSync();
+      case 'commit':
+        _commitPending();
+    }
+  }
+
+  Future<void> _commitPending() async {
+    if (_committing || !RepoCache.I.hasPending) return;
+    setState(() => _committing = true);
+    try {
+      final count = await RepoCache.I.commitAll(
+        'Update files from Ovid Studio',
+      );
+      if (!mounted) return;
+      final mode = RepoCache.I.lastCommit?.mode == CommitMode.atomic
+          ? 'one atomic commit'
+          : 'separate commits';
+      showStudioToast(
+        context,
+        count == 0 ? 'No changes to commit' : 'Committed $count file(s) · $mode',
+      );
+    } catch (e) {
+      if (mounted) showStudioToast(context, StudioFailure.of(e).message, error: true);
+    } finally {
+      if (mounted) setState(() => _committing = false);
     }
   }
 
@@ -842,6 +867,16 @@ class _StudioScreenState extends State<StudioScreen> {
             color: Aether.accent,
             onPressed: _syncing ? null : _autoSync,
           ),
+        if (!compactActions && repo != null && RepoCache.I.hasPending)
+          StudioIconButton(
+            icon: Icons.cloud_upload_outlined,
+            tooltip: _committing
+                ? 'Committing changes'
+                : 'Commit ${RepoCache.I.dirtyCount} pending file(s)',
+            iconSize: 18,
+            color: Aether.warnLight,
+            onPressed: _committing ? null : _commitPending,
+          ),
         if (compactActions)
           PopupMenuButton<String>(
             tooltip: 'More Studio actions',
@@ -855,15 +890,26 @@ class _StudioScreenState extends State<StudioScreen> {
                   label: 'Working folder',
                 ),
               ),
-              if (repo != null)
-                PopupMenuItem(
+               if (repo != null)
+                 PopupMenuItem(
                   value: 'sync',
                   enabled: !_syncing,
                   child: _OverflowRow(
                     icon: Icons.sync_rounded,
                     label: _syncing ? 'Syncing…' : 'Sync repo',
-                  ),
-                ),
+                   ),
+                 ),
+               if (repo != null && RepoCache.I.hasPending)
+                 PopupMenuItem(
+                   value: 'commit',
+                   enabled: !_committing,
+                   child: _OverflowRow(
+                     icon: Icons.cloud_upload_outlined,
+                     label: _committing
+                         ? 'Committing…'
+                         : 'Commit ${RepoCache.I.dirtyCount} file(s)',
+                   ),
+                 ),
             ],
             child: SizedBox(
               width: kStudioTapTarget,

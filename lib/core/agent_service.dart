@@ -4354,6 +4354,18 @@ if (!window.__ovidBlankHooked) {
     notifyListeners();
   }
 
+  /// Persist an editor save through the same cache/disk path as agent edits.
+  Future<void> saveStudioFile(String path, String content) async {
+    final repoOwns = RepoCache.I.files.containsKey(path) || RepoCache.I.repoFull != null;
+    if (repoOwns) RepoCache.I.write(path, content);
+    await _mirrorToDisk(path, content);
+    final st = _studio;
+    st.fileBuffer[path] = content;
+    if (!st.openFiles.contains(path)) st.openFiles.add(path);
+    st.activeFilePath = path;
+    notifyListeners();
+  }
+
   /// Open [path] in the ACTIVE session's Studio, reading it from the repo
   /// cache or the session workspace. Used by chat surfaces (produced-file
   /// chips, inline file references) where only the path is known.
