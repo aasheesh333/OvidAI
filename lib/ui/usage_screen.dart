@@ -670,7 +670,7 @@ class _Row extends StatelessWidget {
 /// Usage is fetched from the gateway's `/usage` (the source of truth), never
 /// computed on the device, so it is identical across a user's devices and
 /// cannot be faked. Free tier is Zen-style: a plain "Free plan" card with NO
-/// numbers. Paid tiers (5x/10x/20x) show today's spend, budget and requests.
+/// numbers. Paid tiers (3x/7x/15x) show today's spend, budget and requests.
 class _OvidCloudUsageCard extends StatefulWidget {
   const _OvidCloudUsageCard();
 

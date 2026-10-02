@@ -5359,7 +5359,7 @@ class AppState extends ChangeNotifier {
   static const ovidCloudProviderId = 'ovid-cloud';
 
   /// The user's current Ovid Cloud plan tier, as reported by the mint endpoint.
-  /// One of 'free', '5x', '10x', '20x'. Drives the usage-screen display rule:
+  /// One of 'free', '3x', '7x', '15x'. Drives the usage-screen display rule:
   /// free tier is Zen-style (no usage shown), paid tiers show plan usage.
   /// Persisted so the UI knows the tier before the next mint refresh.
   String ovidCloudTier = 'free';
@@ -5369,7 +5369,7 @@ class AppState extends ChangeNotifier {
   bool get ovidCloudIsPaid => ovidCloudTier != 'free';
 
   void setOvidCloudTier(String tier) {
-    final t = const {'free', '5x', '10x', '20x'}.contains(tier) ? tier : 'free';
+    final t = const {'free', '3x', '7x', '15x'}.contains(tier) ? tier : 'free';
     if (t == ovidCloudTier) return;
     ovidCloudTier = t;
     SharedPreferences.getInstance()
@@ -5385,7 +5385,7 @@ class AppState extends ChangeNotifier {
     try {
       final p = await SharedPreferences.getInstance();
       final t = p.getString(_kOvidTier);
-      if (t != null && const {'free', '5x', '10x', '20x'}.contains(t)) {
+      if (t != null && const {'free', '3x', '7x', '15x'}.contains(t)) {
         ovidCloudTier = t;
       }
     } catch (e) {

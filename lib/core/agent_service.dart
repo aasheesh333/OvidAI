@@ -12869,7 +12869,7 @@ ${await _agentsMdBlock()}
                 'to share the file path, or create it first with run_shell.';
           }
           final bytes = await f.readAsBytes();
-          if (bytes.length > 512 * 1024) {
+          if (bytes.length > 8 * 1024 * 1024) {
             return 'File too large to read directly (${bytes.length} bytes). '
                 'Use run_shell with head/tail instead.';
           }
@@ -17415,7 +17415,7 @@ ${await _agentsMdBlock()}
     required int offset,
     required int limit,
   }) {
-    const maxBytes = 51200;
+    const maxBytes = 262144;
     final lines = content.split('\n');
     final total = lines.length;
     final start = (offset - 1).clamp(0, total);
@@ -17600,6 +17600,17 @@ ${await _agentsMdBlock()}
     final model = _runResolved.modelSnapshot ?? _runSession?.model ?? '';
     final provider = AppState.I.providerById(_runSession?.providerId);
     if (!modelSupportsImagesResolved(model, provider)) return false;
+    // Guard against unbounded base64 bloat: a huge image is re-sent on every
+    // subsequent turn via pendingVisionMessages. Cap raw bytes (~10 MB) so a
+    // single giant attachment cannot balloon the request envelope indefinitely.
+    const maxVisionBytes = 10 * 1024 * 1024;
+    if (bytes.length > maxVisionBytes) {
+      _emit(
+        'err',
+        'image too large for vision (${bytes.length} bytes > $maxVisionBytes cap) — skipped',
+      );
+      return false;
+    }
     final mime = switch (extension.toLowerCase()) {
       'jpg' || 'jpeg' => 'image/jpeg',
       'webp' => 'image/webp',

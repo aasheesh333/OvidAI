@@ -59,6 +59,10 @@ class OvidCloudService {
   /// a user's devices and a reverse engineer cannot fake or inflate it.
   static const String usageUrl = 'https://cloud.dhanuksoftwares.com/usage';
 
+  /// TEST-only upgrade endpoint (the "Pay now" button). The server gates it
+  /// behind ALLOW_TEST_UPGRADE; a real payment webhook replaces it later.
+  static const String upgradeUrl = 'https://cloud.dhanuksoftwares.com/upgrade';
+
   /// Test seams.
   @visibleForTesting
   static Future<String?> Function()? idTokenOverrideForTest;
@@ -187,6 +191,44 @@ class OvidCloudService {
       return OvidUsage.fromJson(j);
     } catch (e) {
       Diag.swallow('ovid_cloud.usage', e);
+      return null;
+    } finally {
+      if (client == null) c.close();
+    }
+  }
+
+  /// TEST "Pay now": upgrade the signed-in user's plan tier. Server-gated by
+  /// ALLOW_TEST_UPGRADE. Returns the new tier on success, null on failure.
+  Future<String?> upgrade(String tier, {http.Client? client}) async {
+    final idToken = idTokenOverrideForTest != null
+        ? await idTokenOverrideForTest!()
+        : await FirebaseService.I.getIdToken();
+    if (idToken == null || idToken.isEmpty) return null;
+    final appCheck = appCheckTokenProvider == null
+        ? null
+        : await appCheckTokenProvider!();
+    final c = client ?? http.Client();
+    try {
+      final res = await c
+          .post(
+            Uri.parse(upgradeUrl),
+            headers: {
+              'Authorization': 'Bearer $idToken',
+              'Content-Type': 'application/json',
+              if (appCheck != null && appCheck.isNotEmpty)
+                'X-Firebase-AppCheck': appCheck,
+            },
+            body: jsonEncode({'tier': tier}),
+          )
+          .timeout(const Duration(seconds: 20));
+      if (res.statusCode != 200) return null;
+      final j = jsonDecode(res.body) as Map<String, dynamic>;
+      final newTier = (j['tier'] as String?) ?? tier;
+      AppState.I.setOvidCloudTier(newTier);
+      await AppState.I.refreshOvidCloudModels();
+      return newTier;
+    } catch (e) {
+      Diag.swallow('ovid_cloud.upgrade', e);
       return null;
     } finally {
       if (client == null) c.close();

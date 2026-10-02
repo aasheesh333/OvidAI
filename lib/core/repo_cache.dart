@@ -285,7 +285,7 @@ class RepoCache extends ChangeNotifier {
   /// A PARTIAL sync does not throw — check `report.partial` and surface
   /// `report.summary`. Only binding loss and auth death throw.
   Future<SyncReport> sync({
-    int maxFiles = 400,
+    int maxFiles = 2000,
     void Function(String line)? onLine,
     http.Client? client,
     Duration deadline = defaultSyncDeadline,

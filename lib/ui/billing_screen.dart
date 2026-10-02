@@ -42,25 +42,25 @@ const _plans = <_PlanOption>[
     '1x',
   ),
   _PlanOption(
-    '5x',
+    '3x',
     'Plus',
     '₹499',
-    '5× the daily limit. Resets every 24 hours.',
-    '5x',
+    '3× the free limit, as a monthly pool — no daily cap.',
+    '3x',
   ),
   _PlanOption(
-    '10x',
+    '7x',
     'Pro',
     '₹899',
-    '10× the daily limit. Resets every 24 hours.',
-    '10x',
+    '7× the free limit, as a monthly pool — no daily cap.',
+    '7x',
   ),
   _PlanOption(
-    '20x',
+    '15x',
     'Max',
     '₹1699',
-    '20× the daily limit. Resets every 24 hours.',
-    '20x',
+    '15× the free limit, as a monthly pool — no daily cap.',
+    '15x',
   ),
 ];
 
@@ -333,9 +333,34 @@ class _BillingScreenState extends State<BillingScreen> {
   }
 }
 
-class _UpgradeButton extends StatelessWidget {
+class _UpgradeButton extends StatefulWidget {
   const _UpgradeButton({required this.plan});
   final _PlanOption plan;
+
+  @override
+  State<_UpgradeButton> createState() => _UpgradeButtonState();
+}
+
+class _UpgradeButtonState extends State<_UpgradeButton> {
+  bool _busy = false;
+
+  Future<void> _payNow(BuildContext sheetContext) async {
+    setState(() => _busy = true);
+    final newTier = await OvidCloudService.I.upgrade(widget.plan.tier);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    final messenger = ScaffoldMessenger.of(context);
+    if (sheetContext.mounted) Navigator.of(sheetContext).pop();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          newTier == widget.plan.tier
+              ? 'You are now on the ${widget.plan.title} plan.'
+              : 'Could not complete the upgrade. Try again.',
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -350,48 +375,67 @@ class _UpgradeButton extends StatelessWidget {
         showModalBottomSheet<void>(
           context: context,
           backgroundColor: Aether.surface,
-          builder: (_) => Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Upgrade to ${plan.title}',
-                  style: TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w700,
-                    color: Aether.text,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  '${plan.price} / 24h · ${plan.blurb}',
-                  style: TextStyle(fontSize: 13, color: Aether.textMuted),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'In-app checkout is coming soon. Once you subscribe, your '
-                  'plan and daily limit update automatically — no app update '
-                  'needed.',
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    height: 1.5,
-                    color: Aether.textFaint,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Aether.accent,
+          isScrollControlled: true,
+          builder: (sheetCtx) => StatefulBuilder(
+            builder: (sheetCtx, setSheet) => Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Upgrade to ${widget.plan.title}',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                      color: Aether.text,
                     ),
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Got it'),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 6),
+                  Text(
+                    '${widget.plan.price} / month · ${widget.plan.blurb}',
+                    style: TextStyle(fontSize: 13, color: Aether.textMuted),
+                  ),
+                  const SizedBox(height: 14),
+                  Text(
+                    'Test mode: tap Pay now to activate this plan instantly for '
+                    'testing. Real payment will be wired here before launch.',
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.5,
+                      color: Aether.textFaint,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Aether.accent,
+                        minimumSize: const Size(0, 48),
+                      ),
+                      onPressed: _busy ? null : () => _payNow(sheetCtx),
+                      child: _busy
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : Text('Pay now · ${widget.plan.price}'),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Center(
+                    child: TextButton(
+                      onPressed: _busy ? null : () => Navigator.pop(sheetCtx),
+                      child: const Text('Cancel'),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         );

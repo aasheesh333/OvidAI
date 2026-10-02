@@ -42,7 +42,7 @@ void main() {
         return http.Response(
           jsonEncode({
             'key': 'sk-user-abc',
-            'tier': '10x',
+            'tier': '7x',
             'base_url': 'https://cloud.dhanuksoftwares.com/v1',
           }),
           200,
@@ -65,11 +65,11 @@ void main() {
 
     final outcome = await OvidCloudService.I.bindOvidCloud(client: client);
     expect(outcome.ok, isTrue);
-    expect(outcome.result!.tier, '10x');
+    expect(outcome.result!.tier, '7x');
 
     final provider = app.providerById(AppState.ovidCloudProviderId)!;
     expect(provider.apiKey, 'sk-user-abc');
-    expect(app.ovidCloudTier, '10x');
+    expect(app.ovidCloudTier, '7x');
     expect(app.ovidCloudIsPaid, isTrue);
     client.close();
   });
@@ -120,7 +120,7 @@ void main() {
       expect(request.url.path, '/usage');
       return http.Response(
         jsonEncode({
-          'tier': '5x',
+          'tier': '3x',
           'is_paid': true,
           'daily_spent_usd': 0.42,
           'daily_budget_usd': 2.5,
@@ -150,7 +150,7 @@ void main() {
     });
     final usage = await OvidCloudService.I.fetchUsage(client: client);
     expect(usage, isNotNull);
-    expect(usage!.tier, '5x');
+    expect(usage!.tier, '3x');
     expect(usage.isPaid, isTrue);
     expect(usage.dailySpentUsd, closeTo(0.42, 1e-9));
     expect(usage.dailyRemainingUsd, closeTo(2.08, 1e-9));
