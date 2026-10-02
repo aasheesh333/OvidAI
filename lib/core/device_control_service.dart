@@ -690,7 +690,16 @@ class DeviceControlService {
         'Screen exposes no readable structure. Use device_screenshot if the current model supports images.',
       );
     }
-    return out.toString().trimRight();
+    // Safety cap: even with per-node bounds clamping, a pathological tree
+    // (thousands of WebView child nodes) could blow up the output buffer.
+    // Hard-truncate at 48 KB — spillToolOutput will further cap to 24 KB
+    // for the model, but this prevents the StringBuffer itself from growing
+    // unbounded.
+    final raw = out.toString().trimRight();
+    if (raw.length > 48000) {
+      return '${raw.substring(0, 48000)}\n[truncated — screen tree exceeded 48 KB]';
+    }
+    return raw;
   }
 
   static List<Map<String, dynamic>> _rows(Object? raw) => [
@@ -701,10 +710,19 @@ class DeviceControlService {
   static String _formatNode(Map<String, dynamic> row, {String packageName = ''}) {
     final handle = (row['handle'] as num?)?.toInt() ?? 0;
     final className = row['class']?.toString().trim() ?? '';
-    final text = row['text']?.toString().trim() ?? '';
-    final description = row['description']?.toString().trim() ?? '';
+    // Cap text and description to prevent a single malformed node from
+    // producing kilobytes of output (WebView nodes can surface page text).
+    var text = row['text']?.toString().trim() ?? '';
+    if (text.length > 120) text = '${text.substring(0, 120)}…';
+    var description = row['description']?.toString().trim() ?? '';
+    if (description.length > 120) description = '${description.substring(0, 120)}…';
     final viewId = row['viewId']?.toString().trim() ?? '';
-    final bounds = (row['bounds'] as List? ?? const [])
+    final boundsRaw = row['bounds'] as List? ?? const [];
+    // Guard: Android WebView nodes can return malformed bounds arrays with
+    // hundreds of repeated values (e.g. nested scroll containers). Cap to
+    // the 4 standard rect values (left, top, right, bottom).
+    final boundsCapped = boundsRaw.length > 4 ? boundsRaw.sublist(0, 4) : boundsRaw;
+    final bounds = boundsCapped
         .map((value) => value.toString())
         .join(',');
     final flags = <String>[
